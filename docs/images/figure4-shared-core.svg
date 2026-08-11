@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1500 900" font-family="Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="ab4" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10z" fill="#1a56db"/>
+    </marker>
+  </defs>
+  <rect width="1500" height="900" fill="#fbfbfc"/>
+
+  <text x="750" y="48" text-anchor="middle" font-size="29" font-weight="bold" fill="#374151">One core, two homes — only the adapters differ</text>
+
+  <!-- Kubernetes column -->
+  <rect x="60" y="90" width="640" height="460" rx="20" fill="#f4f4f6" stroke="#a3a8b0" stroke-width="2"/>
+  <text x="380" y="136" text-anchor="middle" font-size="26" font-weight="bold" fill="#4b5563">With Kubernetes</text>
+
+  <rect x="110" y="165" width="540" height="90" rx="12" fill="#ffffff" stroke="#1a56db" stroke-width="2.5"/>
+  <text x="380" y="203" text-anchor="middle" font-size="23" font-weight="bold" fill="#1f2937">CapacityGrant kind</text>
+  <text x="380" y="233" text-anchor="middle" font-size="19" fill="#4b5563">scheduler · quota · preemption</text>
+
+  <rect x="110" y="285" width="540" height="66" rx="12" fill="#ffffff" stroke="#8a8f98" stroke-width="2.5"/>
+  <text x="380" y="325" text-anchor="middle" font-size="20" fill="#4b5563">kubelet — tolerance gate only</text>
+
+  <rect x="110" y="385" width="540" height="116" rx="12" fill="#ffffff" stroke="#7b1fa2" stroke-width="2.5"/>
+  <text x="380" y="423" text-anchor="middle" font-size="23" font-weight="bold" fill="#6a1b8a">K8s adapter</text>
+  <text x="380" y="453" text-anchor="middle" font-size="19" fill="#5e3a6e">watch grants · ready via KEP-5007</text>
+  <text x="380" y="481" text-anchor="middle" font-size="17" fill="#5e3a6e">fabric channel: ComputeDomain claim</text>
+
+  <!-- Platform column -->
+  <rect x="800" y="90" width="640" height="460" rx="20" fill="#eef7ee" stroke="#3f8f43" stroke-width="2"/>
+  <text x="1120" y="136" text-anchor="middle" font-size="26" font-weight="bold" fill="#2e7d32">Your platform (no Kubernetes)</text>
+
+  <rect x="850" y="165" width="540" height="90" rx="12" fill="#ffffff" stroke="#1a56db" stroke-width="2.5"/>
+  <text x="1120" y="203" text-anchor="middle" font-size="23" font-weight="bold" fill="#1f2937">platform control plane</text>
+  <text x="1120" y="233" text-anchor="middle" font-size="19" fill="#4b5563">placement · billing · grant issuer</text>
+
+  <text x="1120" y="325" text-anchor="middle" font-size="20" font-style="italic" fill="#6b7280">no kubelet — nothing to cohabit with</text>
+
+  <rect x="850" y="385" width="540" height="116" rx="12" fill="#ffffff" stroke="#7b1fa2" stroke-width="2.5"/>
+  <text x="1120" y="423" text-anchor="middle" font-size="23" font-weight="bold" fill="#6a1b8a">platform adapter</text>
+  <text x="1120" y="453" text-anchor="middle" font-size="19" fill="#5e3a6e">signed grants · ready via status stream</text>
+  <text x="1120" y="481" text-anchor="middle" font-size="17" fill="#5e3a6e">fabric channel: agent-minted</text>
+
+  <!-- shared core -->
+  <line x1="380" y1="505" x2="620" y2="596" stroke="#1a56db" stroke-width="3.5" marker-end="url(#ab4)"/>
+  <line x1="1120" y1="505" x2="880" y2="596" stroke="#1a56db" stroke-width="3.5" marker-end="url(#ab4)"/>
+
+  <rect x="400" y="600" width="700" height="112" rx="16" fill="#eef7ee" stroke="#2e7d32" stroke-width="3"/>
+  <text x="750" y="646" text-anchor="middle" font-size="26" font-weight="bold" fill="#2e7d32">fiberd core — same binary</text>
+  <text x="750" y="682" text-anchor="middle" font-size="19" fill="#3d6b40">ledger · fence · sessions · thrash budget · audit · PSI+GPU pressure ladder</text>
+
+  <line x1="750" y1="716" x2="750" y2="762" stroke="#1a56db" stroke-width="3.5" marker-end="url(#ab4)"/>
+  <rect x="600" y="766" width="300" height="70" rx="12" fill="#ffffff" stroke="#7b1fa2" stroke-width="2.5"/>
+  <text x="750" y="808" text-anchor="middle" font-size="22" font-weight="bold" fill="#6a1b8a">CRI runtime (tier)</text>
+
+  <text x="750" y="878" text-anchor="middle" font-size="19" font-style="italic" fill="#6b7280">Adapters diverge; the ledger, fence, sessions, and budget never fork.</text>
+</svg>

@@ -1,0 +1,106 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1500 1000" font-family="Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="ab3" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10z" fill="#1a56db"/>
+    </marker>
+    <marker id="ag3" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10z" fill="#8a8f98"/>
+    </marker>
+  </defs>
+  <rect width="1500" height="1000" fill="#fbfbfc"/>
+
+  <text x="750" y="42" text-anchor="middle" font-size="29" font-weight="bold" fill="#374151">Standalone deployment — no Kubernetes</text>
+
+  <!-- Router -->
+  <rect x="50" y="170" width="200" height="140" rx="14" fill="#ffffff" stroke="#3d4a5c" stroke-width="2.5"/>
+  <text x="150" y="230" text-anchor="middle" font-size="25" font-weight="bold" fill="#1f2937">Router /</text>
+  <text x="150" y="262" text-anchor="middle" font-size="25" font-weight="bold" fill="#1f2937">platform edge</text>
+
+  <!-- request path region: IDENTICAL to the k8s figure — that's the point -->
+  <rect x="400" y="70" width="530" height="320" rx="20" fill="#e9f1ff" stroke="#7da2e8" stroke-width="2"/>
+  <text x="665" y="118" text-anchor="middle" font-size="26" font-weight="bold" fill="#1a56db">request path (ms) — per node</text>
+
+  <rect x="430" y="165" width="215" height="160" rx="12" fill="#ffffff" stroke="#1a56db" stroke-width="2.5"/>
+  <text x="537" y="222" text-anchor="middle" font-size="25" font-weight="bold" fill="#1f2937">Grant agent</text>
+  <text x="537" y="254" text-anchor="middle" font-size="20" fill="#4b5563">(plain daemon,</text>
+  <text x="537" y="279" text-anchor="middle" font-size="20" fill="#4b5563">same binary)</text>
+  <text x="537" y="306" text-anchor="middle" font-size="18" fill="#4b5563">PSI + GPU ledger</text>
+
+  <rect x="730" y="185" width="170" height="120" rx="12" fill="#ffffff" stroke="#1a56db" stroke-width="2.5"/>
+  <text x="815" y="235" text-anchor="middle" font-size="23" font-weight="bold" fill="#1f2937">ledger +</text>
+  <text x="815" y="265" text-anchor="middle" font-size="23" font-weight="bold" fill="#1f2937">fence</text>
+
+  <line x1="647" y1="245" x2="722" y2="245" stroke="#1a56db" stroke-width="3" marker-end="url(#ab3)"/>
+  <text x="665" y="336" text-anchor="middle" font-size="18" fill="#1a56db">node-local claim + fence</text>
+  <text x="665" y="360" text-anchor="middle" font-size="18" fill="#1a56db">(grant, epoch, seq)</text>
+
+  <!-- warm fibers region -->
+  <rect x="1060" y="70" width="390" height="400" rx="20" fill="#eef7ee" stroke="#3f8f43" stroke-width="2"/>
+  <text x="1255" y="112" text-anchor="middle" font-size="27" font-weight="bold" fill="#2e7d32">CapacityGrant</text>
+  <text x="1255" y="140" text-anchor="middle" font-size="20" fill="#2e7d32">(signed artifact)</text>
+
+  <rect x="1090" y="160" width="330" height="78" rx="12" fill="#ffffff" stroke="#2e7d32" stroke-width="2.5"/>
+  <text x="1255" y="207" text-anchor="middle" font-size="24" font-weight="bold" fill="#2e7d32">fiber · warm</text>
+  <rect x="1090" y="256" width="330" height="78" rx="12" fill="#ffffff" stroke="#2e7d32" stroke-width="2.5"/>
+  <text x="1255" y="303" text-anchor="middle" font-size="24" font-weight="bold" fill="#2e7d32">fiber · warm</text>
+  <rect x="1090" y="352" width="330" height="78" rx="12" fill="#fdf3e3" stroke="#e8930c" stroke-width="2.5"/>
+  <text x="1255" y="391" text-anchor="middle" font-size="21" font-weight="bold" fill="#c47708">resuming delta</text>
+  <text x="1255" y="416" text-anchor="middle" font-size="19" fill="#c47708">(fabric or portable store)</text>
+
+  <!-- arrows -->
+  <line x1="253" y1="240" x2="422" y2="240" stroke="#1a56db" stroke-width="3.5" marker-end="url(#ab3)"/>
+  <text x="335" y="212" text-anchor="middle" font-size="20" fill="#1a56db">Clone(S)</text>
+
+  <line x1="903" y1="245" x2="1052" y2="245" stroke="#1a56db" stroke-width="3.5" marker-end="url(#ab3)"/>
+  <text x="977" y="208" text-anchor="middle" font-size="20" fill="#1a56db">mint / attach</text>
+  <text x="977" y="232" text-anchor="middle" font-size="20" fill="#1a56db">fiber</text>
+
+  <path d="M150 313 L150 430 L1052 430" fill="none" stroke="#1a56db" stroke-width="3.5" marker-end="url(#ab3)"/>
+  <text x="600" y="464" text-anchor="middle" font-size="20" fill="#1a56db">HTTP + fence — endpoint returned by Clone</text>
+  <text x="600" y="498" text-anchor="middle" font-size="19" font-style="italic" fill="#6b7280">no kubelet: the agent is the sole CRI client — it creates the sandbox and cgroups itself</text>
+  <text x="780" y="532" text-anchor="middle" font-size="18" font-style="italic" fill="#6b7280">fabric (v2): static IMEX domain · agent mints one channel per grant</text>
+
+  <!-- session client -->
+  <rect x="1240" y="620" width="250" height="130" rx="14" fill="#ffffff" stroke="#3d4a5c" stroke-width="2.5"/>
+  <text x="1365" y="672" text-anchor="middle" font-size="24" font-weight="bold" fill="#1f2937">Session / harness</text>
+  <text x="1365" y="704" text-anchor="middle" font-size="20" fill="#4b5563">(out of contract)</text>
+  <line x1="1350" y1="616" x2="1330" y2="478" stroke="#1a56db" stroke-width="3" marker-end="url(#ab3)"/>
+  <text x="1415" y="536" text-anchor="middle" font-size="19" fill="#1a56db">exec against</text>
+  <text x="1415" y="559" text-anchor="middle" font-size="19" fill="#1a56db">endpoint</text>
+
+  <!-- platform control plane region -->
+  <rect x="55" y="690" width="1060" height="260" rx="20" fill="#f4f4f6" stroke="#a3a8b0" stroke-width="2"/>
+  <text x="585" y="734" text-anchor="middle" font-size="25" font-weight="bold" fill="#4b5563">platform control plane — any stack, async, replaceable</text>
+
+  <!-- platform store cylinder -->
+  <path d="M110 792 a90 22 0 0 1 180 0 v108 a90 22 0 0 1 -180 0 z" fill="#ffffff" stroke="#3d4a5c" stroke-width="2.5"/>
+  <ellipse cx="200" cy="792" rx="90" ry="22" fill="#ffffff" stroke="#3d4a5c" stroke-width="2.5"/>
+  <text x="200" y="845" text-anchor="middle" font-size="23" font-weight="bold" fill="#1f2937">platform DB</text>
+  <text x="200" y="872" text-anchor="middle" font-size="18" fill="#4b5563">grants · billing</text>
+
+  <rect x="430" y="780" width="250" height="130" rx="12" fill="#ffffff" stroke="#4b5563" stroke-width="2.5"/>
+  <text x="555" y="826" text-anchor="middle" font-size="22" font-weight="bold" fill="#1f2937">grant issuer</text>
+  <text x="555" y="855" text-anchor="middle" font-size="18" fill="#4b5563">ed25519 signing key</text>
+  <text x="555" y="878" text-anchor="middle" font-size="18" fill="#4b5563">charge once, at issue</text>
+
+  <rect x="820" y="780" width="230" height="130" rx="12" fill="#ffffff" stroke="#4b5563" stroke-width="2.5"/>
+  <text x="935" y="826" text-anchor="middle" font-size="22" font-weight="bold" fill="#1f2937">placement</text>
+  <text x="935" y="855" text-anchor="middle" font-size="18" fill="#4b5563">routes on ready ·</text>
+  <text x="935" y="878" text-anchor="middle" font-size="18" fill="#4b5563">knows fabric topology</text>
+
+  <line x1="812" y1="845" x2="688" y2="845" stroke="#8a8f98" stroke-width="2.5" stroke-dasharray="8 7" marker-end="url(#ag3)"/>
+  <text x="750" y="822" text-anchor="middle" font-size="17" fill="#6b7280">sizes blocks</text>
+  <line x1="422" y1="845" x2="298" y2="845" stroke="#8a8f98" stroke-width="2.5" stroke-dasharray="8 7" marker-end="url(#ag3)"/>
+  <text x="360" y="822" text-anchor="middle" font-size="17" fill="#6b7280">record grant ·</text>
+  <text x="360" y="874" text-anchor="middle" font-size="17" fill="#6b7280">charge once</text>
+
+  <!-- dashed async links -->
+  <line x1="537" y1="686" x2="537" y2="396" stroke="#8a8f98" stroke-width="2.5" stroke-dasharray="8 7" marker-end="url(#ag3)"/>
+  <text x="420" y="546" text-anchor="middle" font-size="19" fill="#6b7280">signed grant —</text>
+  <text x="420" y="570" text-anchor="middle" font-size="19" fill="#6b7280">verified offline,</text>
+  <text x="420" y="594" text-anchor="middle" font-size="19" fill="#6b7280">no round trip</text>
+
+  <path d="M1150 476 L1150 640 L1000 640 L1000 772" fill="none" stroke="#8a8f98" stroke-width="2.5" stroke-dasharray="8 7" marker-end="url(#ag3)"/>
+  <text x="1252" y="546" text-anchor="middle" font-size="19" fill="#6b7280">ready · demand · usage</text>
+  <text x="1252" y="570" text-anchor="middle" font-size="19" fill="#6b7280">audit to platform sink</text>
+</svg>
