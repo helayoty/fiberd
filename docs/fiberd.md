@@ -1,13 +1,6 @@
 # fiberd: Delegated Capacity and Millisecond Instances for Container Platforms
 
-**A node-level execution fabric for serverless and agent platforms: charge
-capacity once as a block, mint instances locally in milliseconds, survive
-control-plane outages by construction.**
-
-Status: DRAFT — one core, two homes: standalone platforms and Kubernetes
-Audience: teams building ACI-class serverless container services, agent
-platforms, and inference fleets — on their own control planes or on
-Kubernetes.
+Status: DRAFT
 
 ---
 
