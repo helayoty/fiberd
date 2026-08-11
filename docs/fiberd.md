@@ -54,9 +54,7 @@ object the control plane owns; roles 3, 4, 5, 7 are delivered per
 instance by the node.** Every pain point in the motivating discussions
 targets one of these roles, not per-instance records in general.
 
-## 2. Goals and non-goals
-
-**Goals — the bar, as constraints.**
+## 2. Goals
 
 **(a)** Activation is synchronous, node-local, ms-scale, with **zero
 control-plane dependency on the warm path** — no reads, no writes, no
@@ -94,7 +92,7 @@ ranking); **the grant is the disruption unit**.
 standalone and under Kubernetes; only thin adapters differ, and an
 adapter is conformant iff the core runs unmodified beneath it.
 
-**Non-goals.**
+## 3. Non-goals
 
 - No replacement of your scheduler, billing, or tenancy model — the grant
   is deliberately shaped so your existing block-accounting *is* the
@@ -104,17 +102,17 @@ adapter is conformant iff the core runs unmodified beneath it.
   not a gap: anything needing platform-level lifecycle belongs at grant
   granularity.
 - No Windows: the mechanism stack (fork/CoW, cgroups v2, PSI, CRIU) is a
-  Linux kernel property, measured as such in §5.1.
+  Linux kernel property.
 - No opinion on what runs inside a fiber beyond the template's own
   contract: entropy reseeding and per-instance credential fetch after
   clone are the template author's obligations, stated in the tier table,
   enforced by scrub.
 
-## 3. Design
+## 4. Design
 
 ![One core, two homes](./images/figure4-shared-core.svg)
 
-Three components, one hard boundary:
+Three components:
 
 **CapacityGrant** — an authenticated artifact your control plane issues
 once per block of capacity: template reference, `fibers: {max, warm}`,
@@ -128,8 +126,7 @@ ever calls home.
 fiber class. It holds the ledger (which fibers exist, under which grant,
 with which lease), the fence (a monotonic incarnation triple
 `(grantUID, epoch, seq)` that scopes every claim and credential), the
-thrash budget, the audit spool, and the pressure ladder. Its internals
-are §6.
+thrash budget, the audit spool, and the pressure ladder.
 
 **Fibers** — node-minted instances inside a grant: copy-on-write clones of
 a checkpointed **engine zygote** (one fully initialized template instance
@@ -142,15 +139,13 @@ IP allocator sees the prefix, never the addresses.
 **Grant lifecycle: issued → ready → serving → expiring.** Delivery of the
 grant is not readiness: the agent builds the zygote, checkpoints it, and
 only then reports `ready`. **Readiness is a state the agent publishes,
-never a call anyone makes** — how the state travels upward is per-home
-(§6), and routing happens against ready grants only.
+never a call anyone makes** — how the state travels upward is per-home, and 
+routing happens against ready grants only.
 
-**The core never forks.** Everything above, the contract of §4, and the
-mechanics of §5 are home-invariant; an adapter is conformant iff the core
-runs unmodified beneath it. §6 states exactly what each home adapts and
-nothing else.
+**The core never forks.** An adapter is conformant if the core
+runs unmodified beneath it.
 
-## 4. The contract
+## 5. The contract
 
 ![Clone resolution](./images/figure2-clone-resolution.svg)
 
@@ -195,10 +190,9 @@ thrash budget prices. Fresh fibers get a reset contract
 parked, devices renegotiated). Cross-node resume requires the delta
 reachable from the target node and the router knowing where — "a worker"
 survives your control plane's outage at full strength; "my worker"
-survives at the strength of the router's cache plus reachable storage
-(§5.2 upgrades this within a fabric domain).
+survives at the strength of the router's cache plus reachable storage.
 
-## 5. CPU vs GPU design
+## 6. CPU vs GPU design
 
 The split in one sentence: **the CPU side is cloned; the GPU side is
 multiplexed.** `fork()` does not cross the PCIe boundary — device memory
@@ -206,7 +200,7 @@ has no copy-on-write and driver contexts do not survive a fork — so each
 side gets the primitive that is actually cheap there, and the two meet
 over local IPC.
 
-### 5.1 CPU: clone-not-create
+### 6.1 CPU: clone-not-create
 
 The mechanism is an unmodified kernel primitive; its economics are
 measurable on any Linux host before a line of platform integration exists:
@@ -232,7 +226,7 @@ under 100 ms at 200+ concurrent fibers through containerd's restore path.
 The bare-fork floor leaves ~25× of headroom for that plumbing; pass, and
 integration is an object-model argument — fail, and the named bottleneck
 (page-server vs snapshot layering) decides whether zygotes need per-node
-replication, which changes the grant spec (§8).
+replication, which changes the grant spec.
 
 #### CRI: verbs and tiers
 
@@ -257,9 +251,9 @@ to it. Prototyping reuses create-from-checkpoint on containerd ≥ 2.0; the
 honest verbs are proposed rather than smuggled through annotations —
 private-protocol reuse is the failure mode this design exists to end.
 
-### 5.2 GPU: engine-multiplexed
+### 6.2 GPU: engine-multiplexed
 
-The **engine zygote** is, in v1, the **only process that touches device
+The **engine zygote** is the **only process that touches device
 state**; fibers are CPU-side clients over local IPC — how vLLM-class
 servers already multiplex. A fiber's device footprint is its slice of the
 engine's KV cache, not a context: no per-fiber context creation (~100ms+),
@@ -305,9 +299,9 @@ rung — it degrades to the PCIe path when the fabric daemon ensemble is
 unhealthy and is never a dependency of Clone** — so warm-path
 independence survives by construction, not by the fabric's uptime. How
 the channel is provisioned, and which trust boundary scopes it, is where
-the two homes genuinely differ (§6).
+the two homes genuinely differ.
 
-## 6. Architecture
+## 7. Architecture
 
 The core is home-invariant and stated once; each home below adds only
 what it changes: how grants arrive proven, how readiness travels, who
@@ -316,9 +310,10 @@ channels are provisioned.
 
 **The agent's subcomponents**: RPC frontend (authn, admission-completeness
 enforcement), budget enforcer (thrash f(W), backpressure), ledger
-(sessions, leases, fences, fabric channels), pressure controller — **two
-inputs, one ladder**: kernel PSI on the grant slice and the ledger-derived
-device pressure of §5.2, responding shed → park → yield in that order,
+(sessions, leases, fences, fabric channels), pressure controller 
+
+**two inputs, one ladder**: kernel PSI on the grant slice and the ledger-derived
+device pressure responding shed → park → yield in that order,
 the expensive step last — zygote manager (build, scrub on clone and
 reuse, maxAge drain-and-swap), checkpoint store (deltas, TTL GC), audit
 spool, runtime client.
@@ -341,11 +336,11 @@ assigned after the fork, never baked into the template.
 **Accounting.** The grant's cgroup slice is the hard ceiling: a fiber can
 burst within the block, and the block cannot exceed what was charged.
 Usage returns asynchronously as resource-time integrals — CPU and memory
-exact per grant, device engine-apportioned per §5.2. Per-fiber memory
-attribution is approximate under CoW (the slice is exact; the fiber is an
-estimate); per-fiber `memory.max` + `oom.group` make the kernel the
-executioner for over-limit fibers. Reclaim is drain-then-kill everywhere:
-park named sessions, shed anonymous fibers, then take the grant.
+exact per grant. Per-fiber memory attribution is approximate under CoW 
+(the slice is exact; the fiber is an estimate); per-fiber `memory.max` + 
+`oom.group` make the kernel the executioner for over-limit fibers. Reclaim 
+is drain-then-kill everywhere: park named sessions, shed anonymous fibers, 
+then take the grant.
 
 **Identity and audit.** v1: fibers share the grant's identity,
 distinguished by port; a later phase mints per-fiber identities from a
@@ -372,7 +367,7 @@ tier, never silent; delta-over-base is runtime-dependent (incremental
 dump maturity varies), and the worst case is a full per-fiber checkpoint,
 which inflates parked-storage budgets without changing the model.
 
-### 6.1 Kubernetes
+### 7.1 Kubernetes
 
 ![Delegated capacity under Kubernetes](./images/figure1-delegated-capacity.svg)
 
@@ -389,7 +384,7 @@ disagree, the companion wins.
 the cluster's authenticated control-plane→node watch channel — the same
 trust that runs workload specs today — so in-cluster signing would add a
 PKI surface the accounting invariant does not require. Signing is the
-default only standalone (§6.2), where no such channel exists.
+default only standalone, where no such channel exists.
 
 **Readiness.** The `ready` state rides DRA Device Binding Conditions
 (KEP-5007, beta track): the grant publishes `fiberd.io/zygote-ready` and
@@ -414,7 +409,7 @@ sharing a physical NVLink clique conflict over fabric memory permissions
 today, which gates the tier on upstream domain coordination (open
 questions below).
 
-**Open questions (Kubernetes).**
+**Open questions**
 
 1. **Dynamic-domain arbitration**: independent IMEX domains on nodes
    sharing a physical NVLink clique conflict over fabric memory
@@ -428,7 +423,7 @@ questions below).
    one side must close the gap before the readiness ride-along is
    load-bearing.
 
-### 6.2 Standalone
+### 7.2 Standalone
 
 ![Standalone deployment](./images/figure3-standalone-deployment.svg)
 
@@ -446,10 +441,10 @@ binding protocol exists or is needed.
 **Node.** The agent is the node's sole runtime client and owns the
 sandbox and cgroup hierarchy itself — the awkwardest parts of running
 beside a general orchestrator (reconciliation exemptions, eviction races,
-dual runtime writers) do not get solved here; **they do not exist**.
+dual runtime writers) do not get solved here.
 
 **Caller authentication.** Local JWT validation against cached JWKS plus
-the grant capability — the same warm-path posture as §6.1, with the JWKS
+the grant capability — the same warm-path posture, with the JWKS
 endpoint being your platform's, and the same stated revocation window.
 
 **GPU standalone.** The fabric domain is static infrastructure — the rack
@@ -470,13 +465,13 @@ at provisioning: cross-node resume is NVLink-fast within the domain and
 falls back to the portable-store path across domains — a topology
 constraint your placer must know about.
 
-**Open questions (standalone).**
+**Open questions**
 
 1. **Fabric multi-tenancy**: within a domain-wide trusted daemon
    ensemble, is per-grant channel scoping sufficient isolation, or is
    domain-per-tenant the floor a platform must provision?
 
-## 7. Delivery: phases
+## 8. Delivery: phases
 
 **v0 (exists).** Agent + process-tier fibers (the zygote self-forks,
 Android-style; the agent speaks a control socket). Runs on any Linux host
@@ -510,27 +505,21 @@ two carriers, zero core changes. A platform adopting fiberd standalone is
 never locked out of Kubernetes, and its capacity can later surface there
 natively.
 
-## 8. Open questions (core)
-
-Home-specific open questions live at the end of their adapter sections
-(§6.1, §6.2); what remains here is home-invariant.
+## 9. Open questions (core)
 
 1. **The checkpoint-tier gate** (the one real feasibility bet): warm
    restore p99 < 100 ms at 200+ concurrent fibers through containerd's
    restore path. Pass → v1 is integration work. Fail → the named
    bottleneck (page-server vs snapshot layering) decides whether zygotes
    need per-node replication, which changes the grant spec.
+   
 2. **Park under device pressure**: KV offload cost ∝ W over PCIe — if the
    park rung is too slow exactly when pressure is highest, the ladder
    degrades to shed → evict for device-pressure events. FIBER_FABRIC
    changes the constant, not the question: PCIe remains the floor the
    ladder must survive on.
+
 3. **Sub-partition device sharing across grants**: is one hard partition
    per grant the floor (exact attribution, clean arbitration), or is the
    device-utilization tiebreaker of §5.2 sufficient to admit
    shared-context co-residence?
-4. **Naming**: *fiber* carries a cooperative-scheduling connotation it
-   disclaims (it replaced *cell*: a Borg cell is a cluster, and naming
-   the smallest unit after the audience's word for the largest taxes
-   every conversation); fallback *task* collides with batch-Job
-   vocabulary. The property is non-negotiable; the noun is not.
