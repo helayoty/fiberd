@@ -1,0 +1,13 @@
+.DS_Store
+.idea
+.vscode
+
+.cursor
+
+/vendor
+/out
+/bin
+/build
+
+fiberd
+zb
