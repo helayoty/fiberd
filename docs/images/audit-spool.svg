@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="340" viewBox="0 0 760 340" font-family="Helvetica Neue, Arial, sans-serif">
+  <defs>
+    <marker id="arw" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L8,3 L0,6 Z" fill="#333"/></marker>
+    <marker id="arwo" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L8,3 L0,6 Z" fill="#d79b00"/></marker>
+  </defs>
+  <rect width="760" height="340" fill="#ffffff"/>
+
+  <!-- op -->
+  <rect x="40" y="150" width="150" height="56" rx="6" fill="#dae8fc" stroke="#6c8ebf"/>
+  <text x="115" y="182" text-anchor="middle" font-size="12" fill="#1a1a1a">Clone / Park / Release</text>
+
+  <!-- spool -->
+  <rect x="230" y="150" width="180" height="56" rx="6" fill="#d5e8d4" stroke="#82b366"/>
+  <text x="320" y="174" text-anchor="middle" font-size="12" font-weight="600" fill="#1a1a1a">local audit spool</text>
+  <text x="320" y="190" text-anchor="middle" font-size="10.5" fill="#1a1a1a">(sequence-numbered)</text>
+
+  <!-- best effort row -->
+  <rect x="470" y="78" width="120" height="46" rx="6" fill="#d5e8d4" stroke="#82b366"/>
+  <text x="530" y="106" text-anchor="middle" font-size="12" fill="#1a1a1a">ack caller</text>
+  <rect x="620" y="78" width="120" height="46" rx="6" fill="#ffe6cc" stroke="#d79b00" stroke-dasharray="5 3"/>
+  <text x="680" y="99" text-anchor="middle" font-size="11" fill="#1a1a1a">ship remote</text>
+  <text x="680" y="113" text-anchor="middle" font-size="10" fill="#1a1a1a">(later)</text>
+
+  <!-- sync row -->
+  <rect x="470" y="228" width="120" height="46" rx="6" fill="#ffe6cc" stroke="#d79b00"/>
+  <text x="530" y="256" text-anchor="middle" font-size="12" fill="#1a1a1a">ship remote</text>
+  <rect x="620" y="228" width="120" height="46" rx="6" fill="#d5e8d4" stroke="#82b366"/>
+  <text x="680" y="256" text-anchor="middle" font-size="12" fill="#1a1a1a">ack caller</text>
+
+  <!-- arrows -->
+  <polyline points="190,178 230,178" fill="none" stroke="#333" stroke-width="1.5" marker-end="url(#arw)"/>
+  <text x="210" y="170" text-anchor="middle" font-size="11" fill="#333">append</text>
+
+  <polyline points="410,168 440,168 440,101 470,101" fill="none" stroke="#333" stroke-width="1.5" marker-end="url(#arw)"/>
+  <text x="446" y="70" font-size="11" font-weight="600" fill="#333">BEST_EFFORT</text>
+  <polyline points="590,101 620,101" fill="none" stroke="#d79b00" stroke-width="1.5" stroke-dasharray="6 4" marker-end="url(#arwo)"/>
+  <text x="605" y="140" text-anchor="middle" font-size="10.5" fill="#d79b00">ship later (loss window = flush)</text>
+
+  <polyline points="410,190 440,190 440,251 470,251" fill="none" stroke="#333" stroke-width="1.5" marker-end="url(#arw)"/>
+  <text x="446" y="300" font-size="11" font-weight="600" fill="#333">SYNC</text>
+  <polyline points="590,251 620,251" fill="none" stroke="#333" stroke-width="1.5" marker-end="url(#arw)"/>
+  <text x="605" y="290" text-anchor="middle" font-size="10.5" fill="#333">ack only after remote</text>
+</svg>

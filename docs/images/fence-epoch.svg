@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="360" viewBox="0 0 720 360" font-family="Helvetica Neue, Arial, sans-serif">
+  <defs>
+    <marker id="arw" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L8,3 L0,6 Z" fill="#333"/></marker>
+    <marker id="arwo" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L8,3 L0,6 Z" fill="#d79b00"/></marker>
+    <marker id="arwr" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L8,3 L0,6 Z" fill="#b85450"/></marker>
+  </defs>
+  <rect width="720" height="360" fill="#ffffff"/>
+
+  <text x="360" y="40" text-anchor="middle" font-size="14" font-weight="600" fill="#333">Identity vs incarnation</text>
+  <text x="360" y="60" text-anchor="middle" font-size="11" fill="#555">the name is stable; the fence changes each incarnation; an epoch bump invalidates all prior fences</text>
+
+  <rect x="40" y="90" width="640" height="120" rx="10" fill="#f5f5f5" stroke="#999" stroke-dasharray="6 4"/>
+  <text x="360" y="112" text-anchor="middle" font-size="13" font-weight="600" fill="#333">session name "S1" - survives incarnations</text>
+
+  <rect x="70" y="130" width="200" height="64" rx="6" fill="#b0e3e6" stroke="#0e8088"/>
+  <text x="170" y="152" text-anchor="middle" font-size="12" font-weight="600" fill="#1a1a1a">incarnation A</text>
+  <text x="170" y="169" text-anchor="middle" font-size="11" fill="#1a1a1a">fence demo/7/1</text>
+  <text x="170" y="185" text-anchor="middle" font-size="11" fill="#1a1a1a">creds bound here</text>
+
+  <rect x="300" y="138" width="110" height="48" rx="6" fill="#d5e8d4" stroke="#82b366"/>
+  <text x="355" y="158" text-anchor="middle" font-size="12" fill="#1a1a1a">Park</text>
+  <text x="355" y="174" text-anchor="middle" font-size="10" fill="#1a1a1a">(delta on disk)</text>
+
+  <rect x="440" y="130" width="200" height="64" rx="6" fill="#b0e3e6" stroke="#0e8088"/>
+  <text x="540" y="152" text-anchor="middle" font-size="12" font-weight="600" fill="#1a1a1a">incarnation B</text>
+  <text x="540" y="169" text-anchor="middle" font-size="11" fill="#1a1a1a">fence demo/7/2</text>
+  <text x="540" y="185" text-anchor="middle" font-size="11" fill="#1a1a1a">NEW creds</text>
+
+  <rect x="440" y="270" width="200" height="46" rx="6" fill="#ffe6cc" stroke="#d79b00"/>
+  <text x="540" y="298" text-anchor="middle" font-size="12" font-weight="600" fill="#1a1a1a">agent restart: epoch 7 -&gt; 8</text>
+
+  <rect x="90" y="268" width="280" height="50" rx="6" fill="#f8cecc" stroke="#b85450"/>
+  <text x="230" y="290" text-anchor="middle" font-size="11" fill="#1a1a1a">every fence with epoch 7 now invalid</text>
+  <text x="230" y="306" text-anchor="middle" font-size="11" fill="#1a1a1a">-&gt; orphans reaped</text>
+
+  <polyline points="270,162 300,162" fill="none" stroke="#333" stroke-width="1.5" marker-end="url(#arw)"/>
+  <text x="285" y="132" text-anchor="middle" font-size="11" fill="#333">park</text>
+  <polyline points="410,162 440,162" fill="none" stroke="#333" stroke-width="1.5" marker-end="url(#arw)"/>
+  <text x="425" y="132" text-anchor="middle" font-size="11" fill="#333">resume</text>
+
+  <polyline points="540,194 540,270" fill="none" stroke="#d79b00" stroke-width="1.6" marker-end="url(#arwo)"/>
+  <polyline points="440,293 370,293" fill="none" stroke="#b85450" stroke-width="1.6" marker-end="url(#arwr)"/>
+</svg>

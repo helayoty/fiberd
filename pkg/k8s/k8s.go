@@ -14,7 +14,9 @@ import (
 
 // Source watches grants. Real implementation: client-go informer; kept
 // dependency-free in the skeleton so the module builds with stdlib only.
-type Source struct{ Events chan adapter.GrantEvent }
+type Source struct {
+	Events chan adapter.GrantEvent
+}
 
 func (s *Source) Watch(ctx context.Context) (<-chan adapter.GrantEvent, error) {
 	return s.Events, nil

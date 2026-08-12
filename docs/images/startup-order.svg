@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="780" height="200" viewBox="0 0 780 200" font-family="Helvetica Neue, Arial, sans-serif">
+  <defs>
+    <marker id="arw" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L8,3 L0,6 Z" fill="#333"/></marker>
+  </defs>
+  <rect width="780" height="200" fill="#ffffff"/>
+
+  <text x="390" y="45" text-anchor="middle" font-size="12" font-style="italic" fill="#555">the agent serves nothing until its view of the node is real</text>
+
+  <rect x="30" y="80" width="210" height="64" rx="6" fill="#ffe6cc" stroke="#d79b00"/>
+  <text x="135" y="108" text-anchor="middle" font-size="13" font-weight="600" fill="#1a1a1a">1. epoch++</text>
+  <text x="135" y="126" text-anchor="middle" font-size="10.5" fill="#1a1a1a">(all prior fences invalid)</text>
+
+  <rect x="285" y="80" width="210" height="64" rx="6" fill="#fff2cc" stroke="#d6b656"/>
+  <text x="390" y="108" text-anchor="middle" font-size="13" font-weight="600" fill="#1a1a1a">2. runtime reconcile</text>
+  <text x="390" y="126" text-anchor="middle" font-size="10.5" fill="#1a1a1a">(reality wins; orphans reaped)</text>
+
+  <rect x="540" y="80" width="210" height="64" rx="6" fill="#d5e8d4" stroke="#82b366"/>
+  <text x="645" y="108" text-anchor="middle" font-size="13" font-weight="600" fill="#1a1a1a">3. open RPC</text>
+  <text x="645" y="126" text-anchor="middle" font-size="10.5" fill="#1a1a1a">(serve the warm path)</text>
+
+  <polyline points="240,112 285,112" fill="none" stroke="#333" stroke-width="1.6" marker-end="url(#arw)"/>
+  <polyline points="495,112 540,112" fill="none" stroke="#333" stroke-width="1.6" marker-end="url(#arw)"/>
+</svg>
