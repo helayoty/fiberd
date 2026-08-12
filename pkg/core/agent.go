@@ -67,6 +67,8 @@ type Agent struct {
 	Audit   Auditor
 	Verify  Verifier
 
+	Health *SourceHealth
+
 	// SandboxFor maps a grant to its sandbox: in Kubernetes the pod sandbox
 	// kubelet built; standalone, one the adapter created itself.
 	SandboxFor func(grantUID string) (string, bool)
@@ -88,16 +90,17 @@ func (a *Agent) Clone(ctx context.Context, token []byte, req CloneRequest) (Clon
 	}
 
 	// 3. Ledger: resolve attach | resume | create, mint or reuse the fence.
-	// Capacity is reserved inside Resolve; ErrGrantFull maps to
-	// DEFERRED_FALLBACK per healthy-control-plane default — choosing
-	// SHED instead requires a control-plane health signal the agent does
-	// not have yet.
+	// Capacity is reserved inside Resolve. ErrGrantFull and ErrGrantUnknown
+	// ("capacity not on this node") map to DEFERRED_FALLBACK while the grant
+	// lane is healthy and SHED while it is not — a miss must not queue into
+	// a dead control plane. Nil Health fails toward healthy, matching boot
+	// bias. ErrNeedsTier is a local capability gap and always falls back.
 	act, fence, ref, commit, unlock, err := a.Ledger.Resolve(req.GrantUID, req.Session, a.Runtime.Tier())
 	if err != nil {
 		if unlock != nil {
 			unlock()
 		}
-		return CloneResponse{}, DeferredFallback, err
+		return CloneResponse{}, a.capacityMiss(err), err
 	}
 	defer unlock()
 
@@ -109,7 +112,7 @@ func (a *Agent) Clone(ctx context.Context, token []byte, req CloneRequest) (Clon
 	// 4. Runtime: the one fork or restore call, under a hard deadline.
 	sandbox, ok := a.SandboxFor(req.GrantUID)
 	if !ok {
-		return CloneResponse{}, DeferredFallback, ErrGrantUnknown
+		return CloneResponse{}, a.capacityMiss(ErrGrantUnknown), ErrGrantUnknown
 	}
 	src, srcRef := SourceZygote, ""
 	if act == ActResume {
@@ -135,6 +138,17 @@ func (a *Agent) Clone(ctx context.Context, token []byte, req CloneRequest) (Clon
 	_ = a.Audit.Append(ctx, "clone", fence, req.Session)
 
 	return CloneResponse{FiberID: h.ID, Endpoint: h.Endpoint, Fence: fence, Resumed: act == ActResume}, OK, nil
+}
+
+// capacityMiss maps "capacity not on this node" to the two miss codes.
+// ErrNeedsTier and other local failures stay DEFERRED_FALLBACK regardless
+// of lane health — they are not a control-plane reachability question.
+func (a *Agent) capacityMiss(err error) StatusCode {
+	if (errors.Is(err, ErrGrantFull) || errors.Is(err, ErrGrantUnknown)) &&
+		a.Health != nil && !a.Health.Healthy(time.Now()) {
+		return Shed
+	}
+	return DeferredFallback
 }
 
 // Park checkpoints a named session's delta and frees its running tier.

@@ -53,12 +53,16 @@ func main() {
 		log.Printf("reconcile: %d fibers running", len(fibers))
 	}
 
+	staleTTL := 30 * time.Second // TODO: adapter.Grant carries no lease TTL yet — add it there
+	health := core.NewSourceHealth(staleTTL, time.Now())
+
 	ag := &core.Agent{
 		Ledger:  led,
 		Budget:  core.NewBudget(baseRate(), 256<<20), // placeholders until the rig speaks
 		Runtime: rt,
 		Audit:   nopAudit{},
 		Verify:  k8s.JWKSVerifier{},
+		Health:  health,
 		SandboxFor: func(uid string) (string, bool) {
 			return "sbx-" + uid, true // stub; adapters own this mapping
 		},
@@ -69,20 +73,40 @@ func main() {
 	src.Events <- adapter.GrantEvent{Kind: adapter.GrantAdded,
 		Grant: adapter.Grant{UID: "demo", FiberMax: 128, SandboxID: "sbx-demo"}}
 	go func() {
-		ch, _ := src.Watch(context.Background())
-		for ev := range ch {
-			switch ev.Kind {
-			case adapter.GrantAdded:
-				led.AdmitGrant(ev.Grant.UID, ev.Grant.SandboxID, ev.Grant.FiberMax)
-			case adapter.GrantRevoked:
-				led.RevokeGrant(ev.Grant.UID)
+		ch, err := src.Watch(context.Background())
+		if err != nil {
+			return
+		}
+		health.MarkSync(time.Now()) // watch established: idle is not unreachability
+		// This source has no wire heartbeat; tick while the watch is held.
+		// A real informer replaces the ticker with relist / watch errors.
+		tick := time.NewTicker(staleTTL / 2)
+		defer tick.Stop()
+		for {
+			select {
+			case ev, ok := <-ch:
+				if !ok {
+					return // watch gone; lastSync stops advancing → stale
+				}
+				health.MarkSync(time.Now())
+				switch ev.Kind {
+				case adapter.GrantAdded:
+					led.AdmitGrant(ev.Grant.UID, ev.Grant.SandboxID, ev.Grant.FiberMax)
+				case adapter.GrantRevoked:
+					led.RevokeGrant(ev.Grant.UID)
+				}
+			case <-tick.C:
+				health.MarkSync(time.Now())
 			}
 		}
 	}()
 
 	// Readiness + epoch introspection: poll this before driving load.
 	http.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]uint64{"epoch": ep.Current()})
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"epoch":            ep.Current(),
+			"grantLaneHealthy": health.Healthy(time.Now()),
+		})
 	})
 
 	// Warm path. JSON/HTTP in the skeleton; gRPC + mTLS in the real agent.

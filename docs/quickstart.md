@@ -45,11 +45,12 @@ for i in $(seq 1 30); do curl -s -o /dev/null -w '%{http_code}\n' \
 
 kill %1 && ./fiberd &                    # same FIBERD_STATE -> epoch 1 -> 2
 until curl -sf localhost:8484/healthz >/dev/null; do sleep 0.2; done
-curl -s localhost:8484/healthz           # fence rotation = revocation, node-local
+curl -s localhost:8484/healthz           # epoch bump = revocation; grantLaneHealthy true while the grant watch is held
 ```
 
 ## Notes
 
 - `000` from `curl` means the loop outran server startup - always poll `/healthz` first.
+- `/healthz` HTTP 200 means the process is up (the poll loops); `grantLaneHealthy` is grant-lane liveness (watch held; idle is not down), not readiness.
 - A sequential `curl` loop cannot outrun the default 200/s budget; that is why the shed demo pins `FIBERD_BASE_RATE=5`.
 - Auth is a stub (`JWKSVerifier` accepts everything) - localhost only.
