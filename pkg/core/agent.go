@@ -88,6 +88,10 @@ func (a *Agent) Clone(ctx context.Context, token []byte, req CloneRequest) (Clon
 	}
 
 	// 3. Ledger: resolve attach | resume | create, mint or reuse the fence.
+	// Capacity is reserved inside Resolve; ErrGrantFull maps to
+	// DEFERRED_FALLBACK per healthy-control-plane default — choosing
+	// SHED instead requires a control-plane health signal the agent does
+	// not have yet.
 	act, fence, ref, commit, unlock, err := a.Ledger.Resolve(req.GrantUID, req.Session, a.Runtime.Tier())
 	if err != nil {
 		if unlock != nil {
@@ -134,9 +138,12 @@ func (a *Agent) Clone(ctx context.Context, token []byte, req CloneRequest) (Clon
 }
 
 // Park checkpoints a named session's delta and frees its running tier.
+// The ledger is told on success so the fiber's fibers.max slot is returned
+// and a later Clone(S) resolves to ActResume against the delta.
 func (a *Agent) Park(ctx context.Context, fiberID string, sync bool) (string, error) {
 	ref, err := a.Runtime.Park(ctx, fiberID, sync)
 	if err == nil {
+		a.Ledger.OnPark(fiberID, ref)
 		_ = a.Audit.Append(ctx, "park", Fence{}, fiberID)
 	}
 	return ref, err
@@ -145,6 +152,7 @@ func (a *Agent) Park(ctx context.Context, fiberID string, sync bool) (string, er
 func (a *Agent) Release(ctx context.Context, fiberID string) error {
 	err := a.Runtime.Release(ctx, fiberID)
 	if err == nil {
+		a.Ledger.OnRelease(fiberID)
 		_ = a.Audit.Append(ctx, "release", Fence{}, fiberID)
 	}
 	return err
