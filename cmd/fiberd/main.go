@@ -15,6 +15,16 @@ import (
 	"fiberd/pkg/runtime/stub"
 )
 
+// nopAudit discards every audit event.
+//
+// TODO(poc): this is a stand-in, not the audit spool the contract requires.
+// core.Auditor is specified as "append-locally, ship-async", and under
+// durability SYNC Append must not return until the record is remote (Clone
+// acks after it). nopAudit persists nothing and always returns nil, so SYNC
+// grants get no durability guarantee and BEST_EFFORT grants leave no local
+// trail. Implement a real Auditor: append to a local durable spool, ship
+// asynchronously to the audit sink, and block in Append only under SYNC until
+// the record is durable/remote.
 type nopAudit struct{}
 
 func (nopAudit) Append(context.Context, string, core.Fence, string) error { return nil }
@@ -51,9 +61,38 @@ func main() {
 		// Reconcile: reality wins; orphans from the previous epoch would be
 		// reaped here (stub starts empty).
 		log.Printf("reconcile: %d fibers running", len(fibers))
+		// TODO(poc): this is a log line, not a reconcile. The Ledger doc
+		// comment promises authoritative state "rebuilt at startup from
+		// Runtime.List reconciled against the on-disk snapshot, discrepancies
+		// resolving in favor of what is actually running." None of that
+		// happens: there is no on-disk snapshot of grants/sessions/fibers, so
+		// nothing is reloaded into `led`, and orphaned instances from a prior
+		// epoch are neither adopted nor torn down. Implement (1) a durable
+		// snapshot of the ledger (grants, sessions with fences, fiber refs)
+		// persisted under FIBERD_STATE, and (2) a reconcile that seeds `led`
+		// from the snapshot, matches it against rt.List, and reaps runtime
+		// instances with no live grant.
 	}
 
-	staleTTL := 30 * time.Second // TODO: adapter.Grant carries no lease TTL yet — add it there
+	staleTTL := 30 * time.Second
+	if v := os.Getenv("FIBERD_STALE_TTL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			staleTTL = d
+		}
+	}
+	laneDies := time.Duration(0) // FIBERD_LANE_DIES_AFTER, e.g. "5s"; 0 = never
+	if v := os.Getenv("FIBERD_LANE_DIES_AFTER"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			laneDies = d
+		}
+	}
+	fiberMax := 128
+	if v := os.Getenv("FIBERD_DEMO_MAX"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			fiberMax = n
+		}
+	}
+	log.Printf("staleTTL=%s laneDies=%s fiberMax=%d", staleTTL, laneDies, fiberMax)
 	health := core.NewSourceHealth(staleTTL, time.Now())
 
 	ag := &core.Agent{
@@ -71,7 +110,7 @@ func main() {
 	// Async lane: grants in. Skeleton feeds one grant by hand.
 	src := &k8s.Source{Events: make(chan adapter.GrantEvent, 1)}
 	src.Events <- adapter.GrantEvent{Kind: adapter.GrantAdded,
-		Grant: adapter.Grant{UID: "demo", FiberMax: 128, SandboxID: "sbx-demo"}}
+		Grant: adapter.Grant{UID: "demo", FiberMax: fiberMax, SandboxID: "sbx-demo"}}
 	go func() {
 		ch, err := src.Watch(context.Background())
 		if err != nil {
@@ -82,6 +121,10 @@ func main() {
 		// A real informer replaces the ticker with relist / watch errors.
 		tick := time.NewTicker(staleTTL / 2)
 		defer tick.Stop()
+		var deadCh <-chan time.Time
+		if laneDies > 0 {
+			deadCh = time.After(laneDies)
+		}
 		for {
 			select {
 			case ev, ok := <-ch:
@@ -97,6 +140,9 @@ func main() {
 				}
 			case <-tick.C:
 				health.MarkSync(time.Now())
+			case <-deadCh:
+				log.Printf("grant lane simulated death (FIBERD_LANE_DIES_AFTER=%s)", laneDies)
+				return
 			}
 		}
 	}()

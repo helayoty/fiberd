@@ -146,7 +146,7 @@ runs unmodified beneath it.
 Clone(grant, deadline)              -> anonymous fiber          (fungible worker)
 Clone(grant, deadline, session: S)  -> attach | resume | create (idempotent: "my worker")
 Park(fiberID, sync)                 -> checkpoint delta, keep name
-Release(fiberID, discard)           -> destroy state, free name
+Release(fiberID)                    -> destroy state, free name
 ```
 
 `Clone(S)` resolves against the node ledger: S running → return the

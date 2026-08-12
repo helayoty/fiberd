@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 )
 
 // createFiber drives one full Resolve→commit→unlock cycle and returns the
@@ -164,6 +165,36 @@ func TestResolveCapacity(t *testing.T) {
 			session: "S1",
 			wantAct: ActCreate, // not attach or resume: the name was freed
 		},
+		{
+			name: "revoked grant is unknown",
+			max:  1,
+			setup: func(t *testing.T, l *Ledger) {
+				l.RevokeGrant(grant)
+			},
+			grant:   grant,
+			wantErr: ErrGrantUnknown,
+		},
+		{
+			name: "re-admit preserves live count (still full)",
+			max:  1,
+			setup: func(t *testing.T, l *Ledger) {
+				createFiber(t, l, grant, "", "f1") // live = 1 at max = 1
+				// A duplicate delivery (relist/reconnect) must not reset live.
+				l.AdmitGrant(grant, "sbx-"+grant, 1)
+			},
+			grant:   grant,
+			wantErr: ErrGrantFull, // regression: overwrite would zero live → ActCreate
+		},
+		{
+			name: "re-admit refreshes fiberMax in place",
+			max:  1,
+			setup: func(t *testing.T, l *Ledger) {
+				createFiber(t, l, grant, "", "f1")   // live = 1
+				l.AdmitGrant(grant, "sbx-"+grant, 2) // raise the ceiling to 2
+			},
+			grant:   grant,
+			wantAct: ActCreate, // live 1 < new max 2, so a second create fits
+		},
 	}
 
 	for _, tc := range cases {
@@ -184,4 +215,57 @@ func TestResolveCapacity(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("re-admit preserves fence sequence", func(t *testing.T) {
+		l := NewLedger(1)
+		l.AdmitGrant(grant, "sbx-"+grant, 4)
+		createFiber(t, l, grant, "", "f1") // mints seq 1
+
+		// Duplicate delivery: must not reset nextSeq, or the next fence would
+		// reuse a sequence already handed out for this grant+epoch.
+		l.AdmitGrant(grant, "sbx-"+grant, 4)
+
+		_, fence, _, commit, unlock, err := l.Resolve(grant, "", TierCheckpoint)
+		if err != nil {
+			t.Fatalf("Resolve after re-admit: %v", err)
+		}
+		commit(Session{
+			GrantUID: grant, State: StateRunning, Fence: fence,
+			Handle: FiberHandle{ID: "f2", Endpoint: "127.0.0.1:2"},
+		})
+		unlock()
+		if fence.Seq <= 1 {
+			t.Fatalf("fence.Seq = %d after re-admit, want > 1 (sequence reused)", fence.Seq)
+		}
+	})
+
+	t.Run("revoke while blocked on session lock", func(t *testing.T) {
+		l := NewLedger(1)
+		l.AdmitGrant(grant, "sbx-"+grant, 2)
+		createFiber(t, l, grant, "S1", "f1")
+
+		key := grant + "/S1"
+		gate := l.acquireSession(key) // hold the per-name lock so Resolve blocks
+
+		done := make(chan error, 1)
+		go func() {
+			_, _, _, _, unlock, err := l.Resolve(grant, "S1", TierCheckpoint)
+			if unlock != nil {
+				unlock()
+			}
+			done <- err
+		}()
+
+		select {
+		case err := <-done:
+			l.releaseSession(key, gate)
+			t.Fatalf("Resolve returned before revoke (did not block): %v", err)
+		case <-time.After(50 * time.Millisecond):
+		}
+		l.RevokeGrant(grant)
+		l.releaseSession(key, gate)
+		if err := <-done; !errors.Is(err, ErrGrantUnknown) {
+			t.Fatalf("Resolve err = %v, want %v", err, ErrGrantUnknown)
+		}
+	})
 }

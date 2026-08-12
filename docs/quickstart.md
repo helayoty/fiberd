@@ -48,9 +48,23 @@ until curl -sf localhost:8484/healthz >/dev/null; do sleep 0.2; done
 curl -s localhost:8484/healthz           # epoch bump = revocation; grantLaneHealthy true while the grant watch is held
 ```
 
+Capacity miss while the grant lane is dead is SHED (429), not DEFERRED_FALLBACK (503). Kill the previous process first (`lsof` if `%1` is already gone). Default budget is 200/s so this 429 is `ErrGrantFull`, not the token bucket.
+
+```bash
+FIBERD_DEMO_MAX=2 FIBERD_STALE_TTL=1s FIBERD_LANE_DIES_AFTER=2s ./fiberd &
+until curl -sf localhost:8484/healthz >/dev/null; do sleep 0.2; done
+curl -s -X POST localhost:8484/v0/clone -d '{"GrantUID":"demo"}'   # 1/2
+curl -s -X POST localhost:8484/v0/clone -d '{"GrantUID":"demo"}'   # 2/2
+sleep 4                                                          # watch dies at 2s; stale 1s later
+curl -s localhost:8484/healthz                                   # grantLaneHealthy: false
+curl -s -w '\n%{http_code}\n' \
+  -X POST localhost:8484/v0/clone -d '{"GrantUID":"demo"}'       # 429 + ErrGrantFull
+```
+
 ## Notes
 
 - `000` from `curl` means the loop outran server startup - always poll `/healthz` first.
 - `/healthz` HTTP 200 means the process is up (the poll loops); `grantLaneHealthy` is grant-lane liveness (watch held; idle is not down), not readiness.
 - A sequential `curl` loop cannot outrun the default 200/s budget; that is why the shed demo pins `FIBERD_BASE_RATE=5`.
+- `FIBERD_LANE_DIES_AFTER` stops the watch (and its ticker); after `FIBERD_STALE_TTL` (default 30s) `grantLaneHealthy` goes false and a capacity miss is 429, not 503.
 - Auth is a stub (`JWKSVerifier` accepts everything) - localhost only.

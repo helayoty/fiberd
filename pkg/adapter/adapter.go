@@ -3,15 +3,29 @@
 // fork. An adapter is conformant iff the core runs unmodified beneath it.
 package adapter
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // Grant is the supply-side artifact: authority issued once, charged at
 // admission, exercised locally, revoked asynchronously.
 type Grant struct {
-	UID       string
-	FiberMax  int
+	UID      string
+	FiberMax int
+	// WarmCount is the warm floor (fibers.warm): the number of fibers the
+	// node should keep pre-forked and hot so the first Clone is an attach,
+	// not a cold fork.
+	//
+	// TODO(poc): WarmCount is carried here but never enforced. main.go calls
+	// AdmitGrant(uid, sandboxID, FiberMax) and drops WarmCount on the floor;
+	// the Ledger has no notion of a warm floor and nothing pre-forks or
+	// backfills fibers to keep `warm` hot. Thread WarmCount into the ledger
+	// (or a warm-pool manager) and add a backfill loop that mints up to
+	// WarmCount idle fibers per grant and refills after each attach/park.
 	WarmCount int
-	SandboxID string // filled by the adapter once the sandbox exists
+	SandboxID string    // filled by the adapter once the sandbox exists
+	Expiry    time.Time //zero = no expiry (skeleton)
 }
 
 type GrantEventKind int

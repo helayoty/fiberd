@@ -47,7 +47,15 @@ func (b *Budget) ObserveWorkingSet(bytes float64) {
 	b.w = bytes
 }
 
-func (b *Budget) rateLocked() float64 { return b.base / (1 + b.w/b.refW) }
+func (b *Budget) rateLocked() float64 {
+	// refW is the working-set scale at which rate halves; a non-positive refW
+	// has no meaningful curve (and w/refW would divide by zero → +Inf, or 0/0
+	// → NaN). Degrade to the flat base rate rather than poison the token math.
+	if b.refW <= 0 {
+		return b.base
+	}
+	return b.base / (1 + b.w/b.refW)
+}
 
 // Rate is what grant.status advertises so routers and autoscalers can plan.
 func (b *Budget) Rate() float64 {

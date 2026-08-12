@@ -3,6 +3,7 @@
 .vscode
 
 .cursor
+.claude
 
 /vendor
 /out

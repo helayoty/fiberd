@@ -8,6 +8,7 @@ package k8s
 
 import (
 	"context"
+	"errors"
 
 	"fiberd/pkg/adapter"
 )
@@ -26,11 +27,13 @@ func (s *Source) Watch(ctx context.Context) (<-chan adapter.GrantEvent, error) {
 // ListPodSandbox filtered on the pod UID — kubelet built it; we ride it.
 type Sandboxes struct{}
 
+var ErrNoSandbox = errors.New("k8s: sandbox not found for grant")
+
 func (Sandboxes) EnsureSandbox(_ context.Context, g adapter.Grant) (string, error) {
 	if g.SandboxID != "" {
 		return g.SandboxID, nil
 	}
-	return "", context.Canceled // TODO: CRI ListPodSandbox lookup
+	return "", ErrNoSandbox // TODO: CRI ListPodSandbox lookup
 }
 
 // JWKSVerifier validates the caller's projected SA token offline against

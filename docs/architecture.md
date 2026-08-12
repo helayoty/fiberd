@@ -65,7 +65,7 @@ Four verbs are the entire instance-management surface:
 Clone(grant, deadline)              -> anonymous fiber          (fungible worker)
 Clone(grant, deadline, session: S)  -> attach | resume | create (idempotent: "my worker")
 Park(fiberID, sync)                 -> checkpoint delta, keep name
-Release(fiberID, discard)           -> destroy state, free name
+Release(fiberID)                    -> destroy state, free name
 ```
 
 ### One verb, three costs

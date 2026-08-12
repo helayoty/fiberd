@@ -19,10 +19,10 @@ type CloneRequest struct {
 }
 
 type CloneResponse struct {
-	FiberID  string
-	Endpoint string
-	Fence    Fence
-	Resumed  bool // true when session state was restored, not fresh
+	FiberID    string
+	Endpoint   string
+	Fence      Fence
+	Resolution string // "attach" | "resume" | "create"
 }
 
 // StatusCode mirrors the wire semantics forced by constraint (a)/(e).
@@ -36,6 +36,7 @@ const (
 	// Shed: miss while the control plane is unreachable, or budget
 	// backpressure. 429 + Retry-After; never queue on a dead control plane.
 	Shed
+	Invalid
 )
 
 // Auditor is append-locally, ship-async. Under durability SYNC, Append must
@@ -60,6 +61,15 @@ var (
 
 // Agent wires the eight subcomponents. One per node; same struct in both
 // deployments — only the adapter-injected Verifier and sandbox mapping vary.
+//
+// TODO(poc): the pressure controller is not wired in. The design specifies
+// a controller with two inputs — kernel PSI on the grant's cgroup slice and
+// ledger-derived device pressure (engine KV occupancy + queue depth) — driving
+// one ladder, cheapest-first: shed new clones -> park over-quota capacity ->
+// yield/evict the grant. None of that exists here: the only backpressure is
+// Budget.Take (thrash rate), there is no PSI/device-pressure reader, and the
+// park/yield rungs are never triggered. Add a PressureController field and a
+// background loop that samples both inputs and applies shed/park/yield.
 type Agent struct {
 	Ledger  *Ledger
 	Budget  *Budget
@@ -78,10 +88,10 @@ type Agent struct {
 func (a *Agent) Clone(ctx context.Context, token []byte, req CloneRequest) (CloneResponse, StatusCode, error) {
 	// 1. Frontend: authn + admission completeness.
 	if len(req.Payload) > maxPayload {
-		return CloneResponse{}, Shed, ErrPayloadTooLarge
+		return CloneResponse{}, Invalid, ErrPayloadTooLarge
 	}
 	if err := a.Verify.Verify(ctx, token, req.GrantUID); err != nil {
-		return CloneResponse{}, Shed, fmt.Errorf("capability: %w", err)
+		return CloneResponse{}, Invalid, fmt.Errorf("capability: %w", err)
 	}
 
 	// 2. Budget: backpressure before any work.
@@ -106,7 +116,7 @@ func (a *Agent) Clone(ctx context.Context, token []byte, req CloneRequest) (Clon
 
 	if act == ActAttach {
 		_ = a.Audit.Append(ctx, "attach", fence, req.Session)
-		return CloneResponse{FiberID: fence.String(), Endpoint: ref, Fence: fence, Resumed: true}, OK, nil
+		return CloneResponse{FiberID: fence.String(), Endpoint: ref, Fence: fence, Resolution: "attach"}, OK, nil
 	}
 
 	// 4. Runtime: the one fork or restore call, under a hard deadline.
@@ -120,6 +130,13 @@ func (a *Agent) Clone(ctx context.Context, token []byte, req CloneRequest) (Clon
 	}
 	rctx, cancel := context.WithTimeout(ctx, req.Deadline)
 	defer cancel()
+	// TODO(poc): identity scrub at the fork boundary is not performed. The
+	// design requires that Clone "scrubs inherited descriptors, baked tokens,
+	// and entropy: identity is assigned after the fork, never baked into the
+	// template". Nothing here or in the stub runtime scrubs the freshly forked
+	// fiber, so a create/resume could inherit the zygote's or parent's fds,
+	// tokens, and RNG state. Implement scrub-on-clone (in the zygote manager /
+	// Runtime.Clone path) and only assign the fence-derived identity afterward.
 	h, err := a.Runtime.Clone(rctx, sandbox, src, srcRef, fence, req.Deadline)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
@@ -137,7 +154,16 @@ func (a *Agent) Clone(ctx context.Context, token []byte, req CloneRequest) (Clon
 	// the Auditor implementation owns that distinction.
 	_ = a.Audit.Append(ctx, "clone", fence, req.Session)
 
-	return CloneResponse{FiberID: h.ID, Endpoint: h.Endpoint, Fence: fence, Resumed: act == ActResume}, OK, nil
+	resolution := "create"
+	if act == ActResume {
+		resolution = "resume"
+	}
+	return CloneResponse{
+		FiberID:    h.ID,
+		Endpoint:   h.Endpoint,
+		Fence:      fence,
+		Resolution: resolution,
+	}, OK, nil
 }
 
 // capacityMiss maps "capacity not on this node" to the two miss codes.

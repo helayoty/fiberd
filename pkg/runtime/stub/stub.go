@@ -25,8 +25,15 @@ func New() *Runtime {
 	return &Runtime{fibers: map[string]core.FiberHandle{}, parked: map[string][]byte{}, port: 30000}
 }
 
-func (r *Runtime) Tier() core.Tier { return core.TierWarm }
+func (r *Runtime) Tier() core.Tier { return core.TierCheckpoint }
 
+// TODO(poc): this Clone does no real work. It allocates a fake endpoint and
+// records a handle in a map — there is no fork/CoW of a zygote (TierWarm), no
+// checkpoint restore of a delta (TierCheckpoint), no identity scrub, and the
+// deadline is ignored. Replace with the real CRI path: CreateContainer /
+// CreateContainer-with-checkpoint against the grant sandbox for v0/v1, and the
+// CloneFiber verb once it lands, honoring the hard deadline and reporting the
+// true birth mechanism.
 func (r *Runtime) Clone(_ context.Context, sandboxID string, src core.CloneSource, ref string, f core.Fence, _ time.Duration) (core.FiberHandle, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -47,6 +54,12 @@ func (r *Runtime) Clone(_ context.Context, sandboxID string, src core.CloneSourc
 	return h, nil
 }
 
+// TODO(poc): this Park does not checkpoint anything. It drops the fiber from
+// the map and stores an empty byte slice as the "delta"; the `sync` flag is
+// ignored, so there is no real CRIU (or equivalent) checkpoint of the fiber's
+// delta over the zygote and nothing durable to restore on resume. Implement
+// the real checkpoint path (CRIU / CheckpointPod per KEP-5823), writing the
+// per-fiber delta to the checkpoint store and honoring sync durability.
 func (r *Runtime) Park(_ context.Context, fiberID string, _ bool) (string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

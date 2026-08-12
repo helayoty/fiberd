@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"fiberd/pkg/adapter"
 )
@@ -41,6 +42,9 @@ func (v Verifier) Verify(_ context.Context, token []byte, grantUID string) error
 	}
 	if g.UID != grantUID {
 		return fmt.Errorf("grant mismatch: signed %q, requested %q", g.UID, grantUID)
+	}
+	if !g.Expiry.IsZero() && time.Now().After(g.Expiry) {
+		return fmt.Errorf("grant expired %s ago", time.Since(g.Expiry).Round(time.Second))
 	}
 	return nil
 }

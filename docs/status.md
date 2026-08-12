@@ -91,29 +91,31 @@ flowchart TD
 | Storm throughput W=1MB vs W=4MB | ~110/s vs ~32/s | thrash budget is genuinely f(W) |
 | 51 procs x 128MB heap, total PSS | 180-330 MB (vs 6.5 GB naive) | CoW density basis for ~1000/node |
 
-## Semantic proofs (exercised live in the prototype)
+## Semantic checks
 
-The Go core reproduces the attach, shed, and epoch rows today; the park/resume, signed-grant, and audit rows are next-step items. The `fibers.max` capacity ceiling is enforced in the ledger.
+The default agent wires the no-op `JWKSVerifier` (accepts every token) and `nopAudit` (writes nothing), so the signed-grant and audit rows are not exercised as shipped.
 
-| Demo | Output observed | Design invariant |
-| --- | --- | --- |
-| Grant signature verified before boot | boot refuses on bad sig | accounting precedes activation; offline proof |
-| `Clone(S)` twice | 2nd returns `attach`, same endpoint/fence | idempotency on the request path |
-| hit x4, Park, `Clone(S)` | `resume`, count continues 4 -> 5, new pid, new seq | identity != incarnation; continuity contract |
-| `{"image": "evil"}` on Clone | rejected: un-admitted fields | admission completeness (structural, not policy) |
-| 12-clone burst at 5/s limit | accepted=5 shed=7, `code: SHED` | thrash budget backpressure |
-| agent restart | epoch 1 -> 2 in status | fence rotation = revocation, node-local |
-| `state/audit.jsonl` | one record per op with fence | audit spool, async-shippable |
+| Check | Status | Output / state | Design invariant |
+| --- | --- | --- | --- |
+| `Clone(S)` twice | live | 2nd returns `attach`, same endpoint/fence | idempotency on the request path |
+| 12-clone burst at 5/s limit | live | accepted=5 shed=7, `code: SHED` | thrash budget backpressure |
+| agent restart | live | epoch 1 -> 2 in status | fence rotation = revocation, node-local |
+| `{"image": "evil"}` on Clone | live | clone succeeds; the unknown `image` key is silently ignored (the request struct has no field to bind it to) | admission completeness |
+| `fibers.max` ceiling | unit | reserve / rollback / free proven in `pkg/core/ledger_test.go`; `ErrGrantFull` -> 503 | the node never mints past the charged block |
+| hit, Park, `Clone(S)` -> resume | unit | resume action + fence seq+1 in `pkg/core/ledger_test.go`; no HTTP Park endpoint in the agent yet | identity != incarnation; continuity contract |
+| signed-grant verify | next-step | ed25519 verify (sig, UID, expiry) implemented in `pkg/standalone` but NOT wired — the agent injects the JWKS stub, and verification is per-`Clone`, not a boot gate | accounting precedes activation; offline proof |
+| audit record per op | next-step | none — the agent wires `nopAudit`; no `state/audit.jsonl` is written | audit spool, async-shippable |
 
 ## What is real vs planned
 
 | Component | Prototype today | In the full design |
 | --- | --- | --- |
-| Clone mechanism | prestarted process pool in the agent; true CoW fork only in the C bench | CRI CloneFiber against a zygote checkpoint (containerd >= 2.0 restore path) |
+| Clone mechanism | in-memory fiber handles (`runtime/stub`) — NO process created, deadline ignored; true CoW fork only in the C bench | CRI CloneFiber against a zygote checkpoint (containerd >= 2.0 restore path) |
 | Capacity ceiling | ledger enforces `fibers.max`: reserve at `Resolve`, roll back on abandon, free on `Park`/`Release`; `ErrGrantFull` -> 503 (DEFERRED_FALLBACK); unit-tested in `pkg/core/ledger_test.go` | same, plus the cgroup slice hard ceiling and per-fiber `memory.max` + `oom.group` |
 | Isolation | none - plain processes | runtime tiers; leaf cgroups + oom.group |
-| Park delta | worker serializes its own state | CRIU incremental / snapshot layer diff |
+| Park delta | stub stores an empty placeholder — no real checkpoint (`sync` ignored) | CRIU incremental / snapshot layer diff |
 | Grant source | local signed JSON | k8s adapter (watch) or platform adapter (signed) |
+| Lease enforcement | none — revocation is map-delete only; running fibers and their credentials are unbounded after `RevokeGrant` | lease TTL bounds fiber + credential lifetime (`min(lease TTL, fence)`); reaper drains on non-renewal, bounded even during a control-plane outage |
 | Identity | none | grant capability -> per-fiber delegation |
-| Pressure ladder | HTTP-triggered demo ordering | PSI-driven, racing kubelet eviction (measure!) |
+| Pressure ladder | none — only the Budget token-bucket rate limit; no PSI/device inputs, no park/yield rungs | PSI-driven, racing kubelet eviction (measure!) |
 | Orphan adoption on boot | missing (running fibers lost on restart) | ledger reconcile from CRI ListFibers |

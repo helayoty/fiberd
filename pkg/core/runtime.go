@@ -20,6 +20,13 @@ const (
 	// TierCheckpoint: per-fiber delta checkpoint + restore. Park/resume —
 	// the entire session model — requires this.
 	TierCheckpoint
+	// TODO(poc): the top tier, FIBER_FABRIC, is missing from this ladder. The
+	// contract and fiberd docs define a fourth tier above TierCheckpoint that
+	// provisions a per-grant fabric channel (e.g. an IMEX channel via a
+	// ComputeDomain-class DRA claim) for multi-node/collective workloads. Add
+	// a TierFabric constant here and teach placement/Resolve about it (a
+	// fabric-tier request must not be satisfied by a sub-fabric runtime, the
+	// same way a parked session must not fall back below TierCheckpoint).
 )
 
 // CloneSource selects the birth mechanism for a fiber.
