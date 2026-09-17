@@ -1,0 +1,17 @@
+version: v2
+modules:
+  - path: proto
+lint:
+  use:
+    - STANDARD
+  except:
+    # The file is Agent Substrate's, copied verbatim (Apache-2.0); its
+    # names are their wire contract, not ours to restyle.
+    - PACKAGE_DIRECTORY_MATCH
+    - PACKAGE_VERSION_SUFFIX
+    - ENUM_VALUE_PREFIX
+    - ENUM_ZERO_VALUE_SUFFIX
+    - SERVICE_SUFFIX
+    - FIELD_NOT_REQUIRED
+    - COMMENT_FIELD
+    - COMMENT_MESSAGE

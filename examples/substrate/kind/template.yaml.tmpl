@@ -1,0 +1,33 @@
+# An ActorTemplate (protojson-shaped ateapipb.ActorTemplate) for an actor
+# that is a fiber. The container image is what atelet pulls and prepares
+# a bundle for; the herder does not run it: in this phase the workload is
+# the reference zygote the worker image carries, named by the herder's
+# ATEOM_FIBERD_TEMPLATE (the key "${ATESPACE}/${TEMPLATE}" or "default").
+# Readiness and resources are honoured: the fiber is probed at /readyz
+# and the memory limit becomes the grant's W budget.
+metadata:
+  atespace: ${ATESPACE}
+  name: ${TEMPLATE}
+workerSelector:
+  matchLabels:
+    workload: ${POOL}
+containers:
+- name: counter
+  image: registry.k8s.io/pause:3.10.2@sha256:f548e0e8e3dc1896ca956272154dde3314e8cc4fde0a57577ee9fa1c63f5baf4
+  readyz:
+    httpGet:
+      path: /readyz
+      port: 80
+resources:
+  limits:
+  - name: cpu
+    quantity: "1"
+  - name: memory
+    quantity: 256Mi
+snapshotsConfig:
+  onPause: SNAPSHOT_CONTENT_SCOPE_FULL
+  onCommit: SNAPSHOT_CONTENT_SCOPE_FULL
+  storageLocation: gs://${BUCKET_NAME}/${ATESPACE}/
+sandboxConfig:
+  sandboxClass: SANDBOX_CLASS_GVISOR
+  configName: gvisor-default

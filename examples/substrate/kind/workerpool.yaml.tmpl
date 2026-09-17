@@ -1,0 +1,32 @@
+# A Substrate WorkerPool whose workers are fiberd homes: the only change
+# from the counter demo's pool is the image. The class stays `gvisor`
+# because Substrate's controller and API know only that class and
+# `microvm` (the enum is hard-coded); atelet fetches the gVisor assets
+# the class implies and hands them to the herder, which does not use
+# them. ${SUBSTRATE_VERSION} is the node label the install stamped.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ${ATESPACE}
+---
+apiVersion: ate.dev/v1alpha1
+kind: WorkerPool
+metadata:
+  name: ${POOL}
+  namespace: ${ATESPACE}
+  labels:
+    workload: ${POOL}
+spec:
+  replicas: 2
+  workerImage: ${IMAGE}
+  sandboxClass: gvisor
+  template:
+    nodeSelector:
+      ate.dev/substrate-version: "${SUBSTRATE_VERSION}"
+    resources:
+      limits:
+        cpu: "1"
+        memory: 1Gi
+      requests:
+        cpu: 250m
+        memory: 1Gi
