@@ -8,8 +8,8 @@
 //	                    -min-tier FIBER_WARM -ttl 10m > grant.jwt
 //	grant-issuer serve  -key key.json -addr :8686 [-issuer http://issuer:8686]
 //
-// The Kubernetes controller (phase 3k) is a fourth subcommand on this
-// binary, using the same key and handler.
+// An integration runs the same issuer inside its control plane; the
+// Kubernetes example's grant-controller is one (examples/kubernetes).
 package main
 
 import (
@@ -94,6 +94,8 @@ func mint(args []string) error {
 	durability := fs.String("durability", "best-effort", "audit durability: best-effort or sync")
 	psiShed := fs.Float64("psi-shed", 0, "PSI memory some avg10 (%) at which the home sheds new clones")
 	psiPark := fs.Float64("psi-park", 0, "PSI memory some avg10 (%) at which the home parks sessions")
+	devBudget := fs.String("device-budget", "0", "per-fiber slice of the engine's device state, bytes with optional Ki/Mi/Gi suffix (0 = no device)")
+	devClass := fs.String("device-class", "", "device class the budget is for (gpu, sim; empty = any)")
 	_ = fs.Parse(args)
 
 	if *issuer == "" || *aud == "" {
@@ -110,6 +112,10 @@ func mint(args []string) error {
 	w, err := parseBytes(*wBudget)
 	if err != nil {
 		return fmt.Errorf("-w-budget: %w", err)
+	}
+	dev, err := parseBytes(*devBudget)
+	if err != nil {
+		return fmt.Errorf("-device-budget: %w", err)
 	}
 	var d core.Durability
 	switch strings.ToLower(*durability) {
@@ -129,8 +135,9 @@ func mint(args []string) error {
 	g := core.Grant{
 		UID: *uid, Audience: *aud, TemplateDigest: *template,
 		FiberMax: int(*maxF), FiberWarm: int(*warm), WBudgetBytes: w, MinTier: tier,
-		LeaseExpiry: now.Add(*ttl).Truncate(time.Second),
-		Policy:      core.Policy{Durability: d, PSISomeAvg10Shed: *psiShed, PSISomeAvg10Park: *psiPark},
+		LeaseExpiry:  now.Add(*ttl).Truncate(time.Second),
+		Policy:       core.Policy{Durability: d, PSISomeAvg10Shed: *psiShed, PSISomeAvg10Park: *psiPark},
+		DeviceBudget: core.DeviceBudget{Bytes: dev, Class: *devClass},
 	}
 	is := &grant.Issuer{Key: key, URL: *issuer}
 	tok, err := is.Mint(g)

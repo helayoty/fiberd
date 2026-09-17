@@ -17,6 +17,7 @@ import (
 	"github.com/helayoty/fiberd/pkg/artifact"
 	"github.com/helayoty/fiberd/pkg/backend"
 	"github.com/helayoty/fiberd/pkg/core"
+	"github.com/helayoty/fiberd/pkg/endpoint"
 	"github.com/helayoty/fiberd/pkg/sys/cgroup"
 )
 
@@ -39,6 +40,7 @@ type Runtime struct {
 	mu     sync.Mutex
 	warms  map[string]*warm  // grant uid
 	fibers map[string]*fiber // fiber id (fence string)
+	ports  map[int]string    // tcp endpoints: port -> fiber id holding it
 	exits  chan core.FiberExit
 
 	// parents is the content-addressed store of template checkpoints:
@@ -48,6 +50,26 @@ type Runtime struct {
 	// the same artifact warmed another home, across homes.
 	parentsMu sync.Mutex
 	parents   map[string]backend.Parent
+
+	fabricMu sync.Mutex
+	fabrics  map[string]core.FabricChannel // grant uid -> what the home provisioned
+}
+
+// AttachFabric implements core.FabricAware: the grant's devices reach
+// its warm instance's environment at PrepareTemplate.
+func (r *Runtime) AttachFabric(grantUID string, fc core.FabricChannel) {
+	r.fabricMu.Lock()
+	defer r.fabricMu.Unlock()
+	if r.fabrics == nil {
+		r.fabrics = map[string]core.FabricChannel{}
+	}
+	r.fabrics[grantUID] = fc
+}
+
+func (r *Runtime) fabricOf(grantUID string) core.FabricChannel {
+	r.fabricMu.Lock()
+	defer r.fabricMu.Unlock()
+	return r.fabrics[grantUID]
 }
 
 type warm struct {
@@ -71,10 +93,15 @@ type fiber struct {
 	grantUID string
 	pid      int
 	cg       cgroup.Dir
-	endpoint string
+	endpoint string // the URL Clone returned
+	port     int    // tcp endpoints: the port held while running or parked
+	fenceFn  string // where a resumed fiber's new fence is published, "" for a fresh one
 	started  time.Time
 	budget   uint64 // w_budget_bytes; 0 = unlimited
+	devMax   uint64 // device_budget bytes; 0 = none
+	overWhy  string // why the host killed it, for the exit's detail
 	released bool   // Release or Park in progress: do not report the exit
+	parked   bool   // the end in progress is a park: the port stays with the delta
 	overW    bool   // killed by the host for exceeding its W budget
 	ready    bool   // the backend has answered: before that, W is a restore in flight, not the fiber's
 	done     chan struct{}
@@ -134,20 +161,68 @@ func New(cfg Config) (core.Runtime, error) {
 		}
 	}
 	host.Backend = cfg.Backend.Name()
-	log.Printf("host: backend %s tier %s platform %s parity %s", host.Backend, cfg.Tier, host, cfg.Parity)
+	if err := cfg.Endpoints.Validate(); err != nil {
+		return nil, fmt.Errorf("host: %w", err)
+	}
+	if scheme := cfg.Endpoints.Family.Scheme(); scheme != "unix" {
+		// Every backend serves unix sockets under the run directory; a
+		// tcp family needs the backend to say it can bind one.
+		ok := false
+		if s, has := cfg.Backend.(backend.EndpointSchemer); has {
+			for _, sc := range s.EndpointSchemes() {
+				ok = ok || sc == scheme
+			}
+		}
+		if !ok {
+			return nil, fmt.Errorf("host: backend %s cannot serve %s endpoints (family %s)", cfg.Backend.Name(), scheme, cfg.Endpoints.Family)
+		}
+	}
+	log.Printf("host: backend %s tier %s platform %s parity %s endpoints %s", host.Backend, cfg.Tier, host, cfg.Parity, cfg.Endpoints.Family.Scheme())
 	r := &Runtime{
 		cfg: cfg, be: cfg.Backend, root: root, host: host,
-		warms: map[string]*warm{}, fibers: map[string]*fiber{},
+		warms: map[string]*warm{}, fibers: map[string]*fiber{}, ports: map[int]string{},
 		exits:   make(chan core.FiberExit, 1024),
 		parents: map[string]backend.Parent{},
 	}
 	go r.pump()
 	_, overhead := cfg.Backend.(backend.Overheader)
 	_, reports := cfg.Backend.(backend.WReporter)
-	if overhead || reports {
+	_, devices := cfg.Backend.(backend.DeviceReporter)
+	if overhead || reports || devices {
 		go r.enforceW()
 	}
 	return r, nil
+}
+
+// OffersDevice implements core.DeviceCapable: the grant's warm instance
+// is an engine that has reported a device (the class is not checked
+// beyond that; one engine, one device class).
+func (r *Runtime) OffersDevice(grantUID, _ string) bool {
+	dr, ok := r.be.(backend.DeviceReporter)
+	if !ok {
+		return false
+	}
+	_, capacity, ok := dr.WarmDevice(grantUID)
+	return ok && capacity > 0
+}
+
+// DevicePressure is the ladder's second input: the engine's occupancy in
+// percent of its capacity, for grants whose template is an engine; 0 for
+// the rest. Combine with the PSI source through core.MaxPressure.
+func (r *Runtime) DevicePressure() core.PressureSource { return devicePressure{r} }
+
+type devicePressure struct{ r *Runtime }
+
+func (d devicePressure) Pressure(grantUID string) (float64, error) {
+	dr, ok := d.r.be.(backend.DeviceReporter)
+	if !ok {
+		return 0, nil
+	}
+	used, capacity, ok := dr.WarmDevice(grantUID)
+	if !ok || capacity == 0 {
+		return 0, nil
+	}
+	return 100 * float64(used) / float64(capacity), nil
 }
 
 // enforceW is the executioner for backends whose fibers carry a fixed
@@ -162,20 +237,35 @@ func (r *Runtime) enforceW() {
 		r.mu.Lock()
 		fs := make([]*fiber, 0, len(r.fibers))
 		for _, f := range r.fibers {
-			if f.budget > 0 && !f.released && f.ready {
+			if (f.budget > 0 || f.devMax > 0) && !f.released && f.ready {
 				fs = append(fs, f)
 			}
 		}
 		r.mu.Unlock()
+		dr, _ := r.be.(backend.DeviceReporter)
 		for _, f := range fs {
-			w, err := r.wBytes(f)
-			if err != nil || w <= f.budget {
+			why := ""
+			if _, ok := r.be.(backend.Overheader); ok || dr == nil {
+				if w, err := r.wBytes(f); err == nil && f.budget > 0 && w > f.budget {
+					why = fmt.Sprintf("W=%d over budget %d", w, f.budget)
+				}
+			} else if _, ok := r.be.(backend.WReporter); ok {
+				if w, err := r.wBytes(f); err == nil && f.budget > 0 && w > f.budget {
+					why = fmt.Sprintf("W=%d over budget %d", w, f.budget)
+				}
+			}
+			if why == "" && dr != nil && f.devMax > 0 {
+				if d, ok := dr.FiberDevice(f.id); ok && d > f.devMax {
+					why = fmt.Sprintf("device %d over budget %d", d, f.devMax)
+				}
+			}
+			if why == "" {
 				continue
 			}
 			r.mu.Lock()
-			f.overW = true
+			f.overW, f.overWhy = true, why
 			r.mu.Unlock()
-			log.Printf("host: %s W=%d over budget %d: killed", f.id, w, f.budget)
+			log.Printf("host: %s %s: killed", f.id, why)
 			_ = r.be.Kill(f.id)
 			_ = f.cg.Kill()
 		}
@@ -420,7 +510,8 @@ func (r *Runtime) PrepareTemplate(ctx context.Context, g core.Grant) error {
 	}()
 
 	workDir := filepath.Join(r.cfg.RunDir, g.UID)
-	w, err := r.be.Warm(ctx, backend.WarmSpec{GrantUID: g.UID, Template: tpl, CgroupFD: int(zfd.Fd()), WorkDir: workDir, ProbeCgroupFD: probeFD})
+	w, err := r.be.Warm(ctx, backend.WarmSpec{GrantUID: g.UID, Template: tpl, CgroupFD: int(zfd.Fd()), WorkDir: workDir, ProbeCgroupFD: probeFD,
+		Devices: r.fabricOf(g.UID).Devices})
 	if err != nil {
 		return err
 	}
@@ -557,10 +648,10 @@ func (r *Runtime) pump() {
 			reason, detail = "oom", fmt.Sprintf("%s oom_kill=%d", e.Status, n)
 		}
 		r.mu.Lock()
-		overW := f.overW
+		overW, why := f.overW, f.overWhy
 		r.mu.Unlock()
 		if overW {
-			reason, detail = "oom", e.Status+" w over budget"
+			reason, detail = "oom", e.Status+" "+why
 		}
 		r.finish(f, reason, detail)
 	}
@@ -592,8 +683,9 @@ func (r *Runtime) finish(f *fiber, reason, detail string) {
 	delete(r.fibers, f.id)
 	released := f.released
 	r.mu.Unlock()
-	_ = os.Remove(strings.TrimPrefix(f.endpoint, "unix://"))
-	_ = os.Remove(strings.TrimPrefix(f.endpoint, "unix://") + ".fence")
+	if p := endpoint.UnixPath(f.endpoint); p != "" {
+		_ = os.Remove(p)
+	}
 	// The leaf may still be tearing down; retry briefly.
 	for i := 0; i < 20; i++ {
 		if err := f.cg.Remove(); err == nil {
@@ -601,14 +693,88 @@ func (r *Runtime) finish(f *fiber, reason, detail string) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
+	// A parked fiber keeps its port: the restored listener needs the same
+	// one. Every other end frees it.
+	r.mu.Lock()
+	parked := f.parked
+	r.mu.Unlock()
+	if !parked {
+		r.freePort(f.port, f.id)
+	}
+	if f.fenceFn != "" {
+		_ = os.Remove(f.fenceFn)
+	}
 	close(f.done)
 	if !released {
 		r.exits <- core.FiberExit{FiberID: f.id, Reason: reason, Detail: detail}
 	}
 }
 
-func (r *Runtime) endpoint(fence core.Fence) string {
+// unixPath is where a unix endpoint for the fence lives.
+func (r *Runtime) unixPath(fence core.Fence) string {
 	return filepath.Join(r.cfg.RunDir, fence.GrantUID, fmt.Sprintf("%d-%d.sock", fence.Epoch, fence.Seq))
+}
+
+// fenceFile is where the current fence of a resumed fiber is published
+// for applications that need it (the in-process one is stale after a
+// resume): beside the unix endpoint it serves on, or, for a tcp
+// endpoint, under the run directory by the new fence.
+func (r *Runtime) fenceFile(parked endpoint.Endpoint, fence core.Fence) string {
+	if parked.Scheme == "unix" {
+		return parked.Path + ".fence"
+	}
+	return filepath.Join(r.cfg.RunDir, fence.GrantUID, fmt.Sprintf("%d-%d.fence", fence.Epoch, fence.Seq))
+}
+
+// mintEndpoint chooses a fiber's endpoint under the runtime's policy:
+// the unix socket path for its fence, or the declared address with a
+// port taken from the range. bind is what the backend is told to serve
+// on; url is what Clone returns.
+func (r *Runtime) mintEndpoint(fence core.Fence) (url, bind string, port int, err error) {
+	if r.cfg.Endpoints.Family.Scheme() == "unix" {
+		p := r.unixPath(fence)
+		return "unix://" + p, p, 0, nil
+	}
+	port, err = r.allocPort(fence.String(), 0)
+	if err != nil {
+		return "", "", 0, err
+	}
+	e := endpoint.Endpoint{Scheme: "tcp", Host: r.cfg.Endpoints.Host, Port: port}
+	return e.String(), e.String(), port, nil
+}
+
+// allocPort hands out a free port from the range, or reserves want
+// when it is given and free (a resumed fiber's listener is restored on
+// the port it was parked with).
+func (r *Runtime) allocPort(fiberID string, want int) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	lo, hi := r.cfg.Endpoints.Ports()
+	if want != 0 {
+		if holder, taken := r.ports[want]; taken && holder != fiberID {
+			return 0, fmt.Errorf("host: endpoint port %d is held by %s", want, holder)
+		}
+		r.ports[want] = fiberID
+		return want, nil
+	}
+	for p := lo; p <= hi; p++ {
+		if _, taken := r.ports[p]; !taken {
+			r.ports[p] = fiberID
+			return p, nil
+		}
+	}
+	return 0, fmt.Errorf("host: no free endpoint port in %d-%d", lo, hi)
+}
+
+func (r *Runtime) freePort(port int, fiberID string) {
+	if port == 0 {
+		return
+	}
+	r.mu.Lock()
+	if r.ports[port] == fiberID {
+		delete(r.ports, port)
+	}
+	r.mu.Unlock()
 }
 
 func leafName(f core.Fence) string { return fmt.Sprintf("f-%d-%d", f.Epoch, f.Seq) }
@@ -623,7 +789,18 @@ func (r *Runtime) Clone(ctx context.Context, spec core.CloneSpec) (core.FiberHan
 	z, ok := r.warms[spec.Grant.UID]
 	r.mu.Unlock()
 	if !ok {
-		return core.FiberHandle{}, fmt.Errorf("%w: %s", ErrNotPrepared, spec.Grant.UID)
+		// The warm instance is gone (an engine crash takes its fibers but
+		// not the grant): warm it again on demand, so the grant recovers
+		// without a re-admission.
+		if err := r.PrepareTemplate(ctx, spec.Grant); err != nil {
+			return core.FiberHandle{}, fmt.Errorf("%w: %s: %w", ErrNotPrepared, spec.Grant.UID, err)
+		}
+		r.mu.Lock()
+		z, ok = r.warms[spec.Grant.UID]
+		r.mu.Unlock()
+		if !ok {
+			return core.FiberHandle{}, fmt.Errorf("%w: %s", ErrNotPrepared, spec.Grant.UID)
+		}
 	}
 
 	leaf := z.cg.Child(leafName(spec.Fence))
@@ -637,20 +814,24 @@ func (r *Runtime) Clone(ctx context.Context, spec core.CloneSpec) (core.FiberHan
 	}
 	defer func() { _ = lfd.Close() }()
 
-	ep := r.endpoint(spec.Fence)
-	if err := os.MkdirAll(filepath.Dir(ep), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(r.cfg.RunDir, spec.Grant.UID), 0o755); err != nil {
 		_ = leaf.Remove()
 		return core.FiberHandle{}, err
 	}
-	f := &fiber{id: spec.Fence.String(), grantUID: spec.Grant.UID, cg: leaf, endpoint: "unix://" + ep,
-		started: time.Now(), budget: spec.Grant.WBudgetBytes, done: make(chan struct{})}
+	url, bind, port, err := r.mintEndpoint(spec.Fence)
+	if err != nil {
+		_ = leaf.Remove()
+		return core.FiberHandle{}, err
+	}
+	f := &fiber{id: spec.Fence.String(), grantUID: spec.Grant.UID, cg: leaf, endpoint: url, port: port,
+		started: time.Now(), budget: spec.Grant.WBudgetBytes, devMax: spec.Grant.DeviceBudget.Bytes, done: make(chan struct{})}
 	// Registered before the backend answers so an exit that races the
 	// reply is not lost.
 	r.mu.Lock()
 	r.fibers[f.id] = f
 	r.mu.Unlock()
 	fb, err := r.be.Clone(ctx, z.id, backend.FiberSpec{
-		Fence: f.id, Endpoint: ep, CgroupFD: int(lfd.Fd()), Deadline: spec.Deadline,
+		Fence: f.id, Endpoint: bind, CgroupFD: int(lfd.Fd()), Deadline: spec.Deadline,
 		Payload: spec.Payload, OwnPIDNS: !r.cfg.NoFiberPIDNS,
 	})
 	if err != nil {
@@ -659,6 +840,7 @@ func (r *Runtime) Clone(ctx context.Context, spec core.CloneSpec) (core.FiberHan
 			delete(r.fibers, f.id)
 		}
 		r.mu.Unlock()
+		r.freePort(port, f.id)
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 			// The backend enforces the same deadline and kills the child.
 			_ = leaf.Kill()
@@ -706,6 +888,7 @@ func (r *Runtime) Park(ctx context.Context, fiberID string, sync bool) (string, 
 	f, ok := r.fibers[fiberID]
 	if ok {
 		f.released = true // the coming exit is ours, not a death
+		f.parked = true   // and its port stays with the delta
 	}
 	r.mu.Unlock()
 	if !ok {
@@ -718,9 +901,16 @@ func (r *Runtime) Park(ctx context.Context, fiberID string, sync bool) (string, 
 	dir := r.deltaDir(fence)
 	_ = os.RemoveAll(dir)
 	w, _ := r.wBytes(f)
+	// Devices are renegotiated on resume: the engine drops the slice
+	// before the CPU side is checkpointed (the continuity contract).
+	if dr, ok := r.be.(backend.DeviceReporter); ok && f.devMax > 0 {
+		if err := dr.EvictDevice(f.id); err != nil {
+			log.Printf("host: evict device slice of %s: %v", f.id, err)
+		}
+	}
 	if err := r.be.Park(ctx, f.id, backend.ParkSpec{Dir: dir, Sync: sync}); err != nil {
 		r.mu.Lock()
-		f.released = false
+		f.released, f.parked = false, false
 		r.mu.Unlock()
 		// Keep the failed dump's log for diagnosis; it is small.
 		_ = os.RemoveAll(dir + ".failed")
@@ -820,25 +1010,53 @@ func (r *Runtime) resume(ctx context.Context, spec core.CloneSpec) (core.FiberHa
 		return core.FiberHandle{}, err
 	}
 	defer func() { _ = lfd.Close() }()
-	ep := strings.TrimPrefix(m.Endpoint, "unix://")
-	_ = os.MkdirAll(filepath.Dir(ep), 0o755)
-	_ = os.Remove(ep) // the restored socket binds it again
+	// The restored listener serves on the endpoint it was parked with: a
+	// unix socket that binds its path again, or the tcp port, which must
+	// still be this fiber's (or free) on this home.
+	parked, err := endpoint.Parse(m.Endpoint)
+	if err != nil {
+		_ = leaf.Remove()
+		return core.FiberHandle{}, fmt.Errorf("host: delta %s: %w", dir, err)
+	}
+	if parked.Scheme != r.cfg.Endpoints.Family.Scheme() {
+		_ = leaf.Remove()
+		return core.FiberHandle{}, fmt.Errorf("host: delta %s was parked on a %s endpoint, this home serves %s", dir, parked.Scheme, r.cfg.Endpoints.Family.Scheme())
+	}
+	workDir := filepath.Join(r.cfg.RunDir, spec.Grant.UID)
+	_ = os.MkdirAll(workDir, 0o755)
+	bind, port := m.Endpoint, 0
+	if parked.Scheme == "unix" {
+		bind = parked.Path
+		_ = os.Remove(bind) // the restored socket binds it again
+	} else {
+		// The port the parked listener holds. The fiber id changes on
+		// resume; the manifest's fence held it while parked.
+		if port, err = r.allocPort(spec.Fence.String(), parked.Port); err != nil {
+			r.freePort(parked.Port, m.Fence)
+			if port, err = r.allocPort(spec.Fence.String(), parked.Port); err != nil {
+				_ = leaf.Remove()
+				return core.FiberHandle{}, err
+			}
+		}
+	}
 	// The fiber resumes with its old fence in memory; the new one is
-	// published beside the endpoint for applications that need it.
-	_ = os.WriteFile(ep+".fence", []byte(spec.Fence.String()+"\n"), 0o644)
+	// published for applications that need it.
+	fenceFn := r.fenceFile(parked, spec.Fence)
+	_ = os.WriteFile(fenceFn, []byte(spec.Fence.String()+"\n"), 0o644)
 
-	f := &fiber{id: spec.Fence.String(), grantUID: spec.Grant.UID, cg: leaf,
-		endpoint: m.Endpoint, started: time.Now(), budget: spec.Grant.WBudgetBytes, done: make(chan struct{})}
+	f := &fiber{id: spec.Fence.String(), grantUID: spec.Grant.UID, cg: leaf, port: port, fenceFn: fenceFn,
+		endpoint: m.Endpoint, started: time.Now(), budget: spec.Grant.WBudgetBytes, devMax: spec.Grant.DeviceBudget.Bytes, done: make(chan struct{})}
 	r.mu.Lock()
 	r.fibers[f.id] = f
 	r.mu.Unlock()
-	fb, err := r.be.Resume(ctx, backend.ResumeSpec{Dir: dir, Fence: f.id, Endpoint: ep, CgroupFD: int(lfd.Fd()), Deadline: spec.Deadline, WarmID: spec.Grant.UID})
+	fb, err := r.be.Resume(ctx, backend.ResumeSpec{Dir: dir, Fence: f.id, Endpoint: bind, CgroupFD: int(lfd.Fd()), Deadline: spec.Deadline, WarmID: spec.Grant.UID, WorkDir: workDir})
 	if err != nil {
 		r.mu.Lock()
 		if r.fibers[f.id] == f {
 			delete(r.fibers, f.id)
 		}
 		r.mu.Unlock()
+		r.freePort(port, f.id)
 		_ = leaf.Kill()
 		_ = leaf.Remove()
 		return core.FiberHandle{}, err
@@ -872,6 +1090,14 @@ func (r *Runtime) Release(ctx context.Context, fiberID string, discard bool) err
 	fence, ferr := core.ParseFence(fiberID)
 	if discard && ferr == nil {
 		_ = os.RemoveAll(r.deltaDir(fence))
+		// A discarded delta gives its port back.
+		r.mu.Lock()
+		for p, holder := range r.ports {
+			if holder == fiberID {
+				delete(r.ports, p)
+			}
+		}
+		r.mu.Unlock()
 	}
 	if !ok {
 		if ferr != nil {
@@ -913,8 +1139,8 @@ func (r *Runtime) killOrphan(ctx context.Context, fence core.Fence) error {
 		case <-time.After(10 * time.Millisecond):
 		}
 	}
-	_ = os.Remove(r.endpoint(fence))
-	_ = os.Remove(r.endpoint(fence) + ".fence")
+	_ = os.Remove(r.unixPath(fence))
+	_ = os.Remove(r.unixPath(fence) + ".fence")
 	return leaf.Remove()
 }
 
@@ -1029,7 +1255,13 @@ func (r *Runtime) List(context.Context) ([]core.FiberHandle, error) {
 				continue
 			}
 			fence := core.Fence{GrantUID: g.Name(), Epoch: epoch, Seq: seq}
-			out = append(out, core.FiberHandle{ID: fence.String(), Endpoint: "unix://" + r.endpoint(fence)})
+			// An orphan's tcp port is not recoverable from its leaf; the
+			// reconcile only needs the fence to kill or adopt it.
+			ep := ""
+			if r.cfg.Endpoints.Family.Scheme() == "unix" {
+				ep = "unix://" + r.unixPath(fence)
+			}
+			out = append(out, core.FiberHandle{ID: fence.String(), Endpoint: ep})
 		}
 	}
 	return out, nil
@@ -1046,7 +1278,11 @@ func (r *Runtime) Stats(_ context.Context, fiberID string) (core.FiberStats, err
 	if err != nil {
 		return core.FiberStats{}, err
 	}
-	return core.FiberStats{WUsedBytes: w}, nil
+	st := core.FiberStats{WUsedBytes: w}
+	if dr, ok := r.be.(backend.DeviceReporter); ok {
+		st.DeviceUsedBytes, _ = dr.FiberDevice(f.id)
+	}
+	return st, nil
 }
 
 func (r *Runtime) Exits() <-chan core.FiberExit { return r.exits }

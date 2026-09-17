@@ -62,6 +62,21 @@ message FiberLimits {
   uint32 warm = 2;
 }
 
+// DeviceBudget is the per-fiber slice of the engine's device state (its
+// KV cache, its VRAM) a fiber may hold: the device-side twin of
+// w_budget_bytes. On the GPU side one engine per grant owns the device
+// and fibers are its clients; the engine reports each fiber's slice and
+// the home enforces this budget on the report, since the kernel has no
+// pressure class for devices. A home whose template offers no device of
+// this class refuses the grant with FailedPrecondition, never a silent
+// CPU-only fiber.
+message DeviceBudget {
+  uint64 bytes = 1;
+  // class names the device the budget is for ("gpu"; "sim" is the
+  // reference workload's simulated engine). Empty means any.
+  string class = 2;
+}
+
 // CapacityGrant is what the issuer signs. It is carried as the `grant`
 // claim of a JWT whose registered claims mirror issuer, audience,
 // lease_expiry and grant_uid (iss, aud, exp, jti).
@@ -80,6 +95,8 @@ message CapacityGrant {
   Tier min_tier = 7;
   google.protobuf.Timestamp lease_expiry = 8;
   Policy policy = 9;
+  // Absent or zero bytes: the grant needs no device.
+  DeviceBudget device_budget = 10;
 }
 
 // Fence identifies one incarnation of a fiber: (grant, agent epoch, seq).

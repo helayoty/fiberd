@@ -24,6 +24,8 @@ import (
 // with a titled layer per file. Parked deltas and zygote parent
 // checkpoints travel this way; the manifest annotations carry what a
 // home needs to decide before it pulls (size, parent hash, origin).
+// A reference starting with file:// names a directory tree instead of a
+// registry (see fileregistry.go); every function here takes either.
 
 const (
 	ArtifactTypeDelta  = "application/vnd.fiberd.delta.v1"
@@ -45,6 +47,9 @@ func PushDir(ctx context.Context, dir, ref, artifactType string, annotations map
 	dir, err := filepath.Abs(dir)
 	if err != nil {
 		return "", err
+	}
+	if IsFileRef(ref) {
+		return filePushDir(dir, ref, artifactType, annotations)
 	}
 	fs, err := file.New(dir)
 	if err != nil {
@@ -101,6 +106,9 @@ type Located struct {
 // Resolve fetches only the manifest at ref (repo:tag or repo@digest).
 // found is false when the registry has nothing there.
 func Resolve(ctx context.Context, ref string, plainHTTP bool) (Located, bool, error) {
+	if IsFileRef(ref) {
+		return fileResolve(ref)
+	}
 	repo, target, err := repository(ref, plainHTTP)
 	if err != nil {
 		return Located{}, false, err
@@ -131,11 +139,14 @@ func Resolve(ctx context.Context, ref string, plainHTTP bool) (Located, bool, er
 // PullDir downloads the artifact at ref into dst (files land under their
 // titles) and returns the manifest digest.
 func PullDir(ctx context.Context, ref, dst string, plainHTTP bool) (string, error) {
-	repo, target, err := repository(ref, plainHTTP)
+	dst, err := filepath.Abs(dst)
 	if err != nil {
 		return "", err
 	}
-	dst, err = filepath.Abs(dst)
+	if IsFileRef(ref) {
+		return filePullDir(ref, dst)
+	}
+	repo, target, err := repository(ref, plainHTTP)
 	if err != nil {
 		return "", err
 	}
@@ -160,6 +171,9 @@ func PullDir(ctx context.Context, ref, dst string, plainHTTP bool) (string, erro
 // is deleted as a tag first (some registries keep tag entries when the
 // manifest is deleted by digest), then the manifest by digest.
 func Delete(ctx context.Context, ref string, plainHTTP bool) error {
+	if IsFileRef(ref) {
+		return fileDelete(ref)
+	}
 	repo, target, err := repository(ref, plainHTTP)
 	if err != nil {
 		return err

@@ -40,6 +40,12 @@ func (d Dir) Ensure(controllers ...string) error {
 	if err := os.MkdirAll(d.Path, 0o755); err != nil {
 		return err
 	}
+	// Only what the parent delegated can be enabled; a home that offers
+	// no pids controller (a Slurm step) still works, memory is a must.
+	controllers, err := d.available(controllers)
+	if err != nil {
+		return err
+	}
 	for _, c := range controllers {
 		if err := d.write("cgroup.subtree_control", "+"+c); err != nil {
 			return fmt.Errorf("cgroup: enable %s under %s: %w", c, d.Path, err)
@@ -71,11 +77,16 @@ func (d Dir) Create(memMax uint64, oomGroup bool) error {
 
 // SetCeiling sets memory.high (throttle: the kernel reclaims and stalls
 // the group, which PSI reports) and memory.max (the hard stop). max of 0
-// leaves the hard limit unset.
+// leaves the hard limit unset. Swap is closed for the group: the ceiling
+// is resident memory, and a home that lets jobs swap (Slurm without
+// ConstrainSwapSpace) would otherwise let the zygote's pages slip out
+// under the ceiling instead of stalling, and the ladder would never see
+// the pressure it acts on.
 func (d Dir) SetCeiling(high, max uint64) error {
 	if err := d.write("memory.high", strconv.FormatUint(high, 10)); err != nil {
 		return fmt.Errorf("cgroup: memory.high on %s: %w", d.Path, err)
 	}
+	_ = d.write("memory.swap.max", "0")
 	if max > 0 {
 		if err := d.write("memory.max", strconv.FormatUint(max, 10)); err != nil {
 			return fmt.Errorf("cgroup: memory.max on %s: %w", d.Path, err)

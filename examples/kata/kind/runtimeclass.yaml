@@ -1,0 +1,8 @@
+# Pods with runtimeClassName: fiberd get their containers from
+# containerd-shim-fiberd-v1: each container is a fiber of the session and
+# home the Pod's io.fiberd/* annotations name.
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: fiberd
+handler: fiberd

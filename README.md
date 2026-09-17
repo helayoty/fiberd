@@ -21,22 +21,21 @@ Fast, dense instance creation is a solved mechanism. fiberd does not claim any o
 
 ## What is new
 
-fiberd is the **protocol between a control plane and an environment that runs instances on its behalf**, not the daemon that runs them. Three properties are the contribution, and every phase of the work preserves all three:
+fiberd is the **protocol between a control plane and an environment that runs instances on its behalf**, not the daemon that runs them. Three properties are the contribution:
 
-1. **The signed capability grant.** Authorization travels with the work as a signed `CapacityGrant`; the receiving node or environment verifies it offline, and revocation is lease non-renewal. Nothing on the activation path calls home.
-2. **Two miss codes keyed on control-plane health.** A clone that cannot be served returns `SHED` when the control plane is unreachable (back off; never queue on a dead control plane) and `DEFERRED_FALLBACK` when it is healthy (route the caller back to its home's ordinary path). Conflating them is what makes routers retry into outages.
-3. **A W-priced cost model.** Activation rate, park cost, and reclaim are all priced in the same quantity: the working set W a fiber dirties after fork. W is also the mobility budget for moving a parked session between environments.
+1. **The signed capability grant.** Authorization travels with the work as a signed `CapacityGrant`; the receiving environment verifies it offline, and revocation is lease non-renewal. Nothing on the activation path calls home.
+2. **Two miss codes keyed on control-plane health.** A clone that cannot be served returns `SHED` when the control plane is unreachable (back off; never queue on a dead control plane) and `DEFERRED_FALLBACK` when it is healthy (route the caller to its ordinary path). Conflating them is what makes routers retry into outages.
+3. **A W-priced cost model.** Activation rate, park cost and reclaim are priced in the same quantity, the working set W a fiber dirties after fork. W is also the mobility budget for moving a parked session between environments.
 
 ## How it works
-
-The components as specified. [docs/status.md](docs/status.md) says which parts exist today.
 
 | Component | What it is |
 | --- | --- |
 | **CapacityGrant** | A signed JWT the control plane issues once per block of capacity: template digest, `fibers: {max, warm}`, `w_budget_bytes`, minimum runtime tier, lease expiry, policy. Billing charges it exactly once, at issue. |
-| **Home** | The environment that holds the grant and runs fibers under it: standalone host, Kubernetes grant Pod, or Slurm allocation. Homes implement the protocol; the core is home-invariant. |
-| **Grant agent** (`fiberd`) | One process per home instance. Holds the ledger, budget, fences, audit spool, and pressure ladder; forks fibers from a warm zygote. |
-| **Fibers** | Node-minted instances inside a grant: copy-on-write clones of a warm zygote, addressed by an endpoint, scoped by a fence, held by a lease. |
+| **Home** | The environment that holds the grant and runs fibers under it: a standalone host, a Kubernetes grant Pod, a Slurm allocation. Homes implement the protocol; the core is home-invariant. |
+| **Grant agent** (`fiberd`) | One process per home instance. Holds the ledger, budget, fences, audit spool and pressure ladder; mints fibers from a warm template through one of four backends (fork zygote, runc, gVisor, Hyperlight). |
+| **Fibers** | Instances minted inside a grant: clones of the warm template, addressed by an endpoint, scoped by a fence, held by a lease. |
+| **Consumers** | Whatever calls `Clone`: a Knative activator, a containerd shim, a cluster-level herder. |
 
 The warm-path contract is one verb with three costs:
 
@@ -49,11 +48,13 @@ Release(fiberID)                    -> destroy state, free name
 
 ## Documentation
 
-- [docs/overview.md](docs/overview.md) - start here: the thesis and a reading guide.
-- [docs/quickstart.md](docs/quickstart.md) - build and exercise the prototype locally.
-- [docs/status.md](docs/status.md) - what is implemented, what is measured, what is novel.
-- [docs/architecture.md](docs/architecture.md) - the design reference.
-- [docs/status.md](docs/status.md) - what is implemented today versus specified.
+- [docs/overview.md](docs/overview.md): the thesis, in one page.
+- [docs/quickstart.md](docs/quickstart.md): build, run, and exercise the protocol.
+- [docs/protocol.md](docs/protocol.md): the wire semantics and the conformance suite.
+- [docs/architecture.md](docs/architecture.md): the design reference.
+- [docs/concepts.md](docs/concepts.md): a glossary, one analogy and one diagram per term.
+- [docs/status.md](docs/status.md): what exists, what it measured, what blocks the rest.
+- Integrations, each its own module and README: [Kubernetes](examples/kubernetes/README.md), [Slurm](examples/slurm/README.md), [Knative over Hyperlight](examples/knative/README.md), [a Kata-shaped shim](examples/kata/README.md), and the in-progress [Substrate herder](examples/substrate/README.md).
 
 ## License
 

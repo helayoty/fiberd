@@ -4,16 +4,12 @@ package host
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/helayoty/fiberd/pkg/artifact"
@@ -39,40 +35,7 @@ import (
 // next Clone(S) that its recorded digest is no longer at the tag and
 // forgets its stale copy.
 
-var repoUnsafe = regexp.MustCompile(`[^a-z0-9._-]+`)
-
-func (r *Runtime) domainRepo(g core.Grant) string {
-	domain := g.SessionDomain()
-	sum := sha256.Sum256([]byte(domain))
-	name := repoUnsafe.ReplaceAllString(strings.ToLower(strings.TrimPrefix(domain, "sha256:")), "-")
-	name = strings.Trim(name, "-._")
-	if name == "" {
-		name = "g"
-	}
-	if len(name) > 40 {
-		name = name[:40]
-	}
-	return strings.TrimSuffix(r.cfg.DeltaRegistry, "/") + "/" + name + "-" + hex.EncodeToString(sum[:4])
-}
-
-func sessionTag(session string) string {
-	sum := sha256.Sum256([]byte(session))
-	return "s-" + hex.EncodeToString(sum[:12])
-}
-
-func parentTag(sha string) string {
-	if len(sha) > 24 {
-		sha = sha[:24]
-	}
-	return "p-" + sha
-}
-
-type remoteRecord struct {
-	Ref    string `json:"ref"`
-	Digest string `json:"digest"`
-}
-
-const remoteFile = "remote.json"
+func (r *Runtime) domainRepo(g core.Grant) string { return domainRepoFor(r.cfg.DeltaRegistry, g) }
 
 // PublishDelta implements core.DeltaPublisher.
 func (r *Runtime) PublishDelta(ctx context.Context, deltaRef string, g core.Grant, session string) (string, error) {

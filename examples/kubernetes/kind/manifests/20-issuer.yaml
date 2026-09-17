@@ -1,0 +1,78 @@
+# The issuer controller: one Deployment, its key in a Secret it creates,
+# discovery and JWKS on the grant-issuer Service. Grant Pods verify
+# against http://grant-issuer.fiberd-system.svc:8080.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: grant-issuer
+  namespace: fiberd-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: fiberd-grant-issuer
+rules:
+  - apiGroups: [fiberd.io]
+    resources: [capacitygrants]
+    verbs: [get, list]
+  - apiGroups: [fiberd.io]
+    resources: [capacitygrants/status]
+    verbs: [patch]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, create, delete]
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get, create, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: fiberd-grant-issuer
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: fiberd-grant-issuer
+subjects:
+  - kind: ServiceAccount
+    name: grant-issuer
+    namespace: fiberd-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grant-issuer
+  namespace: fiberd-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: grant-issuer }
+  template:
+    metadata:
+      labels: { app: grant-issuer }
+    spec:
+      serviceAccountName: grant-issuer
+      containers:
+        - name: controller
+          image: fiberd:kind
+          imagePullPolicy: IfNotPresent
+          command: [grant-controller]
+          args: [-addr, ":8080", -poll, 1s]
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet: { path: /openid/v1/jwks, port: 8080 }
+            periodSeconds: 2
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grant-issuer
+  namespace: fiberd-system
+spec:
+  selector: { app: grant-issuer }
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080

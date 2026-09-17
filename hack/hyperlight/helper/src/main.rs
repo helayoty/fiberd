@@ -148,9 +148,16 @@ fn fiber_thread(ctl: Ctl, fence: String, endpoint: PathBuf, mut sb: MultiUseSand
             Ok(Cmd::Park { dir, sync }) => {
                 serving = false;
                 let _ = std::fs::remove_file(&endpoint);
+                eprintln!("helper: {fence} parking into {}", dir.display());
                 match park(&mut sb, &dir) {
-                    Ok(bytes) => ctl.say(format!("PARKED {fence} {bytes}")),
-                    Err(e) => ctl.say(format!("ERROR {fence} park: {e:#}")),
+                    Ok(bytes) => {
+                        eprintln!("helper: {fence} parked, {bytes} bytes");
+                        ctl.say(format!("PARKED {fence} {bytes}"))
+                    }
+                    Err(e) => {
+                        eprintln!("helper: {fence} park failed: {e:#}");
+                        ctl.say(format!("ERROR {fence} park: {e:#}"))
+                    }
                 }
                 if !sync {
                     ctl.say(format!("EXITED {fence} exit:0"));
@@ -299,6 +306,10 @@ fn main() -> Result<()> {
         if f.is_empty() {
             continue;
         }
+        // stderr is the helper's log (the backend points it at the
+        // grant's zygote.log): one line per command, so a park that
+        // never comes back can be told from one that never arrived.
+        eprintln!("helper: < {}", line.trim());
         match f[0] {
             "CLONE" if f.len() >= 5 => {
                 let (fence, endpoint, payload) = (f[1].to_string(), PathBuf::from(f[2]), if f[4] == "-" { Vec::new() } else { unhex(f[4]) });

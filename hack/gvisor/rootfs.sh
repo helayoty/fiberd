@@ -16,7 +16,7 @@ mkdir -p "$OUT"/{bin,proc,dev,tmp,host}
 # flag keeps our own objects clean on a toolchain that defaults to PAC.
 FLAGS=""
 if [ "$(uname -m)" = aarch64 ]; then FLAGS="-mbranch-protection=none"; fi
-gcc -static -O2 -Wall $FLAGS -o "$OUT/bin/refzygote" hack/zygote/refzygote.c hack/zygote/libfiberzygote.c
+gcc -static -O2 -Wall -pthread $FLAGS -o "$OUT/bin/refzygote" hack/zygote/refzygote.c hack/zygote/libfiberzygote.c
 if [ "$(uname -m)" = aarch64 ] && command -v objdump >/dev/null; then
   n=$(objdump -d "$OUT/bin/refzygote" | grep -cE 'paciasp|autiasp' || true)
   [ "$n" = 0 ] || echo "warning: $n PAC instructions in $OUT/bin/refzygote; restores will trap on FEAT_FPAC CPUs" >&2

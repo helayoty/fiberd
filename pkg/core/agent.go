@@ -87,6 +87,10 @@ var (
 	// (architecture, kernel, libc) this home cannot restore. Not moved
 	// here; the Miss names the home that has it.
 	ErrIncompatible = errors.New("agent: parked state was made on an incompatible platform; not moving it")
+	// ErrNeedsDevice: the grant carries a device budget and this home's
+	// template offers no such device. Like a tier gap it is a
+	// FailedPrecondition, never a silent CPU-only fiber.
+	ErrNeedsDevice = errors.New("agent: grant needs a device class this home does not offer")
 )
 
 // DeadlineAdvisor is implemented by runtimes whose create or resume is
@@ -94,6 +98,33 @@ var (
 // is given. The caller's own deadline is always honoured as is.
 type DeadlineAdvisor interface {
 	DefaultDeadlines() (create, resume time.Duration)
+}
+
+// ScopeClaim is one fact a home asserts about where it runs: the
+// namespace and service account of a grant Pod, the DRA claim behind a
+// fabric channel, the Slurm job. The core never interprets a claim; it
+// stamps them on audit records (and, later, on fiber credentials) so a
+// reader can check integrity against facts the home vouched for.
+type ScopeClaim struct {
+	Name  string
+	Value string
+}
+
+// FabricChannel is what a home provisions for a grant's engine: the
+// devices it may drive. Standalone: a static set; Kubernetes: a DRA
+// claim; Slurm: the allocation's GRES. It is grant-scoped and released
+// with the grant; nothing per fiber refers to it except through its
+// fence.
+type FabricChannel struct {
+	Kind    string   // "static", "dra", "gres", "" for none
+	Devices []string // device paths or ids as the engine expects them
+	Detail  string   // the claim, the allocation: for the audit record
+}
+
+// FabricAware is implemented by runtimes that pass a grant's fabric
+// channel to its warm instance (as the engine's device environment).
+type FabricAware interface {
+	AttachFabric(grantUID string, fc FabricChannel)
 }
 
 // RemoteMiss wraps a capacity miss with the home the caller should prefer
@@ -135,6 +166,20 @@ type Agent struct {
 	// StatusInterval paces the W sampler and the Watch stream. Zero means
 	// one second.
 	StatusInterval time.Duration
+
+	// Scope, when set, is what the home asserts about where this agent
+	// runs (namespace, service account, fabric claim, ...); it is stamped
+	// on every audit record. Nil on a standalone host.
+	Scope func() []ScopeClaim
+	// Fabric, when set, provisions a grant's fabric channel (the devices
+	// its engine may use) before its template is warmed, and returns how
+	// to release it. Nil means grants get no devices.
+	Fabric func(ctx context.Context, g Grant) (FabricChannel, func(), error)
+	// Epoch, when set, lets BumpEpoch revoke every fence in place.
+	Epoch *EpochStore
+
+	fabricMu sync.Mutex
+	fabrics  map[string]func() // grant uid -> release
 
 	admitMu   sync.Mutex
 	admitting map[string]chan struct{}
@@ -355,13 +400,101 @@ func (a *Agent) Admit(ctx context.Context, g Grant) (StatusCode, error) {
 		close(done)
 	}()
 
+	// The fabric channel comes before the template: an engine needs its
+	// devices at warm-up. It is released with the grant.
+	var fabric FabricChannel
+	if a.Fabric != nil {
+		fc, release, err := a.Fabric(ctx, g)
+		if err != nil {
+			return a.missCode(ErrNotReady), fmt.Errorf("%w: fabric: %w", ErrNotReady, err)
+		}
+		fabric = fc
+		a.fabricMu.Lock()
+		if a.fabrics == nil {
+			a.fabrics = map[string]func(){}
+		}
+		if old := a.fabrics[g.UID]; old != nil {
+			old()
+		}
+		a.fabrics[g.UID] = release
+		a.fabricMu.Unlock()
+		if fa, ok := a.Runtime.(FabricAware); ok {
+			fa.AttachFabric(g.UID, fc)
+		}
+	}
 	if err := a.Runtime.PrepareTemplate(ctx, g); err != nil {
+		a.releaseFabric(g.UID)
 		return a.missCode(ErrNotReady), fmt.Errorf("%w: %w", ErrNotReady, err)
 	}
+	if g.DeviceBudget.Bytes > 0 {
+		// The template is warm, so the runtime now knows whether its
+		// engine holds a device of the class the grant budgets for.
+		dc, ok := a.Runtime.(DeviceCapable)
+		if !ok || !dc.OffersDevice(g.UID, g.DeviceBudget.Class) {
+			return NeedsTier, fmt.Errorf("%w: class %q", ErrNeedsDevice, g.DeviceBudget.Class)
+		}
+	}
 	a.Ledger.AdmitGrant(g)
-	_ = a.audit(ctx, BestEffort, AuditRecord{Event: "admit", Fence: Fence{GrantUID: g.UID, Epoch: a.Ledger.Epoch()}, Detail: g.TemplateDigest})
+	detail := g.TemplateDigest
+	if fabric.Kind != "" {
+		detail += fmt.Sprintf(" fabric=%s devices=%d %s", fabric.Kind, len(fabric.Devices), fabric.Detail)
+	}
+	_ = a.audit(ctx, BestEffort, AuditRecord{Event: "admit", Fence: Fence{GrantUID: g.UID, Epoch: a.Ledger.Epoch()}, Detail: detail})
 	a.notify()
 	return OK, nil
+}
+
+// releaseFabric gives a grant's fabric channel back, if it holds one.
+func (a *Agent) releaseFabric(grantUID string) {
+	a.fabricMu.Lock()
+	release := a.fabrics[grantUID]
+	delete(a.fabrics, grantUID)
+	a.fabricMu.Unlock()
+	if release != nil {
+		release()
+	}
+}
+
+// Revoke drops a grant and releases its fabric channel: what the home's
+// lane, the reaper and the ladder's last rung all go through. Fibers
+// under it drain by lease non-renewal; parked deltas are kept.
+func (a *Agent) Revoke(grantUID string) {
+	a.Ledger.RevokeGrant(grantUID)
+	a.releaseFabric(grantUID)
+}
+
+// BumpEpoch is scope loss without a restart: the home has learned that
+// what everything was minted under is gone (its namespace, its
+// service-account issuer, a fabric claim) while the agent lives. The
+// epoch advances and is persisted, every running fiber is released with
+// an audit record naming the reason, and every fence minted before is
+// invalid from here: Park and Release answer NotFound, new clones carry
+// the new epoch. Grants stay admitted and parked sessions keep their
+// deltas; a home that lost a grant's own scope revokes that grant too.
+func (a *Agent) BumpEpoch(ctx context.Context, reason string) (uint64, error) {
+	if a.Epoch == nil {
+		return 0, errors.New("agent: no epoch store to bump")
+	}
+	next, err := a.Epoch.Bump()
+	if err != nil {
+		return 0, err
+	}
+	fibers := a.Ledger.RunningFibers()
+	a.Ledger.BumpEpoch(next)
+	for _, id := range fibers {
+		fence, ok := a.Ledger.Fiber(id)
+		if !ok {
+			continue
+		}
+		if err := a.Runtime.Release(ctx, id, false); err != nil {
+			log.Printf("epoch bump: release %s: %v", id, err)
+		}
+		a.Ledger.OnRelease(id)
+		_ = a.audit(ctx, a.durability(fence.GrantUID), AuditRecord{Event: "scope-revoked", Fence: fence, FiberID: id, Detail: reason})
+	}
+	log.Printf("epoch bumped to %d (%s): %d running fibers released, prior fences invalid", next, reason, len(fibers))
+	a.notify()
+	return next, nil
 }
 
 // missCode maps a resolve failure to the outcome. "Capacity not on this
@@ -370,7 +503,7 @@ func (a *Agent) Admit(ctx context.Context, g Grant) (StatusCode, error) {
 // queue into a dead control plane. Nil Health fails toward healthy,
 // matching boot bias. A tier gap is neither: it is FailedPrecondition.
 func (a *Agent) missCode(err error) StatusCode {
-	if errors.Is(err, ErrNeedsTier) {
+	if errors.Is(err, ErrNeedsTier) || errors.Is(err, ErrNeedsDevice) {
 		return NeedsTier
 	}
 	if a.Health != nil && !a.Health.Healthy(time.Now()) {
@@ -432,7 +565,7 @@ func (a *Agent) Release(ctx context.Context, fiberID string, discard bool) (Stat
 // home delivers the grant again.
 func (a *Agent) Yield(ctx context.Context, grantUID string, reason string) {
 	fibers := a.Ledger.FibersOf(grantUID)
-	a.Ledger.RevokeGrant(grantUID)
+	a.Revoke(grantUID)
 	for _, f := range fibers {
 		fence, ok := a.Ledger.Fiber(f.ID)
 		if !ok {
@@ -517,6 +650,7 @@ func (a *Agent) sample(ctx context.Context) {
 			continue
 		}
 		a.Ledger.SetFiberW(id, st.WUsedBytes)
+		a.Ledger.SetFiberDevice(id, st.DeviceUsedBytes)
 		total += st.WUsedBytes
 	}
 	if len(ids) > 0 && a.Budget != nil {
@@ -617,6 +751,14 @@ func (a *Agent) audit(ctx context.Context, d Durability, rec AuditRecord) error 
 	}
 	if d == DurabilityUnspecified {
 		d = BestEffort
+	}
+	if a.Scope != nil && rec.Scope == nil {
+		if claims := a.Scope(); len(claims) > 0 {
+			rec.Scope = make(map[string]string, len(claims))
+			for _, c := range claims {
+				rec.Scope[c.Name] = c.Value
+			}
+		}
 	}
 	err := a.Audit.Append(ctx, d, rec)
 	if err != nil && d != Sync {

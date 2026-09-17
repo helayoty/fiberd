@@ -157,6 +157,11 @@ func (b *Backend) DefaultDeadlines() (time.Duration, time.Duration) {
 }
 func (b *Backend) FiberOverheadBytes() uint64 { return b.opt.OverheadBytes }
 
+// EndpointSchemes: unix only. A TCP listener inside a sandbox is a host
+// socket (not checkpointable) unless the sandbox runs netstack in a
+// network namespace of its own, which this backend does not set up.
+func (b *Backend) EndpointSchemes() []string { return []string{"unix"} }
+
 // WCounter: the guest's memory is the sentry's memfd, which the leaf
 // accounts as shmem; the sentry's own Go heap (anon, tens of MiB and
 // different in every sandbox) is not the fiber's working set.

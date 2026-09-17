@@ -33,6 +33,7 @@ jobs:
           cache-dependency-path: |
             go.sum
             hack/tools/go.sum
+            examples/kubernetes/go.sum
       - run: make lint
 
   unit:
@@ -50,7 +51,7 @@ jobs:
       - run: make test
 
   conform-stub:
-    name: conformance C1-C7 against the stub runtime
+    name: conformance C1-C10 against the stub runtime
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -69,14 +70,14 @@ jobs:
       - run: make linux-test
 
   conform-proc:
-    name: conformance C1-C7 against the proc backend (cgroups, CRIU)
+    name: conformance C1-C10 against the proc backend (cgroups, CRIU)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - run: make conform-proc
 
   conform-gvisor:
-    name: conformance C1-C7 against the gvisor backend (a runsc sandbox per fiber)
+    name: conformance C1-C10 against the gvisor backend (a runsc sandbox per fiber)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -84,21 +85,21 @@ jobs:
       - run: make conform-gvisor
 
   conform-runc:
-    name: conformance C1-C7 against the runc backend (the zygote as a container's init)
+    name: conformance C1-C10 against the runc backend (the zygote as a container's init)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - run: make conform-runc
 
   conform-hyperlight-fake:
-    name: conformance C1-C7 against the hyperlight backend over the fake helper (no hypervisor)
+    name: conformance C1-C10 against the hyperlight backend over the fake helper (no hypervisor)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - run: make conform-hyperlight-fake
 
   conform-hyperlight:
-    name: conformance C1-C7 against the hyperlight backend with the Rust helper (KVM)
+    name: conformance C1-C10 against the hyperlight backend with the Rust helper (KVM)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -131,3 +132,81 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: make overcommit
+
+  conform-kind:
+    name: example - Kubernetes integration in kind (grant-controller, grant Pod, C1-C10, overcommit storm)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: helm/kind-action@v1
+        with:
+          version: v0.29.0
+          cluster_name: fiberd
+          config: examples/kubernetes/kind/kind.yaml
+      - run: make conform-kind
+      - name: cluster state on failure
+        if: failure()
+        run: |
+          kubectl --context kind-fiberd get pods -A -o wide
+          kubectl --context kind-fiberd -n tenant-a get cg -o yaml
+          kubectl --context kind-fiberd -n fiberd-system logs deploy/grant-issuer --tail=100 || true
+          kubectl --context kind-fiberd -n tenant-a logs conform-grant --tail=200 || true
+          kubectl --context kind-fiberd -n tenant-a logs conform-grant --previous --tail=100 || true
+          kubectl --context kind-fiberd -n tenant-a logs storm-grant --tail=100 || true
+
+  example-kata:
+    name: example - Kata-shaped containerd shim in kind (Pod containers are fibers)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: helm/kind-action@v1
+        with:
+          version: v0.29.0
+          cluster_name: fiberd
+          config: examples/kubernetes/kind/kind.yaml
+      - run: make example-kata
+      - name: cluster state on failure
+        if: failure()
+        run: |
+          kubectl --context kind-fiberd get pods -A -o wide
+          kubectl --context kind-fiberd -n tenant-a describe pod kata-1 kata-2 || true
+          docker exec fiberd-control-plane journalctl -u containerd --no-pager -n 100 || true
+          kubectl --context kind-fiberd -n tenant-a logs conform-grant --tail=100 || true
+
+  example-knative:
+    name: example - Knative scale-from-zero over Hyperlight (KVM)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: enable KVM for this runner
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+      - run: make hyperlight-helper
+      - run: make example-knative
+      - run: make example-knative-kvm
+      - name: logs on failure
+        if: failure()
+        run: sudo tail -n 50 bin/knative-state/*.log || true
+
+  conform-slurm:
+    name: example - Slurm integration in Docker (allocation, C1-C10, overcommit storm)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: make conform-slurm
+      - name: cluster state on failure
+        if: failure()
+        run: |
+          docker exec fiberd-slurm sh -c 'squeue; sinfo; tail -50 /var/log/slurm/slurmd.log; tail -50 /var/log/fiberd-conform.out; tail -50 /var/log/fiberd-storm.out' || true

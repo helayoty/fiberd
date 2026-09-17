@@ -7,7 +7,7 @@
   <rect width="680" height="500" fill="#ffffff"/>
 
   <rect x="40" y="40" width="600" height="54" rx="8" fill="#ede7f6" stroke="#7e57c2" stroke-width="0.8"/>
-  <text x="340" y="61" text-anchor="middle" font-size="14" font-weight="600" fill="#311b92">consumers: Knative · Kata shim · Kubernetes virtual node</text>
+  <text x="340" y="61" text-anchor="middle" font-size="14" font-weight="600" fill="#311b92">consumers: Knative activator · Kata-shaped shim · Substrate herder</text>
   <text x="340" y="79" text-anchor="middle" font-size="12" fill="#4527a0">call Clone(grant, session) and act on SHED / DEFERRED_FALLBACK</text>
   <line x1="340" y1="96" x2="340" y2="110" stroke="#555" stroke-width="0.8" marker-end="url(#arw)"/>
 
@@ -30,25 +30,25 @@
   <line x1="415" y1="318" x2="415" y2="336" stroke="#555" stroke-width="0.8" marker-end="url(#arw)"/>
   <line x1="565" y1="318" x2="565" y2="336" stroke="#555" stroke-width="0.8" marker-end="url(#arw)"/>
 
-  <rect x="50" y="340" width="130" height="66" rx="8" fill="#e8f5e9" stroke="#43a047" stroke-width="0.8"/>
-  <text x="115" y="361" text-anchor="middle" font-size="14" font-weight="600" fill="#1b5e20">proc (done)</text>
+  <rect x="45" y="340" width="140" height="66" rx="8" fill="#e8f5e9" stroke="#43a047" stroke-width="0.8"/>
+  <text x="115" y="361" text-anchor="middle" font-size="14" font-weight="600" fill="#1b5e20">proc</text>
   <text x="115" y="378" text-anchor="middle" font-size="12" fill="#2e7d32">fork zygote + CRIU</text>
   <text x="115" y="394" text-anchor="middle" font-size="12" fill="#2e7d32">FIBER_CHECKPOINT</text>
 
-  <rect x="200" y="340" width="130" height="66" rx="8" fill="#f5f5f5" stroke="#9e9e9e" stroke-width="0.8"/>
-  <text x="265" y="361" text-anchor="middle" font-size="14" font-weight="600" fill="#333">gvisor</text>
-  <text x="265" y="378" text-anchor="middle" font-size="12" fill="#555">runsc checkpoint</text>
-  <text x="265" y="394" text-anchor="middle" font-size="12" fill="#555">FIBER_SNAPSHOT</text>
+  <rect x="195" y="340" width="140" height="66" rx="8" fill="#e8f5e9" stroke="#43a047" stroke-width="0.8"/>
+  <text x="265" y="361" text-anchor="middle" font-size="14" font-weight="600" fill="#1b5e20">runc</text>
+  <text x="265" y="378" text-anchor="middle" font-size="12" fill="#2e7d32">zygote in a bundle</text>
+  <text x="265" y="394" text-anchor="middle" font-size="12" fill="#2e7d32">FIBER_CHECKPOINT</text>
 
-  <rect x="350" y="340" width="130" height="66" rx="8" fill="#f5f5f5" stroke="#9e9e9e" stroke-width="0.8"/>
-  <text x="415" y="361" text-anchor="middle" font-size="14" font-weight="600" fill="#333">runc</text>
-  <text x="415" y="378" text-anchor="middle" font-size="12" fill="#555">zygote in a bundle</text>
-  <text x="415" y="394" text-anchor="middle" font-size="12" fill="#555">FIBER_CHECKPOINT</text>
+  <rect x="345" y="340" width="140" height="66" rx="8" fill="#e8f5e9" stroke="#43a047" stroke-width="0.8"/>
+  <text x="415" y="361" text-anchor="middle" font-size="14" font-weight="600" fill="#1b5e20">gVisor</text>
+  <text x="415" y="378" text-anchor="middle" font-size="12" fill="#2e7d32">runsc snapshots</text>
+  <text x="415" y="394" text-anchor="middle" font-size="12" fill="#2e7d32">FIBER_SNAPSHOT</text>
 
-  <rect x="500" y="340" width="130" height="66" rx="8" fill="#f5f5f5" stroke="#9e9e9e" stroke-width="0.8"/>
-  <text x="565" y="361" text-anchor="middle" font-size="14" font-weight="600" fill="#333">hyperlight</text>
-  <text x="565" y="378" text-anchor="middle" font-size="12" fill="#555">Rust helper, fd 3</text>
-  <text x="565" y="394" text-anchor="middle" font-size="12" fill="#555">FIBER_SNAPSHOT · KVM</text>
+  <rect x="495" y="340" width="140" height="66" rx="8" fill="#e8f5e9" stroke="#43a047" stroke-width="0.8"/>
+  <text x="565" y="361" text-anchor="middle" font-size="14" font-weight="600" fill="#1b5e20">Hyperlight</text>
+  <text x="565" y="378" text-anchor="middle" font-size="12" fill="#2e7d32">micro-VMs, on KVM</text>
+  <text x="565" y="394" text-anchor="middle" font-size="12" fill="#2e7d32">FIBER_SNAPSHOT</text>
 
   <rect x="40" y="426" width="600" height="54" rx="8" fill="#fafafa" stroke="#757575" stroke-width="0.8"/>
   <text x="340" y="447" text-anchor="middle" font-size="14" font-weight="600" fill="#212121">parity facts on every checkpoint: arch · kernel · libc · backend</text>

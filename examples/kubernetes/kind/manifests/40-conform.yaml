@@ -1,0 +1,44 @@
+# The grant the conformance suite runs against: the reference zygote as
+# the template (with a simulated device for C8/C9), the test-only admin
+# controls on for the hooks, and a NodePort so grant-conform on the host
+# reaches the agent at localhost:30084 across container restarts.
+apiVersion: fiberd.io/v1alpha1
+kind: CapacityGrant
+metadata:
+  name: conform
+  namespace: tenant-a
+spec:
+  template: sha256:conform
+  fibers: { max: 8, warm: 1 }
+  wBudget: 32Mi
+  minTier: FIBER_CHECKPOINT
+  lease: 10m
+  pod:
+    image: fiberd:kind
+    runtime: proc
+    unsafeAdmin: true
+    args:
+      - -template
+      - default=/usr/local/bin/refzygote --heap-mb 16 --device-mb 64
+      - -stale-ttl
+      - 30s
+    resources:
+      # Every conformance case admits its own grant, each with a warm
+      # template of its own; a run keeps a dozen of them until their
+      # leases lapse. The limit is the kubelet's ceiling on all of it.
+      limits: { memory: 1Gi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: conform-grant
+  namespace: tenant-a
+spec:
+  type: NodePort
+  selector:
+    fiberd.io/grant: conform
+  ports:
+    - name: grpc
+      port: 8484
+      targetPort: 8484
+      nodePort: 30084

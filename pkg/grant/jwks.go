@@ -36,6 +36,10 @@ type Cache struct {
 	jwksURI     string
 	lastRefresh time.Time
 	lastAttempt time.Time
+	// refreshing serialises refreshes: a miss that arrives while one is
+	// in flight waits for it and re-checks, instead of being rate-limited
+	// into "no key" by the attempt it could have used.
+	refreshing sync.Mutex
 }
 
 var (
@@ -99,13 +103,15 @@ func (c *Cache) Key(ctx context.Context, kid string) (*jose.JSONWebKey, error) {
 // RefreshIfDue refreshes unless a refresh was attempted within MinRefresh.
 // It reports whether an attempt was made.
 func (c *Cache) RefreshIfDue(ctx context.Context) (bool, error) {
+	c.refreshing.Lock()
+	defer c.refreshing.Unlock()
 	c.mu.Lock()
-	if c.now().Sub(c.lastAttempt) < c.minRefresh() {
-		c.mu.Unlock()
+	due := c.now().Sub(c.lastAttempt) >= c.minRefresh()
+	c.mu.Unlock()
+	if !due {
 		return false, nil
 	}
-	c.mu.Unlock()
-	return true, c.Refresh(ctx)
+	return true, c.refresh(ctx)
 }
 
 func (c *Cache) refreshRateLimited(ctx context.Context) error {
@@ -116,6 +122,12 @@ func (c *Cache) refreshRateLimited(ctx context.Context) error {
 // Refresh performs discovery (once; the jwks_uri is remembered) and
 // reloads the key set.
 func (c *Cache) Refresh(ctx context.Context) error {
+	c.refreshing.Lock()
+	defer c.refreshing.Unlock()
+	return c.refresh(ctx)
+}
+
+func (c *Cache) refresh(ctx context.Context) error {
 	c.mu.Lock()
 	c.lastAttempt = c.now()
 	uri := c.jwksURI

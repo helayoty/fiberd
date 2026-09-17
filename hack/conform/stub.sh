@@ -24,15 +24,22 @@ SIGNED=${CONFORM_SIGNED:-0}
 LOG=$STATE/fiberd.log
 ISSUER_URL="http://$ISSUER_ADDR"
 GVISOR_ROOTFS=${CONFORM_GVISOR_ROOTFS:-/var/lib/fiberd/gvisor-rootfs}
+CGROOT=${FIBERD_CGROUP_ROOT:-/sys/fs/cgroup/fiberd}
+# The engine-loss hook (C9) reaches the zygote through its cgroup leaf:
+# fork backends only. --device-mb gives the reference zygote a simulated
+# device, which is what C8 budgets.
+ENGINE_HOOK=()
 if [ "$RUNTIME" = proc ]; then
   TIER=${CONFORM_TIER:-FIBER_CHECKPOINT}   # what proc offers when criu check passes
-  RUNTIME_FLAGS=(-runtime proc -template "default=$PWD/bin/refzygote --heap-mb 32" -run-dir /tmp/fz-conform)
+  RUNTIME_FLAGS=(-runtime proc -template "default=$PWD/bin/refzygote --heap-mb 32 --device-mb 64" -run-dir /tmp/fz-conform)
+  ENGINE_HOOK=(-engine-kill-cmd "$0 engine-kill \$1")
 elif [ "$RUNTIME" = gvisor ]; then
   TIER=${CONFORM_TIER:-FIBER_SNAPSHOT}
   RUNTIME_FLAGS=(-runtime gvisor -gvisor-rootfs "$GVISOR_ROOTFS" -template "default=/bin/refzygote --heap-mb 32 --gvisor" -run-dir /tmp/fz-conform)
 elif [ "$RUNTIME" = runc ]; then
   TIER=${CONFORM_TIER:-FIBER_CHECKPOINT}
-  RUNTIME_FLAGS=(-runtime runc -runc-rootfs "$GVISOR_ROOTFS" -template "default=/bin/refzygote --heap-mb 32" -run-dir /tmp/fz-conform)
+  RUNTIME_FLAGS=(-runtime runc -runc-rootfs "$GVISOR_ROOTFS" -template "default=/bin/refzygote --heap-mb 32 --device-mb 64" -run-dir /tmp/fz-conform)
+  ENGINE_HOOK=(-engine-kill-cmd "$0 engine-kill \$1")
 elif [ "$RUNTIME" = hyperlight ]; then
   # CONFORM_HL_HELPER selects the helper: the Rust one where KVM exists,
   # else bin/fakehelper (built below), which speaks the same protocol.
@@ -97,15 +104,35 @@ lane() {
   esac
 }
 
+# scope-lost: the standalone home's stand-in for losing its scope while
+# running (a namespace, a fabric claim): the agent bumps its epoch in
+# place, which revokes every fence at once.
+scope_lost() {
+  curl -sf --unix-socket "$STATE/admin.sock" -X POST http://x/scope-lost >/dev/null
+}
+
+# engine-kill <grant>: end the grant's zygote (its engine) as a crash
+# would, through the cgroup leaf the runtime keeps it in.
+engine_kill() {
+  local procs="$CGROOT/$1/zygote/cgroup.procs"
+  [ -r "$procs" ] || { echo "engine-kill: no zygote cgroup for $1" >&2; return 1; }
+  local p; for p in $(cat "$procs"); do kill -9 "$p" 2>/dev/null || true; done
+}
+
 case "${1:-}" in
   start) start ;;
   stop) stop ;;
   restart) stop; start ;;
   lane) lane "$2" ;;
+  engine-kill) engine_kill "$2" ;;
+  scope-lost) scope_lost ;;
   run)
     rm -rf "$STATE"; mkdir -p "$STATE"
     go build -o bin/ ./cmd/fiberd ./cmd/grant-issuer
-    go test -c -o bin/grant-conform ./cmd/grant-conform
+    # bin/ is shared between the macOS host and the Linux container; go
+    # refuses to overwrite a test binary built for the other OS.
+    rm -f bin/grant-conform
+    go test -c -o bin/grant-conform ./tests/conform
     if [ "$RUNTIME" = proc ]; then make -s zygote; fi
     if [ "$RUNTIME" = gvisor ] || [ "$RUNTIME" = runc ]; then hack/gvisor/rootfs.sh "$GVISOR_ROOTFS" >/dev/null; fi
     if [ "$RUNTIME" = hyperlight ] && [ -z "${CONFORM_HL_HELPER:-}" ]; then
@@ -122,7 +149,7 @@ case "${1:-}" in
     start
     bin/grant-conform -test.v -target "$ADDR" -target-tier "$TIER" -node-id "$NODE" "${mint[@]}" \
       -restart-cmd "$0 restart" -cp-health-cmd "$0 lane \$1" -audit-file "$STATE/audit.jsonl" \
-      "${@:2}"
+      -scope-cmd "$0 scope-lost" ${ENGINE_HOOK[@]+"${ENGINE_HOOK[@]}"} "${@:2}"
     ;;
   *) echo "usage: $0 run|start|stop|restart|lane up|down" >&2; exit 2 ;;
 esac

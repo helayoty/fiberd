@@ -16,7 +16,7 @@ The only cross-environment contract in fiberd is [`api/grant/v1/grant.proto`](..
 | `lease_expiry` | the JWT `exp`; revocation is lease non-renewal |
 | `policy` | durability (`BEST_EFFORT` / `SYNC`), session and audit class, PSI watermarks |
 
-The grant is carried inside every `CloneRequest` as a JWT (Phase 2). Its verified arrival at a home *is* admission: the home admits it on first sight, warms the template, and never re-checks anything on the warm path.
+The grant is carried inside every `CloneRequest` as a JWT. Its verified arrival at a home *is* admission: the home admits it on first sight, warms the template, and never re-checks anything on the warm path.
 
 ## The four verbs
 
@@ -27,7 +27,7 @@ Release(fiber_id, discard)                      -> ()
 Watch()                                         -> stream Status
 ```
 
-`Clone` with a `session` is idempotent: the home serializes on the session name and resolves it to `ATTACH` (running: same endpoint, same fence), `RESUME` (parked: restore the delta, fence `seq+1`) or `CREATE` (unknown or anonymous: fork the zygote, fence `seq+1`). `deadline` bounds the runtime fork or restore; a late fiber is a miss, not a result. `payload` is at most 4096 bytes and is delivered to the fiber as data, never interpreted as configuration.
+`Clone` with a `session` is idempotent: the home serializes on the session name and resolves it to `ATTACH` (running: same endpoint, same fence), `RESUME` (parked: restore the delta, fence `seq+1`) or `CREATE` (unknown or anonymous: clone the template, fence `seq+1`). `deadline` bounds the runtime fork or restore; a late fiber is a miss, not a result. `payload` is at most 4096 bytes and is delivered to the fiber as data, never interpreted as configuration.
 
 ## Admission completeness
 
@@ -51,6 +51,27 @@ The two miss codes are keyed on one question: **is the control plane reachable f
 ## Fences and epochs
 
 A fence is `(grant_uid, epoch, seq)`. `epoch` is the home's incarnation, bumped on every start; `seq` is the fiber incarnation within `(grant, epoch)`. Attach returns the existing fence; resume and create mint `seq+1`. After a restart every prior fence is invalid at once: `Park` or `Release` on a prior-epoch fiber id is `NotFound`, and a new `Clone` returns a fence with a strictly greater `epoch`.
+
+### Scope
+
+Nothing minted for a fiber validates beyond `min(lease, fence)`; that is the only rule the core enforces, in every home. A home that knows more about where it runs (the namespace and service account of a grant Pod, the DRA claim behind a fabric channel, the Slurm job) does not add a third validity term. It turns its scope into the two mechanisms above: **whole-agent scope loss is an epoch bump**, taken in place while the agent lives (`Agent.BumpEpoch`: the epoch is persisted, every running fiber is released with a `scope-revoked` audit record, every prior fence answers `NotFound`, new clones carry the new epoch, parked sessions keep their deltas and resume under it); **per-grant scope loss is a revocation on the grant lane** (`GrantRemoved`: admission stops, fibers drain by lease non-renewal, readiness is withdrawn, and the grant's fabric channel is released). The home's scope claims are visible, not enforced: they are stamped on every audit record (`scope`), so a reader can check namespace integrity against facts the home vouched for. The fence string on the wire never changes.
+
+A grant's **fabric channel** (the devices its engine may drive: a static set on a standalone host, a DRA claim under Kubernetes, the allocation's GRES under Slurm) is provisioned by the home at admission, before the template is warmed, and released with the grant. Nothing per fiber refers to it except through its fence.
+
+## Device budget
+
+`CapacityGrant.device_budget {bytes, class}` is the device-side twin of `w_budget_bytes`: the slice of the engine's device state (its KV cache, its VRAM) one fiber may hold. On the GPU side the CPU side is cloned and the device side is multiplexed: one engine per grant owns the device, and fibers are its clients over the IPC endpoint the home publishes to them as `FIBERD_ENGINE`. The engine, not the kernel, reports each fiber's slice (`DEVICE <fence> <bytes> 0`) and its own occupancy (`DEVICE - <used> <capacity>`) on the zygote channel; the home prices those reports, kills a fiber whose slice exceeds its budget (reason `oom`, like W), and feeds the occupancy into the same pressure ladder as PSI (the higher reading drives the rungs). A park tells the engine `EVICT <fence>` before the CPU checkpoint: devices are renegotiated, never checkpointed, and a resumed fiber reserves again under its new fence (published in the fence file beside its endpoint). A home whose template is not an engine of the grant's class refuses the grant with `FailedPrecondition`, never a silent CPU-only fiber. The reference workload's `--device-mb N` is a simulated engine, so all of this is tested without a GPU; a CUDA engine is a drop-in that speaks the same lines.
+
+## Endpoints
+
+`CloneResponse.endpoint` is a URL the caller dials as given and never inspects:
+
+| Form | When |
+|---|---|
+| `unix:///run/fiberd/<grant>/<epoch>-<seq>.sock` | callers on the same host (the default; the only form a sandbox backend such as gVisor serves) |
+| `tcp://10.0.0.7:30012`, `tcp://[fd00::7]:30012` | callers over the network; an IPv6 literal is bracketed |
+
+Which family a home hands out is **declared per deployment, never discovered**: the standalone home takes `-endpoint-family unix|inet4|inet6` with `-endpoint-host` (the one address the grant's fibers share) and `-endpoint-ports` (one port per live fiber, freed when it ends); the Kubernetes home takes the address from its Pod and the Slurm home from its node. Under a shared address fibers are told apart by port, which is the model for IPv4 and equally for one IPv6 address per grant; network policy is then per grant. A parked fiber keeps its port so the restored listener comes back where it was; a resume on a home whose port is taken fails rather than moving the fiber silently. Per-fiber IPv6 addresses (a delegated prefix per grant, a network namespace per fiber, policy per fiber) are a further policy the protocol leaves room for and this implementation does not build. Conformance case C1 checks every endpoint's form.
 
 ## Session mobility
 
@@ -78,7 +99,7 @@ The architecture must always match. Kernel and libc are compared at a level the 
 
 ## Audit
 
-Every state transition (`admit`, `create`, `attach`, `resume`, `park`, `release`, `oom`, `expire`) writes one record carrying the fence to the home's spool before the caller is acked. Under `BEST_EFFORT` the record is appended locally and shipped asynchronously; under `SYNC` it is remote before the ack, and a shipping failure fails the call.
+Every state transition writes one record carrying the fence, and the home's scope claims when it has any, to the home's spool before the caller is acked. The events are `admit`, `create`, `attach`, `resume`, `park`, `release`, `oom`, `expire`, `yield` (the pressure ladder took the fiber), `revoke` (the grant was removed on the grant lane), `scope-revoked` (an epoch bump in place), and the mobility events `publish`, `migrate-in` and `migrate-out`. Under `BEST_EFFORT` the record is appended locally and shipped asynchronously; under `SYNC` it is remote before the ack, and a shipping failure fails the call.
 
 ## JSON gateway
 
@@ -86,7 +107,7 @@ Every state transition (`admit`, `create`, `attach`, `resume`, `park`, `release`
 
 ## Conformance
 
-`grant-conform -target=host:port` runs the seven cases any home must pass:
+`grant-conform -target=host:port` runs the cases any home must pass:
 
 | Case | Property |
 | --- | --- |
@@ -97,7 +118,10 @@ Every state transition (`admit`, `create`, `attach`, `resume`, `park`, `release`
 | C5 admission completeness | any field beyond the four: `InvalidArgument` |
 | C6 W budget | dirtied working set over `w_budget_bytes`: fiber killed, slot freed, audit record written |
 | C7 tier floor | `min_tier` above the target, or a parked session on a sub-checkpoint target: `FailedPrecondition`, never a fresh fork |
+| C8 device budget | a grant with `device_budget` is refused with `FailedPrecondition` where the template offers no such device, else a fiber whose engine slice exceeds the budget is killed, its slot freed and an audit record written (payload `device_bytes` drives it) |
+| C9 engine loss | the grant's engine (warm template) dies: every running fiber ends and its slot returns, parked sessions survive, and `Clone(S)` on a parked session resumes it once the template is warm again (driven by `-engine-kill-cmd`) |
+| C10 scope revocation | the home loses its scope while running (driven by `-scope-cmd`): every running fiber ends, every prior fence is `NotFound`, a new `Clone` carries a strictly greater `epoch`, and a session parked before resumes under it |
 
 ## Issuer alternatives
 
-The reference issuer (`grant-issuer`) signs with its own key and publishes it at `<issuer>/.well-known/openid-configuration` and `/openid/v1/jwks`. Under Kubernetes a cluster may instead reuse the API server's service-account issuer, so grants are minted as projected service-account tokens carrying the `grant` claim; homes then discover the JWKS from the cluster issuer. That is acceptable where the API server's signing key may be trusted for capacity, and keeps one PKI; the reference issuer is the default because it is portable across distributions and off-cluster homes.
+The reference issuer (`grant-issuer`) signs with its own key and publishes it at `<issuer>/.well-known/openid-configuration` and `/openid/v1/jwks`. An integration runs the same issuer inside its own control plane: the Kubernetes example (`examples/kubernetes`) wraps it in a controller whose key lives in a Secret, whose JWKS is served on a Service, and which turns every `CapacityGrant` resource into one grant Pod and one signed grant addressed to it, renewed at half-life. A cluster may instead reuse the API server's service-account issuer, so grants are minted as projected service-account tokens carrying the `grant` claim; homes then discover the JWKS from the cluster issuer. That is acceptable where the API server's signing key may be trusted for capacity, and keeps one PKI; the reference issuer is the default because it is portable across distributions and off-cluster homes.

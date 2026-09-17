@@ -1,0 +1,41 @@
+# What a grant Pod's agent may do: read its own Pod, Namespace and
+# ResourceClaims, and set its readiness gate. The ClusterRole is bound per
+# tenant namespace with a RoleBinding, which also scopes the Namespace get
+# to that one namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: fiberd-grant
+rules:
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get]
+  - apiGroups: [""]
+    resources: [pods/status]
+    verbs: [patch]
+  - apiGroups: [""]
+    resources: [namespaces]
+    verbs: [get]
+  - apiGroups: [resource.k8s.io]
+    resources: [resourceclaims]
+    verbs: [get]
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: fiberd-grant
+  namespace: tenant-a
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: fiberd-grant
+  namespace: tenant-a
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: fiberd-grant
+subjects:
+  - kind: ServiceAccount
+    name: fiberd-grant
+    namespace: tenant-a

@@ -1,0 +1,7 @@
+
+# fiberd runtime handler: appended to /etc/containerd/config.toml on the
+# node by examples/kata/kind/run.sh. pod_annotations passes the Pod's
+# io.fiberd/* annotations into the OCI spec the shim reads.
+[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.fiberd]
+  runtime_type = "io.containerd.fiberd.v1"
+  pod_annotations = ["io.fiberd/*"]

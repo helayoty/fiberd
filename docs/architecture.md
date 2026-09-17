@@ -1,6 +1,6 @@
-# fiberd Architecture
+# Architecture
 
-This is the design reference for fiberd. It describes the intended system: how capacity is issued and exercised, the instance contract, the CPU and GPU execution models, the two deployment homes, and the cross-cutting mechanisms that make the whole thing safe.
+This is the design reference for fiberd. It describes how capacity is issued and exercised, the instance contract, the CPU and GPU execution models, the backend seam, the three homes, and the cross-cutting mechanisms that make the whole thing safe.
 
 For plain-language definitions of individual terms, see [concepts.md](concepts.md). For a high-level introduction, see [overview.md](overview.md).
 
@@ -34,20 +34,18 @@ An authenticated artifact the control plane issues once per block of capacity. I
 
 ### Grant agent
 
-One daemon per node, the sole runtime client for the fiber class. Its subcomponents:
+One agent per home instance (a node, a grant Pod, a Slurm allocation), the sole runtime client for the fiber class. Its subcomponents:
 
 - **RPC frontend** — authentication and admission-completeness enforcement.
 - **Budget enforcer** — the thrash budget (maximum sustainable activation rate as a function of working-set size) and backpressure.
 - **Ledger** — the node-authoritative record of sessions, leases, fences, and fabric channels.
 - **Pressure controller** — two inputs, one ladder (kernel PSI on the grant slice and ledger-derived device pressure), responding shed -> park -> yield.
-- **Zygote manager** — build, scrub on clone and reuse, and `maxAge` drain-and-swap.
-- **Checkpoint store** — parked deltas with TTL garbage collection.
+- **Host runtime** — cgroup leaves and ceilings, W, the parent checkpoint store and delta manifests, the delta registry, parity, orphan adoption; one for every backend (section 4).
 - **Audit spool** — at-least-once, sequence-numbered, shipped asynchronously.
-- **Runtime client** — the seam to the CRI-conformant runtime.
 
 ### Fibers
 
-Node-minted instances inside a grant: copy-on-write clones of a checkpointed engine zygote (one fully initialized template instance per grant per node). A fiber is addressed by the endpoint returned at clone time, scoped by its fence, held by a lease, and known to exactly two parties: the agent's ledger and the caller.
+Instances minted by the home inside a grant: clones of the warm engine zygote (one fully initialized template instance per grant per home), a copy-on-write fork on the proc and runc backends and a snapshot restore on gVisor and Hyperlight. A fiber is addressed by the endpoint returned at clone time, scoped by its fence, held by a lease, and known to exactly two parties: the agent's ledger and the caller.
 
 ### Grant lifecycle
 
@@ -75,7 +73,7 @@ Release(fiberID)                    -> destroy state, free name
 ![Clone resolution: verify and budget, then resolve the session to attach, resume, or create; misses shed](./images/clone-resolution.svg)
 
 - **S running** -> return the existing endpoint and fence (**attach**, ~free).
-- **S parked** -> restore its delta (**resume**, sub-second).
+- **S parked** -> restore its delta (**resume**, tens of milliseconds).
 - **S unknown** (or anonymous) -> fork the zygote and bind the name (**create**, milliseconds).
 
 Retries cannot create duplicate sessions: the agent serializes per session name, holding a per-session lock across the resolution and the runtime work.
@@ -121,7 +119,7 @@ Device pressure is a ledger comparison, not a kernel signal: the kernel's pressu
 
 ### The runtime tier ladder
 
-The agent drives any CRI-conformant runtime through fiber verbs carrying fence, lease, and clone provenance in-protocol. Capability is advertised, and grants are placed against the advertised tier — the tier decides which guarantees the platform can sell:
+The agent never talks to a container runtime directly: one host runtime drives a backend (fork zygote, runc, gVisor, Hyperlight) through a small interface, and each backend advertises the tier its mechanism can honour. Grants carry a `min_tier` and are placed against the advertised tier — the tier decides which guarantees the platform can sell:
 
 | Tier | Runtime must have | Enables |
 |---|---|---|
@@ -129,9 +127,9 @@ The agent drives any CRI-conformant runtime through fiber verbs carrying fence, 
 | **FIBER_WARM** | zygote fork / snapshot clone (CoW) | millisecond activation + density |
 | **FIBER_CHECKPOINT** | per-fiber delta checkpoint + restore | Park/resume — the session model |
 | **FIBER_SNAPSHOT** | snapshot-restore of a whole sandbox or micro-VM per fiber | park/resume with a kernel or hypervisor boundary per fiber |
-| **FIBER_FABRIC** | multi-node NVLink + IMEX-scoped fabric memory | fabric-tier park + cross-node resume at NVLink bandwidth |
+| **FIBER_FABRIC** | multi-node NVLink + IMEX-scoped fabric memory | fabric-tier park + cross-node resume at NVLink bandwidth (reserved in the protocol; nothing implements it) |
 
-`Clone(S)` on a parked session against a sub-CHECKPOINT runtime fails loudly; it never silently forks a fresh, amnesiac instance.
+`Clone(S)` on a parked session against a sub-CHECKPOINT runtime fails loudly with `FailedPrecondition`; it never silently forks a fresh, amnesiac instance.
 
 ### One host runtime, many backends
 
@@ -139,19 +137,23 @@ The tier a home advertises comes from the sandbox mechanism it runs, but the mec
 
 ![The backend seam: consumers above the protocol, the agent and ledger, one host runtime, the backend interface, and the proc, gVisor, runc and Hyperlight backends beneath it](./images/backend-seam.svg)
 
-Consumers sit above all of this and only ever call `Clone`: a Knative activator routing a scale-from-zero, a Kata shim creating a sandbox, a Kubernetes virtual node admitting a gated Pod. The function's code runs inside whatever sandbox the backend provides; fiberd is the layer beneath the sandbox that owns its capacity and its parked state.
+Consumers sit above all of this and only ever call `Clone`, `Park` and `Release` through `pkg/consumer`: a Knative activator routing a scale-from-zero, a containerd shim creating a sandbox, a cluster-level herder. The function's code runs inside whatever sandbox the backend provides; fiberd is the layer beneath the sandbox that owns its capacity and its parked state. The [Knative](../examples/knative/README.md) and [Kata-shaped](../examples/kata/README.md) examples are the two built; the [Substrate herder](../examples/substrate/README.md) is in progress.
 
 ## 5. Homes implement the protocol
 
-The core is home-invariant. A **home** is any environment that holds a grant and runs fibers under it; the identical agent and semantics run in every home, and a home is conformant if and only if the `grant-conform` suite passes against it with the core unmodified. Three homes are specified: standalone, Kubernetes, and Slurm.
+The core is home-invariant. A **home** is any environment that holds a grant and runs fibers under it; the identical agent and semantics run in every home, and a home is conformant if and only if the `grant-conform` suite passes against it with the core unmodified. Three homes exist: standalone (`cmd/fiberd`), [Kubernetes](../examples/kubernetes/README.md) and [Slurm](../examples/slurm/README.md); the agent is a library (`pkg/agent`) and a home's binary is a `main` of a few lines around it.
 
-![One core, many homes: an invariant core with thin homes that differ only in grant delivery, readiness, scheduling, runtime ownership, authentication, and fabric provisioning](./images/one-core-two-homes.svg)
+![One core, many homes: an invariant core with thin homes that differ only in grant delivery, readiness, scheduling, runtime ownership, authentication, and fabric provisioning](./images/one-core-many-homes.svg)
 
 Each home adapts only: how the signed grant arrives, how readiness is published, who schedules, who owns the cgroup subtree, how callers authenticate, and how fabric channels are provisioned. In every home the grant is the same signed JWT, verified offline against the issuer's cached JWKS.
 
+The standalone home is the reference: a plain daemon on a host, with the platform's issuer and placer wherever the platform keeps them.
+
+![The standalone home: the platform's issuer signs a grant once and publishes its keys; cmd/fiberd verifies it offline, warms the template and mints fibers under a delegated cgroup subtree; callers clone over gRPC or the JSON gateway and dial the endpoint they are handed; status and audit flow back asynchronously](./images/standalone-home.svg)
+
 | Aspect | Standalone | Kubernetes | Slurm |
 |---|---|---|---|
-| Grant delivery | JWT file or carried in the first `Clone`; issuer polled for liveness | JWT projected into the grant Pod from the `CapacityGrant` CRD by the issuer controller | JWT passed to the allocation; prolog verifies it and starts the agent |
+| Grant delivery | JWT file or carried in the first `Clone`; issuer polled for liveness | JWT projected into the grant Pod from the `CapacityGrant` CRD by the issuer controller | JWT passed to the allocation; the launcher verifies it and starts the agent |
 | Readiness | batched `Watch` status stream | Pod readiness gate `fiberd.io/zygote-ready`, set by the agent after the zygote is warm | allocation state plus the `Watch` stream |
 | Scheduling | the platform's placer treats the grant as the unit | the scheduler places the grant Pod | the Slurm scheduler places the allocation |
 | Cgroup ownership | the agent owns a delegated cgroup v2 subtree | the Pod's own cgroup, delegated to the agent running as PID 1 | the allocation's cgroup |
@@ -166,7 +168,7 @@ A **fence** is a monotonic incarnation triple `(grantUID, epoch, seq)` that scop
 
 ![Fence and epoch: a session name survives incarnations while its fence is minted fresh each time; an epoch bump on restart invalidates every prior fence at once](./images/fence-epoch.svg)
 
-Nothing minted for a fiber validates beyond `min(lease TTL, its exact fence)`. Revocation of a grant propagates by lease non-renewal, bounded by lease TTL even during an outage. `Clone` scrubs inherited descriptors, baked tokens, and entropy: identity is assigned after the fork, never baked into the template. A restart bumps the epoch, which invalidates all prior fences at once — orphans are reaped and nothing minted before the restart validates after it.
+Nothing minted for a fiber validates beyond `min(lease TTL, its exact fence)`. Revocation of a grant propagates by lease non-renewal, bounded by lease TTL even during an outage. `Clone` scrubs inherited descriptors, baked tokens, and entropy: identity is assigned after the fork, never baked into the template. A restart bumps the epoch, which invalidates all prior fences at once — orphans are reaped and nothing minted before the restart validates after it. A home can take the same bump without restarting when it learns that its scope is gone under it (a namespace deleted, a service-account issuer rotated, a fabric claim revoked): `min(lease, fence)` stays the only rule the core enforces, and a home with more scope than that expresses it by revoking, per grant on the grant lane or for the whole agent by epoch, never as a third validity term. What the home asserts about its scope is visible on every audit record.
 
 ### Persistence and restart
 
@@ -207,4 +209,4 @@ Compliance-grade deployments buy the SYNC class, where `Clone` acks only after t
 
 ### Network
 
-A fiber's endpoint is returned by `Clone` and exists nowhere else. Under IPv4, fibers share the grant's IP with port distinction (network policy at grant granularity); per-fiber IPs are viable under IPv6 (policy at fiber granularity). Which applies is declared per deployment, never discovered.
+A fiber's endpoint is returned by `Clone` and exists nowhere else, as a URL the caller dials as given: `unix://` for same-host callers, `tcp://` for callers over the network with an IPv6 literal bracketed. Which address family a home hands out is declared per deployment (`-endpoint-family` on the standalone home, the Pod's addresses under Kubernetes), never discovered. Under a shared IPv4 or IPv6 address fibers share the grant's address with port distinction (network policy at grant granularity); the host runtime hands out one port per live fiber and a parked fiber keeps its port for the restored listener. Per-fiber IPs, viable under IPv6 (policy at fiber granularity), are left as a further policy and not built.

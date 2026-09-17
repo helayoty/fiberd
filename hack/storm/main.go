@@ -14,12 +14,12 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"net"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
@@ -29,6 +29,7 @@ import (
 
 	grantv1 "github.com/helayoty/fiberd/api/grant/v1"
 	"github.com/helayoty/fiberd/pkg/core"
+	"github.com/helayoty/fiberd/pkg/endpoint"
 	"github.com/helayoty/fiberd/pkg/grant"
 	"github.com/helayoty/fiberd/pkg/sys/cgroup"
 )
@@ -133,7 +134,7 @@ func run(o opts) int {
 		if err != nil {
 			return fatal("clone s%d: %v", i, err)
 		}
-		fs = append(fs, &fib{id: r.GetFiberId(), endpoint: strings.TrimPrefix(r.GetEndpoint(), "unix://")})
+		fs = append(fs, &fib{id: r.GetFiberId(), endpoint: r.GetEndpoint()})
 	}
 	fmt.Printf("storm: %d fibers running; dirtying %dMiB per round per fiber\n", len(fs), o.step>>20)
 
@@ -158,8 +159,18 @@ func run(o opts) int {
 			go func(f *fib) {
 				defer wg.Done()
 				if err := say(f.endpoint, fmt.Sprintf("dirty %d", f.dirtied), time.Second); err != nil {
-					if _, statErr := os.Stat(f.endpoint); statErr != nil {
-						f.gone = true // endpoint removed: parked or killed
+					// A unix endpoint whose socket is gone was parked or
+					// killed; a tcp endpoint that refuses the connection
+					// is the same. A timeout is a fiber throttled under
+					// memory.high, which is the ladder working: keep it.
+					var dialErr *dialError
+					switch p := endpoint.UnixPath(f.endpoint); {
+					case p != "":
+						if _, statErr := os.Stat(p); statErr != nil {
+							f.gone = true
+						}
+					case errors.As(err, &dialErr) && !dialErr.timeout:
+						f.gone = true
 					}
 				}
 			}(f)
@@ -215,11 +226,24 @@ func run(o opts) int {
 	return rc
 }
 
+// dialError is a failure to reach the endpoint at all, with whether it
+// was the dial timing out (throttled) or being refused (gone).
+type dialError struct {
+	err     error
+	timeout bool
+}
+
+func (e *dialError) Error() string { return e.err.Error() }
+func (e *dialError) Unwrap() error { return e.err }
+
 // say sends one line to a fiber endpoint and waits for the reply.
-func say(endpoint, line string, to time.Duration) error {
-	c, err := net.DialTimeout("unix", endpoint, to)
+func say(ep, line string, to time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), to)
+	defer cancel()
+	c, err := endpoint.Dial(ctx, ep)
 	if err != nil {
-		return err
+		var ne net.Error
+		return &dialError{err: err, timeout: errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &ne) && ne.Timeout())}
 	}
 	defer func() { _ = c.Close() }()
 	_ = c.SetDeadline(time.Now().Add(to))

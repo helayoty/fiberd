@@ -1,16 +1,19 @@
-// Command fibctl sends one line to a fiber's unix-socket endpoint and
-// prints the reply: the shell's way to talk to a reference-zygote fiber.
+// Command fibctl sends one line to a fiber's endpoint and prints the
+// reply: the shell's way to talk to a reference-zygote fiber.
 //
 //	fibctl unix:///run/fiberd/g/1-1.sock incr
+//	fibctl tcp://10.0.0.7:30012 get
 package main
 
 import (
 	"bufio"
+	"context"
 	"fmt"
-	"net"
 	"os"
 	"strings"
 	"time"
+
+	"github.com/helayoty/fiberd/pkg/endpoint"
 )
 
 func main() {
@@ -18,7 +21,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "usage: fibctl <endpoint> <line>")
 		os.Exit(2)
 	}
-	reply, err := say(strings.TrimPrefix(os.Args[1], "unix://"), strings.Join(os.Args[2:], " "))
+	reply, err := say(os.Args[1], strings.Join(os.Args[2:], " "))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "fibctl:", err)
 		os.Exit(1)
@@ -27,7 +30,9 @@ func main() {
 }
 
 func say(ep, line string) (string, error) {
-	c, err := net.DialTimeout("unix", ep, 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	c, err := endpoint.Dial(ctx, ep)
 	if err != nil {
 		return "", err
 	}

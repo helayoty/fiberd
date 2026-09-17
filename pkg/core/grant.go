@@ -26,6 +26,14 @@ type Policy struct {
 	PSISomeAvg10Park float64
 }
 
+// DeviceBudget is the per-fiber slice of the grant's engine device state
+// a fiber may hold (its share of a KV cache, of VRAM): the device-side
+// twin of WBudgetBytes. Zero bytes means the grant needs no device.
+type DeviceBudget struct {
+	Bytes uint64
+	Class string // "gpu", "sim" (the reference engine's simulated device); "" = any
+}
+
 // Grant is the home-invariant, proto-free twin of api/grant/v1
 // CapacityGrant. It is what a Verifier returns after checking the signed
 // grant offline, and what the ledger stores. Its authenticated arrival is
@@ -42,6 +50,7 @@ type Grant struct {
 	MinTier        Tier
 	LeaseExpiry    time.Time // zero = no expiry
 	Policy         Policy
+	DeviceBudget   DeviceBudget
 }
 
 // Expired reports whether the lease has lapsed at now. Revocation is lease

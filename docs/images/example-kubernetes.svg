@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="820" height="470" viewBox="0 0 820 470" font-family="Helvetica Neue, Arial, sans-serif">
+  <title>The Kubernetes example</title>
+  <desc>The issuer controller turns a CapacityGrant resource into a grant Pod and a signed grant projected into it; fiberd-k8s runs as PID 1 of the Pod, admits the grant, warms the template, sets the readiness gate and serves fibers on the Pod IP from the Pod's own cgroup; the conformance suite and the overcommit storm run against the Pod in kind.</desc>
+  <defs>
+    <marker id="arw" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L8,3 L0,6 Z" fill="#333"/></marker>
+  </defs>
+  <rect width="820" height="470" fill="#ffffff"/>
+
+  <rect x="30" y="30" width="760" height="300" rx="10" fill="#f5f5f5" stroke="#999"/>
+  <text x="45" y="54" font-size="13" font-weight="600" fill="#333">kind cluster</text>
+
+  <rect x="50" y="72" width="220" height="90" rx="6" fill="#dae8fc" stroke="#6c8ebf"/>
+  <text x="160" y="94" text-anchor="middle" font-size="13" font-weight="600" fill="#1a1a1a">CapacityGrant (CRD)</text>
+  <text x="160" y="114" text-anchor="middle" font-size="11" fill="#1a1a1a">template, fibers, wBudget, lease</text>
+  <text x="160" y="130" text-anchor="middle" font-size="11" fill="#1a1a1a">spec.pod: image, runtime, limits</text>
+  <text x="160" y="146" text-anchor="middle" font-size="11" fill="#1a1a1a">status: placed, ready, endpoint</text>
+
+  <rect x="300" y="72" width="220" height="90" rx="6" fill="#e1d5e7" stroke="#9673a6"/>
+  <text x="410" y="94" text-anchor="middle" font-size="13" font-weight="600" fill="#1a1a1a">grant-controller</text>
+  <text x="410" y="114" text-anchor="middle" font-size="11" fill="#1a1a1a">key in a Secret, JWKS on a Service</text>
+  <text x="410" y="130" text-anchor="middle" font-size="11" fill="#1a1a1a">creates the Pod, mints the grant</text>
+  <text x="410" y="146" text-anchor="middle" font-size="11" fill="#1a1a1a">renews at half-life</text>
+
+  <rect x="550" y="72" width="220" height="90" rx="6" fill="#b0e3e6" stroke="#0e8088"/>
+  <text x="660" y="94" text-anchor="middle" font-size="13" font-weight="600" fill="#1a1a1a">Secret conform-grant</text>
+  <text x="660" y="114" text-anchor="middle" font-size="11" fill="#1a1a1a">grant.jwt, aud = the Pod's name</text>
+  <text x="660" y="130" text-anchor="middle" font-size="11" fill="#1a1a1a">projected into the Pod</text>
+  <text x="660" y="146" text-anchor="middle" font-size="11" fill="#1a1a1a">owned by the resource</text>
+
+  <polyline points="270,117 300,117" fill="none" stroke="#333" stroke-width="1.5" marker-end="url(#arw)"/>
+  <polyline points="520,117 550,117" fill="none" stroke="#333" stroke-width="1.5" marker-end="url(#arw)"/>
+
+  <rect x="50" y="190" width="720" height="120" rx="6" fill="#fff2cc" stroke="#d6b656"/>
+  <text x="410" y="212" text-anchor="middle" font-size="13" font-weight="600" fill="#1a1a1a">grant Pod conform-grant (privileged; the memory limit is the block ceiling)</text>
+  <text x="410" y="236" text-anchor="middle" font-size="11" fill="#1a1a1a">fiberd-k8s as PID 1: admits the projected grant, warms the template, sets readiness gate fiberd.io/zygote-ready</text>
+  <text x="410" y="256" text-anchor="middle" font-size="11" fill="#1a1a1a">cgroup: its containerd scope from /proc/self/cgroup, an agent leaf, then fiberd/&lt;grant&gt;/zygote and f-&lt;epoch&gt;-&lt;seq&gt;</text>
+  <text x="410" y="276" text-anchor="middle" font-size="11" fill="#1a1a1a">fibers on the Pod IP: tcp://10.244.0.12:300xx · NodePort 30084 to the host</text>
+  <text x="410" y="296" text-anchor="middle" font-size="11" fill="#1a1a1a">liveness: the API server answers for the Pod · scope lost: namespace or claim gone, epoch bump</text>
+
+  <polyline points="660,162 660,190" fill="none" stroke="#333" stroke-width="1.5" marker-end="url(#arw)"/>
+
+  <rect x="30" y="360" width="370" height="90" rx="6" fill="#d5e8d4" stroke="#82b366"/>
+  <text x="215" y="382" text-anchor="middle" font-size="13" font-weight="600" fill="#1a1a1a">grant-conform on the host</text>
+  <text x="215" y="404" text-anchor="middle" font-size="11" fill="#1a1a1a">C1 to C10 against 127.0.0.1:30084</text>
+  <text x="215" y="422" text-anchor="middle" font-size="11" fill="#1a1a1a">hooks through kubectl exec: restart is kill 1,</text>
+  <text x="215" y="438" text-anchor="middle" font-size="11" fill="#1a1a1a">lane and scope loss on the admin socket, engine loss in the cgroup</text>
+
+  <rect x="420" y="360" width="370" height="90" rx="6" fill="#ffe6cc" stroke="#d79b00"/>
+  <text x="605" y="382" text-anchor="middle" font-size="13" font-weight="600" fill="#1a1a1a">the storm in a second grant Pod</text>
+  <text x="605" y="404" text-anchor="middle" font-size="11" fill="#1a1a1a">384 MiB limit, 160 MiB grant ceiling, 2x demand</text>
+  <text x="605" y="422" text-anchor="middle" font-size="11" fill="#1a1a1a">first park at PSI ~40%, no OOM kill, no restart</text>
+  <text x="605" y="438" text-anchor="middle" font-size="11" fill="#1a1a1a">the storm binary runs inside the Pod</text>
+
+  <polyline points="215,360 215,310" fill="none" stroke="#333" stroke-width="1.5" marker-end="url(#arw)"/>
+  <polyline points="605,360 605,310" fill="none" stroke="#333" stroke-width="1.5" marker-end="url(#arw)"/>
+</svg>

@@ -17,6 +17,36 @@ type PressureSource interface {
 	Pressure(grantUID string) (someAvg10 float64, err error)
 }
 
+// MaxPressure combines several sources into the ladder's one input: the
+// highest reading wins, so kernel PSI on the grant's cgroup and the
+// engine's device occupancy (used over capacity, in percent) drive the
+// same rungs. A source that errors is skipped; all erroring is an error.
+type MaxPressure []PressureSource
+
+func (m MaxPressure) Pressure(grantUID string) (float64, error) {
+	var best float64
+	var lastErr error
+	got := false
+	for _, s := range m {
+		v, err := s.Pressure(grantUID)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		got = true
+		if v > best {
+			best = v
+		}
+	}
+	if !got {
+		if lastErr == nil {
+			lastErr = errors.New("pressure: no source")
+		}
+		return 0, lastErr
+	}
+	return best, nil
+}
+
 // FiberInfo is what the ladder needs to pick a victim.
 type FiberInfo struct {
 	ID      string

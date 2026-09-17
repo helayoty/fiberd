@@ -1,6 +1,6 @@
-# fiberd Concepts
+# Concepts
 
-Plain-language definitions of every term in the design, each with an analogy and, where useful, a diagram. For how the pieces fit together, see [architecture.md](architecture.md).
+Plain-language definitions of every term in the design, each with an analogy and, where useful, a diagram. For how the pieces fit together, see [architecture.md](architecture.md); for the wire semantics, [protocol.md](protocol.md).
 
 ---
 
@@ -14,7 +14,7 @@ A grant says: *this tenant may run up to N fibers of this template, until this e
 
 ## Fiber
 
-**A single running instance minted on the node by copy-on-write forking a warm template — cheap to create, and invisible to the control plane.**
+**A single running instance minted by the home from a warm template — a copy-on-write fork or a snapshot restore, by backend — cheap to create, and invisible to the control plane.**
 
 A fiber is "one worker." It is created in milliseconds by cloning the engine zygote, addressed by an endpoint returned at clone time, scoped by a fence, and held by a lease. It is known to exactly two parties: the agent's ledger and the caller. The control plane never sees an individual fiber.
 
@@ -22,7 +22,7 @@ A fiber is "one worker." It is created in milliseconds by cloning the engine zyg
 
 ## Engine (engine zygote)
 
-**The one warm, fully-initialized template process per grant per node — the thing fibers are cloned from, and, on GPU, the only process that touches device state.**
+**The one warm, fully-initialized template process per grant per home — the thing fibers are cloned from, and, on GPU, the only process that touches device state.**
 
 Two roles:
 
@@ -35,7 +35,7 @@ Its declared trade-off: the engine is a grant-wide single point of failure — i
 
 ## Grant agent (`fiberd`)
 
-**The one daemon per node that ties grants, engines, and fibers together — the sole runtime client for the fiber class.**
+**The one agent per home instance (a node, a grant Pod, a Slurm allocation) that ties grants, engines, and fibers together — the sole runtime client for the fiber class.**
 
 It holds the ledger (what exists), the budget (how fast it can mint), the fences (revocation), the audit spool (what happened), and the pressure ladder (what to shed under load). It is distinct from the engine: the agent does bookkeeping and admission; the engine is the template fibers come from.
 
@@ -90,7 +90,7 @@ The ledger stamps every fence it mints with the current epoch, and serializes co
 ![Clone resolution: attach a running session, resume a parked one, or create a new fiber; misses shed](./images/clone-resolution.svg)
 
 - **attach** (running) — return the existing endpoint and fence, ~free;
-- **resume** (parked) — restore the delta, sub-second, with a *new* fence;
+- **resume** (parked) — restore the delta, tens of milliseconds, with a *new* fence;
 - **create** (unknown or anonymous) — fork the zygote, milliseconds, with a new fence.
 
 Continuity of a session never implies continuity of its secrets: a resumed session gets fresh credentials scoped to its new fence.
@@ -117,12 +117,12 @@ The advertised rate is published in grant status so routers and autoscalers can 
 
 **The two, deliberately distinct, outcomes of a clone that cannot be served:**
 
-| Code | When | Caller action |
-|---|---|---|
-| **SHED** (429 + Retry-After) | over the thrash budget, or out of capacity with the control plane unreachable | back off; never queue on a dead control plane |
-| **DEFERRED_FALLBACK** | out of capacity with the control plane healthy | fall back to ordinary provisioning |
+| Code | Carried as | When | Caller action |
+|---|---|---|---|
+| **SHED** | gRPC `ResourceExhausted`; HTTP 429 + `Retry-After` | over the thrash budget, or out of capacity with the control plane unreachable | back off; never queue on a dead control plane |
+| **DEFERRED_FALLBACK** | gRPC `Unavailable`; HTTP 503 | out of capacity with the control plane healthy | fall back to ordinary provisioning |
 
-Conflating the two would let routers retry into a dead control plane believing capacity is coming.
+Every miss carries a `Miss` detail with the code. Conflating the two would let routers retry into a dead control plane believing capacity is coming.
 
 ## Runtime tiers
 
@@ -133,7 +133,56 @@ Conflating the two would let routers retry into a dead control plane believing c
 | **FIBER_BASIC** | create in an existing warm sandbox | correct semantics, pod-class latency |
 | **FIBER_WARM** | zygote fork / snapshot clone (CoW) | millisecond activation + density |
 | **FIBER_CHECKPOINT** | per-fiber delta checkpoint + restore | Park/resume — the session model |
-| **FIBER_FABRIC** | multi-node NVLink + IMEX-scoped fabric memory | fabric-tier park + cross-node resume |
+| **FIBER_SNAPSHOT** | snapshot-restore of a whole sandbox or micro-VM per fiber | park/resume with a kernel or hypervisor boundary per fiber |
+| **FIBER_FABRIC** | multi-node NVLink + IMEX-scoped fabric memory | fabric-tier park + cross-node resume (reserved; nothing implements it) |
+
+A grant names its `min_tier`; a home whose backend advertises less refuses it with `FailedPrecondition` rather than substituting a lesser mechanism.
+
+## Backend
+
+**The sandbox mechanism a home runs fibers in: proc (fork zygote + CRIU), runc (the zygote as a container's init), gVisor (a `runsc` sandbox per fiber) or Hyperlight (a micro-VM per fiber).**
+
+One host runtime implements the runtime contract for every backend — cgroup leaves, W pricing, checkpoint store, delta registry, parity, orphan adoption — and a backend implements only the mechanism beneath it: warm a template, clone a fiber from it, checkpoint, restore, kill, report exits. The backend's name travels with every checkpoint as a parity fact, so a delta from one mechanism is never offered to another.
+
+*Analogy:* a car's drivetrain — the controls are identical, and only what turns the wheels differs.
+
+## Consumer
+
+**Anything that calls `Clone`, `Park` and `Release`: a Knative activator, a containerd shim, a cluster-level herder.**
+
+A consumer never shapes a workload; it selects capacity by naming a grant and, optionally, a session, and branches on the two miss codes. `pkg/consumer` is the typed client: `*Shed`, `*Deferred` and `*TierGap` errors, plus `CloneRetry` to wait out a `SHED`.
+
+## Session domain and delta registry
+
+**A parked session belongs to a session domain — the grant's `policy.session_class`, or its `template_digest` when none is set — and two grants in the same domain, on any two homes, name the same sessions.**
+
+Parked state moves through an OCI registry: park publishes the delta under a tag derived from the session name, `Clone(S)` on a home that does not hold S looks the tag up, pulls the delta if it fits the W budget, and claims the session by deleting the tag. A delta too large to move is a `DEFERRED_FALLBACK` whose `preferred_home` names where the state already is.
+
+*Analogy:* a coat check — one ticket, whoever presents it first takes the coat.
+
+## Platform parity
+
+**The three facts a checkpoint assumes about its host — architecture, kernel release, libc — recorded in every artifact and delta and compared before a home warms a template or takes a session.**
+
+Architecture must always match. Kernel and libc are compared at the level the home is started with (`-parity strict`, `kernel=series`, `off`); a mismatch refuses the template or defers the session with `preferred_home`, never a restore that fails late.
+
+## Scope
+
+**What a home asserts about where it runs — a namespace and service account, a Slurm job, a DRA claim — stamped on every audit record but never a third validity term.**
+
+The core enforces exactly `min(lease, fence)`. A home that loses its scope expresses that through the two mechanisms it already has: an epoch bump for whole-agent loss, a revocation on the grant lane for one grant.
+
+## Fabric channel
+
+**The devices a grant's engine may drive: a static list on a standalone host (`-devices`), a DRA claim under Kubernetes, the allocation's GRES under Slurm.**
+
+Provisioned by the home at admission before the template is warmed, released with the grant, and referred to per fiber only through the fence.
+
+## Device budget
+
+**`device_budget {bytes, class}`: the device-side twin of `w_budget_bytes` — the slice of the engine's device state (KV cache, VRAM) one fiber may hold.**
+
+The kernel has no pressure class for devices, so the engine reports each fiber's slice and its own occupancy over the zygote channel, and the home prices those reports: a fiber over its slice is killed (reason `oom`, like W), and occupancy feeds the pressure ladder alongside PSI. A home whose template offers no device of the grant's class refuses the grant with `FailedPrecondition`.
 
 ## CPU-clone vs GPU-multiplex
 
@@ -166,10 +215,10 @@ Two durability classes, chosen per grant:
 
 **A home is any environment that holds a grant and runs fibers under it. The identical core runs in every home; only thin home adapters differ.** A home is conformant if and only if the conformance suite passes against it with the core unmodified.
 
-![One core, many homes: an invariant core with thin home adapters](./images/one-core-two-homes.svg)
+![One core, many homes: an invariant core with thin home adapters](./images/one-core-many-homes.svg)
 
 - **Standalone** — the grant JWT arrives as a file or inside the first `Clone`; readiness rides the batched status stream; the platform's placer schedules; the agent owns its cgroup subtree.
 - **Kubernetes** — the issuer controller mints the JWT from a `CapacityGrant` object and projects it into a grant Pod where the agent runs as PID 1; readiness is a Pod readiness gate; the scheduler places the Pod; GPU is a DRA claim per grant.
-- **Slurm** — the JWT is handed to the allocation; the prolog verifies it and starts the agent inside; capacity is bounded by the allocation.
+- **Slurm** — the JWT is handed to the allocation; the launcher verifies it and starts the agent inside; capacity is bounded by the allocation.
 
 In every home callers authenticate the same way: the signed grant travels with the request and is verified offline against the issuer's cached JWKS.

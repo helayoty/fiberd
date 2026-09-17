@@ -1,0 +1,8 @@
+# Build contexts: hack/dev (copies one script) and hack/kind (copies the
+# tree to build inside the dev image). Keep the large, generated or
+# host-specific parts out of both.
+.git
+bin/
+hack/hyperlight/guest/target
+hack/hyperlight/helper/target
+**/*.log

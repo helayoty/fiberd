@@ -43,6 +43,10 @@ type WarmSpec struct {
 	// WorkDir is the grant's run directory: the instance's cwd, its log,
 	// and where fiber endpoints live.
 	WorkDir string
+	// Devices names the devices the grant's fabric channel provisions for
+	// its engine (device paths or ids), for the warm instance's
+	// environment; nil when the grant has none.
+	Devices []string
 	// ProbeCgroupFD is an open fd of an empty cgroup a backend may use
 	// to measure what one fiber of this template costs (Warm.Bytes), by
 	// starting one there and reading the cgroup; the host removes it
@@ -67,9 +71,12 @@ type Warm struct {
 
 // FiberSpec asks for one fiber from a warm instance or a checkpoint.
 type FiberSpec struct {
-	Fence    string // the fiber's id; the backend reports exits under it
-	Endpoint string // unix socket path the fiber must serve on
-	CgroupFD int    // the fiber's leaf; -1 when the host has none
+	Fence string // the fiber's id; the backend reports exits under it
+	// Endpoint is what the fiber must serve on: an absolute unix socket
+	// path under the grant's run directory, or "tcp://host:port" for a
+	// backend that lists "tcp" in EndpointSchemes.
+	Endpoint string
+	CgroupFD int // the fiber's leaf; -1 when the host has none
 	Deadline time.Duration
 	Payload  []byte
 	// OwnPIDNS asks for the fiber to be the init of its own pid namespace
@@ -96,12 +103,21 @@ type ParkSpec struct {
 type ResumeSpec struct {
 	Dir      string
 	Fence    string
-	Endpoint string // the endpoint the checkpoint served on; recreated by the restore
+	Endpoint string // the endpoint the checkpoint served on (as in FiberSpec); recreated by the restore
 	CgroupFD int
 	Deadline time.Duration
 	// WarmID names the grant's warm instance the fiber is resumed under
 	// (its template, and for a launcher its container's root and mounts).
 	WarmID string
+	// WorkDir is the grant's run directory (WarmSpec.WorkDir).
+	WorkDir string
+}
+
+// EndpointSchemer is implemented by backends that can serve fibers on
+// more than unix sockets under the run directory. A backend without it
+// speaks "unix" only, and the host refuses a policy it cannot honour.
+type EndpointSchemer interface {
+	EndpointSchemes() []string
 }
 
 // Exit reports the end of a fiber (FiberID set) or of a warm instance
@@ -177,6 +193,24 @@ type WMeter interface {
 // for W and for budget enforcement instead of the leaf's counters.
 type WReporter interface {
 	FiberW(fiberID string) (uint64, bool)
+}
+
+// DeviceReporter is implemented by backends whose warm instance is an
+// engine that owns device state (a KV cache, VRAM) and reports each
+// fiber's slice of it: on the zygote channel, `DEVICE <fence> <bytes> 0`
+// per fiber and `DEVICE - <used> <capacity>` for the whole engine. The
+// host prices, enforces and reclaims on those reports, since the kernel
+// has no pressure class for devices.
+type DeviceReporter interface {
+	// FiberDevice is the engine's slice for the fiber; ok is false when
+	// the engine has said nothing about it.
+	FiberDevice(fiberID string) (used uint64, ok bool)
+	// WarmDevice is the engine's total use and capacity; ok is false when
+	// the warm instance reported no device at all.
+	WarmDevice(warmID string) (used, capacity uint64, ok bool)
+	// EvictDevice asks the engine to drop the fiber's slice: what a park
+	// does before the CPU checkpoint (devices are renegotiated on resume).
+	EvictDevice(fiberID string) error
 }
 
 // SelfCheckpointer is implemented by backends that can checkpoint a

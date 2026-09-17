@@ -1,0 +1,71 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="820" height="440" viewBox="0 0 820 440" font-family="Helvetica Neue, Arial, sans-serif">
+  <title>The Knative example</title>
+  <desc>The activator holds a revision's grant and serves scale-from-zero with fibers on a Hyperlight home: the first request clones the session, later requests attach, an idle revision is parked and the next request resumes it with the guest's state intact; DEFERRED_FALLBACK and SHED become Knative's own fallbacks.</desc>
+  <defs>
+    <marker id="arw" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L8,3 L0,6 Z" fill="#333"/></marker>
+  </defs>
+  <rect width="820" height="440" fill="#ffffff"/>
+
+  <rect x="30" y="30" width="190" height="80" rx="6" fill="#f5f5f5" stroke="#999"/>
+  <text x="125" y="54" text-anchor="middle" font-size="13" font-weight="600" fill="#1a1a1a">HTTP caller</text>
+  <text x="125" y="76" text-anchor="middle" font-size="11" fill="#1a1a1a">POST /hello  "incr"</text>
+  <text x="125" y="94" text-anchor="middle" font-size="11" fill="#1a1a1a">the revision's route</text>
+
+  <rect x="270" y="30" width="270" height="110" rx="6" fill="#e1d5e7" stroke="#9673a6"/>
+  <text x="405" y="54" text-anchor="middle" font-size="13" font-weight="600" fill="#1a1a1a">fiberd-activator (a consumer)</text>
+  <text x="405" y="76" text-anchor="middle" font-size="11" fill="#1a1a1a">holds the revision's grant; session hello-0</text>
+  <text x="405" y="94" text-anchor="middle" font-size="11" fill="#1a1a1a">a second fiber only when the first is busy</text>
+  <text x="405" y="112" text-anchor="middle" font-size="11" fill="#1a1a1a">parks after idle; pkg/consumer's typed misses</text>
+  <text x="405" y="130" text-anchor="middle" font-size="11" fill="#1a1a1a">line or http data path to the guest</text>
+
+  <rect x="590" y="30" width="200" height="110" rx="6" fill="#b0e3e6" stroke="#0e8088"/>
+  <text x="690" y="54" text-anchor="middle" font-size="13" font-weight="600" fill="#1a1a1a">fiberd home</text>
+  <text x="690" y="76" text-anchor="middle" font-size="11" fill="#1a1a1a">Hyperlight backend</text>
+  <text x="690" y="94" text-anchor="middle" font-size="11" fill="#1a1a1a">tier FIBER_SNAPSHOT</text>
+  <text x="690" y="112" text-anchor="middle" font-size="11" fill="#1a1a1a">Clone, Park, Release</text>
+  <text x="690" y="130" text-anchor="middle" font-size="11" fill="#1a1a1a">grant: 2 fibers, 32 MiB each</text>
+
+  <polyline points="220,70 270,70" fill="none" stroke="#333" stroke-width="1.5" marker-end="url(#arw)"/>
+  <polyline points="540,70 590,70" fill="none" stroke="#333" stroke-width="1.5" marker-end="url(#arw)"/>
+
+  <rect x="30" y="170" width="760" height="150" rx="10" fill="#f5f5f5" stroke="#999"/>
+  <text x="45" y="194" font-size="13" font-weight="600" fill="#333">one revision's life (make example-knative, fake helper on this Mac)</text>
+
+  <rect x="50" y="212" width="170" height="90" rx="6" fill="#d5e8d4" stroke="#82b366"/>
+  <text x="135" y="234" text-anchor="middle" font-size="13" font-weight="600" fill="#1a1a1a">CREATE</text>
+  <text x="135" y="254" text-anchor="middle" font-size="11" fill="#1a1a1a">scale from zero</text>
+  <text x="135" y="270" text-anchor="middle" font-size="11" fill="#1a1a1a">139 ms round trip</text>
+  <text x="135" y="286" text-anchor="middle" font-size="11" fill="#1a1a1a">reply: pong</text>
+
+  <rect x="240" y="212" width="170" height="90" rx="6" fill="#dae8fc" stroke="#6c8ebf"/>
+  <text x="325" y="234" text-anchor="middle" font-size="13" font-weight="600" fill="#1a1a1a">ATTACH</text>
+  <text x="325" y="254" text-anchor="middle" font-size="11" fill="#1a1a1a">same fiber, state kept</text>
+  <text x="325" y="270" text-anchor="middle" font-size="11" fill="#1a1a1a">incr: 1, then 2</text>
+  <text x="325" y="286" text-anchor="middle" font-size="11" fill="#1a1a1a">no second clone</text>
+
+  <rect x="430" y="212" width="170" height="90" rx="6" fill="#ffe6cc" stroke="#d79b00"/>
+  <text x="515" y="234" text-anchor="middle" font-size="13" font-weight="600" fill="#1a1a1a">PARK</text>
+  <text x="515" y="254" text-anchor="middle" font-size="11" fill="#1a1a1a">idle for 2 s in the run</text>
+  <text x="515" y="270" text-anchor="middle" font-size="11" fill="#1a1a1a">state kept, memory freed</text>
+  <text x="515" y="286" text-anchor="middle" font-size="11" fill="#1a1a1a">a Hyperlight snapshot on KVM</text>
+
+  <rect x="620" y="212" width="150" height="90" rx="6" fill="#f8cecc" stroke="#b85450"/>
+  <text x="695" y="234" text-anchor="middle" font-size="13" font-weight="600" fill="#1a1a1a">RESUME</text>
+  <text x="695" y="254" text-anchor="middle" font-size="11" fill="#1a1a1a">the next request</text>
+  <text x="695" y="270" text-anchor="middle" font-size="11" fill="#1a1a1a">35 ms round trip</text>
+  <text x="695" y="286" text-anchor="middle" font-size="11" fill="#1a1a1a">incr: 3</text>
+
+  <polyline points="220,257 240,257" fill="none" stroke="#333" stroke-width="1.5" marker-end="url(#arw)"/>
+  <polyline points="410,257 430,257" fill="none" stroke="#333" stroke-width="1.5" marker-end="url(#arw)"/>
+  <polyline points="600,257 620,257" fill="none" stroke="#333" stroke-width="1.5" marker-end="url(#arw)"/>
+
+  <rect x="30" y="350" width="370" height="70" rx="6" fill="#f5f5f5" stroke="#999"/>
+  <text x="215" y="372" text-anchor="middle" font-size="13" font-weight="600" fill="#1a1a1a">DEFERRED_FALLBACK</text>
+  <text x="215" y="392" text-anchor="middle" font-size="11" fill="#1a1a1a">no capacity while the control plane is reachable</text>
+  <text x="215" y="408" text-anchor="middle" font-size="11" fill="#1a1a1a">Knative's ordinary path; here 503 + X-Fiberd-Preferred-Home</text>
+
+  <rect x="420" y="350" width="370" height="70" rx="6" fill="#f5f5f5" stroke="#999"/>
+  <text x="605" y="372" text-anchor="middle" font-size="13" font-weight="600" fill="#1a1a1a">SHED</text>
+  <text x="605" y="392" text-anchor="middle" font-size="11" fill="#1a1a1a">control plane unreachable: 503 with Retry-After</text>
+  <text x="605" y="408" text-anchor="middle" font-size="11" fill="#1a1a1a">CloneRetry waits it out for batch callers</text>
+</svg>

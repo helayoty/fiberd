@@ -16,6 +16,7 @@ import (
 	"github.com/helayoty/fiberd/pkg/artifact"
 	"github.com/helayoty/fiberd/pkg/backend"
 	"github.com/helayoty/fiberd/pkg/core"
+	"github.com/helayoty/fiberd/pkg/endpoint"
 )
 
 // Config selects the backend, the templates and where the runtime may write.
@@ -38,6 +39,11 @@ type Config struct {
 	// RunDir holds fiber endpoints (unix sockets); keep it short, the path
 	// limit is 108 bytes.
 	RunDir string
+	// Endpoints is the address family fibers are served on: unix sockets
+	// under RunDir (the zero value), or tcp on one declared address with
+	// a port per fiber. The backend must list the family's scheme in
+	// EndpointSchemes; every backend speaks unix.
+	Endpoints endpoint.Policy
 	// DeltaDir holds parked images: <DeltaDir>/<grant>/<epoch>-<seq>/.
 	DeltaDir string
 	// Tier advertised. Unspecified means the backend's best; a lower

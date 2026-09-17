@@ -191,3 +191,35 @@ func TestJWKSOffline(t *testing.T) {
 		}
 	})
 }
+
+// A burst of verifications for a kid the cache has never seen must all
+// succeed on the one refresh they share, not race the rate limit into
+// "no key": the herder mints a grant, announces it on the lane and
+// clones with it in the same instant.
+func TestJWKSConcurrentMissesShareOneRefresh(t *testing.T) {
+	k, err := grant.GenerateKey(jose.EdDSA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	is := newIssuer(t, k)
+	c := &grant.Cache{IssuerURL: is.srv.URL}
+	var wg sync.WaitGroup
+	errs := make(chan error, 16)
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := c.Key(context.Background(), k.KeyID); err != nil {
+				errs <- err
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Errorf("concurrent miss: %v", err)
+	}
+	if hits := is.jwksHits.Load(); hits != 1 {
+		t.Fatalf("jwks fetched %d times, want once", hits)
+	}
+}

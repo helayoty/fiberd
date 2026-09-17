@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
 	"net/http/httptest"
 	"os"
 	"os/exec"
@@ -24,6 +23,7 @@ import (
 	"github.com/helayoty/fiberd/pkg/artifact"
 	procbackend "github.com/helayoty/fiberd/pkg/backend/proc"
 	"github.com/helayoty/fiberd/pkg/core"
+	fiberendpoint "github.com/helayoty/fiberd/pkg/endpoint"
 	"github.com/helayoty/fiberd/pkg/runtime/host"
 )
 
@@ -54,7 +54,7 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 	zygoteBin = filepath.Join(dir, "refzygote")
-	build := exec.Command("gcc", "-O2", "-o", zygoteBin, "../../hack/zygote/refzygote.c", "../../hack/zygote/libfiberzygote.c")
+	build := exec.Command("gcc", "-O2", "-pthread", "-o", zygoteBin, "../../hack/zygote/refzygote.c", "../../hack/zygote/libfiberzygote.c")
 	build.Stderr = os.Stderr
 	if err := build.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "skipping proc tests: cannot build refzygote: %v\n", err)
@@ -88,7 +88,9 @@ func newRuntime(t *testing.T) core.Runtime {
 // talk sends one line to a fiber's endpoint and returns the reply.
 func talk(t *testing.T, endpoint, line string) string {
 	t.Helper()
-	c, err := net.DialTimeout("unix", strings.TrimPrefix(endpoint, "unix://"), 2*time.Second)
+	dctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	c, err := fiberendpoint.Dial(dctx, endpoint)
 	if err != nil {
 		t.Fatalf("dial %s: %v", endpoint, err)
 	}
@@ -170,7 +172,7 @@ func TestCloneServeStatsRelease(t *testing.T) {
 	if list, _ := rt.List(ctx); len(list) != 0 {
 		t.Fatalf("after release list = %+v", list)
 	}
-	if _, err := os.Stat(strings.TrimPrefix(h.Endpoint, "unix://")); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(fiberendpoint.UnixPath(h.Endpoint)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("endpoint not cleaned: %v", err)
 	}
 }
@@ -233,7 +235,7 @@ func TestParkResumeKeepsState(t *testing.T) {
 	if got := talk(t, h2.Endpoint, "incr"); got != "3" {
 		t.Fatalf("incr after resume = %q", got)
 	}
-	pub, _ := os.ReadFile(strings.TrimPrefix(h2.Endpoint, "unix://") + ".fence")
+	pub, _ := os.ReadFile(fiberendpoint.UnixPath(h2.Endpoint) + ".fence")
 	if strings.TrimSpace(string(pub)) != "g5/1/2" {
 		t.Fatalf("published fence = %q", pub)
 	}

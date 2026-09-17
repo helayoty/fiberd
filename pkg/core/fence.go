@@ -88,6 +88,19 @@ func OpenEpochStore(dir string) (*EpochStore, error) {
 
 func (s *EpochStore) Current() uint64 { return s.epoch.Load() }
 
+// Bump advances the epoch without a restart: what a home does when the
+// scope everything was minted under is gone while the agent lives (a
+// rotated service-account issuer, a released fabric claim). Every fence
+// minted before is invalid from the moment the new value is durable.
+func (s *EpochStore) Bump() (uint64, error) {
+	next := s.epoch.Load() + 1
+	if err := s.write(next); err != nil {
+		return 0, fmt.Errorf("persist epoch: %w", err)
+	}
+	s.epoch.Store(next)
+	return next, nil
+}
+
 func (s *EpochStore) read() (uint64, error) {
 	b, err := os.ReadFile(s.path)
 	if err != nil {

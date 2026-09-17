@@ -24,6 +24,10 @@ type AuditRecord struct {
 	Session string    `json:"session,omitempty"`
 	FiberID string    `json:"fiber_id,omitempty"`
 	Detail  string    `json:"detail,omitempty"`
+	// Scope is what the home asserts about where this happened
+	// (namespace, service account, fabric claim, ...): facts a reader can
+	// check integrity against, empty on a standalone host.
+	Scope map[string]string `json:"scope,omitempty"`
 }
 
 // Auditor is append-locally, ship-async. Under Sync, Append must not
