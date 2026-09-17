@@ -1,0 +1,17 @@
+[package]
+name = "fiberd-hyperlight-helper"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "fiberd's Hyperlight helper: micro-VM fibers over hack/hyperlight/PROTOCOL.md on fd 3"
+
+[[bin]]
+name = "hyperlight-helper"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0"
+hyperlight-host = "0.17.0"
+
+[profile.release]
+opt-level = 2
