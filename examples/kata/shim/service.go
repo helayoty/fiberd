@@ -278,7 +278,11 @@ func (s *Service) log(ctx context.Context, c *container, line string) {
 		return
 	}
 	go func() {
-		wctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		// Without WithoutCancel this outlives its request: containerd
+		// cancels the Create context as soon as the call returns, and
+		// opening the fifo then fails, so the line appears only when the
+		// goroutine wins that race. Keep the deadline, drop the cancel.
+		wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 		defer cancel()
 		f, err := fifo.OpenFifo(wctx, c.stdout, syscall.O_WRONLY, 0)
 		if err != nil {

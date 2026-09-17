@@ -41,14 +41,14 @@ trap stop EXIT
 bin/grant-issuer keygen -alg EdDSA -out "$STATE/issuer-key.json" >/dev/null
 bin/grant-issuer serve -key "$STATE/issuer-key.json" -addr "$ISSUER_ADDR" -issuer "$ISSUER_URL" >"$STATE/issuer.log" 2>&1 &
 pids+=($!)
-for _ in $(seq 1 50); do curl -sf "$ISSUER_URL/openid/v1/jwks" >/dev/null 2>&1 && break; sleep 0.1; done
+for _ in $(seq 1 50); do curl -sf --max-time 2 "$ISSUER_URL/openid/v1/jwks" >/dev/null 2>&1 && break; sleep 0.1; done
 bin/fiberd -state "$STATE" -node-id "$NODE" -verifier jwks -issuer "$ISSUER_URL" -jwks-max-stale 10m \
   -listen "$HOME_ADDR" -runtime hyperlight -hyperlight-helper "$HL_HELPER" -hyperlight-guest "$HL_GUEST" \
   -template "default=$HL_TEMPLATE" -run-dir /tmp/fz-knative -status-interval 50ms -stale-ttl 30s \
   >"$STATE/fiberd.log" 2>&1 &
 pids+=($!)
-for _ in $(seq 1 100); do curl -sf --unix-socket "$STATE/admin.sock" http://x/healthz >/dev/null 2>&1 && break; sleep 0.1; done
-curl -sf --unix-socket "$STATE/admin.sock" http://x/healthz >/dev/null || { echo "home did not come up"; tail -20 "$STATE/fiberd.log"; exit 1; }
+for _ in $(seq 1 100); do curl -sf --max-time 2 --unix-socket "$STATE/admin.sock" http://x/healthz >/dev/null 2>&1 && break; sleep 0.1; done
+curl -sf --max-time 5 --unix-socket "$STATE/admin.sock" http://x/healthz >/dev/null || { echo "home did not come up"; tail -n 20 "$STATE/fiberd.log"; exit 1; }
 
 # 2. the revision's grant: FIBER_SNAPSHOT, two fibers, 32 MiB each.
 bin/grant-issuer mint -key "$STATE/issuer-key.json" -issuer "$ISSUER_URL" -aud "$NODE" \
@@ -64,7 +64,11 @@ sleep 0.3
 # served; the body is the guest's answer.
 ask() { # ask <body> -> prints "<clone kind> <body>"
   local out kind body
-  out=$(curl -s -i -X POST --data-binary "$1" "http://$ACT_ADDR/hello")
+  # --max-time: a request the activator never answers must fail this
+  # script, not hold it (and a CI job) until something else times out.
+  # It is generous: a cold Hyperlight clone is milliseconds, a resume
+  # from a snapshot on disk under load is seconds.
+  out=$(curl -s -i --max-time 30 -X POST --data-binary "$1" "http://$ACT_ADDR/hello")
   kind=$(printf '%s' "$out" | tr -d '\r' | awk -F': ' 'tolower($1)=="x-fiberd-clone"{print $2}')
   body=$(printf '%s' "$out" | tr -d '\r' | awk 'f{print} /^$/{f=1}' | head -1)
   echo "$kind $body"

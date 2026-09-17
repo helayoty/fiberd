@@ -313,9 +313,16 @@ func (b *Backend) helperGone(h *helper) {
 }
 
 // ask sends one line and waits for the helper's reply on that fence.
+// Replies carry only the fence, so one command per fence may be in
+// flight: a second would take the first's place in pend and leave it
+// waiting for a reply that has already been delivered.
 func (b *Backend) ask(ctx context.Context, h *helper, fence, line string) (reply, error) {
 	ch := make(chan reply, 1)
 	h.pmu.Lock()
+	if _, busy := h.pend[fence]; busy {
+		h.pmu.Unlock()
+		return reply{}, fmt.Errorf("hyperlight: another command for %s is still in flight", fence)
+	}
 	h.pend[fence] = ch
 	h.pmu.Unlock()
 	if _, err := h.ctl.Write([]byte(line + "\n")); err != nil {
@@ -407,9 +414,27 @@ func (b *Backend) Park(ctx context.Context, fiberID string, sp backend.ParkSpec)
 	if sp.Sync {
 		sync = "1"
 	}
-	_, err = b.ask(ctx, h, fiberID, fmt.Sprintf("PARK %s %s %s", fiberID, sp.Dir, sync))
-	return err
+	// A park that never comes back is worse than a park that fails: the
+	// caller (a consumer parking an idle session) has no deadline of its
+	// own, and a helper that misses the command, or is stuck serving the
+	// fiber's endpoint, would hold it forever. Snapshotting is hundreds
+	// of milliseconds; this is generous and still an answer.
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, parkTimeout)
+		defer cancel()
+	}
+	if _, err = b.ask(ctx, h, fiberID, fmt.Sprintf("PARK %s %s %s", fiberID, sp.Dir, sync)); err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return fmt.Errorf("%w: no answer to PARK %s within %s", ErrHelper, fiberID, parkTimeout)
+		}
+		return err
+	}
+	return nil
 }
+
+// parkTimeout bounds a park whose caller set no deadline.
+const parkTimeout = 15 * time.Second
 
 // Resume asks the helper for a fiber from a park directory.
 func (b *Backend) Resume(ctx context.Context, sp backend.ResumeSpec) (backend.Fiber, error) {
@@ -460,9 +485,21 @@ func payloadHex(p []byte) string {
 	return hex.EncodeToString(p)
 }
 
+// FiberOverheadBytes: a fiber here is a whole sandbox restored from the
+// template's snapshot, not a copy-on-write child, so it costs about what
+// the warm instance costs however little of it the guest dirties. W stays
+// the dirtied bytes the helper reports; this is what the grant's block
+// ceiling must leave room for, and 0 asks the host to measure it from the
+// warm instance rather than guess. Without it the ceiling is sized as if
+// a fiber cost only its W budget, and the first clone puts the grant
+// cgroup over memory.high: the ladder then sheds and yields while the
+// helper crawls, which is what a park that never came back looked like.
+func (b *Backend) FiberOverheadBytes() uint64 { return 0 }
+
 var (
 	_ backend.Backend         = (*Backend)(nil)
 	_ backend.Platformer      = (*Backend)(nil)
 	_ backend.DeadlineAdvisor = (*Backend)(nil)
 	_ backend.WReporter       = (*Backend)(nil)
+	_ backend.Overheader      = (*Backend)(nil)
 )
