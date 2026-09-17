@@ -7,7 +7,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,6 +16,7 @@ import (
 
 	gvisorbackend "github.com/helayoty/fiberd/pkg/backend/gvisor"
 	"github.com/helayoty/fiberd/pkg/core"
+	fiberendpoint "github.com/helayoty/fiberd/pkg/endpoint"
 	"github.com/helayoty/fiberd/pkg/runtime/host"
 )
 
@@ -90,7 +90,9 @@ func newRuntime(t *testing.T) core.Runtime {
 
 func talk(t *testing.T, endpoint, line string) string {
 	t.Helper()
-	c, err := net.DialTimeout("unix", strings.TrimPrefix(endpoint, "unix://"), 2*time.Second)
+	dctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	c, err := fiberendpoint.Dial(dctx, endpoint)
 	if err != nil {
 		t.Fatalf("dial %s: %v", endpoint, err)
 	}
@@ -221,7 +223,7 @@ func TestParkResumeKeepsState(t *testing.T) {
 		t.Fatalf("park: %v", err)
 	}
 	t.Logf("parked in %s -> %s", time.Since(t0).Round(time.Millisecond), ref)
-	if _, err := os.Stat(strings.TrimPrefix(h.Endpoint, "unix://")); err == nil {
+	if _, err := os.Stat(fiberendpoint.UnixPath(h.Endpoint)); err == nil {
 		t.Fatal("endpoint still present after park")
 	}
 	if list, _ := rt.List(ctx); len(list) != 0 {
@@ -282,7 +284,7 @@ func TestDeadlineAndOOM(t *testing.T) {
 	if st, err := rt.Stats(ctx, h.ID); err == nil {
 		t.Logf("fresh fiber W = %d MiB above the template footprint", st.WUsedBytes>>20)
 	}
-	c, err := net.Dial("unix", strings.TrimPrefix(h.Endpoint, "unix://"))
+	c, err := fiberendpoint.Dial(ctx, h.Endpoint)
 	if err != nil {
 		t.Fatal(err)
 	}
