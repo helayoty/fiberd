@@ -93,6 +93,13 @@ type zygote struct {
 	pmu  sync.Mutex
 	pend map[string]chan cloneResult // fence -> reply
 	gone chan struct{}
+
+	// The engine's device reports (DEVICE lines), when it sends any.
+	dmu    sync.Mutex
+	dev    map[string]uint64 // fence -> slice bytes
+	devUse uint64
+	devCap uint64
+	devOK  bool
 }
 
 type cloneResult struct {
@@ -132,6 +139,11 @@ func (b *Backend) Name() string {
 	return "proc"
 }
 func (b *Backend) Tier() core.Tier { return b.tier }
+
+// EndpointSchemes: a forked fiber binds whatever it is told, a unix
+// socket or a tcp port in the home's network namespace; criu restores
+// a listening tcp socket on its port like any other.
+func (b *Backend) EndpointSchemes() []string { return []string{"unix", "tcp"} }
 
 // Warm execs the zygote inside the given cgroup with the control
 // socketpair as fd 3 and waits for READY.
@@ -176,6 +188,11 @@ func (b *Backend) Warm(ctx context.Context, spec backend.WarmSpec) (backend.Warm
 	} else {
 		cmd.Stdin, cmd.Stdout, cmd.Stderr = devnull, zlog, zlog
 		cmd.Env = []string{"PATH=/usr/bin:/bin"} // nothing grant-specific: identical pages on every home
+		if len(spec.Devices) > 0 {
+			// The fabric channel: the one grant-specific thing an engine
+			// needs at warm-up (a CUDA engine reads it as its visible set).
+			cmd.Env = append(cmd.Env, "FIBERD_DEVICES="+strings.Join(spec.Devices, ","))
+		}
 		// The zygote's (and so every fiber's) working directory is its own run
 		// directory, never the agent's: criu's parasite creates scratch
 		// entries in the dumped task's cwd.
@@ -354,8 +371,80 @@ func (b *Backend) read(z *zygote, rd *bufio.Reader) {
 				pid, _ := strconv.Atoi(fields[1])
 				b.exited(pid, fields[2])
 			}
+		case "DEVICE":
+			// DEVICE <fence|-> <bytes> <capacity|0>: the engine's own
+			// accounting, per fiber or for the whole device.
+			if len(fields) >= 4 {
+				used, _ := strconv.ParseUint(fields[2], 10, 64)
+				capacity, _ := strconv.ParseUint(fields[3], 10, 64)
+				z.dmu.Lock()
+				if z.dev == nil {
+					z.dev = map[string]uint64{}
+				}
+				switch {
+				case fields[1] == "-":
+					z.devUse, z.devCap, z.devOK = used, capacity, true
+				case used == 0:
+					delete(z.dev, fields[1])
+				default:
+					z.dev[fields[1]] = used
+				}
+				z.dmu.Unlock()
+			}
 		}
 	}
+}
+
+// FiberDevice implements backend.DeviceReporter from the engine's lines.
+func (b *Backend) FiberDevice(fiberID string) (uint64, bool) {
+	b.mu.Lock()
+	f, ok := b.fibers[fiberID]
+	var z *zygote
+	if ok {
+		z = b.zygotes[f.warmID]
+	}
+	b.mu.Unlock()
+	if z == nil {
+		return 0, false
+	}
+	z.dmu.Lock()
+	defer z.dmu.Unlock()
+	if !z.devOK {
+		return 0, false
+	}
+	return z.dev[fiberID], true
+}
+
+// WarmDevice implements backend.DeviceReporter.
+func (b *Backend) WarmDevice(warmID string) (used, capacity uint64, ok bool) {
+	b.mu.Lock()
+	z := b.zygotes[warmID]
+	b.mu.Unlock()
+	if z == nil {
+		return 0, 0, false
+	}
+	z.dmu.Lock()
+	defer z.dmu.Unlock()
+	return z.devUse, z.devCap, z.devOK
+}
+
+// EvictDevice implements backend.DeviceReporter: EVICT <fence> to the
+// engine, which drops the slice and reports it gone.
+func (b *Backend) EvictDevice(fiberID string) error {
+	b.mu.Lock()
+	f, ok := b.fibers[fiberID]
+	var z *zygote
+	if ok {
+		z = b.zygotes[f.warmID]
+	}
+	b.mu.Unlock()
+	if z == nil {
+		return fmt.Errorf("proc: no engine for %q", fiberID)
+	}
+	if _, err := z.ctl.Write([]byte("EVICT " + fiberID + "\n")); err != nil {
+		return fmt.Errorf("proc: send EVICT: %w", err)
+	}
+	return nil
 }
 
 func (z *zygote) reply(fence string, res cloneResult) {
@@ -430,7 +519,9 @@ func (b *Backend) Clone(ctx context.Context, warmID string, spec backend.FiberSp
 		opt = "pidns"
 	}
 	endpoint := spec.Endpoint
-	if b.opt.Launcher != nil {
+	if b.opt.Launcher != nil && !strings.Contains(endpoint, "://") {
+		// A unix path under the run directory is seen at the launcher's
+		// mount; a tcp endpoint is the same address inside and out.
 		endpoint = b.opt.Launcher.Endpoint(z.spec, endpoint)
 	}
 	msg := fmt.Sprintf("CLONE %s %s %d %s %s\n", spec.Fence, endpoint, deadline, payload, opt)
@@ -503,7 +594,11 @@ func (b *Backend) Resume(ctx context.Context, spec backend.ResumeSpec) (backend.
 	if b.opt.Launcher != nil {
 		// The tree was dumped inside a container of this grant; it is
 		// restored with that container's root and mounts.
-		extra = b.opt.Launcher.RestoreExtra(backend.WarmSpec{GrantUID: spec.WarmID, WorkDir: filepath.Dir(spec.Endpoint)})
+		workDir := spec.WorkDir
+		if workDir == "" {
+			workDir = filepath.Dir(spec.Endpoint)
+		}
+		extra = b.opt.Launcher.RestoreExtra(backend.WarmSpec{GrantUID: spec.WarmID, WorkDir: workDir})
 	}
 	res, err := b.criu.RestoreWith(rctx, spec.Dir, spec.CgroupFD, extra)
 	if err != nil {
@@ -592,4 +687,5 @@ var (
 	_ backend.Backend          = (*Backend)(nil)
 	_ backend.SelfCheckpointer = (*Backend)(nil)
 	_ backend.DeltaCodec       = (*Backend)(nil)
+	_ backend.DeviceReporter   = (*Backend)(nil)
 )
