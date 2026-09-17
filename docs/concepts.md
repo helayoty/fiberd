@@ -162,11 +162,14 @@ Two durability classes, chosen per grant:
 - **BEST_EFFORT** — append locally, ack the caller, ship later; loss window = flush interval.
 - **SYNC** — block until the record is remote, then ack; paid as extra activation latency.
 
-## The two homes
+## Homes
 
-**The identical core runs standalone and under Kubernetes; only thin adapters differ.** An adapter is conformant if and only if the core runs unmodified beneath it.
+**A home is any environment that holds a grant and runs fibers under it. The identical core runs in every home; only thin home adapters differ.** A home is conformant if and only if the conformance suite passes against it with the core unmodified.
 
-![One core, two homes: an invariant core with Kubernetes and standalone adapters](./images/one-core-two-homes.svg)
+![One core, many homes: an invariant core with thin home adapters](./images/one-core-two-homes.svg)
 
-- **Kubernetes** — grants arrive over the authenticated apiserver->node watch; readiness rides DRA binding conditions; the scheduler places grants; fibers inherit kubelet's pod sandbox; callers authenticate via cached JWKS; GPU is a DRA claim per grant.
-- **Standalone** — grants are signed ed25519 artifacts verified offline; readiness rides the batched status stream; the platform's placer schedules; the agent owns the sandbox itself; callers authenticate via the platform's JWKS; the agent mints one IMEX channel per grant from a statically-provisioned domain.
+- **Standalone** — the grant JWT arrives as a file or inside the first `Clone`; readiness rides the batched status stream; the platform's placer schedules; the agent owns its cgroup subtree.
+- **Kubernetes** — the issuer controller mints the JWT from a `CapacityGrant` object and projects it into a grant Pod where the agent runs as PID 1; readiness is a Pod readiness gate; the scheduler places the Pod; GPU is a DRA claim per grant.
+- **Slurm** — the JWT is handed to the allocation; the prolog verifies it and starts the agent inside; capacity is bounded by the allocation.
+
+In every home callers authenticate the same way: the signed grant travels with the request and is verified offline against the issuer's cached JWKS.

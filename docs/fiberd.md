@@ -379,21 +379,21 @@ trust that runs workload specs today — so in-cluster signing would add a
 PKI surface the accounting invariant does not require. Signing is the
 default only standalone, where no such channel exists.
 
-**Readiness.** The `ready` state rides DRA Device Binding Conditions
-(KEP-5007, beta track): the grant publishes `fiberd.io/zygote-ready` and
-never binds to a node whose agent has not checkpointed the zygote —
-grant placement is the cold path, so the wait is free. Inherited caveat:
-a grant waiting on binding conditions is invisible to autoscaling until
-KEP-5278 lands, and the demand signal (rate counters, not pending
-objects) does not surface the stall either (open questions below).
+**Readiness.** The `ready` state is a Pod readiness gate
+(`fiberd.io/zygote-ready`) on the grant Pod: the agent, running as the
+Pod's PID 1, sets the condition once the zygote is warm, and routing
+targets only ready grant Pods. Grant placement is the cold path, so the
+wait is free. An earlier draft proposed riding DRA Device Binding
+Conditions (KEP-5007) instead; that is not used, because it would tie
+readiness to device allocation and require an in-tree change.
 
 **GPU under Kubernetes.** The device is one DRA claim per grant — device
 attachment, reset, and accounting all at grant boundaries, charged at
 admission with everything else. FIBER_FABRIC provisions its channel
 through a ComputeDomain-class claim (one per grant): the cluster
 orchestrates the IMEX daemons and channels as an ephemeral domain that
-follows the grant, and fabric readiness joins zygote readiness in the
-grant's binding conditions — the same KEP-5007 wait, no second mechanism.
+follows the grant, and fabric readiness joins zygote readiness under the
+same Pod readiness gate — one mechanism, no second wait.
 Two declared weaknesses relative to the fence: the IMEX boundary is
 namespace-grade — an actor with namespace access can mutate the
 ComputeDomain primitives — so claims on fabric-parked deltas are scoped
@@ -411,10 +411,10 @@ questions below).
 2. **Pressure-ladder vs kubelet-eviction race**: under fast host
    pressure, does the agent's shed rung fire before kubelet's eviction
    manager ranks the grant? Measured on a real node, not argued.
-3. **Autoscaling visibility for grants waiting in PreBind**: KEP-5278
-   node nomination vs surfacing the wait in the grant's demand counters —
-   one side must close the gap before the readiness ride-along is
-   load-bearing.
+3. **Autoscaling visibility for grant Pods that are scheduled but not
+   ready**: a Pod waiting on its readiness gate is visible to the
+   autoscaler as a running Pod, not as pending demand; the grant's demand
+   counters must surface the stall before readiness is load-bearing.
 
 ### 7.2 Standalone
 

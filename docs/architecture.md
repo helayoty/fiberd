@@ -128,26 +128,35 @@ The agent drives any CRI-conformant runtime through fiber verbs carrying fence, 
 | **FIBER_BASIC** | create in an existing warm sandbox | correct semantics, pod-class latency |
 | **FIBER_WARM** | zygote fork / snapshot clone (CoW) | millisecond activation + density |
 | **FIBER_CHECKPOINT** | per-fiber delta checkpoint + restore | Park/resume — the session model |
+| **FIBER_SNAPSHOT** | snapshot-restore of a whole sandbox or micro-VM per fiber | park/resume with a kernel or hypervisor boundary per fiber |
 | **FIBER_FABRIC** | multi-node NVLink + IMEX-scoped fabric memory | fabric-tier park + cross-node resume at NVLink bandwidth |
 
 `Clone(S)` on a parked session against a sub-CHECKPOINT runtime fails loudly; it never silently forks a fresh, amnesiac instance.
 
-## 5. One core, two homes
+### One host runtime, many backends
 
-The core is home-invariant. The identical agent and semantics run standalone and under Kubernetes; only thin adapters differ. An adapter is conformant if and only if the core runs unmodified beneath it.
+The tier a home advertises comes from the sandbox mechanism it runs, but the mechanism is the only thing that varies. One host runtime implements the runtime contract for every mechanism: it carves a cgroup leaf per fiber and prices W from it, keeps the parent checkpoint store and the delta manifests, publishes and claims sessions through the delta registry, gates on platform parity and adopts orphans after a restart. A backend implements a small interface underneath it: warm a template instance, clone a fiber from it into a given cgroup, checkpoint a fiber to a directory, restore one, kill, report exits. Two optional interfaces let a backend contribute a self-checkpoint as the parent for deltas and a codec that strips and merges parent pages in its own image format. The backend's name travels with every checkpoint as a parity fact, so a delta from one mechanism is never offered to another.
 
-![One core, two homes: an invariant core with adapters for Kubernetes and standalone that differ only in grant delivery, readiness, scheduling, runtime ownership, authentication, and fabric provisioning](./images/one-core-two-homes.svg)
+![The backend seam: consumers above the protocol, the agent and ledger, one host runtime, the backend interface, and the proc, gVisor, runc and Hyperlight backends beneath it](./images/backend-seam.svg)
 
-Each home adapts only: how grants arrive proven, how readiness travels, who schedules, who owns the runtime, how callers authenticate, and how fabric channels are provisioned.
+Consumers sit above all of this and only ever call `Clone`: a Knative activator routing a scale-from-zero, a Kata shim creating a sandbox, a Kubernetes virtual node admitting a gated Pod. The function's code runs inside whatever sandbox the backend provides; fiberd is the layer beneath the sandbox that owns its capacity and its parked state.
 
-| Aspect | Kubernetes | Standalone |
-|---|---|---|
-| Grant delivery / proof | API object over the authenticated control-plane->node watch channel | Signed ed25519 artifact, verified offline |
-| Readiness | DRA Device Binding Conditions (the grant publishes zygote-ready) | Batched status stream the platform already consumes |
-| Scheduling | the Kubernetes scheduler places grants | the platform's placer treats the grant as the unit |
-| Runtime ownership | inherits the pod sandbox and cgroup slice kubelet built | the agent owns the sandbox and cgroup hierarchy itself |
-| Caller authentication | cached JWKS (projected SA tokens) | local JWT against cached JWKS (the platform's) |
-| GPU / fabric | one DRA claim per grant; ComputeDomain-class claim for fabric | static domain fixed at provisioning; agent mints one IMEX channel per grant |
+## 5. Homes implement the protocol
+
+The core is home-invariant. A **home** is any environment that holds a grant and runs fibers under it; the identical agent and semantics run in every home, and a home is conformant if and only if the `grant-conform` suite passes against it with the core unmodified. Three homes are specified: standalone, Kubernetes, and Slurm.
+
+![One core, many homes: an invariant core with thin homes that differ only in grant delivery, readiness, scheduling, runtime ownership, authentication, and fabric provisioning](./images/one-core-two-homes.svg)
+
+Each home adapts only: how the signed grant arrives, how readiness is published, who schedules, who owns the cgroup subtree, how callers authenticate, and how fabric channels are provisioned. In every home the grant is the same signed JWT, verified offline against the issuer's cached JWKS.
+
+| Aspect | Standalone | Kubernetes | Slurm |
+|---|---|---|---|
+| Grant delivery | JWT file or carried in the first `Clone`; issuer polled for liveness | JWT projected into the grant Pod from the `CapacityGrant` CRD by the issuer controller | JWT passed to the allocation; prolog verifies it and starts the agent |
+| Readiness | batched `Watch` status stream | Pod readiness gate `fiberd.io/zygote-ready`, set by the agent after the zygote is warm | allocation state plus the `Watch` stream |
+| Scheduling | the platform's placer treats the grant as the unit | the scheduler places the grant Pod | the Slurm scheduler places the allocation |
+| Cgroup ownership | the agent owns a delegated cgroup v2 subtree | the Pod's own cgroup, delegated to the agent running as PID 1 | the allocation's cgroup |
+| Caller authentication | grant JWT in the request, verified against the issuer's JWKS | same; the issuer is the cluster's controller (or the API server's SA issuer where acceptable) | same |
+| GPU / fabric | static domain fixed at provisioning | one DRA claim per grant | allocation-scoped GRES |
 
 ## 6. Cross-cutting model
 
