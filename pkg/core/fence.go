@@ -23,6 +23,32 @@ func (f Fence) String() string {
 	return fmt.Sprintf("%s/%d/%d", f.GrantUID, f.Epoch, f.Seq)
 }
 
+// ParseFence is the inverse of String: "grant/epoch/seq". Fiber IDs on
+// the wire are fence strings, so this is how a runtime or a home gets
+// back to the triple.
+func ParseFence(s string) (Fence, error) {
+	i := strings.LastIndexByte(s, '/')
+	if i < 0 {
+		return Fence{}, fmt.Errorf("fence %q: want grant/epoch/seq", s)
+	}
+	j := strings.LastIndexByte(s[:i], '/')
+	if j < 0 {
+		return Fence{}, fmt.Errorf("fence %q: want grant/epoch/seq", s)
+	}
+	epoch, err := strconv.ParseUint(s[j+1:i], 10, 64)
+	if err != nil {
+		return Fence{}, fmt.Errorf("fence %q: epoch: %w", s, err)
+	}
+	seq, err := strconv.ParseUint(s[i+1:], 10, 64)
+	if err != nil {
+		return Fence{}, fmt.Errorf("fence %q: seq: %w", s, err)
+	}
+	if s[:j] == "" {
+		return Fence{}, fmt.Errorf("fence %q: empty grant", s)
+	}
+	return Fence{GrantUID: s[:j], Epoch: epoch, Seq: seq}, nil
+}
+
 // Newer reports whether f supersedes o for the same grant. A caller holding
 // an older fence is detectably stale regardless of which path it raced.
 func (f Fence) Newer(o Fence) bool {
