@@ -1,10 +1,10 @@
-// Package conform is the executable contract of the grant protocol: seven
-// cases any home must pass, driven only through the public gRPC surface
-// plus a few out-of-band hooks (mint a grant, restart the target, flip
-// control-plane health, look up an audit record). cmd/grant-conform wraps
-// it as a `go test`-style binary; homes provide the hooks as shell
-// commands.
-package conform
+// The suite: the executable contract of the grant protocol, cases C1-C10
+// any home must pass, driven only through the public gRPC surface plus a
+// few out-of-band hooks (mint a grant, restart the target, flip
+// control-plane health, look up an audit record, end the engine, lose the
+// scope). conform_test.go wraps it as the `go test`-style grant-conform
+// binary; homes provide the hooks as shell commands.
+package main
 
 import (
 	"context"
@@ -23,6 +23,7 @@ import (
 
 	grantv1 "github.com/helayoty/fiberd/api/grant/v1"
 	"github.com/helayoty/fiberd/pkg/core"
+	"github.com/helayoty/fiberd/pkg/endpoint"
 	"github.com/helayoty/fiberd/pkg/rpc"
 )
 
@@ -47,8 +48,15 @@ type Driver struct {
 	// skips C4.
 	SetCPHealth func(ctx context.Context, healthy bool) error
 	// AuditHas reports whether the target's audit spool holds a record for
-	// the event and fence. Nil skips the audit half of C6.
+	// the event and fence. Nil skips the audit half of C6 and C8.
 	AuditHas func(ctx context.Context, event string, fence core.Fence) (bool, error)
+	// EngineKill ends the grant's warm template instance (its engine) the
+	// way a crash would. Nil skips C9.
+	EngineKill func(ctx context.Context, grantUID string) error
+	// ScopeLost tells the home the scope everything was minted under is
+	// gone while it keeps running (a namespace, a fabric claim): the home
+	// must turn that into fence revocation. Nil skips C10.
+	ScopeLost func(ctx context.Context) error
 	// Timeout bounds each case (default 15s); Restart gets twice that.
 	Timeout time.Duration
 }
@@ -77,6 +85,9 @@ func Run(t *testing.T, d Driver) {
 	t.Run("C5_AdmissionCompleteness", func(t *testing.T) { c.c5(t) })
 	t.Run("C6_WBudget", func(t *testing.T) { c.c6(t) })
 	t.Run("C7_TierFloor", func(t *testing.T) { c.c7(t) })
+	t.Run("C8_DeviceBudget", func(t *testing.T) { c.c8(t) })
+	t.Run("C9_EngineLoss", func(t *testing.T) { c.c9(t) })
+	t.Run("C10_ScopeRevocation", func(t *testing.T) { c.c10(t) })
 }
 
 type client struct {
@@ -186,6 +197,12 @@ func (c *client) c1(t *testing.T) {
 	defer c.release(ctx, r1.GetFiberId())
 	if r1.GetKind() != grantv1.CloneKind_CREATE {
 		t.Fatalf("first clone kind = %v, want CREATE", r1.GetKind())
+	}
+	// The endpoint is a URL a caller dials as given: unix://<path>, or
+	// tcp://host:port with an IPv6 literal bracketed. Which family a home
+	// hands out is its declaration, not the caller's business.
+	if err := endpoint.Validate(r1.GetEndpoint()); err != nil {
+		t.Fatalf("endpoint %q is not well-formed: %v", r1.GetEndpoint(), err)
 	}
 	r2, err := c.clone(ctx, tok, "S", nil)
 	if err != nil {
@@ -421,6 +438,160 @@ func (c *client) c6(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("no audit record event=oom fence=%s", fence)
+	}
+}
+
+// C8: a grant with a device budget is either refused loudly (the home's
+// template offers no such device: FailedPrecondition, never a silent
+// CPU-only fiber) or enforced: a fiber whose engine slice exceeds
+// device_budget is killed, the slot comes back, and an audit record is
+// written with its fence, exactly as C6 does for W.
+func (c *client) c8(t *testing.T) {
+	ctx, cancel := c.ctx(t, 2)
+	defer cancel()
+	const budget = 1 << 20
+	g, tok := c.grant(t, "c8", func(g *core.Grant) {
+		g.DeviceBudget = core.DeviceBudget{Bytes: budget, Class: "sim"}
+		g.FiberMax = 2
+	})
+	r, err := c.clone(ctx, tok, "", []byte(fmt.Sprintf(`{"device_bytes": %d}`, 4*budget)))
+	if status.Code(err) == codes.FailedPrecondition {
+		t.Logf("target offers no device for the grant's class: refused loudly (%v)", err)
+		if _, ok := status.FromError(err); !ok {
+			t.Fatalf("refusal is not a gRPC status: %v", err)
+		}
+		return
+	}
+	if err != nil && status.Code(err) != codes.Unavailable {
+		t.Fatalf("over-device-budget clone: %v", err)
+	}
+	if _, err := c.waitStatus(ctx, g.UID, func(st *grantv1.Status) bool { return st.GetRunning() == 0 }); err != nil {
+		t.Fatalf("slot never freed after over-budget device slice: %v", err)
+	}
+	a, err := c.clone(ctx, tok, "", []byte(`{"device_bytes": 1024}`))
+	if err != nil {
+		t.Fatalf("clone within the device budget after the kill: %v", err)
+	}
+	defer c.release(ctx, a.GetFiberId())
+	if c.d.AuditHas == nil || r == nil {
+		t.Log("audit record not checked (no hook, or the kill was reported inside Clone)")
+		return
+	}
+	fence := rpc.FenceFromProto(r.GetFence())
+	var found bool
+	for i := 0; i < 50 && !found; i++ {
+		found, err = c.d.AuditHas(ctx, "oom", fence)
+		if err != nil {
+			t.Fatalf("audit hook: %v", err)
+		}
+		if !found {
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+	if !found {
+		t.Fatalf("no audit record event=oom fence=%s", fence)
+	}
+}
+
+// C9: the engine (the grant's warm template instance) dies. Every running
+// fiber of the grant ends and its slot comes back; parked sessions
+// survive; the next Clone of a parked session resumes it once the home
+// has warmed the template again, never a fresh amnesiac instance.
+func (c *client) c9(t *testing.T) {
+	if c.d.EngineKill == nil {
+		t.Skip("no -engine-kill-cmd hook; engine loss not driven")
+	}
+	if c.d.TargetTier < core.TierCheckpoint {
+		t.Skipf("target tier %s is below FIBER_CHECKPOINT; nothing parked can survive", c.d.TargetTier)
+	}
+	ctx, cancel := c.ctx(t, 3)
+	defer cancel()
+	g, tok := c.grant(t, "c9", func(g *core.Grant) { g.FiberMax = 4 })
+	anon, err := c.clone(ctx, tok, "", nil)
+	if err != nil {
+		t.Fatalf("anonymous clone: %v", err)
+	}
+	s, err := c.clone(ctx, tok, "S", nil)
+	if err != nil {
+		t.Fatalf("clone S: %v", err)
+	}
+	if _, err := c.api.Park(ctx, &grantv1.ParkRequest{FiberId: s.GetFiberId(), Sync: true}); err != nil {
+		t.Fatalf("park S: %v", err)
+	}
+	if err := c.d.EngineKill(ctx, g.UID); err != nil {
+		t.Fatalf("engine-kill hook: %v", err)
+	}
+	if _, err := c.waitStatus(ctx, g.UID, func(st *grantv1.Status) bool { return st.GetRunning() == 0 && st.GetParked() == 1 }); err != nil {
+		t.Fatalf("after engine loss: want running=0 parked=1: %v", err)
+	}
+	_, perr := c.api.Park(ctx, &grantv1.ParkRequest{FiberId: anon.GetFiberId()})
+	expectCode(t, "park of a fiber the engine took with it", perr, codes.NotFound)
+	r, err := c.clone(ctx, tok, "S", nil)
+	if err != nil {
+		t.Fatalf("clone S after engine loss: %v", err)
+	}
+	defer c.release(ctx, r.GetFiberId())
+	if r.GetKind() != grantv1.CloneKind_RESUME {
+		t.Fatalf("clone S after engine loss = %v, want RESUME of the parked session", r.GetKind())
+	}
+	if !rpc.FenceFromProto(r.GetFence()).Newer(rpc.FenceFromProto(s.GetFence())) {
+		t.Fatalf("resumed fence %v is not newer than %v", r.GetFence(), s.GetFence())
+	}
+}
+
+// C10: scope revocation is fence revocation. When the home's scope is
+// lost while it runs, every fence minted under it is invalid at once
+// (Park and Release answer NotFound, running drops to 0), parked sessions
+// survive and resume under a newer epoch, and the grant keeps serving:
+// nothing minted before the loss validates after it.
+func (c *client) c10(t *testing.T) {
+	if c.d.ScopeLost == nil {
+		t.Skip("no -scope-cmd hook; scope loss not driven")
+	}
+	ctx, cancel := c.ctx(t, 3)
+	defer cancel()
+	g, tok := c.grant(t, "c10", func(g *core.Grant) { g.FiberMax = 4 })
+	a, err := c.clone(ctx, tok, "", nil)
+	if err != nil {
+		t.Fatalf("anonymous clone: %v", err)
+	}
+	var parked *grantv1.CloneResponse
+	if c.d.TargetTier >= core.TierCheckpoint {
+		parked, err = c.clone(ctx, tok, "P", nil)
+		if err != nil {
+			t.Fatalf("clone P: %v", err)
+		}
+		if _, err := c.api.Park(ctx, &grantv1.ParkRequest{FiberId: parked.GetFiberId(), Sync: true}); err != nil {
+			t.Fatalf("park P: %v", err)
+		}
+	}
+	if err := c.d.ScopeLost(ctx); err != nil {
+		t.Fatalf("scope-lost hook: %v", err)
+	}
+	if _, err := c.waitStatus(ctx, g.UID, func(st *grantv1.Status) bool { return st.GetRunning() == 0 }); err != nil {
+		t.Fatalf("after scope loss: want running=0: %v", err)
+	}
+	_, perr := c.api.Park(ctx, &grantv1.ParkRequest{FiberId: a.GetFiberId()})
+	expectCode(t, "park of a fiber from the lost scope", perr, codes.NotFound)
+	_, rerr := c.api.Release(ctx, &grantv1.ReleaseRequest{FiberId: a.GetFiberId()})
+	expectCode(t, "release of a fiber from the lost scope", rerr, codes.NotFound)
+	fresh, err := c.clone(ctx, tok, "", nil)
+	if err != nil {
+		t.Fatalf("clone after scope loss: %v", err)
+	}
+	defer c.release(ctx, fresh.GetFiberId())
+	if !rpc.FenceFromProto(fresh.GetFence()).Newer(rpc.FenceFromProto(a.GetFence())) || fresh.GetFence().GetEpoch() <= a.GetFence().GetEpoch() {
+		t.Fatalf("fence after scope loss %v is not in a newer epoch than %v", fresh.GetFence(), a.GetFence())
+	}
+	if parked != nil {
+		r, err := c.clone(ctx, tok, "P", nil)
+		if err != nil {
+			t.Fatalf("clone P after scope loss: %v", err)
+		}
+		defer c.release(ctx, r.GetFiberId())
+		if r.GetKind() != grantv1.CloneKind_RESUME || r.GetFence().GetEpoch() <= parked.GetFence().GetEpoch() {
+			t.Fatalf("P after scope loss = %v %v, want RESUME in a newer epoch", r.GetKind(), r.GetFence())
+		}
 	}
 }
 

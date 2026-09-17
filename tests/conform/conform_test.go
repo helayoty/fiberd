@@ -14,7 +14,6 @@ import (
 
 	"google.golang.org/protobuf/encoding/protojson"
 
-	"github.com/helayoty/fiberd/pkg/conform"
 	"github.com/helayoty/fiberd/pkg/core"
 	"github.com/helayoty/fiberd/pkg/grant"
 )
@@ -31,6 +30,8 @@ var (
 	healthCmd  = flag.String("cp-health-cmd", "", "hook: $1 = up|down sets grant-lane health")
 	auditCmd   = flag.String("audit-cmd", "", "hook: $1 = event, $2 = fence; exit 0 if the audit record exists")
 	auditFile  = flag.String("audit-file", "", "path to the target's audit.jsonl (local alternative to -audit-cmd)")
+	engineCmd  = flag.String("engine-kill-cmd", "", "hook: $1 = grant uid; end the grant's warm template instance (its engine) as a crash would")
+	scopeCmd   = flag.String("scope-cmd", "", "hook: the home's scope is lost while it runs (namespace, fabric claim); it must revoke every fence")
 	caseTO     = flag.Duration("case-timeout", 15*time.Second, "per-case timeout")
 )
 
@@ -47,7 +48,7 @@ func sh(ctx context.Context, cmd string, args ...string) error {
 
 func TestConformance(t *testing.T) {
 	if *target == "" {
-		t.Skip("no -target: nothing to conform (this is the grant-conform binary; see cmd/grant-conform/main.go)")
+		t.Skip("no -target: nothing to conform (this is the grant-conform binary; see tests/conform/main.go)")
 	}
 	if *nodeID == "" {
 		t.Fatal("-node-id is required")
@@ -56,7 +57,7 @@ func TestConformance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	d := conform.Driver{Target: *target, TargetTier: tier, NodeID: *nodeID, Template: *template, Timeout: *caseTO}
+	d := Driver{Target: *target, TargetTier: tier, NodeID: *nodeID, Template: *template, Timeout: *caseTO}
 
 	switch *mint {
 	case "insecure-json":
@@ -91,6 +92,14 @@ func TestConformance(t *testing.T) {
 			return sh(ctx, cmd, arg)
 		}
 	}
+	if *engineCmd != "" {
+		cmd := *engineCmd
+		d.EngineKill = func(ctx context.Context, grantUID string) error { return sh(ctx, cmd, grantUID) }
+	}
+	if *scopeCmd != "" {
+		cmd := *scopeCmd
+		d.ScopeLost = func(ctx context.Context) error { return sh(ctx, cmd) }
+	}
 	switch {
 	case *auditCmd != "":
 		cmd := *auditCmd
@@ -108,7 +117,7 @@ func TestConformance(t *testing.T) {
 			return auditFileHas(path, event, f)
 		}
 	}
-	conform.Run(t, d)
+	Run(t, d)
 }
 
 func auditFileHas(path, event string, f core.Fence) (bool, error) {
