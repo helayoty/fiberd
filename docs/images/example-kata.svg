@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="820" height="440" viewBox="0 0 820 440" font-family="Helvetica Neue, Arial, sans-serif">
+  <title>The Kata-shaped example</title>
+  <desc>A Pod with runtimeClassName fiberd reaches containerd-shim-fiberd-v1 through containerd; the shim clones a fiber on the home the Pod's annotations name; Kill parks or releases; a later Pod on the same session resumes it.</desc>
+  <defs>
+    <marker id="arw" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L8,3 L0,6 Z" fill="#333"/></marker>
+  </defs>
+  <rect width="820" height="440" fill="#ffffff"/>
+
+  <rect x="30" y="30" width="230" height="110" rx="6" fill="#f5f5f5" stroke="#999"/>
+  <text x="145" y="54" text-anchor="middle" font-size="13" font-weight="600" fill="#1a1a1a">Pod kata-1</text>
+  <text x="145" y="76" text-anchor="middle" font-size="11" fill="#1a1a1a">runtimeClassName: fiberd</text>
+  <text x="145" y="94" text-anchor="middle" font-size="11" fill="#1a1a1a">io.fiberd/grant, io.fiberd/home</text>
+  <text x="145" y="112" text-anchor="middle" font-size="11" fill="#1a1a1a">io.fiberd/session: kata-demo</text>
+  <text x="145" y="130" text-anchor="middle" font-size="11" fill="#1a1a1a">io.fiberd/on-stop: park</text>
+
+  <rect x="300" y="30" width="230" height="110" rx="6" fill="#dae8fc" stroke="#6c8ebf"/>
+  <text x="415" y="54" text-anchor="middle" font-size="13" font-weight="600" fill="#1a1a1a">containerd on the kind node</text>
+  <text x="415" y="76" text-anchor="middle" font-size="11" fill="#1a1a1a">runtime handler fiberd</text>
+  <text x="415" y="94" text-anchor="middle" font-size="11" fill="#1a1a1a">pod_annotations = ["io.fiberd/*"]</text>
+  <text x="415" y="112" text-anchor="middle" font-size="11" fill="#1a1a1a">Create, Start, Kill, Delete</text>
+  <text x="415" y="130" text-anchor="middle" font-size="11" fill="#1a1a1a">over ttrpc, task API v3</text>
+
+  <rect x="570" y="30" width="220" height="110" rx="6" fill="#e1d5e7" stroke="#9673a6"/>
+  <text x="680" y="54" text-anchor="middle" font-size="13" font-weight="600" fill="#1a1a1a">containerd-shim-fiberd-v1</text>
+  <text x="680" y="76" text-anchor="middle" font-size="11" fill="#1a1a1a">sandbox container: a record</text>
+  <text x="680" y="94" text-anchor="middle" font-size="11" fill="#1a1a1a">app container: Clone(session)</text>
+  <text x="680" y="112" text-anchor="middle" font-size="11" fill="#1a1a1a">Kill: Park or Release</text>
+  <text x="680" y="130" text-anchor="middle" font-size="11" fill="#1a1a1a">one shim per Pod</text>
+
+  <polyline points="260,85 300,85" fill="none" stroke="#333" stroke-width="1.5" marker-end="url(#arw)"/>
+  <polyline points="530,85 570,85" fill="none" stroke="#333" stroke-width="1.5" marker-end="url(#arw)"/>
+
+  <rect x="570" y="170" width="220" height="80" rx="6" fill="#b0e3e6" stroke="#0e8088"/>
+  <text x="680" y="194" text-anchor="middle" font-size="13" font-weight="600" fill="#1a1a1a">fiberd home</text>
+  <text x="680" y="214" text-anchor="middle" font-size="11" fill="#1a1a1a">the conform grant Pod of the</text>
+  <text x="680" y="230" text-anchor="middle" font-size="11" fill="#1a1a1a">Kubernetes example, at 127.0.0.1:30084</text>
+  <polyline points="680,140 680,170" fill="none" stroke="#333" stroke-width="1.5" marker-end="url(#arw)"/>
+
+  <rect x="30" y="280" width="760" height="140" rx="10" fill="#f5f5f5" stroke="#999"/>
+  <text x="45" y="304" font-size="13" font-weight="600" fill="#333">what make example-kata shows (kubectl logs of each Pod)</text>
+
+  <rect x="50" y="322" width="230" height="84" rx="6" fill="#d5e8d4" stroke="#82b366"/>
+  <text x="165" y="344" text-anchor="middle" font-size="13" font-weight="600" fill="#1a1a1a">kata-1: CREATE</text>
+  <text x="165" y="364" text-anchor="middle" font-size="11" fill="#1a1a1a">fence kata-demo-grant/1/1</text>
+  <text x="165" y="380" text-anchor="middle" font-size="11" fill="#1a1a1a">endpoint tcp://10.244.0.11:30001</text>
+  <text x="165" y="396" text-anchor="middle" font-size="11" fill="#1a1a1a">delete: the home parks the session</text>
+
+  <rect x="300" y="322" width="230" height="84" rx="6" fill="#ffe6cc" stroke="#d79b00"/>
+  <text x="415" y="344" text-anchor="middle" font-size="13" font-weight="600" fill="#1a1a1a">kata-2: RESUME</text>
+  <text x="415" y="364" text-anchor="middle" font-size="11" fill="#1a1a1a">same grant uid, same session</text>
+  <text x="415" y="380" text-anchor="middle" font-size="11" fill="#1a1a1a">fence kata-demo-grant/1/2, same port</text>
+  <text x="415" y="396" text-anchor="middle" font-size="11" fill="#1a1a1a">the container's state intact</text>
+
+  <rect x="550" y="322" width="220" height="84" rx="6" fill="#f8cecc" stroke="#b85450"/>
+  <text x="660" y="344" text-anchor="middle" font-size="13" font-weight="600" fill="#1a1a1a">delete kata-2</text>
+  <text x="660" y="364" text-anchor="middle" font-size="11" fill="#1a1a1a">on-stop release</text>
+  <text x="660" y="380" text-anchor="middle" font-size="11" fill="#1a1a1a">the home's audit records the release</text>
+  <text x="660" y="396" text-anchor="middle" font-size="11" fill="#1a1a1a">nothing left</text>
+
+  <polyline points="280,364 300,364" fill="none" stroke="#333" stroke-width="1.5" marker-end="url(#arw)"/>
+  <polyline points="530,364 550,364" fill="none" stroke="#333" stroke-width="1.5" marker-end="url(#arw)"/>
+</svg>

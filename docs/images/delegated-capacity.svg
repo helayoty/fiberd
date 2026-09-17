@@ -44,7 +44,7 @@
   <polyline points="665,214 665,236" fill="none" stroke="#9673a6" stroke-width="1.5" stroke-dasharray="6 4" marker-end="url(#arwp)"/>
   <polyline points="665,224 567,238" fill="none" stroke="#9673a6" stroke-width="1.2" stroke-dasharray="6 4" marker-end="url(#arwp)"/>
   <polyline points="665,224 763,238" fill="none" stroke="#9673a6" stroke-width="1.2" stroke-dasharray="6 4" marker-end="url(#arwp)"/>
-  <text x="675" y="228" font-size="11" fill="#9673a6">CoW fork</text>
+  <text x="690" y="220" font-size="11" fill="#9673a6">CoW fork</text>
 
   <polyline points="590,405 510,405 510,146 525,146" fill="none" stroke="#333" stroke-width="1.6" marker-end="url(#arw)"/>
   <text x="505" y="400" text-anchor="end" font-size="11" fill="#333">Clone() - node-local</text>

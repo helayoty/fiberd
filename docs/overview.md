@@ -1,4 +1,4 @@
-# fiberd
+# fiberd overview
 
 **A node-level execution fabric for serverless and agent platforms: charge capacity once as a block, mint instances locally in milliseconds, survive control-plane outages by construction.**
 
@@ -39,8 +39,8 @@ Two proven systems already work this way: an IP router is delegated a prefix onc
 | Component | What it is |
 |---|---|
 | **CapacityGrant** | An authenticated artifact the control plane issues once per block of capacity (template reference, `fibers: {max, warm}`, policy, expiry). Billing charges it exactly once, at issue. |
-| **Grant agent** (`fiberd`) | One daemon per node — the sole runtime client. Holds the ledger, the fence, the thrash budget, the audit spool, and the pressure ladder. |
-| **Fibers** | Node-minted instances inside a grant: copy-on-write clones of a checkpointed engine zygote. Known to exactly two parties — the agent's ledger and the caller. |
+| **Grant agent** (`fiberd`) | One agent per home instance (a node, a grant Pod, a Slurm allocation) — the sole runtime client. Holds the ledger, the fence, the thrash budget, the audit spool, and the pressure ladder. |
+| **Fibers** | Instances minted by the home inside a grant: clones of a warm engine zygote — a copy-on-write fork or a snapshot restore, by backend. Known to exactly two parties — the agent's ledger and the caller. |
 
 The control plane sees the grant and its batched status — never individual fibers — the same way an IP allocator sees the prefix, never the addresses.
 
@@ -53,5 +53,9 @@ The control plane sees the grant and its batched status — never individual fib
 
 ## Reading guide
 
-- **[architecture.md](architecture.md)** — the full design reference: the inversion, the three components and grant lifecycle, the `Clone`/`Park`/`Release` contract, CPU vs GPU, the homes that implement the protocol, and the cross-cutting model (fencing, accounting, identity/audit, network, pressure).
-- **[concepts.md](concepts.md)** — a glossary: plain-language definitions of every term (fiber, grant, engine, agent, fence, epoch, ledger, session, lease, copy-on-write, thrash budget, park/resume, audit spool, pressure ladder, tiers, miss codes, homes), each with an analogy and a diagram.
+- **[quickstart.md](quickstart.md)** — build, run, and exercise the protocol on this machine; real fibers in the Linux dev container.
+- **[protocol.md](protocol.md)** — the wire semantics: the grant, the four verbs, the two miss codes, fences, mobility, and the conformance suite.
+- **[architecture.md](architecture.md)** — the design reference: the inversion, the components, the contract, CPU vs GPU, the backend seam, the homes, and the cross-cutting model.
+- **[concepts.md](concepts.md)** — a glossary with an analogy and a diagram per term.
+- **[status.md](status.md)** — what exists, what it measured, what blocks the rest.
+- The examples' READMEs — [Kubernetes](../examples/kubernetes/README.md), [Slurm](../examples/slurm/README.md), [Knative over Hyperlight](../examples/knative/README.md), [a Kata-shaped shim](../examples/kata/README.md), and the in-progress [Substrate herder](../examples/substrate/README.md) — each a worked integration.
