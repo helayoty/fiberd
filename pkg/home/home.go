@@ -47,6 +47,16 @@ type Home interface {
 	// PublishReady tells the home's control plane that the grant's
 	// template is warm (a readiness gate, a status stream, nothing).
 	PublishReady(ctx context.Context, grantUID string, ready bool) error
+	// Scope is what this home asserts about where it runs (namespace,
+	// service account, fabric claim, job). Stamped on audit records;
+	// nil on a standalone host. Scope is visible, never a third validity
+	// term: a home that loses it revokes fences (Agent.BumpEpoch) or
+	// grants (GrantRemoved), and the core keeps min(lease, fence).
+	Scope() []core.ScopeClaim
+	// Fabric provisions the grant's fabric channel, the devices its
+	// engine may drive, and returns how to release it: a static set here,
+	// a DRA claim under Kubernetes, the allocation's GRES under Slurm.
+	Fabric(ctx context.Context, g core.Grant) (core.FabricChannel, func(), error)
 	// Run drives whatever the home needs in the background (issuer polls,
 	// watches) until ctx ends.
 	Run(ctx context.Context)
@@ -85,7 +95,7 @@ func Drive(ctx context.Context, h Home, a *core.Agent) {
 				}
 				_ = h.PublishReady(ctx, g.UID, true)
 			case GrantRemoved:
-				a.Ledger.RevokeGrant(ev.UID)
+				a.Revoke(ev.UID)
 				_ = h.PublishReady(ctx, ev.UID, false)
 			}
 		}

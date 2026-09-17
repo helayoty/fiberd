@@ -80,6 +80,17 @@ type FiberHandle struct {
 // dirtied working set: the fiber's private pages since fork.
 type FiberStats struct {
 	WUsedBytes uint64
+	// DeviceUsedBytes is the fiber's slice of the engine's device state,
+	// as the engine reports it; 0 when the grant has no device.
+	DeviceUsedBytes uint64
+}
+
+// DeviceCapable is implemented by runtimes whose warm template can hold
+// device state for its fibers (an engine that reports slices). A grant
+// with a device budget is admitted only where this answers true; the
+// class is the grant's DeviceBudget.Class ("" for any).
+type DeviceCapable interface {
+	OffersDevice(grantUID, class string) bool
 }
 
 // FiberExit is reported when a fiber dies on its own: the kernel killed it

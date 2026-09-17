@@ -114,6 +114,7 @@ type fiberRef struct {
 	sessionKey string // "" for anonymous fibers
 	fence      Fence
 	wUsed      uint64
+	devUsed    uint64 // the engine's device slice for the fiber, last sampled
 }
 
 func NewLedger(epoch uint64) *Ledger {
@@ -127,7 +128,23 @@ func NewLedger(epoch uint64) *Ledger {
 	}
 }
 
-func (l *Ledger) Epoch() uint64 { return l.epoch }
+func (l *Ledger) Epoch() uint64 {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.epoch
+}
+
+// BumpEpoch moves the ledger to a new epoch in place: every fence minted
+// from here on carries it, and every fence minted before is stale by
+// construction. The agent releases the running fibers around this call;
+// parked sessions keep their deltas and resume under the new epoch.
+func (l *Ledger) BumpEpoch(epoch uint64) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if epoch > l.epoch {
+		l.epoch = epoch
+	}
+}
 
 // AdmitGrant records a verified grant. Its authenticated arrival IS the
 // proof that admission and quota already happened; nothing is re-checked
@@ -373,6 +390,15 @@ func (l *Ledger) SetFiberW(fiberID string, bytes uint64) {
 	defer l.mu.Unlock()
 	if ref, ok := l.fibers[fiberID]; ok {
 		ref.wUsed = bytes
+	}
+}
+
+// SetFiberDevice records the fiber's latest device-slice measurement.
+func (l *Ledger) SetFiberDevice(fiberID string, bytes uint64) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if ref, ok := l.fibers[fiberID]; ok {
+		ref.devUsed = bytes
 	}
 }
 

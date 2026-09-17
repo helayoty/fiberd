@@ -386,6 +386,68 @@ func (x *FiberLimits) GetWarm() uint32 {
 	return 0
 }
 
+// DeviceBudget is the per-fiber slice of the engine's device state (its
+// KV cache, its VRAM) a fiber may hold: the device-side twin of
+// w_budget_bytes. On the GPU side one engine per grant owns the device
+// and fibers are its clients; the engine reports each fiber's slice and
+// the home enforces this budget on the report, since the kernel has no
+// pressure class for devices. A home whose template offers no device of
+// this class refuses the grant with FailedPrecondition, never a silent
+// CPU-only fiber.
+type DeviceBudget struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Bytes uint64                 `protobuf:"varint,1,opt,name=bytes,proto3" json:"bytes,omitempty"`
+	// class names the device the budget is for ("gpu"; "sim" is the
+	// reference workload's simulated engine). Empty means any.
+	Class         string `protobuf:"bytes,2,opt,name=class,proto3" json:"class,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DeviceBudget) Reset() {
+	*x = DeviceBudget{}
+	mi := &file_grant_v1_grant_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeviceBudget) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeviceBudget) ProtoMessage() {}
+
+func (x *DeviceBudget) ProtoReflect() protoreflect.Message {
+	mi := &file_grant_v1_grant_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeviceBudget.ProtoReflect.Descriptor instead.
+func (*DeviceBudget) Descriptor() ([]byte, []int) {
+	return file_grant_v1_grant_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *DeviceBudget) GetBytes() uint64 {
+	if x != nil {
+		return x.Bytes
+	}
+	return 0
+}
+
+func (x *DeviceBudget) GetClass() string {
+	if x != nil {
+		return x.Class
+	}
+	return ""
+}
+
 // CapacityGrant is what the issuer signs. It is carried as the `grant`
 // claim of a JWT whose registered claims mirror issuer, audience,
 // lease_expiry and grant_uid (iss, aud, exp, jti).
@@ -401,17 +463,19 @@ type CapacityGrant struct {
 	Fibers         *FiberLimits `protobuf:"bytes,5,opt,name=fibers,proto3" json:"fibers,omitempty"`
 	// Maximum dirtied working set per fiber, in bytes. Enforced as the
 	// fiber's cgroup memory.max; also the mobility budget for deltas.
-	WBudgetBytes  uint64                 `protobuf:"varint,6,opt,name=w_budget_bytes,json=wBudgetBytes,proto3" json:"w_budget_bytes,omitempty"`
-	MinTier       Tier                   `protobuf:"varint,7,opt,name=min_tier,json=minTier,proto3,enum=fiberd.grant.v1.Tier" json:"min_tier,omitempty"`
-	LeaseExpiry   *timestamppb.Timestamp `protobuf:"bytes,8,opt,name=lease_expiry,json=leaseExpiry,proto3" json:"lease_expiry,omitempty"`
-	Policy        *Policy                `protobuf:"bytes,9,opt,name=policy,proto3" json:"policy,omitempty"`
+	WBudgetBytes uint64                 `protobuf:"varint,6,opt,name=w_budget_bytes,json=wBudgetBytes,proto3" json:"w_budget_bytes,omitempty"`
+	MinTier      Tier                   `protobuf:"varint,7,opt,name=min_tier,json=minTier,proto3,enum=fiberd.grant.v1.Tier" json:"min_tier,omitempty"`
+	LeaseExpiry  *timestamppb.Timestamp `protobuf:"bytes,8,opt,name=lease_expiry,json=leaseExpiry,proto3" json:"lease_expiry,omitempty"`
+	Policy       *Policy                `protobuf:"bytes,9,opt,name=policy,proto3" json:"policy,omitempty"`
+	// Absent or zero bytes: the grant needs no device.
+	DeviceBudget  *DeviceBudget `protobuf:"bytes,10,opt,name=device_budget,json=deviceBudget,proto3" json:"device_budget,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *CapacityGrant) Reset() {
 	*x = CapacityGrant{}
-	mi := &file_grant_v1_grant_proto_msgTypes[2]
+	mi := &file_grant_v1_grant_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -423,7 +487,7 @@ func (x *CapacityGrant) String() string {
 func (*CapacityGrant) ProtoMessage() {}
 
 func (x *CapacityGrant) ProtoReflect() protoreflect.Message {
-	mi := &file_grant_v1_grant_proto_msgTypes[2]
+	mi := &file_grant_v1_grant_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -436,7 +500,7 @@ func (x *CapacityGrant) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CapacityGrant.ProtoReflect.Descriptor instead.
 func (*CapacityGrant) Descriptor() ([]byte, []int) {
-	return file_grant_v1_grant_proto_rawDescGZIP(), []int{2}
+	return file_grant_v1_grant_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *CapacityGrant) GetGrantUid() string {
@@ -502,6 +566,13 @@ func (x *CapacityGrant) GetPolicy() *Policy {
 	return nil
 }
 
+func (x *CapacityGrant) GetDeviceBudget() *DeviceBudget {
+	if x != nil {
+		return x.DeviceBudget
+	}
+	return nil
+}
+
 // Fence identifies one incarnation of a fiber: (grant, agent epoch, seq).
 // Every credential and claim is scoped to it. An epoch bump on agent
 // restart invalidates every prior fence at once.
@@ -516,7 +587,7 @@ type Fence struct {
 
 func (x *Fence) Reset() {
 	*x = Fence{}
-	mi := &file_grant_v1_grant_proto_msgTypes[3]
+	mi := &file_grant_v1_grant_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -528,7 +599,7 @@ func (x *Fence) String() string {
 func (*Fence) ProtoMessage() {}
 
 func (x *Fence) ProtoReflect() protoreflect.Message {
-	mi := &file_grant_v1_grant_proto_msgTypes[3]
+	mi := &file_grant_v1_grant_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -541,7 +612,7 @@ func (x *Fence) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Fence.ProtoReflect.Descriptor instead.
 func (*Fence) Descriptor() ([]byte, []int) {
-	return file_grant_v1_grant_proto_rawDescGZIP(), []int{3}
+	return file_grant_v1_grant_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *Fence) GetGrantUid() string {
@@ -583,7 +654,7 @@ type CloneRequest struct {
 
 func (x *CloneRequest) Reset() {
 	*x = CloneRequest{}
-	mi := &file_grant_v1_grant_proto_msgTypes[4]
+	mi := &file_grant_v1_grant_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -595,7 +666,7 @@ func (x *CloneRequest) String() string {
 func (*CloneRequest) ProtoMessage() {}
 
 func (x *CloneRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_grant_v1_grant_proto_msgTypes[4]
+	mi := &file_grant_v1_grant_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -608,7 +679,7 @@ func (x *CloneRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CloneRequest.ProtoReflect.Descriptor instead.
 func (*CloneRequest) Descriptor() ([]byte, []int) {
-	return file_grant_v1_grant_proto_rawDescGZIP(), []int{4}
+	return file_grant_v1_grant_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *CloneRequest) GetGrantJwt() string {
@@ -651,7 +722,7 @@ type CloneResponse struct {
 
 func (x *CloneResponse) Reset() {
 	*x = CloneResponse{}
-	mi := &file_grant_v1_grant_proto_msgTypes[5]
+	mi := &file_grant_v1_grant_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -663,7 +734,7 @@ func (x *CloneResponse) String() string {
 func (*CloneResponse) ProtoMessage() {}
 
 func (x *CloneResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_grant_v1_grant_proto_msgTypes[5]
+	mi := &file_grant_v1_grant_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -676,7 +747,7 @@ func (x *CloneResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CloneResponse.ProtoReflect.Descriptor instead.
 func (*CloneResponse) Descriptor() ([]byte, []int) {
-	return file_grant_v1_grant_proto_rawDescGZIP(), []int{5}
+	return file_grant_v1_grant_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *CloneResponse) GetFiberId() string {
@@ -722,7 +793,7 @@ type Miss struct {
 
 func (x *Miss) Reset() {
 	*x = Miss{}
-	mi := &file_grant_v1_grant_proto_msgTypes[6]
+	mi := &file_grant_v1_grant_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -734,7 +805,7 @@ func (x *Miss) String() string {
 func (*Miss) ProtoMessage() {}
 
 func (x *Miss) ProtoReflect() protoreflect.Message {
-	mi := &file_grant_v1_grant_proto_msgTypes[6]
+	mi := &file_grant_v1_grant_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -747,7 +818,7 @@ func (x *Miss) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Miss.ProtoReflect.Descriptor instead.
 func (*Miss) Descriptor() ([]byte, []int) {
-	return file_grant_v1_grant_proto_rawDescGZIP(), []int{6}
+	return file_grant_v1_grant_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *Miss) GetCode() MissCode {
@@ -790,7 +861,7 @@ type ParkRequest struct {
 
 func (x *ParkRequest) Reset() {
 	*x = ParkRequest{}
-	mi := &file_grant_v1_grant_proto_msgTypes[7]
+	mi := &file_grant_v1_grant_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -802,7 +873,7 @@ func (x *ParkRequest) String() string {
 func (*ParkRequest) ProtoMessage() {}
 
 func (x *ParkRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_grant_v1_grant_proto_msgTypes[7]
+	mi := &file_grant_v1_grant_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -815,7 +886,7 @@ func (x *ParkRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ParkRequest.ProtoReflect.Descriptor instead.
 func (*ParkRequest) Descriptor() ([]byte, []int) {
-	return file_grant_v1_grant_proto_rawDescGZIP(), []int{7}
+	return file_grant_v1_grant_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *ParkRequest) GetFiberId() string {
@@ -843,7 +914,7 @@ type ReleaseRequest struct {
 
 func (x *ReleaseRequest) Reset() {
 	*x = ReleaseRequest{}
-	mi := &file_grant_v1_grant_proto_msgTypes[8]
+	mi := &file_grant_v1_grant_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -855,7 +926,7 @@ func (x *ReleaseRequest) String() string {
 func (*ReleaseRequest) ProtoMessage() {}
 
 func (x *ReleaseRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_grant_v1_grant_proto_msgTypes[8]
+	mi := &file_grant_v1_grant_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -868,7 +939,7 @@ func (x *ReleaseRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReleaseRequest.ProtoReflect.Descriptor instead.
 func (*ReleaseRequest) Descriptor() ([]byte, []int) {
-	return file_grant_v1_grant_proto_rawDescGZIP(), []int{8}
+	return file_grant_v1_grant_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *ReleaseRequest) GetFiberId() string {
@@ -900,7 +971,7 @@ type Status struct {
 
 func (x *Status) Reset() {
 	*x = Status{}
-	mi := &file_grant_v1_grant_proto_msgTypes[9]
+	mi := &file_grant_v1_grant_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -912,7 +983,7 @@ func (x *Status) String() string {
 func (*Status) ProtoMessage() {}
 
 func (x *Status) ProtoReflect() protoreflect.Message {
-	mi := &file_grant_v1_grant_proto_msgTypes[9]
+	mi := &file_grant_v1_grant_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -925,7 +996,7 @@ func (x *Status) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Status.ProtoReflect.Descriptor instead.
 func (*Status) Descriptor() ([]byte, []int) {
-	return file_grant_v1_grant_proto_rawDescGZIP(), []int{9}
+	return file_grant_v1_grant_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *Status) GetGrantUid() string {
@@ -979,7 +1050,10 @@ const file_grant_v1_grant_proto_rawDesc = "" +
 	"\x13psi_some_avg10_park\x18\x05 \x01(\x02R\x10psiSomeAvg10Park\"3\n" +
 	"\vFiberLimits\x12\x10\n" +
 	"\x03max\x18\x01 \x01(\rR\x03max\x12\x12\n" +
-	"\x04warm\x18\x02 \x01(\rR\x04warm\"\x87\x03\n" +
+	"\x04warm\x18\x02 \x01(\rR\x04warm\":\n" +
+	"\fDeviceBudget\x12\x14\n" +
+	"\x05bytes\x18\x01 \x01(\x04R\x05bytes\x12\x14\n" +
+	"\x05class\x18\x02 \x01(\tR\x05class\"\xcb\x03\n" +
 	"\rCapacityGrant\x12\x1b\n" +
 	"\tgrant_uid\x18\x01 \x01(\tR\bgrantUid\x12\x16\n" +
 	"\x06issuer\x18\x02 \x01(\tR\x06issuer\x12\x1a\n" +
@@ -989,7 +1063,9 @@ const file_grant_v1_grant_proto_rawDesc = "" +
 	"\x0ew_budget_bytes\x18\x06 \x01(\x04R\fwBudgetBytes\x120\n" +
 	"\bmin_tier\x18\a \x01(\x0e2\x15.fiberd.grant.v1.TierR\aminTier\x12=\n" +
 	"\flease_expiry\x18\b \x01(\v2\x1a.google.protobuf.TimestampR\vleaseExpiry\x12/\n" +
-	"\x06policy\x18\t \x01(\v2\x17.fiberd.grant.v1.PolicyR\x06policy\"L\n" +
+	"\x06policy\x18\t \x01(\v2\x17.fiberd.grant.v1.PolicyR\x06policy\x12B\n" +
+	"\rdevice_budget\x18\n" +
+	" \x01(\v2\x1d.fiberd.grant.v1.DeviceBudgetR\fdeviceBudget\"L\n" +
 	"\x05Fence\x12\x1b\n" +
 	"\tgrant_uid\x18\x01 \x01(\tR\bgrantUid\x12\x14\n" +
 	"\x05epoch\x18\x02 \x01(\x04R\x05epoch\x12\x10\n" +
@@ -1064,7 +1140,7 @@ func file_grant_v1_grant_proto_rawDescGZIP() []byte {
 }
 
 var file_grant_v1_grant_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
-var file_grant_v1_grant_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
+var file_grant_v1_grant_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
 var file_grant_v1_grant_proto_goTypes = []any{
 	(Tier)(0),                     // 0: fiberd.grant.v1.Tier
 	(Durability)(0),               // 1: fiberd.grant.v1.Durability
@@ -1072,41 +1148,43 @@ var file_grant_v1_grant_proto_goTypes = []any{
 	(MissCode)(0),                 // 3: fiberd.grant.v1.MissCode
 	(*Policy)(nil),                // 4: fiberd.grant.v1.Policy
 	(*FiberLimits)(nil),           // 5: fiberd.grant.v1.FiberLimits
-	(*CapacityGrant)(nil),         // 6: fiberd.grant.v1.CapacityGrant
-	(*Fence)(nil),                 // 7: fiberd.grant.v1.Fence
-	(*CloneRequest)(nil),          // 8: fiberd.grant.v1.CloneRequest
-	(*CloneResponse)(nil),         // 9: fiberd.grant.v1.CloneResponse
-	(*Miss)(nil),                  // 10: fiberd.grant.v1.Miss
-	(*ParkRequest)(nil),           // 11: fiberd.grant.v1.ParkRequest
-	(*ReleaseRequest)(nil),        // 12: fiberd.grant.v1.ReleaseRequest
-	(*Status)(nil),                // 13: fiberd.grant.v1.Status
-	(*timestamppb.Timestamp)(nil), // 14: google.protobuf.Timestamp
-	(*emptypb.Empty)(nil),         // 15: google.protobuf.Empty
+	(*DeviceBudget)(nil),          // 6: fiberd.grant.v1.DeviceBudget
+	(*CapacityGrant)(nil),         // 7: fiberd.grant.v1.CapacityGrant
+	(*Fence)(nil),                 // 8: fiberd.grant.v1.Fence
+	(*CloneRequest)(nil),          // 9: fiberd.grant.v1.CloneRequest
+	(*CloneResponse)(nil),         // 10: fiberd.grant.v1.CloneResponse
+	(*Miss)(nil),                  // 11: fiberd.grant.v1.Miss
+	(*ParkRequest)(nil),           // 12: fiberd.grant.v1.ParkRequest
+	(*ReleaseRequest)(nil),        // 13: fiberd.grant.v1.ReleaseRequest
+	(*Status)(nil),                // 14: fiberd.grant.v1.Status
+	(*timestamppb.Timestamp)(nil), // 15: google.protobuf.Timestamp
+	(*emptypb.Empty)(nil),         // 16: google.protobuf.Empty
 }
 var file_grant_v1_grant_proto_depIdxs = []int32{
 	1,  // 0: fiberd.grant.v1.Policy.durability:type_name -> fiberd.grant.v1.Durability
 	5,  // 1: fiberd.grant.v1.CapacityGrant.fibers:type_name -> fiberd.grant.v1.FiberLimits
 	0,  // 2: fiberd.grant.v1.CapacityGrant.min_tier:type_name -> fiberd.grant.v1.Tier
-	14, // 3: fiberd.grant.v1.CapacityGrant.lease_expiry:type_name -> google.protobuf.Timestamp
+	15, // 3: fiberd.grant.v1.CapacityGrant.lease_expiry:type_name -> google.protobuf.Timestamp
 	4,  // 4: fiberd.grant.v1.CapacityGrant.policy:type_name -> fiberd.grant.v1.Policy
-	14, // 5: fiberd.grant.v1.CloneRequest.deadline:type_name -> google.protobuf.Timestamp
-	7,  // 6: fiberd.grant.v1.CloneResponse.fence:type_name -> fiberd.grant.v1.Fence
-	2,  // 7: fiberd.grant.v1.CloneResponse.kind:type_name -> fiberd.grant.v1.CloneKind
-	3,  // 8: fiberd.grant.v1.Miss.code:type_name -> fiberd.grant.v1.MissCode
-	7,  // 9: fiberd.grant.v1.Status.latest:type_name -> fiberd.grant.v1.Fence
-	8,  // 10: fiberd.grant.v1.Fibers.Clone:input_type -> fiberd.grant.v1.CloneRequest
-	11, // 11: fiberd.grant.v1.Fibers.Park:input_type -> fiberd.grant.v1.ParkRequest
-	12, // 12: fiberd.grant.v1.Fibers.Release:input_type -> fiberd.grant.v1.ReleaseRequest
-	15, // 13: fiberd.grant.v1.Fibers.Watch:input_type -> google.protobuf.Empty
-	9,  // 14: fiberd.grant.v1.Fibers.Clone:output_type -> fiberd.grant.v1.CloneResponse
-	15, // 15: fiberd.grant.v1.Fibers.Park:output_type -> google.protobuf.Empty
-	15, // 16: fiberd.grant.v1.Fibers.Release:output_type -> google.protobuf.Empty
-	13, // 17: fiberd.grant.v1.Fibers.Watch:output_type -> fiberd.grant.v1.Status
-	14, // [14:18] is the sub-list for method output_type
-	10, // [10:14] is the sub-list for method input_type
-	10, // [10:10] is the sub-list for extension type_name
-	10, // [10:10] is the sub-list for extension extendee
-	0,  // [0:10] is the sub-list for field type_name
+	6,  // 5: fiberd.grant.v1.CapacityGrant.device_budget:type_name -> fiberd.grant.v1.DeviceBudget
+	15, // 6: fiberd.grant.v1.CloneRequest.deadline:type_name -> google.protobuf.Timestamp
+	8,  // 7: fiberd.grant.v1.CloneResponse.fence:type_name -> fiberd.grant.v1.Fence
+	2,  // 8: fiberd.grant.v1.CloneResponse.kind:type_name -> fiberd.grant.v1.CloneKind
+	3,  // 9: fiberd.grant.v1.Miss.code:type_name -> fiberd.grant.v1.MissCode
+	8,  // 10: fiberd.grant.v1.Status.latest:type_name -> fiberd.grant.v1.Fence
+	9,  // 11: fiberd.grant.v1.Fibers.Clone:input_type -> fiberd.grant.v1.CloneRequest
+	12, // 12: fiberd.grant.v1.Fibers.Park:input_type -> fiberd.grant.v1.ParkRequest
+	13, // 13: fiberd.grant.v1.Fibers.Release:input_type -> fiberd.grant.v1.ReleaseRequest
+	16, // 14: fiberd.grant.v1.Fibers.Watch:input_type -> google.protobuf.Empty
+	10, // 15: fiberd.grant.v1.Fibers.Clone:output_type -> fiberd.grant.v1.CloneResponse
+	16, // 16: fiberd.grant.v1.Fibers.Park:output_type -> google.protobuf.Empty
+	16, // 17: fiberd.grant.v1.Fibers.Release:output_type -> google.protobuf.Empty
+	14, // 18: fiberd.grant.v1.Fibers.Watch:output_type -> fiberd.grant.v1.Status
+	15, // [15:19] is the sub-list for method output_type
+	11, // [11:15] is the sub-list for method input_type
+	11, // [11:11] is the sub-list for extension type_name
+	11, // [11:11] is the sub-list for extension extendee
+	0,  // [0:11] is the sub-list for field type_name
 }
 
 func init() { file_grant_v1_grant_proto_init() }
@@ -1120,7 +1198,7 @@ func file_grant_v1_grant_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_grant_v1_grant_proto_rawDesc), len(file_grant_v1_grant_proto_rawDesc)),
 			NumEnums:      4,
-			NumMessages:   10,
+			NumMessages:   11,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

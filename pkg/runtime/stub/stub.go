@@ -58,13 +58,19 @@ func (r *Runtime) PrepareTemplate(_ context.Context, g core.Grant) error {
 }
 
 type payload struct {
-	DirtyBytes uint64 `json:"dirty_bytes"`
+	DirtyBytes  uint64 `json:"dirty_bytes"`
+	DeviceBytes uint64 `json:"device_bytes"`
 }
+
+// OffersDevice implements core.DeviceCapable: the stub simulates an
+// engine for every template, so device budgets are admitted and enforced
+// on the payload's device_bytes.
+func (r *Runtime) OffersDevice(string, string) bool { return true }
 
 func (r *Runtime) Clone(_ context.Context, spec core.CloneSpec) (core.FiberHandle, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	var w uint64
+	var w, dev uint64
 	if spec.Source == core.SourceDelta {
 		carried, ok := r.parked[spec.Ref]
 		if !ok {
@@ -77,12 +83,13 @@ func (r *Runtime) Clone(_ context.Context, spec core.CloneSpec) (core.FiberHandl
 		var p payload
 		if err := json.Unmarshal(spec.Payload, &p); err == nil {
 			w += p.DirtyBytes
+			dev = p.DeviceBytes
 		}
 	}
 	r.port++
 	h := core.FiberHandle{
 		ID:       spec.Fence.String(),
-		Endpoint: fmt.Sprintf("127.0.0.1:%d", r.port),
+		Endpoint: fmt.Sprintf("tcp://127.0.0.1:%d", r.port),
 		Started:  time.Now(),
 	}
 	r.fibers[h.ID] = fiber{h: h, w: w}
@@ -93,6 +100,12 @@ func (r *Runtime) Clone(_ context.Context, spec core.CloneSpec) (core.FiberHandl
 		delete(r.fibers, h.ID)
 		r.exits <- core.FiberExit{FiberID: h.ID, Reason: "oom",
 			Detail: fmt.Sprintf("dirtied %d > w_budget %d", w, spec.Grant.WBudgetBytes)}
+	} else if spec.Grant.DeviceBudget.Bytes > 0 && dev > spec.Grant.DeviceBudget.Bytes {
+		// The engine reported a slice past the device budget: the home
+		// kills the fiber as it would for W.
+		delete(r.fibers, h.ID)
+		r.exits <- core.FiberExit{FiberID: h.ID, Reason: "oom",
+			Detail: fmt.Sprintf("device %d > device_budget %d", dev, spec.Grant.DeviceBudget.Bytes)}
 	}
 	return h, nil
 }
