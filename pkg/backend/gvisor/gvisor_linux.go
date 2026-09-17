@@ -209,6 +209,12 @@ func (b *Backend) runsc(ctx context.Context, cgroupFD int, args ...string) (stri
 		out, err = cmd.CombinedOutput()
 	}
 	if err != nil {
+		if ctx.Err() != nil {
+			// The context ended and CommandContext killed runsc itself:
+			// the deadline is the reason, and the caller must see it as
+			// one ("signal: killed" is not a miss the agent can name).
+			return string(out), fmt.Errorf("gvisor: runsc %s: %w", args[0], ctx.Err())
+		}
 		tail := strings.TrimSpace(string(out))
 		if len(tail) > 400 {
 			tail = "..." + tail[len(tail)-400:]
