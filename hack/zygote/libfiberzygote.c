@@ -5,6 +5,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -29,6 +30,13 @@
 #define MAX_PENDING 1024
 
 static int ready_fd = -1;
+
+/* The control channel, once fz_serve has it, for lines sent from other
+ * threads (fz_report); one mutex keeps lines whole. */
+static int g_ctl_fd = -1;
+static pthread_mutex_t g_ctl_mu = PTHREAD_MUTEX_INITIALIZER;
+static char engine_endpoint[256];
+static fz_on_control control_handler;
 
 /* Fibers that reported ready: pid -> fence, for EXITED lines. */
 static struct {
@@ -80,7 +88,30 @@ static int sendf(int fd, const char *fmt, ...) {
     va_end(ap);
     if (n < 0 || (size_t)n >= sizeof buf) return -1;
     buf[n++] = '\n';
-    return write_all(fd, buf, (size_t)n);
+    pthread_mutex_lock(&g_ctl_mu);
+    int rc = write_all(fd, buf, (size_t)n);
+    pthread_mutex_unlock(&g_ctl_mu);
+    return rc;
+}
+
+void fz_set_engine(const char *endpoint) {
+    snprintf(engine_endpoint, sizeof engine_endpoint, "%s", endpoint ? endpoint : "");
+}
+
+void fz_set_control(fz_on_control handler) { control_handler = handler; }
+
+int fz_report(const char *fmt, ...) {
+    if (g_ctl_fd < 0) return -1;
+    char buf[1024];
+    va_list ap; va_start(ap, fmt);
+    int n = vsnprintf(buf, sizeof buf, fmt, ap);
+    va_end(ap);
+    if (n < 0 || (size_t)n >= sizeof buf) return -1;
+    buf[n++] = '\n';
+    pthread_mutex_lock(&g_ctl_mu);
+    int rc = write_all(g_ctl_fd, buf, (size_t)n);
+    pthread_mutex_unlock(&g_ctl_mu);
+    return rc;
 }
 
 /* Read one line; if a descriptor rides along via SCM_RIGHTS, store it in
@@ -237,6 +268,7 @@ static void scrub_and_run(int ready_w, const char *fence, const char *endpoint,
     clearenv();
     setenv("FIBERD_FENCE", fence, 1);
     setenv("FIBERD_ENDPOINT", endpoint, 1);
+    if (engine_endpoint[0]) setenv("FIBERD_ENGINE", engine_endpoint, 1);
 
     /* Session, signals, entropy. No PR_SET_PDEATHSIG: a resumed fiber has
      * a different parent, and the runtime kills leaves through the cgroup
@@ -362,6 +394,7 @@ static int handle_clone(int ctl_fd, char *line, int cgroup_fd, fz_on_fiber on_fi
 int fz_serve(int ctl_fd, fz_on_fiber on_fiber) {
     signal(SIGPIPE, SIG_IGN);
     if (sendf(ctl_fd, "READY") < 0) return -1;
+    g_ctl_fd = ctl_fd; /* from here on other threads may fz_report */
     static char line[MAX_LINE];
     static struct pollfd fds[1 + MAX_PENDING];
     for (;;) {
@@ -400,6 +433,8 @@ int fz_serve(int ctl_fd, fz_on_fiber on_fiber) {
             handle_clone(ctl_fd, line, passed_fd, on_fiber);
         } else if (strcmp(line, "PING") == 0) {
             sendf(ctl_fd, "PONG");
+        } else if (control_handler) {
+            control_handler(line);
         } else {
             sendf(ctl_fd, "ERROR ? unknown message");
         }

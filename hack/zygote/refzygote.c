@@ -21,9 +21,27 @@
  *
  * The clone payload, if any, is JSON with an optional "dirty_bytes": the
  * fiber dirties that much right after reporting ready, which is how
- * conformance case C6 drives a fiber over its W budget.
+ * conformance case C6 drives a fiber over its W budget; and an optional
+ * "device_bytes", reserved from the engine the same way (C8).
  *
- * Build: gcc -O2 -o refzygote refzygote.c libfiberzygote.c
+ * --http makes every fiber serve HTTP/1.1 on its endpoint instead of the
+ * line protocol, for consumers that route web traffic to fibers (an
+ * ingress proxy in front of the endpoint): GET /readyz -> "ok", GET / or
+ * GET /count -> the counter, POST / or POST /incr -> the counter after
+ * one increment, GET /fence -> the fence, POST /dirty?bytes=N -> "ok N".
+ * The same counter, the same fence, the same working set: only the
+ * framing differs.
+ *
+ * --device-mb N makes the zygote an engine with a simulated device of N
+ * MiB: the GPU model in miniature. The zygote owns the device; fibers are
+ * its clients over the unix socket named by FIBERD_ENGINE, holding slices
+ * ("reserve <bytes>" on the fiber sets its slice; "devfree" drops it).
+ * The engine reports every slice to the agent (DEVICE lines) and drops a
+ * slice on EVICT, which is what a park does before the CPU checkpoint; a
+ * resumed fiber renegotiates by reserving again. A real CUDA engine is a
+ * drop-in that speaks the same lines.
+ *
+ * Build: gcc -O2 -pthread -o refzygote refzygote.c libfiberzygote.c
  * Run:   fiberd starts it; by hand: refzygote --heap-mb 64 3<>/dev/null
  *
  * --gvisor runs the same workload as the init process of a gVisor sandbox
@@ -41,10 +59,14 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <stdint.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -95,6 +117,130 @@ static unsigned long long payload_num(const unsigned char *p, size_t n, const ch
     return strtoull(k + 1, NULL, 10);
 }
 
+/* ---- the simulated device engine (zygote side) --------------------- */
+
+static int listen_endpoint(const char *ep); /* below, with the fiber's serving code */
+
+static pthread_mutex_t dev_mu = PTHREAD_MUTEX_INITIALIZER;
+static unsigned long long dev_cap, dev_used;
+static struct { char fence[128]; unsigned long long bytes; } dev_slices[4096];
+static int ndev;
+static char engine_path[256];
+
+/* dev_set replaces a fiber's slice (0 drops it) and reports both the
+ * slice and the whole device to the agent. Called with dev_mu held. */
+static const char *dev_set(const char *fence, unsigned long long bytes) {
+    int i;
+    for (i = 0; i < ndev && strcmp(dev_slices[i].fence, fence) != 0; i++) {}
+    unsigned long long had = i < ndev ? dev_slices[i].bytes : 0;
+    if (dev_used - had + bytes > dev_cap) return "err capacity";
+    if (bytes == 0) {
+        if (i < ndev) dev_slices[i] = dev_slices[--ndev];
+    } else {
+        if (i == ndev) {
+            if (ndev >= (int)(sizeof dev_slices / sizeof dev_slices[0])) return "err too many slices";
+            snprintf(dev_slices[ndev].fence, sizeof dev_slices[ndev].fence, "%s", fence);
+            ndev++;
+        }
+        dev_slices[i].bytes = bytes;
+    }
+    dev_used = dev_used - had + bytes;
+    fz_report("DEVICE %s %llu 0", fence, bytes);
+    fz_report("DEVICE - %llu %llu", dev_used, dev_cap);
+    return "ok";
+}
+
+static void on_control(const char *line) {
+    if (strncmp(line, "EVICT ", 6) == 0) {
+        pthread_mutex_lock(&dev_mu);
+        dev_set(line + 6, 0);
+        pthread_mutex_unlock(&dev_mu);
+    }
+}
+
+/* One request per connection: "reserve <fence> <bytes>", "release <fence>"
+ * or "stat"; the reply is one line. */
+static void *engine_thread(void *arg) {
+    (void)arg;
+    int s = listen_endpoint(engine_path);
+    if (s < 0) { fprintf(stderr, "refzygote: engine listen %s: %s\n", engine_path, strerror(errno)); return NULL; }
+    /* The agent learns of the device once the channel is up. */
+    while (fz_report("DEVICE - %llu %llu", dev_used, dev_cap) < 0) usleep(5000);
+    for (;;) {
+        int c = accept4(s, NULL, NULL, SOCK_CLOEXEC);
+        if (c < 0) { if (errno == EINTR) continue; break; }
+        char line[256]; ssize_t n = read(c, line, sizeof line - 1);
+        if (n <= 0) { close(c); continue; }
+        line[n] = 0; line[strcspn(line, "\r\n")] = 0;
+        char out[128]; char fence[128]; unsigned long long bytes;
+        pthread_mutex_lock(&dev_mu);
+        if (sscanf(line, "reserve %127s %llu", fence, &bytes) == 2) snprintf(out, sizeof out, "%s\n", dev_set(fence, bytes));
+        else if (sscanf(line, "release %127s", fence) == 1) snprintf(out, sizeof out, "%s\n", dev_set(fence, 0));
+        else if (strcmp(line, "stat") == 0) snprintf(out, sizeof out, "%llu %llu\n", dev_used, dev_cap);
+        else snprintf(out, sizeof out, "err unknown\n");
+        pthread_mutex_unlock(&dev_mu);
+        (void)!write(c, out, strlen(out));
+        close(c);
+    }
+    return NULL;
+}
+
+static void engine_start(size_t mb) {
+    dev_cap = (unsigned long long)mb << 20;
+    char cwd[192];
+    if (!getcwd(cwd, sizeof cwd)) { perror("refzygote: getcwd"); exit(2); }
+    snprintf(engine_path, sizeof engine_path, "%s/engine.sock", cwd);
+    fz_set_engine(engine_path);
+    fz_set_control(on_control);
+    pthread_t t;
+    if (pthread_create(&t, NULL, engine_thread, NULL) != 0) { perror("refzygote: engine thread"); exit(2); }
+    pthread_detach(t);
+}
+
+/* ---- the fiber's side of the device ----------------------------------- */
+
+static const char *cur_endpoint; /* this fiber's endpoint, for the fence file */
+static const char *cur_fence;
+
+/* The fence the engine should file the slice under: the one published
+ * beside a unix endpoint after a resume (the in-process fence is stale
+ * then), else the one this incarnation was born with. */
+static const char *current_fence(char *buf, size_t n) {
+    const char *ep = cur_endpoint ? cur_endpoint : "";
+    if (strncmp(ep, "unix://", 7) == 0) ep += 7;
+    if (ep[0] == '/') {
+        char path[300]; snprintf(path, sizeof path, "%s.fence", ep);
+        FILE *f = fopen(path, "r");
+        if (f) {
+            if (fgets(buf, (int)n, f)) { buf[strcspn(buf, "\r\n")] = 0; fclose(f); if (buf[0]) return buf; }
+            fclose(f);
+        }
+    }
+    return cur_fence ? cur_fence : "?";
+}
+
+/* device_reserve asks the engine for a slice of bytes (0 releases it) and
+ * returns the engine's reply line. */
+static const char *device_reserve(unsigned long long bytes, char *reply, size_t n) {
+    const char *eng = getenv("FIBERD_ENGINE");
+    if (!eng) return "err no engine";
+    if (strncmp(eng, "unix://", 7) == 0) eng += 7;
+    int s = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (s < 0) return "err socket";
+    struct sockaddr_un a = { .sun_family = AF_UNIX };
+    snprintf(a.sun_path, sizeof a.sun_path, "%s", eng);
+    if (connect(s, (struct sockaddr *)&a, sizeof a) < 0) { close(s); return "err engine unreachable"; }
+    char fb[128]; const char *fence = current_fence(fb, sizeof fb);
+    char req[256];
+    int m = bytes ? snprintf(req, sizeof req, "reserve %s %llu\n", fence, bytes) : snprintf(req, sizeof req, "release %s\n", fence);
+    (void)!write(s, req, (size_t)m);
+    ssize_t r = read(s, reply, n - 1);
+    close(s);
+    if (r <= 0) return "err no reply";
+    reply[r] = 0; reply[strcspn(reply, "\r\n")] = 0;
+    return reply;
+}
+
 static int serve_client(int c, const char *fence, unsigned long *counter) {
     FILE *in = fdopen(dup(c), "r");
     if (!in) return -1;
@@ -115,6 +261,8 @@ static int serve_client(int c, const char *fence, unsigned long *counter) {
             snprintf(out, sizeof out, "%ld\n", pages * 4096L);
         }
         else if (strncmp(line, "getenv ", 7) == 0) { const char *v = getenv(line + 7); snprintf(out, sizeof out, "%s\n", v ? v : "-"); }
+        else if (strncmp(line, "reserve ", 8) == 0) { char rp[128]; snprintf(out, sizeof out, "%s\n", device_reserve(strtoull(line + 8, NULL, 10), rp, sizeof rp)); }
+        else if (strcmp(line, "devfree") == 0) { char rp[128]; snprintf(out, sizeof out, "%s\n", device_reserve(0, rp, sizeof rp)); }
         else if (strcmp(line, "quit") == 0) break;
         else snprintf(out, sizeof out, "err unknown command\n");
         if (write(c, out, strlen(out)) < 0) break;
@@ -123,15 +271,95 @@ static int serve_client(int c, const char *fence, unsigned long *counter) {
     return 0;
 }
 
-static int on_fiber(const fz_fiber_t *f) {
+/* One HTTP/1.1 request per connection (Connection: close), routed onto
+ * the same state the line protocol serves. */
+static int http_mode;
+
+static void http_reply(int c, int status, const char *reason, const char *body) {
+    char head[256];
+    int n = snprintf(head, sizeof head, "HTTP/1.1 %d %s\r\nContent-Type: text/plain\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n",
+                     status, reason, strlen(body));
+    if (write(c, head, (size_t)n) < 0) return;
+    (void)!write(c, body, strlen(body));
+}
+
+static int serve_http(int c, const char *fence, unsigned long *counter) {
+    char req[4096]; size_t n = 0;
+    /* Read the head (up to the blank line); the body, if any, is ignored. */
+    while (n < sizeof req - 1) {
+        ssize_t r = read(c, req + n, sizeof req - 1 - n);
+        if (r <= 0) break;
+        n += (size_t)r; req[n] = 0;
+        if (strstr(req, "\r\n\r\n") || strstr(req, "\n\n")) break;
+    }
+    if (n == 0) return -1;
+    req[n] = 0;
+    char method[8], target[512];
+    if (sscanf(req, "%7s %511s", method, target) != 2) { http_reply(c, 400, "Bad Request", "bad request\n"); return 0; }
+    char *q = strchr(target, '?');
+    const char *query = "";
+    if (q) { *q = 0; query = q + 1; }
+    char body[128];
+    if (strcmp(target, "/readyz") == 0) { http_reply(c, 200, "OK", "ok\n"); return 0; }
+    if (strcmp(method, "GET") == 0 && (strcmp(target, "/") == 0 || strcmp(target, "/count") == 0)) {
+        snprintf(body, sizeof body, "%lu\n", *counter); http_reply(c, 200, "OK", body); return 0;
+    }
+    if (strcmp(method, "POST") == 0 && (strcmp(target, "/") == 0 || strcmp(target, "/incr") == 0)) {
+        snprintf(body, sizeof body, "%lu\n", ++*counter); http_reply(c, 200, "OK", body); return 0;
+    }
+    if (strcmp(target, "/fence") == 0) { snprintf(body, sizeof body, "%s\n", fence); http_reply(c, 200, "OK", body); return 0; }
+    if (strcmp(method, "POST") == 0 && strcmp(target, "/dirty") == 0) {
+        const char *b = strstr(query, "bytes=");
+        size_t got = dirty(b ? (size_t)strtoull(b + 6, NULL, 10) : 0);
+        snprintf(body, sizeof body, "ok %zu\n", got); http_reply(c, 200, "OK", body); return 0;
+    }
+    http_reply(c, 404, "Not Found", "not found\n");
+    return 0;
+}
+
+/* Listen on an endpoint as fiberd spells it: a unix socket path, or
+ * "tcp://host:port" (the host is the address fiberd advertises; the
+ * listener binds the wildcard of that address family so it is reachable
+ * however the home is addressed). Returns the listening fd, or -1. */
+static int listen_endpoint(const char *ep) {
+    if (strncmp(ep, "tcp://", 6) == 0) {
+        const char *hp = ep + 6;
+        const char *colon = strrchr(hp, ':');
+        if (!colon) { errno = EINVAL; return -1; }
+        int port = atoi(colon + 1);
+        int v6 = hp[0] == '[';
+        int s = socket(v6 ? AF_INET6 : AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+        if (s < 0) return -1;
+        int one = 1;
+        setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+        int rc;
+        if (v6) {
+            struct sockaddr_in6 a6 = { .sin6_family = AF_INET6, .sin6_port = htons((uint16_t)port), .sin6_addr = in6addr_any };
+            rc = bind(s, (struct sockaddr *)&a6, sizeof a6);
+        } else {
+            struct sockaddr_in a4 = { .sin_family = AF_INET, .sin_port = htons((uint16_t)port), .sin_addr.s_addr = htonl(INADDR_ANY) };
+            rc = bind(s, (struct sockaddr *)&a4, sizeof a4);
+        }
+        if (rc < 0 || listen(s, 16) < 0) { int e = errno; close(s); errno = e; return -1; }
+        return s;
+    }
+    if (strncmp(ep, "unix://", 7) == 0) ep += 7;
     int s = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
-    if (s < 0) return 2;
+    if (s < 0) return -1;
     struct sockaddr_un a = { .sun_family = AF_UNIX };
-    if (strlen(f->endpoint) >= sizeof a.sun_path) return 3;
-    strcpy(a.sun_path, f->endpoint);
-    unlink(f->endpoint);
-    if (bind(s, (struct sockaddr *)&a, sizeof a) < 0 || listen(s, 16) < 0) {
-        fprintf(stderr, "refzygote %s: bind %s: %s\n", f->fence, f->endpoint, strerror(errno));
+    if (strlen(ep) >= sizeof a.sun_path) { close(s); errno = ENAMETOOLONG; return -1; }
+    strcpy(a.sun_path, ep);
+    unlink(ep);
+    if (bind(s, (struct sockaddr *)&a, sizeof a) < 0 || listen(s, 16) < 0) { int e = errno; close(s); errno = e; return -1; }
+    return s;
+}
+
+static int on_fiber(const fz_fiber_t *f) {
+    cur_endpoint = f->endpoint;
+    cur_fence = f->fence;
+    int s = listen_endpoint(f->endpoint);
+    if (s < 0) {
+        fprintf(stderr, "refzygote %s: listen %s: %s\n", f->fence, f->endpoint, strerror(errno));
         return 4;
     }
     /* "ready_delay_ms" lets tests make a fiber miss its deadline. */
@@ -143,12 +371,17 @@ static int on_fiber(const fz_fiber_t *f) {
      * w_budget this is where the kernel kills us. */
     size_t db = (size_t)payload_num(f->payload, f->payload_len, "\"dirty_bytes\"");
     if (db) dirty(db);
+    /* And its device slice, which the engine reports and the home holds
+     * against the grant's device budget. */
+    unsigned long long dev = payload_num(f->payload, f->payload_len, "\"device_bytes\"");
+    if (dev) { char rp[128]; device_reserve(dev, rp, sizeof rp); }
 
     unsigned long counter = 0;
     for (;;) {
         int c = accept4(s, NULL, NULL, SOCK_CLOEXEC);
         if (c < 0) { if (errno == EINTR) continue; return 5; }
-        serve_client(c, f->fence, &counter);
+        if (http_mode) serve_http(c, f->fence, &counter);
+        else serve_client(c, f->fence, &counter);
         close(c);
     }
 }
@@ -291,15 +524,17 @@ int main(int argc, char **argv) {
     for (int i = 1; i < argc; i++) if (strcmp(argv[i], "--gvisor") == 0) gvisor = 1;
     gvisor_mode = gvisor;
     if (!gvisor) fz_init(argc, argv); /* gVisor: no fork, no CoW delta, so no need to pin the layout */
-    size_t heap_mb = 64;
+    size_t heap_mb = 64, device_mb = 0;
     int ctl_fd = 3;
     const char *logpath = NULL;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--heap-mb") == 0 && i + 1 < argc) heap_mb = (size_t)atoi(argv[++i]);
+        else if (strcmp(argv[i], "--device-mb") == 0 && i + 1 < argc) device_mb = (size_t)atoi(argv[++i]);
         else if (strcmp(argv[i], "--ctl-fd") == 0 && i + 1 < argc) ctl_fd = atoi(argv[++i]);
         else if (strcmp(argv[i], "--log") == 0 && i + 1 < argc) logpath = argv[++i];
         else if (strcmp(argv[i], "--gvisor") == 0) {}
-        else { fprintf(stderr, "usage: %s [--heap-mb N] [--ctl-fd N] [--log PATH] [--gvisor]\n", argv[0]); return 2; }
+        else if (strcmp(argv[i], "--http") == 0) http_mode = 1;
+        else { fprintf(stderr, "usage: %s [--heap-mb N] [--device-mb N] [--ctl-fd N] [--log PATH] [--gvisor] [--http]\n", argv[0]); return 2; }
     }
     if (logpath) {
         /* Reopen stdio from inside: a zygote that is a container's init
@@ -313,6 +548,7 @@ int main(int argc, char **argv) {
     }
     heavy_init(heap_mb);
     if (gvisor) return gvisor_main();
+    if (device_mb) engine_start(device_mb); /* the engine thread reports once fz_serve is up */
     int rc = fz_serve(ctl_fd, on_fiber);
     if (rc < 0) { perror("refzygote: fz_serve"); return 1; }
     return 0;
