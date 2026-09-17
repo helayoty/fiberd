@@ -1,182 +1,370 @@
+// Command fiberd is the grant agent: one process per home instance. It
+// verifies signed grants offline, mints fibers under them through a
+// runtime, and serves the grant protocol (api/grant/v1) over gRPC.
+//
+// Startup order is fixed: epoch++ -> reconcile -> open RPC. The agent
+// serves nothing until its view of the home is real.
 package main
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
+	"os/signal"
+	"path/filepath"
 	"strconv"
+	"syscall"
 	"time"
 
-	"fiberd/pkg/adapter"
-	"fiberd/pkg/core"
-	"fiberd/pkg/k8s"
-	"fiberd/pkg/runtime/stub"
+	"github.com/helayoty/fiberd/pkg/artifact"
+	"github.com/helayoty/fiberd/pkg/backend"
+	gvisorbackend "github.com/helayoty/fiberd/pkg/backend/gvisor"
+	hlbackend "github.com/helayoty/fiberd/pkg/backend/hyperlight"
+	procbackend "github.com/helayoty/fiberd/pkg/backend/proc"
+	runcbackend "github.com/helayoty/fiberd/pkg/backend/runc"
+	"github.com/helayoty/fiberd/pkg/core"
+	"github.com/helayoty/fiberd/pkg/grant"
+	"github.com/helayoty/fiberd/pkg/home"
+	"github.com/helayoty/fiberd/pkg/home/standalone"
+	"github.com/helayoty/fiberd/pkg/rpc"
+	"github.com/helayoty/fiberd/pkg/runtime/host"
+	"github.com/helayoty/fiberd/pkg/runtime/stub"
 )
 
-// nopAudit discards every audit event.
-//
-// TODO(poc): this is a stand-in, not the audit spool the contract requires.
-// core.Auditor is specified as "append-locally, ship-async", and under
-// durability SYNC Append must not return until the record is remote (Clone
-// acks after it). nopAudit persists nothing and always returns nil, so SYNC
-// grants get no durability guarantee and BEST_EFFORT grants leave no local
-// trail. Implement a real Auditor: append to a local durable spool, ship
-// asynchronously to the audit sink, and block in Append only under SYNC until
-// the record is durable/remote.
-type nopAudit struct{}
+func envOr(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
 
-func (nopAudit) Append(context.Context, string, core.Fence, string) error { return nil }
+func envDuration(key string, def time.Duration) time.Duration {
+	if v := os.Getenv(key); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			return d
+		}
+	}
+	return def
+}
 
-// baseRate reads FIBERD_BASE_RATE (clones/sec) so demos can pick a budget
-// small enough to actually trip; default matches the placeholder curve.
-func baseRate() float64 {
-	if v := os.Getenv("FIBERD_BASE_RATE"); v != "" {
+func envFloat(key string, def float64) float64 {
+	if v := os.Getenv(key); v != "" {
 		if f, err := strconv.ParseFloat(v, 64); err == nil && f > 0 {
 			return f
 		}
 	}
-	return 200
+	return def
+}
+
+type config struct {
+	home, listen, httpAddr, stateDir, nodeID, issuer string
+	runtimeName, runtimeTier, verifier, adminPath    string
+	grantsDir, cgroupRoot, advertise, runDir         string
+	deltaDir, criuBin, registry, templateCache       string
+	deltaRegistry, parity                            string
+	gvisorRootfs, runsc, runcRootfs, runc            string
+	hlHelper, hlGuest                                string
+	gvisorOverhead                                   uint64
+	registryPlain, gvisorDebug                       bool
+	grantCeiling                                     uint64
+	templates                                        map[string]string
+	adminUnsafe                                      bool
+	staleTTL, laneDies, statusEvery, jwksMaxStale    time.Duration
+	pressureEvery                                    time.Duration
+	baseRate, refW                                   float64
+}
+
+func parseFlags() config {
+	hostname, _ := os.Hostname()
+	var c config
+	flag.StringVar(&c.home, "home", "standalone", "home adapter: standalone (k8s and slurm arrive with their phases)")
+	flag.StringVar(&c.listen, "listen", ":8484", "gRPC listen address for the Fibers service")
+	flag.StringVar(&c.advertise, "advertise", "", "address callers reach this home at (default the listen address)")
+	flag.StringVar(&c.httpAddr, "http", "", "optional JSON gateway listen address (off when empty)")
+	flag.StringVar(&c.stateDir, "state", envOr("FIBERD_STATE", "/var/lib/fiberd"), "state directory: epoch, audit spool, deltas")
+	flag.StringVar(&c.nodeID, "node-id", envOr("FIBERD_NODE_ID", hostname), "this home's identity; a grant's audience must match it")
+	flag.StringVar(&c.issuer, "issuer", "", "issuer URL: OIDC discovery root for -verifier=jwks, and what Miss details report")
+	flag.StringVar(&c.verifier, "verifier", "", "grant verifier: jwks (signed JWTs, keys from -issuer) or insecure-json (development only); required")
+	flag.DurationVar(&c.jwksMaxStale, "jwks-max-stale", time.Hour, "refuse to verify when the key set is older than this (set to the lease TTL)")
+	flag.StringVar(&c.grantsDir, "grants-dir", "", "directory polled for *.jwt files to pre-admit (warm before the first Clone)")
+	flag.StringVar(&c.cgroupRoot, "cgroup-root", "/sys/fs/cgroup/fiberd", "delegated cgroup v2 subtree the runtime may carve (phase 3)")
+	flag.StringVar(&c.runtimeName, "runtime", "stub", "runtime: stub (in-memory), or a sandbox backend on the host runtime: proc (fork zygote + criu), runc (the zygote as an OCI container's init), gvisor (runsc sandbox per fiber), hyperlight (micro-VM snapshots through a helper process)")
+	flag.StringVar(&c.runtimeTier, "runtime-tier", "FIBER_CHECKPOINT", "tier the stub runtime advertises (stub only)")
+	c.templates = map[string]string{}
+	flag.Func("template", "proc: digest=path [args] mapping a template digest to a zygote command (repeatable; key `default` catches the rest)",
+		func(v string) error { return host.ParseTemplateFlag(c.templates, v) })
+	flag.StringVar(&c.runDir, "run-dir", "/run/fiberd", "proc: directory for fiber endpoints (unix sockets; keep short)")
+	flag.StringVar(&c.deltaDir, "delta-dir", "", "proc: directory for parked deltas (default <state>/deltas)")
+	flag.StringVar(&c.criuBin, "criu", "criu", "proc: criu binary; park/resume (FIBER_CHECKPOINT) is offered when `criu check` passes")
+	flag.Uint64Var(&c.grantCeiling, "grant-ceiling", 0, "proc: fixed block ceiling per grant in bytes (memory.high); 0 = fibers.max * w_budget + zygote + 25%")
+	flag.StringVar(&c.registry, "registry", "", "proc: OCI repository (host/repo) to pull zygote artifacts from by template digest")
+	flag.BoolVar(&c.registryPlain, "registry-plain-http", false, "proc: the registry speaks http, not https")
+	flag.StringVar(&c.templateCache, "template-cache", "", "proc: directory for pulled artifacts (default <state>/templates)")
+	flag.StringVar(&c.deltaRegistry, "delta-registry", "", "proc: OCI repository prefix (host/prefix) where parked sessions are published and claimed by other homes")
+	flag.StringVar(&c.gvisorRootfs, "gvisor-rootfs", "", "gvisor: rootfs directory every sandbox runs in; -template commands are paths inside it")
+	flag.StringVar(&c.runsc, "runsc", "runsc", "gvisor: runsc binary")
+	flag.StringVar(&c.runcRootfs, "runc-rootfs", "", "runc: rootfs directory the zygote container runs in; -template commands are paths inside it")
+	flag.StringVar(&c.runc, "runc", "runc", "runc: runc binary")
+	flag.StringVar(&c.hlHelper, "hyperlight-helper", "", "hyperlight: helper executable speaking hack/hyperlight/PROTOCOL.md (the Rust helper, or fakehelper)")
+	flag.StringVar(&c.hlGuest, "hyperlight-guest", "", "hyperlight: guest binary the helper loads")
+	flag.Uint64Var(&c.gvisorOverhead, "gvisor-overhead", 0, "gvisor: fixed bytes one sandbox costs besides its working set (sentry + template pages); added to memory.max, subtracted from W; 0 = the warm template's measured size")
+	flag.BoolVar(&c.gvisorDebug, "gvisor-debug", false, "gvisor: keep runsc debug logs under <state>/gvisor/log")
+	flag.StringVar(&c.parity, "parity", "strict", "proc: how closely artifact images and other homes' deltas must match this host: strict, off, or kernel=exact|series|off,libc=exact|off (arch always)")
+	flag.StringVar(&c.adminPath, "admin", "", "admin unix socket (default <state>/admin.sock): GET /healthz")
+	flag.BoolVar(&c.adminUnsafe, "admin-unsafe", false, "enable test-only admin controls (POST /lane)")
+	flag.DurationVar(&c.staleTTL, "stale-ttl", envDuration("FIBERD_STALE_TTL", 30*time.Second), "grant lane is unhealthy past this silence from the issuer")
+	flag.DurationVar(&c.laneDies, "lane-dies-after", envDuration("FIBERD_LANE_DIES_AFTER", 0), "simulate the issuer disappearing after this long (0 = never)")
+	flag.Float64Var(&c.baseRate, "base-rate", envFloat("FIBERD_BASE_RATE", 200), "thrash budget: clones/sec at W -> 0")
+	flag.Float64Var(&c.refW, "ref-w", 256<<20, "thrash budget: working-set bytes at which the rate halves")
+	flag.DurationVar(&c.statusEvery, "status-interval", time.Second, "W sampling and Watch cadence")
+	flag.DurationVar(&c.pressureEvery, "pressure-interval", time.Second, "pressure ladder evaluation cadence (0 disables the ladder)")
+	flag.Parse()
+	if c.advertise == "" {
+		c.advertise = c.listen
+	}
+	return c
 }
 
 func main() {
-	dir := os.Getenv("FIBERD_STATE")
-	if dir == "" {
-		dir = "/var/lib/fiberd"
+	if err := run(parseFlags()); err != nil {
+		log.Fatal(err)
 	}
-	_ = os.MkdirAll(dir, 0o700)
+}
 
-	// Startup order is fixed: epoch++ → CRI reconcile → open RPC.
-	// The agent serves nothing until its view of the node is real.
-	ep, err := core.OpenEpochStore(dir)
-	if err != nil {
-		log.Fatalf("epoch: %v", err)
-	}
-	log.Printf("fiberd epoch=%d (all prior fences invalid)", ep.Current())
-
-	rt := stub.New()
-	led := core.NewLedger(ep.Current())
-	if fibers, err := rt.List(context.Background(), ""); err == nil {
-		// Reconcile: reality wins; orphans from the previous epoch would be
-		// reaped here (stub starts empty).
-		log.Printf("reconcile: %d fibers running", len(fibers))
-		// TODO(poc): this is a log line, not a reconcile. The Ledger doc
-		// comment promises authoritative state "rebuilt at startup from
-		// Runtime.List reconciled against the on-disk snapshot, discrepancies
-		// resolving in favor of what is actually running." None of that
-		// happens: there is no on-disk snapshot of grants/sessions/fibers, so
-		// nothing is reloaded into `led`, and orphaned instances from a prior
-		// epoch are neither adopted nor torn down. Implement (1) a durable
-		// snapshot of the ledger (grants, sessions with fences, fiber refs)
-		// persisted under FIBERD_STATE, and (2) a reconcile that seeds `led`
-		// from the snapshot, matches it against rt.List, and reaps runtime
-		// instances with no live grant.
-	}
-
-	staleTTL := 30 * time.Second
-	if v := os.Getenv("FIBERD_STALE_TTL"); v != "" {
-		if d, err := time.ParseDuration(v); err == nil && d > 0 {
-			staleTTL = d
+func run(c config) error {
+	// Verifier first: it decides whether there is an issuer to poll.
+	var ver core.Verifier
+	var jwks *grant.Cache
+	switch c.verifier {
+	case "jwks":
+		if c.issuer == "" {
+			return errors.New("-verifier=jwks needs -issuer (the OIDC discovery root)")
 		}
-	}
-	laneDies := time.Duration(0) // FIBERD_LANE_DIES_AFTER, e.g. "5s"; 0 = never
-	if v := os.Getenv("FIBERD_LANE_DIES_AFTER"); v != "" {
-		if d, err := time.ParseDuration(v); err == nil {
-			laneDies = d
-		}
-	}
-	fiberMax := 128
-	if v := os.Getenv("FIBERD_DEMO_MAX"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			fiberMax = n
-		}
-	}
-	log.Printf("staleTTL=%s laneDies=%s fiberMax=%d", staleTTL, laneDies, fiberMax)
-	health := core.NewSourceHealth(staleTTL, time.Now())
-
-	ag := &core.Agent{
-		Ledger:  led,
-		Budget:  core.NewBudget(baseRate(), 256<<20), // placeholders until the rig speaks
-		Runtime: rt,
-		Audit:   nopAudit{},
-		Verify:  k8s.JWKSVerifier{},
-		Health:  health,
-		SandboxFor: func(uid string) (string, bool) {
-			return "sbx-" + uid, true // stub; adapters own this mapping
-		},
+		jwks = &grant.Cache{IssuerURL: c.issuer}
+		ver = &grant.Verifier{Cache: jwks, Audience: c.nodeID, MaxStale: c.jwksMaxStale}
+	case "insecure-json":
+		log.Printf("WARNING: -verifier=insecure-json performs no signature check; development only")
+		ver = grant.InsecureJSONVerifier{}
+	case "":
+		return errors.New("-verifier is required: jwks (signed grants) or insecure-json (development only)")
+	default:
+		return fmt.Errorf("unknown verifier %q", c.verifier)
 	}
 
-	// Async lane: grants in. Skeleton feeds one grant by hand.
-	src := &k8s.Source{Events: make(chan adapter.GrantEvent, 1)}
-	src.Events <- adapter.GrantEvent{Kind: adapter.GrantAdded,
-		Grant: adapter.Grant{UID: "demo", FiberMax: fiberMax, SandboxID: "sbx-demo"}}
-	go func() {
-		ch, err := src.Watch(context.Background())
+	var h *standalone.Home
+	switch c.home {
+	case "standalone":
+		h = standalone.New(standalone.Config{
+			Cache: jwks, StaleTTL: c.staleTTL, GrantsDir: c.grantsDir,
+			CgroupRoot: c.cgroupRoot, Endpoint: c.advertise, DieAfter: c.laneDies,
+		})
+	default:
+		return fmt.Errorf("home %q is not available yet; only standalone is wired in this phase", c.home)
+	}
+
+	var rt core.Runtime
+	switch c.runtimeName {
+	case "stub":
+		tier, err := core.ParseTier(c.runtimeTier)
 		if err != nil {
+			return fmt.Errorf("runtime-tier: %w", err)
+		}
+		rt = stub.NewWithTier(tier)
+	case "proc", "gvisor", "runc", "hyperlight":
+		if len(c.templates) == 0 && c.registry == "" {
+			return fmt.Errorf("-runtime=%s needs a -template digest=path or a -registry to pull artifacts from", c.runtimeName)
+		}
+		// One host runtime, one backend per -runtime name.
+		var be backend.Backend
+		switch c.runtimeName {
+		case "proc":
+			be = procbackend.New(procbackend.Options{CRIU: c.criuBin})
+		case "hyperlight":
+			if c.hlHelper == "" {
+				return errors.New("-runtime=hyperlight needs -hyperlight-helper (hack/hyperlight/helper, or fakehelper without a hypervisor)")
+			}
+			be = hlbackend.New(hlbackend.Options{Helper: c.hlHelper, Guest: c.hlGuest})
+		case "runc":
+			if c.runcRootfs == "" {
+				return errors.New("-runtime=runc needs -runc-rootfs (hack/gvisor/rootfs.sh builds one)")
+			}
+			be = runcbackend.New(runcbackend.Options{Runc: c.runc, Rootfs: c.runcRootfs, CRIU: c.criuBin,
+				StateDir: filepath.Join(c.stateDir, "runc")})
+		case "gvisor":
+			if c.gvisorRootfs == "" {
+				return errors.New("-runtime=gvisor needs -gvisor-rootfs (hack/gvisor/rootfs.sh builds one)")
+			}
+			be = gvisorbackend.New(gvisorbackend.Options{Runsc: c.runsc, Rootfs: c.gvisorRootfs,
+				StateDir: filepath.Join(c.stateDir, "gvisor"), OverheadBytes: c.gvisorOverhead, Debug: c.gvisorDebug})
+		}
+		if c.deltaDir == "" {
+			c.deltaDir = filepath.Join(c.stateDir, "deltas")
+		}
+		if c.templateCache == "" {
+			c.templateCache = filepath.Join(c.stateDir, "templates")
+		}
+		parity, err := artifact.ParseParity(c.parity)
+		if err != nil {
+			return err
+		}
+		pc := host.Config{Backend: be, Templates: c.templates, CgroupRoot: h.CgroupRoot(), RunDir: c.runDir,
+			DeltaDir: c.deltaDir,
+			Registry: c.registry, RegistryPlainHTTP: c.registryPlain, TemplateCache: c.templateCache,
+			DeltaRegistry: c.deltaRegistry, HomeID: c.nodeID, Parity: parity}
+		if c.grantCeiling > 0 {
+			fixed := c.grantCeiling
+			pc.Ceiling = func(core.Grant, uint64) uint64 { return fixed }
+		}
+		rt, err = host.New(pc)
+		if err != nil {
+			return fmt.Errorf("%s runtime: %w", c.runtimeName, err)
+		}
+		if closer, ok := rt.(interface{ Close() }); ok {
+			defer closer.Close()
+		}
+	default:
+		return fmt.Errorf("runtime %q is not available yet", c.runtimeName)
+	}
+	if err := os.MkdirAll(c.stateDir, 0o700); err != nil {
+		return fmt.Errorf("state dir: %w", err)
+	}
+	if c.adminPath == "" {
+		c.adminPath = filepath.Join(c.stateDir, "admin.sock")
+	}
+
+	// 1. Epoch: every prior fence is invalid from here on.
+	ep, err := core.OpenEpochStore(c.stateDir)
+	if err != nil {
+		return fmt.Errorf("epoch: %w", err)
+	}
+	log.Printf("fiberd epoch=%d node=%s home=%s (all prior fences invalid)", ep.Current(), c.nodeID, h.Name())
+
+	// 2. Ledger, audit spool, agent.
+	led := core.NewLedger(ep.Current())
+	spool, err := core.OpenSpool(c.stateDir, nil)
+	if err != nil {
+		return fmt.Errorf("audit: %w", err)
+	}
+	defer func() { _ = spool.Close() }()
+
+	store := &core.SnapshotStore{Path: filepath.Join(c.stateDir, "ledger.json")}
+	ag := &core.Agent{
+		NodeID:         c.nodeID,
+		Ledger:         led,
+		Budget:         core.NewBudget(c.baseRate, c.refW),
+		Runtime:        rt,
+		Audit:          spool,
+		Verify:         ver,
+		Health:         h.Health(),
+		Store:          store,
+		StatusInterval: c.statusEvery,
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	// 3. Reconcile: the snapshot says what to re-admit and which parked
+	// sessions to remember; the runtime says what is actually running,
+	// and everything running is from a prior epoch and is killed.
+	snap, err := store.Load()
+	if err != nil {
+		return fmt.Errorf("snapshot: %w", err)
+	}
+	rep, err := ag.Reconcile(ctx, snap)
+	if err != nil {
+		return err
+	}
+	if pruner, ok := rt.(interface{ PruneGrants(map[string]bool) }); ok {
+		keep := map[string]bool{}
+		for _, st := range led.Statuses() {
+			keep[st.GrantUID] = true
+		}
+		pruner.PruneGrants(keep)
+	}
+	log.Printf("reconcile: grants re-admitted=%d expired=%d parked restored=%d dropped=%d orphans killed=%d",
+		rep.GrantsReadmitted, rep.GrantsExpired, rep.ParkedRestored, rep.ParkedDropped, rep.OrphansKilled)
+	go ag.Run(ctx)
+
+	// The pressure ladder, when the runtime can report PSI.
+	if src, ok := rt.(core.PressureSource); ok && c.pressureEvery > 0 {
+		ctl := &core.PressureController{
+			Ledger: led, Source: src, Interval: c.pressureEvery,
+			Park:    func(ctx context.Context, id string) error { _, _, err := ag.Park(ctx, id, false); return err },
+			Release: func(ctx context.Context, id string) error { _, err := ag.Release(ctx, id, false); return err },
+			Yield:   func(ctx context.Context, uid string) { ag.Yield(ctx, uid, "pressure") },
+		}
+		ag.Pressure = ctl
+		go ctl.Run(ctx)
+	}
+
+	// 4. The home: liveness signal and the async grant lane.
+	go h.Run(ctx)
+	go home.Drive(ctx, h, ag)
+
+	// 5. Admin socket.
+	healthz := rpc.HealthFunc(ep.Current, h.Health(), rt.Tier())
+	admin := http.NewServeMux()
+	admin.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(healthz())
+	})
+	admin.HandleFunc("POST /lane", func(w http.ResponseWriter, r *http.Request) {
+		if !c.adminUnsafe {
+			http.Error(w, "admin controls disabled; start with -admin-unsafe", http.StatusForbidden)
 			return
 		}
-		health.MarkSync(time.Now()) // watch established: idle is not unreachability
-		// This source has no wire heartbeat; tick while the watch is held.
-		// A real informer replaces the ticker with relist / watch errors.
-		tick := time.NewTicker(staleTTL / 2)
-		defer tick.Stop()
-		var deadCh <-chan time.Time
-		if laneDies > 0 {
-			deadCh = time.After(laneDies)
+		var body struct {
+			Healthy bool `json:"healthy"`
 		}
-		for {
-			select {
-			case ev, ok := <-ch:
-				if !ok {
-					return // watch gone; lastSync stops advancing → stale
-				}
-				health.MarkSync(time.Now())
-				switch ev.Kind {
-				case adapter.GrantAdded:
-					led.AdmitGrant(ev.Grant.UID, ev.Grant.SandboxID, ev.Grant.FiberMax)
-				case adapter.GrantRevoked:
-					led.RevokeGrant(ev.Grant.UID)
-				}
-			case <-tick.C:
-				health.MarkSync(time.Now())
-			case <-deadCh:
-				log.Printf("grant lane simulated death (FIBERD_LANE_DIES_AFTER=%s)", laneDies)
-				return
-			}
-		}
-	}()
-
-	// Readiness + epoch introspection: poll this before driving load.
-	http.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"epoch":            ep.Current(),
-			"grantLaneHealthy": health.Healthy(time.Now()),
-		})
-	})
-
-	// Warm path. JSON/HTTP in the skeleton; gRPC + mTLS in the real agent.
-	http.HandleFunc("/v0/clone", func(w http.ResponseWriter, r *http.Request) {
-		var req core.CloneRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		if req.Deadline == 0 {
-			req.Deadline = 10 * time.Millisecond
-		}
-		resp, code, err := ag.Clone(r.Context(), []byte(r.Header.Get("Authorization")), req)
-		switch code {
-		case core.Shed:
-			w.Header().Set("Retry-After", "1")
-			http.Error(w, err.Error(), http.StatusTooManyRequests)
-		case core.DeferredFallback:
-			http.Error(w, err.Error(), http.StatusServiceUnavailable)
-		default:
-			_ = json.NewEncoder(w).Encode(resp)
-		}
+		h.SetLane(body.Healthy)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(healthz())
 	})
+	_ = os.Remove(c.adminPath)
+	al, err := net.Listen("unix", c.adminPath)
+	if err != nil {
+		return fmt.Errorf("admin socket: %w", err)
+	}
+	defer func() { _ = os.Remove(c.adminPath) }()
+	adminSrv := &http.Server{Handler: admin, ReadHeaderTimeout: 5 * time.Second}
+	go func() { _ = adminSrv.Serve(al) }()
 
-	log.Println("fiberd warm path on :8484 — apiserver not required beyond this point")
-	log.Fatal(http.ListenAndServe(":8484", nil))
+	// 6. Open the warm path.
+	srv := &rpc.Server{Agent: ag, Issuer: c.issuer}
+	gs := rpc.NewGRPCServer(srv)
+	gl, err := net.Listen("tcp", c.listen)
+	if err != nil {
+		return fmt.Errorf("listen %s: %w", c.listen, err)
+	}
+	if c.httpAddr != "" {
+		gw := &rpc.Gateway{Server: srv, Health: healthz}
+		hs := &http.Server{Addr: c.httpAddr, Handler: gw.Handler(), ReadHeaderTimeout: 5 * time.Second}
+		go func() {
+			log.Printf("fiberd json gateway on %s", c.httpAddr)
+			if err := hs.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Printf("gateway: %v", err)
+			}
+		}()
+		go func() { <-ctx.Done(); _ = hs.Close() }()
+	}
+	go func() {
+		<-ctx.Done()
+		gs.GracefulStop()
+		_ = adminSrv.Close()
+	}()
+	log.Printf("fiberd warm path on %s tier=%s admin=%s (no control plane needed beyond this point)", gl.Addr(), rt.Tier(), c.adminPath)
+	if err := gs.Serve(gl); err != nil {
+		return fmt.Errorf("serve: %w", err)
+	}
+	return nil
 }

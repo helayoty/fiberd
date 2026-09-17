@@ -1,0 +1,5 @@
+# cargo-hyperlight builds guests for a custom target specification, which
+# Rust made unstable in 1.95; the last stable release that accepts it.
+[toolchain]
+channel = "1.94.0"
+components = ["rust-src"]

@@ -1,28 +1,42 @@
 # fiberd
 
-**A node-level execution fabric for serverless, agent, and inference platforms: charge capacity once as a block, mint instances locally in milliseconds, survive control-plane outages by construction.**
+**A capability-grant protocol that lets any execution environment mint instances locally in milliseconds from capacity a control plane charged once, and lets callers fall back sanely when it cannot.**
 
 > Instances that cost nothing to create but still count.
 
 ![fiberd: the control plane issues a grant once; the node mints fibers on the warm path with no call home](./docs/images/fiberd-hero.png)
 
-## The problem
+## Prior art: the mechanisms are known
 
-Serverless container instances must be **cheap** (thousands per host), **fast** (created inside the request path), and **billable** (attributed to a tenant with a hard ceiling). Per-instance control-plane records (a Kubernetes Pod is the sharpest example) deliver *billable* and can be made *fast*, but never *cheap* - a single record fuses scheduling, accounting, isolation, identity, lifecycle, ecosystem contract, and network identity, and pays the cost of all of them per instance.
+Fast, dense instance creation is a solved mechanism. fiberd does not claim any of the rows below as novel; it reuses them.
 
-## The inversion
+| System | Mechanism it proves | What it gives | What it leaves open |
+| --- | --- | --- | --- |
+| **SOCK** (Oakes et al., ATC '18) | Zygote-provisioned lean containers: fork from a warm, package-cached interpreter | Millisecond starts, shared pages across instances | Capacity and authorization stay per instance in the orchestrator; one runtime, one home |
+| **SAND** (Akkus et al., ATC '18) | Application-level sandboxing: fork worker processes inside a per-app container | Cheap instances within an app's isolation boundary | No signed authority a foreign environment can verify; no miss semantics tied to control-plane health |
+| **Catalyzer** (Du et al., ASPLOS '20) | `sfork` + on-demand restore of a gVisor sandbox image | Sub-millisecond restore, snapshot-as-template | Mechanism only: no delegation of capacity, no cost model for dirtied state |
+| **Firecracker snapshots** | MicroVM snapshot/restore behind a KVM boundary | Multi-tenant-safe warm instances | Each VM is still a control-plane record; nothing says who may restore what, or when to give up |
+| **Orleans** (virtual actors) | Activation on demand: an actor identity is attached, resumed, or created, idempotently | The session model: name survives incarnations | Single cluster, single runtime; no portable authority, no memory-priced budget |
+| **Slurm** | Allocation as a block: capacity granted once, jobs run inside it with no scheduler contact | Block delegation, prolog-time authorization | No millisecond instances inside the block, no fence/miss protocol, not portable to Kubernetes |
 
-fiberd splits those roles. The control plane's involvement ends at **issuing capacity as a block**; the node **exercises** it by minting instances locally, with no control-plane read, write, or lease on the warm path. Scheduling, accounting, and the ecosystem contract stay on a block-level object the control plane owns; isolation, identity, lifecycle, and network identity are delivered per instance by the node.
+## What is new
 
-Two proven precedents shape the design: an IP router is delegated a prefix once and hosts mint addresses from it with no allocator involvement; Android keeps one warm zygote and forks every app copy-on-write. fiberd applies both moves to container instances.
+fiberd is the **protocol between a control plane and an environment that runs instances on its behalf**, not the daemon that runs them. Three properties are the contribution, and every phase of the work preserves all three:
+
+1. **The signed capability grant.** Authorization travels with the work as a signed `CapacityGrant`; the receiving node or environment verifies it offline, and revocation is lease non-renewal. Nothing on the activation path calls home.
+2. **Two miss codes keyed on control-plane health.** A clone that cannot be served returns `SHED` when the control plane is unreachable (back off; never queue on a dead control plane) and `DEFERRED_FALLBACK` when it is healthy (route the caller back to its home's ordinary path). Conflating them is what makes routers retry into outages.
+3. **A W-priced cost model.** Activation rate, park cost, and reclaim are all priced in the same quantity: the working set W a fiber dirties after fork. W is also the mobility budget for moving a parked session between environments.
 
 ## How it works
 
+The components as specified. [docs/status.md](docs/status.md) says which parts exist today.
+
 | Component | What it is |
 | --- | --- |
-| **CapacityGrant** | An authenticated artifact the control plane issues once per block of capacity (template reference, `fibers: {max, warm}`, policy, expiry). Billing charges it exactly once, at issue. |
-| **Grant agent** (`fiberd`) | One daemon per node, the sole runtime client. Holds the ledger, budget, fences, audit spool, and pressure ladder. |
-| **Fibers** | Node-minted instances inside a grant: copy-on-write clones of a checkpointed engine zygote, addressed by an endpoint, scoped by a fence, held by a lease. |
+| **CapacityGrant** | A signed JWT the control plane issues once per block of capacity: template digest, `fibers: {max, warm}`, `w_budget_bytes`, minimum runtime tier, lease expiry, policy. Billing charges it exactly once, at issue. |
+| **Home** | The environment that holds the grant and runs fibers under it: standalone host, Kubernetes grant Pod, or Slurm allocation. Homes implement the protocol; the core is home-invariant. |
+| **Grant agent** (`fiberd`) | One process per home instance. Holds the ledger, budget, fences, audit spool, and pressure ladder; forks fibers from a warm zygote. |
+| **Fibers** | Node-minted instances inside a grant: copy-on-write clones of a warm zygote, addressed by an endpoint, scoped by a fence, held by a lease. |
 
 The warm-path contract is one verb with three costs:
 
@@ -33,27 +47,13 @@ Park(fiberID, sync)                 -> checkpoint delta, keep name
 Release(fiberID)                    -> destroy state, free name
 ```
 
-## Key properties
-
-- **Node-local activation** - millisecond clones; no control-plane call on the warm path.
-- **Outage tolerance by construction** - a control-plane outage freezes new supply but never breaks binds against supply already on the node.
-- **Accounting precedes activation** - the block is charged once; the node's authenticated copy of the grant is the proof at activation time.
-- **CPU cloned, GPU multiplexed** - fibers are copy-on-write forks of a warm zygote; on GPU, one engine owns device state and fibers hold slices of its KV cache.
-- **One core, two homes** - the identical agent and semantics run standalone and under Kubernetes; only thin adapters differ.
-
 ## Documentation
 
-- [docs/overview.md](docs/overview.md) - start here: the thesis, the problem, and a reading guide into the rest of the docs.
+- [docs/overview.md](docs/overview.md) - start here: the thesis and a reading guide.
 - [docs/quickstart.md](docs/quickstart.md) - build and exercise the prototype locally.
-- [docs/status.md](docs/status.md) - implementation status, measured results, and semantic proofs.
-
-## Status and roadmap
-
-- **v0 (exists)** - the agent and process-tier semantics; the C bench measures the raw `fork()`/CoW mechanism. Runs on any Linux host with no platform changes.
-- **v1** - checkpoint tier on containerd >= 2.0, real JWKS/ed25519 verification, audit shipping, and the two-input pressure ladder.
-- **v2** - multi-node NVLink fabric tier, portable delta store for cross-domain mobility, and per-fiber identity delegation.
-
-See [docs/status.md](docs/status.md) for what is implemented today versus specified.
+- [docs/status.md](docs/status.md) - what is implemented, what is measured, what is novel.
+- [docs/architecture.md](docs/architecture.md) - the design reference.
+- [docs/status.md](docs/status.md) - what is implemented today versus specified.
 
 ## License
 

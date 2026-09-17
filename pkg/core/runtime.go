@@ -5,29 +5,47 @@ import (
 	"time"
 )
 
-// Tier is advertised runtime capability. Conformance to the verbs does not
-// imply the mechanics; the scheduler (or platform) places grants against the
-// tier, and Clone(S) on a parked session MUST fail rather than silently fork
-// a fresh amnesiac fiber when the runtime lacks TierCheckpoint.
+// Tier is advertised runtime capability. Values match api/grant/v1 Tier so
+// a grant's min_tier compares directly. Conformance to the verbs does not
+// imply the mechanics; grants are placed against the tier, and Clone(S) on
+// a parked session MUST fail rather than silently fork a fresh amnesiac
+// fiber when the runtime lacks TierCheckpoint.
 type Tier int
 
 const (
+	TierUnspecified Tier = iota
 	// TierBasic: create a worker in an existing warm sandbox. Correct
-	// semantics, pod-class latency. Every runtime qualifies; this is v0.
-	TierBasic Tier = iota
-	// TierWarm: zygote fork / snapshot clone, CoW. The ms + density claim.
+	// semantics, pod-class latency. Every runtime qualifies.
+	TierBasic
+	// TierWarm: zygote fork, copy-on-write. Millisecond activation and
+	// density. Single-tenant per grant by definition.
 	TierWarm
-	// TierCheckpoint: per-fiber delta checkpoint + restore. Park/resume —
-	// the entire session model — requires this.
+	// TierCheckpoint: per-fiber delta checkpoint + restore. Park/resume,
+	// the entire session model, requires this.
 	TierCheckpoint
-	// TODO(poc): the top tier, FIBER_FABRIC, is missing from this ladder. The
-	// contract and fiberd docs define a fourth tier above TierCheckpoint that
-	// provisions a per-grant fabric channel (e.g. an IMEX channel via a
-	// ComputeDomain-class DRA claim) for multi-node/collective workloads. Add
-	// a TierFabric constant here and teach placement/Resolve about it (a
-	// fabric-tier request must not be satisfied by a sub-fabric runtime, the
-	// same way a parked session must not fall back below TierCheckpoint).
+	// TierSnapshot: microVM or gVisor snapshot-restore per fiber.
+	// Multi-tenant per node.
+	TierSnapshot
+	// TierFabric is reserved. Nothing implements it.
+	TierFabric
 )
+
+func (t Tier) String() string {
+	switch t {
+	case TierBasic:
+		return "FIBER_BASIC"
+	case TierWarm:
+		return "FIBER_WARM"
+	case TierCheckpoint:
+		return "FIBER_CHECKPOINT"
+	case TierSnapshot:
+		return "FIBER_SNAPSHOT"
+	case TierFabric:
+		return "FIBER_FABRIC"
+	default:
+		return "TIER_UNSPECIFIED"
+	}
+}
 
 // CloneSource selects the birth mechanism for a fiber.
 type CloneSource int
@@ -38,32 +56,114 @@ const (
 	SourceCold                      // full create; the honest fallback
 )
 
+// CloneSpec is everything the runtime needs to birth one fiber. Grant
+// carries the template digest and the W budget; Fence is the identity the
+// child adopts after the fork, never before.
+type CloneSpec struct {
+	Grant    Grant
+	Source   CloneSource
+	Ref      string // delta ref when Source == SourceDelta
+	Fence    Fence
+	Deadline time.Duration // hard budget: exceeding it is an error, not a late fiber
+	Payload  []byte        // opaque data handed to the fiber at birth
+}
+
 // FiberHandle is what the runtime knows about a running fiber. Endpoint is
-// returned directly to the caller — fibers never join EndpointSlices.
+// returned directly to the caller; fibers never join any service registry.
 type FiberHandle struct {
 	ID       string
-	Endpoint string // host:port or uds path inside the grant's netns
+	Endpoint string // host:port or unix socket path
 	Started  time.Time
 }
 
-// Runtime is the seam to CRI. The real implementation wraps
-// k8s.io/cri-api (CreateContainer against the grant sandbox for v0/v1,
-// CloneFiber verbs once they exist); this interface is what keeps the core
-// identical across Kubernetes and standalone deployments.
+// FiberStats is the runtime's measurement of one fiber. WUsedBytes is the
+// dirtied working set: the fiber's private pages since fork.
+type FiberStats struct {
+	WUsedBytes uint64
+}
+
+// FiberExit is reported when a fiber dies on its own: the kernel killed it
+// for exceeding its W budget (Reason "oom"), it exited, or was signalled.
+type FiberExit struct {
+	FiberID string
+	Reason  string // "oom" | "exit" | "signal"
+	Detail  string
+}
+
+// SessionDomain is the namespace a session name lives in when it moves
+// between homes: the grant's session_class when the issuer set one, else
+// the template digest. Two homes each hold their own grant; what they
+// share is the template (a session's state is a delta over its pages)
+// or an issuer-chosen class.
+func (g Grant) SessionDomain() string {
+	if g.Policy.SessionClass != "" {
+		return g.Policy.SessionClass
+	}
+	return g.TemplateDigest
+}
+
+// DeltaPublisher is implemented by runtimes that can put a parked delta
+// where other homes can find it. The agent calls it after every park of a
+// named session; the returned handle is remembered with the session.
+type DeltaPublisher interface {
+	PublishDelta(ctx context.Context, deltaRef string, g Grant, session string) (remote string, err error)
+}
+
+// RemoteDelta is what a finder learns about a parked session elsewhere
+// without pulling it: how much it costs to move, and where it lives.
+type RemoteDelta struct {
+	WBytes uint64
+	Home   string
+	Handle string // opaque; passed back to Claim
+}
+
+// DeltaFinder is implemented by runtimes that can look a session up in
+// the shared store and bring its delta here. Claim pulls the delta (and,
+// if needed, the parent checkpoint it depends on), makes the remote copy
+// unavailable to others, and returns a local delta ref for SourceDelta.
+//
+// FindDelta may return a *RemoteMiss as its error when the session exists
+// but this home must not take it (the state was made on an incompatible
+// platform); the agent turns that into a miss naming the preferred home.
+// Any other error means the store is unreachable.
+type DeltaFinder interface {
+	FindDelta(ctx context.Context, g Grant, session string) (RemoteDelta, bool, error)
+	ClaimDelta(ctx context.Context, g Grant, session string, rd RemoteDelta) (deltaRef string, err error)
+	// Owned reports whether a locally parked delta is still ours: false
+	// when another home has claimed the session since we published it.
+	Owned(ctx context.Context, deltaRef string) bool
+}
+
+// Runtime is the seam between the invariant core and a mechanism. This
+// interface is what keeps the core identical across homes and tiers.
 type Runtime interface {
 	Tier() Tier
 
-	// Clone births a fiber inside sandboxID from src. deadline is a hard
-	// budget: exceeding it must return an error, not a late fiber.
-	Clone(ctx context.Context, sandboxID string, src CloneSource, ref string, fence Fence, deadline time.Duration) (FiberHandle, error)
+	// PrepareTemplate makes the grant's template warm on this home (boots
+	// the zygote, pulls the artifact). Idempotent. Grant readiness is this
+	// call returning nil.
+	PrepareTemplate(ctx context.Context, g Grant) error
+
+	// Clone births a fiber. spec.Deadline is a hard budget.
+	Clone(ctx context.Context, spec CloneSpec) (FiberHandle, error)
 
 	// Park checkpoints the fiber's delta over the zygote and releases its
-	// running-tier resources. Returns the delta ref for later SourceDelta.
+	// running-tier resources. sync means the delta is durable before the
+	// call returns. Returns the delta ref for a later SourceDelta clone.
 	Park(ctx context.Context, fiberID string, sync bool) (deltaRef string, err error)
 
-	Release(ctx context.Context, fiberID string) error
+	// Release destroys the fiber; discard also deletes any parked delta
+	// belonging to the same session.
+	Release(ctx context.Context, fiberID string, discard bool) error
 
 	// List rebuilds the ledger's view of reality at startup; discrepancies
 	// resolve in favor of what is actually running.
-	List(ctx context.Context, sandboxID string) ([]FiberHandle, error)
+	List(ctx context.Context) ([]FiberHandle, error)
+
+	// Stats measures one running fiber.
+	Stats(ctx context.Context, fiberID string) (FiberStats, error)
+
+	// Exits delivers fibers that died without a Park or Release. The agent
+	// frees their ledger slot and writes the audit record.
+	Exits() <-chan FiberExit
 }

@@ -4,7 +4,7 @@
 
 > **Instances that cost nothing to create but still count.**
 
-fiberd lets a platform issue a *block* of capacity once, then create individual instances ("fibers") on the node itself — in milliseconds, with no control-plane call on the request path. One core runs in two homes: standalone platforms and Kubernetes.
+fiberd lets a platform issue a *block* of capacity once, then create individual instances ("fibers") on the node itself — in milliseconds, with no control-plane call on the request path. One core runs in many homes: standalone platforms, Kubernetes, and Slurm.
 
 ---
 
@@ -24,23 +24,15 @@ Existing designs pick two:
 | Warm pools | no | yes | yes |
 | Userspace multiplexers | yes | yes | no |
 
-The reason per-instance records resist removal is that a single record (the Kubernetes Pod is the sharpest example) fuses **seven roles**: scheduling unit, accounting unit, isolation/failure domain, workload identity, lifecycle, ecosystem contract, and network identity. The per-instance cost lives in delivering all seven, every time.
+Per-instance records resist removal because one record fuses scheduling, accounting, isolation, identity, lifecycle, ecosystem contract, and network identity, and pays for all of them every time. The mechanisms that make instances cheap (zygote fork, snapshot restore, virtual actors, block allocation) are established prior art; the [README](../README.md) lists them. What they leave open is the **protocol** between the control plane and the environment that mints instances on its behalf.
 
 ## The core inversion
 
-fiberd resolves the tension by inverting *who does what*: the control plane's involvement ends at **issuing capacity**; the node **exercises** it.
+fiberd resolves the tension by inverting *who does what*: the control plane's involvement ends at **issuing capacity as a signed grant**; the home **exercises** it locally.
 
 ![Delegated capacity: the control plane issues a grant once; the node mints fibers on the warm path with no call home](./images/delegated-capacity.svg)
 
-This is how two well-proven systems already work:
-
-- **IP allocation** — a router is delegated a prefix once; hosts mint addresses from it with zero allocator involvement.
-- **Android** — one warm *zygote* process; every app launch is a copy-on-write `fork()`.
-
-fiberd applies the same two moves to container instances. The seven roles split cleanly:
-
-- **Stay on a block-level object the control plane owns:** scheduling unit, accounting unit, ecosystem contract.
-- **Delivered per instance by the node:** isolation/failure domain, workload identity, lifecycle, network identity.
+Two proven systems already work this way: an IP router is delegated a prefix once and hosts mint addresses with no allocator involvement; Android keeps one warm *zygote* and forks every app copy-on-write. fiberd applies both moves, and adds the three things the prior art leaves open: the **signed capability grant** that carries authorization with the work, the **two miss codes** (`SHED` when the control plane is unreachable, `DEFERRED_FALLBACK` when it is healthy) that tell the caller what to do on a miss, and the **W-priced cost model** in which activation, parking and mobility are all priced in the working set a fiber dirties.
 
 ## The three components
 
@@ -57,9 +49,9 @@ The control plane sees the grant and its batched status — never individual fib
 - **Synchronous, node-local activation** — millisecond clones, no control-plane read/write/lease on the warm path.
 - **Outage tolerance by construction** — a control-plane outage freezes new supply but never breaks binds against supply already on the node.
 - **Accounting precedes activation** — the block is charged once; the node's authenticated copy of the grant is the proof at activation time.
-- **One core, two homes** — the identical agent and semantics run standalone and under Kubernetes; only thin adapters differ.
+- **One core, many homes** — the identical agent and semantics run standalone, under Kubernetes, and inside a Slurm allocation; only thin home adapters differ, and one conformance suite proves each.
 
 ## Reading guide
 
-- **[architecture.md](architecture.md)** — the full design reference: the inversion, the three components and grant lifecycle, the `Clone`/`Park`/`Release` contract, CPU vs GPU, the two homes, and the cross-cutting model (fencing, accounting, identity/audit, network, pressure).
+- **[architecture.md](architecture.md)** — the full design reference: the inversion, the three components and grant lifecycle, the `Clone`/`Park`/`Release` contract, CPU vs GPU, the homes that implement the protocol, and the cross-cutting model (fencing, accounting, identity/audit, network, pressure).
 - **[concepts.md](concepts.md)** — a glossary: plain-language definitions of every term (fiber, grant, engine, agent, fence, epoch, ledger, session, lease, copy-on-write, thrash budget, park/resume, audit spool, pressure ladder, tiers, miss codes, homes), each with an analogy and a diagram.

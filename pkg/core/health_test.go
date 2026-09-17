@@ -1,13 +1,15 @@
-package core
+package core_test
 
 import (
 	"testing"
 	"time"
+
+	"github.com/helayoty/fiberd/pkg/core"
 )
 
 func TestSourceHealthHysteresis(t *testing.T) {
 	t0 := time.Unix(0, 0)
-	h := NewSourceHealth(10*time.Second, t0) // recover = 5s
+	h := core.NewSourceHealth(10*time.Second, t0) // recover = 5s
 
 	if !h.Healthy(t0.Add(9 * time.Second)) {
 		t.Fatal("fresh must be healthy")

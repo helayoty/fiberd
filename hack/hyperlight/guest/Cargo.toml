@@ -1,0 +1,12 @@
+[package]
+name = "fiberd-guest"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "The reference workload as a Hyperlight guest: a heap warmed at init, a counter, and a way to dirty memory"
+
+[dependencies]
+hyperlight-guest-bin = "0.17.0"
+
+[profile.release]
+opt-level = 2

@@ -10,5 +10,8 @@
 /bin
 /build
 
+# Rust build output of the Hyperlight guest and helper
+hack/hyperlight/*/target/
+
 fiberd
 zb

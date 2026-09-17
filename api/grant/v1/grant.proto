@@ -1,0 +1,172 @@
+// The grant protocol: the only cross-environment contract in fiberd.
+//
+// A control plane (the issuer) signs a CapacityGrant once. A home (a
+// standalone host, a Kubernetes grant Pod, a Slurm allocation) verifies it
+// offline and mints fibers under it through the Fibers service. Nothing on
+// the Clone path calls back to the issuer.
+//
+// Enum value names follow the plan verbatim (SHED, CREATE, FIBER_WARM, ...)
+// rather than buf's prefixed style; buf.yaml excepts those two lint rules.
+syntax = "proto3";
+
+package fiberd.grant.v1;
+
+import "google/protobuf/empty.proto";
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/helayoty/fiberd/api/grant/v1;grantv1";
+
+// Tier is the runtime capability a home advertises and a grant demands.
+// A grant with min_tier above the home's tier is never satisfied by a
+// lesser mechanism: Clone fails with FailedPrecondition, never a fresh fork.
+enum Tier {
+  TIER_UNSPECIFIED = 0;
+  // Create a worker in an existing warm sandbox. Correct semantics,
+  // pod-class latency. Every runtime qualifies.
+  FIBER_BASIC = 1;
+  // Zygote fork, copy-on-write. Millisecond activation and density.
+  // Single-tenant per grant by definition.
+  FIBER_WARM = 2;
+  // Per-fiber delta checkpoint and restore. Park/resume, the session model.
+  FIBER_CHECKPOINT = 3;
+  // MicroVM or gVisor snapshot-restore per fiber. Multi-tenant per node.
+  FIBER_SNAPSHOT = 4;
+  // Reserved. Multi-node fabric tier; nothing implements it.
+  FIBER_FABRIC = 5;
+}
+
+// Durability selects when the audit record for an operation must be remote.
+enum Durability {
+  DURABILITY_UNSPECIFIED = 0;
+  // Append locally, ack the caller, ship later. Loss window = flush interval.
+  BEST_EFFORT = 1;
+  // Block until the record is remote, then ack. Paid as activation latency.
+  SYNC = 2;
+}
+
+// Policy is the per-grant session, durability and pressure class.
+message Policy {
+  Durability durability = 1;
+  string session_class = 2;
+  string audit_class = 3;
+  // PSI memory "some avg10" watermarks on the grant's cgroup, in percent.
+  // The home sets them below its own eviction threshold so park fires first.
+  float psi_some_avg10_shed = 4;
+  float psi_some_avg10_park = 5;
+}
+
+// FiberLimits is `fibers: {max, warm}`. (Named FiberLimits rather than
+// Fibers because the service below already takes that name.)
+message FiberLimits {
+  uint32 max = 1;
+  uint32 warm = 2;
+}
+
+// CapacityGrant is what the issuer signs. It is carried as the `grant`
+// claim of a JWT whose registered claims mirror issuer, audience,
+// lease_expiry and grant_uid (iss, aud, exp, jti).
+message CapacityGrant {
+  string grant_uid = 1;
+  // OIDC issuer URL of the issuing home. Verifiers discover the JWKS here.
+  string issuer = 2;
+  // Target environment id: the home that may exercise this grant.
+  string audience = 3;
+  // OCI digest of the zygote artifact, or of the template image.
+  string template_digest = 4;
+  FiberLimits fibers = 5;
+  // Maximum dirtied working set per fiber, in bytes. Enforced as the
+  // fiber's cgroup memory.max; also the mobility budget for deltas.
+  uint64 w_budget_bytes = 6;
+  Tier min_tier = 7;
+  google.protobuf.Timestamp lease_expiry = 8;
+  Policy policy = 9;
+}
+
+// Fence identifies one incarnation of a fiber: (grant, agent epoch, seq).
+// Every credential and claim is scoped to it. An epoch bump on agent
+// restart invalidates every prior fence at once.
+message Fence {
+  string grant_uid = 1;
+  uint64 epoch = 2;
+  uint64 seq = 3;
+}
+
+// CloneRequest is the entire clone-time surface. Admission completeness is
+// structural: there is no field with which to shape a workload. A request
+// carrying any other field is rejected with InvalidArgument.
+message CloneRequest {
+  string grant_jwt = 1;
+  // Optional stable identity. Empty means an anonymous, fungible fiber.
+  string session = 2;
+  // Hard budget for the runtime work; exceeding it is a miss, not a late fiber.
+  google.protobuf.Timestamp deadline = 3;
+  // Opaque, size-capped (4096 bytes), delivered as data, never config.
+  bytes payload = 4;
+}
+
+enum CloneKind {
+  CREATE = 0;
+  ATTACH = 1;
+  RESUME = 2;
+}
+
+message CloneResponse {
+  string fiber_id = 1;
+  string endpoint = 2;
+  Fence fence = 3;
+  CloneKind kind = 4;
+}
+
+// MissCode is the one thing a caller needs to decide what to do next.
+enum MissCode {
+  // The control plane is unreachable or the thrash budget is exceeded.
+  // Back off for retry_after_s; never queue on a dead control plane.
+  SHED = 0;
+  // Capacity is not on this home and the control plane is healthy.
+  // Fall back to the home's ordinary provisioning path.
+  DEFERRED_FALLBACK = 1;
+}
+
+// Miss is attached to every miss error as a google.rpc.Status detail.
+message Miss {
+  MissCode code = 1;
+  uint32 retry_after_s = 2;
+  string issuer = 3;
+  // For DEFERRED_FALLBACK: the home that holds the session's parked
+  // state, when known.
+  string preferred_home = 4;
+}
+
+message ParkRequest {
+  string fiber_id = 1;
+  // sync: checkpoint completes before the reply; the fiber keeps running
+  // until the delta is durable.
+  bool sync = 2;
+}
+
+message ReleaseRequest {
+  string fiber_id = 1;
+  // discard: also delete any parked delta for the fiber's session.
+  bool discard = 2;
+}
+
+// Status is the batched, per-grant view the home publishes. It is the
+// only thing a control plane ever sees; never individual fibers.
+message Status {
+  string grant_uid = 1;
+  uint32 running = 2;
+  uint32 parked = 3;
+  uint64 w_used_bytes = 4;
+  Fence latest = 5;
+}
+
+service Fibers {
+  // Clone resolves a session to attach, resume or create. Every miss
+  // carries a Miss detail: ResourceExhausted for SHED, Unavailable for
+  // DEFERRED_FALLBACK. FailedPrecondition when min_tier exceeds the
+  // home's tier or a parked session needs a tier the home lacks.
+  rpc Clone(CloneRequest) returns (CloneResponse);
+  rpc Park(ParkRequest) returns (google.protobuf.Empty);
+  rpc Release(ReleaseRequest) returns (google.protobuf.Empty);
+  rpc Watch(google.protobuf.Empty) returns (stream Status);
+}

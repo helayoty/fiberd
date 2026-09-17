@@ -1,0 +1,11 @@
+version: v2
+clean: false
+managed:
+  enabled: false
+plugins:
+  - local: ["go", "tool", "-modfile=hack/tools/go.mod", "protoc-gen-go"]
+    out: api
+    opt: paths=source_relative
+  - local: ["go", "tool", "-modfile=hack/tools/go.mod", "protoc-gen-go-grpc"]
+    out: api
+    opt: paths=source_relative
