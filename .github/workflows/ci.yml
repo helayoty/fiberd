@@ -1,0 +1,133 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  proto-drift:
+    name: proto lint + generated code up to date
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: |
+            go.sum
+            hack/tools/go.sum
+      - run: make proto-check
+
+  lint:
+    name: go vet + golangci-lint (depguard keeps pkg/core home-invariant)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: |
+            go.sum
+            hack/tools/go.sum
+      - run: make lint
+
+  unit:
+    name: unit tests (${{ matrix.os }})
+    strategy:
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: make build
+      - run: make test
+
+  conform-stub:
+    name: conformance C1-C7 against the stub runtime
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: make conform-stub
+      - run: make conform-signed
+
+  linux-env:
+    name: Linux dev container (cgroup v2, PSI, criu) + tests inside it
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: make linux-check
+      - run: make linux-test
+
+  conform-proc:
+    name: conformance C1-C7 against the proc backend (cgroups, CRIU)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: make conform-proc
+
+  conform-gvisor:
+    name: conformance C1-C7 against the gvisor backend (a runsc sandbox per fiber)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: make linux-gvisor-check
+      - run: make conform-gvisor
+
+  conform-runc:
+    name: conformance C1-C7 against the runc backend (the zygote as a container's init)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: make conform-runc
+
+  conform-hyperlight-fake:
+    name: conformance C1-C7 against the hyperlight backend over the fake helper (no hypervisor)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: make conform-hyperlight-fake
+
+  conform-hyperlight:
+    name: conformance C1-C7 against the hyperlight backend with the Rust helper (KVM)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: enable KVM for this runner
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+      - run: make hyperlight-helper
+      - run: make linux-hyperlight-check
+      - run: make conform-hyperlight
+      - name: make the state readable for the upload (written as root inside the container)
+        if: always()
+        run: sudo chmod -R a+rX bin/conform-state-hyperlight-kvm 2>/dev/null || true
+      - name: keep the helper's logs and park images
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: conform-hyperlight-state
+          path: |
+            bin/conform-state-hyperlight-kvm/**/*.log
+            bin/conform-state-hyperlight-kvm/deltas
+          if-no-files-found: ignore
+
+  overcommit:
+    name: 2x overcommit storm parks before any OOM kill
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: make overcommit

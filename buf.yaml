@@ -1,0 +1,24 @@
+version: v2
+modules:
+  - path: api
+lint:
+  use:
+    - STANDARD
+  except:
+    # Enum value names are fixed by the protocol plan (SHED, CREATE,
+    # FIBER_WARM, ...); they are the wire contract, not a style choice.
+    - ENUM_VALUE_PREFIX
+    - ENUM_ZERO_VALUE_SUFFIX
+    # Watch(Empty) returns (stream Status) and Park/Release return Empty,
+    # as the plan specifies; no per-RPC wrapper messages.
+    - RPC_REQUEST_STANDARD_NAME
+    - RPC_RESPONSE_STANDARD_NAME
+    - RPC_REQUEST_RESPONSE_UNIQUE
+    # The service is named `Fibers`, not `FibersService`, per the plan.
+    - SERVICE_SUFFIX
+    # Package fiberd.grant.v1 lives at api/grant/v1 (plan layout); the
+    # `fiberd.` prefix keeps type URLs globally unique for Any details.
+    - PACKAGE_DIRECTORY_MATCH
+breaking:
+  use:
+    - FILE

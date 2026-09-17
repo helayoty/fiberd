@@ -1,0 +1,59 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: standard
+  enable:
+    - depguard
+    - errorlint
+    - gocritic
+    - misspell
+    - unconvert
+  settings:
+    depguard:
+      rules:
+        # Engineering rule: pkg/core is home-invariant. It may not import
+        # Kubernetes, gRPC, the runtime or home packages, or any JWT library.
+        core-is-home-invariant:
+          list-mode: lax
+          files:
+            - "**/pkg/core/**"
+          deny:
+            - pkg: "k8s.io"
+              desc: "pkg/core must not depend on Kubernetes"
+            - pkg: "sigs.k8s.io"
+              desc: "pkg/core must not depend on Kubernetes"
+            - pkg: "google.golang.org/grpc"
+              desc: "pkg/core is transport-agnostic; gRPC lives in pkg/rpc"
+            - pkg: "github.com/helayoty/fiberd/api"
+              desc: "pkg/core must not depend on generated proto types"
+            - pkg: "github.com/helayoty/fiberd/pkg/runtime"
+              desc: "pkg/core sees runtimes only through core.Runtime"
+            - pkg: "github.com/helayoty/fiberd/pkg/home"
+              desc: "pkg/core sees homes only through interfaces it defines"
+            - pkg: "github.com/helayoty/fiberd/pkg/grant"
+              desc: "pkg/core sees grants only through core.Verifier"
+            - pkg: "github.com/helayoty/fiberd/pkg/rpc"
+              desc: "pkg/core is transport-agnostic"
+            - pkg: "github.com/helayoty/fiberd/pkg/sys"
+              desc: "pkg/core must not touch cgroups or CRIU directly"
+            - pkg: "github.com/go-jose"
+              desc: "JWT handling belongs in pkg/grant"
+  exclusions:
+    generated: lax
+    paths:
+      - api/
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/helayoty/fiberd
+  exclusions:
+    paths:
+      - api/
