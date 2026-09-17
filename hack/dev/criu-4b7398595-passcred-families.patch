@@ -1,0 +1,120 @@
+From 4b73985955ecc01604d8ed1247605a5875042e4c Mon Sep 17 00:00:00 2001
+From: Dong Sunchao <dongsunchao@gmail.com>
+Date: Wed, 20 Aug 2025 12:38:37 +0000
+Subject: [PATCH] criu/sockets: Restrict SO_PASSCRED and SO_PASSSEC to
+ supported families
+
+Linux 6.16+ restricts SO_PASSCRED and SO_PASSSEC to AF_UNIX, AF_NETLINK, and AF_BLUETOOTH
+This patch updates CRIU to check the socket family before dumping these options
+
+Fixes: #2705
+Signed-off-by: Dong Sunchao <dongsunchao@gmail.com>
+---
+ criu/include/sockets.h |  2 +-
+ criu/sk-inet.c         |  2 +-
+ criu/sk-netlink.c      |  2 +-
+ criu/sk-packet.c       |  2 +-
+ criu/sk-unix.c         |  2 +-
+ criu/sockets.c         | 16 +++++++++-------
+ 6 files changed, 14 insertions(+), 12 deletions(-)
+
+diff --git a/criu/include/sockets.h b/criu/include/sockets.h
+index c3e7c879a7..6c81d3edd7 100644
+--- a/criu/include/sockets.h
++++ b/criu/include/sockets.h
+@@ -25,7 +25,7 @@ struct socket_desc {
+ };
+ 
+ extern int dump_socket(struct fd_parms *p, int lfd, FdinfoEntry *);
+-extern int dump_socket_opts(int sk, SkOptsEntry *soe);
++extern int dump_socket_opts(int sk, int family, SkOptsEntry *soe);
+ extern int restore_socket_opts(int sk, SkOptsEntry *soe);
+ extern int sk_setbufs(int sk, uint32_t *bufs);
+ extern void release_skopts(SkOptsEntry *);
+diff --git a/criu/sk-inet.c b/criu/sk-inet.c
+index 6e0acf2ce3..422edc6567 100644
+--- a/criu/sk-inet.c
++++ b/criu/sk-inet.c
+@@ -581,7 +581,7 @@ static int do_dump_one_inet_fd(int lfd, u32 id, const struct fd_parms *p, int fa
+ 	if (dump_ip_opts(lfd, family, type, proto, &ipopts))
+ 		goto err;
+ 
+-	if (dump_socket_opts(lfd, &skopts))
++	if (dump_socket_opts(lfd, family, &skopts))
+ 		goto err;
+ 
+ 	pr_info("Dumping inet socket at %d\n", p->fd);
+diff --git a/criu/sk-netlink.c b/criu/sk-netlink.c
+index a219b69be1..dc2baa1b80 100644
+--- a/criu/sk-netlink.c
++++ b/criu/sk-netlink.c
+@@ -165,7 +165,7 @@ static int dump_one_netlink_fd(int lfd, u32 id, const struct fd_parms *p)
+ 	ne.fown = (FownEntry *)&p->fown;
+ 	ne.opts = &skopts;
+ 
+-	if (dump_socket_opts(lfd, &skopts))
++	if (dump_socket_opts(lfd, AF_NETLINK, &skopts))
+ 		goto err;
+ 
+ 	fe.type = FD_TYPES__NETLINKSK;
+diff --git a/criu/sk-packet.c b/criu/sk-packet.c
+index 1d2e23522a..6530bff580 100644
+--- a/criu/sk-packet.c
++++ b/criu/sk-packet.c
+@@ -173,7 +173,7 @@ static int dump_one_packet_fd(int lfd, u32 id, const struct fd_parms *p)
+ 	psk.fown = (FownEntry *)&p->fown;
+ 	psk.opts = &skopts;
+ 
+-	if (dump_socket_opts(lfd, &skopts))
++	if (dump_socket_opts(lfd, AF_PACKET, &skopts))
+ 		return -1;
+ 
+ 	psk.protocol = sd->proto;
+diff --git a/criu/sk-unix.c b/criu/sk-unix.c
+index 70ca16be4a..6145fe7347 100644
+--- a/criu/sk-unix.c
++++ b/criu/sk-unix.c
+@@ -527,7 +527,7 @@ static int dump_one_unix_fd(int lfd, uint32_t id, const struct fd_parms *p)
+ 			}
+ 	}
+ dump:
+-	if (dump_socket_opts(lfd, skopts))
++	if (dump_socket_opts(lfd, AF_UNIX, skopts))
+ 		goto err;
+ 
+ 	pr_info("Dumping unix socket at %d\n", p->fd);
+diff --git a/criu/sockets.c b/criu/sockets.c
+index 0affccad02..e4adae03cd 100644
+--- a/criu/sockets.c
++++ b/criu/sockets.c
+@@ -649,7 +649,7 @@ int do_dump_opt(int sk, int level, int name, void *val, int len)
+ 	return 0;
+ }
+ 
+-int dump_socket_opts(int sk, SkOptsEntry *soe)
++int dump_socket_opts(int sk, int family, SkOptsEntry *soe)
+ {
+ 	int ret = 0, val;
+ 	struct timeval tv;
+@@ -688,13 +688,15 @@ int dump_socket_opts(int sk, SkOptsEntry *soe)
+ 	soe->so_reuseport = val ? true : false;
+ 	soe->has_so_reuseport = true;
+ 
+-	ret |= dump_opt(sk, SOL_SOCKET, SO_PASSCRED, &val);
+-	soe->has_so_passcred = true;
+-	soe->so_passcred = val ? true : false;
++	if (family == AF_UNIX || family == AF_NETLINK) {
++		ret |= dump_opt(sk, SOL_SOCKET, SO_PASSCRED, &val);
++		soe->has_so_passcred = true;
++		soe->so_passcred = val ? true : false;
+ 
+-	ret |= dump_opt(sk, SOL_SOCKET, SO_PASSSEC, &val);
+-	soe->has_so_passsec = true;
+-	soe->so_passsec = val ? true : false;
++		ret |= dump_opt(sk, SOL_SOCKET, SO_PASSSEC, &val);
++		soe->has_so_passsec = true;
++		soe->so_passsec = val ? true : false;
++	}
+ 
+ 	ret |= dump_opt(sk, SOL_SOCKET, SO_DONTROUTE, &val);
+ 	soe->has_so_dontroute = true;

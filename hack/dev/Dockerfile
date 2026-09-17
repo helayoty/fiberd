@@ -17,17 +17,25 @@ FROM golang:1.26-bookworm
 
 ARG DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      gcc make pkg-config \
+      gcc make pkg-config patch \
       runc \
       curl ca-certificates jq procps iproute2 strace \
       libprotobuf-c-dev protobuf-c-compiler libprotobuf-dev python3-protobuf \
       libnl-3-dev libnet1-dev libcap-dev libbsd-dev uuid-dev libaio-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# criu 4.1.1 from source (the binary only; no docs, no python bindings).
+# criu 4.1.1 from source (the binary only; no docs, no python bindings),
+# plus one upstream commit: on Linux >= 6.16 getsockopt(SO_PASSCRED /
+# SO_PASSSEC) on a non-unix socket is EOPNOTSUPP, and 4.1.1 reads them on
+# every socket, so a park of a fiber with a tcp endpoint fails on GitHub's
+# 6.17 runners. criu 4b7398595 (in 4.2) restricts them to the families
+# that have them. 4.2.1 itself is not used: its restore segfaults with
+# these images on both arm64 and amd64.
 ARG CRIU_VERSION=4.1.1
+COPY hack/dev/criu-4b7398595-passcred-families.patch /tmp/criu-passcred.patch
 RUN set -eu; curl -fsSL "https://github.com/checkpoint-restore/criu/archive/refs/tags/v${CRIU_VERSION}.tar.gz" | tar -xz -C /tmp; \
-    cd "/tmp/criu-${CRIU_VERSION}"; make -j"$(nproc)" criu >/tmp/criu-build.log 2>&1 || (tail -40 /tmp/criu-build.log; exit 1); \
+    cd "/tmp/criu-${CRIU_VERSION}"; patch -p1 < /tmp/criu-passcred.patch; \
+    make -j"$(nproc)" criu >/tmp/criu-build.log 2>&1 || (tail -40 /tmp/criu-build.log; exit 1); \
     install -m 0755 criu/criu /usr/local/sbin/criu; cd /; rm -rf "/tmp/criu-${CRIU_VERSION}"; criu --version
 
 # gVisor's runsc for the gvisor backend (FIBER_SNAPSHOT without KVM: the
