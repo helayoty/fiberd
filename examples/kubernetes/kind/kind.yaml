@@ -1,0 +1,12 @@
+# One-node kind cluster for the Kubernetes home's acceptance. The grant
+# Pod's gRPC port is published on the host through a NodePort so
+# grant-conform runs on the host against a stable address across Pod
+# restarts (a port-forward would die with the container).
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+    extraPortMappings:
+      - containerPort: 30084
+        hostPort: 30084
+        protocol: TCP

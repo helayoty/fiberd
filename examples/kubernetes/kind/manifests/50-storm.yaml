@@ -1,0 +1,33 @@
+# The overcommit storm's grant: a 384 MiB Pod limit (the kubelet's block
+# ceiling), a 160 MiB grant ceiling, and the ladder tuned as in
+# hack/test/overcommit.sh. The storm binary runs inside the Pod (it reads
+# the Pod cgroup's OOM counter) and must see a park before any OOM kill.
+apiVersion: fiberd.io/v1alpha1
+kind: CapacityGrant
+metadata:
+  name: storm
+  namespace: tenant-a
+spec:
+  # The resource's own grant only keeps the Pod ready (a small template);
+  # the storm mints its own grant against sha256:storm, the 64 MiB one.
+  template: sha256:storm-ready
+  fibers: { max: 8, warm: 1 }
+  wBudget: 64Mi
+  minTier: FIBER_CHECKPOINT
+  lease: 10m
+  pod:
+    image: fiberd:kind
+    runtime: proc
+    args:
+      - -template
+      - sha256:storm=/usr/local/bin/refzygote --heap-mb 64
+      - -template
+      - default=/usr/local/bin/refzygote --heap-mb 8
+      - -grant-ceiling
+      - "167772160"
+      - -pressure-interval
+      - 200ms
+      - -status-interval
+      - 100ms
+    resources:
+      limits: { memory: 384Mi }
