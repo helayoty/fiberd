@@ -1,0 +1,31 @@
+# One node, one partition; rendered by the entrypoint (@NODE@, @CPUS@,
+# @MEM@, @PROCTRACK@, @TASK@ substituted). The cgroup settings are what
+# make the allocation's cgroup fiberd's block ceiling: task/cgroup puts
+# every step in its own cgroup and constrains its memory.
+ClusterName=fiberd
+SlurmctldHost=@NODE@
+AuthType=auth/munge
+CryptoType=crypto/munge
+SlurmUser=root
+SlurmdUser=root
+StateSaveLocation=/var/spool/slurmctld
+SlurmdSpoolDir=/var/spool/slurmd
+SlurmctldPidFile=/var/run/slurm/slurmctld.pid
+SlurmdPidFile=/var/run/slurm/slurmd.pid
+SlurmctldLogFile=/var/log/slurm/slurmctld.log
+SlurmdLogFile=/var/log/slurm/slurmd.log
+SlurmctldDebug=info
+SlurmdDebug=info
+ProctrackType=@PROCTRACK@
+TaskPlugin=@TASK@
+ReturnToService=2
+SlurmdParameters=config_overrides
+SchedulerType=sched/backfill
+SelectType=select/cons_tres
+SelectTypeParameters=CR_Core_Memory
+JobAcctGatherType=jobacct_gather/none
+MpiDefault=none
+Prolog=/usr/local/bin/fiberd-prolog.sh
+PrologFlags=Alloc
+NodeName=@NODE@ CPUs=@CPUS@ RealMemory=@MEM@ State=UNKNOWN
+PartitionName=main Nodes=ALL Default=YES MaxTime=INFINITE State=UP
