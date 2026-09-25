@@ -77,7 +77,7 @@ The warm command initializes a 128 MiB parent, starts 50 children concurrently, 
 | Warm fork-to-ready | about 4 ms |
 | Cold initialization per process | about 225 ms |
 | Warm 50-way burst, p99 | 33 ms |
-| Total PSS for parent and 50 children | 180–330 MiB |
+| Total PSS for parent and 50 children | 180 to 330 MiB |
 | Memory without sharing | 6.5 GiB |
 
 The broad PSS range reflects repeated development runs rather than one archived output file. Use this benchmark to validate the mechanism on a machine, not as a fiberd end-to-end latency claim.
@@ -117,7 +117,7 @@ This is an integration duration and pressure observation rather than a backend m
 make conform-slurm
 ```
 
-The recorded run completed conformance cases C1–C10 in 13 seconds. During the overcommit phase, the first park occurred at 13 seconds with memory PSI near 50 percent, and the job reported no OOM kill.
+The recorded run completed conformance cases C1 to C10 in 13 seconds. During the overcommit phase, the first park occurred at 13 seconds with memory PSI near 50 percent, and the job reported no OOM kill.
 
 The script and checks are in [`examples/slurm/conform.sh`](../examples/slurm/conform.sh).
 

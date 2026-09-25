@@ -130,5 +130,6 @@ For CPU, memory, sizing, and OOM behavior, continue with the
 boundaries, see [networking](networking.md). For grant authentication,
 fences, and workload credentials, see [identity](identity.md). For internal
 component boundaries and backend contracts, see the [architecture
-reference](architecture.md). For the full `CapacityGrant` lifecycle and
-scale-out responsibilities, see [Kubernetes operations](operating-kubernetes.md).
+reference](architecture.md). The [protocol reference](protocol.md) defines the
+grant lifecycle visible to callers. For the Kubernetes mapping, see
+[Kubernetes operations](operating-kubernetes.md).
