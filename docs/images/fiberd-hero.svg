@@ -1,0 +1,100 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="620" viewBox="0 0 1100 620" font-family="Inter, Helvetica Neue, Arial, sans-serif">
+  <title>fiberd separates capacity placement from local fiber activation</title>
+  <desc>The control plane issues and charges a signed CapacityGrant once. A home verifies the grant, warms one template, and creates fibers locally. A caller sends Clone to the fiberd agent, receives an endpoint and fence, and connects directly to the selected fiber. The home reports aggregate status to the control plane.</desc>
+  <defs>
+    <linearGradient id="pageBg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#fafcff"/>
+      <stop offset="1" stop-color="#f1f5fb"/>
+    </linearGradient>
+    <linearGradient id="homeBg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f5fbfa"/>
+      <stop offset="1" stop-color="#e8f7f3"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="3" stdDeviation="5" flood-color="#182230" flood-opacity="0.09"/>
+    </filter>
+    <marker id="blueArrow" markerWidth="9" markerHeight="9" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#3165b5"/>
+    </marker>
+    <marker id="tealArrow" markerWidth="9" markerHeight="9" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#16877f"/>
+    </marker>
+    <marker id="purpleArrow" markerWidth="9" markerHeight="9" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#704a80"/>
+    </marker>
+  </defs>
+
+  <rect width="1100" height="620" fill="url(#pageBg)"/>
+  <text x="40" y="46" font-size="24" font-weight="700" fill="#172033">Place capacity once, activate fibers locally</text>
+  <text x="40" y="72" font-size="12" fill="#667085">The cold path allocates a grant. The warm path creates and routes to fibers without another placement call.</text>
+
+  <rect x="40" y="128" width="220" height="130" rx="16" fill="#ffffff" stroke="#7f9dc8" stroke-width="1.5" filter="url(#shadow)"/>
+  <text x="150" y="163" text-anchor="middle" font-size="15" font-weight="700" fill="#24466f">Control plane</text>
+  <text x="150" y="190" text-anchor="middle" font-size="11" fill="#52657c">places and charges capacity</text>
+  <text x="150" y="212" text-anchor="middle" font-size="11" fill="#52657c">signs one CapacityGrant</text>
+  <rect x="78" y="225" width="144" height="22" rx="11" fill="#e8f0fd"/>
+  <text x="150" y="240" text-anchor="middle" font-size="9.5" font-weight="700" fill="#24466f">cold path</text>
+
+  <rect x="40" y="380" width="220" height="126" rx="16" fill="#ffffff" stroke="#9875ba" stroke-width="1.5" filter="url(#shadow)"/>
+  <text x="150" y="414" text-anchor="middle" font-size="15" font-weight="700" fill="#4b3158">Caller or router</text>
+  <text x="150" y="442" text-anchor="middle" font-size="11" fill="#667085">asks for a session</text>
+  <text x="150" y="464" text-anchor="middle" font-size="11" fill="#667085">keeps endpoint + fence</text>
+  <rect x="78" y="477" width="144" height="22" rx="11" fill="#eee6f6"/>
+  <text x="150" y="492" text-anchor="middle" font-size="9.5" font-weight="700" fill="#704a80">request path</text>
+
+  <rect x="330" y="100" width="730" height="470" rx="24" fill="url(#homeBg)" stroke="#42a39a" stroke-width="2" filter="url(#shadow)"/>
+  <text x="360" y="137" font-size="17" font-weight="700" fill="#126b66">Home</text>
+  <text x="360" y="158" font-size="10.5" fill="#526d69">capacity and isolation boundary</text>
+  <rect x="863" y="119" width="165" height="27" rx="13" fill="#ffffff" stroke="#9bc9c4"/>
+  <text x="945" y="137" text-anchor="middle" font-size="9.5" font-weight="700" fill="#126b66">warm path</text>
+
+  <rect x="370" y="214" width="210" height="128" rx="15" fill="#ffffff" stroke="#42a39a" stroke-width="1.5"/>
+  <text x="475" y="249" text-anchor="middle" font-size="14" font-weight="700" fill="#126b66">fiberd agent</text>
+  <text x="475" y="275" text-anchor="middle" font-size="10.5" fill="#526d69">verifies the grant offline</text>
+  <text x="475" y="296" text-anchor="middle" font-size="10.5" fill="#526d69">owns ledger and fences</text>
+  <rect x="401" y="308" width="148" height="23" rx="11" fill="#d8f1ec"/>
+  <text x="475" y="324" text-anchor="middle" font-size="9.5" font-weight="700" fill="#126b66">aggregate status</text>
+
+  <rect x="650" y="174" width="330" height="84" rx="15" fill="#fff7dc" stroke="#d7a933" stroke-width="1.5"/>
+  <text x="815" y="208" text-anchor="middle" font-size="14" font-weight="700" fill="#6f4d05">Warm template (zygote)</text>
+  <text x="815" y="232" text-anchor="middle" font-size="10.5" fill="#805600">initialized once, then forked or restored</text>
+
+  <rect x="635" y="342" width="150" height="94" rx="14" fill="#ffffff" stroke="#9875ba" stroke-width="1.5"/>
+  <text x="710" y="375" text-anchor="middle" font-size="13" font-weight="700" fill="#4b3158">Fiber A</text>
+  <text x="710" y="399" text-anchor="middle" font-size="10" fill="#667085">endpoint + fence</text>
+  <text x="710" y="419" text-anchor="middle" font-size="9.5" fill="#704a80">running</text>
+
+  <rect x="805" y="342" width="150" height="94" rx="14" fill="#ffffff" stroke="#9875ba" stroke-width="1.5"/>
+  <text x="880" y="375" text-anchor="middle" font-size="13" font-weight="700" fill="#4b3158">Fiber B</text>
+  <text x="880" y="399" text-anchor="middle" font-size="10" fill="#667085">endpoint + fence</text>
+  <text x="880" y="419" text-anchor="middle" font-size="9.5" fill="#704a80">running</text>
+
+  <rect x="635" y="458" width="320" height="58" rx="14" fill="#f8f5fb" stroke="#9875ba" stroke-width="1.5" stroke-dasharray="6 4"/>
+  <text x="795" y="482" text-anchor="middle" font-size="12" font-weight="700" fill="#704a80">Unused grant capacity</text>
+  <text x="795" y="502" text-anchor="middle" font-size="9.5" fill="#667085">available for later Clone requests</text>
+
+  <path d="M260 188H315V235H370" fill="none" stroke="#3165b5" stroke-width="2" marker-end="url(#blueArrow)"/>
+  <rect x="271" y="158" width="112" height="23" rx="11" fill="#e8f0fd"/>
+  <text x="327" y="174" text-anchor="middle" font-size="9.5" font-weight="700" fill="#24466f">1  signed grant</text>
+
+  <path d="M475 214V88H150V128" fill="none" stroke="#3165b5" stroke-width="1.7" stroke-dasharray="6 4" marker-end="url(#blueArrow)"/>
+  <text x="312" y="105" text-anchor="middle" font-size="9.5" fill="#52657c">aggregate status returns asynchronously</text>
+
+  <path d="M580 236H650" fill="none" stroke="#16877f" stroke-width="2" marker-end="url(#tealArrow)"/>
+  <rect x="585" y="201" width="82" height="23" rx="11" fill="#d8f1ec"/>
+  <text x="626" y="217" text-anchor="middle" font-size="9.5" font-weight="700" fill="#126b66">2  warm once</text>
+
+  <path d="M815 258V304H710V342" fill="none" stroke="#704a80" stroke-width="1.8" marker-end="url(#purpleArrow)"/>
+  <path d="M815 304H880V342" fill="none" stroke="#704a80" stroke-width="1.8" marker-end="url(#purpleArrow)"/>
+  <text x="815" y="293" text-anchor="middle" font-size="9.5" font-weight="700" fill="#704a80">fork or restore</text>
+
+  <path d="M260 414H310V275H370" fill="none" stroke="#3165b5" stroke-width="2" marker-end="url(#blueArrow)"/>
+  <text x="288" y="400" text-anchor="middle" font-size="9.5" font-weight="700" fill="#24466f">3  Clone</text>
+
+  <path d="M370 315H335V454H260" fill="none" stroke="#3165b5" stroke-width="2" stroke-dasharray="6 4" marker-end="url(#blueArrow)"/>
+  <text x="296" y="474" text-anchor="middle" font-size="9.5" font-weight="700" fill="#24466f">4  endpoint + fence</text>
+
+  <path d="M150 506V544H710V436" fill="none" stroke="#704a80" stroke-width="2.5" marker-end="url(#purpleArrow)"/>
+  <rect x="356" y="527" width="142" height="25" rx="12" fill="#eee6f6"/>
+  <text x="427" y="544" text-anchor="middle" font-size="9.5" font-weight="700" fill="#704a80">5  connect directly</text>
+</svg>

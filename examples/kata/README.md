@@ -4,7 +4,11 @@ This directory is an example of a **consumer** of fiberd's protocol, not
 part of fiberd. It is its own Go module (containerd's dependency tree
 stays here) and builds against the checkout it sits in.
 
-![The Kata-shaped example: a Pod with runtimeClassName fiberd reaches the shim through containerd; the shim clones a fiber on the home the annotations name; Kill parks or releases; a later Pod on the same session resumes](../../docs/images/example-kata.svg)
+![A Pod using the fiberd RuntimeClass reaches the shim through containerd. The shim maps container Create and Kill to Clone, Park, and Release, and a later Pod on the same session resumes the parked fiber.](../../docs/images/example-kata.svg)
+
+The fiber lifecycle and request semantics are defined in
+[Runtime model](../../docs/runtime-model.md) and
+[Protocol](../../docs/protocol.md). This page covers the containerd mapping.
 
 ## The idea
 
@@ -69,7 +73,7 @@ cd examples/kata && go test ./...
 It is not a fork of Kata: Kata's own shim keeps booting VMs. The point
 is the shape: a RuntimeClass whose sandboxes come from `Clone`, so a
 Kubernetes workload gets fiberd's clone-not-create, park and resume
-without any change to Kubernetes or to the Pod beyond three annotations.
+without any change to Kubernetes or to the Pod beyond the fiberd annotations.
 A Kata deployment that wanted this would add fiberd's calls where its
 shim creates the sandbox; the containerd config, the RuntimeClass and the
 annotations would be the same.

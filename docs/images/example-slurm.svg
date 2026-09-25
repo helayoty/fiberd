@@ -1,56 +1,117 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="820" height="470" viewBox="0 0 820 470" font-family="Helvetica Neue, Arial, sans-serif">
-  <title>The Slurm example</title>
-  <desc>The issuer mints a grant for the node; sbatch starts fiberd-job.sh, which runs fiberd-slurm inside the allocation; the agent verifies the grant, lives in the job step's cgroup under the job's memory limit, uses scontrol as liveness and the allocation's GRES as its fabric channel; the conformance suite and the overcommit storm run against allocations in Slurm-in-Docker.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="700" viewBox="0 0 1100 700" font-family="Inter, Helvetica Neue, Arial, sans-serif">
+  <title>How the Slurm example runs fibers inside one allocation</title>
+  <desc>An issuer signs a grant for a Slurm node and sbatch starts fiberd-job inside an allocation. The job script launches fiberd-slurm in the job step cgroup, stages the grant, watches Slurm job state, and forwards termination. The agent warms one template and creates fibers inside the allocation resource ceiling. Callers use the agent for Clone and then connect to the returned node address and fiber port.</desc>
   <defs>
-    <marker id="arw" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L8,3 L0,6 Z" fill="#333"/></marker>
+    <linearGradient id="page" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#F8FAFD"/>
+      <stop offset="1" stop-color="#EEF3F8"/>
+    </linearGradient>
+    <marker id="arrow" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto">
+      <path d="M0 0L9 4.5L0 9Z" fill="#486581"/>
+    </marker>
+    <marker id="arrowGreen" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto">
+      <path d="M0 0L9 4.5L0 9Z" fill="#2F855A"/>
+    </marker>
+    <marker id="arrowRed" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto">
+      <path d="M0 0L9 4.5L0 9Z" fill="#B84B4B"/>
+    </marker>
   </defs>
-  <rect width="820" height="470" fill="#ffffff"/>
 
-  <rect x="30" y="30" width="760" height="300" rx="10" fill="#f5f5f5" stroke="#999"/>
-  <text x="45" y="54" font-size="13" font-weight="600" fill="#333">Slurm node in Docker (slurmctld, slurmd, cgroup v2, task/cgroup)</text>
+  <rect width="1100" height="700" fill="url(#page)"/>
+  <text x="40" y="42" font-size="23" font-weight="700" fill="#172033">Slurm example: the allocation is the capacity home</text>
+  <text x="40" y="67" font-size="13" fill="#526273">Slurm allocates CPU, memory, node, and devices. fiberd creates fibers only inside that allocation.</text>
 
-  <rect x="50" y="72" width="220" height="90" rx="6" fill="#e1d5e7" stroke="#9673a6"/>
-  <text x="160" y="94" text-anchor="middle" font-size="13" font-weight="600" fill="#1a1a1a">grant-issuer serve</text>
-  <text x="160" y="114" text-anchor="middle" font-size="11" fill="#1a1a1a">the control plane</text>
-  <text x="160" y="130" text-anchor="middle" font-size="11" fill="#1a1a1a">mint: aud = the node's name</text>
-  <text x="160" y="146" text-anchor="middle" font-size="11" fill="#1a1a1a">JWKS at :8686</text>
+  <text x="40" y="105" font-size="12" font-weight="700" fill="#6B7785" letter-spacing="1.2">BEFORE THE JOB SERVES</text>
 
-  <rect x="300" y="72" width="220" height="90" rx="6" fill="#dae8fc" stroke="#6c8ebf"/>
-  <text x="410" y="94" text-anchor="middle" font-size="13" font-weight="600" fill="#1a1a1a">sbatch fiberd-job.sh</text>
-  <text x="410" y="114" text-anchor="middle" font-size="11" fill="#1a1a1a">--cpus-per-task 4 --mem 1G</text>
-  <text x="410" y="130" text-anchor="middle" font-size="11" fill="#1a1a1a">FIBERD_GRANT in the environment</text>
-  <text x="410" y="146" text-anchor="middle" font-size="11" fill="#1a1a1a">restarts the agent in place</text>
+  <rect x="40" y="120" width="245" height="112" rx="12" fill="#F3ECFF" stroke="#8B6CB0" stroke-width="1.5"/>
+  <circle cx="68" cy="150" r="15" fill="#8B6CB0"/>
+  <text x="68" y="155" text-anchor="middle" font-size="12" font-weight="700" fill="#FFFFFF">1</text>
+  <text x="92" y="150" font-size="15" font-weight="700" fill="#172033">grant issuer</text>
+  <text x="60" y="178" font-size="12" fill="#4A3F5C">signs capacity for one node</text>
+  <text x="60" y="198" font-size="12" fill="#4A3F5C">audience = node name</text>
+  <text x="60" y="218" font-size="12" fill="#4A3F5C">publishes JWKS</text>
 
-  <rect x="550" y="72" width="220" height="90" rx="6" fill="#b0e3e6" stroke="#0e8088"/>
-  <text x="660" y="94" text-anchor="middle" font-size="13" font-weight="600" fill="#1a1a1a">fiberd-slurm</text>
-  <text x="660" y="114" text-anchor="middle" font-size="11" fill="#1a1a1a">verifies the grant offline, stages it</text>
-  <text x="660" y="130" text-anchor="middle" font-size="11" fill="#1a1a1a">runs pkg/agent with the Slurm home</text>
-  <text x="660" y="146" text-anchor="middle" font-size="11" fill="#1a1a1a">refuses fibers.max above the CPUs</text>
+  <rect x="425" y="120" width="260" height="112" rx="12" fill="#EAF2FF" stroke="#5B7DB1" stroke-width="1.5"/>
+  <circle cx="453" cy="150" r="15" fill="#5B7DB1"/>
+  <text x="453" y="155" text-anchor="middle" font-size="12" font-weight="700" fill="#FFFFFF">2</text>
+  <text x="477" y="150" font-size="15" font-weight="700" fill="#172033">sbatch</text>
+  <text x="445" y="178" font-size="12" fill="#334E68">requests CPUs, memory, GRES</text>
+  <text x="445" y="198" font-size="12" fill="#334E68">passes the JWT or stages a file</text>
+  <text x="445" y="218" font-size="12" fill="#334E68">starts fiberd-job.sh</text>
 
-  <polyline points="270,117 300,117" fill="none" stroke="#333" stroke-width="1.5" marker-end="url(#arw)"/>
-  <polyline points="520,117 550,117" fill="none" stroke="#333" stroke-width="1.5" marker-end="url(#arw)"/>
+  <rect x="825" y="120" width="235" height="112" rx="12" fill="#E7F7F7" stroke="#25858A" stroke-width="1.5"/>
+  <circle cx="853" cy="150" r="15" fill="#25858A"/>
+  <text x="853" y="155" text-anchor="middle" font-size="12" font-weight="700" fill="#FFFFFF">3</text>
+  <text x="877" y="150" font-size="15" font-weight="700" fill="#172033">Slurm scheduler</text>
+  <text x="845" y="178" font-size="12" fill="#285E61">places the job on a node</text>
+  <text x="845" y="198" font-size="12" fill="#285E61">creates the job-step cgroup</text>
+  <text x="845" y="218" font-size="12" fill="#285E61">exposes allocated GRES</text>
 
-  <rect x="50" y="190" width="720" height="120" rx="6" fill="#fff2cc" stroke="#d6b656"/>
-  <text x="410" y="212" text-anchor="middle" font-size="13" font-weight="600" fill="#1a1a1a">system.slice/slurmstepd.scope/job_1 (memory.max = --mem, the block ceiling)</text>
-  <text x="410" y="236" text-anchor="middle" font-size="11" fill="#1a1a1a">step_batch/user/task_0/agent: fiberd-slurm and the job script</text>
-  <text x="410" y="256" text-anchor="middle" font-size="11" fill="#1a1a1a">step_batch/user/task_0/fiberd/&lt;grant&gt;/zygote and f-&lt;epoch&gt;-&lt;seq&gt; (memory delegated; the step has no pids controller)</text>
-  <text x="410" y="276" text-anchor="middle" font-size="11" fill="#1a1a1a">liveness: scontrol show job says RUNNING · fabric: GRES · scope: job, user, partition, node, CPUs</text>
-  <text x="410" y="296" text-anchor="middle" font-size="11" fill="#1a1a1a">the job ending: SIGTERM forwarded to the agent, which leaves with the allocation</text>
+  <path d="M285 176H425" fill="none" stroke="#486581" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="355" y="166" text-anchor="middle" font-size="11" fill="#526273">signed grant</text>
+  <path d="M685 176H825" fill="none" stroke="#486581" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="755" y="166" text-anchor="middle" font-size="11" fill="#526273">schedule</text>
 
-  <polyline points="660,162 660,190" fill="none" stroke="#333" stroke-width="1.5" marker-end="url(#arw)"/>
+  <rect x="155" y="280" width="905" height="370" rx="18" fill="#FFFFFF" stroke="#3F6B86" stroke-width="2"/>
+  <rect x="155" y="280" width="905" height="43" rx="18" fill="#E9F1F6"/>
+  <rect x="155" y="305" width="905" height="18" fill="#E9F1F6"/>
+  <text x="180" y="307" font-size="15" font-weight="700" fill="#172033">Slurm allocation and job-step cgroup</text>
+  <text x="1035" y="307" text-anchor="end" font-size="11.5" fill="#526273">--cpus-per-task and --mem remain the aggregate ceiling</text>
 
-  <rect x="30" y="360" width="370" height="90" rx="6" fill="#d5e8d4" stroke="#82b366"/>
-  <text x="215" y="382" text-anchor="middle" font-size="13" font-weight="600" fill="#1a1a1a">grant-conform on the host</text>
-  <text x="215" y="404" text-anchor="middle" font-size="11" fill="#1a1a1a">C1 to C10 against the published port</text>
-  <text x="215" y="422" text-anchor="middle" font-size="11" fill="#1a1a1a">hooks through docker exec; restart is the job script</text>
-  <text x="215" y="438" text-anchor="middle" font-size="11" fill="#1a1a1a">restarting the agent in the same allocation</text>
+  <path d="M942 232V280" fill="none" stroke="#486581" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="954" y="258" font-size="11" fill="#526273">allocation</text>
 
-  <rect x="420" y="360" width="370" height="90" rx="6" fill="#ffe6cc" stroke="#d79b00"/>
-  <text x="605" y="382" text-anchor="middle" font-size="13" font-weight="600" fill="#1a1a1a">the storm in a second allocation</text>
-  <text x="605" y="404" text-anchor="middle" font-size="11" fill="#1a1a1a">--mem 384M, 160 MiB grant ceiling, 2x demand</text>
-  <text x="605" y="422" text-anchor="middle" font-size="11" fill="#1a1a1a">first park at PSI ~50%, no OOM kill</text>
-  <text x="605" y="438" text-anchor="middle" font-size="11" fill="#1a1a1a">the grant cgroup closes swap so the ladder sees pressure</text>
+  <rect x="790" y="345" width="235" height="82" rx="12" fill="#F2F5F9" stroke="#7B8794"/>
+  <text x="907" y="369" text-anchor="middle" font-size="14" font-weight="700" fill="#172033">fiberd-job.sh</text>
+  <text x="907" y="391" text-anchor="middle" font-size="11" fill="#526273">launches or restarts the agent</text>
+  <text x="907" y="409" text-anchor="middle" font-size="11" fill="#526273">job end: scope loss + SIGTERM</text>
 
-  <polyline points="215,360 215,310" fill="none" stroke="#333" stroke-width="1.5" marker-end="url(#arw)"/>
-  <polyline points="605,360 605,310" fill="none" stroke="#333" stroke-width="1.5" marker-end="url(#arw)"/>
+  <rect x="470" y="345" width="250" height="120" rx="12" fill="#EAF2FF" stroke="#5B7DB1" stroke-width="1.5"/>
+  <circle cx="498" cy="375" r="15" fill="#5B7DB1"/>
+  <text x="498" y="380" text-anchor="middle" font-size="12" font-weight="700" fill="#FFFFFF">4</text>
+  <text x="522" y="375" font-size="15" font-weight="700" fill="#172033">fiberd-slurm</text>
+  <text x="490" y="402" font-size="12" fill="#334E68">verifies grant for this node</text>
+  <text x="490" y="422" font-size="12" fill="#334E68">owns the job cgroup subtree</text>
+  <text x="490" y="442" font-size="12" fill="#334E68">refuses fibers.max above CPUs</text>
+
+  <path d="M790 386H720" fill="none" stroke="#486581" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="755" y="376" text-anchor="middle" font-size="11" fill="#526273">start</text>
+
+  <path d="M825 214C760 214 760 260 690 260V345" fill="none" stroke="#486581" stroke-width="1.7" stroke-dasharray="6 4" marker-end="url(#arrow)"/>
+  <text x="750" y="251" text-anchor="middle" font-size="11" fill="#526273">scontrol: is the job RUNNING?</text>
+
+  <rect x="755" y="472" width="270" height="76" rx="12" fill="#FFF4DC" stroke="#C98A2E" stroke-width="1.5"/>
+  <text x="890" y="497" text-anchor="middle" font-size="13.5" font-weight="700" fill="#172033">fabric channel</text>
+  <text x="890" y="519" text-anchor="middle" font-size="11" fill="#6B4E16">GRES to visible device paths</text>
+  <text x="890" y="537" text-anchor="middle" font-size="11" fill="#6B4E16">attached before template warm</text>
+
+  <path d="M908 427V472" fill="none" stroke="#486581" stroke-width="1.7" marker-end="url(#arrow)"/>
+
+  <rect x="470" y="500" width="220" height="82" rx="41" fill="#FFF4DC" stroke="#C98A2E" stroke-width="1.5"/>
+  <circle cx="500" cy="528" r="14" fill="#C98A2E"/>
+  <text x="500" y="533" text-anchor="middle" font-size="11" font-weight="700" fill="#FFFFFF">5</text>
+  <text x="580" y="527" text-anchor="middle" font-size="14" font-weight="700" fill="#172033">warm template</text>
+  <text x="580" y="550" text-anchor="middle" font-size="11" fill="#6B4E16">inside the allocation</text>
+  <text x="580" y="568" text-anchor="middle" font-size="11" fill="#6B4E16">uses the fabric channel</text>
+
+  <path d="M595 465V500" fill="none" stroke="#486581" stroke-width="2" marker-end="url(#arrow)"/>
+  <path d="M755 520H690" fill="none" stroke="#486581" stroke-width="1.7" marker-end="url(#arrow)"/>
+
+  <rect x="755" y="570" width="270" height="62" rx="12" fill="#EAF8EF" stroke="#3A8F5B" stroke-width="1.5"/>
+  <text x="890" y="594" text-anchor="middle" font-size="13.5" font-weight="700" fill="#172033">fibers in cgroup leaves</text>
+  <text x="890" y="615" text-anchor="middle" font-size="11" fill="#245C3D">node address / one port per fiber</text>
+  <path d="M690 557C725 557 720 601 755 601" fill="none" stroke="#2F855A" stroke-width="2" marker-end="url(#arrowGreen)"/>
+  <text x="721" y="580" text-anchor="middle" font-size="10.5" fill="#2F855A">clone</text>
+
+  <rect x="185" y="365" width="190" height="84" rx="12" fill="#F2F5F9" stroke="#7B8794"/>
+  <text x="280" y="391" text-anchor="middle" font-size="14" font-weight="700" fill="#172033">router or client</text>
+  <text x="280" y="413" text-anchor="middle" font-size="11" fill="#526273">calls the published</text>
+  <text x="280" y="431" text-anchor="middle" font-size="11" fill="#526273">agent address</text>
+  <path d="M375 395H470" fill="none" stroke="#486581" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="422" y="385" text-anchor="middle" font-size="11" fill="#526273">1 Clone</text>
+  <path d="M470 432H375" fill="none" stroke="#486581" stroke-width="1.7" stroke-dasharray="5 4" marker-end="url(#arrow)"/>
+  <text x="422" y="448" text-anchor="middle" font-size="10.5" fill="#526273">endpoint</text>
+  <path d="M280 449V608H755" fill="none" stroke="#2F855A" stroke-width="2" marker-end="url(#arrowGreen)"/>
+  <text x="470" y="600" text-anchor="middle" font-size="11" fill="#2F855A">2 connect directly to nodeIP:fiberPort</text>
+
 </svg>

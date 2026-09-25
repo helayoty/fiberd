@@ -4,7 +4,11 @@ This directory is an example of a **consumer** of fiberd's protocol, not
 part of fiberd. It is its own Go module and builds against the checkout
 it sits in. Nothing under it is imported by fiberd.
 
-![The Knative example: the activator holds a revision's grant; the first request clones the session, later ones attach, an idle revision is parked and the next request resumes it; misses become Knative's fallbacks](../../docs/images/example-knative.svg)
+![The activator holds a revision grant, calls Clone, forwards the request to the returned fiber endpoint, parks the session when idle, and resumes it on the next request.](../../docs/images/example-knative.svg)
+
+The CREATE, ATTACH, RESUME, SHED, and DEFERRED_FALLBACK semantics are defined
+in the [protocol reference](../../docs/protocol.md). This page covers only how
+the example maps them to an activator.
 
 ## The idea
 
@@ -22,6 +26,9 @@ role is played with fibers:
 | the next request after zero | `Clone(session)` again: `RESUME`, state intact |
 | the Pod cannot be scheduled | `DEFERRED_FALLBACK`: take the ordinary path (here: 503 naming the home that holds the session) |
 | the control plane is unreachable | `SHED`: 503 with `Retry-After` |
+
+The 503 response for `SHED` is this activator's HTTP mapping. fiberd's
+canonical JSON gateway maps `SHED` to 429 and `DEFERRED_FALLBACK` to 503.
 
 The layers, as the user set them: Knative above, the function inside a
 Hyperlight sandbox, fiberd beneath the sandbox owning its capacity and
@@ -56,6 +63,9 @@ make example-knative          # fake helper, no hypervisor
 make hyperlight-helper && make example-knative-kvm   # the Rust helper, needs /dev/kvm
 cd examples/knative && go test ./...                 # no cluster, no container
 ```
+
+Historical round-trip measurements from these scripts are recorded in
+[Benchmarks](../../docs/benchmarks.md#run-c-knative-shaped-activator).
 
 ## Fitting it into a Knative install
 

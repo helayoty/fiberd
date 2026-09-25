@@ -5,29 +5,16 @@ not part of fiberd. It is its own Go module, and it builds against the
 checkout it sits in (`replace github.com/helayoty/fiberd => ../..`).
 Nothing under it is imported by fiberd.
 
-![The Kubernetes example: the controller turns a CapacityGrant into a grant Pod and a projected grant; fiberd-k8s runs as PID 1, sets the readiness gate and serves fibers on the Pod IP; conformance and the storm run against the Pod in kind](../../docs/images/example-kubernetes.svg)
+![The controller reconciles one CapacityGrant into a signed grant and one grant Pod. fiberd-k8s admits the grant, warms one template, publishes readiness, and returns fiber endpoints on the Pod IP.](../../docs/images/example-kubernetes.svg)
 
-## What fiberd asks of an environment
+## Canonical model
 
-An environment holds grants and runs fibers under them. fiberd calls it a
-**home**, and everything it needs from one is an interface:
-
-- `pkg/home.Home`: how signed grants arrive (`Grants`), how control-plane
-  liveness is observed (`Health`), which cgroup subtree the agent owns
-  (`CgroupRoot`), how readiness is published (`PublishReady`), where
-  callers reach the agent (`AdvertisedEndpoint`), what the home asserts
-  about where it runs (`Scope`) and how it provisions a grant's devices
-  (`Fabric`).
-- the optional interfaces `pkg/agent` looks for: `LaneSetter` (a
-  test-only lane override), `ScopeLoser` (the home can lose its scope
-  while running and wants the agent to revoke every fence), and
-  `EndpointHoster` (the one address the home's fibers share).
-
-The agent itself is `pkg/agent`: every flag, the wiring, the fixed
-startup order. A binary for a home is a `main` of a few lines that binds
-the flags and calls `agent.Run` with a factory for the home. `cmd/fiberd`
-does that with the standalone home; `cmd/fiberd-k8s` here does it with the
-Kubernetes one.
+This README explains the example files and how to run them. The complete
+CapacityGrant lifecycle, readiness contract, resource fields, networking, and
+security boundaries are documented in
+[Operating on Kubernetes](../../docs/operating-kubernetes.md). The generic
+home and agent seams are documented in
+[Architecture](../../docs/architecture.md#home-seam).
 
 ## What this example is
 

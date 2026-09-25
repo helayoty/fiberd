@@ -6,56 +6,19 @@ it sits in. It plugs fiberd into [Agent Substrate](https://github.com/agent-subs
 as a worker image, so Substrate's control plane creates, suspends and
 resumes actors that are fibers.
 
-## Why: the same lifecycle, an order of magnitude cheaper
+## Why fibers fit
 
-Substrate multiplexes many idle actors onto a few pre-started worker
-Pods by snapshotting a whole sandbox to object storage on suspend and
-restoring it on the next request. fiberd's claim is that every step of
-that lifecycle costs an order of magnitude less when the actor is a
-fiber: a copy-on-write child of a warm template, parked as the pages it
-dirtied. The table is the same lifecycle measured on the same machine in
-the same minute (fiberd's dev container on an M-series Mac, Docker
-Desktop, `FIBERD_BENCH=1 go test -run TestStormNumbers ./tests/{proc,runc,gvisor}`),
-plus the Hyperlight column from the CI job that has a hypervisor.
+Substrate starts, suspends, restores, and terminates actors. The example maps
+those operations to Clone, Park with delta export, delta import followed by
+Clone, and Release. The worker keeps one admitted template warm, so actor
+state can be separated from reusable parent state.
 
-| lifecycle step | whole sandbox (gVisor `runsc` checkpoint/restore, what Substrate's `gvisor` class does) | fiber, fork (`proc`) | fiber, container (`runc`) | fiber, micro-VM (Hyperlight, CI on KVM) |
-|---|---|---|---|---|
-| warm the template, paid once | 655 ms | 194 ms | 273 ms | 236 ms |
-| start one actor (to ready), p50 | 214 ms | 0.7 ms | 1.6 ms | 1.5 ms |
-| start under a burst, p50 | 1.16 s (10 at once) | 58 ms (50 at once) | 37 ms (50 at once) | not measured |
-| suspend, p50 | 109 ms, 71 MB image | 164 ms, 4.2 MB delta | 164 ms, 4.2 MB delta | 215 ms, 135 MB image |
-| resume, p50 | 110 ms | 57 ms | 57 ms | 1.6 ms |
-| 50 actors resident, each with 4 MiB of its own | 50 sandboxes | 242 MiB for all (1632 MiB as copies) | same | one snapshot each |
-
-Read it by column, not just by row:
-
-- **Start** is where fibers win by three orders of magnitude: a fork or a
-  micro-VM restore from a resident snapshot, not a sandbox boot. This is
-  the "activation latency" Substrate's north-star metric names (100 ms at
-  the 95th percentile); a fiber spends its budget on the request.
-- **Suspend** writes what moved. A fiber's park is the delta over the
-  template's checkpoint, 4.2 MB for 4 MiB dirtied, which is what travels
-  to the object store and back; a sandbox image is the whole address
-  space. Substrate's roadmap lists incremental snapshots and storage
-  tiering; the delta is that, priced as W.
-- **Resume** from a delta merges it over the parent the worker already
-  holds; the Hyperlight resume is a snapshot already in memory.
-- **Density** is what the copy-on-write column shows: fifty resident
-  actors cost a seventh of fifty copies, before any of them is suspended.
-  Substrate's Worker holds one actor at a time; a fiberd worker can hold
-  many, which is the second phase below.
-- **Isolation** is the honest cost of the fork column: fibers of one
-  template share a kernel. Hyperlight is the answer where actors are
-  mutually untrusted: each fiber its own micro-VM with no guest kernel to
-  boot, restored in 1.5 ms. It runs Hyperlight guests (or the Python and
-  JavaScript guests of `hyperlight-sandbox`), not arbitrary images.
-
-The Substrate-shaped cycle end to end, in the herder's own test (two
-in-process workers, files shipped between them as atelet would, no
-object store): run the golden actor 183 ms including the template's
-warm, checkpoint 175 ms, restore on the other worker 414 ms (import,
-claim, resume, readiness probe), 8.6 MB shipped of which the parent
-checkpoint is 8 MB and the delta 0.5 MB.
+The lifecycle and resource behavior are documented in
+[Runtime model](../../docs/runtime-model.md) and
+[Resources](../../docs/resources.md). Backend comparisons and the
+Substrate-shaped worker measurement are centralized in
+[Benchmarks](../../docs/benchmarks.md#run-a-backend-lifecycle-comparison) and
+[Run E](../../docs/benchmarks.md#run-e-substrate-shaped-worker-lifecycle).
 
 ## How it fits
 
@@ -123,6 +86,6 @@ the cluster.
 It is not a fork of Substrate and changes nothing in it. The point is
 the shape: a worker image that answers Substrate's contract with
 fiberd's four verbs, so a Substrate cluster gets clone-not-boot, W-sized
-suspends and instant resumes without a change to its control plane. A
+suspends, and resumable state without a change to its control plane. A
 Substrate that registered sandbox classes and let a worker hold more
 than one actor would get the density column too.

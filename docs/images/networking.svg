@@ -1,0 +1,82 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="500" viewBox="0 0 1000 500" font-family="Inter, Helvetica Neue, Arial, sans-serif">
+  <title>Networking from Clone to one fiber</title>
+  <desc>A router calls the fiberd agent on the home address. This example shows a home configured for IPv4. Clone returns the selected home address with a port allocated to one fiber. The router then connects directly to that endpoint. Other fibers share the home address and use different ports.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#fafcff"/>
+      <stop offset="1" stop-color="#f1f5fb"/>
+    </linearGradient>
+    <linearGradient id="pod" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f6f9ff"/>
+      <stop offset="1" stop-color="#eaf1ff"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="3" stdDeviation="5" flood-color="#182230" flood-opacity="0.10"/>
+    </filter>
+    <marker id="blueArrow" markerWidth="9" markerHeight="9" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#3165b5"/>
+    </marker>
+    <marker id="purpleArrow" markerWidth="9" markerHeight="9" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#704a80"/>
+    </marker>
+  </defs>
+
+  <rect width="1000" height="500" fill="url(#bg)"/>
+  <text x="40" y="42" font-size="22" font-weight="700" fill="#172033">Clone returns the route to one fiber</text>
+  <text x="40" y="66" font-size="11" fill="#667085">TCP home with inet4 selected</text>
+
+  <!-- Caller -->
+  <rect x="40" y="196" width="190" height="116" rx="16" fill="#ffffff" stroke="#7f9dc8" stroke-width="1.5" filter="url(#shadow)"/>
+  <text x="135" y="229" text-anchor="middle" font-size="14" font-weight="700" fill="#24466f">Router or consumer</text>
+  <rect x="70" y="250" width="130" height="32" rx="8" fill="#e8f0fd"/>
+  <text x="135" y="270" text-anchor="middle" font-size="10" font-weight="700" fill="#24466f">holds Clone result</text>
+
+  <!-- Home network boundary -->
+  <rect x="300" y="92" width="660" height="390" rx="22" fill="url(#pod)" stroke="#6584b5" stroke-width="2" filter="url(#shadow)"/>
+  <text x="328" y="125" font-size="16" font-weight="700" fill="#24466f">Home network boundary</text>
+  <rect x="328" y="135" width="164" height="25" rx="12" fill="#ffffff" stroke="#b7c7e0"/>
+  <text x="410" y="152" text-anchor="middle" font-size="9" font-weight="700" fill="#24466f">selected: inet4 10.0.0.8</text>
+  <rect x="740" y="108" width="190" height="27" rx="13" fill="#ffffff" stroke="#9fb3ce"/>
+  <text x="835" y="126" text-anchor="middle" font-size="9.5" font-weight="700" fill="#24466f">one address, many ports</text>
+
+  <!-- Agent -->
+  <rect x="345" y="183" width="190" height="94" rx="14" fill="#ffffff" stroke="#42a39a" stroke-width="1.5"/>
+  <text x="440" y="211" text-anchor="middle" font-size="13" font-weight="700" fill="#126b66">fiberd agent</text>
+  <text x="440" y="232" text-anchor="middle" font-size="10" fill="#526d69">control endpoint</text>
+  <rect x="375" y="243" width="130" height="22" rx="11" fill="#d8f1ec"/>
+  <text x="440" y="258" text-anchor="middle" font-size="9" font-weight="700" fill="#126b66">10.0.0.8:8484</text>
+
+  <!-- Fiber endpoints -->
+  <text x="608" y="177" font-size="11" font-weight="700" fill="#4b3158">Data endpoints</text>
+
+  <rect x="590" y="192" width="310" height="66" rx="13" fill="#ffffff" stroke="#9875ba"/>
+  <rect x="606" y="207" width="66" height="36" rx="8" fill="#eee6f6"/>
+  <text x="639" y="230" text-anchor="middle" font-size="10" font-weight="700" fill="#704a80">fiber A</text>
+  <text x="690" y="229" font-size="10" font-weight="700" fill="#704a80">tcp://10.0.0.8:30001</text>
+
+  <rect x="590" y="274" width="310" height="66" rx="13" fill="#ffffff" stroke="#9875ba"/>
+  <rect x="606" y="289" width="66" height="36" rx="8" fill="#eee6f6"/>
+  <text x="639" y="312" text-anchor="middle" font-size="10" font-weight="700" fill="#704a80">fiber B</text>
+  <text x="690" y="301" font-size="9" fill="#667085">same selected home address</text>
+  <text x="690" y="321" font-size="11" font-weight="700" fill="#704a80">port 30002</text>
+
+  <rect x="590" y="356" width="310" height="66" rx="13" fill="#ffffff" stroke="#9875ba"/>
+  <rect x="606" y="371" width="66" height="36" rx="8" fill="#eee6f6"/>
+  <text x="639" y="394" text-anchor="middle" font-size="10" font-weight="700" fill="#704a80">fiber C</text>
+  <text x="690" y="383" font-size="9" fill="#667085">same selected home address</text>
+  <text x="690" y="403" font-size="11" font-weight="700" fill="#704a80">port 30003</text>
+
+  <!-- Clone and direct-connect flow -->
+  <path d="M230 222C270 170 300 166 345 205" fill="none" stroke="#3165b5" stroke-width="2" marker-end="url(#blueArrow)"/>
+  <rect x="234" y="155" width="117" height="25" rx="12" fill="#e8f0fd"/>
+  <text x="292" y="172" text-anchor="middle" font-size="9.5" font-weight="700" fill="#24466f">1  Clone(grant)</text>
+
+  <path d="M345 254C298 286 271 294 230 277" fill="none" stroke="#3165b5" stroke-width="2" stroke-dasharray="6 4" marker-end="url(#blueArrow)"/>
+  <rect x="231" y="299" width="260" height="25" rx="12" fill="#e8f0fd"/>
+  <text x="361" y="316" text-anchor="middle" font-size="9.5" font-weight="700" fill="#24466f">2  selected home address + port 30001</text>
+
+  <path d="M135 312V454H560V226H590" fill="none" stroke="#704a80" stroke-width="2.5" marker-end="url(#purpleArrow)"/>
+  <rect x="286" y="414" width="155" height="27" rx="13" fill="#eee6f6"/>
+  <text x="363" y="432" text-anchor="middle" font-size="9.5" font-weight="700" fill="#704a80">3  connect directly</text>
+
+</svg>

@@ -1,212 +1,149 @@
 # Architecture
 
-This is the design reference for fiberd. It describes how capacity is issued and exercised, the instance contract, the CPU and GPU execution models, the backend seam, the three homes, and the cross-cutting mechanisms that make the whole thing safe.
+This page describes how the current fiberd implementation is assembled. It focuses on package boundaries, state transitions, persistence, and runtime extension points. For the operator-facing model, start with [Runtime model](runtime-model.md), [Resources and limits](resources.md), [Networking](networking.md), and [Identity](identity.md). For exact request and response behavior, see the [Protocol reference](protocol.md).
 
-For plain-language definitions of individual terms, see [concepts.md](concepts.md). For a high-level introduction, see [overview.md](overview.md).
+![A home runs one fiberd agent. The control plane sends signed grants and receives aggregate status, while callers send Clone and receive an endpoint and fence. Each admitted grant contains one warm template and its fibers.](images/containment.svg)
 
----
+## Component boundaries
 
-## 1. The problem and the inversion
+fiberd keeps scheduling policy in a small core and injects the environment-specific parts around it.
 
-Serverless container instances must simultaneously be **cheap** (thousands per host), **fast** (created inside the request path), and **billable** (attributed to a tenant with a hard ceiling). A per-instance control-plane record delivers *billable* and can be made *fast*, but never *cheap*, because it fuses seven roles into one object and pays the cost of all of them per instance:
+- `cmd/fiberd` parses configuration and starts the reference agent.
+- `pkg/agent` assembles the home, runtime, verifier, ledger, audit spool, pressure controller, and network servers.
+- `pkg/core` owns grant admission, session resolution, fences, budgets, pressure reactions, snapshots, and the runtime interfaces.
+- `pkg/rpc` exposes the core through gRPC and the optional JSON gateway.
+- `pkg/grant` verifies and converts signed CapacityGrants.
+- `pkg/runtime/host` implements the host runtime over a selected backend.
+- `pkg/backend` defines the backend boundary. The `proc`, `runc`, `gvisor`, and `hyperlight` packages implement it.
+- `pkg/home` supplies control-plane health, scope claims, grants, and optional fabric channels. The reference binary currently includes standalone and file-lane homes.
+- `pkg/artifact` manages templates, checkpoints, deltas, registry exchange, and platform-parity metadata.
+- `pkg/sys` contains Linux integrations such as cgroups and CRIU.
 
-| # | Role | Delivered by |
-|---|---|---|
-| 1 | Scheduling unit | block-level object (control plane) |
-| 2 | Accounting unit | block-level object (control plane) |
-| 3 | Isolation / failure domain | node, per instance |
-| 4 | Workload identity | node, per instance |
-| 5 | Lifecycle | node, per instance |
-| 6 | Ecosystem contract | block-level object (control plane) |
-| 7 | Network identity | node, per instance |
+The core does not import Kubernetes APIs, container runtimes, or a particular control plane. Those concerns enter through the home, verifier, runtime, and artifact interfaces.
 
-fiberd splits the roles. The control plane's involvement ends at **issuing capacity as a block**; the node **exercises** that capacity by minting instances locally. Roles 1, 2, and 6 stay on a block-level object the control plane owns; roles 3, 4, 5, and 7 are delivered per instance by the node.
+## Startup and reconciliation
 
-![Delegated capacity: the control plane issues a grant once on the cold path; the node mints fibers on the warm path and reports usage asynchronously](./images/delegated-capacity.svg)
+The reference agent starts in the following order:
 
-Two precedents make this concrete: an IP router is delegated a prefix once and hosts mint addresses from it with no allocator involvement; Android keeps one warm zygote and forks every app copy-on-write. fiberd applies both moves to container instances.
+1. It creates the selected home and asks it for the cgroup root, health source, scope claims, and optional fabric provider.
+2. It creates the runtime and backend.
+3. It opens the persistent epoch. Opening the epoch advances it, which invalidates fences from the previous process.
+4. It creates an empty ledger, opens the local audit spool, and loads the last ledger snapshot.
+5. Reconciliation re-admits unexpired grants, restores parked-session metadata, removes unusable entries, and asks the runtime to terminate orphaned running fibers from the old epoch.
+6. It starts the W sampler, lease reaper, pressure loop when supported, home grant lane, admin server, and public RPC servers.
 
-## 2. The three components
+Running fibers are not recovered after an agent restart. Parked named sessions can remain resumable when their delta and parent checkpoint are still available.
 
-### CapacityGrant
+## Admission and the warm path
 
-An authenticated artifact the control plane issues once per block of capacity. It carries a template reference, `fibers: {max, warm}`, session and durability policy, a per-fiber device budget, and an expiry. Billing charges the block at issue, exactly once. It carries **no per-instance state**. Its authenticated arrival is the proof that admission and quota already happened — nothing is re-checked on the warm path.
+A home can deliver a CapacityGrant before traffic arrives. Admission checks the required tier, lease, and device requirements, provisions any grant-scoped fabric channel, and prepares the grant's warm template. Concurrent admissions for the same grant are coalesced.
 
-### Grant agent
+A valid Clone request can also self-admit an unknown grant. The signed grant travels with the request, so the verifier can authenticate it locally and the agent can prepare its template without a synchronous control-plane call. Pre-admission avoids that setup on the first request.
 
-One agent per home instance (a node, a grant Pod, a Slurm allocation), the sole runtime client for the fiber class. Its subcomponents:
+After verification, the core asks the ledger to resolve the session and reserve
+any required fiber slot. Budget and pressure checks run before new runtime
+work. A successful runtime call commits the reservation, records the action,
+and returns the endpoint. A failure releases the reservation. The
+[protocol reference](protocol.md) defines the wire-visible actions and
+outcomes.
 
-- **RPC frontend** — authentication and admission-completeness enforcement.
-- **Budget enforcer** — the thrash budget (maximum sustainable activation rate as a function of working-set size) and backpressure.
-- **Ledger** — the node-authoritative record of sessions, leases, fences, and fabric channels.
-- **Pressure controller** — two inputs, one ladder (kernel PSI on the grant slice and ledger-derived device pressure), responding shed -> park -> yield.
-- **Host runtime** — cgroup leaves and ceilings, W, the parent checkpoint store and delta manifests, the delta registry, parity, orphan adoption; one for every backend (section 4).
-- **Audit spool** — at-least-once, sequence-numbered, shipped asynchronously.
+## Ledger, sessions, and fences
 
-### Fibers
+The in-memory ledger is the authority for admitted grants, running fibers,
+parked named sessions, per-grant sequence counters, and status. Ledger
+mutations are serialized around session resolution. A reservation is committed
+only after the runtime succeeds, so concurrent requests for the same name
+cannot create two active incarnations. Fence structure and session behavior
+are defined in the [protocol reference](protocol.md#fences-and-epochs) and
+their trust meaning is covered in [Identity](identity.md).
 
-Instances minted by the home inside a grant: clones of the warm engine zygote (one fully initialized template instance per grant per home), a copy-on-write fork on the proc and runc backends and a snapshot restore on gVisor and Hyperlight. A fiber is addressed by the endpoint returned at clone time, scoped by its fence, held by a lease, and known to exactly two parties: the agent's ledger and the caller.
+## Runtime and backend seam
 
-### Grant lifecycle
+`pkg/core.Runtime` is the core's required execution boundary. A runtime must prepare templates, clone or restore fibers, park and release fibers, report stats and exits, reconcile discovered work, and advertise its tier.
 
-```
-issued  ->  ready  ->  serving  ->  expiring
-```
+The host runtime uses a narrower backend interface for mechanism-specific operations. Backends can additionally implement optional capabilities:
 
-Delivery of the grant is **not** readiness: the agent builds the zygote, checkpoints it, and only then reports `ready`. Readiness is a state the agent *publishes*, never a call anyone *makes*, and routing happens against ready grants only.
+- endpoint scheme reporting.
+- fixed-overhead and W measurement.
+- device usage and pressure reporting.
+- runtime-selected create and resume deadlines.
+- self-checkpointing or external checkpoint support.
+- delta encoding and platform facts.
+- grant pruning and fabric attachment.
 
-## 3. The contract
+The optional interfaces keep the core independent of whether a fiber is a process, container, sandbox, or micro-VM. A backend must not claim a stronger tier or endpoint form than it implements. Current backend behavior and limitations are summarized in [Runtime model](runtime-model.md).
 
-Four verbs are the entire instance-management surface:
+## Home seam
 
-```
-Clone(grant, deadline)              -> anonymous fiber          (fungible worker)
-Clone(grant, deadline, session: S)  -> attach | resume | create (idempotent: "my worker")
-Park(fiberID, sync)                 -> checkpoint delta, keep name
-Release(fiberID)                    -> destroy state, free name
-```
+A home represents the environment that supplies capacity. It has four responsibilities:
 
-### One verb, three costs
+- report whether the asynchronous grant lane is healthy.
+- deliver grants to the agent.
+- identify the scope in which the agent is running.
+- optionally allocate a grant-scoped fabric channel.
 
-`Clone(S)` resolves against the node ledger and takes one of three paths:
+The standalone home uses local configuration. The file-lane home accepts
+grants from a directory-backed lane. The repository also contains a reference
+Kubernetes home and controller under `examples/kubernetes`. They demonstrate
+the seam but are not core fiberd or a production operator.
 
-![Clone resolution: verify and budget, then resolve the session to attach, resume, or create; misses shed](./images/clone-resolution.svg)
+The core uses the home's control-plane health when it selects a capacity miss.
+The wire outcomes and caller behavior are defined in the [protocol reference](protocol.md#outcomes).
 
-- **S running** -> return the existing endpoint and fence (**attach**, ~free).
-- **S parked** -> restore its delta (**resume**, tens of milliseconds).
-- **S unknown** (or anonymous) -> fork the zygote and bind the name (**create**, milliseconds).
+## Checkpoints and session mobility
 
-Retries cannot create duplicate sessions: the agent serializes per session name, holding a per-session lock across the resolution and the runtime work.
+Parking asks the runtime to capture a fiber's mutable state and returns a delta reference. The 
+ledger retains that reference only for a named session. The runtime can publish the delta 
+so another home can discover and claim it.
 
-### Admission completeness (invariant)
+The artifact layer separates a reusable parent checkpoint from session-specific delta state:
 
-Every executable property of a fiber — image, command, args, env, mounts, security context, resource shape — is fixed by the template referenced in the grant and validated when the control plane issued it. `Clone` accepts exactly a grant reference, a deadline, an optional session ID, and an opaque size-capped payload delivered as data, never interpreted as configuration. The data plane selects capacity; it never shapes workloads. Nothing expressible at clone time was not already admitted.
+- the parent is keyed by template and platform information.
+- the delta carries the parked session's mutable state.
+- platform facts prevent restore on an incompatible host.
+- ownership claims prevent two homes from resuming the same published delta.
+- optional parity data can protect registry chunks.
 
-### Miss semantics
+Mobility is conditional. If no delta finder is configured, the session stays local. If a discovered delta exceeds `w_budget_bytes` or the target platform is incompatible, the miss points to the home that currently holds the state. If the shared store is unavailable, the current implementation can create a fresh session instead of waiting for it.
 
-Two distinct outcomes, deliberately never conflated:
+## Persistence and failure handling
 
-| Code | When | Caller action |
-|---|---|---|
-| **SHED** (429 + Retry-After) | Over the thrash budget, or out of capacity with the control plane unreachable | Back off and retry; never queue on a dead control plane |
-| **DEFERRED_FALLBACK** | Out of capacity with the control plane healthy | Fall back to the platform's ordinary provisioning path |
+The snapshot store writes admitted grants and parked-session metadata after state transitions. Running fibers are intentionally not restored from the snapshot.
 
-A `Clone` racing ahead of a grant's `ready` state resolves under the same two codes — "zygote not yet built" is indistinguishable from "capacity not yet on this node" from the caller's seat.
+The runtime reports asynchronous exits such as normal exit, signal, or OOM. The agent removes the fiber from the ledger, frees its slot, forgets any running named session, and records the exit. An exit that arrives before Clone commits is held briefly and settled after the commit so the slot is not leaked.
 
-### Sessions
+The lease reaper periodically yields expired grants. Yielding revokes the grant, releases its running fibers, and retains parked deltas. A later delivery can admit the grant again.
 
-A session *name* is caller-supplied identity that survives incarnations; the *fence* is minted per incarnation and credentials die with it — continuity of a session never implies continuity of its secrets. A parked session's *delta* is its divergence from the zygote (pages dirtied since fork), so park cost is approximately the working set — the same quantity the thrash budget prices. Fresh fibers get a reset contract (restored-to-template); resumed fibers get a continuity contract (state as parked, devices renegotiated).
+## Pressure controller
 
-## 4. CPU vs GPU
+When the runtime exposes pressure data, `PressureController` polls each
+admitted grant and can combine memory and device sources through
+`MaxPressure`. It maintains the shedding state consulted by Clone and invokes
+the agent's Park, Release, and Yield operations for reclamation. The
+W-dependent rate budget is a separate token bucket whose current curve is a
+placeholder. See [Resources and limits](resources.md) for watermarks, victim
+selection, and operator-visible behavior.
 
-The split in one sentence: **the CPU side is cloned; the GPU side is multiplexed.** `fork()` does not cross the PCIe boundary — device memory has no copy-on-write and driver contexts do not survive a fork — so each side gets the primitive that is actually cheap there, and the two meet over local IPC.
+## Audit path
 
-![CPU side clones the zygote with copy-on-write; GPU side multiplexes one engine that owns all device state, with fibers as IPC clients holding KV-cache slices](./images/cpu-vs-gpu.svg)
+Every state-changing operation emits an audit record with the fence and, when available, session, fiber, scope, and fabric details. The spool abstraction supports best-effort and synchronous durability modes.
 
-### CPU: clone-not-create
+The reference agent opens the spool without a remote shipper. In that configuration, records are persisted locally and synchronous durability can only wait for local `fsync`. A deployment that promises remote durability must inject and operate a remote shipper.
 
-A fiber is a copy-on-write `fork()` of the warm zygote. The expensive initialization is paid once by the zygote; each fiber pays only for the working set it dirties.
+## Device and fabric seams
 
-![Copy-on-write: after fork the zygote and fiber share all pages; only pages the fiber writes are copied privately](./images/copy-on-write.svg)
+A home may allocate a grant-scoped fabric channel before the template is prepared. A device-capable runtime then verifies that the prepared template offers the requested device class and reports device usage or pressure through optional interfaces.
 
-Because unmodified pages stay shared, density scales with the sum of working sets, not with instance count times image size. Activation latency scales with the working set W the fiber dirties, which is exactly what the thrash budget prices.
+The repository's device engine is a simulation used to exercise accounting and pressure behavior. It is not a production CUDA, GPU, DRA, or RDMA integration. The `FABRIC` runtime tier is reserved and is not implemented.
 
-### GPU: engine-multiplexed
+## Security boundaries
 
-The engine zygote is the only process that touches device state; fibers are CPU-side clients over local IPC — how vLLM-class servers already multiplex. A fiber's device footprint is its slice of the engine's KV cache, not a context: no per-fiber context creation, no per-fiber VRAM overhead, no partition-count ceiling. A fiber crash cannot poison a device context; an engine crash drops service for the grant's fibers — the same blast radius a shared inference server has today — and parked state survives it.
+The implementation separates several boundaries that should not be conflated:
 
-Device pressure is a ledger comparison, not a kernel signal: the kernel's pressure interface (PSI) has no device class, so the engine reports KV occupancy and queue depth over the IPC channel, and the agent evaluates watermarks against the declared per-fiber budget.
+- signed grants authorize capacity and bind the request to a home audience.
+- fences order fiber incarnations and become invalid when the epoch changes.
+- home scope claims describe where the agent is running.
+- backend isolation determines the OS boundary around a fiber.
+- workload credentials and network identity remain deployment concerns unless a backend or sidecar provides them.
 
-### The runtime tier ladder
-
-The agent never talks to a container runtime directly: one host runtime drives a backend (fork zygote, runc, gVisor, Hyperlight) through a small interface, and each backend advertises the tier its mechanism can honour. Grants carry a `min_tier` and are placed against the advertised tier — the tier decides which guarantees the platform can sell:
-
-| Tier | Runtime must have | Enables |
-|---|---|---|
-| **FIBER_BASIC** | create in an existing warm sandbox | correct semantics, pod-class latency |
-| **FIBER_WARM** | zygote fork / snapshot clone (CoW) | millisecond activation + density |
-| **FIBER_CHECKPOINT** | per-fiber delta checkpoint + restore | Park/resume — the session model |
-| **FIBER_SNAPSHOT** | snapshot-restore of a whole sandbox or micro-VM per fiber | park/resume with a kernel or hypervisor boundary per fiber |
-| **FIBER_FABRIC** | multi-node NVLink + IMEX-scoped fabric memory | fabric-tier park + cross-node resume at NVLink bandwidth (reserved in the protocol; nothing implements it) |
-
-`Clone(S)` on a parked session against a sub-CHECKPOINT runtime fails loudly with `FailedPrecondition`; it never silently forks a fresh, amnesiac instance.
-
-### One host runtime, many backends
-
-The tier a home advertises comes from the sandbox mechanism it runs, but the mechanism is the only thing that varies. One host runtime implements the runtime contract for every mechanism: it carves a cgroup leaf per fiber and prices W from it, keeps the parent checkpoint store and the delta manifests, publishes and claims sessions through the delta registry, gates on platform parity and adopts orphans after a restart. A backend implements a small interface underneath it: warm a template instance, clone a fiber from it into a given cgroup, checkpoint a fiber to a directory, restore one, kill, report exits. Two optional interfaces let a backend contribute a self-checkpoint as the parent for deltas and a codec that strips and merges parent pages in its own image format. The backend's name travels with every checkpoint as a parity fact, so a delta from one mechanism is never offered to another.
-
-![The backend seam: consumers above the protocol, the agent and ledger, one host runtime, the backend interface, and the proc, gVisor, runc and Hyperlight backends beneath it](./images/backend-seam.svg)
-
-Consumers sit above all of this and only ever call `Clone`, `Park` and `Release` through `pkg/consumer`: a Knative activator routing a scale-from-zero, a containerd shim creating a sandbox, a cluster-level herder. The function's code runs inside whatever sandbox the backend provides; fiberd is the layer beneath the sandbox that owns its capacity and its parked state. The [Knative](../examples/knative/README.md) and [Kata-shaped](../examples/kata/README.md) examples are the two built; the [Substrate herder](../examples/substrate/README.md) is in progress.
-
-## 5. Homes implement the protocol
-
-The core is home-invariant. A **home** is any environment that holds a grant and runs fibers under it; the identical agent and semantics run in every home, and a home is conformant if and only if the `grant-conform` suite passes against it with the core unmodified. Three homes exist: standalone (`cmd/fiberd`), [Kubernetes](../examples/kubernetes/README.md) and [Slurm](../examples/slurm/README.md); the agent is a library (`pkg/agent`) and a home's binary is a `main` of a few lines around it.
-
-![One core, many homes: an invariant core with thin homes that differ only in grant delivery, readiness, scheduling, runtime ownership, authentication, and fabric provisioning](./images/one-core-many-homes.svg)
-
-Each home adapts only: how the signed grant arrives, how readiness is published, who schedules, who owns the cgroup subtree, how callers authenticate, and how fabric channels are provisioned. In every home the grant is the same signed JWT, verified offline against the issuer's cached JWKS.
-
-The standalone home is the reference: a plain daemon on a host, with the platform's issuer and placer wherever the platform keeps them.
-
-![The standalone home: the platform's issuer signs a grant once and publishes its keys; cmd/fiberd verifies it offline, warms the template and mints fibers under a delegated cgroup subtree; callers clone over gRPC or the JSON gateway and dial the endpoint they are handed; status and audit flow back asynchronously](./images/standalone-home.svg)
-
-| Aspect | Standalone | Kubernetes | Slurm |
-|---|---|---|---|
-| Grant delivery | JWT file or carried in the first `Clone`; issuer polled for liveness | JWT projected into the grant Pod from the `CapacityGrant` CRD by the issuer controller | JWT passed to the allocation; the launcher verifies it and starts the agent |
-| Readiness | batched `Watch` status stream | Pod readiness gate `fiberd.io/zygote-ready`, set by the agent after the zygote is warm | allocation state plus the `Watch` stream |
-| Scheduling | the platform's placer treats the grant as the unit | the scheduler places the grant Pod | the Slurm scheduler places the allocation |
-| Cgroup ownership | the agent owns a delegated cgroup v2 subtree | the Pod's own cgroup, delegated to the agent running as PID 1 | the allocation's cgroup |
-| Caller authentication | grant JWT in the request, verified against the issuer's JWKS | same; the issuer is the cluster's controller (or the API server's SA issuer where acceptable) | same |
-| GPU / fabric | static domain fixed at provisioning | one DRA claim per grant | allocation-scoped GRES |
-
-## 6. Cross-cutting model
-
-### Fencing is revocation
-
-A **fence** is a monotonic incarnation triple `(grantUID, epoch, seq)` that scopes every claim and credential. The **epoch** is the agent's incarnation counter, bumped on every start; the **seq** is the fiber incarnation within a `(grant, epoch)`.
-
-![Fence and epoch: a session name survives incarnations while its fence is minted fresh each time; an epoch bump on restart invalidates every prior fence at once](./images/fence-epoch.svg)
-
-Nothing minted for a fiber validates beyond `min(lease TTL, its exact fence)`. Revocation of a grant propagates by lease non-renewal, bounded by lease TTL even during an outage. `Clone` scrubs inherited descriptors, baked tokens, and entropy: identity is assigned after the fork, never baked into the template. A restart bumps the epoch, which invalidates all prior fences at once — orphans are reaped and nothing minted before the restart validates after it. A home can take the same bump without restarting when it learns that its scope is gone under it (a namespace deleted, a service-account issuer rotated, a fabric claim revoked): `min(lease, fence)` stays the only rule the core enforces, and a home with more scope than that expresses it by revoking, per grant on the grant lane or for the whole agent by epoch, never as a third validity term. What the home asserts about its scope is visible on every audit record.
-
-### Persistence and restart
-
-Only four things persist across a restart:
-
-- the **epoch file** (bump on start; timestamp-jump on corruption — never guess);
-- a **ledger snapshot** (a cache; runtime reality wins at reconcile);
-- **parked deltas** (the only unreconstructible user state);
-- the **audit spool** (at-least-once, sequence-numbered; loss window = flush interval).
-
-Startup order is fixed:
-
-![Startup order: bump the epoch, reconcile the ledger against runtime reality, then open the warm path](./images/startup-order.svg)
-
-The agent serves nothing until its view of the node is real.
-
-### Accounting
-
-The grant's cgroup slice is the hard ceiling: a fiber can burst within the block, and the block cannot exceed what was charged. Usage returns asynchronously as resource-time integrals — CPU and memory exact per grant, device engine-apportioned. Per-fiber memory attribution is approximate under CoW (the slice is exact; the fiber is an estimate); per-fiber `memory.max` + `oom.group` make the kernel the executioner for over-limit fibers. Reclaim is drain-then-kill everywhere: park named sessions, shed anonymous fibers, then take the grant.
-
-### The pressure ladder
-
-The pressure controller takes two inputs and applies one ordering, cheapest reaction first, the expensive step last:
-
-![Pressure ladder: kernel PSI and ledger device pressure feed one ladder that responds shed, then park, then yield](./images/pressure-ladder.svg)
-
-- **shed** — refuse new clones (one more ledger predicate at Clone admission);
-- **park** — reclaim over-quota capacity before entitled capacity;
-- **yield / evict** — take the grant, weighted by occupancy and resource-seconds.
-
-### Identity and audit
-
-Fibers share the grant's identity, distinguished by port; a later phase mints per-fiber identities from a node-held, grant-scoped signing key with delegation depth of one, so a compromised agent compromises its node's grants and nothing else. Because nothing calls home on the warm path, there is no central record of who activated what: the agent ships structured audit asynchronously with a declared loss window.
-
-![Audit spool: every operation appends locally; BEST_EFFORT ships async after ack, SYNC ships before ack](./images/audit-spool.svg)
-
-Compliance-grade deployments buy the SYNC class, where `Clone` acks only after the record is remote — priced as latency, chosen per grant.
-
-### Network
-
-A fiber's endpoint is returned by `Clone` and exists nowhere else, as a URL the caller dials as given: `unix://` for same-host callers, `tcp://` for callers over the network with an IPv6 literal bracketed. Which address family a home hands out is declared per deployment (`-endpoint-family` on the standalone home, the Pod's addresses under Kubernetes), never discovered. Under a shared IPv4 or IPv6 address fibers share the grant's address with port distinction (network policy at grant granularity); the host runtime hands out one port per live fiber and a parked fiber keeps its port for the restored listener. Per-fiber IPs, viable under IPv6 (policy at fiber granularity), are left as a further policy and not built.
+The detailed identity model is in [Identity](identity.md), networking behavior is in [Networking](networking.md), and resource containment is in [Resources and limits](resources.md).

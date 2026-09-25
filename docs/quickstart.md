@@ -1,6 +1,8 @@
 # Quickstart
 
-Build fiberd, run an agent on this machine, and exercise the four verbs. Everything beyond that is one `make` target away and is described where it lives: the backends in this page's second half, the environments and consumers in the examples' own READMEs.
+Build fiberd, run an agent on this machine, and exercise the four protocol
+operations. This page covers the runnable path. The conceptual guides explain
+the results, while each environment and consumer has its own example README.
 
 ## Build
 
@@ -8,8 +10,6 @@ Go 1.26 or newer. The build tools are pinned in `hack/tools/go.mod` and run thro
 
 ```bash
 make build      # bin/fiberd, bin/grant-issuer, bin/zygotectl
-make test       # unit tests, fiberd and every example module
-make lint
 ```
 
 ## Run the protocol on this machine
@@ -60,18 +60,19 @@ make linux-test       # unit and integration tests
 make conform-proc     # the conformance suite against the fork zygote
 ```
 
-| Backend | `-runtime` | Tier | Fibers are | Conformance |
-| --- | --- | --- | --- | --- |
-| proc | `proc` with `-template default=bin/refzygote --heap-mb 32` | `FIBER_CHECKPOINT` | forks of the warm zygote; parks are CRIU deltas | `make conform-proc` |
-| runc | `runc -runc-rootfs <dir>` (rootfs from `hack/gvisor/rootfs.sh`) | `FIBER_CHECKPOINT` | the same forks inside an OCI container | `make conform-runc` |
-| gVisor | `gvisor -gvisor-rootfs <dir>` | `FIBER_SNAPSHOT` | one `runsc` sandbox each, restored from the warm image | `make conform-gvisor` |
-| Hyperlight | `hyperlight -hyperlight-helper <bin> -hyperlight-guest <bin>` | `FIBER_SNAPSHOT` | micro-VMs restored from the warm snapshot; needs KVM | `make conform-hyperlight-fake` (no hypervisor), `make conform-hyperlight` |
+| Backend | Conformance target | Additional requirement |
+| --- | --- | --- |
+| proc | `make conform-proc` | cgroup v2 and CRIU |
+| runc | `make conform-runc` | runc, CRIU, and a root filesystem |
+| gVisor | `make conform-gvisor` | runsc and a root filesystem |
+| Hyperlight | `make conform-hyperlight-fake` or `make conform-hyperlight` | the real-helper target requires KVM |
 
-`fiberd -h` lists every flag. The ones worth knowing: `-endpoint-family inet4|inet6` with `-endpoint-host` serves fibers on tcp instead of unix sockets; `-devices` names the devices a grant's engine may drive; `-template "default=bin/refzygote --heap-mb 32 --device-mb 64"` makes the reference zygote an engine with a simulated device; `-registry` warms templates from OCI artifacts; `-parity` sets how closely a checkpoint's host must match this one.
+See the [runtime model](runtime-model.md) for backend behavior and tiers.
+`fiberd -h` lists every configuration flag.
 
 ## Conformance
 
-`grant-conform` (built from `tests/conform`) is the executable contract: cases C1 to C10 of [protocol.md](protocol.md), driven through the public gRPC surface plus hooks a target supplies as commands (restart it, flip the grant lane, look up an audit record, end the engine, lose the scope). Cases without their hook are skipped and say so.
+`grant-conform` (built from `tests/conform`) is the executable contract: cases C1 to C10, driven through the public gRPC surface plus hooks a target supplies as commands (restart it, flip the grant lane, look up an audit record, end the engine, lose the scope). The outcomes are defined in [protocol.md](protocol.md). Cases without their hook are skipped and say so.
 
 ```bash
 make conform-stub      # the in-memory runtime, unsigned grants
@@ -80,17 +81,12 @@ bin/grant-conform -target host:port -node-id <audience> -mint jwt -issuer-key ke
   [-restart-cmd ...] [-cp-health-cmd ...] [-audit-file ...] [-engine-kill-cmd ...] [-scope-cmd ...]
 ```
 
-## More
+## Next
 
-- **Templates as artifacts and session mobility**: `make registry-start`, `make zygote-artifact`, `make mobility` (a session moves between two agents through the registry). The rules are in [protocol.md](protocol.md), "Session mobility".
-- **The overcommit storm**: `make overcommit` drives 2x demand into a 160 MiB grant under a 384 MiB cap and prints the ladder's timeline.
-- **The fork/CoW mechanism alone**: `make bench` builds `zygote_bench.c`; the numbers are in [status.md](status.md).
-- **Environments**: [Kubernetes](../examples/kubernetes/README.md) (the agent as PID 1 of a grant Pod, an issuer controller, `make conform-kind`) and [Slurm](../examples/slurm/README.md) (the agent inside an allocation, `make conform-slurm`).
-- **Consumers**: [Knative over Hyperlight](../examples/knative/README.md) (`make example-knative`) and the [Kata-shaped containerd shim](../examples/kata/README.md) (`make example-kata`).
+Continue with an environment or consumer example:
 
-## Notes
-
-- `000` from `curl` means the loop outran startup; poll `/healthz` first.
-- `/healthz` says the process is up; `grantLaneHealthy` is lane liveness, not readiness.
-- The thrash budget defaults to 200 clones/s; `-base-rate 5` shows budget SHED from a sequential loop.
-- A `Miss` whose `code` is absent in JSON is `SHED`: the enum's zero value, omitted by protobuf JSON.
+- [Kubernetes](../examples/kubernetes/README.md)
+- [Slurm](../examples/slurm/README.md)
+- [Knative](../examples/knative/README.md)
+- [Kata-shaped containerd shim](../examples/kata/README.md)
+- [Agent Substrate](../examples/substrate/README.md)

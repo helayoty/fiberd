@@ -1,43 +1,44 @@
 # fiberd
 
-**A capability-grant protocol that lets any execution environment mint instances locally in milliseconds from capacity a control plane charged once, and lets callers fall back sanely when it cannot.**
+**A capability-grant protocol for fast, local instance activation.**
 
-> Instances that cost nothing to create but still count.
+fiberd lets a control plane allocate and charge a block of capacity once, then lets the receiving
+environment create instances from that block without another control-plane call. These instances
+are called **fibers**.
 
-![fiberd: the control plane issues a grant once; the node mints fibers on the warm path with no call home](./docs/images/fiberd-hero.png)
+The cold path handles placement, admission, quota, and billing, while the warm path creates, attaches, 
+parks, and releases individual fibers. Capacity already present in a home remains usable during a 
+control-plane outage.
 
-## Prior art: the mechanisms are known
+![The control plane issues and charges a signed capacity grant once. The home verifies it, warms one template, creates fibers locally, returns endpoints to callers, and reports aggregate status.](./docs/images/fiberd-hero.svg)
 
-Fast, dense instance creation is a solved mechanism. fiberd does not claim any of the rows below as novel; it reuses them.
+## Why fiberd?
 
-| System | Mechanism it proves | What it gives | What it leaves open |
-| --- | --- | --- | --- |
-| **SOCK** (Oakes et al., ATC '18) | Zygote-provisioned lean containers: fork from a warm, package-cached interpreter | Millisecond starts, shared pages across instances | Capacity and authorization stay per instance in the orchestrator; one runtime, one home |
-| **SAND** (Akkus et al., ATC '18) | Application-level sandboxing: fork worker processes inside a per-app container | Cheap instances within an app's isolation boundary | No signed authority a foreign environment can verify; no miss semantics tied to control-plane health |
-| **Catalyzer** (Du et al., ASPLOS '20) | `sfork` + on-demand restore of a gVisor sandbox image | Sub-millisecond restore, snapshot-as-template | Mechanism only: no delegation of capacity, no cost model for dirtied state |
-| **Firecracker snapshots** | MicroVM snapshot/restore behind a KVM boundary | Multi-tenant-safe warm instances | Each VM is still a control-plane record; nothing says who may restore what, or when to give up |
-| **Orleans** (virtual actors) | Activation on demand: an actor identity is attached, resumed, or created, idempotently | The session model: name survives incarnations | Single cluster, single runtime; no portable authority, no memory-priced budget |
-| **Slurm** | Allocation as a block: capacity granted once, jobs run inside it with no scheduler contact | Block delegation, prolog-time authorization | No millisecond instances inside the block, no fence/miss protocol, not portable to Kubernetes |
+Serverless and agent platforms need instances that are:
 
-## What is new
+* **fast** enough to create on the request path.
+* **dense** enough to run in large numbers.
+* **accountable** to a tenant and a hard capacity ceiling.
 
-fiberd is the **protocol between a control plane and an environment that runs instances on its behalf**, not the daemon that runs them. Three properties are the contribution:
+fiberd combines block-level capacity delegation with warm-template cloning. The control plane 
+delegates capacity to a home, much like assigning an IP prefix to a router. The home keeps the 
+workload template initialized and creates fibers through the backend's clone or restore 
+mechanism. The protocol adds the controls needed to use this model across execution environments:
 
-1. **The signed capability grant.** Authorization travels with the work as a signed `CapacityGrant`; the receiving environment verifies it offline, and revocation is lease non-renewal. Nothing on the activation path calls home.
-2. **Two miss codes keyed on control-plane health.** A clone that cannot be served returns `SHED` when the control plane is unreachable (back off; never queue on a dead control plane) and `DEFERRED_FALLBACK` when it is healthy (route the caller to its ordinary path). Conflating them is what makes routers retry into outages.
-3. **A W-priced cost model.** Activation rate, park cost and reclaim are priced in the same quantity, the working set W a fiber dirties after fork. W is also the mobility budget for moving a parked session between environments.
+1. **Signed capacity grants** carry authorization with the work and are verified offline.
+2. **Explicit miss semantics** distinguish local backpressure (`SHED`) from capacity that may
+    be provisioned elsewhere (`DEFERRED_FALLBACK`).
+3. **Working-set accounting** uses the memory a fiber dirties (`W`) to bound private memory and 
+checkpoint mobility.
 
 ## How it works
 
-| Component | What it is |
-| --- | --- |
-| **CapacityGrant** | A signed JWT the control plane issues once per block of capacity: template digest, `fibers: {max, warm}`, `w_budget_bytes`, minimum runtime tier, lease expiry, policy. Billing charges it exactly once, at issue. |
-| **Home** | The environment that holds the grant and runs fibers under it: a standalone host, a Kubernetes grant Pod, a Slurm allocation. Homes implement the protocol; the core is home-invariant. |
-| **Grant agent** (`fiberd`) | One process per home instance. Holds the ledger, budget, fences, audit spool and pressure ladder; mints fibers from a warm template through one of four backends (fork zygote, runc, gVisor, Hyperlight). |
-| **Fibers** | Instances minted inside a grant: clones of the warm template, addressed by an endpoint, scoped by a fence, held by a lease. |
-| **Consumers** | Whatever calls `Clone`: a Knative activator, a containerd shim, a cluster-level herder. |
+The control plane issues a signed `CapacityGrant`. It identifies the admitted template and 
+defines the capacity limit, working-set budget, runtime tier, policy, and expiry. The 
+receiving **home** verifies the grant, warms the template, and runs one fiberd agent. 
+A home can be a standalone host, a Kubernetes grant Pod, or a Slurm allocation.
 
-The warm-path contract is one verb with three costs:
+Callers use four operations:
 
 ```
 Clone(grant, deadline)              -> anonymous fiber          (fungible worker)
@@ -46,16 +47,80 @@ Park(fiberID, sync)                 -> checkpoint delta, keep name
 Release(fiberID)                    -> destroy state, free name
 ```
 
+`Clone` returns the endpoint and fence for the selected fiber. The fence identifies that 
+incarnation, while the grant lease limits how long the home holds the capacity. The control 
+plane receives aggregate grant status rather than a record for every fiber.
+
+## Quick start
+
+Go 1.26 or newer is required.
+
+```bash
+make build
+make test
+make conform-stub
+```
+
+`make conform-stub` runs the executable protocol contract against the in-memory runtime and
+works on macOS and Linux. To exercise real forks, cgroup v2, and CRIU inside the Linux
+development container:
+
+```bash
+make conform-proc
+```
+
+See the [quickstart](docs/quickstart.md) for a signed-grant walkthrough, JSON and gRPC examples,
+and all available backend targets.
+
+## Backends and homes
+
+The core is independent of both the sandbox mechanism and the environment
+that owns the grant.
+
+| Type | Implementations |
+| --- | --- |
+| **Backend** | `proc` (fork + CRIU), `runc`, gVisor, Hyperlight |
+| **Built-in home** | standalone with an optional file-backed grant lane |
+| **Environment examples** | Kubernetes, Slurm |
+| **Consumer examples** | Knative activator, Kata-shaped containerd shim, Agent Substrate herder |
+
+Each backend and integration target advertises its capabilities and uses the
+same conformance contract. Linux is required for real fibers. The stub runtime
+supports development and protocol tests on macOS.
+
+## Examples
+
+- [Kubernetes](examples/kubernetes/README.md): a `CapacityGrant` CRD,
+  issuer controller, and grant Pod with fiberd as PID 1.
+- [Slurm](examples/slurm/README.md): fiberd inside an allocation, bounded by
+  the allocation's cgroup and CPUs.
+- [Knative](examples/knative/README.md): scale-from-zero through a fiberd
+  activator over Hyperlight.
+- [Kata-shaped shim](examples/kata/README.md): a containerd runtime-v2 shim
+  whose containers are fibers.
+- [Agent Substrate](examples/substrate/README.md): actors created, suspended,
+  and resumed as fibers.
+
 ## Documentation
 
-- [docs/overview.md](docs/overview.md): the thesis, in one page.
-- [docs/quickstart.md](docs/quickstart.md): build, run, and exercise the protocol.
-- [docs/protocol.md](docs/protocol.md): the wire semantics and the conformance suite.
-- [docs/architecture.md](docs/architecture.md): the design reference.
-- [docs/concepts.md](docs/concepts.md): a glossary, one analogy and one diagram per term.
-- [docs/status.md](docs/status.md): what exists, what it measured, what blocks the rest.
-- Integrations, each its own module and README: [Kubernetes](examples/kubernetes/README.md), [Slurm](examples/slurm/README.md), [Knative over Hyperlight](examples/knative/README.md), [a Kata-shaped shim](examples/kata/README.md), and the in-progress [Substrate herder](examples/substrate/README.md).
+- **Run it:** [Quickstart](docs/quickstart.md)
+- **Understand what runs:** [Runtime model](docs/runtime-model.md)
+- **Plan CPU and memory:** [Resource model](docs/resources.md)
+- **Plan connectivity:** [Networking](docs/networking.md)
+- **Understand trust boundaries:** [Identity](docs/identity.md)
+- **Operate on Kubernetes:** [Kubernetes operations](docs/operating-kubernetes.md)
+- **Understand the design:** [Architecture](docs/architecture.md)
+- **Implement the wire contract:** [Protocol](docs/protocol.md)
+- **Review measured results and methodology:** [Benchmarks](docs/benchmarks.md)
+
+## Contributing
+
+- Run `make test` and `make lint`.
+- Run `make proto` after changing `api/**/*.proto`.
+- Backend changes must pass the corresponding `conform-*` target.
+- New homes and integrations should keep `pkg/core` unchanged and pass the
+  conformance suite.
 
 ## License
 
-See [LICENSE](LICENSE).
+[Apache-2.0](LICENSE).

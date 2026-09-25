@@ -5,7 +5,13 @@ fiberd. It is its own Go module and builds against the checkout it sits
 in (`replace github.com/helayoty/fiberd => ../..`). Nothing under it is
 imported by fiberd, and nothing in `pkg/core` changed for it.
 
-![The Slurm example: the issuer mints a grant for the node, sbatch runs fiberd-slurm inside the allocation, the agent lives in the job step's cgroup under the job's memory limit; conformance and the storm run against allocations in Slurm-in-Docker](../../docs/images/example-slurm.svg)
+![A signed grant is submitted with sbatch. fiberd-slurm verifies it inside the allocation, watches job state, warms one template, and serves fibers on the node address.](../../docs/images/example-slurm.svg)
+
+The generic execution, resource, endpoint, and trust models are documented in
+[Runtime model](../../docs/runtime-model.md),
+[Resources](../../docs/resources.md), [Networking](../../docs/networking.md),
+and [Identity](../../docs/identity.md). This page covers only the Slurm
+mapping.
 
 ## The shape
 
@@ -71,8 +77,9 @@ cluster:
 cd examples/slurm && go test ./...
 ```
 
-Measured on this Mac (Docker Desktop, arm64): C1 to C10 in 13 s; the storm's
-first park at 13 s with PSI 50%, no OOM kill.
+The historical duration and pressure observation for this acceptance run are
+recorded with their environment in
+[Benchmarks](../../docs/benchmarks.md#run-d-slurm-acceptance).
 
 Two things Slurm taught the example: slurmstepd signals the job script and
 the cgroups it made, not the ones fiberd carves beneath the step, so

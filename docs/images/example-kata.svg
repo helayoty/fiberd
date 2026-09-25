@@ -1,62 +1,118 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="820" height="440" viewBox="0 0 820 440" font-family="Helvetica Neue, Arial, sans-serif">
-  <title>The Kata-shaped example</title>
-  <desc>A Pod with runtimeClassName fiberd reaches containerd-shim-fiberd-v1 through containerd; the shim clones a fiber on the home the Pod's annotations name; Kill parks or releases; a later Pod on the same session resumes it.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="700" viewBox="0 0 1100 700" font-family="Inter, Helvetica Neue, Arial, sans-serif">
+  <title>How the Kata-shaped shim maps a Pod container to a fiber</title>
+  <desc>A Pod selects the fiberd RuntimeClass and carries grant, home, session, and stop-policy annotations. Kubelet asks containerd to create the sandbox and application container. containerd invokes the fiberd runtime-v2 shim. The shim records the sandbox, calls Clone for the application container, and presents the returned fiber as a container. Killing the first Pod parks the named session, so a later Pod using the same session resumes it. Releasing the second Pod destroys the fiber state.</desc>
   <defs>
-    <marker id="arw" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L8,3 L0,6 Z" fill="#333"/></marker>
+    <linearGradient id="page" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#F8FAFD"/>
+      <stop offset="1" stop-color="#EEF3F8"/>
+    </linearGradient>
+    <marker id="arrow" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto">
+      <path d="M0 0L9 4.5L0 9Z" fill="#486581"/>
+    </marker>
+    <marker id="arrowGreen" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto">
+      <path d="M0 0L9 4.5L0 9Z" fill="#2F855A"/>
+    </marker>
   </defs>
-  <rect width="820" height="440" fill="#ffffff"/>
 
-  <rect x="30" y="30" width="230" height="110" rx="6" fill="#f5f5f5" stroke="#999"/>
-  <text x="145" y="54" text-anchor="middle" font-size="13" font-weight="600" fill="#1a1a1a">Pod kata-1</text>
-  <text x="145" y="76" text-anchor="middle" font-size="11" fill="#1a1a1a">runtimeClassName: fiberd</text>
-  <text x="145" y="94" text-anchor="middle" font-size="11" fill="#1a1a1a">io.fiberd/grant, io.fiberd/home</text>
-  <text x="145" y="112" text-anchor="middle" font-size="11" fill="#1a1a1a">io.fiberd/session: kata-demo</text>
-  <text x="145" y="130" text-anchor="middle" font-size="11" fill="#1a1a1a">io.fiberd/on-stop: park</text>
+  <rect width="1100" height="700" fill="url(#page)"/>
+  <text x="40" y="42" font-size="23" font-weight="700" fill="#172033">Kata-shaped example: container lifecycle outside, fiber lifecycle inside</text>
+  <text x="40" y="67" font-size="13" fill="#526273">The shim translates containerd operations. It does not make a fiber into an OCI container.</text>
 
-  <rect x="300" y="30" width="230" height="110" rx="6" fill="#dae8fc" stroke="#6c8ebf"/>
-  <text x="415" y="54" text-anchor="middle" font-size="13" font-weight="600" fill="#1a1a1a">containerd on the kind node</text>
-  <text x="415" y="76" text-anchor="middle" font-size="11" fill="#1a1a1a">runtime handler fiberd</text>
-  <text x="415" y="94" text-anchor="middle" font-size="11" fill="#1a1a1a">pod_annotations = ["io.fiberd/*"]</text>
-  <text x="415" y="112" text-anchor="middle" font-size="11" fill="#1a1a1a">Create, Start, Kill, Delete</text>
-  <text x="415" y="130" text-anchor="middle" font-size="11" fill="#1a1a1a">over ttrpc, task API v3</text>
+  <text x="40" y="105" font-size="12" font-weight="700" fill="#6B7785" letter-spacing="1.2">KUBERNETES NODE</text>
 
-  <rect x="570" y="30" width="220" height="110" rx="6" fill="#e1d5e7" stroke="#9673a6"/>
-  <text x="680" y="54" text-anchor="middle" font-size="13" font-weight="600" fill="#1a1a1a">containerd-shim-fiberd-v1</text>
-  <text x="680" y="76" text-anchor="middle" font-size="11" fill="#1a1a1a">sandbox container: a record</text>
-  <text x="680" y="94" text-anchor="middle" font-size="11" fill="#1a1a1a">app container: Clone(session)</text>
-  <text x="680" y="112" text-anchor="middle" font-size="11" fill="#1a1a1a">Kill: Park or Release</text>
-  <text x="680" y="130" text-anchor="middle" font-size="11" fill="#1a1a1a">one shim per Pod</text>
+  <rect x="40" y="120" width="255" height="140" rx="12" fill="#F2F5F9" stroke="#7B8794" stroke-width="1.5"/>
+  <circle cx="68" cy="150" r="15" fill="#7B8794"/>
+  <text x="68" y="155" text-anchor="middle" font-size="12" font-weight="700" fill="#FFFFFF">1</text>
+  <text x="92" y="150" font-size="15" font-weight="700" fill="#172033">Pod specification</text>
+  <text x="60" y="178" font-size="12" fill="#526273">runtimeClassName: fiberd</text>
+  <text x="60" y="198" font-size="12" fill="#526273">grant + home address</text>
+  <text x="60" y="218" font-size="12" fill="#526273">session: kata-demo</text>
+  <text x="60" y="238" font-size="12" fill="#526273">on-stop: park or release</text>
 
-  <polyline points="260,85 300,85" fill="none" stroke="#333" stroke-width="1.5" marker-end="url(#arw)"/>
-  <polyline points="530,85 570,85" fill="none" stroke="#333" stroke-width="1.5" marker-end="url(#arw)"/>
+  <rect x="395" y="120" width="255" height="140" rx="12" fill="#EAF2FF" stroke="#5B7DB1" stroke-width="1.5"/>
+  <circle cx="423" cy="150" r="15" fill="#5B7DB1"/>
+  <text x="423" y="155" text-anchor="middle" font-size="12" font-weight="700" fill="#FFFFFF">2</text>
+  <text x="447" y="150" font-size="15" font-weight="700" fill="#172033">kubelet to containerd</text>
+  <text x="415" y="178" font-size="12" fill="#334E68">selects runtime handler fiberd</text>
+  <text x="415" y="198" font-size="12" fill="#334E68">passes io.fiberd/* annotations</text>
+  <text x="415" y="218" font-size="12" fill="#334E68">sends Create, Start, Kill, Delete</text>
+  <text x="415" y="238" font-size="12" fill="#334E68">over the runtime-v2 task API</text>
 
-  <rect x="570" y="170" width="220" height="80" rx="6" fill="#b0e3e6" stroke="#0e8088"/>
-  <text x="680" y="194" text-anchor="middle" font-size="13" font-weight="600" fill="#1a1a1a">fiberd home</text>
-  <text x="680" y="214" text-anchor="middle" font-size="11" fill="#1a1a1a">the conform grant Pod of the</text>
-  <text x="680" y="230" text-anchor="middle" font-size="11" fill="#1a1a1a">Kubernetes example, at 127.0.0.1:30084</text>
-  <polyline points="680,140 680,170" fill="none" stroke="#333" stroke-width="1.5" marker-end="url(#arw)"/>
+  <rect x="750" y="120" width="310" height="140" rx="12" fill="#F3ECFF" stroke="#8B6CB0" stroke-width="1.5"/>
+  <circle cx="778" cy="150" r="15" fill="#8B6CB0"/>
+  <text x="778" y="155" text-anchor="middle" font-size="12" font-weight="700" fill="#FFFFFF">3</text>
+  <text x="802" y="150" font-size="15" font-weight="700" fill="#172033">containerd-shim-fiberd-v1</text>
+  <text x="770" y="178" font-size="12" fill="#4A3F5C">sandbox Create: record only</text>
+  <text x="770" y="198" font-size="12" fill="#4A3F5C">app Create: Clone(session)</text>
+  <text x="770" y="218" font-size="12" fill="#4A3F5C">Start: mark container running</text>
+  <text x="770" y="238" font-size="12" fill="#4A3F5C">Kill: Park or Release</text>
 
-  <rect x="30" y="280" width="760" height="140" rx="10" fill="#f5f5f5" stroke="#999"/>
-  <text x="45" y="304" font-size="13" font-weight="600" fill="#333">what make example-kata shows (kubectl logs of each Pod)</text>
+  <path d="M295 190H395" fill="none" stroke="#486581" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="345" y="180" text-anchor="middle" font-size="11" fill="#526273">Pod admitted</text>
+  <path d="M650 190H750" fill="none" stroke="#486581" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="700" y="180" text-anchor="middle" font-size="11" fill="#526273">task API</text>
 
-  <rect x="50" y="322" width="230" height="84" rx="6" fill="#d5e8d4" stroke="#82b366"/>
-  <text x="165" y="344" text-anchor="middle" font-size="13" font-weight="600" fill="#1a1a1a">kata-1: CREATE</text>
-  <text x="165" y="364" text-anchor="middle" font-size="11" fill="#1a1a1a">fence kata-demo-grant/1/1</text>
-  <text x="165" y="380" text-anchor="middle" font-size="11" fill="#1a1a1a">endpoint tcp://10.244.0.11:30001</text>
-  <text x="165" y="396" text-anchor="middle" font-size="11" fill="#1a1a1a">delete: the home parks the session</text>
+  <rect x="265" y="310" width="795" height="235" rx="18" fill="#FFFFFF" stroke="#25858A" stroke-width="2"/>
+  <rect x="265" y="310" width="795" height="43" rx="18" fill="#E7F7F7"/>
+  <rect x="265" y="335" width="795" height="18" fill="#E7F7F7"/>
+  <text x="290" y="337" font-size="15" font-weight="700" fill="#172033">fiberd home in the grant Pod</text>
+  <text x="1035" y="337" text-anchor="end" font-size="11.5" fill="#285E61">reached by gRPC through the example NodePort</text>
 
-  <rect x="300" y="322" width="230" height="84" rx="6" fill="#ffe6cc" stroke="#d79b00"/>
-  <text x="415" y="344" text-anchor="middle" font-size="13" font-weight="600" fill="#1a1a1a">kata-2: RESUME</text>
-  <text x="415" y="364" text-anchor="middle" font-size="11" fill="#1a1a1a">same grant uid, same session</text>
-  <text x="415" y="380" text-anchor="middle" font-size="11" fill="#1a1a1a">fence kata-demo-grant/1/2, same port</text>
-  <text x="415" y="396" text-anchor="middle" font-size="11" fill="#1a1a1a">the container's state intact</text>
+  <rect x="310" y="385" width="210" height="105" rx="12" fill="#EAF2FF" stroke="#5B7DB1" stroke-width="1.5"/>
+  <text x="415" y="414" text-anchor="middle" font-size="15" font-weight="700" fill="#172033">agent + ledger</text>
+  <text x="415" y="438" text-anchor="middle" font-size="11.5" fill="#334E68">resolves kata-demo</text>
+  <text x="415" y="458" text-anchor="middle" font-size="11.5" fill="#334E68">returns kind, fence, endpoint</text>
+  <text x="415" y="478" text-anchor="middle" font-size="11.5" fill="#334E68">owns Park and Release</text>
 
-  <rect x="550" y="322" width="220" height="84" rx="6" fill="#f8cecc" stroke="#b85450"/>
-  <text x="660" y="344" text-anchor="middle" font-size="13" font-weight="600" fill="#1a1a1a">delete kata-2</text>
-  <text x="660" y="364" text-anchor="middle" font-size="11" fill="#1a1a1a">on-stop release</text>
-  <text x="660" y="380" text-anchor="middle" font-size="11" fill="#1a1a1a">the home's audit records the release</text>
-  <text x="660" y="396" text-anchor="middle" font-size="11" fill="#1a1a1a">nothing left</text>
+  <rect x="590" y="396" width="190" height="82" rx="41" fill="#FFF4DC" stroke="#C98A2E" stroke-width="1.5"/>
+  <text x="685" y="426" text-anchor="middle" font-size="14" font-weight="700" fill="#172033">warm template</text>
+  <text x="685" y="449" text-anchor="middle" font-size="11" fill="#6B4E16">already initialized</text>
+  <text x="685" y="467" text-anchor="middle" font-size="11" fill="#6B4E16">for the grant</text>
 
-  <polyline points="280,364 300,364" fill="none" stroke="#333" stroke-width="1.5" marker-end="url(#arw)"/>
-  <polyline points="530,364 550,364" fill="none" stroke="#333" stroke-width="1.5" marker-end="url(#arw)"/>
+  <rect x="850" y="385" width="165" height="105" rx="12" fill="#EAF8EF" stroke="#3A8F5B" stroke-width="1.5"/>
+  <text x="932" y="414" text-anchor="middle" font-size="14" font-weight="700" fill="#172033">fiber</text>
+  <text x="932" y="438" text-anchor="middle" font-size="11" fill="#245C3D">session kata-demo</text>
+  <text x="932" y="458" text-anchor="middle" font-size="11" fill="#245C3D">endpoint returned</text>
+  <text x="932" y="478" text-anchor="middle" font-size="11" fill="#245C3D">state survives Park</text>
+
+  <path d="M905 260V288H415V385" fill="none" stroke="#486581" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="660" y="280" text-anchor="middle" font-size="11" fill="#526273">Clone, Park, or Release over gRPC</text>
+  <path d="M520 438H590" fill="none" stroke="#486581" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="555" y="428" text-anchor="middle" font-size="10.5" fill="#526273">create or restore</text>
+  <path d="M780 438H850" fill="none" stroke="#2F855A" stroke-width="2" marker-end="url(#arrowGreen)"/>
+  <text x="815" y="428" text-anchor="middle" font-size="10.5" fill="#2F855A">running</text>
+  <path d="M415 385V365H905V260" fill="none" stroke="#486581" stroke-width="1.7" stroke-dasharray="5 4" marker-end="url(#arrow)"/>
+  <text x="660" y="365" text-anchor="middle" font-size="10.5" fill="#526273">kind + fence + endpoint become the shim's container record</text>
+
+  <text x="40" y="585" font-size="12" font-weight="700" fill="#6B7785" letter-spacing="1.2">WHAT THE TWO-POD ACCEPTANCE PROVES</text>
+
+  <rect x="40" y="602" width="190" height="68" rx="12" fill="#EAF2FF" stroke="#5B7DB1"/>
+  <text x="135" y="627" text-anchor="middle" font-size="13" font-weight="700" fill="#172033">kata-1 app Create</text>
+  <text x="135" y="649" text-anchor="middle" font-size="11" fill="#334E68">Clone(kata-demo)</text>
+  <text x="135" y="665" text-anchor="middle" font-size="11" fill="#334E68">result: CREATE</text>
+
+  <rect x="260" y="602" width="180" height="68" rx="12" fill="#FFF4DC" stroke="#C98A2E"/>
+  <text x="350" y="627" text-anchor="middle" font-size="13" font-weight="700" fill="#172033">delete kata-1</text>
+  <text x="350" y="649" text-anchor="middle" font-size="11" fill="#6B4E16">Kill(on-stop=park)</text>
+  <text x="350" y="665" text-anchor="middle" font-size="11" fill="#6B4E16">result: parked delta</text>
+
+  <rect x="470" y="602" width="190" height="68" rx="12" fill="#EAF8EF" stroke="#3A8F5B"/>
+  <text x="565" y="627" text-anchor="middle" font-size="13" font-weight="700" fill="#172033">kata-2 app Create</text>
+  <text x="565" y="649" text-anchor="middle" font-size="11" fill="#245C3D">same grant + session</text>
+  <text x="565" y="665" text-anchor="middle" font-size="11" fill="#245C3D">result: RESUME</text>
+
+  <rect x="690" y="602" width="170" height="68" rx="12" fill="#F3ECFF" stroke="#8B6CB0"/>
+  <text x="775" y="627" text-anchor="middle" font-size="13" font-weight="700" fill="#172033">state continues</text>
+  <text x="775" y="649" text-anchor="middle" font-size="11" fill="#4A3F5C">new fence</text>
+  <text x="775" y="665" text-anchor="middle" font-size="11" fill="#4A3F5C">same session state</text>
+
+  <rect x="890" y="602" width="170" height="68" rx="12" fill="#FFF0F0" stroke="#B84B4B"/>
+  <text x="975" y="627" text-anchor="middle" font-size="13" font-weight="700" fill="#172033">delete kata-2</text>
+  <text x="975" y="649" text-anchor="middle" font-size="11" fill="#8B3333">on-stop=release</text>
+  <text x="975" y="665" text-anchor="middle" font-size="11" fill="#8B3333">result: state removed</text>
+
+  <path d="M230 636H260" fill="none" stroke="#486581" stroke-width="2" marker-end="url(#arrow)"/>
+  <path d="M440 636H470" fill="none" stroke="#486581" stroke-width="2" marker-end="url(#arrow)"/>
+  <path d="M660 636H690" fill="none" stroke="#486581" stroke-width="2" marker-end="url(#arrow)"/>
+  <path d="M860 636H890" fill="none" stroke="#486581" stroke-width="2" marker-end="url(#arrow)"/>
 </svg>
