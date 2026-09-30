@@ -26,7 +26,14 @@ The verifier accepts EdDSA and ES256. It requires exactly one signature and a
 and cross-checks the mirrored claims. It also requires the configured audience
 and, when configured, issuer.
 
+The JWT is a bearer credential. The reference client and server use plaintext
+gRPC, so a deployment must add authenticated transport and protect the token
+from logs, metadata readers, and network observers.
+
 Verification does not reject a token merely because `exp` is in the past. Lease expiry is a capacity event handled by admission and the lease reaper, so it produces a capacity miss rather than `Unauthenticated`. Stale or unavailable key material produces `SHED` when the verifier cannot safely decide.
+
+`exp` and `lease_expiry` are optional. A token and grant with neither value do
+not expire through these checks; production issuers should always set both.
 
 ### Grant fields
 
@@ -42,7 +49,9 @@ Verification does not reject a token merely because `exp` is in the past. Lease 
 - `policy.durability` selects best-effort or synchronous audit handling.
 - `policy.session_class` and `policy.audit_class` are carried as policy labels.
 - `policy.psi_some_avg10_shed` and `policy.psi_some_avg10_park` override pressure watermarks when non-zero.
-- `device_budget.bytes` and `device_budget.class` describe the per-fiber device-state slice and required device class.
+- `device_budget.bytes` and `device_budget.class` describe the per-fiber
+  device-state slice and requested device class. The current host enforces
+  available bytes but does not compare the requested class with the engine.
 
 ## Fibers service
 
@@ -85,15 +94,25 @@ ATTACH returns the same fiber ID, endpoint, and fence. CREATE and RESUME mint a 
 
 `sync=true` asks the runtime to complete its synchronous durability path before replying. The exact storage guarantee depends on the configured runtime and artifact store.
 
+Do not Park an anonymous fiber when retained checkpoint files or a reserved TCP
+port would be unacceptable. The current public API has no session handle with
+which to resume or discard that anonymous parked state.
+
 ### Release
 
-`Release(ReleaseRequest) returns (Empty)` terminates the identified running fiber and frees its slot and session name. `discard=true` also asks the runtime to remove retained checkpoint data associated with the release.
+`Release(ReleaseRequest) returns (Empty)` terminates the identified running
+fiber and frees its slot and session name. `discard=true` asks the runtime to
+remove checkpoint data associated with that active release. Release lookup
+requires a running fiber ID, so the current public API cannot use it to discard
+the delta of an already parked session.
 
 Calling Park or Release with an unknown or old-epoch fiber ID returns `NotFound`.
 
 ### Watch
 
-`Watch(Empty) returns (stream Status)` emits an initial batch, every ledger change, and a periodic refresh. Each `Status` contains only:
+`Watch(Empty) returns (stream Status)` emits the records in an initial
+snapshot, records after ledger changes, and periodic refreshes. Each `Status`
+contains only:
 
 - `grant_uid`.
 - the number of running fibers.
@@ -102,6 +121,11 @@ Calling Park or Release with an unknown or old-epoch fiber ID returns `NotFound`
 - the latest fence value for the grant.
 
 The stream does not advertise clone rate, desired replicas, warm-pool size, CPU usage, or autoscaling decisions.
+
+Snapshot batches are flattened into individual `Status` messages. There is no
+batch-complete marker or grant-deletion tombstone, and a transition from one
+grant to zero emits no record. Consumers cannot use Watch alone as an
+authoritative set-reconciliation protocol.
 
 ## Admission completeness
 
@@ -147,9 +171,18 @@ The core returns transport-independent outcomes, and the gRPC layer maps them as
 - a malformed request becomes `InvalidArgument`.
 - an invalid grant, signature, issuer, or audience becomes `Unauthenticated`.
 - an unknown fiber becomes `NotFound`.
-- runtime or audit failures become `Internal`.
+- Clone runtime or deadline failures become `DEFERRED_FALLBACK`.
+- admission and template-preparation failures become a health-dependent
+  capacity miss.
+- Park and Release runtime failures become `Internal`.
+- audit failures can become `Internal`.
 
 Every capacity miss carries a `Miss` detail. `SHED` tells the caller to wait for `retry_after_s` and retry. `DEFERRED_FALLBACK` tells the caller to use its ordinary provisioning path or route to `preferred_home`.
+
+Runtime and ledger state change before synchronous audit completion. An
+`Internal` audit error can therefore be returned after Clone, Park, or Release
+already changed state. In particular, blindly retrying an anonymous Clone can
+create another fiber.
 
 A capacity miss is selected using grant-lane health:
 
@@ -179,3 +212,7 @@ Requests and successful responses use protobuf JSON. Errors use `google.rpc.Stat
 
 The HTTP status endpoint returns the current status snapshot. The streaming Watch RPC is available only over gRPC.
 
+Neither the reference gRPC server nor the JSON gateway adds TLS or caller
+authorization. Production deployment requirements and current protocol
+limitations are summarized in
+[Production readiness](production-readiness.md).

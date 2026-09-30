@@ -13,6 +13,11 @@ A `CapacityGrant` is carried in a signed JWT. The home verifies the signature,
 issuer, audience, and registered claims against the embedded grant. The
 audience must name the home that is allowed to exercise the grant.
 
+The JWT is a bearer credential for capacity authority. Anyone who can read and
+replay it can ask the named home to exercise the grant while the token remains
+valid. Protect it in storage and transit, and do not place it in broadly
+readable metadata.
+
 The verified grant authorizes fiberd to create fibers within its signed
 limits. It is not a credential for the workload running inside a fiber, and it
 does not give each fiber a separate principal.
@@ -21,6 +26,10 @@ The grant travels with `Clone`, so verification stays on the home. A grant
 seen for the first time can be admitted and warmed there without a synchronous
 call to the issuer. Lease expiry is then enforced by the ledger and reaper
 rather than by treating the JWT as a request-time user token.
+
+Both JWT `exp` and grant `lease_expiry` are optional in the schema. A grant
+without them does not expire at those layers; production issuers should always
+set an explicit, short lifetime and renewal policy.
 
 ## The fence identifies one incarnation
 
@@ -45,6 +54,11 @@ fence as authentication.
 An agent restart advances the epoch. Scope loss can advance it while the agent
 continues running. In both cases, prior fences become stale and running fibers
 from the previous epoch are released.
+
+That release is an intended invariant, not currently a transactional
+guarantee. Runtime release failures are logged while ledger ownership may
+still be removed. Monitor backend cleanup until retryable release and
+quarantine are implemented.
 
 ## Home scope records where work ran
 
@@ -111,10 +125,14 @@ assuming that every fiber inherits or rejects the home identity.
   namespace.
 - Add workload-level TLS or another authentication mechanism when downstream
   callers need a cryptographic identity. fiberd does not provide one today.
+- Put the fiberd control endpoint behind authenticated TLS or mTLS and
+  operation-level authorization. The reference server is plaintext, and Park,
+  Release, and Watch do not carry a caller identity.
 
 For endpoint allocation and network-policy boundaries, see the
 [networking model](networking.md). For the process and sandbox relationships,
 see the [runtime model](runtime-model.md). For the exact wire fields and
 outcomes, see the [protocol reference](protocol.md). For Kubernetes
 ServiceAccounts, readiness, and scope handling, see
-[Kubernetes operations](operating-kubernetes.md).
+[Kubernetes operations](operating-kubernetes.md). Deployment mitigations are
+collected in [Production readiness](production-readiness.md).

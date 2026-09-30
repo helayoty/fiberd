@@ -1,169 +1,54 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="760" viewBox="0 0 1100 760" font-family="Inter, Helvetica Neue, Arial, sans-serif">
-  <title>fiberd resource boundaries and memory outcomes</title>
-  <desc>A capacity-home cgroup contains the fiberd agent and grant cgroup. The grant contains a warm template, independent fiber leaf cgroups, and backend overhead. Four visual cases show normal unequal memory use, one fiber reaching its leaf limit, aggregate grant pressure, and the parent capacity home reaching its hard limit.</desc>
-  <defs>
-    <linearGradient id="pageBg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#f9fbff"/>
-      <stop offset="1" stop-color="#f1f5fb"/>
-    </linearGradient>
-    <linearGradient id="homeBg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#ffffff"/>
-      <stop offset="1" stop-color="#f1f5ff"/>
-    </linearGradient>
-    <linearGradient id="grantBg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#f4fffc"/>
-      <stop offset="1" stop-color="#e8f7f3"/>
-    </linearGradient>
-    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
-      <feDropShadow dx="0" dy="3" stdDeviation="5" flood-color="#182230" flood-opacity="0.09"/>
-    </filter>
-    <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto" markerUnits="strokeWidth">
-      <path d="M0,0 L7,3 L0,6 Z" fill="#667085"/>
-    </marker>
-    <clipPath id="normalBar">
-      <rect x="60" y="547" width="200" height="30" rx="7"/>
-    </clipPath>
-    <clipPath id="pressureBar">
-      <rect x="582" y="547" width="196" height="30" rx="7"/>
-    </clipPath>
-  </defs>
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="780" viewBox="0 0 1200 780" role="img" aria-labelledby="resources-title resources-desc">
+  <title id="resources-title">fiberd resource hierarchy and memory outcomes</title>
+  <desc id="resources-desc">A capacity-home cgroup contains the fiberd agent and grant subtree. The grant contains a warm template, backend overhead, and running fibers. Process backends use fiber leaf cgroups; Hyperlight sandboxes share the helper in the grant cgroup and report working set. Four cases illustrate normal unequal use, one fiber exceeding its budget, aggregate grant pressure, and parent enforcement.</desc>
+  <style>
+    :root{--bg:#f7f9fc;--panel:#fff;--ink:#172033;--muted:#5d6b7d;--line:#b8c4d4;--blue:#3165b5;--blue-bg:#eaf1ff;--teal:#13776f;--teal-bg:#e8f7f4;--violet:#704aa1;--violet-bg:#f2edfa;--amber:#a76500;--amber-bg:#fff3d6;--red:#b33b32;--red-bg:#fff0ef;--green:#287a4d;--green-bg:#e8f6ed}
+    @media(prefers-color-scheme:dark){:root{--bg:#0d1117;--panel:#161b22;--ink:#e6edf3;--muted:#a3adba;--line:#3d4652;--blue:#79a7ff;--blue-bg:#17243d;--teal:#53c7b8;--teal-bg:#102923;--violet:#c09cff;--violet-bg:#251b35;--amber:#f0b44d;--amber-bg:#30240f;--red:#ff8178;--red-bg:#321817;--green:#63cf8e;--green-bg:#142b1e}}
+    text{font-family:ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;fill:var(--ink)}.bg{fill:var(--bg)}.panel{fill:var(--panel);stroke:var(--line);stroke-width:1.5}.home{fill:var(--blue-bg);stroke:var(--blue);stroke-width:2}.grant{fill:var(--teal-bg);stroke:var(--teal);stroke-width:2}.violetbox{fill:var(--violet-bg);stroke:var(--violet);stroke-width:1.5}.amberbox{fill:var(--amber-bg);stroke:var(--amber);stroke-width:1.5}.redbox{fill:var(--red-bg);stroke:var(--red);stroke-width:1.5}.greenbox{fill:var(--green-bg);stroke:var(--green);stroke-width:1.5}.title{font-size:27px;font-weight:750}.subtitle{font-size:14px;fill:var(--muted)}.h{font-size:16px;font-weight:700}.b{font-size:13px}.s{font-size:11px;fill:var(--muted)}.cap{font-size:12px;font-weight:700;letter-spacing:.5px}.blue{fill:var(--blue)}.teal{fill:var(--teal)}.violet{fill:var(--violet)}.amber{fill:var(--amber)}.red{fill:var(--red)}.green{fill:var(--green)}.barbg{fill:var(--bg);stroke:var(--line)}.barwarm{fill:var(--amber)}.barfiber{fill:var(--violet)}.barover{fill:var(--muted)}.arrow{fill:none;stroke:var(--muted);stroke-width:2}
+  </style>
+  <defs><marker id="resources-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M1 1l8 4-8 4z" fill="#7b8794"/></marker></defs>
+  <rect class="bg" width="1200" height="780"/>
+  <text class="title" x="42" y="48">Resource hierarchy: aggregate capacity, bounded working sets</text>
+  <text class="subtitle" x="42" y="74">Ancestor limits always win. W budgets are ceilings, not equal reservations; the backend determines how each fiber is measured.</text>
+  <rect class="home" x="42" y="106" width="1116" height="330" rx="23"/>
+  <text class="h blue" x="70" y="140">CAPACITY-HOME CGROUP</text>
+  <text class="s" x="1128" y="140" text-anchor="end">aggregate CPU + memory ceiling around agent, template, helpers, and fibers</text>
+  <rect class="panel" x="70" y="188" width="150" height="100" rx="15"/>
+  <text class="h" x="145" y="221" text-anchor="middle">agent/</text><text class="b" x="145" y="253" text-anchor="middle">fiberd</text>
+  <rect class="grant" x="260" y="168" width="868" height="235" rx="19"/>
+  <text class="cap teal" x="286" y="200">GRANT CGROUP</text>
+  <text class="s" x="1102" y="200" text-anchor="end">memory.high + memory.max · shared CPU pool</text>
+  <rect class="amberbox" x="286" y="229" width="176" height="122" rx="14"/>
+  <text class="h amber" x="374" y="260" text-anchor="middle">Warm template</text><text class="b" x="374" y="291" text-anchor="middle">base footprint</text><text class="s" x="374" y="318" text-anchor="middle">shared COW pages</text><text class="s" x="374" y="337" text-anchor="middle">on proc / runc</text>
+  <rect class="violetbox" x="492" y="229" width="250" height="122" rx="14"/>
+  <text class="h violet" x="617" y="260" text-anchor="middle">Process fibers</text><text class="b" x="617" y="291" text-anchor="middle">proc / runc leaf cgroups</text><text class="s" x="617" y="318" text-anchor="middle">leaf memory.max + W enforcement</text><text class="s" x="617" y="337" text-anchor="middle">fiber A · fiber B · + N</text>
+  <rect class="violetbox" x="772" y="229" width="204" height="122" rx="14"/>
+  <text class="h violet" x="874" y="260" text-anchor="middle">Sandbox fibers</text><text class="b" x="874" y="291" text-anchor="middle">backend-specific</text><text class="s" x="874" y="318" text-anchor="middle">Hyperlight: helper reports W</text><text class="s" x="874" y="337" text-anchor="middle">no fiber process / leaf</text>
+  <rect class="panel" x="1006" y="229" width="96" height="122" rx="14"/>
+  <text class="h" x="1054" y="266" text-anchor="middle">Fixed</text><text class="h" x="1054" y="286" text-anchor="middle">overhead</text><text class="s" x="1054" y="319" text-anchor="middle">backend</text><text class="s" x="1054" y="337" text-anchor="middle">dependent</text>
+  <path class="arrow" d="M220 238h40" marker-end="url(#resources-arrow)"/>
+  <text class="s" x="600" y="388" text-anchor="middle">Every descendant remains subject to the grant and capacity-home ceilings.</text>
 
-  <rect width="1100" height="760" fill="url(#pageBg)"/>
-  <text x="40" y="40" font-size="22" font-weight="700" fill="#172033">Resource boundaries and memory outcomes</text>
-  <text x="40" y="63" font-size="11" fill="#667085">One shared home, independent fiber leaves, and different enforcement boundaries</text>
-
-  <!-- Capacity home -->
-  <rect x="40" y="82" width="1020" height="338" rx="22" fill="url(#homeBg)" stroke="#7f9dc8" stroke-width="2" filter="url(#shadow)"/>
-  <text x="68" y="116" font-size="16" font-weight="700" fill="#24466f">Capacity-home cgroup</text>
-  <rect x="650" y="96" width="180" height="29" rx="14" fill="#e8f0fd"/>
-  <text x="740" y="115" text-anchor="middle" font-size="9.5" font-weight="700" fill="#24466f">parent memory.max</text>
-  <rect x="842" y="96" width="185" height="29" rx="14" fill="#e8f0fd"/>
-  <text x="934" y="115" text-anchor="middle" font-size="9.5" font-weight="700" fill="#24466f">one shared CPU pool</text>
-
-  <rect x="68" y="163" width="104" height="64" rx="12" fill="#ffffff" stroke="#aebbd0"/>
-  <text x="120" y="188" text-anchor="middle" font-size="11" font-weight="700" fill="#344054">agent/</text>
-  <text x="120" y="208" text-anchor="middle" font-size="9" fill="#667085">fiberd</text>
-  <path d="M172 195H195" fill="none" stroke="#667085" stroke-width="1.5" marker-end="url(#arrow)"/>
-
-  <!-- Grant subtree -->
-  <rect x="200" y="142" width="827" height="227" rx="17" fill="url(#grantBg)" stroke="#42a39a" stroke-width="1.8"/>
-  <text x="224" y="173" font-size="14" font-weight="700" fill="#126b66">Grant cgroup</text>
-  <rect x="806" y="156" width="91" height="24" rx="12" fill="#d8f1ec"/>
-  <text x="851" y="172" text-anchor="middle" font-size="9" font-weight="700" fill="#126b66">memory.high</text>
-  <rect x="908" y="156" width="91" height="24" rx="12" fill="#fde8e6"/>
-  <text x="953" y="172" text-anchor="middle" font-size="9" font-weight="700" fill="#b42318">memory.max</text>
-
-  <rect x="224" y="198" width="178" height="125" rx="13" fill="#fff7dc" stroke="#d7a933"/>
-  <text x="313" y="223" text-anchor="middle" font-size="11" font-weight="700" fill="#6f4d05">zygote/</text>
-  <rect x="247" y="240" width="132" height="25" rx="6" fill="#f3cf72"/>
-  <text x="313" y="257" text-anchor="middle" font-size="9" font-weight="700" fill="#664700">base footprint</text>
-  <text x="313" y="288" text-anchor="middle" font-size="10" fill="#6e6250">shared COW pages</text>
-  <text x="313" y="306" text-anchor="middle" font-size="9" fill="#8a6a22">warm template</text>
-
-  <rect x="420" y="198" width="140" height="125" rx="13" fill="#ffffff" stroke="#9875ba"/>
-  <text x="490" y="221" text-anchor="middle" font-size="11" font-weight="700" fill="#4b3158">fiber A</text>
-  <text x="490" y="239" text-anchor="middle" font-size="8.5" fill="#704a80">leaf memory.max*</text>
-  <rect x="442" y="252" width="96" height="22" rx="5" fill="#f2edf7" stroke="#c5b1d7"/>
-  <rect x="442" y="252" width="38" height="22" rx="5" fill="#a987c7"/>
-  <text x="490" y="299" text-anchor="middle" font-size="13" font-weight="700" fill="#704a80">W(A)</text>
-
-  <rect x="578" y="198" width="140" height="125" rx="13" fill="#ffffff" stroke="#9875ba"/>
-  <text x="648" y="221" text-anchor="middle" font-size="11" font-weight="700" fill="#4b3158">fiber B</text>
-  <text x="648" y="239" text-anchor="middle" font-size="8.5" fill="#704a80">leaf memory.max*</text>
-  <rect x="600" y="252" width="96" height="22" rx="5" fill="#f2edf7" stroke="#c5b1d7"/>
-  <rect x="600" y="252" width="67" height="22" rx="5" fill="#8056a7"/>
-  <text x="648" y="299" text-anchor="middle" font-size="13" font-weight="700" fill="#704a80">W(B)</text>
-
-  <rect x="736" y="198" width="113" height="125" rx="13" fill="#f8f5fb" stroke="#9875ba" stroke-dasharray="5 4"/>
-  <text x="792" y="239" text-anchor="middle" font-size="18" font-weight="700" fill="#704a80">+ N</text>
-  <text x="792" y="268" text-anchor="middle" font-size="10" font-weight="700" fill="#4b3158">fiber leaves</text>
-  <text x="792" y="288" text-anchor="middle" font-size="9" fill="#667085">≤ fibers.max</text>
-
-  <rect x="867" y="198" width="132" height="125" rx="13" fill="#f2f4f7" stroke="#aeb7c4"/>
-  <text x="933" y="224" text-anchor="middle" font-size="11" font-weight="700" fill="#344054">overhead</text>
-  <rect x="888" y="243" width="90" height="17" rx="4" fill="#c8ced7"/>
-  <rect x="888" y="268" width="63" height="17" rx="4" fill="#aeb7c4"/>
-  <text x="933" y="306" text-anchor="middle" font-size="9" fill="#667085">backend dependent</text>
-
-  <text x="224" y="348" font-size="9" fill="#526d69">* proc/runc: leaf memory.max = wBudget</text>
-  <text x="487" y="348" font-size="9" fill="#526d69">fixed-overhead backends: larger leaf max, separate W enforcement</text>
-  <rect x="68" y="386" width="959" height="22" rx="11" fill="#e8f0fd"/>
-  <text x="547" y="401" text-anchor="middle" font-size="9.5" font-weight="600" fill="#24466f">Every descendant remains inside the parent memory.max and shared CPU pool.</text>
-
-  <!-- Cases -->
-  <text x="40" y="451" font-size="15" font-weight="700" fill="#172033">Four cases</text>
-
-  <!-- Case 1 -->
-  <rect x="40" y="467" width="240" height="250" rx="16" fill="#ffffff" stroke="#c7d0dc" filter="url(#shadow)"/>
-  <text x="60" y="497" font-size="13" font-weight="700" fill="#172033">1  Normal use</text>
-  <text x="60" y="518" font-size="9.5" fill="#667085">Unequal W, shared headroom</text>
-  <g clip-path="url(#normalBar)">
-    <rect x="60" y="547" width="55" height="30" fill="#f3cf72"/>
-    <rect x="115" y="547" width="25" height="30" fill="#a987c7"/>
-    <rect x="140" y="547" width="42" height="30" fill="#8056a7"/>
-    <rect x="182" y="547" width="18" height="30" fill="#aeb7c4"/>
-    <rect x="200" y="547" width="60" height="30" fill="#f8fafc"/>
-  </g>
-  <rect x="60" y="547" width="200" height="30" rx="7" fill="none" stroke="#aeb7c4"/>
-  <text x="87" y="596" text-anchor="middle" font-size="8.5" fill="#805600">base</text>
-  <text x="128" y="596" text-anchor="middle" font-size="8.5" fill="#704a80">A</text>
-  <text x="161" y="596" text-anchor="middle" font-size="8.5" fill="#704a80">B</text>
-  <text x="221" y="596" text-anchor="middle" font-size="8.5" fill="#667085">free</text>
-  <path d="M72 641H248" stroke="#d0d5dd" stroke-width="2" stroke-linecap="round"/>
-  <circle cx="101" cy="641" r="6" fill="#a987c7"/>
-  <circle cx="174" cy="641" r="9" fill="#8056a7"/>
-  <text x="160" y="674" text-anchor="middle" font-size="10" font-weight="600" fill="#475467">No equal split or reservation</text>
-
-  <!-- Case 2 -->
-  <rect x="300" y="467" width="240" height="250" rx="16" fill="#ffffff" stroke="#c7d0dc" filter="url(#shadow)"/>
-  <text x="320" y="497" font-size="13" font-weight="700" fill="#172033">2  Fiber limit</text>
-  <text x="320" y="518" font-size="9.5" fill="#667085">One leaf reaches memory.max</text>
-  <rect x="322" y="545" width="50" height="85" rx="8" fill="#f2edf7" stroke="#9875ba"/>
-  <rect x="329" y="592" width="36" height="31" rx="4" fill="#a987c7"/>
-  <text x="347" y="565" text-anchor="middle" font-size="9" font-weight="700" fill="#704a80">A</text>
-  <rect x="381" y="545" width="50" height="85" rx="8" fill="#fff0ee" stroke="#c4322a" stroke-width="2"/>
-  <rect x="388" y="552" width="36" height="71" rx="4" fill="#e88982"/>
-  <path d="M388 559H424" stroke="#b42318" stroke-width="2"/>
-  <text x="406" y="565" text-anchor="middle" font-size="9" font-weight="700" fill="#8f241e">B</text>
-  <rect x="440" y="545" width="50" height="85" rx="8" fill="#f2edf7" stroke="#9875ba"/>
-  <rect x="447" y="580" width="36" height="43" rx="4" fill="#8056a7"/>
-  <text x="465" y="565" text-anchor="middle" font-size="9" font-weight="700" fill="#704a80">C</text>
-  <path d="M406 634V650" stroke="#b42318" stroke-width="1.5" marker-end="url(#arrow)"/>
-  <text x="406" y="670" text-anchor="middle" font-size="10" font-weight="700" fill="#b42318">B exits as OOM</text>
-  <text x="406" y="694" text-anchor="middle" font-size="9.5" fill="#475467">A and C continue</text>
-
-  <!-- Case 3 -->
-  <rect x="560" y="467" width="240" height="250" rx="16" fill="#ffffff" stroke="#c7d0dc" filter="url(#shadow)"/>
-  <text x="580" y="497" font-size="13" font-weight="700" fill="#172033">3  Grant pressure</text>
-  <text x="580" y="518" font-size="9.5" fill="#667085">Aggregate use crosses memory.high</text>
-  <g clip-path="url(#pressureBar)">
-    <rect x="582" y="547" width="150" height="30" fill="#e8b84a"/>
-    <rect x="732" y="547" width="46" height="30" fill="#f8fafc"/>
-  </g>
-  <rect x="582" y="547" width="196" height="30" rx="7" fill="none" stroke="#aeb7c4"/>
-  <path d="M707 538V585" stroke="#0e8088" stroke-width="2"/>
-  <text x="707" y="532" text-anchor="middle" font-size="8.5" font-weight="700" fill="#0e666d">high</text>
-  <rect x="594" y="609" width="172" height="24" rx="12" fill="#fff7dc" stroke="#e8b84a"/>
-  <text x="680" y="625" text-anchor="middle" font-size="9.5" font-weight="700" fill="#805600">SHED new work</text>
-  <path d="M680 633V645" stroke="#667085" marker-end="url(#arrow)"/>
-  <rect x="594" y="649" width="172" height="24" rx="12" fill="#fff7dc" stroke="#e8b84a"/>
-  <text x="680" y="665" text-anchor="middle" font-size="9.5" font-weight="700" fill="#805600">RECLAIM largest W</text>
-  <text x="680" y="698" text-anchor="middle" font-size="9.5" fill="#475467">Persistent pressure → YIELD</text>
-
-  <!-- Case 4 -->
-  <rect x="820" y="467" width="240" height="250" rx="16" fill="#ffffff" stroke="#c7d0dc" filter="url(#shadow)"/>
-  <text x="840" y="497" font-size="13" font-weight="700" fill="#172033">4  Parent limit</text>
-  <text x="840" y="518" font-size="9.5" fill="#667085">Total use reaches parent memory.max</text>
-  <rect x="844" y="543" width="192" height="112" rx="12" fill="#edf2fb" stroke="#c4322a" stroke-width="2"/>
-  <text x="940" y="562" text-anchor="middle" font-size="8.5" font-weight="700" fill="#8f241e">capacity home</text>
-  <rect x="859" y="575" width="162" height="59" rx="8" fill="#eefaf7" stroke="#42a39a"/>
-  <rect x="870" y="591" width="34" height="30" rx="5" fill="#f3cf72"/>
-  <rect x="910" y="584" width="29" height="37" rx="5" fill="#a987c7"/>
-  <rect x="945" y="579" width="29" height="42" rx="5" fill="#8056a7"/>
-  <rect x="980" y="586" width="29" height="35" rx="5" fill="#aeb7c4"/>
-  <path d="M844 543H1036" stroke="#b42318" stroke-width="4" stroke-linecap="round"/>
-  <path d="M940 657V674" stroke="#b42318" stroke-width="1.5" marker-end="url(#arrow)"/>
-  <text x="940" y="694" text-anchor="middle" font-size="10" font-weight="700" fill="#b42318">Parent enforcement</text>
-
-  <text x="550" y="746" text-anchor="middle" font-size="9" fill="#667085">Illustrative proportions. Actual charges depend on the workload and backend.</text>
+  <text class="cap" x="42" y="478">ILLUSTRATIVE MEMORY OUTCOMES</text>
+  <rect class="panel" x="42" y="500" width="260" height="226" rx="17"/>
+  <text class="h green" x="64" y="532">1 · Normal use</text><text class="s" x="64" y="556">unequal W with shared headroom</text>
+  <rect class="barbg" x="64" y="584" width="216" height="36" rx="8"/><rect class="barwarm" x="64" y="584" width="54" height="36" rx="8"/><rect class="barfiber" x="118" y="584" width="32" height="36"/><rect class="barfiber" x="150" y="584" width="62" height="36" opacity=".75"/><rect class="barover" x="212" y="584" width="22" height="36"/>
+  <text class="b" x="172" y="658" text-anchor="middle">no equal split or reservation</text><text class="s" x="172" y="684" text-anchor="middle">actual charge follows workload + backend</text>
+  <rect class="panel" x="326" y="500" width="260" height="226" rx="17"/>
+  <text class="h red" x="348" y="532">2 · Fiber budget</text><text class="s" x="348" y="556">one running fiber exceeds its W ceiling</text>
+  <rect class="violetbox" x="354" y="584" width="52" height="78" rx="9"/><rect class="redbox" x="430" y="570" width="52" height="92" rx="9"/><rect class="violetbox" x="506" y="592" width="52" height="70" rx="9"/>
+  <text class="b" x="380" y="630" text-anchor="middle">A</text><text class="b red" x="456" y="622" text-anchor="middle">B</text><text class="b" x="532" y="634" text-anchor="middle">C</text>
+  <text class="b red" x="456" y="688" text-anchor="middle">B exits as OOM</text><text class="s" x="456" y="710" text-anchor="middle">other fibers continue</text>
+  <rect class="panel" x="610" y="500" width="260" height="226" rx="17"/>
+  <text class="h amber" x="632" y="532">3 · Grant pressure</text><text class="s" x="632" y="556">aggregate input crosses watermarks</text>
+  <rect class="amberbox" x="638" y="584" width="204" height="34" rx="12"/><text class="b amber" x="740" y="607" text-anchor="middle">SHED new CREATE / RESUME</text>
+  <path class="arrow" d="M740 618v26" marker-end="url(#resources-arrow)"/>
+  <rect class="amberbox" x="638" y="650" width="204" height="34" rx="12"/><text class="b amber" x="740" y="673" text-anchor="middle">RECLAIM largest W</text>
+  <text class="s" x="740" y="710" text-anchor="middle">persistent + no victim → YIELD</text>
+  <rect class="panel" x="894" y="500" width="264" height="226" rx="17"/>
+  <text class="h red" x="916" y="532">4 · Parent limit</text><text class="s" x="916" y="556">total home use reaches memory.max</text>
+  <rect class="home" x="922" y="584" width="208" height="91" rx="13"/><rect class="grant" x="944" y="607" width="164" height="44" rx="9"/>
+  <path d="M922 584h208" stroke="var(--red)" stroke-width="6" stroke-linecap="round"/>
+  <text class="b red" x="1026" y="704" text-anchor="middle">ancestor enforcement can still occur</text>
+  <text class="s" x="600" y="760" text-anchor="middle">Illustrative proportions only. Exact leaf limits and W measurement differ by backend; the home remains the outer stop.</text>
 </svg>

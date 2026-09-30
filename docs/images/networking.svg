@@ -1,82 +1,41 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="500" viewBox="0 0 1000 500" font-family="Inter, Helvetica Neue, Arial, sans-serif">
-  <title>Networking from Clone to one fiber</title>
-  <desc>A router calls the fiberd agent on the home address. This example shows a home configured for IPv4. Clone returns the selected home address with a port allocated to one fiber. The router then connects directly to that endpoint. Other fibers share the home address and use different ports.</desc>
-  <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#fafcff"/>
-      <stop offset="1" stop-color="#f1f5fb"/>
-    </linearGradient>
-    <linearGradient id="pod" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#f6f9ff"/>
-      <stop offset="1" stop-color="#eaf1ff"/>
-    </linearGradient>
-    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
-      <feDropShadow dx="0" dy="3" stdDeviation="5" flood-color="#182230" flood-opacity="0.10"/>
-    </filter>
-    <marker id="blueArrow" markerWidth="9" markerHeight="9" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
-      <path d="M0,0 L8,3 L0,6 Z" fill="#3165b5"/>
-    </marker>
-    <marker id="purpleArrow" markerWidth="9" markerHeight="9" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
-      <path d="M0,0 L8,3 L0,6 Z" fill="#704a80"/>
-    </marker>
-  </defs>
-
-  <rect width="1000" height="500" fill="url(#bg)"/>
-  <text x="40" y="42" font-size="22" font-weight="700" fill="#172033">Clone returns the route to one fiber</text>
-  <text x="40" y="66" font-size="11" fill="#667085">TCP home with inet4 selected</text>
-
-  <!-- Caller -->
-  <rect x="40" y="196" width="190" height="116" rx="16" fill="#ffffff" stroke="#7f9dc8" stroke-width="1.5" filter="url(#shadow)"/>
-  <text x="135" y="229" text-anchor="middle" font-size="14" font-weight="700" fill="#24466f">Router or consumer</text>
-  <rect x="70" y="250" width="130" height="32" rx="8" fill="#e8f0fd"/>
-  <text x="135" y="270" text-anchor="middle" font-size="10" font-weight="700" fill="#24466f">holds Clone result</text>
-
-  <!-- Home network boundary -->
-  <rect x="300" y="92" width="660" height="390" rx="22" fill="url(#pod)" stroke="#6584b5" stroke-width="2" filter="url(#shadow)"/>
-  <text x="328" y="125" font-size="16" font-weight="700" fill="#24466f">Home network boundary</text>
-  <rect x="328" y="135" width="164" height="25" rx="12" fill="#ffffff" stroke="#b7c7e0"/>
-  <text x="410" y="152" text-anchor="middle" font-size="9" font-weight="700" fill="#24466f">selected: inet4 10.0.0.8</text>
-  <rect x="740" y="108" width="190" height="27" rx="13" fill="#ffffff" stroke="#9fb3ce"/>
-  <text x="835" y="126" text-anchor="middle" font-size="9.5" font-weight="700" fill="#24466f">one address, many ports</text>
-
-  <!-- Agent -->
-  <rect x="345" y="183" width="190" height="94" rx="14" fill="#ffffff" stroke="#42a39a" stroke-width="1.5"/>
-  <text x="440" y="211" text-anchor="middle" font-size="13" font-weight="700" fill="#126b66">fiberd agent</text>
-  <text x="440" y="232" text-anchor="middle" font-size="10" fill="#526d69">control endpoint</text>
-  <rect x="375" y="243" width="130" height="22" rx="11" fill="#d8f1ec"/>
-  <text x="440" y="258" text-anchor="middle" font-size="9" font-weight="700" fill="#126b66">10.0.0.8:8484</text>
-
-  <!-- Fiber endpoints -->
-  <text x="608" y="177" font-size="11" font-weight="700" fill="#4b3158">Data endpoints</text>
-
-  <rect x="590" y="192" width="310" height="66" rx="13" fill="#ffffff" stroke="#9875ba"/>
-  <rect x="606" y="207" width="66" height="36" rx="8" fill="#eee6f6"/>
-  <text x="639" y="230" text-anchor="middle" font-size="10" font-weight="700" fill="#704a80">fiber A</text>
-  <text x="690" y="229" font-size="10" font-weight="700" fill="#704a80">tcp://10.0.0.8:30001</text>
-
-  <rect x="590" y="274" width="310" height="66" rx="13" fill="#ffffff" stroke="#9875ba"/>
-  <rect x="606" y="289" width="66" height="36" rx="8" fill="#eee6f6"/>
-  <text x="639" y="312" text-anchor="middle" font-size="10" font-weight="700" fill="#704a80">fiber B</text>
-  <text x="690" y="301" font-size="9" fill="#667085">same selected home address</text>
-  <text x="690" y="321" font-size="11" font-weight="700" fill="#704a80">port 30002</text>
-
-  <rect x="590" y="356" width="310" height="66" rx="13" fill="#ffffff" stroke="#9875ba"/>
-  <rect x="606" y="371" width="66" height="36" rx="8" fill="#eee6f6"/>
-  <text x="639" y="394" text-anchor="middle" font-size="10" font-weight="700" fill="#704a80">fiber C</text>
-  <text x="690" y="383" font-size="9" fill="#667085">same selected home address</text>
-  <text x="690" y="403" font-size="11" font-weight="700" fill="#704a80">port 30003</text>
-
-  <!-- Clone and direct-connect flow -->
-  <path d="M230 222C270 170 300 166 345 205" fill="none" stroke="#3165b5" stroke-width="2" marker-end="url(#blueArrow)"/>
-  <rect x="234" y="155" width="117" height="25" rx="12" fill="#e8f0fd"/>
-  <text x="292" y="172" text-anchor="middle" font-size="9.5" font-weight="700" fill="#24466f">1  Clone(grant)</text>
-
-  <path d="M345 254C298 286 271 294 230 277" fill="none" stroke="#3165b5" stroke-width="2" stroke-dasharray="6 4" marker-end="url(#blueArrow)"/>
-  <rect x="231" y="299" width="260" height="25" rx="12" fill="#e8f0fd"/>
-  <text x="361" y="316" text-anchor="middle" font-size="9.5" font-weight="700" fill="#24466f">2  selected home address + port 30001</text>
-
-  <path d="M135 312V454H560V226H590" fill="none" stroke="#704a80" stroke-width="2.5" marker-end="url(#purpleArrow)"/>
-  <rect x="286" y="414" width="155" height="27" rx="13" fill="#eee6f6"/>
-  <text x="363" y="432" text-anchor="middle" font-size="9.5" font-weight="700" fill="#704a80">3  connect directly</text>
-
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="650" viewBox="0 0 1200 650" role="img" aria-labelledby="networking-title networking-desc">
+  <title id="networking-title">Networking from Clone to a fiber endpoint</title>
+  <desc id="networking-desc">For a TCP-capable backend configured with an IPv4 home address, a router calls the fiberd control endpoint, receives a selected home address and fiber port, and connects directly to that fiber. Other fibers can share the home address while using different ports. Unix-only backends return local socket endpoints instead.</desc>
+  <style>
+    :root{--bg:#f7f9fc;--panel:#fff;--ink:#172033;--muted:#5d6b7d;--line:#b8c4d4;--blue:#3165b5;--blue-bg:#eaf1ff;--teal:#13776f;--teal-bg:#e8f7f4;--violet:#704aa1;--violet-bg:#f2edfa;--amber:#a76500;--amber-bg:#fff3d6}
+    @media(prefers-color-scheme:dark){:root{--bg:#0d1117;--panel:#161b22;--ink:#e6edf3;--muted:#a3adba;--line:#3d4652;--blue:#79a7ff;--blue-bg:#17243d;--teal:#53c7b8;--teal-bg:#102923;--violet:#c09cff;--violet-bg:#251b35;--amber:#f0b44d;--amber-bg:#30240f}}
+    text{font-family:ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;fill:var(--ink)}.bg{fill:var(--bg)}.panel{fill:var(--panel);stroke:var(--line);stroke-width:1.5}.home{fill:var(--blue-bg);stroke:var(--blue);stroke-width:2}.tealbox{fill:var(--teal-bg);stroke:var(--teal);stroke-width:1.5}.violetbox{fill:var(--violet-bg);stroke:var(--violet);stroke-width:1.5}.amberbox{fill:var(--amber-bg);stroke:var(--amber);stroke-width:1.5}.title{font-size:27px;font-weight:750}.subtitle{font-size:14px;fill:var(--muted)}.h{font-size:16px;font-weight:700}.b{font-size:13px}.s{font-size:11px;fill:var(--muted)}.cap{font-size:12px;font-weight:700;letter-spacing:.5px}.blue{fill:var(--blue)}.teal{fill:var(--teal)}.violet{fill:var(--violet)}.amber{fill:var(--amber)}.arrow{fill:none;stroke:var(--muted);stroke-width:2}.direct{fill:none;stroke:var(--violet);stroke-width:3}.dash{stroke-dasharray:7 5}
+  </style>
+  <defs><marker id="networking-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M1 1l8 4-8 4z" fill="#7b8794"/></marker><marker id="networking-violet-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M1 1l8 4-8 4z" fill="#704aa1"/></marker></defs>
+  <rect class="bg" width="1200" height="650"/>
+  <text class="title" x="42" y="48">Clone returns the route to one fiber</text>
+  <text class="subtitle" x="42" y="74">Illustrated: a TCP-capable backend with home address 10.0.0.8. The caller uses the exact returned endpoint.</text>
+  <rect class="panel" x="42" y="220" width="230" height="140" rx="18"/>
+  <text class="h blue" x="157" y="255" text-anchor="middle">Router or consumer</text>
+  <text class="b" x="157" y="289" text-anchor="middle">calls Clone</text>
+  <text class="b" x="157" y="314" text-anchor="middle">retains endpoint + fence</text>
+  <text class="s" x="157" y="341" text-anchor="middle">data path bypasses agent</text>
+  <rect class="home" x="340" y="112" width="818" height="458" rx="24"/>
+  <text class="h blue" x="370" y="147">HOME NETWORK BOUNDARY</text>
+  <text class="b" x="610" y="147">selected address: 10.0.0.8</text>
+  <text class="s" x="1126" y="147" text-anchor="end">one address · many allocated ports</text>
+  <rect class="tealbox" x="382" y="206" width="260" height="134" rx="16"/>
+  <text class="h teal" x="512" y="240" text-anchor="middle">fiberd control endpoint</text>
+  <text class="b" x="512" y="274" text-anchor="middle">10.0.0.8:8484</text>
+  <text class="s" x="512" y="304" text-anchor="middle">grant protocol only</text>
+  <text class="cap violet" x="718" y="204">FIBER DATA ENDPOINTS</text>
+  <rect class="violetbox" x="714" y="225" width="390" height="77" rx="14"/>
+  <text class="h violet" x="744" y="257">Fiber A</text><text class="b" x="1080" y="257" text-anchor="end">tcp://10.0.0.8:30001</text><text class="s" x="744" y="282">endpoint selected for this incarnation</text>
+  <rect class="violetbox" x="714" y="329" width="390" height="77" rx="14"/>
+  <text class="h violet" x="744" y="361">Fiber B</text><text class="b" x="1080" y="361" text-anchor="end">tcp://10.0.0.8:30002</text><text class="s" x="744" y="386">same address, distinct allocated port</text>
+  <rect class="violetbox" x="714" y="433" width="390" height="77" rx="14"/>
+  <text class="h violet" x="744" y="465">Fiber C</text><text class="b" x="1080" y="465" text-anchor="end">tcp://10.0.0.8:30003</text><text class="s" x="744" y="490">same address, distinct allocated port</text>
+  <path class="arrow" d="M272 252c42-48 67-50 110-10" marker-end="url(#networking-arrow)"/>
+  <text class="b blue" x="318" y="210" text-anchor="middle">1 · Clone</text>
+  <path class="arrow dash" d="M382 307c-44 46-69 48-110 14" marker-end="url(#networking-arrow)"/>
+  <text class="b blue" x="326" y="349" text-anchor="middle">2 · endpoint + fence</text>
+  <path class="direct" d="M157 360v174h528V264h29" marker-end="url(#networking-violet-arrow)"/>
+  <text class="b violet" x="430" y="524" text-anchor="middle">3 · connect directly to the returned endpoint</text>
+  <rect class="amberbox" x="42" y="594" width="1116" height="36" rx="13"/>
+  <text class="b amber" x="600" y="618" text-anchor="middle">Endpoint form is backend and policy dependent: gVisor and Hyperlight are Unix-only; TCP must be explicitly supported and reachable.</text>
 </svg>

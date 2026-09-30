@@ -48,8 +48,10 @@ its parked state.
 - `run.sh`, `make example-knative`, `make example-knative-kvm`: the
   acceptance in fiberd's dev container: a Hyperlight home with the fake
   helper (or the Rust helper under KVM), the reference issuer minting the
-  revision's grant, the activator, and four requests proving CREATE,
-  ATTACH with state, park when idle, RESUME with the state intact.
+  revision's grant, the activator, and four requests proving CREATE, cached
+  activator reuse, park when idle, and RESUME with the state intact. The
+  cached request is reported as ATTACH by the activator, but it does not issue
+  a second Clone RPC and therefore does not test agent-side ATTACH resolution.
 
 The consumer side of the protocol itself is fiberd's `pkg/consumer`: a
 client for Clone, Park, Release and Watch whose errors are typed
@@ -76,3 +78,8 @@ revision's grant, and point the revision's route at the activator's
 Service. Knative's own activator and autoscaler stay out of the path for
 that revision; the activator here is the scale-from-zero. This example
 stops at the standalone run; the Kubernetes manifests are a follow-up.
+
+The revision grant is a bearer credential. A real deployment must protect it
+at rest and in transit and put the plaintext fiberd control connection behind
+authenticated transport and authorization. See
+[Production readiness](../../docs/production-readiness.md).

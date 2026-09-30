@@ -1,84 +1,46 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="590" viewBox="0 0 1100 590" font-family="Inter, Helvetica Neue, Arial, sans-serif">
-  <title>How fiberd responds to grant pressure</title>
-  <desc>fiberd uses the higher of memory PSI and reported device occupancy. At the shed threshold it refuses new creates and resumes but allows attach. At the reclaim threshold it selects the running fiber with the largest working set, parks it when it has a named session, or releases it when anonymous. After three persistent checks with no victim left, fiberd yields the grant.</desc>
-  <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#fafcff"/>
-      <stop offset="1" stop-color="#f1f5fb"/>
-    </linearGradient>
-    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
-      <feDropShadow dx="0" dy="3" stdDeviation="5" flood-color="#182230" flood-opacity="0.09"/>
-    </filter>
-    <marker id="arrow" markerWidth="9" markerHeight="9" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
-      <path d="M0,0 L8,3 L0,6 Z" fill="#667085"/>
-    </marker>
-    <marker id="redArrow" markerWidth="9" markerHeight="9" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
-      <path d="M0,0 L8,3 L0,6 Z" fill="#b42318"/>
-    </marker>
-  </defs>
-
-  <rect width="1100" height="590" fill="url(#bg)"/>
-  <text x="40" y="43" font-size="22" font-weight="700" fill="#172033">Pressure escalates from refusal to reclamation</text>
-  <text x="40" y="67" font-size="11" fill="#667085">The higher pressure source drives one grant-wide response. Existing ATTACH requests remain available while fiberd sheds new runtime work.</text>
-
-  <rect x="40" y="126" width="210" height="76" rx="14" fill="#ffffff" stroke="#7f9dc8" stroke-width="1.5" filter="url(#shadow)"/>
-  <text x="145" y="157" text-anchor="middle" font-size="13" font-weight="700" fill="#24466f">Memory PSI</text>
-  <text x="145" y="181" text-anchor="middle" font-size="10" fill="#52657c">grant cgroup some avg10</text>
-
-  <rect x="40" y="244" width="210" height="76" rx="14" fill="#ffffff" stroke="#42a39a" stroke-width="1.5" filter="url(#shadow)"/>
-  <text x="145" y="275" text-anchor="middle" font-size="13" font-weight="700" fill="#126b66">Device occupancy</text>
-  <text x="145" y="299" text-anchor="middle" font-size="10" fill="#526d69">when the backend reports it</text>
-
-  <polygon points="340,174 430,223 340,272 250,223" fill="#fff7dc" stroke="#d7a933" stroke-width="1.5"/>
-  <text x="340" y="216" text-anchor="middle" font-size="11" font-weight="700" fill="#6f4d05">Use the higher</text>
-  <text x="340" y="234" text-anchor="middle" font-size="10" fill="#805600">current pressure</text>
-
-  <path d="M250 164H286" fill="none" stroke="#667085" stroke-width="1.8"/>
-  <path d="M286 164V203" fill="none" stroke="#667085" stroke-width="1.8" marker-end="url(#arrow)"/>
-  <path d="M250 282H286" fill="none" stroke="#667085" stroke-width="1.8"/>
-  <path d="M286 282V243" fill="none" stroke="#667085" stroke-width="1.8" marker-end="url(#arrow)"/>
-
-  <rect x="485" y="92" width="575" height="446" rx="22" fill="#ffffff" stroke="#b7c7e0" stroke-width="1.5" filter="url(#shadow)"/>
-  <text x="515" y="126" font-size="14" font-weight="700" fill="#172033">One escalation ladder</text>
-
-  <rect x="520" y="154" width="270" height="80" rx="14" fill="#fff7dc" stroke="#d7a933" stroke-width="1.5"/>
-  <text x="655" y="181" text-anchor="middle" font-size="12" font-weight="700" fill="#6f4d05">1  Shed threshold: 10%</text>
-  <text x="655" y="203" text-anchor="middle" font-size="10" fill="#805600">refuse CREATE and RESUME</text>
-  <text x="655" y="220" text-anchor="middle" font-size="10" fill="#805600">allow ATTACH to running sessions</text>
-
-  <path d="M430 223H520" fill="none" stroke="#667085" stroke-width="2" marker-end="url(#arrow)"/>
-
-  <rect x="520" y="278" width="270" height="76" rx="14" fill="#fff0dc" stroke="#d88a20" stroke-width="1.5"/>
-  <text x="655" y="306" text-anchor="middle" font-size="12" font-weight="700" fill="#8a5200">2  Reclaim threshold: 25%</text>
-  <text x="655" y="329" text-anchor="middle" font-size="10.5" fill="#8a5200">select the running fiber with largest W</text>
-  <text x="655" y="346" text-anchor="middle" font-size="9.5" fill="#8a5200">repeat while a victim remains</text>
-
-  <path d="M655 234V278" fill="none" stroke="#667085" stroke-width="1.8" marker-end="url(#arrow)"/>
-  <text x="674" y="261" font-size="9.5" fill="#667085">pressure rises</text>
-
-  <polygon points="886,273 970,316 886,359 802,316" fill="#f5f0f9" stroke="#9875ba" stroke-width="1.5"/>
-  <text x="886" y="311" text-anchor="middle" font-size="10.5" font-weight="700" fill="#4b3158">Named</text>
-  <text x="886" y="328" text-anchor="middle" font-size="10" fill="#704a80">session?</text>
-
-  <path d="M790 316H802" fill="none" stroke="#667085" stroke-width="1.8" marker-end="url(#arrow)"/>
-
-  <rect x="805" y="389" width="150" height="58" rx="13" fill="#e5f6ed" stroke="#3c9b67" stroke-width="1.5"/>
-  <text x="880" y="414" text-anchor="middle" font-size="11.5" font-weight="700" fill="#245c3d">Park</text>
-  <text x="880" y="433" text-anchor="middle" font-size="9.5" fill="#36704f">retain named state</text>
-
-  <rect x="520" y="389" width="180" height="58" rx="13" fill="#f5f0f9" stroke="#9875ba" stroke-width="1.5"/>
-  <text x="610" y="414" text-anchor="middle" font-size="11.5" font-weight="700" fill="#4b3158">Release</text>
-  <text x="610" y="433" text-anchor="middle" font-size="9.5" fill="#704a80">anonymous has no name</text>
-
-  <path d="M886 359V389" fill="none" stroke="#667085" stroke-width="1.8" marker-end="url(#arrow)"/>
-  <text x="900" y="379" font-size="9.5" fill="#667085">yes</text>
-  <path d="M802 316H744V418H700" fill="none" stroke="#667085" stroke-width="1.8" marker-end="url(#arrow)"/>
-  <text x="749" y="337" font-size="9.5" fill="#667085">no</text>
-
-  <rect x="735" y="476" width="290" height="44" rx="13" fill="#fce8e6" stroke="#b42318" stroke-width="1.5"/>
-  <text x="880" y="495" text-anchor="middle" font-size="11.5" font-weight="700" fill="#8f241e">3  Yield the grant</text>
-  <text x="880" y="512" text-anchor="middle" font-size="9.5" fill="#a33a34">after 3 persistent checks with no victim</text>
-
-  <path d="M520 338H492V498H735" fill="none" stroke="#b42318" stroke-width="1.8" stroke-dasharray="6 4" marker-end="url(#redArrow)"/>
-  <text x="507" y="475" font-size="9.5" fill="#a33a34">no victim for 3 checks</text>
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="650" viewBox="0 0 1200 650" role="img" aria-labelledby="pressure-title pressure-desc">
+  <title id="pressure-title">Grant pressure escalation ladder</title>
+  <desc id="pressure-desc">The higher available input from grant memory PSI or backend-reported device occupancy drives the grant pressure ladder. At the default 10 percent shed watermark, fiberd refuses CREATE and RESUME but allows ATTACH. At the default 25 percent reclaim watermark, it chooses the running fiber with largest working set, parking a named session where supported or releasing an anonymous one. After three persistent checks with no victim, it yields the grant.</desc>
+  <style>
+    :root{--bg:#f7f9fc;--panel:#fff;--ink:#172033;--muted:#5d6b7d;--line:#b8c4d4;--blue:#3165b5;--blue-bg:#eaf1ff;--teal:#13776f;--teal-bg:#e8f7f4;--violet:#704aa1;--violet-bg:#f2edfa;--amber:#a76500;--amber-bg:#fff3d6;--red:#b33b32;--red-bg:#fff0ef;--green:#287a4d;--green-bg:#e8f6ed}
+    @media(prefers-color-scheme:dark){:root{--bg:#0d1117;--panel:#161b22;--ink:#e6edf3;--muted:#a3adba;--line:#3d4652;--blue:#79a7ff;--blue-bg:#17243d;--teal:#53c7b8;--teal-bg:#102923;--violet:#c09cff;--violet-bg:#251b35;--amber:#f0b44d;--amber-bg:#30240f;--red:#ff8178;--red-bg:#321817;--green:#63cf8e;--green-bg:#142b1e}}
+    text{font-family:ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;fill:var(--ink)}.bg{fill:var(--bg)}.panel{fill:var(--panel);stroke:var(--line);stroke-width:1.5}.bluebox{fill:var(--blue-bg);stroke:var(--blue);stroke-width:1.5}.tealbox{fill:var(--teal-bg);stroke:var(--teal);stroke-width:1.5}.violetbox{fill:var(--violet-bg);stroke:var(--violet);stroke-width:1.5}.amberbox{fill:var(--amber-bg);stroke:var(--amber);stroke-width:1.5}.redbox{fill:var(--red-bg);stroke:var(--red);stroke-width:1.5}.greenbox{fill:var(--green-bg);stroke:var(--green);stroke-width:1.5}.title{font-size:27px;font-weight:750}.subtitle{font-size:14px;fill:var(--muted)}.h{font-size:16px;font-weight:700}.b{font-size:13px}.s{font-size:11px;fill:var(--muted)}.cap{font-size:12px;font-weight:700;letter-spacing:.5px}.blue{fill:var(--blue)}.teal{fill:var(--teal)}.violet{fill:var(--violet)}.amber{fill:var(--amber)}.red{fill:var(--red)}.green{fill:var(--green)}.arrow{fill:none;stroke:var(--muted);stroke-width:2}.dash{stroke-dasharray:7 5}
+  </style>
+  <defs><marker id="pressure-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M1 1l8 4-8 4z" fill="#7b8794"/></marker></defs>
+  <rect class="bg" width="1200" height="650"/>
+  <text class="title" x="42" y="48">Pressure escalates from refusal to reclamation</text>
+  <text class="subtitle" x="42" y="74">One grant-wide ladder uses the higher available pressure input; defaults are shown and can be grant-configured.</text>
+  <rect class="bluebox" x="42" y="136" width="224" height="92" rx="16"/>
+  <text class="h blue" x="154" y="168" text-anchor="middle">Memory PSI</text><text class="b" x="154" y="199" text-anchor="middle">grant cgroup some avg10</text>
+  <rect class="tealbox" x="42" y="282" width="224" height="92" rx="16"/>
+  <text class="h teal" x="154" y="314" text-anchor="middle">Device occupancy</text><text class="b" x="154" y="345" text-anchor="middle">when backend reports it</text>
+  <path class="arrow" d="M266 182h72v73h50M266 328h72v-73" marker-end="url(#pressure-arrow)"/>
+  <polygon points="466,195 548,255 466,315 384,255" fill="var(--amber-bg)" stroke="var(--amber)" stroke-width="1.5"/>
+  <text class="h amber" x="466" y="251" text-anchor="middle">Use higher</text><text class="b" x="466" y="274" text-anchor="middle">current input</text>
+  <path class="arrow" d="M548 255h64" marker-end="url(#pressure-arrow)"/>
+  <rect class="panel" x="612" y="108" width="546" height="474" rx="22"/>
+  <text class="cap" x="640" y="142">ONE ESCALATION LADDER</text>
+  <rect class="amberbox" x="640" y="170" width="300" height="98" rx="16"/>
+  <text class="h amber" x="790" y="201" text-anchor="middle">1 · SHED · default 10%</text>
+  <text class="b" x="790" y="229" text-anchor="middle">refuse CREATE and RESUME</text>
+  <text class="b" x="790" y="251" text-anchor="middle">allow ATTACH to a running session</text>
+  <path class="arrow" d="M790 268v54" marker-end="url(#pressure-arrow)"/>
+  <text class="s" x="808" y="300">pressure rises</text>
+  <rect class="redbox" x="640" y="324" width="300" height="98" rx="16"/>
+  <text class="h red" x="790" y="355" text-anchor="middle">2 · RECLAIM · default 25%</text>
+  <text class="b" x="790" y="383" text-anchor="middle">choose running fiber with largest W</text>
+  <text class="s" x="790" y="406" text-anchor="middle">repeat while pressure and a victim remain</text>
+  <polygon points="1033,321 1126,373 1033,425 940,373" fill="var(--violet-bg)" stroke="var(--violet)" stroke-width="1.5"/>
+  <text class="h violet" x="1033" y="370" text-anchor="middle">Named +</text><text class="b" x="1033" y="394" text-anchor="middle">checkpoint tier?</text>
+  <path class="arrow" d="M940 373h-1" marker-end="url(#pressure-arrow)"/>
+  <rect class="greenbox" x="944" y="466" width="178" height="70" rx="15"/>
+  <text class="h green" x="1033" y="495" text-anchor="middle">PARK</text><text class="s" x="1033" y="519" text-anchor="middle">retain named state</text>
+  <rect class="violetbox" x="640" y="466" width="208" height="70" rx="15"/>
+  <text class="h violet" x="744" y="495" text-anchor="middle">RELEASE</text><text class="s" x="744" y="519" text-anchor="middle">anonymous or cannot park</text>
+  <path class="arrow" d="M1033 425v41M940 373h-46v128h-46" marker-end="url(#pressure-arrow)"/>
+  <text class="s" x="1048" y="449">yes</text><text class="s" x="900" y="393">no</text>
+  <path class="arrow dash" d="M640 395h-20v161h226" marker-end="url(#pressure-arrow)"/>
+  <rect class="redbox" x="866" y="548" width="256" height="56" rx="14"/>
+  <text class="h red" x="994" y="574" text-anchor="middle">3 · YIELD grant</text><text class="s" x="994" y="594" text-anchor="middle">3 persistent checks with no victim</text>
+  <text class="s" x="600" y="630" text-anchor="middle">Pressure-driven cleanup is best effort; operators should monitor for orphaned backend work.</text>
 </svg>

@@ -4,6 +4,8 @@ This page describes how the current fiberd implementation is assembled. It focus
 
 ![A home runs one fiberd agent. The control plane sends signed grants and receives aggregate status, while callers send Clone and receive an endpoint and fence. Each admitted grant contains one warm template and its fibers.](images/containment.svg)
 
+![The reference binary composes RPC, core scheduling, verification, home, runtime, audit, and artifact seams, while the host runtime delegates Linux execution to a selected backend and system mechanisms.](images/architecture-components.svg)
+
 ## Component boundaries
 
 fiberd keeps scheduling policy in a small core and injects the environment-specific parts around it.
@@ -36,9 +38,21 @@ Running fibers are not recovered after an agent restart. Parked named sessions c
 
 ## Admission and the warm path
 
-A home can deliver a CapacityGrant before traffic arrives. Admission checks the required tier, lease, and device requirements, provisions any grant-scoped fabric channel, and prepares the grant's warm template. Concurrent admissions for the same grant are coalesced.
+A home can deliver a CapacityGrant before traffic arrives. Admission checks
+the required tier, lease, and available device capacity, provisions any
+grant-scoped fabric channel, and prepares the grant's warm template. The
+current host validator does not compare the requested device class with the
+reported engine class. Concurrent admissions for the same grant are
+coalesced.
 
 A valid Clone request can also self-admit an unknown grant. The signed grant travels with the request, so the verifier can authenticate it locally and the agent can prepare its template without a synchronous control-plane call. Pre-admission avoids that setup on the first request.
+
+The grant UID is also the warm-runtime key. A redelivery with the same UID
+currently replaces ledger grant fields while template preparation returns the
+already-warm runtime. The implementation does not enforce field immutability.
+Treat template, capacity, W budget, tier, device, audience, issuer, and policy
+fields as immutable for a UID; only renew the lease for an otherwise identical
+grant. Drain and issue a new UID when those fields change.
 
 After verification, the core asks the ledger to resolve the session and reserve
 any required fiber slot. Budget and pressure checks run before new runtime
@@ -101,18 +115,36 @@ The artifact layer separates a reusable parent checkpoint from session-specific 
 - the parent is keyed by template and platform information.
 - the delta carries the parked session's mutable state.
 - platform facts prevent restore on an incompatible host.
-- ownership claims prevent two homes from resuming the same published delta.
+- ownership metadata identifies the home that published the delta.
 - optional parity data can protect registry chunks.
 
-Mobility is conditional. If no delta finder is configured, the session stays local. If a discovered delta exceeds `w_budget_bytes` or the target platform is incompatible, the miss points to the home that currently holds the state. If the shared store is unavailable, the current implementation can create a fresh session instead of waiting for it.
+Mobility is conditional. If no delta finder is configured, the session stays
+local. If a discovered delta exceeds `w_budget_bytes` or the target platform
+is incompatible, the miss points to the home that currently holds the state.
+The reference registry claim is not atomic: pull, owner comparison, and delete
+are separate operations, so two homes can race and both resume the same
+published state. If the shared store is unavailable, the current
+implementation can create a fresh session instead of waiting for it. Do not
+enable cross-home mobility where duplicate resume or fresh-state fallback is
+unacceptable.
 
 ## Persistence and failure handling
 
-The snapshot store writes admitted grants and parked-session metadata after state transitions. Running fibers are intentionally not restored from the snapshot.
+The snapshot store writes admitted grants and parked-session metadata after
+state transitions. Running fibers are intentionally not restored from the
+snapshot. The epoch, snapshot, audit spool, and any local checkpoint state
+must live on storage whose lifetime matches the logical home. Losing the epoch
+can reuse an earlier fence after a replacement starts again at epoch 1.
 
 The runtime reports asynchronous exits such as normal exit, signal, or OOM. The agent removes the fiber from the ledger, frees its slot, forgets any running named session, and records the exit. An exit that arrives before Clone commits is held briefly and settled after the commit so the slot is not leaked.
 
 The lease reaper periodically yields expired grants. Yielding revokes the grant, releases its running fibers, and retains parked deltas. A later delivery can admit the grant again.
+
+Release during Yield or scope loss is currently best effort. If a runtime
+release fails, the agent logs the error and can still remove ledger ownership,
+leaving untracked work while freeing its slot. Production integrations need a
+retryable cleanup and quarantine mechanism before relying on this path for
+hard revocation.
 
 ## Pressure controller
 
@@ -126,13 +158,25 @@ selection, and operator-visible behavior.
 
 ## Audit path
 
-Every state-changing operation emits an audit record with the fence and, when available, session, fiber, scope, and fabric details. The spool abstraction supports best-effort and synchronous durability modes.
+Every state-changing operation attempts to append an audit record with the
+fence and, when available, session, fiber, scope, and fabric details. The
+spool abstraction supports best-effort and synchronous durability modes.
 
 The reference agent opens the spool without a remote shipper. In that configuration, records are persisted locally and synchronous durability can only wait for local `fsync`. A deployment that promises remote durability must inject and operate a remote shipper.
 
+Runtime and ledger state change before the audit append. A synchronous append
+failure can therefore return `Internal` after the operation already completed;
+a best-effort append failure is logged while the operation succeeds. Callers
+must not assume that `Internal` proves no state change, and operators must
+monitor spool failures and disk capacity.
+
 ## Device and fabric seams
 
-A home may allocate a grant-scoped fabric channel before the template is prepared. A device-capable runtime then verifies that the prepared template offers the requested device class and reports device usage or pressure through optional interfaces.
+A home may allocate a grant-scoped fabric channel before the template is
+prepared. A device-capable runtime reports device usage or pressure through
+optional interfaces. The current host checks for a reporting engine with
+nonzero capacity but does not enforce `device_budget.class`; operators must
+not treat the requested class as an isolation or compatibility guarantee.
 
 The repository's device engine is a simulation used to exercise accounting and pressure behavior. It is not a production CUDA, GPU, DRA, or RDMA integration. The `FABRIC` runtime tier is reserved and is not implemented.
 
@@ -147,3 +191,6 @@ The implementation separates several boundaries that should not be conflated:
 - workload credentials and network identity remain deployment concerns unless a backend or sidecar provides them.
 
 The detailed identity model is in [Identity](identity.md), networking behavior is in [Networking](networking.md), and resource containment is in [Resources and limits](resources.md).
+The reference control API is plaintext and has no caller authorization beyond
+grant verification on Clone. Review the deployment blockers and mitigations in
+[Production readiness](production-readiness.md) before exposing an agent.

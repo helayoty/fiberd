@@ -6,9 +6,9 @@ fiberd lets a control plane allocate and charge a block of capacity once, then l
 environment create instances from that block without another control-plane call. These instances
 are called **fibers**.
 
-The cold path handles placement, admission, quota, and billing, while the warm path creates, attaches, 
-parks, and releases individual fibers. Capacity already present in a home remains usable during a 
-control-plane outage.
+The cold path handles placement, admission, quota, and billing, while the warm path creates, attaches,
+parks, and releases individual fibers. Capacity already admitted to a healthy home can remain usable
+during a control-plane outage until its lease expires or its home scope is lost.
 
 ![The control plane issues and charges a signed capacity grant once. The home verifies it, warms one template, creates fibers locally, returns endpoints to callers, and reports aggregate status.](./docs/images/fiberd-hero.svg)
 
@@ -111,6 +111,7 @@ supports development and protocol tests on macOS.
 - **Operate on Kubernetes:** [Kubernetes operations](docs/operating-kubernetes.md)
 - **Understand the design:** [Architecture](docs/architecture.md)
 - **Implement the wire contract:** [Protocol](docs/protocol.md)
+- **Evaluate deployment risk:** [Production readiness](docs/production-readiness.md)
 - **Review measured results and methodology:** [Benchmarks](docs/benchmarks.md)
 
 ## Contributing

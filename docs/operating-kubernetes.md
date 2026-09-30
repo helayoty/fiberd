@@ -6,7 +6,8 @@ project's conformance and pressure tests. It is not a general-purpose
 production operator. This page covers the CRD, controller, readiness,
 configuration, and operational workflow. The [runtime model](runtime-model.md)
 defines the platform-neutral relationship between a grant, home, warm
-template, and fibers.
+template, and fibers. Review [Production readiness](production-readiness.md)
+before adapting the example for a real cluster.
 
 ## Components
 
@@ -61,24 +62,45 @@ same Secret.
 Pod creation and scheduling do not mean the home can serve fibers.
 
 - `status.placed` becomes true after the scheduler assigns the Pod to a node.
-- `status.ready` mirrors the Pod Ready condition. That condition requires both
-  the agent's TCP readiness probe and its warm-template readiness gate.
+- `status.ready` currently mirrors only the custom
+  `fiberd.io/zygote-ready` condition. The controller does not inspect the
+  ordinary Pod `Ready` condition.
 - `status.endpoint` is the agent's control endpoint. A successful `Clone`
   returns a separate data endpoint for the selected fiber.
 - `status.expiresAt` shows the current signed grant's lease expiry.
 - `status.message` carries the latest controller reconciliation error.
 
-Route `Clone` requests only to grants whose status is ready. A workload may
-still become unavailable later if the warm template exits, the Pod restarts,
-the grant expires, or the home loses its scope.
+Do not route from `CapacityGrant.status.ready` alone. A production controller
+must also require ordinary Pod readiness, or change the status contract to
+combine both conditions. A workload may still become unavailable later if the
+warm template exits, the Pod restarts, the grant expires, or the home loses
+its scope.
 
 The Pod also has a TCP readiness probe on the agent's port. Kubernetes marks
 the Pod Ready only when that probe and the custom gate both pass.
-The controller then mirrors the Pod Ready condition into `CapacityGrant.status.ready`.
+The reference controller does not mirror that combined Pod condition into
+`CapacityGrant.status.ready`.
 
 The current controller writes `status.endpoint` from the Pod's primary
 `status.podIP`. It does not inspect secondary addresses. On a dual-stack Pod,
 verify the endpoint before relying on status for an `inet6` deployment.
+
+## Persistence and fence continuity
+
+The reference controller mounts `/var/lib/fiberd` from `emptyDir`. That path
+contains the epoch, ledger snapshot, audit spool, and local checkpoint state.
+A container restart in the same Pod can retain the volume, but Pod replacement,
+rescheduling, and node loss do not.
+
+When the epoch file is lost, a replacement can start again at epoch 1. Reusing
+the same grant UID can then reproduce an earlier fence sequence. The reference
+example therefore does not provide global stale-fence safety across Pod
+replacement.
+
+A production integration needs storage and identity semantics whose lifetime
+matches the logical home, such as a deliberate PVC or host-local identity plus
+external fencing. If persisted epoch state is unavailable, start with a new
+home audience and grant UID rather than reusing the old fence namespace.
 
 ## CapacityGrant fields
 
@@ -100,7 +122,8 @@ verify the endpoint before relying on status for an `inet6` deployment.
   the Pod's local spool.
 - `spec.sessionClass` is carried into the signed policy.
 - `spec.deviceBudget` sets the per-fiber device-state budget when the template
-  exposes a compatible engine.
+  exposes a reporting engine. The current host checks nonzero capacity but
+  does not enforce the requested device class.
 
 ### Grant Pod
 
@@ -127,6 +150,14 @@ The current controller creates a missing Pod but does not update or recreate
 an existing Pod when `spec.pod` changes. Recreate the `CapacityGrant` when a
 Pod-level field must change. A future production operator would need an
 explicit rollout policy instead.
+
+Grant-policy fields also require care. Renewals reuse the resource UID as the
+grant UID, while the core does not enforce immutable fields for that UID.
+Changing the template, capacity, W budget, tier, device, issuer, audience, or
+policy in place can update ledger authority without rewarming the template or
+rebuilding its resource boundary. Treat those fields as immutable, drain the
+old home, and create a new `CapacityGrant`. Lease renewal is safe only when the
+rest of the signed grant is unchanged.
 
 ## Example CapacityGrant
 
@@ -234,6 +265,14 @@ Deleting the Pod or namespace, deleting a bound ResourceClaim, or changing
 the ServiceAccount token issuer causes scope loss. The agent advances its
 epoch and releases running fibers, which invalidates their old fences.
 
+The shown RBAC does not fully implement the Namespace part of that contract.
+The home reads the cluster-scoped Namespace resource, but the example grants
+that verb through a namespaced RoleBinding, which cannot authorize
+cluster-scoped resources. Namespace lookup failures are logged, so the shown
+manifests do not reliably detect Namespace termination. A production
+integration must grant narrowly scoped cluster-level read access or use
+another authoritative scope-loss signal.
+
 The proc backend shares the home's mount namespace. A proc fiber can therefore
 open a mounted ServiceAccount token when filesystem permissions allow it.
 runc, gVisor, and Hyperlight do not automatically receive the grant Pod's
@@ -287,6 +326,10 @@ Before adapting the example:
 - review whether the selected backend needs privileged mode
 - reduce ServiceAccount permissions to the required namespace and resources
 - apply Pod-level network policy
+- put the plaintext fiberd control endpoint behind authenticated TLS or mTLS
+  and authorize Clone, Park, Release, and Watch
+- treat signed grant JWTs as bearer credentials and keep them out of broadly
+  readable metadata and logs
 - protect the issuer signing-key Secret
 - expose JWKS and discovery through trusted transport
 - disable `unsafeAdmin`
@@ -298,4 +341,6 @@ encrypted service path.
 
 For the concrete example files, see
 [`examples/kubernetes`](../examples/kubernetes/README.md). For what runs inside
-the Pod, see the [runtime model](runtime-model.md).
+the Pod, see the [runtime model](runtime-model.md). For the complete hardening
+checklist and current blockers, see
+[Production readiness](production-readiness.md).

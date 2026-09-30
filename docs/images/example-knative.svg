@@ -1,132 +1,44 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="700" viewBox="0 0 1100 700" font-family="Inter, Helvetica Neue, Arial, sans-serif">
-  <title>How the Knative-shaped activator serves a revision through fibers</title>
-  <desc>An HTTP caller reaches fiberd-activator, which holds the revision grant and maps the revision to named fiber sessions. The activator calls Clone on a Hyperlight home. The agent returns CREATE, ATTACH, or RESUME with an endpoint, and the activator forwards the request to the guest at that endpoint. After an idle interval the activator calls Park. The next request resumes the parked guest with its state. Capacity misses become fallback or retry responses.</desc>
-  <defs>
-    <linearGradient id="page" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#F8FAFD"/>
-      <stop offset="1" stop-color="#EEF3F8"/>
-    </linearGradient>
-    <marker id="arrow" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto">
-      <path d="M0 0L9 4.5L0 9Z" fill="#486581"/>
-    </marker>
-    <marker id="arrowGreen" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto">
-      <path d="M0 0L9 4.5L0 9Z" fill="#2F855A"/>
-    </marker>
-    <marker id="arrowRed" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto">
-      <path d="M0 0L9 4.5L0 9Z" fill="#B84B4B"/>
-    </marker>
-  </defs>
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="760" viewBox="0 0 1200 760" role="img" aria-labelledby="knative-title knative-desc">
+  <title id="knative-title">Knative-shaped activator driving a fiber lifecycle</title>
+  <desc id="knative-desc">An HTTP caller reaches fiberd-activator, which maps a revision to a named session and calls Clone. A Hyperlight-backed fiberd home resolves CREATE, ATTACH, or RESUME and returns an endpoint and fence. The activator forwards traffic directly to the fiber, parks it after an idle interval, and handles DEFERRED_FALLBACK or SHED according to the protocol.</desc>
+  <style>
+    :root{--bg:#f7f9fc;--panel:#fff;--ink:#172033;--muted:#5d6b7d;--line:#b8c4d4;--blue:#3165b5;--blue-bg:#eaf1ff;--teal:#13776f;--teal-bg:#e8f7f4;--violet:#704aa1;--violet-bg:#f2edfa;--amber:#a76500;--amber-bg:#fff3d6;--red:#b33b32;--red-bg:#fff0ef;--green:#287a4d;--green-bg:#e8f6ed}
+    @media(prefers-color-scheme:dark){:root{--bg:#0d1117;--panel:#161b22;--ink:#e6edf3;--muted:#a3adba;--line:#3d4652;--blue:#79a7ff;--blue-bg:#17243d;--teal:#53c7b8;--teal-bg:#102923;--violet:#c09cff;--violet-bg:#251b35;--amber:#f0b44d;--amber-bg:#30240f;--red:#ff8178;--red-bg:#321817;--green:#63cf8e;--green-bg:#142b1e}}
+    text{font-family:ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;fill:var(--ink)}.bg{fill:var(--bg)}.panel{fill:var(--panel);stroke:var(--line);stroke-width:1.5}.home{fill:var(--teal-bg);stroke:var(--teal);stroke-width:2}.bluebox{fill:var(--blue-bg);stroke:var(--blue);stroke-width:1.5}.violetbox{fill:var(--violet-bg);stroke:var(--violet);stroke-width:1.5}.amberbox{fill:var(--amber-bg);stroke:var(--amber);stroke-width:1.5}.redbox{fill:var(--red-bg);stroke:var(--red);stroke-width:1.5}.greenbox{fill:var(--green-bg);stroke:var(--green);stroke-width:1.5}.title{font-size:27px;font-weight:750}.subtitle{font-size:14px;fill:var(--muted)}.h{font-size:16px;font-weight:700}.b{font-size:13px}.s{font-size:11px;fill:var(--muted)}.cap{font-size:12px;font-weight:700;letter-spacing:.5px}.blue{fill:var(--blue)}.teal{fill:var(--teal)}.violet{fill:var(--violet)}.amber{fill:var(--amber)}.red{fill:var(--red)}.green{fill:var(--green)}.arrow{fill:none;stroke:var(--muted);stroke-width:2}.direct{fill:none;stroke:var(--green);stroke-width:2.5}.dash{stroke-dasharray:7 5}
+  </style>
+  <defs><marker id="knative-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M1 1l8 4-8 4z" fill="#7b8794"/></marker><marker id="knative-green-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M1 1l8 4-8 4z" fill="#287a4d"/></marker></defs>
+  <rect class="bg" width="1200" height="760"/>
+  <text class="title" x="42" y="48">Knative-shaped example: requests drive the fiber lifecycle</text>
+  <text class="subtitle" x="42" y="74">The activator owns request routing and idleness; fiberd owns admitted capacity, session resolution, and state.</text>
+  <rect class="panel" x="42" y="132" width="206" height="112" rx="16"/>
+  <text class="h" x="145" y="165" text-anchor="middle">1 · HTTP caller</text><text class="b" x="145" y="196" text-anchor="middle">POST /hello</text><text class="s" x="145" y="221" text-anchor="middle">request / response</text>
+  <rect class="violetbox" x="320" y="112" width="286" height="152" rx="17"/>
+  <text class="h violet" x="463" y="145" text-anchor="middle">2 · fiberd-activator</text><text class="b" x="463" y="176" text-anchor="middle">holds revision grant</text><text class="b" x="463" y="200" text-anchor="middle">maps hello → session hello-0</text><text class="b" x="463" y="224" text-anchor="middle">tracks endpoint + idle timer</text><text class="s" x="463" y="247" text-anchor="middle">consumer integration</text>
+  <path class="arrow" d="M248 176h72" marker-end="url(#knative-arrow)"/><path class="arrow dash" d="M320 224h-72" marker-end="url(#knative-arrow)"/>
+  <rect class="home" x="680" y="102" width="478" height="424" rx="22"/>
+  <text class="h teal" x="708" y="137">FIBERD HOME · HYPERLIGHT BACKEND</text>
+  <rect class="bluebox" x="714" y="174" width="410" height="98" rx="16"/>
+  <text class="h blue" x="919" y="206" text-anchor="middle">3 · Agent + session ledger</text><text class="b" x="919" y="235" text-anchor="middle">CREATE · ATTACH · RESUME</text><text class="s" x="919" y="258" text-anchor="middle">returns endpoint + fence on success</text>
+  <rect class="amberbox" x="714" y="315" width="174" height="114" rx="16"/>
+  <text class="h amber" x="801" y="347" text-anchor="middle">Warm guest</text><text class="b" x="801" y="376" text-anchor="middle">snapshot held by</text><text class="b" x="801" y="398" text-anchor="middle">grant helper</text><text class="s" x="801" y="418" text-anchor="middle">prepared once</text>
+  <rect class="greenbox" x="936" y="315" width="188" height="114" rx="16"/>
+  <text class="h green" x="1030" y="347" text-anchor="middle">Guest fiber</text><text class="b" x="1030" y="376" text-anchor="middle">hello-0 endpoint</text><text class="b" x="1030" y="398" text-anchor="middle">counter state</text><text class="s" x="1030" y="418" text-anchor="middle">serves while running</text>
+  <path class="arrow" d="M888 372h48" marker-end="url(#knative-arrow)"/>
+  <path class="arrow" d="M606 166h108" marker-end="url(#knative-arrow)"/><text class="s" x="660" y="155" text-anchor="middle">Clone(hello-0)</text>
+  <path class="arrow dash" d="M714 244H606" marker-end="url(#knative-arrow)"/><text class="s" x="660" y="261" text-anchor="middle">kind + endpoint</text>
+  <path class="direct" d="M606 264v214h424v-49" marker-end="url(#knative-green-arrow)"/><text class="b green" x="816" y="470" text-anchor="middle">forward to fiber endpoint; relay response</text>
+  <rect class="amberbox" x="714" y="457" width="410" height="43" rx="14"/><text class="b amber" x="919" y="484" text-anchor="middle">idle timer: Park · next request: Resume retained state</text>
 
-  <rect width="1100" height="700" fill="url(#page)"/>
-  <text x="40" y="42" font-size="23" font-weight="700" fill="#172033">Knative-shaped example: requests drive the fiber lifecycle</text>
-  <text x="40" y="67" font-size="13" fill="#526273">The activator is the consumer. It owns routing and idleness while fiberd owns capacity and state.</text>
-
-  <rect x="40" y="120" width="205" height="105" rx="12" fill="#F2F5F9" stroke="#7B8794" stroke-width="1.5"/>
-  <circle cx="68" cy="150" r="15" fill="#7B8794"/>
-  <text x="68" y="155" text-anchor="middle" font-size="12" font-weight="700" fill="#FFFFFF">1</text>
-  <text x="92" y="150" font-size="15" font-weight="700" fill="#172033">HTTP caller</text>
-  <text x="60" y="180" font-size="12" fill="#526273">POST /hello</text>
-  <text x="60" y="200" font-size="12" fill="#526273">body: ping or incr</text>
-
-  <rect x="335" y="105" width="300" height="150" rx="14" fill="#F3ECFF" stroke="#8B6CB0" stroke-width="1.5"/>
-  <circle cx="365" cy="138" r="15" fill="#8B6CB0"/>
-  <text x="365" y="143" text-anchor="middle" font-size="12" font-weight="700" fill="#FFFFFF">2</text>
-  <text x="389" y="138" font-size="15" font-weight="700" fill="#172033">fiberd-activator</text>
-  <text x="355" y="168" font-size="12" fill="#4A3F5C">holds the revision's signed grant</text>
-  <text x="355" y="188" font-size="12" fill="#4A3F5C">maps hello to session hello-0</text>
-  <text x="355" y="208" font-size="12" fill="#4A3F5C">tracks busy fibers and endpoints</text>
-  <text x="355" y="228" font-size="12" fill="#4A3F5C">parks a session after its idle timer</text>
-
-  <path d="M245 172H335" fill="none" stroke="#486581" stroke-width="2" marker-end="url(#arrow)"/>
-  <text x="290" y="162" text-anchor="middle" font-size="11" fill="#526273">request</text>
-  <path d="M335 210H245" fill="none" stroke="#486581" stroke-width="1.7" stroke-dasharray="5 4" marker-end="url(#arrow)"/>
-  <text x="290" y="226" text-anchor="middle" font-size="11" fill="#526273">response</text>
-
-  <rect x="690" y="90" width="370" height="390" rx="18" fill="#FFFFFF" stroke="#25858A" stroke-width="2"/>
-  <rect x="690" y="90" width="370" height="43" rx="18" fill="#E7F7F7"/>
-  <rect x="690" y="115" width="370" height="18" fill="#E7F7F7"/>
-  <text x="715" y="108" font-size="14" font-weight="700" fill="#172033">fiberd home / Hyperlight backend</text>
-  <text x="715" y="126" font-size="10" fill="#285E61">fake helper or KVM helper</text>
-
-  <rect x="725" y="165" width="300" height="88" rx="12" fill="#EAF2FF" stroke="#5B7DB1" stroke-width="1.5"/>
-  <circle cx="753" cy="193" r="15" fill="#5B7DB1"/>
-  <text x="753" y="198" text-anchor="middle" font-size="12" font-weight="700" fill="#FFFFFF">3</text>
-  <text x="777" y="193" font-size="15" font-weight="700" fill="#172033">agent + session ledger</text>
-  <text x="745" y="220" font-size="12" fill="#334E68">resolves CREATE, ATTACH, or RESUME</text>
-  <text x="745" y="240" font-size="12" fill="#334E68">returns fiber endpoint and fence</text>
-
-  <path d="M635 165H725" fill="none" stroke="#486581" stroke-width="2" marker-end="url(#arrow)"/>
-  <text x="680" y="155" text-anchor="middle" font-size="11" fill="#526273">Clone(hello-0)</text>
-  <path d="M725 228H635" fill="none" stroke="#486581" stroke-width="1.7" stroke-dasharray="5 4" marker-end="url(#arrow)"/>
-  <text x="680" y="244" text-anchor="middle" font-size="10.5" fill="#526273">kind + endpoint</text>
-
-  <rect x="725" y="290" width="145" height="110" rx="55" fill="#FFF4DC" stroke="#C98A2E" stroke-width="1.5"/>
-  <text x="797" y="321" text-anchor="middle" font-size="14" font-weight="700" fill="#172033">warm guest</text>
-  <text x="797" y="344" text-anchor="middle" font-size="11" fill="#6B4E16">snapshot held</text>
-  <text x="797" y="362" text-anchor="middle" font-size="11" fill="#6B4E16">by one helper</text>
-  <text x="797" y="380" text-anchor="middle" font-size="11" fill="#6B4E16">per grant</text>
-
-  <rect x="910" y="285" width="115" height="120" rx="14" fill="#EAF8EF" stroke="#3A8F5B" stroke-width="1.5"/>
-  <text x="967" y="315" text-anchor="middle" font-size="14" font-weight="700" fill="#172033">guest fiber</text>
-  <text x="967" y="339" text-anchor="middle" font-size="11" fill="#245C3D">hello-0</text>
-  <text x="967" y="359" text-anchor="middle" font-size="11" fill="#245C3D">counter state</text>
-  <text x="967" y="379" text-anchor="middle" font-size="11" fill="#245C3D">serves endpoint</text>
-  <text x="967" y="397" text-anchor="middle" font-size="10.5" fill="#245C3D">while running</text>
-
-  <path d="M875 253V278H797V290" fill="none" stroke="#486581" stroke-width="2" marker-end="url(#arrow)"/>
-  <text x="836" y="272" text-anchor="middle" font-size="10.5" fill="#526273">prepare once</text>
-  <path d="M870 345H910" fill="none" stroke="#2F855A" stroke-width="2" marker-end="url(#arrowGreen)"/>
-  <text x="890" y="335" text-anchor="middle" font-size="10.5" fill="#2F855A">restore</text>
-
-  <path d="M635 255H665V415H967V405" fill="none" stroke="#2F855A" stroke-width="2" marker-end="url(#arrowGreen)"/>
-  <text x="815" y="410" text-anchor="middle" font-size="10.5" fill="#2F855A">forward request to endpoint, then relay response</text>
-
-  <rect x="725" y="430" width="300" height="34" rx="17" fill="#FFF4DC" stroke="#C98A2E"/>
-  <text x="875" y="452" text-anchor="middle" font-size="11.5" fill="#6B4E16">Park writes state / Resume restores it</text>
-  <path d="M605 255H650V447H725" fill="none" stroke="#C98A2E" stroke-width="1.8" marker-end="url(#arrow)"/>
-  <text x="687" y="437" text-anchor="middle" font-size="10.5" fill="#8A611F">idle: Park</text>
-
-  <rect x="335" y="295" width="300" height="126" rx="12" fill="#FFF0F0" stroke="#B84B4B" stroke-width="1.5"/>
-  <text x="355" y="323" font-size="13.5" font-weight="700" fill="#172033">When Clone cannot serve locally</text>
-  <circle cx="360" cy="351" r="5" fill="#B84B4B"/>
-  <text x="375" y="355" font-size="11.5" fill="#8B3333">DEFERRED_FALLBACK</text>
-  <text x="375" y="374" font-size="10.5" fill="#6F3A3A">ordinary provisioning path or preferred home</text>
-  <circle cx="360" cy="397" r="5" fill="#B84B4B"/>
-  <text x="375" y="401" font-size="11.5" fill="#8B3333">SHED</text>
-  <text x="425" y="401" font-size="10.5" fill="#6F3A3A">503 with Retry-After</text>
-  <path d="M725 205C670 205 670 335 635 335" fill="none" stroke="#B84B4B" stroke-width="1.7" stroke-dasharray="6 4" marker-end="url(#arrowRed)"/>
-
-  <text x="40" y="525" font-size="12" font-weight="700" fill="#6B7785" letter-spacing="1.2">ONE NAMED REVISION SESSION OVER TIME</text>
-
-  <rect x="40" y="545" width="180" height="90" rx="12" fill="#F2F5F9" stroke="#7B8794"/>
-  <text x="130" y="573" text-anchor="middle" font-size="13" font-weight="700" fill="#172033">no running fiber</text>
-  <text x="130" y="597" text-anchor="middle" font-size="11" fill="#526273">first request arrives</text>
-  <text x="130" y="617" text-anchor="middle" font-size="11" fill="#526273">Clone(hello-0)</text>
-
-  <rect x="250" y="545" width="180" height="90" rx="12" fill="#EAF8EF" stroke="#3A8F5B"/>
-  <text x="340" y="573" text-anchor="middle" font-size="13" font-weight="700" fill="#172033">CREATE</text>
-  <text x="340" y="597" text-anchor="middle" font-size="11" fill="#245C3D">guest fiber starts</text>
-  <text x="340" y="617" text-anchor="middle" font-size="11" fill="#245C3D">request reaches endpoint</text>
-
-  <rect x="460" y="545" width="180" height="90" rx="12" fill="#EAF2FF" stroke="#5B7DB1"/>
-  <text x="550" y="573" text-anchor="middle" font-size="13" font-weight="700" fill="#172033">ATTACH</text>
-  <text x="550" y="597" text-anchor="middle" font-size="11" fill="#334E68">later requests reuse</text>
-  <text x="550" y="617" text-anchor="middle" font-size="11" fill="#334E68">the running incarnation</text>
-
-  <rect x="670" y="545" width="180" height="90" rx="12" fill="#FFF4DC" stroke="#C98A2E"/>
-  <text x="760" y="573" text-anchor="middle" font-size="13" font-weight="700" fill="#172033">PARKED</text>
-  <text x="760" y="597" text-anchor="middle" font-size="11" fill="#6B4E16">idle timer calls Park</text>
-  <text x="760" y="617" text-anchor="middle" font-size="11" fill="#6B4E16">state retained</text>
-
-  <rect x="880" y="545" width="180" height="90" rx="12" fill="#F3ECFF" stroke="#8B6CB0"/>
-  <text x="970" y="573" text-anchor="middle" font-size="13" font-weight="700" fill="#172033">RESUME</text>
-  <text x="970" y="597" text-anchor="middle" font-size="11" fill="#4A3F5C">next request restores</text>
-  <text x="970" y="617" text-anchor="middle" font-size="11" fill="#4A3F5C">the saved counter state</text>
-
-  <path d="M220 590H250" fill="none" stroke="#486581" stroke-width="2" marker-end="url(#arrow)"/>
-  <path d="M430 590H460" fill="none" stroke="#486581" stroke-width="2" marker-end="url(#arrow)"/>
-  <path d="M640 590H670" fill="none" stroke="#486581" stroke-width="2" marker-end="url(#arrow)"/>
-  <path d="M850 590H880" fill="none" stroke="#486581" stroke-width="2" marker-end="url(#arrow)"/>
-  <path d="M970 635V665H550V635" fill="none" stroke="#8B6CB0" stroke-width="1.7" stroke-dasharray="6 4" marker-end="url(#arrow)"/>
-  <text x="760" y="680" text-anchor="middle" font-size="10.5" fill="#6B5680">while active, later requests ATTACH again</text>
+  <rect class="redbox" x="320" y="318" width="286" height="154" rx="17"/>
+  <text class="h red" x="344" y="350">When Clone cannot serve here</text>
+  <text class="b" x="344" y="382">DEFERRED_FALLBACK</text><text class="s" x="344" y="404">ordinary provisioning path or preferred home</text>
+  <text class="b" x="344" y="434">SHED + Retry-After</text><text class="s" x="344" y="456">wait, then retry this home</text>
+  <text class="cap" x="42" y="580">ONE NAMED REVISION SESSION OVER TIME</text>
+  <rect class="panel" x="42" y="604" width="190" height="92" rx="15"/><text class="h" x="137" y="635" text-anchor="middle">No running fiber</text><text class="s" x="137" y="664" text-anchor="middle">first request</text><text class="s" x="137" y="682" text-anchor="middle">Clone(hello-0)</text>
+  <rect class="greenbox" x="272" y="604" width="190" height="92" rx="15"/><text class="h green" x="367" y="635" text-anchor="middle">CREATE</text><text class="b" x="367" y="664" text-anchor="middle">new guest starts</text>
+  <rect class="bluebox" x="502" y="604" width="190" height="92" rx="15"/><text class="h blue" x="597" y="635" text-anchor="middle">ATTACH</text><text class="b" x="597" y="664" text-anchor="middle">reuse incarnation</text>
+  <rect class="amberbox" x="732" y="604" width="190" height="92" rx="15"/><text class="h amber" x="827" y="635" text-anchor="middle">PARKED</text><text class="b" x="827" y="664" text-anchor="middle">idle state retained</text>
+  <rect class="violetbox" x="962" y="604" width="196" height="92" rx="15"/><text class="h violet" x="1060" y="635" text-anchor="middle">RESUME</text><text class="b" x="1060" y="664" text-anchor="middle">new incarnation</text>
+  <path class="arrow" d="M232 650h40M462 650h40M692 650h40M922 650h40" marker-end="url(#knative-arrow)"/>
+  <text class="s" x="600" y="738" text-anchor="middle">While active, later requests resolve ATTACH; after Park, the next valid Clone resolves RESUME.</text>
 </svg>

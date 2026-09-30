@@ -23,14 +23,14 @@ allocation:
 | fiberd asks | Slurm answers (`home/`) |
 | --- | --- |
 | how grants arrive | `*.jwt` files in `/run/fiberd/job-<id>/grants`, put there by `fiberd-slurm -grant` after verifying the grant offline against the issuer's keys, or by the prolog from the node's spool |
-| control-plane liveness | `scontrol show job <id>` answering with the job RUNNING, every half stale-TTL |
+| control-plane liveness | `scontrol show job <id>` answering with RUNNING, CONFIGURING, PENDING, SUSPENDED, or RESIZING, every half stale-TTL |
 | readiness | the allocation's own state plus the `Watch` stream; nothing to publish |
 | the cgroup subtree | the job step's cgroup (`/proc/self/cgroup`), which `task/cgroup` bounds with the job's memory limit: that limit is fiberd's block ceiling |
 | endpoints | the node's address of the declared family, a port per fiber |
 | fabric | the allocation's GRES, the GPUs Slurm exposed as devices |
 | scope | job id and name, user, account, partition, node, nodelist, GRES, CPUs, stamped on every audit record |
-| capacity bound | a grant asking for more fibers than the allocation has CPUs is refused before its template is warmed |
-| scope loss | the job leaving RUNNING while the agent lives: the agent bumps its epoch |
+| capacity bound | a positive `fibers.max` above the allocation CPU count is refused before warm; zero is unlimited at this layer and bypasses that comparison |
+| scope loss | the job entering a state outside the accepted liveness set while the agent lives: the agent bumps its epoch |
 
 `cmd/fiberd-slurm` is the binary: every fiberd flag, plus `-grant` (a JWT
 or `@file`, default `$FIBERD_GRANT`) and `-slurm-probe`.
@@ -97,3 +97,7 @@ cpu and memory but no pids controller, which fiberd tolerates (memory is
 what it needs). At step end slurmstepd logs that it cannot move itself to
 the root cgroup; that root holds controllers and so no processes, and the
 message is harmless.
+
+The reference control listener is plaintext and grant removal is not a hard
+revocation mechanism. Production hardening requirements are collected in
+[Production readiness](../../docs/production-readiness.md).

@@ -1,154 +1,59 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="760" viewBox="0 0 1200 760" font-family="Inter, Helvetica Neue, Arial, sans-serif">
-  <title>How identity flows through fiberd</title>
-  <desc>An issuer signs a capacity grant. A caller carries the grant in Clone, and the fiberd agent verifies it before resolving the request. The agent mints or reuses a fence, starts or attaches to a fiber, and returns the endpoint and fence. The fence and home scope are written to audit records. Scope loss advances the epoch, makes old fences stale, and releases running fibers. Fibers receive an incarnation handle but no per-fiber cryptographic credential.</desc>
-  <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#fafcff"/>
-      <stop offset="1" stop-color="#f1f5fb"/>
-    </linearGradient>
-    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
-      <feDropShadow dx="0" dy="3" stdDeviation="5" flood-color="#182230" flood-opacity="0.09"/>
-    </filter>
-    <marker id="arrow" markerWidth="9" markerHeight="9" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
-      <path d="M0,0 L8,3 L0,6 Z" fill="#667085"/>
-    </marker>
-    <marker id="blueArrow" markerWidth="9" markerHeight="9" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
-      <path d="M0,0 L8,3 L0,6 Z" fill="#3165b5"/>
-    </marker>
-    <marker id="redArrow" markerWidth="9" markerHeight="9" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
-      <path d="M0,0 L8,3 L0,6 Z" fill="#b42318"/>
-    </marker>
-  </defs>
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="760" viewBox="0 0 1200 760" role="img" aria-labelledby="identity-title identity-desc">
+  <title id="identity-title">Identity, fences, scope, and credentials in fiberd</title>
+  <desc id="identity-desc">An issuer signs a CapacityGrant that a caller presents with Clone. fiberd verifies the grant, resolves a session, and returns an endpoint and incarnation fence. Audit records include fence and home scope. Restart or scope loss advances the epoch and invalidates prior fences. A fence is not a secret and fiberd does not mint a per-fiber certificate or JWT.</desc>
+  <style>
+    :root{--bg:#f7f9fc;--panel:#fff;--ink:#172033;--muted:#5d6b7d;--line:#b8c4d4;--blue:#3165b5;--blue-bg:#eaf1ff;--teal:#13776f;--teal-bg:#e8f7f4;--violet:#704aa1;--violet-bg:#f2edfa;--amber:#a76500;--amber-bg:#fff3d6;--red:#b33b32;--red-bg:#fff0ef}
+    @media(prefers-color-scheme:dark){:root{--bg:#0d1117;--panel:#161b22;--ink:#e6edf3;--muted:#a3adba;--line:#3d4652;--blue:#79a7ff;--blue-bg:#17243d;--teal:#53c7b8;--teal-bg:#102923;--violet:#c09cff;--violet-bg:#251b35;--amber:#f0b44d;--amber-bg:#30240f;--red:#ff8178;--red-bg:#321817}}
+    text{font-family:ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;fill:var(--ink)}.bg{fill:var(--bg)}.panel{fill:var(--panel);stroke:var(--line);stroke-width:1.5}.bluebox{fill:var(--blue-bg);stroke:var(--blue);stroke-width:1.5}.tealbox{fill:var(--teal-bg);stroke:var(--teal);stroke-width:1.5}.violetbox{fill:var(--violet-bg);stroke:var(--violet);stroke-width:1.5}.amberbox{fill:var(--amber-bg);stroke:var(--amber);stroke-width:1.5}.redbox{fill:var(--red-bg);stroke:var(--red);stroke-width:1.5}.title{font-size:27px;font-weight:750}.subtitle{font-size:14px;fill:var(--muted)}.h{font-size:16px;font-weight:700}.b{font-size:13px}.s{font-size:11px;fill:var(--muted)}.cap{font-size:12px;font-weight:700;letter-spacing:.5px}.blue{fill:var(--blue)}.teal{fill:var(--teal)}.violet{fill:var(--violet)}.amber{fill:var(--amber)}.red{fill:var(--red)}.arrow{fill:none;stroke:var(--muted);stroke-width:2}.dash{stroke-dasharray:7 5}
+  </style>
+  <defs><marker id="identity-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M1 1l8 4-8 4z" fill="#7b8794"/></marker></defs>
+  <rect class="bg" width="1200" height="760"/>
+  <text class="title" x="42" y="48">Authority, incarnation, route, and workload identity are distinct</text>
+  <text class="subtitle" x="42" y="74">Grant JWT authorizes capacity · fence identifies one incarnation · endpoint is the route · scope anchors audit and revocation.</text>
 
-  <rect width="1200" height="760" fill="url(#bg)"/>
-  <text x="40" y="42" font-size="22" font-weight="700" fill="#172033">How identity flows through fiberd</text>
-  <text x="40" y="66" font-size="11" fill="#667085">Capacity authority leads to one fiber incarnation, while audit scope and workload credentials remain separate</text>
+  <rect class="panel" x="42" y="104" width="1116" height="214" rx="20"/>
+  <text class="cap blue" x="68" y="137">CLONE PATH</text>
+  <rect class="bluebox" x="68" y="164" width="150" height="92" rx="14"/>
+  <text class="h blue" x="143" y="195" text-anchor="middle">Issuer</text><text class="b" x="143" y="225" text-anchor="middle">signing key</text>
+  <rect class="bluebox" x="258" y="164" width="170" height="92" rx="14"/>
+  <text class="h blue" x="343" y="195" text-anchor="middle">CapacityGrant JWT</text><text class="s" x="343" y="225" text-anchor="middle">capacity authority</text>
+  <rect class="violetbox" x="468" y="164" width="160" height="92" rx="14"/>
+  <text class="h violet" x="548" y="195" text-anchor="middle">Caller</text><text class="b" x="548" y="225" text-anchor="middle">Clone + session</text>
+  <rect class="tealbox" x="668" y="154" width="182" height="112" rx="14"/>
+  <text class="h teal" x="759" y="185" text-anchor="middle">fiberd</text><text class="b" x="759" y="214" text-anchor="middle">verify + resolve</text><text class="s" x="759" y="239" text-anchor="middle">ledger serialization</text>
+  <rect class="violetbox" x="890" y="154" width="220" height="112" rx="14"/>
+  <text class="h violet" x="1000" y="184" text-anchor="middle">Fiber incarnation</text><text class="b" x="1000" y="212" text-anchor="middle">fence: grant / epoch / seq</text><text class="s" x="1000" y="238" text-anchor="middle">endpoint returned with fence</text>
+  <path class="arrow" d="M218 210h40M428 210h40M628 210h40M850 210h40" marker-end="url(#identity-arrow)"/>
+  <text class="s" x="238" y="198" text-anchor="middle">signs</text><text class="s" x="448" y="198" text-anchor="middle">carries</text><text class="s" x="648" y="198" text-anchor="middle">sends</text>
+  <path class="arrow dash" d="M1000 266v28H548v-38" marker-end="url(#identity-arrow)"/>
+  <text class="s" x="774" y="290" text-anchor="middle">Clone response: kind + endpoint + fence</text>
 
-  <!-- Main causal flow -->
-  <rect x="40" y="92" width="1120" height="210" rx="20" fill="#ffffff" stroke="#b7c7e0" filter="url(#shadow)"/>
-  <text x="64" y="121" font-size="12" font-weight="700" fill="#24466f">Clone path</text>
+  <rect class="panel" x="42" y="348" width="704" height="350" rx="20"/>
+  <text class="cap teal" x="68" y="381">AUDIT + REVOCATION</text>
+  <rect class="tealbox" x="68" y="411" width="200" height="88" rx="14"/>
+  <text class="h teal" x="168" y="440" text-anchor="middle">Home scope</text><text class="s" x="168" y="466" text-anchor="middle">issuer + resource claim</text><text class="s" x="168" y="485" text-anchor="middle">environment-specific facts</text>
+  <rect class="violetbox" x="308" y="411" width="154" height="88" rx="14"/>
+  <text class="h violet" x="385" y="440" text-anchor="middle">Fence</text><text class="s" x="385" y="466" text-anchor="middle">event incarnation</text>
+  <rect class="tealbox" x="502" y="411" width="216" height="88" rx="14"/>
+  <text class="h teal" x="610" y="440" text-anchor="middle">Audit record</text><text class="s" x="610" y="466" text-anchor="middle">event + scope + fence</text><text class="s" x="610" y="485" text-anchor="middle">durability follows policy</text>
+  <path class="arrow" d="M268 455h40M462 455h40" marker-end="url(#identity-arrow)"/>
+  <rect class="redbox" x="68" y="553" width="144" height="72" rx="14"/><text class="h red" x="140" y="582" text-anchor="middle">Restart or</text><text class="b" x="140" y="605" text-anchor="middle">scope loss</text>
+  <rect class="redbox" x="260" y="553" width="130" height="72" rx="14"/><text class="h red" x="325" y="583" text-anchor="middle">Epoch++</text><text class="s" x="325" y="606" text-anchor="middle">persisted</text>
+  <rect class="redbox" x="438" y="553" width="130" height="72" rx="14"/><text class="h red" x="503" y="582" text-anchor="middle">Old fences</text><text class="s" x="503" y="606" text-anchor="middle">invalid</text>
+  <rect class="redbox" x="616" y="553" width="102" height="72" rx="14"/><text class="h red" x="667" y="582" text-anchor="middle">Running</text><text class="s" x="667" y="606" text-anchor="middle">released</text>
+  <path class="arrow" d="M212 589h48M390 589h48M568 589h48" marker-end="url(#identity-arrow)"/>
+  <text class="s" x="68" y="666">Running fibers are not recovered after agent restart; eligible parked named sessions may remain resumable.</text>
 
-  <rect x="65" y="151" width="140" height="66" rx="12" fill="#e8f0fd" stroke="#7f9dc8"/>
-  <text x="135" y="176" text-anchor="middle" font-size="11" font-weight="700" fill="#24466f">Issuer</text>
-  <text x="135" y="196" text-anchor="middle" font-size="9" fill="#52657c">holds signing key</text>
-
-  <path d="M205 184H239" stroke="#667085" stroke-width="1.5" marker-end="url(#arrow)"/>
-  <text x="222" y="172" text-anchor="middle" font-size="8.5" fill="#667085">signs</text>
-
-  <rect x="239" y="151" width="160" height="66" rx="12" fill="#e8f0fd" stroke="#7f9dc8"/>
-  <text x="319" y="176" text-anchor="middle" font-size="11" font-weight="700" fill="#24466f">Grant JWT</text>
-  <text x="319" y="196" text-anchor="middle" font-size="9" fill="#52657c">capacity authority</text>
-
-  <path d="M399 184H433" stroke="#667085" stroke-width="1.5" marker-end="url(#arrow)"/>
-  <text x="416" y="172" text-anchor="middle" font-size="8.5" fill="#667085">carried by</text>
-
-  <rect x="433" y="151" width="170" height="66" rx="12" fill="#f5f0f9" stroke="#9875ba"/>
-  <text x="518" y="176" text-anchor="middle" font-size="11" font-weight="700" fill="#4b3158">Caller: Clone</text>
-  <text x="518" y="196" text-anchor="middle" font-size="9" fill="#667085">grant JWT + session</text>
-
-  <path d="M603 184H637" stroke="#667085" stroke-width="1.5" marker-end="url(#arrow)"/>
-  <text x="620" y="172" text-anchor="middle" font-size="8.5" fill="#667085">sends</text>
-
-  <rect x="637" y="142" width="180" height="84" rx="12" fill="#edf9f7" stroke="#42a39a" stroke-width="1.5"/>
-  <text x="727" y="169" text-anchor="middle" font-size="11" font-weight="700" fill="#126b66">fiberd agent</text>
-  <text x="727" y="189" text-anchor="middle" font-size="9" fill="#526d69">verifies grant</text>
-  <text x="727" y="207" text-anchor="middle" font-size="9" fill="#526d69">resolves session</text>
-
-  <path d="M817 184H851" stroke="#667085" stroke-width="1.5" marker-end="url(#arrow)"/>
-  <text x="834" y="172" text-anchor="middle" font-size="8.5" fill="#667085">mints or reuses</text>
-
-  <rect x="851" y="142" width="160" height="84" rx="12" fill="#eee6f6" stroke="#9875ba" stroke-width="1.5"/>
-  <text x="931" y="169" text-anchor="middle" font-size="11" font-weight="700" fill="#4b3158">Fence</text>
-  <text x="931" y="190" text-anchor="middle" font-size="10" font-weight="700" fill="#704a80">grant / epoch / seq</text>
-  <text x="931" y="208" text-anchor="middle" font-size="8.5" fill="#667085">incarnation handle</text>
-
-  <path d="M1011 184H1041" stroke="#704a80" stroke-width="1.7" marker-end="url(#arrow)"/>
-
-  <rect x="1041" y="142" width="94" height="84" rx="12" fill="#f8f5fb" stroke="#9875ba"/>
-  <text x="1088" y="171" text-anchor="middle" font-size="11" font-weight="700" fill="#4b3158">Fiber</text>
-  <text x="1088" y="191" text-anchor="middle" font-size="9" fill="#667085">running</text>
-  <text x="1088" y="208" text-anchor="middle" font-size="9" fill="#704a80">endpoint</text>
-
-  <path d="M1088 226V264H518V217" fill="none" stroke="#3165b5" stroke-width="1.8" stroke-dasharray="6 4" marker-end="url(#blueArrow)"/>
-  <rect x="701" y="250" width="204" height="25" rx="12" fill="#e8f0fd"/>
-  <text x="803" y="267" text-anchor="middle" font-size="9.5" font-weight="700" fill="#24466f">Clone response: endpoint + fence</text>
-
-  <!-- Audit and revocation -->
-  <rect x="40" y="330" width="690" height="360" rx="20" fill="#ffffff" stroke="#42a39a" filter="url(#shadow)"/>
-  <text x="64" y="360" font-size="13" font-weight="700" fill="#126b66">Audit and revocation</text>
-
-  <rect x="70" y="393" width="200" height="76" rx="12" fill="#edf9f7" stroke="#76bdb6"/>
-  <text x="170" y="418" text-anchor="middle" font-size="10.5" font-weight="700" fill="#126b66">Home scope</text>
-  <text x="170" y="438" text-anchor="middle" font-size="9" fill="#526d69">namespace, Pod, SA, node</text>
-  <text x="170" y="455" text-anchor="middle" font-size="9" fill="#526d69">issuer, resource claim</text>
-
-  <rect x="304" y="393" width="148" height="76" rx="12" fill="#eee6f6" stroke="#9875ba"/>
-  <text x="378" y="418" text-anchor="middle" font-size="10.5" font-weight="700" fill="#4b3158">Fence</text>
-  <text x="378" y="438" text-anchor="middle" font-size="9" fill="#667085">which incarnation</text>
-  <text x="378" y="455" text-anchor="middle" font-size="9" fill="#667085">performed the event</text>
-
-  <path d="M270 431H304" stroke="#667085" stroke-width="1.5"/>
-  <path d="M452 431H493" stroke="#667085" stroke-width="1.5" marker-end="url(#arrow)"/>
-
-  <rect x="493" y="393" width="205" height="76" rx="12" fill="#f4fbf9" stroke="#76bdb6"/>
-  <text x="595" y="418" text-anchor="middle" font-size="10.5" font-weight="700" fill="#126b66">Audit record</text>
-  <text x="595" y="438" text-anchor="middle" font-size="9" fill="#526d69">event + fence + scope</text>
-  <text x="595" y="455" text-anchor="middle" font-size="9" fill="#526d69">written before acknowledgement</text>
-
-  <path d="M931 226V316H378V393" fill="none" stroke="#9875ba" stroke-width="1.4" stroke-dasharray="5 4" marker-end="url(#arrow)"/>
-
-  <path d="M170 469V516" stroke="#b42318" stroke-width="1.5" marker-end="url(#redArrow)"/>
-  <rect x="70" y="516" width="150" height="49" rx="11" fill="#fff0ee" stroke="#e5a39d"/>
-  <text x="145" y="537" text-anchor="middle" font-size="10" font-weight="700" fill="#8f241e">Scope lost</text>
-  <text x="145" y="553" text-anchor="middle" font-size="8.5" fill="#a33a34">namespace, claim, issuer</text>
-
-  <path d="M220 540H257" stroke="#b42318" stroke-width="1.5" marker-end="url(#redArrow)"/>
-  <rect x="257" y="516" width="120" height="49" rx="11" fill="#fff0ee" stroke="#e5a39d"/>
-  <text x="317" y="537" text-anchor="middle" font-size="10" font-weight="700" fill="#8f241e">Epoch++</text>
-  <text x="317" y="553" text-anchor="middle" font-size="8.5" fill="#a33a34">persisted</text>
-
-  <path d="M377 540H414" stroke="#b42318" stroke-width="1.5" marker-end="url(#redArrow)"/>
-  <rect x="414" y="516" width="130" height="49" rx="11" fill="#fff0ee" stroke="#e5a39d"/>
-  <text x="479" y="537" text-anchor="middle" font-size="10" font-weight="700" fill="#8f241e">Old fences</text>
-  <text x="479" y="553" text-anchor="middle" font-size="8.5" fill="#a33a34">become stale</text>
-
-  <path d="M544 540H581" stroke="#b42318" stroke-width="1.5" marker-end="url(#redArrow)"/>
-  <rect x="581" y="516" width="117" height="49" rx="11" fill="#fff0ee" stroke="#e5a39d"/>
-  <text x="639" y="537" text-anchor="middle" font-size="10" font-weight="700" fill="#8f241e">Running fibers</text>
-  <text x="639" y="553" text-anchor="middle" font-size="8.5" fill="#a33a34">released</text>
-
-  <rect x="70" y="604" width="628" height="50" rx="12" fill="#edf2fb"/>
-  <text x="384" y="625" text-anchor="middle" font-size="9.5" font-weight="700" fill="#24466f">Scope is an audit fact, not another credential.</text>
-  <text x="384" y="643" text-anchor="middle" font-size="9" fill="#52657c">The fence makes stale incarnations detectable and revocable.</text>
-
-  <!-- Workload credential result -->
-  <rect x="760" y="330" width="400" height="360" rx="20" fill="#ffffff" stroke="#d19a32" filter="url(#shadow)"/>
-  <text x="784" y="360" font-size="13" font-weight="700" fill="#805600">What the running fiber receives</text>
-
-  <path d="M1088 226V316H960V386" fill="none" stroke="#704a80" stroke-width="1.5" marker-end="url(#arrow)"/>
-
-  <rect x="790" y="386" width="340" height="66" rx="12" fill="#f5f0f9" stroke="#9875ba"/>
-  <text x="960" y="409" text-anchor="middle" font-size="10.5" font-weight="700" fill="#4b3158">Incarnation context</text>
-  <text x="960" y="429" text-anchor="middle" font-size="9" fill="#667085">FIBERD_FENCE + endpoint + optional payload</text>
-  <text x="960" y="444" text-anchor="middle" font-size="8.5" fill="#704a80">the fence is not a secret</text>
-
-  <path d="M960 452V480" stroke="#667085" stroke-width="1.5" marker-end="url(#arrow)"/>
-  <rect x="790" y="480" width="340" height="45" rx="12" fill="#fff0ee" stroke="#e5a39d"/>
-  <text x="960" y="508" text-anchor="middle" font-size="10" font-weight="700" fill="#8f241e">No per-fiber certificate, JWT, or SPIFFE ID is minted</text>
-
-  <path d="M960 525V550H870V568" fill="none" stroke="#667085" stroke-width="1.4" marker-end="url(#arrow)"/>
-  <path d="M960 550H1050V568" fill="none" stroke="#667085" stroke-width="1.4" marker-end="url(#arrow)"/>
-
-  <rect x="790" y="568" width="160" height="78" rx="12" fill="#fff8e7" stroke="#d7a933"/>
-  <text x="870" y="590" text-anchor="middle" font-size="10" font-weight="700" fill="#6f4d05">Kubernetes + proc</text>
-  <text x="870" y="609" text-anchor="middle" font-size="8.5" fill="#6e6250">Pod mounts are visible</text>
-  <text x="870" y="626" text-anchor="middle" font-size="8.5" fill="#8a5d00">SA token may be readable</text>
-
-  <rect x="970" y="568" width="160" height="78" rx="12" fill="#f7f8fa" stroke="#aeb7c4"/>
-  <text x="1050" y="590" text-anchor="middle" font-size="10" font-weight="700" fill="#344054">Sandbox backend</text>
-  <text x="1050" y="609" text-anchor="middle" font-size="8.5" fill="#667085">separate filesystem view</text>
-  <text x="1050" y="626" text-anchor="middle" font-size="8.5" fill="#667085">no automatic SA token</text>
-
-  <rect x="234" y="718" width="732" height="25" rx="12" fill="#edf2fb"/>
-  <text x="600" y="735" text-anchor="middle" font-size="9.5" font-weight="600" fill="#24466f">Grant JWT authorizes capacity. Fence identifies an incarnation. Endpoint tells callers where to connect.</text>
+  <rect class="panel" x="778" y="348" width="380" height="350" rx="20"/>
+  <text class="cap amber" x="804" y="381">WHAT A FIBER RECEIVES</text>
+  <rect class="violetbox" x="804" y="411" width="328" height="86" rx="14"/>
+  <text class="h violet" x="968" y="441" text-anchor="middle">Incarnation context</text>
+  <text class="b" x="968" y="468" text-anchor="middle">endpoint + fence + optional payload</text>
+  <rect class="redbox" x="804" y="527" width="328" height="64" rx="14"/>
+  <text class="h red" x="968" y="554" text-anchor="middle">No per-fiber credential is minted</text>
+  <text class="s" x="968" y="576" text-anchor="middle">the fence is not a secret</text>
+  <rect class="amberbox" x="804" y="617" width="152" height="58" rx="13"/>
+  <text class="b amber" x="880" y="642" text-anchor="middle">Process backend</text><text class="s" x="880" y="661" text-anchor="middle">home mounts may show</text>
+  <rect class="amberbox" x="980" y="617" width="152" height="58" rx="13"/>
+  <text class="b amber" x="1056" y="642" text-anchor="middle">Sandbox backend</text><text class="s" x="1056" y="661" text-anchor="middle">separate filesystem view</text>
 </svg>

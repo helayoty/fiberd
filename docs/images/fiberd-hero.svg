@@ -1,139 +1,66 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1240 680" width="1240" height="680" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" role="img" aria-labelledby="t d" xmlns:c2pa="http://c2pa.org/manifest"><metadata><c2pa:manifest>AAAWgmp1bWIAAAAeanVtZGMycGEAEQAQgAAAqgA4m3EDYzJwYQAAABZcanVtYgAAAEdqdW1kYzJtYQARABCAAACqADibcQN1cm46YzJwYTo0NjkxNWI3Ni1jNzk5LTQ0MDUtOTk2Mi0xZDYzODE0Njk4ZjgAAAADl2p1bWIAAAApanVtZGMyYXMAEQAQgAAAqgA4m3EDYzJwYS5hc3NlcnRpb25zAAAAALxqdW1iAAAARGp1bWRjYm9yABEAEIAAAKoAOJtxE2MycGEuaW5ncmVkaWVudC52MwAAAAAYYzJzaCQWwDVXLICtuBu2jpKC2isAAABwY2JvcqNpZGM6Zm9ybWF0bWltYWdlL3N2Zyt4bWxqaW5zdGFuY2VJRHgseG1wOmlpZDo3N2I4ZjllNy02Njg5LTQ5NDEtODkyMC1iZWFiOGFhNGUwZTBscmVsYXRpb25zaGlwaHBhcmVudE9mAAAB4mp1bWIAAABBanVtZGNib3IAEQAQgAAAqgA4m3ETYzJwYS5hY3Rpb25zLnYyAAAAABhjMnNoxS9DGMY7ToR31QjndrRRtAAAAZljYm9yomdhY3Rpb25zgqJmYWN0aW9ua2MycGEub3BlbmVkanBhcmFtZXRlcnOha2luZ3JlZGllbnRzgaJjdXJseC1zZWxmI2p1bWJmPWMycGEuYXNzZXJ0aW9ucy9jMnBhLmluZ3JlZGllbnQudjNkaGFzaFggs2cynpKekOfd8WoaCwh5+1ym25kn2h+JacVk5WqLH1GkZmFjdGlvbngdY29tLmFudGhyb3BpYy5jbGF1ZGUucHJvdmlkZWRqcGFyYW1ldGVyc6F4H2NvbS5hbnRocm9waWMub3JpZ2luLWNvbmZpZGVuY2VndW5rbm93bmtkZXNjcmlwdGlvbnhmQ2xhdWRlIHByb3ZpZGVkIHRoaXMgZmlsZSBhdCB0aGUgcmVxdWVzdCBvZiBhIHVzZXIgYW5kIG1heSBoYXZlIGNyZWF0ZWQgb3IgbW9kaWZpZWQgdGhlIGZpbGUgY29udGVudHMubXNvZnR3YXJlQWdlbnShZG5hbWVmQ2xhdWRlcmFsbEFjdGlvbnNJbmNsdWRlZPUAAADIanVtYgAAAEBqdW1kY2JvcgARABCAAACqADibcRNjMnBhLmhhc2guZGF0YQAAAAAYYzJzaN7/p9Z5nRg1LDLQRM+CGGMAAACAY2JvcqVjYWxnZnNoYTI1NmNwYWRMAAAAAAAAAAAAAAAAZGhhc2hYIOKUNoz9sTQ+B5iEJAl29JRX5xf8+wWUJJjDHAQtSO+4ZG5hbWVuanVtYmYgbWFuaWZlc3RqZXhjbHVzaW9uc4GiZXN0YXJ0GQEOZmxlbmd0aBkeBAAAAj5qdW1iAAAAJ2p1bWRjMmNsABEAEIAAAKoAOJtxA2MycGEuY2xhaW0udjIAAAACD2Nib3KlY2FsZ2ZzaGEyNTZpc2lnbmF0dXJleE1zZWxmI2p1bWJmPS9jMnBhL3VybjpjMnBhOjQ2OTE1Yjc2LWM3OTktNDQwNS05OTYyLTFkNjM4MTQ2OThmOC9jMnBhLnNpZ25hdHVyZWppbnN0YW5jZUlEeCx4bXA6aWlkOmM0YWEzN2RmLWJjMDUtNGEwNi1iZmYyLWJkZGQ3NDY0MTg4ZXJjcmVhdGVkX2Fzc2VydGlvbnODomN1cmx4LXNlbGYjanVtYmY9YzJwYS5hc3NlcnRpb25zL2MycGEuaW5ncmVkaWVudC52M2RoYXNoWCCzZzKekp6Q593xahoLCHn7XKbbmSfaH4lpxWTlaosfUaJjdXJseCpzZWxmI2p1bWJmPWMycGEuYXNzZXJ0aW9ucy9jMnBhLmFjdGlvbnMudjJkaGFzaFggIeyMaBLAa8xj141lL76/gkyzSDiuKVw1yzJgOmgL6+2iY3VybHgpc2VsZiNqdW1iZj1jMnBhLmFzc2VydGlvbnMvYzJwYS5oYXNoLmRhdGFkaGFzaFgg56mTGsBJmmejabYChL4obUj9VXXN0aUmrclyxG/loVV0Y2xhaW1fZ2VuZXJhdG9yX2luZm+jZG5hbWVvQW50aHJvcGljIEZpbGVzZ3ZlcnNpb25lMS4wLjBrc3BlY1ZlcnNpb25lMi40LjAAABA4anVtYgAAAChqdW1kYzJjcwARABCAAACqADibcQNjMnBhLnNpZ25hdHVyZQAAABAIY2JvctKEWQISogEmGCFZAgowggIGMIIBjaADAgECAhRA5aAK7sI50L64g/oGQgU9Z1UTADAKBggqhkjOPQQDAzBJMRcwFQYDVQQKEw5BbnRocm9waWMsIFBCQzEuMCwGA1UEAxMlQW50aHJvcGljIENvbnRlbnQgQ3JlZGVudGlhbHMgUm9vdCBDQTAeFw0yNjA4MDcxODQzNTZaFw0yODA4MDYxOTQzNTZaMEQxFzAVBgNVBAoTDkFudGhyb3BpYywgUEJDMSkwJwYDVQQDEyBBbnRocm9waWMgQ2xhdWRlIENvbnRlbnQgU2lnbmluZzBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABJh6CmvLUBgFFNU0vUKlOVtE6djd17L5SuwX0LemFisBM3dkd/3cyjxFA3Qo5S46fX0/ihY0VZ7mfb9KF703t5OjWDBWMA4GA1UdDwEB/wQEAwIHgDAVBgNVHSUEDjAMBgorBgEEAYPoXgIBMAwGA1UdEwEB/wQCMAAwHwYDVR0jBBgwFoAUzlHiBIFOZFsj+OPEz5o+nMHXXMIwCgYIKoZIzj0EAwMDZwAwZAIwMXMdFJ4BetLLVY7ORuE9noqbbAZOZn/aArXyTwFAZfKrPzxF2vPoJNf1+UCdg1XGAjBwX1zd9WGqYkqmL5SFqw1QySjr1zJfpJM9+1rdDwSPLMOPOjKuiXjoU/pUUeG9RwmhY3BhZFkNngAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAPZYQEFewkkg9dSAto1E6VEs+pcQ2gKG+WOpR7upcoGncGLhTbC+rRVeH9hqtf+CsR7VnGU9rghi3+Gn/ene/sW70CI=</c2pa:manifest></metadata>
-  <title id="t">fiberd: place capacity once, activate fibers locally</title>
-  <desc id="d">The control plane signs one CapacityGrant and sends it to the host (step 1). The fiberd agent verifies it offline and warms a zygote once (step 2). A caller asks for a session with Clone (step 3), receives an endpoint and fence (step 4), and connects to the fiber directly (step 5). Aggregate status returns to the control plane asynchronously. Unused grant capacity stays on the host for later Clone requests.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="1240" height="700" viewBox="0 0 1240 700" role="img" aria-labelledby="hero-title hero-desc">
+  <title id="hero-title">fiberd places capacity once and activates fibers locally</title>
+  <desc id="hero-desc">A control plane issues a signed CapacityGrant to a home. The fiberd agent verifies it, prepares a warm template, and resolves Clone requests locally. Each fiber incarnation receives an endpoint and fence while remaining inside grant and backend boundaries. Local operation during a control-plane outage depends on the grant lease, valid home scope, and healthy local runtime.</desc>
   <style>
-    .bg{fill:#ffffff} .ink{fill:#1f2328} .muted{fill:#59636e}
-    .cp{fill:#eef3ff;stroke:#3b6fd6} .host{fill:#f2faf6;stroke:#1f8a70} .agent{fill:#ffffff;stroke:#1f8a70}
-    .zyg{fill:#fff6df;stroke:#c98a00} .fib{fill:#ffffff;stroke:#7a4bc9} .free{fill:#f7f3fc;stroke:#a58ad6}
-    .caller{fill:#f7f3fc;stroke:#7a4bc9} .pill{fill:#ffffff;stroke:#c9d1d9}
-    .cold{fill:none;stroke:#3b6fd6;stroke-width:1.8} .colddash{fill:none;stroke:#3b6fd6;stroke-width:1.5;stroke-dasharray:5 4}
-    .warm{fill:none;stroke:#1f8a70;stroke-width:1.8} .req{fill:none;stroke:#7a4bc9;stroke-width:1.8}
-    .reqdash{fill:none;stroke:#7a4bc9;stroke-width:1.5;stroke-dasharray:5 4}
-    .mcold{fill:#3b6fd6} .mwarm{fill:#1f8a70} .mreq{fill:#7a4bc9}
-    .ncold{fill:#ffffff;stroke:#3b6fd6} .nwarm{fill:#ffffff;stroke:#1f8a70} .nreq{fill:#ffffff;stroke:#7a4bc9}
-    .tcold{fill:#3b6fd6} .twarm{fill:#1f8a70} .treq{fill:#7a4bc9}
-    @media (prefers-color-scheme: dark) {
-      .bg{fill:#0d1117} .ink{fill:#e6edf3} .muted{fill:#9da7b3}
-      .cp{fill:#14203a;stroke:#6ea0ff} .host{fill:#0f1f1a;stroke:#3fb99a} .agent{fill:#161b22;stroke:#3fb99a}
-      .zyg{fill:#2b2110;stroke:#e3a136} .fib{fill:#161b22;stroke:#b48cff} .free{fill:#1a1526;stroke:#8e74c4}
-      .caller{fill:#1e1631;stroke:#b48cff} .pill{fill:#161b22;stroke:#30363d}
-      .cold{stroke:#6ea0ff} .colddash{stroke:#6ea0ff} .warm{stroke:#3fb99a} .req{stroke:#b48cff} .reqdash{stroke:#b48cff}
-      .mcold{fill:#6ea0ff} .mwarm{fill:#3fb99a} .mreq{fill:#b48cff}
-      .ncold{fill:#0d1117;stroke:#6ea0ff} .nwarm{fill:#0d1117;stroke:#3fb99a} .nreq{fill:#0d1117;stroke:#b48cff}
-      .tcold{fill:#6ea0ff} .twarm{fill:#3fb99a} .treq{fill:#b48cff}
-    }
-    .h1{font-size:24px;font-weight:700} .h2{font-size:15px;font-weight:700} .h3{font-size:13px;font-weight:600}
-    .b{font-size:12px} .s{font-size:11px} .n{font-size:11px;font-weight:700}
-    .box{stroke-width:1.4} .n circle{stroke-width:1.4}
+    :root{--bg:#f7f9fc;--panel:#fff;--ink:#172033;--muted:#5d6b7d;--line:#b8c4d4;--blue:#3165b5;--blue-bg:#eaf1ff;--teal:#13776f;--teal-bg:#e8f7f4;--violet:#704aa1;--violet-bg:#f2edfa;--amber:#a76500;--amber-bg:#fff3d6;--green:#287a4d;--green-bg:#e8f6ed}
+    @media(prefers-color-scheme:dark){:root{--bg:#0d1117;--panel:#161b22;--ink:#e6edf3;--muted:#a3adba;--line:#3d4652;--blue:#79a7ff;--blue-bg:#17243d;--teal:#53c7b8;--teal-bg:#102923;--violet:#c09cff;--violet-bg:#251b35;--amber:#f0b44d;--amber-bg:#30240f;--green:#63cf8e;--green-bg:#142b1e}}
+    text{font-family:ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;fill:var(--ink)} .bg{fill:var(--bg)} .panel{fill:var(--panel);stroke:var(--line);stroke-width:1.5}.home{fill:var(--teal-bg);stroke:var(--teal);stroke-width:2}.control{fill:var(--blue-bg);stroke:var(--blue);stroke-width:1.5}.warm{fill:var(--amber-bg);stroke:var(--amber);stroke-width:1.5}.fiber{fill:var(--violet-bg);stroke:var(--violet);stroke-width:1.5}.note{fill:var(--green-bg);stroke:var(--green)}.title{font-size:28px;font-weight:750}.subtitle{font-size:14px;fill:var(--muted)}.h{font-size:16px;font-weight:700}.b{font-size:13px}.s{font-size:11px;fill:var(--muted)}.label{font-size:12px;font-weight:700}.blue{fill:var(--blue)}.teal{fill:var(--teal)}.violet{fill:var(--violet)}.amber{fill:var(--amber)}.arrow{fill:none;stroke:var(--muted);stroke-width:2}.dash{stroke-dasharray:7 5}
   </style>
-  <defs>
-    <marker id="mc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="mcold" d="M1 1 L9 5 L1 9 z"/></marker>
-    <marker id="mw" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="mwarm" d="M1 1 L9 5 L1 9 z"/></marker>
-    <marker id="mr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="mreq" d="M1 1 L9 5 L1 9 z"/></marker>
-  </defs>
-  <rect class="bg" width="1240" height="680"/>
+  <defs><marker id="hero-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M1 1l8 4-8 4z" fill="#7b8794"/></marker></defs>
+  <rect class="bg" width="1240" height="700"/>
+  <text class="title" x="44" y="48">Place capacity once. Activate fibers locally.</text>
+  <text class="subtitle" x="44" y="74">Placement establishes a bounded grant; Clone resolves an already-admitted workload inside that boundary.</text>
 
-  <text class="ink h1" x="40" y="46">Place capacity once, activate fibers locally</text>
-  <text class="muted b" x="40" y="68">The cold path allocates a grant. The warm path creates and routes to fibers without another placement call.</text>
+  <rect class="control" x="44" y="128" width="250" height="154" rx="18"/>
+  <text class="h" x="169" y="160" text-anchor="middle">Control plane</text>
+  <text class="b" x="169" y="191" text-anchor="middle">places bounded capacity</text>
+  <text class="b" x="169" y="214" text-anchor="middle">signs CapacityGrant</text>
+  <text class="s" x="169" y="242" text-anchor="middle">lease + template + policy</text>
 
-  <!-- Host boundary -->
-  <rect class="box host" x="380" y="120" width="820" height="440" rx="16"/>
-  <text class="ink h2" x="400" y="146">Host</text>
-  <text class="muted s" x="580" y="146">capacity and isolation boundary · one agent, one or more grants</text>
-  <rect class="pill" x="1078" y="132" width="104" height="22" rx="11"/>
-  <text class="twarm n" x="1130" y="147" text-anchor="middle">warm path</text>
+  <rect class="panel" x="44" y="374" width="250" height="154" rx="18"/>
+  <text class="h" x="169" y="406" text-anchor="middle">Caller or router</text>
+  <text class="b" x="169" y="437" text-anchor="middle">Clone(session)</text>
+  <text class="b" x="169" y="460" text-anchor="middle">retains endpoint + fence</text>
+  <text class="s" x="169" y="489" text-anchor="middle">then connects directly</text>
 
-  <!-- Control plane -->
-  <rect class="box cp" x="40" y="130" width="250" height="130" rx="10"/>
-  <text class="ink h2" x="165" y="158" text-anchor="middle">Control plane</text>
-  <text class="ink b" x="165" y="184" text-anchor="middle">places and charges capacity</text>
-  <text class="ink b" x="165" y="202" text-anchor="middle">signs one CapacityGrant</text>
-  <rect class="pill" x="120" y="222" width="90" height="22" rx="11"/>
-  <text class="tcold n" x="165" y="237" text-anchor="middle">cold path</text>
+  <rect class="home" x="374" y="104" width="822" height="458" rx="22"/>
+  <text class="h teal" x="402" y="139">Home / resource boundary</text>
+  <text class="s" x="402" y="161">one agent can hold one or more separately bounded grants</text>
+  <rect class="panel" x="404" y="205" width="222" height="176" rx="16"/>
+  <text class="h teal" x="515" y="238" text-anchor="middle">fiberd agent</text>
+  <text class="b" x="515" y="270" text-anchor="middle">verifies grant locally</text>
+  <text class="b" x="515" y="293" text-anchor="middle">owns ledger + fences</text>
+  <text class="b" x="515" y="316" text-anchor="middle">enforces grant policy</text>
+  <text class="s" x="515" y="349" text-anchor="middle">reports aggregate status</text>
 
-  <!-- Caller -->
-  <rect class="box caller" x="40" y="380" width="250" height="130" rx="10"/>
-  <text class="ink h2" x="165" y="408" text-anchor="middle">Caller or router</text>
-  <text class="ink b" x="165" y="434" text-anchor="middle">asks for a session</text>
-  <text class="ink b" x="165" y="452" text-anchor="middle">keeps endpoint + fence</text>
-  <rect class="pill" x="113" y="472" width="104" height="22" rx="11"/>
-  <text class="treq n" x="165" y="487" text-anchor="middle">request path</text>
+  <rect class="panel" x="670" y="183" width="490" height="319" rx="18"/>
+  <text class="label teal" x="694" y="213">Admitted grant / backend boundary</text>
+  <rect class="warm" x="706" y="239" width="418" height="76" rx="15"/>
+  <text class="h amber" x="915" y="269" text-anchor="middle">Warm template</text>
+  <text class="b" x="915" y="294" text-anchor="middle">prepared once; forked or restored by the selected backend</text>
+  <path class="arrow" d="M915 315v34M915 349H790v32M915 349h125v32" marker-end="url(#hero-arrow)"/>
+  <rect class="fiber" x="706" y="383" width="168" height="91" rx="14"/>
+  <text class="h violet" x="790" y="411" text-anchor="middle">Fiber A</text>
+  <text class="b" x="790" y="436" text-anchor="middle">endpoint + fence</text>
+  <text class="s" x="790" y="458" text-anchor="middle">one incarnation</text>
+  <rect class="fiber" x="956" y="383" width="168" height="91" rx="14"/>
+  <text class="h violet" x="1040" y="411" text-anchor="middle">Fiber B</text>
+  <text class="b" x="1040" y="436" text-anchor="middle">endpoint + fence</text>
+  <text class="s" x="1040" y="458" text-anchor="middle">one incarnation</text>
 
-  <!-- Agent -->
-  <rect class="box agent" x="420" y="225" width="220" height="150" rx="10"/>
-  <text class="ink h2" x="530" y="253" text-anchor="middle">fiberd agent</text>
-  <text class="ink b" x="530" y="279" text-anchor="middle">verifies the grant offline</text>
-  <text class="ink b" x="530" y="297" text-anchor="middle">owns the ledger and fences</text>
-  <text class="ink b" x="530" y="315" text-anchor="middle">enforces fibers.max and pressure</text>
-  <rect class="pill" x="470" y="338" width="120" height="22" rx="11"/>
-  <text class="twarm n" x="530" y="353" text-anchor="middle">aggregate status</text>
+  <path class="arrow" d="M294 205h54v71h54" marker-end="url(#hero-arrow)"/>
+  <circle cx="348" cy="241" r="14" fill="var(--blue-bg)" stroke="var(--blue)"/><text class="label blue" x="348" y="245" text-anchor="middle">1</text>
+  <path class="arrow" d="M626 263h42" marker-end="url(#hero-arrow)"/>
+  <circle cx="647" cy="248" r="14" fill="var(--teal-bg)" stroke="var(--teal)"/><text class="label teal" x="647" y="252" text-anchor="middle">2</text>
+  <path class="arrow" d="M294 419h74v-92h34" marker-end="url(#hero-arrow)"/>
+  <circle cx="344" cy="419" r="14" fill="var(--violet-bg)" stroke="var(--violet)"/><text class="label violet" x="344" y="423" text-anchor="middle">3</text>
+  <path class="arrow dash" d="M404 353h-68v116h-42" marker-end="url(#hero-arrow)"/>
+  <circle cx="336" cy="438" r="14" fill="var(--violet-bg)" stroke="var(--violet)"/><text class="label violet" x="336" y="442" text-anchor="middle">4</text>
+  <path class="arrow" d="M169 528v65h621V476" marker-end="url(#hero-arrow)"/>
+  <circle cx="486" cy="593" r="14" fill="var(--violet-bg)" stroke="var(--violet)"/><text class="label violet" x="486" y="597" text-anchor="middle">5</text>
 
-  <!-- Zygote -->
-  <rect class="box zyg" x="700" y="170" width="360" height="86" rx="10"/>
-  <text class="ink h2" x="880" y="198" text-anchor="middle">Warm template (zygote)</text>
-  <text class="ink b" x="880" y="222" text-anchor="middle">initialized and checkpointed once, then forked or restored</text>
-  <text class="muted s" x="880" y="240" text-anchor="middle">never serves traffic</text>
-
-  <!-- Fibers -->
-  <rect class="box fib" x="700" y="330" width="160" height="110" rx="10"/>
-  <text class="ink h2" x="780" y="358" text-anchor="middle">Fiber A</text>
-  <text class="ink b" x="780" y="384" text-anchor="middle">endpoint + fence</text>
-  <text class="ink b" x="780" y="402" text-anchor="middle">own cgroup, own lease</text>
-  <text class="muted s" x="780" y="424" text-anchor="middle">running</text>
-  <rect class="box fib" x="880" y="330" width="160" height="110" rx="10"/>
-  <text class="ink h2" x="960" y="358" text-anchor="middle">Fiber B</text>
-  <text class="ink b" x="960" y="384" text-anchor="middle">endpoint + fence</text>
-  <text class="ink b" x="960" y="402" text-anchor="middle">own cgroup, own lease</text>
-  <text class="muted s" x="960" y="424" text-anchor="middle">running</text>
-  <rect class="box free" x="1060" y="330" width="120" height="110" rx="10" stroke-dasharray="6 4"/>
-  <text class="ink h3" x="1120" y="366" text-anchor="middle">Unused</text>
-  <text class="ink h3" x="1120" y="383" text-anchor="middle">capacity</text>
-  <text class="muted s" x="1120" y="406" text-anchor="middle">up to fibers.max,</text>
-  <text class="muted s" x="1120" y="421" text-anchor="middle">for later Clone calls</text>
-
-  <!-- fork / restore -->
-  <path class="req" d="M880 256 L880 292 L780 292 L780 328" marker-end="url(#mr)"/>
-  <path class="req" d="M880 292 L960 292 L960 328" marker-end="url(#mr)"/>
-  <rect class="pill" x="836" y="269" width="88" height="20" rx="10"/>
-  <text class="treq s" x="880" y="283" text-anchor="middle">fork or restore</text>
-
-  <!-- 1 signed grant: control plane -> agent -->
-  <path class="cold" d="M290 195 L350 195 L350 262 L418 262" marker-end="url(#mc)"/>
-  <g class="n"><circle class="ncold" cx="350" cy="228" r="11"/><text class="tcold" x="350" y="232" text-anchor="middle">1</text></g>
-
-  <!-- aggregate status: agent -> control plane, asynchronous -->
-  <path class="colddash" d="M530 225 L530 98 L165 98 L165 128" marker-end="url(#mc)"/>
-  <rect class="pill" x="270" y="87" width="156" height="22" rx="11"/>
-  <text class="tcold s" x="348" y="102" text-anchor="middle">status returns asynchronously</text>
-
-  <!-- 2 warm once: agent -> zygote -->
-  <path class="warm" d="M640 262 L670 262 L670 213 L698 213" marker-end="url(#mw)"/>
-  <g class="n"><circle class="nwarm" cx="670" cy="238" r="11"/><text class="twarm" x="670" y="242" text-anchor="middle">2</text></g>
-
-  <!-- 3 Clone: caller -> agent -->
-  <path class="req" d="M290 420 L335 420 L335 300 L418 300" marker-end="url(#mr)"/>
-  <g class="n"><circle class="nreq" cx="335" cy="360" r="11"/><text class="treq" x="335" y="364" text-anchor="middle">3</text></g>
-
-  <!-- 4 endpoint + fence: agent -> caller -->
-  <path class="reqdash" d="M420 338 L365 338 L365 460 L292 460" marker-end="url(#mr)"/>
-  <g class="n"><circle class="nreq" cx="365" cy="400" r="11"/><text class="treq" x="365" y="404" text-anchor="middle">4</text></g>
-
-  <!-- 5 connect directly: caller -> fiber A -->
-  <path class="req" d="M165 510 L165 588 L780 588 L780 442" marker-end="url(#mr)"/>
-  <g class="n"><circle class="nreq" cx="470" cy="588" r="11"/><text class="treq" x="470" y="592" text-anchor="middle">5</text></g>
-
-  <!-- Legend -->
-  <g class="s">
-    <g class="n"><circle class="ncold" cx="52" cy="632" r="10"/><text class="tcold" x="52" y="636" text-anchor="middle">1</text></g>
-    <text class="ink" x="70" y="636">signed grant · cold path, once</text>
-    <g class="n"><circle class="nwarm" cx="262" cy="632" r="10"/><text class="twarm" x="262" y="636" text-anchor="middle">2</text></g>
-    <text class="ink" x="280" y="636">warm the zygote once</text>
-    <g class="n"><circle class="nreq" cx="430" cy="632" r="10"/><text class="treq" x="430" y="636" text-anchor="middle">3</text></g>
-    <text class="ink" x="448" y="636">Clone · no control-plane call</text>
-    <g class="n"><circle class="nreq" cx="628" cy="632" r="10"/><text class="treq" x="628" y="636" text-anchor="middle">4</text></g>
-    <text class="ink" x="646" y="636">endpoint + fence returned</text>
-    <g class="n"><circle class="nreq" cx="820" cy="632" r="10"/><text class="treq" x="820" y="636" text-anchor="middle">5</text></g>
-    <text class="ink" x="838" y="636">caller connects to the fiber directly</text>
-    <text class="muted" x="40" y="660">Steps 3 to 5 repeat per request inside the grant. The control plane is not on that path; an outage freezes new grants and nothing already on the host.</text>
-  </g>
+  <rect class="note" x="44" y="625" width="1152" height="48" rx="14"/>
+  <text class="label" x="66" y="647">Outage boundary</text>
+  <text class="b" x="190" y="647">Local serving and activation can continue only while the grant lease and home scope remain valid and the local runtime/template stay healthy.</text>
+  <text class="s" x="66" y="665">1 grant → 2 warm → 3 Clone → 4 endpoint + fence → 5 direct connection. Fibers remain inside grant and backend limits.</text>
 </svg>

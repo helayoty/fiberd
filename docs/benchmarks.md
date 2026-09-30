@@ -4,6 +4,8 @@ This page is the canonical source for fiberd performance measurements. It separa
 
 The values below are historical results already recorded in this repository. They were not rerun during the documentation rewrite. Results from different runs should not be combined because the harness, concurrency, backend, and environment change the outcome.
 
+![Benchmark results are meaningful only with their operation boundary, concurrency, backend, environment, commit, raw output, and statistical method; historical runs must not be combined or treated as service-level objectives.](./images/benchmark-methodology.svg)
+
 ## How to read the results
 
 - **Warm** is the one-time cost of preparing a template.
@@ -15,6 +17,22 @@ The values below are historical results already recorded in this repository. The
 - **Resident memory** is aggregate cgroup memory or PSS as identified for that run.
 
 These are development measurements, not service-level objectives. Docker Desktop, hosted CI runners, storage, CRIU, and hypervisor availability can materially change them.
+
+## Required record for new results
+
+Archive the raw output and record all of the following before adding or
+updating a table:
+
+- repository commit and dirty-tree state
+- UTC date and exact command
+- host CPU, memory, architecture, and virtualization layer
+- OS, kernel, container runtime, CRIU, runc, runsc, and Hyperlight versions
+- backend, endpoint family, grant fields, template configuration, and storage
+- sample count, concurrency, warm-up method, quantile calculation, and failures
+
+Store each run separately. Do not merge measurements from different commits or
+environments into one row, and do not promote development measurements to an
+SLO without a controlled production-like test.
 
 ## Run A: backend lifecycle comparison
 

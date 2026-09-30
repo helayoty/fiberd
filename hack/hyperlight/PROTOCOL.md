@@ -9,6 +9,8 @@ with park and resume, and with fibers named by fence rather than pid,
 because the helper's fibers are sandboxes inside one process, not
 processes of their own.
 
+![fiberd starts one helper per warm template and exchanges lifecycle messages over an fd 3 Unix socketpair; the helper owns the warm snapshot and sandboxes, while fiberd performs host-side durability work after a synchronous park.](../../docs/images/hyperlight-helper-protocol.svg)
+
 Every message is one line, fields separated by single spaces, no field
 contains a space. Paths are absolute host paths. One operation per fence
 is outstanding at a time.
@@ -19,7 +21,7 @@ is outstanding at a time.
 | --- | --- |
 | `READY <version>` | the template is warm: the guest is loaded, its init ran, and the warm snapshot is taken |
 | `CLONED <fence>` | the fiber serves on the endpoint it was given |
-| `PARKED <fence> <bytes>` | the fiber's state is durable in the directory it was given; `bytes` is what it costs to move |
+| `PARKED <fence> <bytes>` | snapshot creation completed in the directory it was given; `bytes` is what it costs to move. Crash durability is not implied until fiberd completes its host-side sync path |
 | `ERROR <fence> <text...>` | the operation on that fence failed (text may contain spaces) |
 | `EXITED <fence> exit:<n>\|signal:<name>\|oom` | the fiber is gone; sent for every end, asked for or not |
 | `W <fence> <bytes>` | the fiber's working set changed: bytes dirtied since the warm snapshot |
@@ -47,8 +49,9 @@ is outstanding at a time.
 
 - `W` is honest: it is what the guest dirtied, not the sandbox's fixed
   footprint, and it is reported at least once after `CLONED`;
-- a `PARK` with sync ends serving before the state is written and the
-  state is complete when `PARKED` is sent;
+- a `PARK` ends serving before the state is written and the snapshot is
+  complete when `PARKED` is sent; for `sync=true`, fiberd then fsyncs the
+  host-side state before replying to the caller;
 - an `EXITED` follows every end, including one fiberd asked for.
 
 ## Implementations

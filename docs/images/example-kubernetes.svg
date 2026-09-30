@@ -1,120 +1,42 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="700" viewBox="0 0 1100 700" font-family="Inter, Helvetica Neue, Arial, sans-serif">
-  <title>How the Kubernetes example turns a CapacityGrant into serving fibers</title>
-  <desc>A CapacityGrant is reconciled by the grant controller into one signed grant Secret and one grant Pod. Inside the Pod, the projected JWT reaches fiberd-k8s, which admits the grant, warms one template, creates fibers locally, and publishes readiness. A router calls Clone on the agent and then connects to the returned Pod IP and fiber port. Every process remains inside the Pod resource and network boundary.</desc>
-  <defs>
-    <linearGradient id="page" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#F8FAFD"/>
-      <stop offset="1" stop-color="#EEF3F8"/>
-    </linearGradient>
-    <marker id="arrow" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto">
-      <path d="M0 0L9 4.5L0 9Z" fill="#486581"/>
-    </marker>
-    <marker id="arrowGreen" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto">
-      <path d="M0 0L9 4.5L0 9Z" fill="#2F855A"/>
-    </marker>
-  </defs>
-
-  <rect width="1100" height="700" fill="url(#page)"/>
-  <text x="40" y="42" font-size="23" font-weight="700" fill="#172033">Kubernetes example: one grant becomes one ready capacity home</text>
-  <text x="40" y="67" font-size="13" fill="#526273">Kubernetes places the Pod once. fiberd creates and routes fibers locally inside it.</text>
-
-  <text x="40" y="105" font-size="12" font-weight="700" fill="#6B7785" letter-spacing="1.2">CONTROL PLANE</text>
-
-  <rect x="40" y="120" width="240" height="115" rx="12" fill="#EAF2FF" stroke="#5B7DB1" stroke-width="1.5"/>
-  <circle cx="68" cy="150" r="15" fill="#5B7DB1"/>
-  <text x="68" y="155" text-anchor="middle" font-size="12" font-weight="700" fill="#FFFFFF">1</text>
-  <text x="92" y="150" font-size="15" font-weight="700" fill="#172033">CapacityGrant</text>
-  <text x="60" y="178" font-size="12" fill="#334E68">template / fibers.max / wBudget</text>
-  <text x="60" y="198" font-size="12" fill="#334E68">Pod image / runtime / resources</text>
-  <rect x="60" y="210" width="170" height="18" rx="9" fill="#D6E5FA"/>
-  <text x="145" y="223" text-anchor="middle" font-size="10.5" fill="#334E68">status is updated later</text>
-
-  <rect x="410" y="120" width="270" height="115" rx="12" fill="#F3ECFF" stroke="#8B6CB0" stroke-width="1.5"/>
-  <circle cx="438" cy="150" r="15" fill="#8B6CB0"/>
-  <text x="438" y="155" text-anchor="middle" font-size="12" font-weight="700" fill="#FFFFFF">2</text>
-  <text x="462" y="150" font-size="15" font-weight="700" fill="#172033">grant-controller</text>
-  <text x="430" y="178" font-size="12" fill="#4A3F5C">creates the Pod and owned Secret</text>
-  <text x="430" y="198" font-size="12" fill="#4A3F5C">mints JWT for the Pod audience</text>
-  <text x="430" y="218" font-size="12" fill="#4A3F5C">renews the lease at half-life</text>
-
-  <rect x="810" y="120" width="250" height="115" rx="12" fill="#E7F7F7" stroke="#25858A" stroke-width="1.5"/>
-  <circle cx="838" cy="150" r="15" fill="#25858A"/>
-  <text x="838" y="155" text-anchor="middle" font-size="12" font-weight="700" fill="#FFFFFF">3</text>
-  <text x="862" y="150" font-size="15" font-weight="700" fill="#172033">Signed grant Secret</text>
-  <text x="830" y="178" font-size="12" fill="#285E61">grant.jwt</text>
-  <text x="830" y="198" font-size="12" fill="#285E61">audience = grant Pod name</text>
-  <text x="830" y="218" font-size="12" fill="#285E61">projected as a volume</text>
-
-  <path d="M280 176H410" fill="none" stroke="#486581" stroke-width="2" marker-end="url(#arrow)"/>
-  <text x="345" y="166" text-anchor="middle" font-size="11" fill="#526273">reconcile</text>
-  <path d="M680 176H810" fill="none" stroke="#486581" stroke-width="2" marker-end="url(#arrow)"/>
-  <text x="745" y="166" text-anchor="middle" font-size="11" fill="#526273">mint or renew</text>
-
-  <rect x="155" y="285" width="905" height="365" rx="18" fill="#FFFFFF" stroke="#3F6B86" stroke-width="2"/>
-  <rect x="155" y="285" width="905" height="42" rx="18" fill="#E9F1F6"/>
-  <rect x="155" y="309" width="905" height="18" fill="#E9F1F6"/>
-  <text x="180" y="312" font-size="15" font-weight="700" fill="#172033">grant Pod</text>
-  <text x="1035" y="312" text-anchor="end" font-size="11.5" fill="#526273">one Pod IP / one aggregate CPU and memory ceiling</text>
-
-  <path d="M935 235V350" fill="none" stroke="#486581" stroke-width="2" marker-end="url(#arrow)"/>
-  <text x="948" y="268" font-size="11" fill="#526273">volume projection</text>
-
-  <rect x="805" y="345" width="220" height="66" rx="10" fill="#E7F7F7" stroke="#25858A"/>
-  <text x="915" y="369" text-anchor="middle" font-size="13" font-weight="700" fill="#172033">/grants/grant.jwt</text>
-  <text x="915" y="390" text-anchor="middle" font-size="11" fill="#285E61">file lane notices updates</text>
-
-  <rect x="370" y="350" width="235" height="115" rx="12" fill="#EAF2FF" stroke="#5B7DB1" stroke-width="1.5"/>
-  <circle cx="398" cy="380" r="15" fill="#5B7DB1"/>
-  <text x="398" y="385" text-anchor="middle" font-size="12" font-weight="700" fill="#FFFFFF">4</text>
-  <text x="422" y="380" font-size="15" font-weight="700" fill="#172033">fiberd-k8s</text>
-  <text x="390" y="407" font-size="12" fill="#334E68">verifies and admits the JWT</text>
-  <text x="390" y="427" font-size="12" fill="#334E68">owns ledger and backend</text>
-  <text x="390" y="447" font-size="12" fill="#334E68">serves Clone on port 8484</text>
-
-  <path d="M805 378H605" fill="none" stroke="#486581" stroke-width="2" marker-end="url(#arrow)"/>
-  <text x="705" y="368" text-anchor="middle" font-size="11" fill="#526273">grant arrives</text>
-
-  <rect x="650" y="450" width="190" height="90" rx="45" fill="#FFF4DC" stroke="#C98A2E" stroke-width="1.5"/>
-  <circle cx="680" cy="480" r="14" fill="#C98A2E"/>
-  <text x="680" y="485" text-anchor="middle" font-size="11" font-weight="700" fill="#FFFFFF">5</text>
-  <text x="745" y="480" text-anchor="middle" font-size="14" font-weight="700" fill="#172033">warm template</text>
-  <text x="745" y="503" text-anchor="middle" font-size="11" fill="#6B4E16">prepared once</text>
-  <text x="745" y="521" text-anchor="middle" font-size="11" fill="#6B4E16">for this grant</text>
-
-  <path d="M605 430C640 430 625 485 650 485" fill="none" stroke="#486581" stroke-width="2" marker-end="url(#arrow)"/>
-  <text x="625" y="452" font-size="11" fill="#526273">warm</text>
-
-  <rect x="875" y="438" width="150" height="118" rx="12" fill="#EAF8EF" stroke="#3A8F5B" stroke-width="1.5"/>
-  <text x="950" y="461" text-anchor="middle" font-size="13" font-weight="700" fill="#172033">running fibers</text>
-  <rect x="895" y="475" width="110" height="20" rx="10" fill="#CDEED8"/>
-  <text x="950" y="489" text-anchor="middle" font-size="10.5" fill="#245C3D">fiber A / :30001</text>
-  <rect x="895" y="503" width="110" height="20" rx="10" fill="#CDEED8"/>
-  <text x="950" y="517" text-anchor="middle" font-size="10.5" fill="#245C3D">fiber B / :30002</text>
-  <rect x="895" y="531" width="110" height="16" rx="8" fill="#DDF4E5"/>
-  <text x="950" y="543" text-anchor="middle" font-size="10" fill="#245C3D">up to fibers.max</text>
-
-  <path d="M840 495H875" fill="none" stroke="#2F855A" stroke-width="2" marker-end="url(#arrowGreen)"/>
-  <text x="858" y="485" text-anchor="middle" font-size="10.5" fill="#2F855A">clone</text>
-
-  <rect x="185" y="370" width="145" height="76" rx="12" fill="#F2F5F9" stroke="#7B8794"/>
-  <text x="257" y="396" text-anchor="middle" font-size="14" font-weight="700" fill="#172033">router</text>
-  <text x="257" y="417" text-anchor="middle" font-size="11" fill="#526273">outside or beside</text>
-  <text x="257" y="434" text-anchor="middle" font-size="11" fill="#526273">the grant Pod</text>
-
-  <path d="M330 395H370" fill="none" stroke="#486581" stroke-width="2" marker-end="url(#arrow)"/>
-  <text x="350" y="385" text-anchor="middle" font-size="10.5" fill="#526273">1 Clone</text>
-  <path d="M370 430H330" fill="none" stroke="#486581" stroke-width="1.7" stroke-dasharray="5 4" marker-end="url(#arrow)"/>
-  <text x="350" y="446" text-anchor="middle" font-size="10.5" fill="#526273">endpoint</text>
-  <path d="M257 446V585H950V556" fill="none" stroke="#2F855A" stroke-width="2" marker-end="url(#arrowGreen)"/>
-  <text x="580" y="577" text-anchor="middle" font-size="11" fill="#2F855A">2 connect directly to the returned PodIP:port</text>
-
-  <rect x="370" y="492" width="235" height="62" rx="10" fill="#EAF8EF" stroke="#3A8F5B"/>
-  <text x="487" y="516" text-anchor="middle" font-size="12.5" font-weight="700" fill="#245C3D">readiness gate = True</text>
-  <text x="487" y="538" text-anchor="middle" font-size="11" fill="#3F6B55">only after the template is warm</text>
-  <path d="M487 465V492" fill="none" stroke="#2F855A" stroke-width="2" marker-end="url(#arrowGreen)"/>
-  <path d="M370 523H315V250H160V235" fill="none" stroke="#2F855A" stroke-width="1.7" stroke-dasharray="6 4" marker-end="url(#arrowGreen)"/>
-  <text x="225" y="264" font-size="10.5" fill="#2F855A">controller mirrors ready, node, endpoint, expiry</text>
-
-  <rect x="185" y="610" width="840" height="26" rx="13" fill="#E9F1F6"/>
-  <text x="605" y="628" text-anchor="middle" font-size="11" fill="#486581">Pod cgroup and network boundary contains the agent, warm template, backend helpers, and every fiber</text>
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="720" viewBox="0 0 1200 720" role="img" aria-labelledby="example-k8s-title example-k8s-desc">
+  <title id="example-k8s-title">Kubernetes example from CapacityGrant to serving fibers</title>
+  <desc id="example-k8s-desc">The reference grant controller reconciles a CapacityGrant into a signed grant Secret and one grant Pod. The projected JWT reaches fiberd-k8s, which verifies and admits the grant, warms a template, and publishes readiness. A router calls Clone and then connects to the returned Pod IP and fiber port. The Pod boundary contains the agent, template, helpers, and fibers.</desc>
+  <style>
+    :root{--bg:#f7f9fc;--panel:#fff;--ink:#172033;--muted:#5d6b7d;--line:#b8c4d4;--blue:#3165b5;--blue-bg:#eaf1ff;--teal:#13776f;--teal-bg:#e8f7f4;--violet:#704aa1;--violet-bg:#f2edfa;--amber:#a76500;--amber-bg:#fff3d6;--green:#287a4d;--green-bg:#e8f6ed}
+    @media(prefers-color-scheme:dark){:root{--bg:#0d1117;--panel:#161b22;--ink:#e6edf3;--muted:#a3adba;--line:#3d4652;--blue:#79a7ff;--blue-bg:#17243d;--teal:#53c7b8;--teal-bg:#102923;--violet:#c09cff;--violet-bg:#251b35;--amber:#f0b44d;--amber-bg:#30240f;--green:#63cf8e;--green-bg:#142b1e}}
+    text{font-family:ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;fill:var(--ink)}.bg{fill:var(--bg)}.panel{fill:var(--panel);stroke:var(--line);stroke-width:1.5}.bluebox{fill:var(--blue-bg);stroke:var(--blue);stroke-width:1.5}.pod{fill:var(--teal-bg);stroke:var(--teal);stroke-width:2}.tealbox{fill:var(--teal-bg);stroke:var(--teal);stroke-width:1.5}.violetbox{fill:var(--violet-bg);stroke:var(--violet);stroke-width:1.5}.amberbox{fill:var(--amber-bg);stroke:var(--amber);stroke-width:1.5}.greenbox{fill:var(--green-bg);stroke:var(--green);stroke-width:1.5}.title{font-size:27px;font-weight:750}.subtitle{font-size:14px;fill:var(--muted)}.h{font-size:16px;font-weight:700}.b{font-size:13px}.s{font-size:11px;fill:var(--muted)}.cap{font-size:12px;font-weight:700;letter-spacing:.5px}.blue{fill:var(--blue)}.teal{fill:var(--teal)}.violet{fill:var(--violet)}.amber{fill:var(--amber)}.green{fill:var(--green)}.arrow{fill:none;stroke:var(--muted);stroke-width:2}.direct{fill:none;stroke:var(--green);stroke-width:2.5}.dash{stroke-dasharray:7 5}
+  </style>
+  <defs><marker id="example-k8s-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M1 1l8 4-8 4z" fill="#7b8794"/></marker><marker id="example-k8s-green-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M1 1l8 4-8 4z" fill="#287a4d"/></marker></defs>
+  <rect class="bg" width="1200" height="720"/>
+  <text class="title" x="42" y="48">Kubernetes example: a grant Pod becomes ready capacity</text>
+  <text class="subtitle" x="42" y="74">This is the repository’s reference integration, not a claim that core fiberd depends on Kubernetes.</text>
+  <text class="cap" x="42" y="112">CONTROL PLANE</text>
+  <rect class="bluebox" x="42" y="132" width="250" height="106" rx="15"/>
+  <text class="h blue" x="167" y="164" text-anchor="middle">1 · CapacityGrant</text><text class="b" x="167" y="194" text-anchor="middle">template · max · W · Pod resources</text><text class="s" x="167" y="218" text-anchor="middle">status updated asynchronously</text>
+  <rect class="violetbox" x="392" y="132" width="250" height="106" rx="15"/>
+  <text class="h violet" x="517" y="164" text-anchor="middle">2 · grant-controller</text><text class="b" x="517" y="194" text-anchor="middle">creates Pod + owned Secret</text><text class="s" x="517" y="218" text-anchor="middle">mints / renews audience-bound JWT</text>
+  <rect class="tealbox" x="742" y="132" width="250" height="106" rx="15"/>
+  <text class="h teal" x="867" y="164" text-anchor="middle">3 · Signed grant Secret</text><text class="b" x="867" y="194" text-anchor="middle">grant.jwt projected into Pod</text><text class="s" x="867" y="218" text-anchor="middle">file lane notices updates</text>
+  <path class="arrow" d="M292 185h100M642 185h100" marker-end="url(#example-k8s-arrow)"/>
+  <rect class="pod" x="232" y="292" width="926" height="356" rx="23"/>
+  <text class="h teal" x="262" y="327">GRANT POD</text><text class="s" x="1128" y="327" text-anchor="end">Pod cgroup + network boundary</text>
+  <rect class="panel" x="262" y="376" width="168" height="102" rx="15"/>
+  <text class="h" x="346" y="408" text-anchor="middle">Router</text><text class="b" x="346" y="437" text-anchor="middle">1 · Clone</text><text class="s" x="346" y="461" text-anchor="middle">outside or beside Pod</text>
+  <rect class="bluebox" x="500" y="358" width="234" height="140" rx="16"/>
+  <text class="h blue" x="617" y="390" text-anchor="middle">4 · fiberd-k8s</text><text class="b" x="617" y="419" text-anchor="middle">verify + admit JWT</text><text class="b" x="617" y="443" text-anchor="middle">ledger + backend + Clone</text><text class="s" x="617" y="471" text-anchor="middle">readiness after template warm</text>
+  <rect class="amberbox" x="794" y="358" width="190" height="92" rx="16"/>
+  <text class="h amber" x="889" y="390" text-anchor="middle">5 · Warm template</text><text class="b" x="889" y="419" text-anchor="middle">prepared once</text><text class="s" x="889" y="439" text-anchor="middle">for this grant</text>
+  <rect class="greenbox" x="1018" y="358" width="110" height="140" rx="15"/>
+  <text class="h green" x="1073" y="391" text-anchor="middle">Fibers</text><text class="b" x="1073" y="423" text-anchor="middle">:30001</text><text class="b" x="1073" y="447" text-anchor="middle">:30002</text><text class="s" x="1073" y="475" text-anchor="middle">up to max</text>
+  <path class="arrow" d="M430 427h70M734 404h60M984 404h34" marker-end="url(#example-k8s-arrow)"/>
+  <path class="arrow dash" d="M500 470h-42v40H346v-32" marker-end="url(#example-k8s-arrow)"/>
+  <text class="s" x="430" y="527" text-anchor="middle">endpoint + fence</text>
+  <path class="direct" d="M346 478v91h727v-71" marker-end="url(#example-k8s-green-arrow)"/>
+  <text class="b green" x="704" y="559" text-anchor="middle">2 · connect directly to returned PodIP:port</text>
+  <rect class="greenbox" x="500" y="536" width="234" height="53" rx="14"/>
+  <text class="b green" x="617" y="559" text-anchor="middle">readiness gate = True</text><text class="s" x="617" y="579" text-anchor="middle">only after warm succeeds</text>
+  <path class="arrow" d="M867 238v54" marker-end="url(#example-k8s-arrow)"/>
+  <text class="s" x="884" y="270">volume projection</text>
+  <rect class="bluebox" x="262" y="608" width="866" height="24" rx="12"/>
+  <text class="s" x="695" y="625" text-anchor="middle">Agent, warm template, backend helpers, and fibers all consume the Pod’s aggregate resources.</text>
 </svg>

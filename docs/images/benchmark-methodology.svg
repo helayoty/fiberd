@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="760" viewBox="0 0 1200 760" role="img" aria-labelledby="benchmark-title benchmark-desc">
+  <title id="benchmark-title">fiberd benchmark measurement taxonomy and provenance checklist</title>
+  <desc id="benchmark-desc">Benchmark records must distinguish warm, start, burst start, park, resume, delta or image size, and resident memory. Every run should preserve source revision, time, environment, runtime and backend versions, harness and command, workload, concurrency, storage and durability settings, raw output, and units. Results from different recorded runs must not be combined, and historical development values are not service-level objectives.</desc>
+  <style>
+    :root{--bg:#f7f9fc;--panel:#fff;--ink:#172033;--muted:#5d6b7d;--line:#b8c4d4;--blue:#3165b5;--blue-bg:#eaf1ff;--teal:#13776f;--teal-bg:#e8f7f4;--violet:#704aa1;--violet-bg:#f2edfa;--amber:#a76500;--amber-bg:#fff3d6;--red:#b33b32;--red-bg:#fff0ef;--green:#287a4d;--green-bg:#e8f6ed}
+    @media(prefers-color-scheme:dark){:root{--bg:#0d1117;--panel:#161b22;--ink:#e6edf3;--muted:#a3adba;--line:#3d4652;--blue:#79a7ff;--blue-bg:#17243d;--teal:#53c7b8;--teal-bg:#102923;--violet:#c09cff;--violet-bg:#251b35;--amber:#f0b44d;--amber-bg:#30240f;--red:#ff8178;--red-bg:#321817;--green:#63cf8e;--green-bg:#142b1e}}
+    text{font-family:ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;fill:var(--ink)}.bg{fill:var(--bg)}.panel{fill:var(--panel);stroke:var(--line);stroke-width:1.5}.bluebox{fill:var(--blue-bg);stroke:var(--blue);stroke-width:1.5}.tealbox{fill:var(--teal-bg);stroke:var(--teal);stroke-width:1.5}.violetbox{fill:var(--violet-bg);stroke:var(--violet);stroke-width:1.5}.amberbox{fill:var(--amber-bg);stroke:var(--amber);stroke-width:1.5}.redbox{fill:var(--red-bg);stroke:var(--red);stroke-width:1.5}.greenbox{fill:var(--green-bg);stroke:var(--green);stroke-width:1.5}.title{font-size:27px;font-weight:750}.subtitle{font-size:14px;fill:var(--muted)}.h{font-size:16px;font-weight:700}.b{font-size:13px}.s{font-size:11px;fill:var(--muted)}.cap{font-size:12px;font-weight:700;letter-spacing:.5px}.blue{fill:var(--blue)}.teal{fill:var(--teal)}.violet{fill:var(--violet)}.amber{fill:var(--amber)}.red{fill:var(--red)}.green{fill:var(--green)}.check{font-size:13px;font-weight:700;fill:var(--green)}
+  </style>
+  <rect class="bg" width="1200" height="760"/>
+  <text class="title" x="42" y="48">Benchmark methodology: name the measure, preserve the run</text>
+  <text class="subtitle" x="42" y="74">Comparable numbers require one coherent run and enough provenance to reproduce what the number actually includes.</text>
+  <rect class="panel" x="42" y="108" width="694" height="488" rx="20"/>
+  <text class="cap blue" x="68" y="142">MEASUREMENT TAXONOMY</text>
+  <rect class="bluebox" x="68" y="168" width="202" height="104" rx="15"/>
+  <text class="h blue" x="169" y="200" text-anchor="middle">Warm</text><text class="b" x="169" y="229" text-anchor="middle">prepare template once</text><text class="s" x="169" y="253" text-anchor="middle">not paid per fiber</text>
+  <rect class="greenbox" x="288" y="168" width="202" height="104" rx="15"/>
+  <text class="h green" x="389" y="200" text-anchor="middle">Start</text><text class="b" x="389" y="229" text-anchor="middle">runtime call → ready</text><text class="s" x="389" y="253" text-anchor="middle">no control-plane placement</text>
+  <rect class="violetbox" x="508" y="168" width="202" height="104" rx="15"/>
+  <text class="h violet" x="609" y="200" text-anchor="middle">Burst start</text><text class="b" x="609" y="229" text-anchor="middle">concurrent activations</text><text class="s" x="609" y="253" text-anchor="middle">report concurrency with latency</text>
+  <rect class="amberbox" x="68" y="294" width="202" height="104" rx="15"/>
+  <text class="h amber" x="169" y="326" text-anchor="middle">Park</text><text class="b" x="169" y="355" text-anchor="middle">checkpoint + configured sync</text><text class="s" x="169" y="379" text-anchor="middle">state capture scope matters</text>
+  <rect class="violetbox" x="288" y="294" width="202" height="104" rx="15"/>
+  <text class="h violet" x="389" y="326" text-anchor="middle">Resume</text><text class="b" x="389" y="355" text-anchor="middle">restore → ready</text><text class="s" x="389" y="379" text-anchor="middle">same backend + compatible host</text>
+  <rect class="amberbox" x="508" y="294" width="202" height="104" rx="15"/>
+  <text class="h amber" x="609" y="326" text-anchor="middle">Delta / image size</text><text class="b" x="609" y="355" text-anchor="middle">Park output bytes</text><text class="s" x="609" y="379" text-anchor="middle">not total running memory</text>
+  <rect class="tealbox" x="68" y="420" width="312" height="104" rx="15"/>
+  <text class="h teal" x="224" y="452" text-anchor="middle">Resident memory</text><text class="b" x="224" y="481" text-anchor="middle">named cgroup aggregate or PSS</text><text class="s" x="224" y="505" text-anchor="middle">state exact accounting boundary</text>
+  <rect class="panel" x="398" y="420" width="312" height="104" rx="15"/>
+  <text class="h" x="554" y="452" text-anchor="middle">Acceptance duration</text><text class="b" x="554" y="481" text-anchor="middle">end-to-end integration observation</text><text class="s" x="554" y="505" text-anchor="middle">not a backend microbenchmark</text>
+  <text class="s" x="68" y="568">Always state percentiles, sample count, warm-up, timeout, success criteria, and what is excluded.</text>
+
+  <rect class="panel" x="770" y="108" width="388" height="488" rx="20"/>
+  <text class="cap green" x="796" y="142">PROVENANCE CHECKLIST</text>
+  <text class="check" x="796" y="181">✓</text><text class="b" x="822" y="181">commit / source revision · date / time</text>
+  <text class="check" x="796" y="217">✓</text><text class="b" x="822" y="217">host model · CPU · memory · architecture</text>
+  <text class="check" x="796" y="253">✓</text><text class="b" x="822" y="253">OS · kernel · container / hypervisor</text>
+  <text class="check" x="796" y="289">✓</text><text class="b" x="822" y="289">backend · tier · binary versions</text>
+  <text class="check" x="796" y="325">✓</text><text class="b" x="822" y="325">harness · full command · configuration</text>
+  <text class="check" x="796" y="361">✓</text><text class="b" x="822" y="361">workload · payload · W · concurrency</text>
+  <text class="check" x="796" y="397">✓</text><text class="b" x="822" y="397">storage · cache state · sync policy</text>
+  <text class="check" x="796" y="433">✓</text><text class="b" x="822" y="433">raw output · units · failures / skips</text>
+  <rect class="bluebox" x="796" y="468" width="336" height="94" rx="15"/>
+  <text class="h blue" x="964" y="499" text-anchor="middle">One record = one run</text>
+  <text class="b" x="964" y="528" text-anchor="middle">keep all columns from that run together</text>
+  <text class="s" x="964" y="550" text-anchor="middle">archive logs when publishing values</text>
+
+  <rect class="redbox" x="42" y="632" width="540" height="86" rx="17"/>
+  <text class="h red" x="68" y="665">Do not combine different recorded runs</text>
+  <text class="b" x="68" y="694">Harness, concurrency, backend, environment, and storage can change the outcome.</text>
+  <rect class="amberbox" x="618" y="632" width="540" height="86" rx="17"/>
+  <text class="h amber" x="644" y="665">Historical values are not SLOs</text>
+  <text class="b" x="644" y="694">They document development observations; validate the mechanism in your own environment.</text>
+  <text class="s" x="600" y="748" text-anchor="middle">Compare only like-for-like records; differences without controlled provenance are hypotheses, not conclusions.</text>
+</svg>

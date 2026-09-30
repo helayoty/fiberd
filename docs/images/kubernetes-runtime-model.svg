@@ -1,132 +1,50 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="720" viewBox="0 0 1100 720" font-family="Inter, Helvetica Neue, Arial, sans-serif">
-  <title>Kubernetes runtime model</title>
-  <desc>An external platform creates a CapacityGrant. The grant controller signs the grant and creates one grant Pod. The Pod has one agent container with fiberd, one warm template, and multiple fibers. A caller sends Clone to the agent and receives the fiber endpoint and fence. Scaling out repeats the CapacityGrant and grant Pod unit.</desc>
-  <defs>
-    <linearGradient id="pageBg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#fafcff"/>
-      <stop offset="1" stop-color="#f1f5fb"/>
-    </linearGradient>
-    <linearGradient id="podBg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#f4fffc"/>
-      <stop offset="1" stop-color="#e8f7f3"/>
-    </linearGradient>
-    <linearGradient id="containerBg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#ffffff"/>
-      <stop offset="1" stop-color="#f7f9fc"/>
-    </linearGradient>
-    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
-      <feDropShadow dx="0" dy="3" stdDeviation="5" flood-color="#182230" flood-opacity="0.10"/>
-    </filter>
-    <marker id="arrow" markerWidth="9" markerHeight="9" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
-      <path d="M0,0 L8,3 L0,6 Z" fill="#667085"/>
-    </marker>
-    <marker id="blueArrow" markerWidth="9" markerHeight="9" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
-      <path d="M0,0 L8,3 L0,6 Z" fill="#3165b5"/>
-    </marker>
-    <marker id="purpleArrow" markerWidth="9" markerHeight="9" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
-      <path d="M0,0 L8,3 L0,6 Z" fill="#704a80"/>
-    </marker>
-  </defs>
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="720" viewBox="0 0 1200 720" role="img" aria-labelledby="k8s-model-title k8s-model-desc">
+  <title id="k8s-model-title">Kubernetes runtime model for a fiberd grant Pod</title>
+  <desc id="k8s-model-desc">In the reference Kubernetes example, an external platform creates a CapacityGrant, the grant controller signs it and creates one grant Pod, and the Pod runs fiberd with one warm template and multiple fibers. A caller sends Clone and receives an endpoint and fence. Scaling out repeats the grant and Pod unit.</desc>
+  <style>
+    :root{--bg:#f7f9fc;--panel:#fff;--ink:#172033;--muted:#5d6b7d;--line:#b8c4d4;--blue:#3165b5;--blue-bg:#eaf1ff;--teal:#13776f;--teal-bg:#e8f7f4;--violet:#704aa1;--violet-bg:#f2edfa;--amber:#a76500;--amber-bg:#fff3d6;--green:#287a4d;--green-bg:#e8f6ed}
+    @media(prefers-color-scheme:dark){:root{--bg:#0d1117;--panel:#161b22;--ink:#e6edf3;--muted:#a3adba;--line:#3d4652;--blue:#79a7ff;--blue-bg:#17243d;--teal:#53c7b8;--teal-bg:#102923;--violet:#c09cff;--violet-bg:#251b35;--amber:#f0b44d;--amber-bg:#30240f;--green:#63cf8e;--green-bg:#142b1e}}
+    text{font-family:ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;fill:var(--ink)}.bg{fill:var(--bg)}.panel{fill:var(--panel);stroke:var(--line);stroke-width:1.5}.bluebox{fill:var(--blue-bg);stroke:var(--blue);stroke-width:1.5}.pod{fill:var(--teal-bg);stroke:var(--teal);stroke-width:2}.violetbox{fill:var(--violet-bg);stroke:var(--violet);stroke-width:1.5}.amberbox{fill:var(--amber-bg);stroke:var(--amber);stroke-width:1.5}.greenbox{fill:var(--green-bg);stroke:var(--green);stroke-width:1.5}.title{font-size:27px;font-weight:750}.subtitle{font-size:14px;fill:var(--muted)}.h{font-size:16px;font-weight:700}.b{font-size:13px}.s{font-size:11px;fill:var(--muted)}.cap{font-size:12px;font-weight:700;letter-spacing:.5px}.blue{fill:var(--blue)}.teal{fill:var(--teal)}.violet{fill:var(--violet)}.amber{fill:var(--amber)}.green{fill:var(--green)}.arrow{fill:none;stroke:var(--muted);stroke-width:2}.dash{stroke-dasharray:7 5}
+  </style>
+  <defs><marker id="k8s-model-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M1 1l8 4-8 4z" fill="#7b8794"/></marker></defs>
+  <rect class="bg" width="1200" height="720"/>
+  <text class="title" x="42" y="48">Reference Kubernetes model: one grant becomes one warm Pod</text>
+  <text class="subtitle" x="42" y="74">Kubernetes places the Pod; fiberd resolves fibers locally inside the Pod’s aggregate resource and network boundary.</text>
+  <rect class="panel" x="42" y="108" width="1116" height="132" rx="18"/>
+  <text class="cap blue" x="68" y="139">CONTROL PLANE</text>
+  <rect class="bluebox" x="68" y="158" width="214" height="58" rx="13"/><text class="b blue" x="175" y="182" text-anchor="middle">External platform</text><text class="s" x="175" y="202" text-anchor="middle">placement + scale policy</text>
+  <rect class="bluebox" x="368" y="158" width="214" height="58" rx="13"/><text class="b blue" x="475" y="182" text-anchor="middle">CapacityGrant</text><text class="s" x="475" y="202" text-anchor="middle">template + max + resources</text>
+  <rect class="violetbox" x="668" y="158" width="214" height="58" rx="13"/><text class="b violet" x="775" y="182" text-anchor="middle">grant-controller</text><text class="s" x="775" y="202" text-anchor="middle">signs grant + creates Pod</text>
+  <rect class="greenbox" x="968" y="158" width="164" height="58" rx="13"/><text class="b green" x="1050" y="182" text-anchor="middle">grant Pod</text><text class="s" x="1050" y="202" text-anchor="middle">example mapping</text>
+  <path class="arrow" d="M282 187h86M582 187h86M882 187h86" marker-end="url(#k8s-model-arrow)"/>
 
-  <rect width="1100" height="720" fill="url(#pageBg)"/>
-  <text x="40" y="41" font-size="22" font-weight="700" fill="#172033">One CapacityGrant becomes one warm grant Pod</text>
-  <text x="40" y="64" font-size="11" fill="#667085">Fibers are created locally inside that Pod, and additional Pods require additional grants</text>
-
-  <!-- Control-plane flow -->
-  <rect x="40" y="84" width="1020" height="142" rx="18" fill="#ffffff" stroke="#b7c7e0" filter="url(#shadow)"/>
-  <text x="64" y="112" font-size="12" font-weight="700" fill="#24466f">Kubernetes control plane</text>
-
-  <rect x="66" y="135" width="182" height="62" rx="12" fill="#fff7dc" stroke="#d7a933"/>
-  <text x="157" y="159" text-anchor="middle" font-size="11" font-weight="700" fill="#6f4d05">External platform</text>
-  <text x="157" y="178" text-anchor="middle" font-size="9" fill="#805600">placement and scale policy</text>
-
-  <path d="M248 166H304" stroke="#667085" stroke-width="1.5" marker-end="url(#arrow)"/>
-  <text x="276" y="155" text-anchor="middle" font-size="8.5" fill="#667085">creates</text>
-
-  <rect x="304" y="135" width="202" height="62" rx="12" fill="#e8f0fd" stroke="#7f9dc8"/>
-  <text x="405" y="158" text-anchor="middle" font-size="11" font-weight="700" fill="#24466f">CapacityGrant</text>
-  <text x="405" y="177" text-anchor="middle" font-size="9" fill="#52657c">template, max, W, Pod spec</text>
-
-  <path d="M506 166H562" stroke="#667085" stroke-width="1.5" marker-end="url(#arrow)"/>
-  <text x="534" y="155" text-anchor="middle" font-size="8.5" fill="#667085">reconciles</text>
-
-  <rect x="562" y="135" width="202" height="62" rx="12" fill="#f5f0f9" stroke="#9875ba"/>
-  <text x="663" y="158" text-anchor="middle" font-size="11" font-weight="700" fill="#4b3158">grant-controller</text>
-  <text x="663" y="177" text-anchor="middle" font-size="9" fill="#667085">signs grant, creates Pod</text>
-
-  <path d="M764 166H820" stroke="#667085" stroke-width="1.5" marker-end="url(#arrow)"/>
-  <text x="792" y="155" text-anchor="middle" font-size="8.5" fill="#667085">produces</text>
-
-  <rect x="820" y="135" width="210" height="62" rx="12" fill="#edf9f7" stroke="#42a39a"/>
-  <text x="925" y="158" text-anchor="middle" font-size="11" font-weight="700" fill="#126b66">One grant Pod</text>
-  <text x="925" y="177" text-anchor="middle" font-size="9" fill="#526d69">one Pod per CapacityGrant</text>
-
-  <!-- Caller -->
-  <rect x="40" y="368" width="174" height="104" rx="15" fill="#ffffff" stroke="#7f9dc8" filter="url(#shadow)"/>
-  <text x="127" y="399" text-anchor="middle" font-size="13" font-weight="700" fill="#24466f">Caller or router</text>
-  <rect x="69" y="420" width="116" height="27" rx="8" fill="#e8f0fd"/>
-  <text x="127" y="438" text-anchor="middle" font-size="9.5" font-weight="700" fill="#24466f">protocol consumer</text>
-
-  <!-- Grant Pod -->
-  <rect x="250" y="258" width="810" height="350" rx="22" fill="url(#podBg)" stroke="#42a39a" stroke-width="2" filter="url(#shadow)"/>
-  <text x="278" y="292" font-size="16" font-weight="700" fill="#126b66">Grant Pod</text>
-  <text x="278" y="312" font-size="10" fill="#526d69">scheduled like any other Pod</text>
-  <rect x="778" y="274" width="250" height="28" rx="14" fill="#ffffff" stroke="#9bc9c4"/>
-  <text x="903" y="292" text-anchor="middle" font-size="9.5" font-weight="700" fill="#126b66">one per grant | not a DaemonSet</text>
-
-  <!-- Agent container -->
-  <rect x="278" y="330" width="750" height="245" rx="17" fill="url(#containerBg)" stroke="#aeb7c4"/>
-  <text x="300" y="356" font-size="11" font-weight="700" fill="#344054">Agent container and parent cgroup</text>
-
-  <rect x="302" y="379" width="190" height="126" rx="14" fill="#edf9f7" stroke="#42a39a" stroke-width="1.5"/>
-  <text x="397" y="406" text-anchor="middle" font-size="13" font-weight="700" fill="#126b66">fiberd-k8s</text>
-  <text x="397" y="425" text-anchor="middle" font-size="9" fill="#526d69">PID 1</text>
-  <rect x="323" y="444" width="148" height="24" rx="8" fill="#d8f1ec"/>
-  <text x="397" y="460" text-anchor="middle" font-size="9" font-weight="700" fill="#126b66">verify | ledger | lifecycle</text>
-  <text x="397" y="488" text-anchor="middle" font-size="9" fill="#667085">publishes readiness</text>
-
-  <path d="M492 423H542" stroke="#667085" stroke-width="1.5" marker-end="url(#arrow)"/>
-  <text x="517" y="412" text-anchor="middle" font-size="8.5" fill="#667085">warms</text>
-
-  <rect x="542" y="379" width="220" height="86" rx="14" fill="#fff7dc" stroke="#d7a933"/>
-  <text x="652" y="407" text-anchor="middle" font-size="12" font-weight="700" fill="#6f4d05">Warm template</text>
-  <text x="652" y="426" text-anchor="middle" font-size="9" fill="#805600">one per admitted grant</text>
-  <text x="652" y="445" text-anchor="middle" font-size="9" fill="#6e6250">fork or snapshot source</text>
-
-  <path d="M762 422H798" stroke="#704a80" stroke-width="1.5" marker-end="url(#purpleArrow)"/>
-  <text x="780" y="411" text-anchor="middle" font-size="8.5" fill="#704a80">local</text>
-
-  <rect x="798" y="370" width="104" height="105" rx="13" fill="#f5f0f9" stroke="#9875ba"/>
-  <text x="850" y="397" text-anchor="middle" font-size="11" font-weight="700" fill="#4b3158">Fiber A</text>
-  <text x="850" y="418" text-anchor="middle" font-size="9" fill="#667085">process or</text>
-  <text x="850" y="433" text-anchor="middle" font-size="9" fill="#667085">sandbox</text>
-  <rect x="815" y="446" width="70" height="18" rx="9" fill="#eee6f6"/>
-  <text x="850" y="459" text-anchor="middle" font-size="8" font-weight="700" fill="#704a80">endpoint A</text>
-
-  <rect x="914" y="370" width="90" height="105" rx="13" fill="#f8f5fb" stroke="#9875ba" stroke-dasharray="5 4"/>
-  <text x="959" y="400" text-anchor="middle" font-size="16" font-weight="700" fill="#704a80">+ N</text>
-  <text x="959" y="423" text-anchor="middle" font-size="9" fill="#667085">fibers</text>
-  <text x="959" y="443" text-anchor="middle" font-size="8.5" fill="#704a80">up to max</text>
-
-  <rect x="302" y="526" width="702" height="29" rx="10" fill="#edf2fb"/>
-  <text x="653" y="545" text-anchor="middle" font-size="9.5" font-weight="600" fill="#24466f">Agent, template, and every fiber share the container's aggregate CPU and memory limits.</text>
-
-  <!-- Clone flow -->
-  <path d="M214 397H302" stroke="#3165b5" stroke-width="2" marker-end="url(#blueArrow)"/>
-  <rect x="220" y="369" width="78" height="22" rx="11" fill="#e8f0fd"/>
-  <text x="259" y="384" text-anchor="middle" font-size="9" font-weight="700" fill="#24466f">1  Clone</text>
-
-  <path d="M302 475H248V493H127V472" fill="none" stroke="#3165b5" stroke-width="2" stroke-dasharray="6 4" marker-end="url(#blueArrow)"/>
-  <rect x="151" y="500" width="155" height="23" rx="11" fill="#e8f0fd"/>
-  <text x="228" y="516" text-anchor="middle" font-size="9" font-weight="700" fill="#24466f">2  endpoint + fence</text>
-
-  <!-- Scale-out unit -->
-  <rect x="250" y="634" width="810" height="57" rx="16" fill="#ffffff" stroke="#d7a933"/>
-  <text x="278" y="668" font-size="11" font-weight="700" fill="#805600">Scale out</text>
-  <rect x="382" y="648" width="167" height="29" rx="10" fill="#e8f0fd" stroke="#9fb3ce"/>
-  <text x="465" y="667" text-anchor="middle" font-size="9.5" font-weight="700" fill="#24466f">another CapacityGrant</text>
-  <path d="M549 662H630" stroke="#667085" stroke-width="1.5" marker-end="url(#arrow)"/>
-  <rect x="630" y="648" width="167" height="29" rx="10" fill="#edf9f7" stroke="#76bdb6"/>
-  <text x="713" y="667" text-anchor="middle" font-size="9.5" font-weight="700" fill="#126b66">another grant Pod</text>
-  <text x="824" y="667" font-size="9.5" fill="#667085">handled by the external platform</text>
+  <rect class="panel" x="42" y="358" width="212" height="124" rx="16"/>
+  <text class="h blue" x="148" y="392" text-anchor="middle">Caller or router</text>
+  <text class="b" x="148" y="425" text-anchor="middle">Clone</text>
+  <text class="s" x="148" y="451" text-anchor="middle">then uses returned endpoint</text>
+  <rect class="pod" x="302" y="278" width="856" height="326" rx="22"/>
+  <text class="h teal" x="332" y="313">GRANT POD</text>
+  <text class="s" x="1128" y="313" text-anchor="end">one Pod IP · one aggregate CPU and memory ceiling</text>
+  <rect class="panel" x="334" y="350" width="230" height="178" rx="16"/>
+  <text class="h teal" x="449" y="382" text-anchor="middle">fiberd-k8s</text>
+  <text class="b" x="449" y="414" text-anchor="middle">verify + ledger + lifecycle</text>
+  <text class="b" x="449" y="439" text-anchor="middle">public Clone endpoint</text>
+  <text class="s" x="449" y="469" text-anchor="middle">publishes aggregate readiness</text>
+  <rect class="amberbox" x="626" y="350" width="230" height="102" rx="16"/>
+  <text class="h amber" x="741" y="383" text-anchor="middle">Warm template</text>
+  <text class="b" x="741" y="414" text-anchor="middle">one per admitted grant</text>
+  <text class="s" x="741" y="437" text-anchor="middle">backend-specific source</text>
+  <rect class="violetbox" x="906" y="350" width="112" height="132" rx="14"/>
+  <text class="h violet" x="962" y="385" text-anchor="middle">Fiber A</text><text class="b" x="962" y="418" text-anchor="middle">endpoint</text><text class="b" x="962" y="442" text-anchor="middle">+ fence</text><text class="s" x="962" y="466" text-anchor="middle">incarnation</text>
+  <rect class="violetbox" x="1038" y="350" width="88" height="132" rx="14" stroke-dasharray="7 5"/>
+  <text class="h violet" x="1082" y="407" text-anchor="middle">+ N</text><text class="s" x="1082" y="438" text-anchor="middle">up to max</text>
+  <path class="arrow" d="M564 405h62M856 405h50" marker-end="url(#k8s-model-arrow)"/>
+  <rect class="bluebox" x="334" y="548" width="792" height="34" rx="13"/>
+  <text class="b blue" x="730" y="571" text-anchor="middle">Agent, template, backend helpers, and fibers stay within the Pod’s aggregate limits.</text>
+  <path class="arrow" d="M254 397h80" marker-end="url(#k8s-model-arrow)"/>
+  <text class="s" x="294" y="387" text-anchor="middle">1 · Clone</text>
+  <path class="arrow dash" d="M334 454h-42v48H148v-20" marker-end="url(#k8s-model-arrow)"/>
+  <text class="s" x="248" y="519" text-anchor="middle">2 · endpoint + fence</text>
+  <rect class="amberbox" x="302" y="632" width="856" height="54" rx="15"/>
+  <text class="h amber" x="332" y="664">Scale out</text><text class="b" x="446" y="664">another CapacityGrant</text><text class="b" x="680" y="664">→ another grant Pod</text><text class="s" x="1128" y="664" text-anchor="end">external platform decision</text>
 </svg>

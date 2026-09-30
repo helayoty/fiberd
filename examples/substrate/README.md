@@ -6,6 +6,8 @@ it sits in. It plugs fiberd into [Agent Substrate](https://github.com/agent-subs
 as a worker image, so Substrate's control plane creates, suspends and
 resumes actors that are fibers.
 
+![Substrate routes through mTLS ingress to a worker herder backed by fiberd, while actor state is parked, exported, imported, and resumed between workers that share the admitted template contract.](../../docs/images/example-substrate.svg)
+
 ## Why fibers fit
 
 Substrate starts, suspends, restores, and terminates actors. The example maps
@@ -89,3 +91,8 @@ fiberd's four verbs, so a Substrate cluster gets clone-not-boot, W-sized
 suspends, and resumable state without a change to its control plane. A
 Substrate that registered sandbox classes and let a worker hold more
 than one actor would get the density column too.
+
+The example inherits fiberd's current control-plane, cleanup, persistence, and
+mobility-claim limitations. Review
+[Production readiness](../../docs/production-readiness.md) before treating the
+mapping as a deployment design.

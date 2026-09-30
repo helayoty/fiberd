@@ -5,6 +5,8 @@ plane issues a `CapacityGrant` to a home. The home runs a fiberd agent, and the
 agent verifies the grant and prepares one warm template. Callers then create
 fibers from that capacity without another placement call.
 
+![A grant warms one template, creates an incarnation with an endpoint and fence, observes it, and either parks and resumes named state or releases it. Process and sandbox backends implement those stages with different isolation mechanisms.](./images/runtime-lifecycle.svg)
+
 These terms describe different parts of the model:
 
 - A **grant** authorizes a bounded block of capacity and fixes the admitted
@@ -77,11 +79,13 @@ The lifecycle is:
 3. **Scrub and start.** Process backends close inherited descriptors, clear
    inherited environment variables, reseed entropy, and publish the new
    endpoint and fence before the workload starts serving.
-4. **Observe.** The agent tracks the fiber's endpoint, fence, lease, working
-   set, exit, and optional device usage.
+4. **Observe.** The agent tracks the fiber's endpoint, fence, working set,
+   exit, and optional device usage while the ledger enforces the grant lease.
 5. **Park or release.** A named session may be checkpointed and resumed later
-   when the backend satisfies the checkpoint tier. Release destroys the
-   running state and can discard retained checkpoint data.
+   when the backend satisfies the checkpoint tier. Release destroys an active
+   running incarnation. The current public API cannot address a parked session
+   to discard its retained delta, so checkpoint garbage collection remains an
+   operator concern.
 
 There is one warm template per grant per home. An agent capable of holding
 multiple grants keeps a separate warm template for each grant.
@@ -124,6 +128,8 @@ capacity should use the platform's provisioning path or retry later.
   aggregate grant status instead.
 - Network endpoint, resource, and identity behavior are properties of the home
   and backend, not implied by the word `fiber`.
+- Control-plane outage tolerance lasts only while the grant lease, home scope,
+  verifier state, and local runtime remain valid.
 
 For CPU, memory, sizing, and OOM behavior, continue with the
 [resource model](resources.md). For endpoint allocation and network
@@ -132,4 +138,5 @@ fences, and workload credentials, see [identity](identity.md). For internal
 component boundaries and backend contracts, see the [architecture
 reference](architecture.md). The [protocol reference](protocol.md) defines the
 grant lifecycle visible to callers. For the Kubernetes mapping, see
-[Kubernetes operations](operating-kubernetes.md).
+[Kubernetes operations](operating-kubernetes.md). Before production use,
+review [Production readiness](production-readiness.md).

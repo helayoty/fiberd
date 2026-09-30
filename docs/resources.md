@@ -152,6 +152,11 @@ The controller applies the following order.
 Device occupancy can feed the same ladder when the backend reports it. The
 higher of memory pressure and device pressure drives the response.
 
+Runtime cleanup is currently best effort during pressure-driven Yield. A
+failed release can be logged while ledger ownership is removed, so operators
+must monitor for orphaned backend work. See
+[Production readiness](production-readiness.md#cleanup-and-state-lifecycle).
+
 ![The higher of memory PSI and reported device occupancy drives one ladder. fiberd sheds new creates and resumes, then reclaims the largest-W fiber by parking a named session or releasing an anonymous one. After three persistent checks with no victim, it yields the grant.](images/pressure-ladder.svg)
 
 ## What controls fiber count
@@ -209,4 +214,5 @@ For how these limits travel in the signed artifact, see the
 [grant protocol](protocol.md). For the instance and backend boundaries, see
 the [runtime model](runtime-model.md). For endpoint boundaries, see
 [networking](networking.md). For grant and workload identity, see
-[identity](identity.md).
+[identity](identity.md). For operational safeguards and known limitations, see
+[Production readiness](production-readiness.md).

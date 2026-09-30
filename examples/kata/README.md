@@ -28,11 +28,17 @@ annotations name, on the home they name, under the grant they carry.
 | Kill | `Park` (state kept) or `Release`, as `io.fiberd/on-stop` says; the container exits |
 | Delete | releases if still running; forgets the container |
 | Wait | returns when the container exits |
-| a shim that died | the manager's Stop releases the fiber from the bundle's record |
+| a shim that died | the manager's Stop attempts to release the fiber from the bundle's record |
 
 Exec, ptys, pause, checkpoint and cgroup stats are not the shim's: a
 fiber is addressed through its endpoint, parked through its home, and
 priced by its home's ledger.
+
+Cleanup is best effort in this example. Manager and service cleanup log some
+dial, Park, or Release failures and can still remove their local state record,
+so a backend fiber can outlive the container mapping. A production shim needs
+retryable reconciliation and must retain ownership until fiberd confirms
+termination.
 
 ## Annotations
 
@@ -46,6 +52,11 @@ through the runtime handler's `pod_annotations`.
 | `io.fiberd/session` | the session name (default `<pod>/<container>`) |
 | `io.fiberd/on-stop` | `park` or `release` (default) |
 | `io.fiberd/payload` | data the fiber receives at clone |
+
+`io.fiberd/grant` contains the complete bearer JWT in Pod metadata. Anyone who
+can read the annotation can replay that token against the named home while it
+remains valid. Do not use this transport in a multi-tenant deployment; pass the
+grant through a scoped secret channel and secure the fiberd control endpoint.
 
 ## Running it
 
@@ -77,3 +88,6 @@ without any change to Kubernetes or to the Pod beyond the fiberd annotations.
 A Kata deployment that wanted this would add fiberd's calls where its
 shim creates the sandbox; the containerd config, the RuntimeClass and the
 annotations would be the same.
+
+The broader control-plane and cleanup requirements are listed in
+[Production readiness](../../docs/production-readiness.md).

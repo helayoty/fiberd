@@ -4,6 +4,8 @@ Build fiberd, run an agent on this machine, and exercise the four protocol
 operations. This page covers the runnable path. The conceptual guides explain
 the results, while each environment and consumer has its own example README.
 
+![The quickstart builds the binaries, starts an issuer and fiberd, exercises create, attach, park, and resume, then restarts the agent to demonstrate epoch invalidation.](./images/quickstart-flow.svg)
+
 ## Build
 
 Go 1.26 or newer. The build tools are pinned in `hack/tools/go.mod` and run through `go tool`; nothing else needs installing.
@@ -48,7 +50,14 @@ curl -s localhost:8485/healthz                  # epoch 1 -> 2: every prior fenc
 curl -s -X POST localhost:8485/v1/park -d '{"fiberId":"g1/1/1"}'   # 404
 ```
 
-`-grants-dir` pre-admits `*.jwt` files dropped there and revokes them when removed. `-verifier insecure-json` takes unsigned protobuf-JSON grants, for development only. `grpcurl -plaintext -proto api/grant/v1/grant.proto localhost:8484 fiberd.grant.v1.Fibers/Clone` reaches the gRPC service directly.
+`-grants-dir` pre-admits `*.jwt` files dropped there. Removing a file invokes
+the current experimental revoke path, but it is not a production revocation
+mechanism: it does not reliably terminate existing work or prevent an
+unexpired token from being admitted again through Clone. See
+[Production readiness](production-readiness.md#grant-lifecycle-and-revocation).
+`-verifier insecure-json` takes unsigned protobuf-JSON grants, for development
+only. `grpcurl -plaintext -proto api/grant/v1/grant.proto localhost:8484
+fiberd.grant.v1.Fibers/Clone` reaches the gRPC service directly.
 
 ## Real fibers
 

@@ -1,99 +1,59 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="570" viewBox="0 0 1100 570" font-family="Inter, Helvetica Neue, Arial, sans-serif">
-  <title>What contains a fiber</title>
-  <desc>One home runs one fiberd agent. The control plane sends signed grants to the agent and receives aggregate status. Callers send Clone and receive an endpoint and fence. The agent manages a grant boundary containing one warm template and multiple fibers.</desc>
-  <defs>
-    <linearGradient id="pageBg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#fafcff"/>
-      <stop offset="1" stop-color="#f1f5fb"/>
-    </linearGradient>
-    <linearGradient id="homeBg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#f6f9ff"/>
-      <stop offset="1" stop-color="#eaf1ff"/>
-    </linearGradient>
-    <linearGradient id="grantBg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#f4fffc"/>
-      <stop offset="1" stop-color="#e8f7f3"/>
-    </linearGradient>
-    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
-      <feDropShadow dx="0" dy="3" stdDeviation="5" flood-color="#182230" flood-opacity="0.09"/>
-    </filter>
-    <marker id="arrow" markerWidth="9" markerHeight="9" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
-      <path d="M0,0 L8,3 L0,6 Z" fill="#667085"/>
-    </marker>
-    <marker id="blueArrow" markerWidth="9" markerHeight="9" refX="8" refY="3" orient="auto-start-reverse" markerUnits="strokeWidth">
-      <path d="M0,0 L8,3 L0,6 Z" fill="#3165b5"/>
-    </marker>
-    <marker id="purpleArrow" markerWidth="9" markerHeight="9" refX="8" refY="3" orient="auto-start-reverse" markerUnits="strokeWidth">
-      <path d="M0,0 L8,3 L0,6 Z" fill="#704a80"/>
-    </marker>
-  </defs>
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="680" viewBox="0 0 1200 680" role="img" aria-labelledby="containment-title containment-desc">
+  <title id="containment-title">Containment boundaries around a fiberd fiber</title>
+  <desc id="containment-desc">A control plane sends signed grants and receives aggregate status. A caller sends Clone and receives an endpoint and fence. A home contains one fiberd agent. Each admitted grant has its own resource and policy boundary, one warm template, and multiple fiber incarnations.</desc>
+  <style>
+    :root{--bg:#f7f9fc;--panel:#fff;--ink:#172033;--muted:#5d6b7d;--line:#b8c4d4;--blue:#3165b5;--blue-bg:#eaf1ff;--teal:#13776f;--teal-bg:#e8f7f4;--violet:#704aa1;--violet-bg:#f2edfa;--amber:#a76500;--amber-bg:#fff3d6}
+    @media(prefers-color-scheme:dark){:root{--bg:#0d1117;--panel:#161b22;--ink:#e6edf3;--muted:#a3adba;--line:#3d4652;--blue:#79a7ff;--blue-bg:#17243d;--teal:#53c7b8;--teal-bg:#102923;--violet:#c09cff;--violet-bg:#251b35;--amber:#f0b44d;--amber-bg:#30240f}}
+    text{font-family:ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;fill:var(--ink)}.bg{fill:var(--bg)}.panel{fill:var(--panel);stroke:var(--line);stroke-width:1.5}.home{fill:var(--blue-bg);stroke:var(--blue);stroke-width:2}.grant{fill:var(--teal-bg);stroke:var(--teal);stroke-width:2}.warm{fill:var(--amber-bg);stroke:var(--amber);stroke-width:1.5}.fiber{fill:var(--violet-bg);stroke:var(--violet);stroke-width:1.5}.title{font-size:27px;font-weight:750}.subtitle{font-size:14px;fill:var(--muted)}.h{font-size:16px;font-weight:700}.b{font-size:13px}.s{font-size:11px;fill:var(--muted)}.cap{font-size:12px;font-weight:700;letter-spacing:.6px}.blue{fill:var(--blue)}.teal{fill:var(--teal)}.violet{fill:var(--violet)}.amber{fill:var(--amber)}.arrow{fill:none;stroke:var(--muted);stroke-width:2}.dash{stroke-dasharray:7 5}
+  </style>
+  <defs><marker id="containment-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M1 1l8 4-8 4z" fill="#7b8794"/></marker></defs>
+  <rect class="bg" width="1200" height="680"/>
+  <text class="title" x="42" y="48">Containment is layered, not per-fiber placement</text>
+  <text class="subtitle" x="42" y="74">The home supplies the outer environment; each grant bounds policy and capacity; the backend defines each fiber’s mechanism.</text>
 
-  <rect width="1100" height="570" fill="url(#pageBg)"/>
-  <text x="40" y="42" font-size="22" font-weight="700" fill="#172033">What contains a fiber</text>
-  <text x="40" y="66" font-size="11" fill="#667085">The home owns the agent, and each admitted grant owns one warm template and its fibers</text>
+  <rect class="panel" x="42" y="150" width="210" height="120" rx="16"/>
+  <text class="h blue" x="147" y="182" text-anchor="middle">Control plane</text>
+  <text class="b" x="147" y="215" text-anchor="middle">signed grants →</text>
+  <text class="b" x="147" y="242" text-anchor="middle">← aggregate status</text>
+  <rect class="panel" x="42" y="376" width="210" height="120" rx="16"/>
+  <text class="h violet" x="147" y="408" text-anchor="middle">Caller or router</text>
+  <text class="b" x="147" y="441" text-anchor="middle">Clone →</text>
+  <text class="b" x="147" y="468" text-anchor="middle">← endpoint + fence</text>
 
-  <!-- External actors -->
-  <rect x="40" y="142" width="170" height="104" rx="14" fill="#ffffff" stroke="#7f9dc8" filter="url(#shadow)"/>
-  <text x="125" y="169" text-anchor="middle" font-size="12" font-weight="700" fill="#24466f">Control plane</text>
-  <text x="125" y="194" text-anchor="middle" font-size="9" fill="#52657c">signed grant -&gt;</text>
-  <text x="125" y="226" text-anchor="middle" font-size="9" fill="#52657c">&lt;- aggregate status</text>
+  <rect class="home" x="310" y="108" width="848" height="492" rx="24"/>
+  <text class="h blue" x="340" y="143">HOME</text>
+  <text class="s" x="402" y="143">standalone host, grant Pod, or Slurm allocation</text>
+  <rect class="panel" x="342" y="224" width="206" height="166" rx="16"/>
+  <text class="h teal" x="445" y="257" text-anchor="middle">fiberd agent</text>
+  <text class="b" x="445" y="291" text-anchor="middle">ledger + budgets</text>
+  <text class="b" x="445" y="315" text-anchor="middle">fences + pressure</text>
+  <text class="s" x="445" y="350" text-anchor="middle">one agent per home</text>
 
-  <rect x="40" y="342" width="170" height="104" rx="14" fill="#ffffff" stroke="#9875ba" filter="url(#shadow)"/>
-  <text x="125" y="369" text-anchor="middle" font-size="12" font-weight="700" fill="#4b3158">Caller or router</text>
-  <text x="125" y="394" text-anchor="middle" font-size="9" fill="#667085">Clone -&gt;</text>
-  <text x="125" y="426" text-anchor="middle" font-size="9" fill="#667085">&lt;- endpoint + fence</text>
+  <rect class="grant" x="596" y="166" width="528" height="374" rx="20"/>
+  <text class="cap teal" x="624" y="200">ONE ADMITTED GRANT</text>
+  <text class="s" x="813" y="200">resources, lease, admitted template, policy</text>
+  <rect class="warm" x="628" y="232" width="464" height="79" rx="15"/>
+  <text class="h amber" x="860" y="262" text-anchor="middle">Warm template</text>
+  <text class="b" x="860" y="288" text-anchor="middle">one initialized fork or restore source for this grant</text>
+  <path class="arrow" d="M860 311v42M860 353H706v29M860 353v29M860 353h154v29" marker-end="url(#containment-arrow)"/>
+  <rect class="fiber" x="628" y="384" width="156" height="93" rx="14"/>
+  <text class="h violet" x="706" y="414" text-anchor="middle">Fiber A</text>
+  <text class="b" x="706" y="440" text-anchor="middle">incarnation</text>
+  <text class="s" x="706" y="461" text-anchor="middle">endpoint + fence</text>
+  <rect class="fiber" x="782" y="384" width="156" height="93" rx="14"/>
+  <text class="h violet" x="860" y="414" text-anchor="middle">Fiber B</text>
+  <text class="b" x="860" y="440" text-anchor="middle">incarnation</text>
+  <text class="s" x="860" y="461" text-anchor="middle">endpoint + fence</text>
+  <rect class="fiber" x="936" y="384" width="156" height="93" rx="14" stroke-dasharray="7 5"/>
+  <text class="h violet" x="1014" y="420" text-anchor="middle">+ N</text>
+  <text class="b" x="1014" y="447" text-anchor="middle">up to fibers.max</text>
 
-  <!-- Home boundary -->
-  <rect x="250" y="92" width="810" height="438" rx="22" fill="url(#homeBg)" stroke="#7f9dc8" stroke-width="2" filter="url(#shadow)"/>
-  <text x="278" y="126" font-size="16" font-weight="700" fill="#24466f">Home</text>
-  <text x="278" y="146" font-size="10" fill="#52657c">standalone host, Kubernetes grant Pod, or Slurm allocation</text>
-
-  <!-- Agent -->
-  <rect x="278" y="210" width="190" height="130" rx="15" fill="#ffffff" stroke="#42a39a" stroke-width="1.5"/>
-  <text x="373" y="241" text-anchor="middle" font-size="13" font-weight="700" fill="#126b66">One fiberd agent</text>
-  <rect x="301" y="260" width="144" height="24" rx="8" fill="#d8f1ec"/>
-  <text x="373" y="276" text-anchor="middle" font-size="9" font-weight="700" fill="#126b66">ledger | budget | fences</text>
-  <text x="373" y="315" text-anchor="middle" font-size="9" fill="#526d69">one agent per home</text>
-  <!-- One grant runtime -->
-  <rect x="510" y="144" width="520" height="326" rx="17" fill="url(#grantBg)" stroke="#42a39a" stroke-width="1.8"/>
-  <text x="534" y="174" font-size="13" font-weight="700" fill="#126b66">One grant boundary</text>
-  <rect x="853" y="158" width="149" height="24" rx="12" fill="#ffffff" stroke="#9bc9c4"/>
-  <text x="927" y="174" text-anchor="middle" font-size="9" font-weight="700" fill="#126b66">resources and policy</text>
-
-  <rect x="545" y="208" width="450" height="68" rx="13" fill="#fff7dc" stroke="#d7a933"/>
-  <text x="770" y="234" text-anchor="middle" font-size="12" font-weight="700" fill="#6f4d05">One warm template</text>
-  <text x="770" y="255" text-anchor="middle" font-size="9" fill="#805600">initialized source for fork or restore</text>
-
-  <path d="M770 276V303" stroke="#704a80" stroke-width="1.5"/>
-  <path d="M607 303H933" stroke="#704a80" stroke-width="1.5"/>
-  <path d="M607 303V326" stroke="#704a80" stroke-width="1.5" marker-end="url(#purpleArrow)"/>
-  <path d="M770 303V326" stroke="#704a80" stroke-width="1.5" marker-end="url(#purpleArrow)"/>
-  <path d="M933 303V326" stroke="#704a80" stroke-width="1.5" marker-end="url(#purpleArrow)"/>
-
-  <rect x="545" y="326" width="124" height="82" rx="12" fill="#f5f0f9" stroke="#9875ba"/>
-  <text x="607" y="354" text-anchor="middle" font-size="11" font-weight="700" fill="#4b3158">Fiber A</text>
-  <text x="607" y="376" text-anchor="middle" font-size="9" fill="#667085">one incarnation</text>
-  <text x="607" y="393" text-anchor="middle" font-size="8.5" fill="#704a80">own endpoint</text>
-
-  <rect x="708" y="326" width="124" height="82" rx="12" fill="#f5f0f9" stroke="#9875ba"/>
-  <text x="770" y="354" text-anchor="middle" font-size="11" font-weight="700" fill="#4b3158">Fiber B</text>
-  <text x="770" y="376" text-anchor="middle" font-size="9" fill="#667085">one incarnation</text>
-  <text x="770" y="393" text-anchor="middle" font-size="8.5" fill="#704a80">own endpoint</text>
-
-  <rect x="871" y="326" width="124" height="82" rx="12" fill="#f8f5fb" stroke="#9875ba" stroke-dasharray="5 4"/>
-  <text x="933" y="354" text-anchor="middle" font-size="14" font-weight="700" fill="#704a80">+ N</text>
-  <text x="933" y="376" text-anchor="middle" font-size="9" fill="#667085">up to fibers.max</text>
-
-  <rect x="545" y="426" width="450" height="25" rx="12" fill="#ffffff" stroke="#b9d6d2"/>
-  <text x="770" y="443" text-anchor="middle" font-size="9" font-weight="600" fill="#365f5b">The control plane does not receive one object per fiber.</text>
-
-  <!-- Clean bidirectional relationships -->
-  <path d="M210 194L278 240" fill="none" stroke="#3165b5" stroke-width="1.7" marker-start="url(#blueArrow)" marker-end="url(#blueArrow)"/>
-  <path d="M210 394L278 314" fill="none" stroke="#704a80" stroke-width="1.7" marker-start="url(#purpleArrow)" marker-end="url(#purpleArrow)"/>
-
-  <path d="M468 292H510" stroke="#667085" stroke-width="1.5" marker-end="url(#arrow)"/>
-  <text x="489" y="281" text-anchor="middle" font-size="8.5" fill="#667085">manages</text>
-
-  <rect x="278" y="486" width="752" height="28" rx="14" fill="#ffffff" stroke="#9fb3ce" stroke-dasharray="6 4"/>
-  <text x="654" y="505" text-anchor="middle" font-size="9.5" font-weight="600" fill="#52657c">When a home admits another grant, it repeats the grant boundary with another warm template and fiber set.</text>
+  <path class="arrow" d="M252 207h90v66" marker-end="url(#containment-arrow)"/>
+  <path class="arrow dash" d="M342 324h-58v116h-32" marker-end="url(#containment-arrow)"/>
+  <path class="arrow" d="M548 307h48" marker-end="url(#containment-arrow)"/>
+  <text class="s" x="572" y="296" text-anchor="middle">manages</text>
+  <rect class="panel" x="342" y="492" width="206" height="69" rx="14"/>
+  <text class="b" x="445" y="519" text-anchor="middle">another grant repeats</text>
+  <text class="s" x="445" y="541" text-anchor="middle">template + bounded fiber set</text>
+  <text class="subtitle" x="600" y="644" text-anchor="middle">Individual fibers are not control-plane placement objects; they stay within the admitted grant and the backend’s actual isolation model.</text>
 </svg>

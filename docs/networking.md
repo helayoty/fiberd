@@ -38,7 +38,9 @@ The default TCP port pool is `30000-32767` unless the home configures another
 range. One live fiber holds one port. A parked session retains its port so its
 listener can return on the same endpoint after resume. The port is released
 when the fiber ends without being parked or when its parked state is
-discarded.
+discarded. The current public API cannot address an already parked session for
+discard, so deployments need an external retention and garbage-collection
+plan to keep ports bounded.
 
 Backend support is not uniform.
 
@@ -90,6 +92,27 @@ The endpoint is a route to the fiber, not proof of the fiber's identity. The
 workload protocol must provide authentication and encryption when callers
 require them.
 
+## Secure the control path separately
+
+The reference gRPC listener, JSON gateway, and consumer client use plaintext
+transport. Clone carries a replayable grant JWT, while Park, Release, and Watch
+do not carry caller credentials. Do not expose the control endpoint on an
+untrusted network. Put it behind authenticated TLS or mTLS, authorize each
+operation, restrict source networks, and protect the JSON gateway with the
+same policy.
+
+The data endpoint is separate and still needs workload-level authentication
+and encryption when its network is not fully trusted.
+
+## Mobility requires compatible endpoint topology
+
+A resumed session currently reuses the exact endpoint stored in its manifest.
+A target home must be able to bind and route that source endpoint. This is
+usually not true for a source Pod IP on another node, and Unix sockets require
+a shared path topology. Cross-home mobility therefore requires an endpoint
+design that is valid from both homes; scheme compatibility alone is not
+enough.
+
 ## Operator implications
 
 - Keep the endpoint returned by `Clone` for as long as the incarnation is
@@ -103,4 +126,6 @@ For grant authentication, fences, and workload credentials, see the
 the [runtime model](runtime-model.md). For the exact endpoint wire fields, see
 the [protocol reference](protocol.md). For Pod addresses, Services,
 EndpointSlices, NetworkPolicy, and router reachability, see
-[Kubernetes operations](operating-kubernetes.md#networking).
+[Kubernetes operations](operating-kubernetes.md#networking). For deployment
+controls and current blockers, see
+[Production readiness](production-readiness.md).

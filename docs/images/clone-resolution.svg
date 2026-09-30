@@ -1,69 +1,72 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="780" height="580" viewBox="0 0 780 580" font-family="Helvetica Neue, Arial, sans-serif">
-  <title>Clone resolution</title>
-  <desc>Clone verifies the grant offline and takes a budget token; over budget is SHED. The session is looked up in the ledger: running attaches, parked resumes, and unknown creates. A capacity miss is DEFERRED_FALLBACK while the grant lane is healthy and SHED while it is unhealthy. A parked session on a runtime without checkpoint support fails instead of creating fresh state.</desc>
-  <defs>
-    <marker id="arw" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L8,3 L0,6 Z" fill="#333"/></marker>
-    <marker id="arwr" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L8,3 L0,6 Z" fill="#b85450"/></marker>
-  </defs>
-  <rect width="780" height="580" fill="#ffffff"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="780" viewBox="0 0 1200 780" role="img" aria-labelledby="clone-title clone-desc">
+  <title id="clone-title">Clone request resolution and stage-specific outcomes</title>
+  <desc id="clone-desc">After request validation, grant verification, admission, budget, optional mobility lookup, and ledger resolution, a running named session returns ATTACH, a parked named session returns RESUME when the runtime supports its checkpoint tier, and an unknown or anonymous session returns CREATE. Capacity misses are DEFERRED_FALLBACK when the grant lane is healthy and SHED when unhealthy. Pressure SHED applies to CREATE and RESUME, not ATTACH. Other failures retain stage-specific statuses.</desc>
+  <style>
+    :root{--bg:#f7f9fc;--panel:#fff;--ink:#172033;--muted:#5d6b7d;--line:#b8c4d4;--blue:#3165b5;--blue-bg:#eaf1ff;--teal:#13776f;--teal-bg:#e8f7f4;--violet:#704aa1;--violet-bg:#f2edfa;--amber:#a76500;--amber-bg:#fff3d6;--red:#b33b32;--red-bg:#fff0ef;--green:#287a4d;--green-bg:#e8f6ed}
+    @media(prefers-color-scheme:dark){:root{--bg:#0d1117;--panel:#161b22;--ink:#e6edf3;--muted:#a3adba;--line:#3d4652;--blue:#79a7ff;--blue-bg:#17243d;--teal:#53c7b8;--teal-bg:#102923;--violet:#c09cff;--violet-bg:#251b35;--amber:#f0b44d;--amber-bg:#30240f;--red:#ff8178;--red-bg:#321817;--green:#63cf8e;--green-bg:#142b1e}}
+    text{font-family:ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;fill:var(--ink)}.bg{fill:var(--bg)}.panel{fill:var(--panel);stroke:var(--line);stroke-width:1.5}.bluebox{fill:var(--blue-bg);stroke:var(--blue);stroke-width:1.5}.tealbox{fill:var(--teal-bg);stroke:var(--teal);stroke-width:1.5}.violetbox{fill:var(--violet-bg);stroke:var(--violet);stroke-width:1.5}.amberbox{fill:var(--amber-bg);stroke:var(--amber);stroke-width:1.5}.redbox{fill:var(--red-bg);stroke:var(--red);stroke-width:1.5}.greenbox{fill:var(--green-bg);stroke:var(--green);stroke-width:1.5}.title{font-size:27px;font-weight:750}.subtitle{font-size:14px;fill:var(--muted)}.h{font-size:16px;font-weight:700}.b{font-size:13px}.s{font-size:11px;fill:var(--muted)}.cap{font-size:12px;font-weight:700;letter-spacing:.5px}.blue{fill:var(--blue)}.teal{fill:var(--teal)}.violet{fill:var(--violet)}.amber{fill:var(--amber)}.red{fill:var(--red)}.green{fill:var(--green)}.arrow{fill:none;stroke:var(--muted);stroke-width:2}.dash{stroke-dasharray:7 5}
+  </style>
+  <defs><marker id="clone-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M1 1l8 4-8 4z" fill="#7b8794"/></marker></defs>
+  <rect class="bg" width="1200" height="780"/>
+  <text class="title" x="42" y="48">Clone resolution: state first, outcome by stage</text>
+  <text class="subtitle" x="42" y="74">CREATE, ATTACH, and RESUME describe session resolution. Miss and error codes depend on where processing stops.</text>
 
-  <rect x="250" y="20" width="280" height="44" rx="6" fill="#dae8fc" stroke="#6c8ebf"/>
-  <text x="390" y="47" text-anchor="middle" font-size="13" font-weight="600" fill="#1a1a1a">Clone(grant, deadline, session S?)</text>
+  <rect class="bluebox" x="42" y="112" width="218" height="92" rx="15"/>
+  <text class="h blue" x="151" y="143" text-anchor="middle">1 · Validate + verify</text>
+  <text class="s" x="151" y="170" text-anchor="middle">shape, JWT, audience</text>
+  <text class="s" x="151" y="188" text-anchor="middle">self-admit if needed</text>
+  <rect class="amberbox" x="304" y="112" width="218" height="92" rx="15"/>
+  <text class="h amber" x="413" y="143" text-anchor="middle">2 · Gate new work</text>
+  <text class="s" x="413" y="170" text-anchor="middle">thrash budget + pressure</text>
+  <text class="s" x="413" y="188" text-anchor="middle">mobility lookup if named</text>
+  <rect class="tealbox" x="566" y="112" width="288" height="92" rx="15"/>
+  <text class="h teal" x="710" y="143" text-anchor="middle">3 · Resolve in ledger</text>
+  <text class="s" x="710" y="170" text-anchor="middle">serialized session lookup</text>
+  <text class="s" x="710" y="188" text-anchor="middle">reserve slot only for new runtime work</text>
+  <rect class="violetbox" x="898" y="112" width="260" height="92" rx="15"/>
+  <text class="h violet" x="1028" y="143" text-anchor="middle">4 · Runtime + commit</text>
+  <text class="s" x="1028" y="170" text-anchor="middle">fork or restore under deadline</text>
+  <text class="s" x="1028" y="188" text-anchor="middle">audit before acknowledgement</text>
+  <path class="arrow" d="M260 158h44M522 158h44M854 158h44" marker-end="url(#clone-arrow)"/>
 
-  <rect x="230" y="92" width="320" height="48" rx="6" fill="#d5e8d4" stroke="#82b366"/>
-  <text x="390" y="121" text-anchor="middle" font-size="13" fill="#1a1a1a">Verify the grant offline + take a budget token</text>
+  <rect class="panel" x="42" y="248" width="1116" height="304" rx="20"/>
+  <text class="cap teal" x="68" y="282">EXACT SESSION RESOLUTION</text>
+  <rect class="greenbox" x="68" y="320" width="302" height="153" rx="17"/>
+  <text class="h green" x="219" y="352" text-anchor="middle">RUNNING named session</text>
+  <text class="h" x="219" y="390" text-anchor="middle">ATTACH</text>
+  <text class="b" x="219" y="419" text-anchor="middle">same endpoint · same fence</text>
+  <text class="s" x="219" y="445" text-anchor="middle">no runtime create or restore</text>
+  <rect class="amberbox" x="449" y="320" width="302" height="153" rx="17"/>
+  <text class="h amber" x="600" y="352" text-anchor="middle">PARKED named session</text>
+  <text class="h" x="600" y="390" text-anchor="middle">RESUME</text>
+  <text class="b" x="600" y="419" text-anchor="middle">new fence · restore retained state</text>
+  <text class="s" x="600" y="445" text-anchor="middle">tier gap → FailedPrecondition, never CREATE</text>
+  <rect class="violetbox" x="830" y="320" width="302" height="153" rx="17"/>
+  <text class="h violet" x="981" y="352" text-anchor="middle">UNKNOWN or anonymous</text>
+  <text class="h" x="981" y="390" text-anchor="middle">CREATE</text>
+  <text class="b" x="981" y="419" text-anchor="middle">new fence · clone warm template</text>
+  <text class="s" x="981" y="445" text-anchor="middle">anonymous state cannot later be named</text>
+  <path class="arrow" d="M219 473v43h762v-43M600 473v43" marker-end="url(#clone-arrow)"/>
+  <rect class="tealbox" x="447" y="495" width="306" height="38" rx="19"/>
+  <text class="b teal" x="600" y="520" text-anchor="middle">successful response: kind + endpoint + fence</text>
 
-  <rect x="580" y="94" width="180" height="44" rx="6" fill="#f8cecc" stroke="#b85450"/>
-  <text x="670" y="113" text-anchor="middle" font-size="12" font-weight="600" fill="#1a1a1a">SHED (429 + Retry-After)</text>
-  <text x="670" y="129" text-anchor="middle" font-size="11" fill="#1a1a1a">over the thrash budget</text>
-
-  <polygon points="390,168 520,196 390,224 260,196" fill="#fff2cc" stroke="#d6b656"/>
-  <text x="390" y="200" text-anchor="middle" font-size="12" fill="#1a1a1a">Look up session S in the ledger</text>
-
-  <rect x="552" y="166" width="222" height="60" rx="6" fill="#f8cecc" stroke="#b85450"/>
-  <text x="663" y="184" text-anchor="middle" font-size="11" font-weight="600" fill="#1a1a1a">no capacity: full, expired, not ready</text>
-  <text x="663" y="200" text-anchor="middle" font-size="11" fill="#1a1a1a">grant lane healthy: DEFERRED_FALLBACK</text>
-  <text x="663" y="215" text-anchor="middle" font-size="11" fill="#1a1a1a">grant lane unhealthy: SHED</text>
-
-  <rect x="40" y="274" width="200" height="74" rx="6" fill="#d5e8d4" stroke="#82b366"/>
-  <text x="140" y="300" text-anchor="middle" font-size="13" font-weight="600" fill="#1a1a1a">ATTACH</text>
-  <text x="140" y="318" text-anchor="middle" font-size="11" fill="#1a1a1a">same endpoint, same fence</text>
-  <text x="140" y="334" text-anchor="middle" font-size="11" fill="#1a1a1a">no runtime work</text>
-
-  <rect x="290" y="274" width="200" height="74" rx="6" fill="#b0e3e6" stroke="#0e8088"/>
-  <text x="390" y="300" text-anchor="middle" font-size="13" font-weight="600" fill="#1a1a1a">RESUME</text>
-  <text x="390" y="318" text-anchor="middle" font-size="11" fill="#1a1a1a">new fence, restore the delta</text>
-  <text x="390" y="334" text-anchor="middle" font-size="11" fill="#1a1a1a">restore checkpoint</text>
-
-  <rect x="540" y="274" width="200" height="74" rx="6" fill="#e1d5e7" stroke="#9673a6"/>
-  <text x="640" y="300" text-anchor="middle" font-size="13" font-weight="600" fill="#1a1a1a">CREATE</text>
-  <text x="640" y="318" text-anchor="middle" font-size="11" fill="#1a1a1a">new fence, clone the template</text>
-  <text x="640" y="334" text-anchor="middle" font-size="11" fill="#1a1a1a">clone warm template</text>
-
-  <rect x="290" y="430" width="200" height="48" rx="6" fill="#d5e8d4" stroke="#82b366"/>
-  <text x="390" y="459" text-anchor="middle" font-size="13" font-weight="600" fill="#1a1a1a">endpoint + fence</text>
-
-  <rect x="250" y="516" width="280" height="48" rx="6" fill="#f8cecc" stroke="#b85450" stroke-dasharray="5 3"/>
-  <text x="390" y="537" text-anchor="middle" font-size="11" fill="#1a1a1a">S parked but the runtime has no checkpoint tier:</text>
-  <text x="390" y="552" text-anchor="middle" font-size="11" fill="#1a1a1a">FailedPrecondition, never a silent fresh clone</text>
-
-  <polyline points="390,64 390,92" fill="none" stroke="#333" stroke-width="1.6" marker-end="url(#arw)"/>
-  <polyline points="550,116 580,116" fill="none" stroke="#b85450" stroke-width="1.6" marker-end="url(#arwr)"/>
-  <polyline points="390,140 390,168" fill="none" stroke="#333" stroke-width="1.6" marker-end="url(#arw)"/>
-  <polyline points="520,196 552,196" fill="none" stroke="#b85450" stroke-width="1.6" marker-end="url(#arwr)"/>
-
-  <polyline points="390,224 390,250" fill="none" stroke="#333" stroke-width="1.4"/>
-  <polyline points="140,250 640,250" fill="none" stroke="#333" stroke-width="1.4"/>
-  <polyline points="140,250 140,274" fill="none" stroke="#333" stroke-width="1.4" marker-end="url(#arw)"/>
-  <polyline points="390,250 390,274" fill="none" stroke="#333" stroke-width="1.4" marker-end="url(#arw)"/>
-  <polyline points="640,250 640,274" fill="none" stroke="#333" stroke-width="1.4" marker-end="url(#arw)"/>
-  <text x="148" y="268" font-size="11" fill="#333">S running</text>
-  <text x="398" y="268" font-size="11" fill="#333">S parked</text>
-  <text x="632" y="268" text-anchor="end" font-size="11" fill="#333">S unknown or anonymous</text>
-
-  <polyline points="140,348 140,454 290,454" fill="none" stroke="#333" stroke-width="1.4" marker-end="url(#arw)"/>
-  <polyline points="390,348 390,430" fill="none" stroke="#333" stroke-width="1.4" marker-end="url(#arw)"/>
-  <polyline points="640,348 640,454 490,454" fill="none" stroke="#333" stroke-width="1.4" marker-end="url(#arw)"/>
-
-  <polyline points="390,250 760,250 760,540 530,540" fill="none" stroke="#b85450" stroke-width="1.4" stroke-dasharray="6 4" marker-end="url(#arwr)"/>
+  <rect class="redbox" x="42" y="590" width="340" height="142" rx="18"/>
+  <text class="h red" x="66" y="622">SHED · retry this home later</text>
+  <text class="b" x="66" y="650">• thrash budget exhausted</text>
+  <text class="b" x="66" y="674">• CREATE / RESUME under local pressure</text>
+  <text class="b" x="66" y="698">• capacity miss while grant lane unhealthy</text>
+  <text class="s" x="66" y="719">ATTACH is pressure-exempt, but still uses the budget.</text>
+  <rect class="amberbox" x="430" y="590" width="340" height="142" rx="18"/>
+  <text class="h amber" x="454" y="622">DEFERRED_FALLBACK · use another path</text>
+  <text class="b" x="454" y="650">• full / expired / not-ready capacity miss</text>
+  <text class="b" x="454" y="674">  while the grant lane is healthy</text>
+  <text class="b" x="454" y="698">• create / restore failure or deadline</text>
+  <text class="s" x="454" y="719">A preferred home may accompany a movable-session miss.</text>
+  <rect class="panel" x="818" y="590" width="340" height="142" rx="18"/>
+  <text class="h" x="842" y="622">Other stage-specific failures</text>
+  <text class="b" x="842" y="650">Invalid · malformed request</text>
+  <text class="b" x="842" y="674">Unauthenticated · bad grant / audience</text>
+  <text class="b" x="842" y="698">FailedPrecondition · required tier unavailable</text>
+  <text class="s" x="842" y="719">Audit/internal failures remain internal; not every runtime exit is a miss.</text>
+  <text class="subtitle" x="600" y="764" text-anchor="middle">The boxes describe Clone resolution—not all later fiber failures, exits, or OOM events.</text>
 </svg>

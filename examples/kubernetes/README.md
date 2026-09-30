@@ -16,6 +16,13 @@ security boundaries are documented in
 home and agent seams are documented in
 [Architecture](../../docs/architecture.md#home-seam).
 
+This remains a reference integration, not a production operator. In
+particular, `CapacityGrant.status.ready` mirrors only the custom zygote gate,
+the agent state directory is an `emptyDir`, and the shown RoleBinding cannot
+authorize reads of the cluster-scoped Namespace resource. The resulting
+readiness, fence-persistence, and scope-loss limits are documented in
+[Production readiness](../../docs/production-readiness.md#kubernetes-example-gaps).
+
 ## What this example is
 
 | Piece | What it does |
