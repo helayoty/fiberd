@@ -780,7 +780,7 @@ func (r *Runtime) PrepareTemplate(ctx context.Context, g core.Grant) error {
 			log.Printf("host: ceiling on grant %s: %v", g.UID, err)
 		}
 	}
-	log.Printf("host: template ready grant=%s template=%s backend=%s pid=%d warm=%dMiB", g.UID, g.TemplateDigest, r.be.Name(), w.PID, zbytes>>20)
+	log.Printf("host: template ready grant=%s template=%s backend=%s pid=%d warm=%dMiB fiber=%dKiB", g.UID, g.TemplateDigest, r.be.Name(), w.PID, zbytes>>20, z.bytes>>10)
 	return nil
 }
 

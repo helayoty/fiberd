@@ -563,12 +563,14 @@ func (b *Backend) Warm(ctx context.Context, sp backend.WarmSpec) (backend.Warm, 
 // tell.
 func (b *Backend) probeFootprint(ctx context.Context, w *warm, cgroupFD int) (shmem, total uint64) {
 	if cgroupFD < 0 {
+		log.Printf("gvisor: footprint probe: no cgroup")
 		return 0, 0
 	}
 	cid := w.cid + "-probe"
 	bundle := filepath.Join(filepath.Dir(w.images), "probe-bundle")
 	ep := filepath.Join(w.workDir, "probe.sock")
 	if err := b.writeBundle(bundle, w.argv, []string{"FIBERD_FENCE=probe", "FIBERD_ENDPOINT=/host/probe.sock"}, w.workDir, "", w.template); err != nil {
+		log.Printf("gvisor: footprint probe: %v", err)
 		return 0, 0
 	}
 	_ = os.Remove(ep)
