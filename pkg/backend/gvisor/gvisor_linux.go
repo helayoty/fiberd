@@ -82,12 +82,13 @@ type Options struct {
 	StateDir string
 }
 
-// Backend implements backend.Backend, Platformer, DeadlineAdvisor and
-// Overheader.
+// Backend implements backend.Backend, Platformer, DeadlineAdvisor,
+// Overheader and Prober.
 type Backend struct {
 	opt     Options
 	version string
 	tier    core.Tier
+	why     error // why tier is unspecified, nil when it is not
 
 	mu    sync.Mutex
 	warms map[string]*warm // warm id
@@ -112,8 +113,8 @@ type box struct {
 	done     chan struct{} // closed when the sandbox has exited
 }
 
-// New opens the backend; the tier is FIBER_SNAPSHOT when runsc answers
-// and the rootfs exists, else the backend refuses to warm anything.
+// New opens the backend. The tier is FIBER_SNAPSHOT when runsc answers
+// and the rootfs exists. Otherwise it offers none, and ProbeErr says why.
 func New(o Options) backend.Backend {
 	if o.Runsc == "" {
 		o.Runsc = "runsc"
@@ -124,24 +125,31 @@ func New(o Options) backend.Backend {
 	b := &Backend{opt: o, warms: map[string]*warm{}, boxes: map[string]*box{}, exits: make(chan backend.Exit, 1024)}
 	out, err := exec.Command(o.Runsc, "--version").Output()
 	if err != nil {
-		log.Printf("gvisor: %s unavailable: %v", o.Runsc, err)
+		b.why = fmt.Errorf("runsc %s unavailable: %w", o.Runsc, err)
 		return b
 	}
 	b.version = strings.TrimSpace(strings.TrimPrefix(strings.SplitN(string(out), "\n", 2)[0], "runsc version "))
 	b.sweep()
-	if st, err := os.Stat(o.Rootfs); err != nil || !st.IsDir() {
-		log.Printf("gvisor: rootfs %q unusable: %v", o.Rootfs, err)
+	if st, err := os.Stat(o.Rootfs); err != nil {
+		b.why = fmt.Errorf("rootfs unusable: %w", err)
+		return b
+	} else if !st.IsDir() {
+		b.why = fmt.Errorf("rootfs %s is not a directory", o.Rootfs)
 		return b
 	}
 	b.tier = core.TierSnapshot
 	return b
 }
 
+// ProbeErr is why New found no tier: runsc does not answer, or the
+// rootfs is not a directory.
+func (b *Backend) ProbeErr() error { return b.why }
+
 func (b *Backend) Name() string    { return "gvisor" }
 func (b *Backend) Tier() core.Tier { return b.tier }
 
-// IsolatesTenants: a fiber's syscalls are served by its sandbox's
-// Sentry, not by the host kernel.
+// IsolatesTenants is true because a fiber's syscalls are served by its
+// sandbox's Sentry, not by the host kernel.
 func (b *Backend) IsolatesTenants() bool { return true }
 
 // Platform: a gVisor image depends on the runsc release and the rootfs,

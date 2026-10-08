@@ -60,7 +60,7 @@ func shellHelper(t *testing.T, body string) string {
 // readyThenWait is a helper body that says READY and serves nothing.
 const readyThenWait = "echo 'READY " + kvmIntel + "' >&3\nexec cat <&3 >/dev/null"
 
-// TestParseFacts: the four facts, or what is wrong with them.
+// TestParseFacts checks that the four facts parse, or what is wrong with them.
 func TestParseFacts(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -91,8 +91,8 @@ func TestParseFacts(t *testing.T) {
 	}
 }
 
-// TestPlatform: the facts in the parity fields, or that nothing can be
-// warmed here.
+// TestPlatform checks the facts in the parity fields, or that nothing can
+// be warmed here.
 func TestPlatform(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -114,7 +114,7 @@ func TestPlatform(t *testing.T) {
 	}
 }
 
-// TestSurface: what the backend tells the host about itself.
+// TestSurface checks what the backend tells the host about itself.
 func TestSurface(t *testing.T) {
 	be := New(Options{Helper: fakeHelper(t, says(kvmIntel), kvmIntel)})
 	cases := []struct {
@@ -158,7 +158,7 @@ func TestSurface(t *testing.T) {
 	}
 }
 
-// TestDeadlineMS: the deadline the helper is told, in milliseconds.
+// TestDeadlineMS checks the deadline the helper is told, in milliseconds.
 func TestDeadlineMS(t *testing.T) {
 	cases := []struct {
 		name string
@@ -178,7 +178,7 @@ func TestDeadlineMS(t *testing.T) {
 	}
 }
 
-// TestPayloadHex: the payload as one field, "-" for none.
+// TestPayloadHex checks the payload as one field, "-" for none.
 func TestPayloadHex(t *testing.T) {
 	cases := []struct {
 		name string
@@ -219,7 +219,8 @@ func waitGone(t *testing.T, pid int) {
 	}
 }
 
-// TestWarm: how the helper is started, and every way it fails to come up.
+// TestWarm checks how the helper is started, and every way it fails to
+// come up.
 func TestWarm(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -404,7 +405,7 @@ func children(t *testing.T) []string {
 		if err != nil {
 			continue
 		}
-		// "<pid> (<comm>) <state> <ppid> ..."; comm may hold spaces.
+		// "<pid> (<comm>) <state> <ppid> ...", and comm may hold spaces.
 		s := string(b)
 		i := strings.LastIndexByte(s, ')')
 		if i < 0 {
@@ -473,7 +474,7 @@ func awaitW(t *testing.T, be backend.Backend, id string, want uint64) {
 }
 
 // TestFakeHelperProtocol drives the backend over hack/hyperlight's fake
-// helper, in the order a grant's life takes: warm, clone, W, park,
+// helper, in the order of a grant's life. That is warm, clone, W, park,
 // kill, resume, and the ends of fibers and of the helper itself. Each
 // step builds on the one before, so a failure stops the sequence.
 func TestFakeHelperProtocol(t *testing.T) {
@@ -651,8 +652,8 @@ func TestFakeHelperProtocol(t *testing.T) {
 	}
 }
 
-// pipe is an in-process helper: the backend's end is h.ctl, the test
-// reads commands from and writes replies to theirs.
+// pipe is an in-process helper. The backend's end is h.ctl, and the test
+// reads commands from and writes replies to the other.
 type pipe struct {
 	b      *Backend
 	h      *helper
@@ -713,7 +714,7 @@ func (p *pipe) hear(t *testing.T) string {
 	return strings.TrimSuffix(line, "\n")
 }
 
-// hangUp is the helper exiting: its end of the socket closes.
+// hangUp is the helper exiting, which closes its end of the socket.
 func (p *pipe) hangUp() { _ = p.theirs.Close() }
 
 // asked runs ask in the background.
@@ -743,7 +744,7 @@ func await[T any](t *testing.T, ch <-chan T) T {
 	}
 }
 
-// TestReadLoop: every line the helper may send, well formed or not, and
+// TestReadLoop covers every line the helper may send, well formed or not, and
 // what the helper hanging up does to what is pending.
 func TestReadLoop(t *testing.T) {
 	cases := []struct {
@@ -865,7 +866,8 @@ func TestReadLoop(t *testing.T) {
 	}
 }
 
-// TestAsk: one command per fence in flight, and the ways waiting ends.
+// TestAsk checks one command per fence in flight, and the ways waiting
+// ends.
 func TestAsk(t *testing.T) {
 	cases := []struct {
 		name string
@@ -923,7 +925,7 @@ func TestAsk(t *testing.T) {
 	}
 }
 
-// TestCommands: the line each operation sends, and what its reply or
+// TestCommands checks the line each operation sends, and what its reply or
 // its absence becomes.
 func TestCommands(t *testing.T) {
 	cases := []struct {
@@ -1045,7 +1047,7 @@ func TestCommands(t *testing.T) {
 		{name: "KILL over a socket the backend closed", wantErr: "closed",
 			setup: func(t *testing.T, p *pipe, _ string) {
 				p.fiber("f")
-				// The read loop sees the close and forgets the warm; the
+				// The read loop sees the close and forgets the warm. The
 				// helper is put back so Kill reaches the socket.
 				_ = p.h.ctl.Close()
 				await(t, p.h.gone)

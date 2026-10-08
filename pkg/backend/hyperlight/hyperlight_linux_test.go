@@ -37,8 +37,8 @@ func fakeHelper(t *testing.T, versionCmd, ready string) string {
 
 func says(facts string) string { return "echo '" + facts + "'; exit 0" }
 
-// homePlatform is what pkg/runtime/host records at open: the host's own
-// facts, with the backend's non-empty ones in their place.
+// homePlatform is what pkg/runtime/host records at open. It is the host's
+// own facts, with the backend's non-empty ones in their place.
 func homePlatform(be backend.Backend) artifact.Platform {
 	host := artifact.Host()
 	bp := be.(backend.Platformer).Platform()
@@ -80,18 +80,26 @@ func TestNew(t *testing.T) {
 			if be.Tier() != c.wantTier {
 				t.Fatalf("tier = %s, want %s", be.Tier(), c.wantTier)
 			}
+			// A backend without a tier says why, and only then.
+			if why := be.(backend.Prober).ProbeErr(); (why == nil) != (c.wantTier != core.TierUnspecified) {
+				t.Fatalf("ProbeErr = %v with tier %s", why, be.Tier())
+			}
 		})
 	}
 	t.Run("no helper at all", func(t *testing.T) {
-		if be := New(Options{Helper: filepath.Join(t.TempDir(), "missing")}); be.Tier() != core.TierUnspecified {
+		be := New(Options{Helper: filepath.Join(t.TempDir(), "missing")})
+		if be.Tier() != core.TierUnspecified {
 			t.Fatalf("tier = %s, want unspecified", be.Tier())
+		}
+		if why := be.(backend.Prober).ProbeErr(); why == nil || !strings.Contains(why.Error(), "unusable") {
+			t.Fatalf("ProbeErr = %v, want the helper named unusable", why)
 		}
 	})
 }
 
-// A snapshot made through one helper is offered to a home running
-// another: parity must refuse every fact that Hyperlight or the helper
-// would refuse at load, and pass the same facts.
+// TestPlatformParity offers a snapshot made through one helper to a home
+// running another. Parity must refuse every fact that Hyperlight or the
+// helper would refuse at load, and pass the same facts.
 func TestPlatformParity(t *testing.T) {
 	cases := []struct {
 		name   string

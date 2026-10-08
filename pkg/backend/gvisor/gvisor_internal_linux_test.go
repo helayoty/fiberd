@@ -153,10 +153,10 @@ func findCall(calls []string, parts ...string) string {
 	return ""
 }
 
-// TestNew: the tier is FIBER_SNAPSHOT only with a runsc that answers and
-// a rootfs directory, the version is read from runsc, and the defaults
-// fill in. The facts the backend states about itself do not depend on
-// either.
+// TestNew checks that the tier is FIBER_SNAPSHOT only with a runsc that
+// answers and a rootfs directory, the version is read from runsc, and the
+// defaults fill in. The facts the backend states about itself do not depend
+// on either.
 func TestNew(t *testing.T) {
 	bin, _ := fakeRunscBin(t, knobs{})
 	rootfs := t.TempDir()
@@ -167,24 +167,25 @@ func TestNew(t *testing.T) {
 		wantVersion string
 		wantRunsc   string
 		wantState   string
+		wantWhy     string // in ProbeErr, "" for none
 	}{
 		{name: "runsc and rootfs", opt: func(*testing.T) Options { return Options{Runsc: bin, Rootfs: rootfs, StateDir: "/s"} },
 			wantTier: core.TierSnapshot, wantVersion: fakeVersion, wantRunsc: bin, wantState: "/s"},
 		{name: "runsc missing", opt: func(t *testing.T) Options {
 			return Options{Runsc: filepath.Join(t.TempDir(), "none"), Rootfs: rootfs, StateDir: "/s"}
-		}, wantRunsc: "NONE", wantState: "/s"},
+		}, wantRunsc: "NONE", wantState: "/s", wantWhy: "unavailable"},
 		{name: "rootfs missing", opt: func(t *testing.T) Options {
 			return Options{Runsc: bin, Rootfs: filepath.Join(t.TempDir(), "none"), StateDir: "/s"}
-		}, wantVersion: fakeVersion, wantRunsc: bin, wantState: "/s"},
+		}, wantVersion: fakeVersion, wantRunsc: bin, wantState: "/s", wantWhy: "rootfs unusable"},
 		{name: "rootfs is a file", opt: func(t *testing.T) Options {
 			f := filepath.Join(t.TempDir(), "file")
 			if err := os.WriteFile(f, nil, 0o600); err != nil {
 				t.Fatal(err)
 			}
 			return Options{Runsc: bin, Rootfs: f, StateDir: "/s"}
-		}, wantVersion: fakeVersion, wantRunsc: bin, wantState: "/s"},
+		}, wantVersion: fakeVersion, wantRunsc: bin, wantState: "/s", wantWhy: "is not a directory"},
 		{name: "defaults", opt: func(t *testing.T) Options { return Options{Rootfs: filepath.Join(t.TempDir(), "none")} },
-			wantRunsc: "runsc", wantState: "/var/lib/fiberd/gvisor", wantVersion: "ANY"},
+			wantRunsc: "runsc", wantState: "/var/lib/fiberd/gvisor", wantVersion: "ANY", wantWhy: "ANY"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -193,6 +194,14 @@ func TestNew(t *testing.T) {
 			t.Cleanup(b.Close)
 			if b.Tier() != tc.wantTier {
 				t.Fatalf("Tier = %s, want %s", b.Tier(), tc.wantTier)
+			}
+			why := b.ProbeErr()
+			switch {
+			case tc.wantWhy == "ANY":
+			case tc.wantWhy == "" && why != nil:
+				t.Fatalf("ProbeErr = %v, want nil", why)
+			case tc.wantWhy != "" && (why == nil || !strings.Contains(why.Error(), tc.wantWhy)):
+				t.Fatalf("ProbeErr = %v, want one mentioning %q", why, tc.wantWhy)
 			}
 			if tc.wantVersion != "ANY" && b.version != tc.wantVersion {
 				t.Fatalf("version = %q, want %q", b.version, tc.wantVersion)
@@ -217,7 +226,7 @@ func TestNew(t *testing.T) {
 	}
 }
 
-// TestRunsc: every runsc command carries the global flags, a failure
+// TestRunsc checks that every runsc command carries the global flags, a failure
 // names the command and the tail of its output, a detached command's
 // output goes through a file that is removed again, and a deadline that
 // ends the command is reported as the deadline.

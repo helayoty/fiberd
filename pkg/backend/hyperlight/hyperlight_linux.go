@@ -22,7 +22,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"log"
 	"net"
 	"os"
 	"os/exec"
@@ -56,18 +55,18 @@ const (
 
 var ErrHelper = errors.New("hyperlight: helper error")
 
-// facts is what a helper's snapshots depend on, as the helper reports
-// it on `--version` and on READY: one token each, in this order.
+// facts is what a helper's snapshots depend on. The helper reports it on
+// `--version` and on READY as one token each, in this order.
 //
 //	helper      the helper and its version ("fiberd-hyperlight-helper/0.1.0")
 //	hyperlight  the hyperlight_host crate the helper was built with
 //	hypervisor  the one in use on this host (kvm, mshv)
 //	cpu         the CPU vendor string (GenuineIntel, AuthenticAMD)
 //
-// Hyperlight refuses to load a snapshot from another version,
-// hypervisor or CPU vendor, and the helper's park layout is the
-// helper's; recorded as the platform, a mismatch is refused before the
-// resume instead of failing inside it.
+// Hyperlight refuses to load a snapshot from another version, hypervisor
+// or CPU vendor, and the park layout is the helper's own. Recording the
+// facts as the platform refuses a mismatch before the resume instead of
+// failing inside it.
 type facts struct {
 	helper, hyperlight, hypervisor, cpu string
 }
@@ -85,20 +84,21 @@ func parseFacts(tokens []string) (facts, error) {
 	return facts{helper: tokens[0], hyperlight: tokens[1], hypervisor: tokens[2], cpu: tokens[3]}, nil
 }
 
-// platform maps the facts onto the parity fields: the Hyperlight
-// version where a kernel release goes (kernel=series relaxes it to a
-// minor series), everything else exact, where libc goes. The host keeps
-// the architecture.
+// platform maps the facts onto the parity fields. The Hyperlight version
+// goes where a kernel release goes, so kernel=series relaxes it to a
+// minor series. Everything else goes, exact, where libc goes. The host
+// keeps the architecture.
 func (f facts) platform() artifact.Platform {
 	return artifact.Platform{Kernel: "hyperlight-" + f.hyperlight, Libc: f.helper + "+" + f.hypervisor + "+" + f.cpu}
 }
 
-// Backend implements backend.Backend, Platformer, DeadlineAdvisor and
-// WReporter.
+// Backend implements backend.Backend, Platformer, DeadlineAdvisor,
+// WReporter and Prober.
 type Backend struct {
 	opt   Options
 	tier  core.Tier
-	facts facts // from `helper --version` at open; every READY must agree
+	why   error // why tier is unspecified, nil when it is not
+	facts facts // from `helper --version` at open, and every READY must agree
 
 	mu     sync.Mutex
 	warms  map[string]*helper
@@ -126,18 +126,19 @@ type fiber struct {
 	w      uint64
 }
 
-// New opens the backend; the tier is FIBER_SNAPSHOT when the helper
-// answers `--version` and the guest exists.
+// New opens the backend. The tier is FIBER_SNAPSHOT when the helper
+// answers `--version` and the guest exists. Otherwise it offers none,
+// and ProbeErr says why.
 func New(o Options) backend.Backend {
 	b := &Backend{opt: o, warms: map[string]*helper{}, fibers: map[string]*fiber{}, exits: make(chan backend.Exit, 1024)}
 	f, err := probeFacts(o.Helper)
 	if err != nil {
-		log.Printf("hyperlight: helper %q unusable: %v", o.Helper, err)
+		b.why = fmt.Errorf("helper %s unusable: %w", o.Helper, err)
 		return b
 	}
 	if o.Guest != "" {
 		if _, err := os.Stat(o.Guest); err != nil {
-			log.Printf("hyperlight: guest %q unusable: %v", o.Guest, err)
+			b.why = fmt.Errorf("guest unusable: %w", err)
 			return b
 		}
 	}
@@ -146,9 +147,13 @@ func New(o Options) backend.Backend {
 	return b
 }
 
-// probeFacts runs `helper --version`: the facts a snapshot made through
-// this helper depends on, known before any grant is warmed because the
-// host records them at open.
+// ProbeErr is why New found no tier: the helper cannot state its facts,
+// or the guest is missing.
+func (b *Backend) ProbeErr() error { return b.why }
+
+// probeFacts runs `helper --version` for the facts a snapshot through
+// this helper depends on. They are known before any grant is warmed,
+// because the host records them at open.
 func probeFacts(helper string) (facts, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), versionTimeout)
 	defer cancel()
@@ -162,12 +167,13 @@ func probeFacts(helper string) (facts, error) {
 func (b *Backend) Name() string    { return "hyperlight" }
 func (b *Backend) Tier() core.Tier { return b.tier }
 
-// IsolatesTenants: a fiber is a micro-VM guest behind the hypervisor.
+// IsolatesTenants is true because a fiber is a micro-VM guest behind the
+// hypervisor.
 func (b *Backend) IsolatesTenants() bool { return true }
 
-// Platform: a snapshot depends on the helper's facts, not on the host
-// kernel or libc. A backend without a usable helper warms nothing, and
-// says so here.
+// Platform reports the helper's facts, because a snapshot depends on them
+// and not on the host kernel or libc. A backend without a usable helper
+// warms nothing, and says so here.
 func (b *Backend) Platform() artifact.Platform {
 	if b.tier < core.TierSnapshot {
 		return artifact.Platform{Kernel: "hyperlight-unusable", Libc: "n/a"}
@@ -232,7 +238,7 @@ func (b *Backend) Warm(ctx context.Context, sp backend.WarmSpec) (backend.Warm, 
 		cmd.SysProcAttr.CgroupFD = sp.CgroupFD
 	}
 	err = cmd.Start()
-	// The helper holds its own copy of its end now. Ours goes, so a
+	// The helper holds its own copy of its end. Ours closes, so a
 	// helper that dies before READY is read as EOF below rather than
 	// waited for until the caller's deadline.
 	_ = childF.Close()
@@ -262,8 +268,8 @@ func (b *Backend) Warm(ctx context.Context, sp backend.WarmSpec) (backend.Warm, 
 			ready <- fmt.Errorf("%w: expected READY, got %q", ErrHelper, strings.TrimSpace(line))
 			return
 		}
-		// The facts recorded at open are what this warm's snapshots
-		// are filed under: a helper replaced since then must not warm.
+		// This warm's snapshots are filed under the facts recorded at
+		// open, so a helper replaced since then must not warm.
 		got, err := parseFacts(f[1:])
 		if err != nil {
 			ready <- err
@@ -505,7 +511,7 @@ func (b *Backend) Park(ctx context.Context, fiberID string, sp backend.ParkSpec)
 		defer cancel()
 	}
 	if _, err = b.ask(ctx, h, fiberID, fmt.Sprintf("PARK %s %s %s", fiberID, sp.Dir, sync)); err != nil {
-		// Name the deadline that fired: the caller's, or this one.
+		// Name the deadline that fired, the caller's or this one.
 		if errors.Is(err, context.DeadlineExceeded) {
 			if callers {
 				return fmt.Errorf("%w: no answer to PARK %s before the caller's deadline: %w", ErrHelper, fiberID, err)
