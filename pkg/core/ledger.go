@@ -23,7 +23,10 @@ type Session struct {
 	State    SessionState
 	Fence    Fence
 	Handle   FiberHandle // valid when StateRunning
-	DeltaRef string      // valid when StateParked
+	// DeltaRef is the parked delta, or, while running, the delta this
+	// incarnation was resumed from ("" after a create). That delta stays
+	// until the next park supersedes it or a Release discards it.
+	DeltaRef string
 }
 
 // Action is the resolved outcome of Clone(S): one verb, three costs.
@@ -118,7 +121,7 @@ func (l *Ledger) Epoch() uint64 {
 // BumpEpoch moves the ledger to a new epoch in place: every fence minted
 // from here on carries it, and every fence minted before is stale by
 // construction. The agent releases the running fibers after this call,
-// and a clone in flight can no longer commit under the old epoch. Parked
+// and a clone in flight cannot commit under the old epoch. Parked
 // sessions keep their deltas and resume under the new epoch.
 func (l *Ledger) BumpEpoch(epoch uint64) {
 	l.mu.Lock()
@@ -219,29 +222,24 @@ func (h *sessionHold) release() {
 }
 
 // resolveHeld decides which of the three paths Clone takes and mints the
-// fence for it. The caller performs the runtime work and then commits.
-// Holding the per-session lock across both is what forbids duplicate
-// sessions.
+// fence for it. The caller does the runtime work and then commits, both
+// under the session hold, so one session never runs twice.
 //
 // Capacity is RESERVED here, not at commit: the runtime clone runs for
 // milliseconds between the two, and reserving late would let a concurrent
 // burst overshoot fibers.max. If the caller never commits, unlock returns
 // the reservation.
 //
-// commit reports whether the fiber was recorded. It records nothing when
-// the grant was revoked or the epoch moved while the runtime worked. A
-// re-admission since does not help, because the reservation was made
-// under the old entry. A fiber committed anyway would escape the sweep,
-// hold a fence nothing can revoke, and collide with a fence the
-// re-admitted grant mints later. The caller releases it instead.
+// commit records nothing and returns false if the grant was revoked or
+// the epoch moved meanwhile, even if the grant came back. Such a fiber
+// would hold a fence nothing can revoke, so the caller releases it.
 //
 // tier is the runtime's advertised tier. A grant whose min_tier exceeds it,
 // or a parked session on a sub-checkpoint runtime, is ErrNeedsTier: never
 // a fresh fork.
 //
-// The caller has already taken hold on the session (nil for an anonymous
-// fiber). Every unlock it returns releases the hold, on the error paths
-// too.
+// hold is nil for an anonymous fiber. Every unlock returned releases it,
+// on the error paths too.
 func (l *Ledger) resolveHeld(hold *sessionHold, grantUID, session string, tier Tier) (Action, Fence, string, func(Session) bool, func(), error) {
 	key := grantUID + "/" + session
 
@@ -413,13 +411,15 @@ func (l *Ledger) SetFiberW(fiberID string, bytes uint64) {
 // OnPark records a successful runtime Park: the fiber leaves the running
 // tier (freeing its slot) and, for a named session, the delta ref is kept
 // so a later Clone(S) resolves to ActResume. Returns the session name
-// ("" for an anonymous fiber, whose delta nobody can ask for).
-func (l *Ledger) OnPark(fiberID, deltaRef string) string {
+// ("" for an anonymous fiber, whose delta nobody can ask for) and the
+// delta the parked incarnation was resumed from, which this park
+// supersedes ("" after a create).
+func (l *Ledger) OnPark(fiberID, deltaRef string) (session, superseded string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	ref, ok := l.fibers[fiberID]
 	if !ok {
-		return ""
+		return "", ""
 	}
 	delete(l.fibers, fiberID)
 	if g, ok := l.grants[ref.grantUID]; ok {
@@ -427,48 +427,52 @@ func (l *Ledger) OnPark(fiberID, deltaRef string) string {
 	}
 	if ref.sessionKey != "" {
 		if s, ok := l.sessions[ref.sessionKey]; ok {
+			superseded = s.DeltaRef
 			s.State = StateParked
 			s.DeltaRef = deltaRef
 			s.Handle = FiberHandle{}
-			return s.Name
+			return s.Name, superseded
 		}
 	}
-	return ""
+	return "", ""
 }
 
 // OnRelease records a successful runtime Release: the slot is freed and
-// the session name, if any, is forgotten.
-func (l *Ledger) OnRelease(fiberID string) {
-	l.onGone(fiberID)
+// the session name, if any, is forgotten. Returns that name and the delta
+// the released incarnation was resumed from, for a discard ("" when
+// there is none).
+func (l *Ledger) OnRelease(fiberID string) (session, deltaRef string) {
+	_, session, deltaRef, _ = l.onGone(fiberID)
+	return session, deltaRef
 }
 
 // OnFiberExit records a fiber that died on its own (OOM, exit, signal).
 // The slot is freed and a named session is forgotten: its state is gone,
 // and pretending it is parked would resume nothing. Returns the fence the
-// fiber held and the session name, for the audit record.
-func (l *Ledger) OnFiberExit(fiberID string) (Fence, string, bool) {
+// fiber held and the session name, for the audit record, and the delta
+// the fiber was resumed from, for a discard.
+func (l *Ledger) OnFiberExit(fiberID string) (fence Fence, session, deltaRef string, ok bool) {
 	return l.onGone(fiberID)
 }
 
-func (l *Ledger) onGone(fiberID string) (Fence, string, bool) {
+func (l *Ledger) onGone(fiberID string) (fence Fence, name, deltaRef string, ok bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	ref, ok := l.fibers[fiberID]
 	if !ok {
-		return Fence{}, "", false
+		return Fence{}, "", "", false
 	}
 	delete(l.fibers, fiberID)
 	if g, ok := l.grants[ref.grantUID]; ok {
 		g.live--
 	}
-	var name string
 	if ref.sessionKey != "" {
 		if s, ok := l.sessions[ref.sessionKey]; ok {
-			name = s.Name
+			name, deltaRef = s.Name, s.DeltaRef
 		}
 		delete(l.sessions, ref.sessionKey)
 	}
-	return ref.fence, name, true
+	return ref.fence, name, deltaRef, true
 }
 
 // Statuses computes the view for every admitted grant, sorted by UID.

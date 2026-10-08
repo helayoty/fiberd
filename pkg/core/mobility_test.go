@@ -35,8 +35,12 @@ type mobileRuntime struct {
 	st        *store
 	claims    []string
 	discarded []string // claimed refs the agent told it to drop
+	retired   []string // local refs whose published copy the agent withdrew
 	deltaW    uint64   // W the next park will report
-	pubErr    error
+	// retireFails is how many RetireDelta calls fail before one works,
+	// like a registry that is down for a while.
+	retireFails int
+	pubErr      error
 	// refuse, when set, is what FindDelta answers for a session it finds:
 	// the runtime's parity gate saying "not here".
 	refuse error
@@ -101,6 +105,24 @@ func (m *mobileRuntime) DiscardDelta(_ context.Context, ref string) error {
 	defer m.st.mu.Unlock()
 	m.discarded = append(m.discarded, ref)
 	return m.discardErr
+}
+
+// RetireDelta withdraws the store's copy while it is this runtime's
+// publish of ref, as a home deletes a tag that still holds its digest.
+func (m *mobileRuntime) RetireDelta(_ context.Context, ref string) error {
+	m.st.mu.Lock()
+	defer m.st.mu.Unlock()
+	if m.retireFails > 0 {
+		m.retireFails--
+		return errors.New("registry: 503")
+	}
+	for k, p := range m.st.deltas {
+		if p.ref == ref && p.owner == m {
+			delete(m.st.deltas, k)
+			m.retired = append(m.retired, ref)
+		}
+	}
+	return nil
 }
 
 func (m *mobileRuntime) Owned(_ context.Context, ref string) bool {
@@ -244,17 +266,14 @@ func TestSessionDomain(t *testing.T) {
 }
 
 // TestParkedSessionPickup has home A park session S, which succeeds even
-// when publishing fails. Then a home clones S again. A delta over the
-// mobility budget, or one the parity gate refuses, is deferred to its
-// preferred home (shed with the lane down) and stays in the store.
-// Otherwise it is claimed and resumed. An unpublished session still
-// resumes locally.
+// when publishing fails, and then clones S again from a home. A delta over
+// the mobility budget, or one parity refuses, is deferred to its preferred
+// home and stays in the store. Otherwise it is claimed and resumed. An
+// unpublished session resumes locally.
 //
-// A claim takes the store's only tag, so what happens to the claimed copy
-// when the ledger refuses it matters. The session arriving here meanwhile
-// means the copy is a duplicate and is dropped. The grant going away
-// meanwhile means the copy is the only one, so it is kept and the caller
-// gets the miss the revocation implies.
+// When the ledger refuses a claimed copy, a session that arrived meanwhile
+// makes the copy a duplicate, which is dropped. A grant that went away
+// makes it the only copy, which is kept.
 func TestParkedSessionPickup(t *testing.T) {
 	ctx := context.Background()
 	yield := func(_ *testing.T, b *core.Agent) { b.Yield(ctx, "g1", "ladder") }
@@ -505,4 +524,190 @@ func TestConcurrentClaims(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestResumedDeltaLifecycle follows the delta a session was resumed from.
+// The ledger keeps its ref with the running incarnation, since the park
+// stored it under the parked fence and the running fiber has another. A
+// Release with discard drops it, the next park drops it as superseded,
+// and a Release without discard leaves it on disk. The resume itself
+// withdraws the copy published at the park, so a Clone after the Release
+// creates fresh instead of claiming that older state.
+func TestResumedDeltaLifecycle(t *testing.T) {
+	ctx := context.Background()
+	cases := []struct {
+		name        string
+		noPark      bool // release the created fiber: nothing was resumed
+		repark      bool // park the resumed fiber instead of releasing it
+		discard     bool // Release(discard)
+		retireFails int  // registry calls that fail before one works
+		// wantStoredAfterResume: the published copy survived the resume.
+		wantStoredAfterResume bool
+		wantRetired           int
+		wantDiscarded         int
+		wantStored            bool        // the store holds S at the end
+		wantNext              core.Action // what the next Clone of S does
+	}{
+		{name: "a created fiber has no delta to discard", noPark: true, discard: true, wantNext: core.ActCreate},
+		{name: "release with discard drops the delta the fiber was resumed from", discard: true,
+			wantRetired: 1, wantDiscarded: 1, wantNext: core.ActCreate},
+		{name: "release without discard keeps it on disk, and the published copy is gone since the resume",
+			wantRetired: 1, wantNext: core.ActCreate},
+		{name: "the next park drops the delta it supersedes", repark: true,
+			wantRetired: 1, wantDiscarded: 1, wantStored: true, wantNext: core.ActResume},
+		{name: "a withdrawal the registry refused is retried by the discarding release", discard: true, retireFails: 1,
+			wantStoredAfterResume: true, wantRetired: 1, wantDiscarded: 1, wantNext: core.ActCreate},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			g := core.Grant{UID: "g1", Audience: "A", TemplateDigest: "sha256:t", FiberMax: 4, WBudgetBytes: 8 << 20}
+			st := &store{deltas: map[string]published{}}
+			a, ra := newMobileAgent(t, "A", st, g)
+			ra.retireFails = tc.retireFails
+			req := core.CloneRequest{GrantJWT: []byte("g1"), Session: "S", Deadline: time.Second}
+			r1, code, err := a.Clone(ctx, req)
+			if err != nil || code != core.OK || r1.Kind != core.ActCreate {
+				t.Fatalf("create: %v %d %v", err, code, r1.Kind)
+			}
+			id, ref1 := r1.FiberID, "delta-A-"+r1.FiberID
+			if !tc.noPark {
+				if _, code, err := a.Park(ctx, id, false); err != nil || code != core.OK {
+					t.Fatalf("park: %v %d", err, code)
+				}
+				if !st.stored("sha256:t/S") {
+					t.Fatal("park did not publish the delta")
+				}
+				r2, code, err := a.Clone(ctx, req)
+				if err != nil || code != core.OK || r2.Kind != core.ActResume {
+					t.Fatalf("resume: %v %d %v", err, code, r2.Kind)
+				}
+				id = r2.FiberID
+				if got := st.stored("sha256:t/S"); got != tc.wantStoredAfterResume {
+					t.Errorf("published copy after the local resume = %v, want %v", got, tc.wantStoredAfterResume)
+				}
+			}
+			if tc.repark {
+				if _, code, err := a.Park(ctx, id, false); err != nil || code != core.OK {
+					t.Fatalf("second park: %v %d", err, code)
+				}
+				if state, ref, ok := a.Ledger.SessionState("g1", "S"); !ok || state != core.StateParked || ref != "delta-A-"+id {
+					t.Fatalf("after the second park S = %v %q %v, want parked at the new delta", state, ref, ok)
+				}
+			} else if code, err := a.Release(ctx, id, tc.discard); err != nil || code != core.OK {
+				t.Fatalf("release: %v %d", err, code)
+			}
+			if len(ra.retired) != tc.wantRetired || (tc.wantRetired == 1 && ra.retired[0] != ref1) {
+				t.Errorf("retired = %v, want %d of %s", ra.retired, tc.wantRetired, ref1)
+			}
+			if len(ra.discarded) != tc.wantDiscarded || (tc.wantDiscarded == 1 && ra.discarded[0] != ref1) {
+				t.Errorf("discarded = %v, want %d of %s", ra.discarded, tc.wantDiscarded, ref1)
+			}
+			if got := st.stored("sha256:t/S"); got != tc.wantStored {
+				t.Errorf("published copy at the end = %v, want %v", got, tc.wantStored)
+			}
+			r3, code, err := a.Clone(ctx, req)
+			if err != nil || code != core.OK || r3.Kind != tc.wantNext {
+				t.Fatalf("next clone: %v %d %v, want %v", err, code, r3.Kind, tc.wantNext)
+			}
+		})
+	}
+}
+
+// TestLostFiberDiscardsResumedDelta checks the rule that a resumed delta
+// is consumed by its resume. However the running fiber is lost, the delta
+// it came from goes, since nothing can resume it and it holds delta
+// quota. A parked session's delta stays through the same events.
+func TestLostFiberDiscardsResumedDelta(t *testing.T) {
+	ctx := context.Background()
+	// lose ends the running fiber (or the whole agent) one way.
+	type loser func(t *testing.T, a *core.Agent, ra *mobileRuntime, fiber string)
+	exit := func(_ *testing.T, a *core.Agent, _ *mobileRuntime, fiber string) {
+		a.OnExit(ctx, core.FiberExit{FiberID: fiber, Reason: "oom", Detail: "dirtied past w_budget"})
+	}
+	yield := func(_ *testing.T, a *core.Agent, _ *mobileRuntime, _ string) { a.Yield(ctx, "g1", "ladder") }
+	remove := func(t *testing.T, a *core.Agent, _ *mobileRuntime, _ string) {
+		r, err := core.OpenRevoked(filepath.Join(t.TempDir(), "revoked.json"), time.Hour, time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		a.Revoked = r
+		a.Remove(ctx, "g1")
+	}
+	bump := func(t *testing.T, a *core.Agent, _ *mobileRuntime, _ string) {
+		store, err := core.OpenEpochStore(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		a.Epoch = store
+		if _, err := a.BumpEpoch(ctx, "scope lost"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	restart := func(t *testing.T, a *core.Agent, ra *mobileRuntime, _ string) {
+		// A new agent over the same runtime boots from the snapshot the
+		// old one left, as after a crash.
+		snap := a.Ledger.Snapshot()
+		b := newAgent(t, "up", core.TierCheckpoint)
+		b.NodeID, b.Runtime, b.Ledger = "A", ra, core.NewLedger(snap.Epoch+1)
+		if _, err := b.Reconcile(ctx, snap); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cases := []struct {
+		name          string
+		lose          loser
+		parked        bool // the session is parked, not resumed, when the fiber is lost
+		wantDiscarded int
+	}{
+		{name: "an exit of its own drops the delta the fiber came from", lose: exit, wantDiscarded: 1},
+		{name: "a yield of the grant drops it", lose: yield, wantDiscarded: 1},
+		{name: "a removal of the grant drops it", lose: remove, wantDiscarded: 1},
+		{name: "an epoch bump drops it", lose: bump, wantDiscarded: 1},
+		{name: "a restart that finds the session running drops it", lose: restart, wantDiscarded: 1},
+		{name: "a yield keeps a parked session's delta", lose: yield, parked: true},
+		{name: "a restart keeps a parked session's delta", lose: restart, parked: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			g := core.Grant{UID: "g1", Audience: "A", TemplateDigest: "sha256:t", FiberMax: 4, WBudgetBytes: 8 << 20}
+			st := &store{deltas: map[string]published{}}
+			a, ra := newMobileAgent(t, "A", st, g)
+			req := core.CloneRequest{GrantJWT: []byte("g1"), Session: "S", Deadline: time.Second}
+			r1, code, err := a.Clone(ctx, req)
+			if err != nil || code != core.OK || r1.Kind != core.ActCreate {
+				t.Fatalf("create: %v %d %v", err, code, r1.Kind)
+			}
+			ref1 := "delta-A-" + r1.FiberID
+			if _, code, err := a.Park(ctx, r1.FiberID, false); err != nil || code != core.OK {
+				t.Fatalf("park: %v %d", err, code)
+			}
+			fiber := r1.FiberID
+			if !tc.parked {
+				r2, code, err := a.Clone(ctx, req)
+				if err != nil || code != core.OK || r2.Kind != core.ActResume {
+					t.Fatalf("resume: %v %d %v", err, code, r2.Kind)
+				}
+				fiber = r2.FiberID
+			}
+			tc.lose(t, a, ra, fiber)
+			if len(ra.discarded) != tc.wantDiscarded || (tc.wantDiscarded == 1 && ra.discarded[0] != ref1) {
+				t.Errorf("discarded = %v, want %d of %s", ra.discarded, tc.wantDiscarded, ref1)
+			}
+			if tc.parked && !ra.HasDeltaLike(ref1) {
+				t.Errorf("the parked delta %s was dropped", ref1)
+			}
+		})
+	}
+}
+
+// HasDeltaLike reports whether the runtime was never told to drop ref.
+func (m *mobileRuntime) HasDeltaLike(ref string) bool {
+	m.st.mu.Lock()
+	defer m.st.mu.Unlock()
+	for _, d := range m.discarded {
+		if d == ref {
+			return false
+		}
+	}
+	return true
 }

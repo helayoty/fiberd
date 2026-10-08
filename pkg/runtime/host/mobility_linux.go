@@ -17,6 +17,14 @@ import (
 	"github.com/helayoty/fiberd/pkg/core"
 )
 
+// remoteRecord is what remoteFile holds: the tag a delta was pushed
+// under and the digest it had there. Owned reads it back, and
+// RetireDelta deletes the tag while it still has that digest.
+type remoteRecord struct {
+	Ref    string `json:"ref"`
+	Digest string `json:"digest"`
+}
+
 // Session mobility through the registry.
 //
 //	<DeltaRegistry>/<domain>:s-<hash(session)>  the parked delta
@@ -109,8 +117,8 @@ func (r *Runtime) FindDelta(ctx context.Context, g core.Grant, session string) (
 	if loc.ArtifactType != artifact.ArtifactTypeDelta {
 		return core.RemoteDelta{}, false, fmt.Errorf("host: %s is %q, not a delta", ref, loc.ArtifactType)
 	}
-	// Nothing in the manifest is believed before its signature is: found,
-	// but not taken, and no home named from its annotations.
+	// Nothing in the manifest is believed before its signature is. The
+	// delta is found but not taken, and no home is named from it.
 	if err := r.cfg.DeltaKeys.Verify(loc); err != nil {
 		return core.RemoteDelta{}, true, &core.RemoteMiss{Err: fmt.Errorf("host: refusing %s/%s: %w", g.UID, session, err)}
 	}
@@ -133,10 +141,9 @@ func (r *Runtime) FindDelta(ctx context.Context, g core.Grant, session string) (
 }
 
 // ClaimDelta implements core.DeltaFinder: pull by the digest that was
-// found (and verified: content addressing makes what is pulled what
-// FindDelta checked the signature of), open it for this session, fetch
-// the parent if this home lacks it, then delete the tag so no other home
-// can claim the same state.
+// found, open it for this session, fetch the parent if this home lacks
+// it, then delete the tag so no other home can claim the same state.
+// Content addressing makes what is pulled what FindDelta verified.
 func (r *Runtime) ClaimDelta(ctx context.Context, g core.Grant, session string, rd core.RemoteDelta) (string, error) {
 	grantUID := g.UID
 	repo := r.domainRepo(g)
@@ -182,9 +189,9 @@ func (r *Runtime) ClaimDelta(ctx context.Context, g core.Grant, session string, 
 	return dst, nil
 }
 
-// DiscardDelta implements core.DeltaDiscarder: a claimed copy that
-// nothing will resume, because the session was already here, is removed.
-// Only a path inside this home's delta store is touched.
+// DiscardDelta implements core.DeltaDiscarder. It removes a claimed copy
+// that nothing will resume, because the session was already here. Only a
+// path inside this home's delta store is touched.
 func (r *Runtime) DiscardDelta(_ context.Context, ref string) error {
 	rel, err := filepath.Rel(r.cfg.DeltaDir, ref)
 	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, "../") {
@@ -255,4 +262,31 @@ func (r *Runtime) Owned(ctx context.Context, deltaRef string) bool {
 		return true // cannot tell; keep serving what we have
 	}
 	return found && loc.Digest == rec.Digest
+}
+
+// RetireDelta implements core.DeltaRetirer. The tag is deleted while it
+// still holds the digest this home pushed for deltaRef. A tag a later
+// park or another home's claim has moved on is left alone. The record of
+// the publish goes either way, so Owned reads the delta as never
+// published. A delta that was never published needs nothing.
+func (r *Runtime) RetireDelta(ctx context.Context, deltaRef string) error {
+	recPath := filepath.Join(deltaRef, remoteFile)
+	var rec remoteRecord
+	if err := readJSON(recPath, &rec); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	loc, found, err := artifact.Resolve(ctx, rec.Ref, r.cfg.RegistryPlainHTTP)
+	if err != nil {
+		return err
+	}
+	if found && loc.Digest == rec.Digest {
+		if err := artifact.Delete(ctx, rec.Ref, r.cfg.RegistryPlainHTTP); err != nil {
+			return fmt.Errorf("host: retire %s: %w", rec.Ref, err)
+		}
+		log.Printf("host: retired %s@%s", rec.Ref, rec.Digest[:19])
+	}
+	return os.Remove(recPath)
 }

@@ -51,12 +51,11 @@ func (l *Ledger) Snapshot() Snapshot {
 	return s
 }
 
-// RestoreParked re-registers a parked session from a snapshot, or one
-// claimed from another home. Its fence is the old one it was parked under.
-// Resume mints a new one, so the old value only documents lineage. It
-// returns false when the grant is not admitted or the ledger already holds
-// the session. That entry is reality, and a parked entry written over it
-// would resume the session a second time.
+// RestoreParked re-registers a parked session from a snapshot or a claim
+// from another home. Its old fence only records lineage, because Resume
+// mints a new one. It returns false when the grant is not admitted or the
+// ledger already holds the session, since a parked entry written over a
+// live one would resume the session twice.
 func (l *Ledger) RestoreParked(s SessionSnapshot) bool {
 	return l.restoreParked(s) == nil
 }
@@ -93,12 +92,10 @@ type SnapshotStore struct {
 	lastErr error         // that write's result
 }
 
-// Persist writes snapshot() so that the file reflects every change made
-// before the call. Writes run one at a time and each captures the ledger
-// inside the lock, so a later write never holds an older snapshot.
-// Concurrent callers share writes. A write captures the ledger after every
-// call that arrived before it started, so a caller it covered returns its
-// result without writing again.
+// Persist writes snapshot() so the file reflects every change made before
+// the call. Writes run one at a time and capture the ledger inside the
+// lock, so a later write never holds an older snapshot. A caller that
+// arrived before a write started shares that write's result.
 func (st *SnapshotStore) Persist(snapshot func() Snapshot) error {
 	n := st.asked.Add(1)
 	st.mu.Lock()
@@ -174,19 +171,18 @@ type heldGrant struct {
 	sessions []SessionSnapshot
 }
 
-// Reconcile is the boot step between epoch++ and opening the warm path:
+// Reconcile is the boot step between epoch++ and opening the warm path.
 //
-//  1. every unexpired grant in the snapshot whose token verifies again is
-//     re-admitted and its template warmed again, since the previous zygote
-//     died with the previous agent. An entry whose token fails, is for
-//     another grant or home, or is missing is dropped. An entry the
-//     verifier cannot check yet is held. It is not admitted, but it stays
-//     in the snapshot so a redelivery or a later boot can still restore it;
-//  2. every parked session whose delta still exists is remembered, so a
-//     Clone(S) after restart resumes it under the new epoch;
-//  3. every fiber the runtime still reports is from a prior epoch by
-//     construction and is killed: its fence is invalid, and nothing
-//     minted before the restart validates after it.
+//  1. Each unexpired grant whose token verifies again is re-admitted and
+//     its template warmed again, because the old zygote died with the old
+//     agent. An entry whose token fails, names another grant or home, or
+//     is missing is dropped. An entry the verifier cannot check yet is
+//     held. It is not admitted, but it stays in the snapshot for a
+//     redelivery or a later boot.
+//  2. Each parked session whose delta still exists is remembered, so a
+//     Clone(S) after restart resumes it under the new epoch.
+//  3. Each fiber the runtime still reports is from a prior epoch and is
+//     killed. Nothing minted before the restart validates after it.
 //
 // Reality wins over the snapshot at every step. The snapshot is a file on
 // the home's disk, so only a grant's signature re-admits it, never the
@@ -268,6 +264,16 @@ func (a *Agent) Reconcile(ctx context.Context, snap Snapshot) (ReconcileReport, 
 		}
 		rep.OrphansKilled++
 		_ = a.audit(ctx, BestEffort, AuditRecord{Event: "orphan", Fence: fence, FiberID: h.ID, Detail: "killed at boot: prior epoch"})
+	}
+	// A session that was running when the old agent stopped is gone. Its
+	// fiber died with that agent or was killed just above. The delta it
+	// was resumed from was consumed by that resume, so it goes too. This
+	// runs after the runtime's List, once the runtime answers. Parked
+	// sessions keep their deltas.
+	for _, s := range snap.Sessions {
+		if s.State == StateRunning && s.DeltaRef != "" {
+			a.discardDelta(ctx, s.Fence, s.Name, s.DeltaRef)
+		}
 	}
 	a.persist()
 	a.notify()

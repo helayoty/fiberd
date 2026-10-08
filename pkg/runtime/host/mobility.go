@@ -79,7 +79,7 @@ func (c Config) sealContext(g core.Grant, session, fence string, now time.Time) 
 // checkSigned refuses a signed delta whose annotations name another
 // domain or session than the one asked for (a manifest copied onto
 // another tag), or whose expiry has passed. Call it after the signature
-// is verified: before that, nothing in the annotations is believed.
+// is verified, because nothing in the annotations is believed before.
 func checkSigned(ann map[string]string, domain, session string, now time.Time) error {
 	if ann[artifact.AnnotationDomain] != domain || ann[artifact.AnnotationSession] != session {
 		return fmt.Errorf("%w: signed for %s/%s, not %s/%s", artifact.ErrUntrusted,
@@ -95,11 +95,9 @@ func checkSigned(ann map[string]string, domain, session string, now time.Time) e
 	return nil
 }
 
-type remoteRecord struct {
-	Ref    string `json:"ref"`
-	Digest string `json:"digest"`
-}
-
+// remoteFile, beside a published delta's images, records the tag and
+// digest it was pushed as. mobility_linux.go writes and reads it, and
+// ImportDelta strips it from an archive.
 const remoteFile = "remote.json"
 
 // Export and import: a parked session as portable files.
@@ -124,14 +122,12 @@ const (
 	ExportInfoFile   = "fiberd-delta.json"
 )
 
-// ExportInfo is what ExportDelta writes beside the archives. Domain
-// records where the session came from for whoever ships the files;
-// ImportDelta never believes it (the destination grant's domain decides
-// what the delta must open for). Annotations and ParentAnnotations are
-// the signed manifests of the delta and of its parent checkpoint: the
-// signatures they carry are what ImportDelta checks the archives
-// against, so an export made before parents were signed has no
-// ParentAnnotations and its parent is refused.
+// ExportInfo is what ExportDelta writes beside the archives. Domain tells
+// whoever ships the files where the session came from. ImportDelta never
+// believes it, because the destination grant's domain decides that.
+// Annotations and ParentAnnotations are the signed manifests of the delta
+// and its parent, which ImportDelta checks the archives against. An
+// export without ParentAnnotations has its parent refused.
 type ExportInfo struct {
 	Session           string            `json:"session"`
 	Domain            string            `json:"domain"`
@@ -224,8 +220,8 @@ func ExportDelta(ctx context.Context, cfg Config, g core.Grant, session, dir str
 		Parent: loc.Annotations[artifact.AnnotationParent]}
 	if info.Parent != "" {
 		// The parent travels with the delta, and so does its signed
-		// manifest: the importing home checks the files against it rather
-		// than taking whatever the archive holds on this home's word.
+		// manifest. The importing home checks the files against it rather
+		// than trusting this home's word.
 		ploc, err := resolveParent(ctx, cfg, repo, info.Parent)
 		if err != nil {
 			return nil, fmt.Errorf("host: refusing to export %s/%s: delta needs %w", g.UID, session, err)
@@ -286,21 +282,17 @@ func ImportDelta(ctx context.Context, cfg Config, g core.Grant, session, dir str
 		return fmt.Errorf("host: import: %w", err)
 	}
 	defer func() { _ = os.RemoveAll(tmp) }()
-	// The delta must carry a trusted home's signature over these very
-	// files, and open with this home's seal key for the session it was
-	// exported as, before this home seals and signs it as its own. The
-	// parent is template state, not tenant memory, so it is not sealed,
-	// but it must carry a trusted home's signature too: a claim checks
-	// only that its pages hash to what the delta names, and this home
-	// signs what it pushes, so an unverified parent would become a
-	// trusted one here.
+	// The delta must carry a trusted home's signature over these files and
+	// open with this home's seal key for its exported session before this
+	// home signs it as its own. The parent is template state, so it is not
+	// sealed, but it must be signed too. This home signs what it pushes, so
+	// an unverified parent would become a trusted one here.
 	//
-	// The domain is g's, never the export's: the seal key is derived per
-	// domain from a master every home holds, so a delta of any domain
-	// would open here, and taking the domain from the (unsigned) info file
-	// would let an import carry one tenant's session into another's
-	// grant. The session name is the export's: a golden snapshot imported
-	// under many names in its own domain is many sessions.
+	// The domain is g's, never the export's. Every home derives seal keys
+	// from one master, so any domain's delta opens here, and the unsigned
+	// info file must not move one tenant's session into another's grant.
+	// The session name is the export's, so a golden snapshot can be
+	// imported as many sessions.
 	if err := artifact.Untar(filepath.Join(dir, ExportDeltaFile), filepath.Join(tmp, "delta")); err != nil {
 		return fmt.Errorf("host: import delta: %w", err)
 	}

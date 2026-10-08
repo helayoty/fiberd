@@ -19,8 +19,8 @@ import (
 	"github.com/helayoty/fiberd/pkg/core"
 )
 
-// mobilityHome is a runtime for the registry protocol alone: no cgroups,
-// no warm instance, a codec and a parent store.
+// mobilityHome is a runtime for the registry protocol alone, with a codec
+// and a parent store but no cgroups or warm instance.
 func mobilityHome(t *testing.T, name string, be backend.Backend, keys artifact.Keys, host artifact.Platform, registry string) *Runtime {
 	t.Helper()
 	root := t.TempDir()
@@ -31,8 +31,8 @@ func mobilityHome(t *testing.T, name string, be backend.Backend, keys artifact.K
 	}
 }
 
-// parkedDelta writes what a park leaves behind: the images, the fake
-// delta naming its parent, a log and the manifest.
+// parkedDelta writes what a park leaves behind, which is the images, the
+// fake delta naming its parent, a log and the manifest.
 func parkedDelta(t *testing.T, dir string, m manifest, parent string) {
 	t.Helper()
 	write(t, dir, map[string]string{"pages-1.img": "dirty pages", "dump.log": "x"})
@@ -44,9 +44,10 @@ func parkedDelta(t *testing.T, dir string, m manifest, parent string) {
 	}
 }
 
-// TestRegistryMobility: home A publishes a parked session to the shared
-// registry, home B finds and claims it, and nothing unsigned, unsealed,
-// foreign or stale is taken. Steps run in order; each builds on the last.
+// TestRegistryMobility checks that home A publishes a parked session to the
+// shared registry, home B finds and claims it, and nothing unsigned,
+// unsealed, foreign or stale is taken. Steps run in order, each building on
+// the last.
 func TestRegistryMobility(t *testing.T) {
 	ctx := context.Background()
 	registry := artifact.FileScheme + filepath.Join(t.TempDir(), "registry")
@@ -134,7 +135,7 @@ func TestRegistryMobility(t *testing.T) {
 			if _, err := time.Parse(time.RFC3339, loc.Annotations[artifact.AnnotationExpires]); err != nil {
 				t.Fatalf("expiry %q: %v", loc.Annotations[artifact.AnnotationExpires], err)
 			}
-			// Published again after another park: the parent is already there.
+			// Published again after another park, the parent is already there.
 			remote2, err := a.PublishDelta(ctx, deltaA, g, "S")
 			if err != nil {
 				t.Fatalf("second publish: %v", err)
@@ -440,5 +441,102 @@ func TestRegistryMobility(t *testing.T) {
 		if !t.Run(st.name, st.run) {
 			return // later steps build on this one
 		}
+	}
+}
+
+// TestRetireDelta checks how a home withdraws the copy it published of a
+// delta, which a local resume does. The tag goes while it still holds the
+// digest this home pushed, and the publish record goes with it. A tag a
+// later park moved on stays. A registry that cannot be asked leaves the
+// record, so a later discard can try again.
+func TestRetireDelta(t *testing.T) {
+	ctx := context.Background()
+	registry := artifact.FileScheme + filepath.Join(t.TempDir(), "registry")
+	seal := &artifact.SealKey{ID: "seal", Key: make([]byte, 32)}
+	platform := artifact.Platform{Arch: "arm64", Kernel: "6.10.0", Libc: "glibc 2.40", Backend: "fake"}
+	a := mobilityHome(t, "home-a", newCodecBackend(core.TierCheckpoint), artifact.Keys{Signer: signingKey(t, "home-a"), Seal: seal}, platform, registry)
+	g := core.Grant{UID: "g1", TemplateDigest: "sha256:tmpl"}
+	parentPages := "template pages"
+	parentSHA := shaOf(parentPages)
+	if err := writeParentDir(filepath.Join(a.parentsDir(), parentSHA), parentPages); err != nil {
+		t.Fatal(err)
+	}
+	tag := a.domainRepo(g) + ":" + sessionTag("S")
+	// park writes and publishes a delta of S under the fence.
+	park := func(t *testing.T, fence string) string {
+		t.Helper()
+		dir := filepath.Join(a.cfg.DeltaDir, "g1", strings.ReplaceAll(strings.TrimPrefix(fence, "g1/"), "/", "-"))
+		parkedDelta(t, dir, manifest{Fence: fence, GrantUID: "g1", Endpoint: "unix:///run/g1/x.sock", Template: g.TemplateDigest, Backend: "fake",
+			WBytes: 7, Delta: true, Parent: parentSHA, ParkedAt: time.Now().UTC().Format(time.RFC3339Nano)}, parentSHA)
+		if _, err := a.PublishDelta(ctx, dir, g, "S"); err != nil {
+			t.Fatalf("publish %s: %v", fence, err)
+		}
+		return dir
+	}
+	cases := []struct {
+		name string
+		// setup leaves the registry and the delta store as the case
+		// needs them and returns the delta to retire.
+		setup   func(t *testing.T) string
+		wantErr bool
+		wantTag string // "" for no tag, "own" for the retired delta's digest, "later" for the later park's
+		wantRec bool   // the publish record is still beside the delta
+	}{
+		{name: "a delta never published needs nothing", setup: func(t *testing.T) string {
+			dir := filepath.Join(a.cfg.DeltaDir, "g1", "1-1")
+			parkedDelta(t, dir, manifest{Fence: "g1/1/1", GrantUID: "g1", Backend: "fake", WBytes: 7}, parentSHA)
+			return dir
+		}},
+		{name: "the tag this home pushed is deleted with its record", setup: func(t *testing.T) string {
+			return park(t, "g1/1/2")
+		}},
+		{name: "a tag a later park moved on stays, and only the record goes", setup: func(t *testing.T) string {
+			dir := park(t, "g1/1/3")
+			park(t, "g1/1/4")
+			return dir
+		}, wantTag: "later"},
+		{name: "a registry that cannot be asked keeps the record and reports it", setup: func(t *testing.T) string {
+			dir := filepath.Join(a.cfg.DeltaDir, "g1", "1-5")
+			parkedDelta(t, dir, manifest{Fence: "g1/1/5", GrantUID: "g1", Backend: "fake", WBytes: 7}, parentSHA)
+			if err := writeJSON(filepath.Join(dir, remoteFile), remoteRecord{Ref: "bogus ref with spaces", Digest: "sha256:x"}); err != nil {
+				t.Fatal(err)
+			}
+			return dir
+		}, wantErr: true, wantRec: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_ = artifact.Delete(ctx, tag, false)
+			dir := tc.setup(t)
+			var before remoteRecord
+			_ = readJSON(filepath.Join(dir, remoteFile), &before)
+			err := a.RetireDelta(ctx, dir)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("RetireDelta = %v, want error %v", err, tc.wantErr)
+			}
+			if _, serr := os.Stat(filepath.Join(dir, remoteFile)); (serr == nil) != tc.wantRec {
+				t.Fatalf("publish record present = %v, want %v", serr == nil, tc.wantRec)
+			}
+			if _, serr := os.Stat(filepath.Join(dir, "manifest.json")); serr != nil {
+				t.Fatalf("the delta itself was touched: %v", serr)
+			}
+			loc, found, rerr := artifact.Resolve(ctx, tag, false)
+			if rerr != nil {
+				t.Fatal(rerr)
+			}
+			switch tc.wantTag {
+			case "":
+				if found {
+					t.Fatalf("tag %s still resolves to %s", tag, loc.Digest)
+				}
+			case "later":
+				if !found || loc.Digest == before.Digest {
+					t.Fatalf("tag found = %v at %s, want the later park's digest, not %s", found, loc.Digest, before.Digest)
+				}
+			}
+			if !a.Owned(ctx, dir) {
+				t.Fatal("a retired delta must read as never published")
+			}
+		})
 	}
 }

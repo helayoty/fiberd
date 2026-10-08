@@ -324,7 +324,7 @@ func (a *Agent) Clone(ctx context.Context, req CloneRequest) (CloneResponse, Sta
 	if err := a.audit(ctx, g.Policy.Durability, AuditRecord{Event: act.String(), Fence: fence, Session: req.Session, FiberID: h.ID}); err != nil {
 		if rerr := a.Runtime.Release(ctx, h.ID, false); rerr != nil {
 			log.Printf("clone: roll back %s: %v", h.ID, rerr)
-			if !commit(Session{Name: req.Session, GrantUID: g.UID, State: StateRunning, Fence: fence, Handle: h}) {
+			if !commit(Session{Name: req.Session, GrantUID: g.UID, State: StateRunning, Fence: fence, Handle: h, DeltaRef: spec.Ref}) {
 				log.Printf("clone: %s may still run under a revoked grant or epoch and could not be released", h.ID)
 			}
 		}
@@ -335,11 +335,11 @@ func (a *Agent) Clone(ctx context.Context, req CloneRequest) (CloneResponse, Sta
 	}
 
 	// 7. Commit. The ledger refuses if the grant was revoked or the epoch
-	// moved while the runtime worked. The sweep from Yield or BumpEpoch
-	// missed this fiber, so it would outlive the revocation. Release it
-	// here and return the miss the sweep implies. A resumed session stays
-	// parked with its delta.
-	if !commit(Session{Name: req.Session, GrantUID: g.UID, State: StateRunning, Fence: fence, Handle: h}) {
+	// moved while the runtime worked. The sweep missed this fiber, so it is
+	// released here with the miss a sweep implies. A resumed session stays
+	// parked with its delta. A committed resume keeps that delta's ref,
+	// so the next park or a discarding release can drop it.
+	if !commit(Session{Name: req.Session, GrantUID: g.UID, State: StateRunning, Fence: fence, Handle: h, DeltaRef: spec.Ref}) {
 		code, cerr := a.swept(g, fence)
 		if rerr := a.Runtime.Release(ctx, h.ID, false); rerr != nil {
 			// Not committed either, since there is no grant entry or epoch
@@ -354,6 +354,13 @@ func (a *Agent) Clone(ctx context.Context, req CloneRequest) (CloneResponse, Sta
 		return CloneResponse{}, code, cerr
 	}
 	if act == ActResume {
+		// The session runs here now. Its published copy is older state
+		// that no home may take and no later Clone may fall back to, so
+		// the tag goes. The delta itself stays until the next park or a
+		// discarding release.
+		if req.Session != "" {
+			a.retireDelta(ctx, fence, req.Session, ref)
+		}
 		a.persist() // the session runs now, so boot must not resume it
 	}
 	a.notify()
@@ -380,12 +387,14 @@ func (a *Agent) routed(r CloneResponse) CloneResponse {
 	return r
 }
 
-// locate settles where a named session's parked state is before resolveHeld:
+// locate settles where a named session's parked state is before
+// resolveHeld runs.
 //
-//   - parked here and still ours: nothing to do, resolveHeld resumes it;
-//   - parked here but claimed elsewhere since: forget it, then as unknown;
-//   - unknown here and found in the shared store: claim it (pull delta
-//     and parent) if w_used <= w_budget, so resolveHeld resumes it; else a
+//   - Parked here and still ours. resolveHeld resumes it.
+//   - Parked here but claimed elsewhere since. It is forgotten and then
+//     treated as unknown.
+//   - Unknown here but in the shared store. It is claimed, with its delta
+//     and parent, if w_used <= w_budget. Otherwise the clone gets a
 //     capacity miss naming the home that holds it.
 func (a *Agent) locate(ctx context.Context, g Grant, session string) (StatusCode, error) {
 	finder, ok := a.Runtime.(DeltaFinder)
@@ -430,11 +439,10 @@ func (a *Agent) locate(ctx context.Context, g Grant, session string) (StatusCode
 	}
 	if err := a.Ledger.restoreParked(SessionSnapshot{Name: session, GrantUID: g.UID, State: StateParked, DeltaRef: ref}); err != nil {
 		if !errors.Is(err, errSessionHeld) {
-			// The grant was revoked while the claim ran (a sweep, the
-			// ladder, Remove). The claim took the store's tag, so the copy
-			// at ref is the only one of this session. It is kept on disk,
-			// unregistered, and the caller gets the miss the revocation
-			// implies, as a commit after a sweep does.
+			// The grant was revoked while the claim ran. The claim took the
+			// store's tag, so the copy at ref is the only one. It stays on
+			// disk, unregistered, and the caller gets the miss a revocation
+			// implies.
 			code, cerr := a.swept(g, Fence{GrantUID: g.UID, Epoch: a.Ledger.Epoch()})
 			log.Printf("WARNING: mobility: %s/%s was claimed from %s but its grant was revoked meanwhile (%v); the only copy of its state is kept at %s and is not registered", g.UID, session, rd.Home, cerr, ref)
 			_ = a.audit(ctx, BestEffort, AuditRecord{Event: "migrate-in", Fence: Fence{GrantUID: g.UID, Epoch: a.Ledger.Epoch()}, Session: session, Detail: fmt.Sprintf("from %s, kept unregistered at %s: %v", rd.Home, ref, cerr)})
@@ -654,7 +662,11 @@ func (a *Agent) BumpEpoch(ctx context.Context, reason string) (uint64, error) {
 		if err := a.Runtime.Release(ctx, id, false); err != nil {
 			log.Printf("epoch bump: release %s: %v", id, err)
 		}
-		a.Ledger.OnRelease(id)
+		// Parked deltas stay. A running fiber's resumed-from delta was
+		// consumed by that resume and goes with the fiber.
+		if session, deltaRef := a.Ledger.OnRelease(id); deltaRef != "" {
+			a.discardDelta(ctx, fence, session, deltaRef)
+		}
 		if err := a.audit(ctx, a.durability(fence.GrantUID), AuditRecord{Event: "scope-revoked", Fence: fence, FiberID: id, Detail: reason}); err != nil {
 			log.Printf("epoch bump: audit %s: %v", id, err)
 		}
@@ -683,11 +695,10 @@ func (a *Agent) missCode(err error) StatusCode {
 }
 
 // swept names why a clone's commit was refused. The grant was removed
-// (denied) or yielded (unknown), or the epoch moved under its fence. A
-// re-admission since does not help, because the fiber's reservation was
-// under the old entry. All three mean this home no longer holds the
-// capacity, so the code is the miss code and the consumer falls back or
-// backs off. NotFound is only for Park and Release on a dead fence.
+// (denied) or yielded (unknown), or the epoch moved under its fence. Each
+// means this home does not hold the capacity, so the code is a miss code
+// and the consumer falls back or backs off. NotFound is only for Park and
+// Release on a dead fence.
 func (a *Agent) swept(g Grant, fence Fence) (StatusCode, error) {
 	if epoch := a.Ledger.Epoch(); epoch != fence.Epoch {
 		err := fmt.Errorf("%w: epoch moved from %d to %d during clone", ErrFiberUnknown, fence.Epoch, epoch)
@@ -703,12 +714,10 @@ func (a *Agent) swept(g Grant, fence Fence) (StatusCode, error) {
 
 // Park checkpoints a named session's delta and frees its running tier.
 //
-// The ledger follows the runtime. A ref back from Runtime.Park means the
-// delta exists and the fiber is gone or going, so the session is parked in
-// the ledger even if a later step failed. Otherwise the slot stays taken by
-// a fiber nothing can park or release, and its delta sits orphaned on disk.
-// For the same reason, a failed sync audit record is returned only after
-// the snapshot and the watchers have seen the change.
+// The ledger follows the runtime. Once Runtime.Park returns a ref, the
+// delta exists, so the session is parked in the ledger even if a later
+// step fails. Otherwise the slot leaks and the delta is orphaned. A failed
+// sync audit is returned only after the snapshot and watchers see it.
 func (a *Agent) Park(ctx context.Context, fiberID string, sync bool) (string, StatusCode, error) {
 	fence, ok := a.Ledger.Fiber(fiberID)
 	if !ok {
@@ -725,7 +734,7 @@ func (a *Agent) Park(ctx context.Context, fiberID string, sync bool) (string, St
 		}
 		return "", Internal, perr
 	}
-	session := a.Ledger.OnPark(fiberID, ref)
+	session, superseded := a.Ledger.OnPark(fiberID, ref)
 	if perr != nil {
 		log.Printf("park %s: parked as %s, then: %v", fiberID, ref, perr)
 	}
@@ -740,6 +749,11 @@ func (a *Agent) Park(ctx context.Context, fiberID string, sync bool) (string, St
 			_ = a.audit(ctx, BestEffort, AuditRecord{Event: "publish", Fence: fence, Session: session, Detail: remote})
 		}
 	}
+	// The delta this incarnation was resumed from is older than the one
+	// just written. Nothing resumes it again.
+	if superseded != "" && superseded != ref {
+		a.discardDelta(ctx, fence, session, superseded)
+	}
 	a.persist()
 	a.notify()
 	switch {
@@ -751,10 +765,12 @@ func (a *Agent) Park(ctx context.Context, fiberID string, sync bool) (string, St
 	return ref, OK, nil
 }
 
-// Release destroys a fiber and frees its name; discard also drops any
-// parked delta of the same session. As in Park, a sync audit record that
-// fails after the ledger changed is reported only after the snapshot and
-// the watchers have seen the change.
+// Release destroys a fiber and frees its name. discard also drops the
+// delta the session was resumed from, here and in the store. The ledger
+// knows that delta, not the runtime, since a park stores it under the
+// parked incarnation and the running one has another fence. As in Park,
+// a sync audit record that fails after the ledger changed is reported
+// only after the snapshot and the watchers have seen the change.
 func (a *Agent) Release(ctx context.Context, fiberID string, discard bool) (StatusCode, error) {
 	fence, ok := a.Ledger.Fiber(fiberID)
 	if !ok {
@@ -763,13 +779,47 @@ func (a *Agent) Release(ctx context.Context, fiberID string, discard bool) (Stat
 	if err := a.Runtime.Release(ctx, fiberID, discard); err != nil {
 		return Internal, err
 	}
-	a.Ledger.OnRelease(fiberID)
+	session, deltaRef := a.Ledger.OnRelease(fiberID)
+	if discard && deltaRef != "" {
+		a.discardDelta(ctx, fence, session, deltaRef)
+	}
 	err := a.audit(ctx, a.durability(fence.GrantUID), AuditRecord{Event: "release", Fence: fence, FiberID: fiberID})
 	a.notify()
 	if err != nil {
 		return Internal, err
 	}
 	return OK, nil
+}
+
+// retireDelta withdraws a delta's published copy, on a runtime that
+// publishes. A failure leaves the copy to its expiry and is logged, as a
+// failed publish is.
+func (a *Agent) retireDelta(ctx context.Context, fence Fence, session, deltaRef string) {
+	rt, ok := a.Runtime.(DeltaRetirer)
+	if !ok {
+		return
+	}
+	if err := rt.RetireDelta(ctx, deltaRef); err != nil {
+		log.Printf("mobility: retire %s: %v", deltaRef, err)
+		return
+	}
+	_ = a.audit(ctx, BestEffort, AuditRecord{Event: "retire", Fence: fence, Session: session, Detail: deltaRef})
+}
+
+// discardDelta drops a delta nothing will resume again: its published
+// copy, if the resume that superseded it could not withdraw it, then the
+// local one.
+func (a *Agent) discardDelta(ctx context.Context, fence Fence, session, deltaRef string) {
+	a.retireDelta(ctx, fence, session, deltaRef)
+	dd, ok := a.Runtime.(DeltaDiscarder)
+	if !ok {
+		return
+	}
+	if err := dd.DiscardDelta(ctx, deltaRef); err != nil {
+		log.Printf("discard %s: %v", deltaRef, err)
+		return
+	}
+	_ = a.audit(ctx, BestEffort, AuditRecord{Event: "discard", Fence: fence, Session: session, Detail: deltaRef})
 }
 
 // Yield is the ladder's last rung and the reaper's verb: the grant is
@@ -791,7 +841,11 @@ func (a *Agent) Yield(ctx context.Context, grantUID string, reason string) {
 		if err := a.Runtime.Release(ctx, f.ID, false); err != nil {
 			log.Printf("yield %s: release %s: %v", grantUID, f.ID, err)
 		}
-		a.Ledger.OnRelease(f.ID)
+		// Parked deltas stay. A running fiber's resumed-from delta was
+		// consumed by that resume and goes with the fiber.
+		if _, deltaRef := a.Ledger.OnRelease(f.ID); deltaRef != "" {
+			a.discardDelta(ctx, fence, f.Session, deltaRef)
+		}
 		_ = a.audit(ctx, BestEffort, AuditRecord{Event: "yield", Fence: fence, Session: f.Session, FiberID: f.ID, Detail: reason})
 	}
 	_ = a.audit(ctx, BestEffort, AuditRecord{Event: "revoke", Fence: Fence{GrantUID: grantUID, Epoch: a.Ledger.Epoch()}, Detail: reason})
@@ -836,7 +890,7 @@ func (a *Agent) Run(ctx context.Context) {
 // a Clone that commits replays an exit held for it. An exit for a fiber
 // not yet committed is held until its Clone commits.
 func (a *Agent) OnExit(ctx context.Context, ex FiberExit) {
-	fence, session, ok := a.Ledger.OnFiberExit(ex.FiberID)
+	fence, session, deltaRef, ok := a.Ledger.OnFiberExit(ex.FiberID)
 	if !ok {
 		a.pendingMu.Lock()
 		if a.pending == nil {
@@ -845,6 +899,11 @@ func (a *Agent) OnExit(ctx context.Context, ex FiberExit) {
 		a.pending[ex.FiberID] = ex
 		a.pendingMu.Unlock()
 		return
+	}
+	// A resumed delta is consumed. The fiber it became is gone, so the
+	// delta goes too. Nothing can resume it, and it holds delta quota.
+	if deltaRef != "" {
+		a.discardDelta(ctx, fence, session, deltaRef)
 	}
 	// The record is written before anything else observes the freed slot
 	// through Watch; the slot itself was freed atomically above.

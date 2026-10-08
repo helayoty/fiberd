@@ -368,7 +368,7 @@ func TestOnPark(t *testing.T) {
 			if tc.park != "" {
 				id = tc.park
 			}
-			if got := l.OnPark(id, "delta"); got != tc.wantName {
+			if got, _ := l.OnPark(id, "delta"); got != tc.wantName {
 				t.Fatalf("OnPark = %q, want %q", got, tc.wantName)
 			}
 			st, _ := coretest.GrantStatus(l, "g1")

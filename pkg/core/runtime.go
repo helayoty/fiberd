@@ -136,6 +136,16 @@ type DeltaPublisher interface {
 	PublishDelta(ctx context.Context, deltaRef string, g Grant, session string) (remote string, err error)
 }
 
+// DeltaRetirer is implemented by runtimes that can withdraw a delta's
+// published copy. The agent calls it once the session resumes here, so
+// the copy in the store no longer names state another home may take or
+// a later Clone may fall back to, and again before a local delta is
+// discarded. A delta never published, or whose tag a later park has
+// replaced, is left alone.
+type DeltaRetirer interface {
+	RetireDelta(ctx context.Context, deltaRef string) error
+}
+
 // RemoteDelta is what a finder learns about a parked session elsewhere
 // without pulling it: how much it costs to move, and where it lives.
 type RemoteDelta struct {

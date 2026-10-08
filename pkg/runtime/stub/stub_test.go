@@ -101,7 +101,7 @@ func TestClone(t *testing.T) {
 }
 
 // TestLifecycle walks one runtime through park, resume and release, in
-// order: each step builds on the state the last one left.
+// order. Each step builds on the state the last one left.
 func TestLifecycle(t *testing.T) {
 	ctx := context.Background()
 	rt := stub.New()
@@ -149,7 +149,7 @@ func TestLifecycle(t *testing.T) {
 				t.Fatal("clone from an unknown delta succeeded")
 			}
 		}},
-		{"resume adds the payload's W to the delta's and consumes it", func(t *testing.T) {
+		{"resume adds the payload's W to the delta's and keeps the delta", func(t *testing.T) {
 			h, err := rt.Clone(ctx, core.CloneSpec{Source: core.SourceDelta, Ref: ref, Fence: f2, Payload: []byte(`{"dirty_bytes": 5}`)})
 			if err != nil {
 				t.Fatal(err)
@@ -157,8 +157,14 @@ func TestLifecycle(t *testing.T) {
 			if st, err := rt.Stats(ctx, h.ID); err != nil || st.WUsedBytes != 105 {
 				t.Fatalf("Stats = %+v, %v; want W 105", st, err)
 			}
-			if rt.HasDelta(ref) {
-				t.Fatal("the delta survived its resume")
+			// As on a host, the delta stays until the agent discards it.
+			if !rt.HasDelta(ref) {
+				t.Fatal("the delta did not survive its resume")
+			}
+		}},
+		{"the agent discards the delta a resume came from", func(t *testing.T) {
+			if err := rt.DiscardDelta(ctx, ref); err != nil || rt.HasDelta(ref) {
+				t.Fatalf("DiscardDelta: %v, delta kept %v", err, rt.HasDelta(ref))
 			}
 		}},
 		{"release without discard keeps the fiber's delta", func(t *testing.T) {

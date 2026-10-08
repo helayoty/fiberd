@@ -1256,3 +1256,149 @@ func TestDeadlineIsEnforced(t *testing.T) {
 		t.Fatalf("late fiber left running: %+v", list)
 	}
 }
+
+// TestResumedDeltaRetiredAndDiscarded follows one named session on one
+// home with a delta registry through park, resume, park, resume and a
+// discarding release. The resume withdraws the copy the park published,
+// so nothing can claim or fall back to that older state. The delta it
+// came from stays on disk until the next park supersedes it or the
+// release discards it. After the release a Clone creates fresh. The
+// steps run in order against one agent.
+func TestResumedDeltaRetiredAndDiscarded(t *testing.T) {
+	ctx := context.Background()
+	out := filepath.Join(t.TempDir(), "art")
+	digest, err := artifact.Build(ctx, artifact.BuildOptions{Zygote: zygoteBin, Args: []string{"--heap-mb", "16"}, Out: out})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(registry.New())
+	defer srv.Close()
+	reg := strings.TrimPrefix(srv.URL, "http://")
+	if _, err := artifact.Push(ctx, out, reg+"/zygotes/ref:v1", true); err != nil {
+		t.Fatal(err)
+	}
+	g := core.Grant{UID: "ret-a", Audience: "home-a", TemplateDigest: digest, FiberMax: 4, WBudgetBytes: 32 << 20,
+		LeaseExpiry: time.Now().Add(time.Hour), Policy: core.Policy{Isolation: core.Trusted}}
+	rt, err := newHost(host.Config{
+		Registry: reg + "/zygotes/ref", RegistryPlainHTTP: true, TemplateCache: t.TempDir(),
+		DeltaRegistry: reg + "/deltas", DeltaKeys: deltaKeys, HomeID: "home-a",
+		CgroupRoot: filepath.Join(cgRoot, "ret"+fmt.Sprint(time.Now().UnixNano()%1_000_000)),
+		RunDir:     filepath.Join("/tmp", "fz-ret-a"), DeltaDir: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if c, ok := rt.(interface{ Close() }); ok {
+			c.Close()
+		}
+	})
+	if rt.Tier() < core.TierCheckpoint {
+		t.Skip("criu not usable here")
+	}
+	a := &core.Agent{NodeID: "home-a", Ledger: core.NewLedger(1), Budget: core.NewBudget(1000, 1<<20),
+		Runtime: rt, Verify: tokenVerifier{"g": g}, Health: core.NewSourceHealth(time.Minute, time.Now())}
+	req := core.CloneRequest{GrantJWT: []byte("g"), Session: "S", Deadline: 5 * time.Second}
+	tag := reg + "/deltas/" + strings.TrimPrefix(digest, "sha256:")[:40] + "-" + shortHash(digest) + ":" + sessionTag("S")
+	published := func(t *testing.T) bool {
+		t.Helper()
+		_, found, err := artifact.Resolve(ctx, tag, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return found
+	}
+	onDisk := func(ref string) bool {
+		_, err := os.Stat(filepath.Join(ref, "manifest.json"))
+		return err == nil
+	}
+	parkedRef := func(t *testing.T) string {
+		t.Helper()
+		st, ref, ok := a.Ledger.SessionState(g.UID, "S")
+		if !ok || st != core.StateParked || ref == "" {
+			t.Fatalf("S = %v %q %v, want parked with a delta", st, ref, ok)
+		}
+		return ref
+	}
+	clone := func(t *testing.T, want core.Action) core.CloneResponse {
+		t.Helper()
+		r, code, err := a.Clone(ctx, req)
+		if err != nil || code != core.OK || r.Kind != want {
+			t.Fatalf("clone: %v %d %v, want %v", err, code, r.Kind, want)
+		}
+		return r
+	}
+	var fiber, ref1, ref2 string
+	steps := []struct {
+		name string
+		run  func(t *testing.T)
+	}{
+		{"create and count to 3", func(t *testing.T) {
+			r := clone(t, core.ActCreate)
+			fiber = r.FiberID
+			for i := 0; i < 3; i++ {
+				talk(t, r.Endpoint, "incr")
+			}
+		}},
+		{"park publishes the delta", func(t *testing.T) {
+			if _, code, err := a.Park(ctx, fiber, true); err != nil || code != core.OK {
+				t.Fatalf("park: %v %d", err, code)
+			}
+			ref1 = parkedRef(t)
+			if !onDisk(ref1) || !published(t) {
+				t.Fatalf("after park: delta on disk %v, published %v", onDisk(ref1), published(t))
+			}
+		}},
+		{"resume keeps the state, withdraws the published copy and keeps the delta on disk", func(t *testing.T) {
+			r := clone(t, core.ActResume)
+			fiber = r.FiberID
+			if got := talk(t, r.Endpoint, "get"); got != "3" {
+				t.Fatalf("counter after resume = %q, want 3", got)
+			}
+			if published(t) {
+				t.Fatal("the published copy survived the local resume")
+			}
+			if !onDisk(ref1) {
+				t.Fatal("the delta the fiber came from must stay until the next park or a discard")
+			}
+		}},
+		{"the next park supersedes that delta", func(t *testing.T) {
+			if _, code, err := a.Park(ctx, fiber, false); err != nil || code != core.OK {
+				t.Fatalf("second park: %v %d", err, code)
+			}
+			ref2 = parkedRef(t)
+			if ref2 == ref1 || !onDisk(ref2) || !published(t) {
+				t.Fatalf("after the second park: ref %s (first %s), on disk %v, published %v", ref2, ref1, onDisk(ref2), published(t))
+			}
+			if onDisk(ref1) {
+				t.Fatalf("the superseded delta %s is still on disk", ref1)
+			}
+		}},
+		{"resume again, then release with discard", func(t *testing.T) {
+			r := clone(t, core.ActResume)
+			if got := talk(t, r.Endpoint, "incr"); got != "4" {
+				t.Fatalf("incr after the second resume = %q, want 4", got)
+			}
+			if code, err := a.Release(ctx, r.FiberID, true); err != nil || code != core.OK {
+				t.Fatalf("release: %v %d", err, code)
+			}
+			if onDisk(ref2) || published(t) {
+				t.Fatalf("after the discarding release: delta on disk %v, published %v", onDisk(ref2), published(t))
+			}
+		}},
+		{"a clone after the release creates fresh", func(t *testing.T) {
+			r := clone(t, core.ActCreate)
+			if got := talk(t, r.Endpoint, "get"); got != "0" {
+				t.Fatalf("counter of the fresh session = %q, want 0", got)
+			}
+			if code, err := a.Release(ctx, r.FiberID, true); err != nil || code != core.OK {
+				t.Fatalf("release: %v %d", err, code)
+			}
+		}},
+	}
+	for _, st := range steps {
+		if !t.Run(st.name, st.run) {
+			return // later steps build on this one
+		}
+	}
+}
