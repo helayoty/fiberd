@@ -15,14 +15,43 @@
  *   incr            -> <n>       (per-fiber counter; state that must survive
  *                                 a park/resume, see phase 6)
  *   get             -> <n>
+ *   random          -> <n>       (libc random(): proves each fiber is
+ *                                 reseeded, not left on the zygote's seed)
  *   fence           -> <fence>
  *   getenv <NAME>   -> value or "-" (proves the scrub: only FIBERD_* exist)
+ *   status <Key>    -> that field of /proc/self/status, or "-"
+ *                      (CapEff, NoNewPrivs: proves the privilege drop)
+ *   read <path>     -> the file's first line, or "-" when it cannot be
+ *                      read (proves what the mount namespace hides)
+ *   wopen <path>    -> what open(path, O_WRONLY) says: the errno's name
+ *                      (EROFS, EACCES, EPERM, ENOENT, or "errno <n>"),
+ *                      or "ok" when it opened; nothing is ever written
+ *                      (proves which host controls are read-only)
+ *   stat <path>     -> what stat(path) finds: "dir", "file", "sock",
+ *                      "other", or the errno's name when it fails
+ *                      (ENOENT, EACCES, or "errno <n>"); nothing is
+ *                      opened or changed (proves what the mount
+ *                      namespace shows of other grants' directories)
  *   quit            -> closes the connection
+ *
+ * A handoff fiber (FIBERD_HANDOFF_FD set) serves the same protocol on the
+ * connections the agent passes it through fz_accept() instead of a
+ * listener of its own, inside TLS 1.3: it serves the grant's identity
+ * (fz_handoff_identity(), sent down the channel at birth, never a file)
+ * and accepts only the client certificate whose x5t#S256 that identity
+ * names. That needs a build with -DFZ_TLS and OpenSSL 3; without it a
+ * handoff fiber refuses to start.
  *
  * The clone payload, if any, is JSON with an optional "dirty_bytes": the
  * fiber dirties that much right after reporting ready, which is how
  * conformance case C6 drives a fiber over its W budget; and an optional
- * "device_bytes", reserved from the engine the same way (C8).
+ * "device_bytes", reserved from the engine the same way. Two keys
+ * are for the runtime's own tests: "ready_delay_ms" delays the ready
+ * report (a fiber that misses its deadline), and "ready_misuse" makes a
+ * fiber misuse the readiness pipe at fd 3 the way a buggy workload would
+ * (1 writes a stray byte on it before reporting, 2 closes it and never
+ * reports, 3 calls fz_report, which must fail in a fiber); the zygote
+ * must refuse such a fiber and go on serving.
  *
  * --http makes every fiber serve HTTP/1.1 on its endpoint instead of the
  * line protocol, for consumers that route web traffic to fibers (an
@@ -42,6 +71,7 @@
  * drop-in that speaks the same lines.
  *
  * Build: gcc -O2 -pthread -o refzygote refzygote.c libfiberzygote.c
+ *        (add -DFZ_TLS ... -lssl -lcrypto to serve handoff grants)
  * Run:   fiberd starts it; by hand: refzygote --heap-mb 64 3<>/dev/null
  *
  * --gvisor runs the same workload as the init process of a gVisor sandbox
@@ -69,8 +99,24 @@
 #include <stdint.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/un.h>
 #include <unistd.h>
+#include <sched.h>
+#include <sys/mount.h>
+#include <sys/wait.h>
+
+#ifdef FZ_TLS
+#include <openssl/bio.h>
+#include <openssl/err.h>
+#include <openssl/evp.h>
+#include <openssl/pem.h>
+#include <openssl/rand.h>
+#include <openssl/ssl.h>
+#include <openssl/x509.h>
+#include <sys/random.h>
+#include <sys/time.h>
+#endif
 
 static char *heap;
 static size_t heap_sz;
@@ -241,12 +287,291 @@ static const char *device_reserve(unsigned long long bytes, char *reply, size_t 
     return reply;
 }
 
-static int serve_client(int c, const char *fence, unsigned long *counter) {
-    FILE *in = fdopen(dup(c), "r");
-    if (!in) return -1;
+/* first_line writes path's first line (or "-") and a newline to out. */
+static void first_line(const char *path, char *out, size_t n) {
+    char buf[200] = "-";
+    FILE *f = fopen(path, "r");
+    if (f) {
+        if (!fgets(buf, sizeof buf, f)) snprintf(buf, sizeof buf, "-");
+        fclose(f);
+    }
+    buf[strcspn(buf, "\r\n")] = 0;
+    snprintf(out, n, "%s\n", buf);
+}
+
+/* errname writes an errno's name (the ones the probes below tell apart)
+ * or "errno N", and a newline. */
+static void errname(int e, char *out, size_t n) {
+    switch (e) {
+    case EROFS: snprintf(out, n, "EROFS\n"); break;
+    case EACCES: snprintf(out, n, "EACCES\n"); break;
+    case EPERM: snprintf(out, n, "EPERM\n"); break;
+    case ENOENT: snprintf(out, n, "ENOENT\n"); break;
+    case ENOSPC: snprintf(out, n, "ENOSPC\n"); break;
+    case ECONNREFUSED: snprintf(out, n, "ECONNREFUSED\n"); break;
+    case ENETUNREACH: snprintf(out, n, "ENETUNREACH\n"); break;
+    case EHOSTUNREACH: snprintf(out, n, "EHOSTUNREACH\n"); break;
+    case ETIMEDOUT: snprintf(out, n, "ETIMEDOUT\n"); break;
+    case EINVAL: snprintf(out, n, "EINVAL\n"); break;
+    default: snprintf(out, n, "errno %d\n", e); break;
+    }
+}
+
+/* wopen_errno writes what open(path, O_WRONLY) answers: the errno's name,
+ * or "ok" when the open succeeds (the descriptor is closed at once). It
+ * never writes a byte, so it is safe to point at a sysctl or a cgroup
+ * control: the open alone tells whether the mount is read-only. */
+static void wopen_errno(const char *path, char *out, size_t n) {
+    int fd = open(path, O_WRONLY | O_CLOEXEC | O_NOCTTY);
+    if (fd >= 0) { close(fd); snprintf(out, n, "ok\n"); return; }
+    errname(errno, out, n);
+}
+
+/* connect_errno writes what a TCP connect to "a.b.c.d:port" answers
+ * within two seconds: "ok" (the peer accepted, the socket is closed at
+ * once), or the errno's name. The one way a fiber can show whether a
+ * host listener is reachable from its network namespace. */
+static void connect_errno(const char *addr, char *out, size_t n) {
+    char host[64]; unsigned port;
+    if (sscanf(addr, "%63[^:]:%u", host, &port) != 2) { errname(EINVAL, out, n); return; }
+    struct sockaddr_in sa = { .sin_family = AF_INET, .sin_port = htons((uint16_t)port) };
+    if (inet_pton(AF_INET, host, &sa.sin_addr) != 1) { errname(EINVAL, out, n); return; }
+    int s = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+    if (s < 0) { errname(errno, out, n); return; }
+    int rc = connect(s, (struct sockaddr *)&sa, sizeof sa);
+    if (rc < 0 && errno == EINPROGRESS) {
+        struct pollfd p = { .fd = s, .events = POLLOUT };
+        if (poll(&p, 1, 2000) <= 0) { close(s); errname(ETIMEDOUT, out, n); return; }
+        int err = 0; socklen_t el = sizeof err;
+        getsockopt(s, SOL_SOCKET, SO_ERROR, &err, &el);
+        rc = err ? -1 : 0;
+        errno = err;
+    }
+    int saved = errno;
+    close(s);
+    if (rc == 0) snprintf(out, n, "ok\n"); else errname(saved, out, n);
+}
+
+/* unshare_errno writes what unshare(CLONE_NEWUSER) answers in a child
+ * process, so this fiber's own namespaces stay as they are. */
+static void unshare_errno(char *out, size_t n) {
+    pid_t pid = fork();
+    if (pid < 0) { errname(errno, out, n); return; }
+    if (pid == 0) _exit(unshare(CLONE_NEWUSER) == 0 ? 0 : (errno & 0xff));
+    int st = 0;
+    if (waitpid(pid, &st, 0) < 0 || !WIFEXITED(st)) { errname(EIO, out, n); return; }
+    if (WEXITSTATUS(st) == 0) snprintf(out, n, "ok\n"); else errname(WEXITSTATUS(st), out, n);
+}
+
+/* mount_errno writes what mounting a fresh instance of fstype at a
+ * scratch directory under /tmp answers. A mount that succeeds is undone
+ * at once. The probe for a filesystem a fiber must not be able to mount. */
+static void mount_errno(const char *fstype, char *out, size_t n) {
+    char dir[] = "/tmp/.probe-XXXXXX";
+    if (!mkdtemp(dir)) { errname(errno, out, n); return; }
+    int rc = mount(fstype, dir, fstype, 0, NULL);
+    int saved = errno;
+    if (rc == 0) umount2(dir, MNT_DETACH);
+    rmdir(dir);
+    if (rc == 0) snprintf(out, n, "ok\n"); else errname(saved, out, n);
+}
+
+/* mkdir_errno writes what mkdir(path) answers, removing a directory it
+ * managed to make. */
+static void mkdir_errno(const char *path, char *out, size_t n) {
+    if (mkdir(path, 0755) == 0) { rmdir(path); snprintf(out, n, "ok\n"); return; }
+    errname(errno, out, n);
+}
+
+/* stat_kind writes what stat(path) finds, by file type, or the errno's
+ * name when it fails. It opens nothing and changes nothing. */
+static void stat_kind(const char *path, char *out, size_t n) {
+    struct stat st;
+    if (stat(path, &st) == 0) {
+        const char *kind = S_ISDIR(st.st_mode) ? "dir" : S_ISREG(st.st_mode) ? "file" : S_ISSOCK(st.st_mode) ? "sock" : "other";
+        snprintf(out, n, "%s\n", kind);
+        return;
+    }
+    switch (errno) {
+    case ENOENT: snprintf(out, n, "ENOENT\n"); break;
+    case EACCES: snprintf(out, n, "EACCES\n"); break;
+    default: snprintf(out, n, "errno %d\n", errno); break;
+    }
+}
+
+/* status_field writes the value of key in /proc/self/status (or "-"). */
+static void status_field(const char *key, char *out, size_t n) {
+    snprintf(out, n, "-\n");
+    FILE *f = fopen("/proc/self/status", "r");
+    if (!f) return;
     char line[256];
-    while (fgets(line, sizeof line, in)) {
-        line[strcspn(line, "\r\n")] = 0;
+    size_t kl = strlen(key);
+    while (fgets(line, sizeof line, f)) {
+        if (strncmp(line, key, kl) != 0 || line[kl] != ':') continue;
+        const char *v = line + kl + 1;
+        while (*v == ' ' || *v == '\t') v++;
+        snprintf(out, n, "%s", v);
+        break;
+    }
+    fclose(f);
+}
+
+/* ---- one client connection, plaintext or TLS ------------------------- */
+
+typedef struct {
+    int fd;
+#ifdef FZ_TLS
+    SSL *ssl;
+#endif
+    char buf[512];
+    size_t off, have;
+} conn_t;
+
+static ssize_t conn_read(conn_t *c, void *p, size_t n) {
+#ifdef FZ_TLS
+    if (c->ssl) {
+        int r = SSL_read(c->ssl, p, n > 65536 ? 65536 : (int)n);
+        return r > 0 ? r : 0;
+    }
+#endif
+    return read(c->fd, p, n);
+}
+
+static int conn_write(conn_t *c, const void *p, size_t n) {
+#ifdef FZ_TLS
+    if (c->ssl) return n == 0 || SSL_write(c->ssl, p, (int)n) > 0 ? 0 : -1;
+#endif
+    return write(c->fd, p, n) == (ssize_t)n ? 0 : -1;
+}
+
+/* conn_line reads one line without its newline; 0 at end of stream. A
+ * line longer than n is cut to n-1 bytes. */
+static int conn_line(conn_t *c, char *line, size_t n) {
+    size_t m = 0;
+    for (;;) {
+        if (c->off == c->have) {
+            ssize_t r = conn_read(c, c->buf, sizeof c->buf);
+            if (r <= 0) { line[m] = 0; return m > 0; }
+            c->off = 0; c->have = (size_t)r;
+        }
+        char ch = c->buf[c->off++];
+        if (ch == '\n') break;
+        if (m < n - 1) line[m++] = ch;
+    }
+    line[m] = 0;
+    return 1;
+}
+
+static void conn_close(conn_t *c) {
+#ifdef FZ_TLS
+    if (c->ssl) { SSL_shutdown(c->ssl); SSL_free(c->ssl); }
+#endif
+    close(c->fd);
+}
+
+#ifdef FZ_TLS
+/* The handoff fiber's TLS server, loaded after the fork from the identity
+ * the agent sent down the fiber's channel, so the key never sits in the
+ * zygote's memory or in a file another grant's fibers could read. */
+static SSL_CTX *tls_ctx;
+static const char *tls_caller;
+
+/* The caller's certificate is self-signed; what makes it trusted is the
+ * pin checked after the handshake, so chain verification accepts it. */
+static int tls_any_chain(int ok, X509_STORE_CTX *x) { (void)ok; (void)x; return 1; }
+
+/* pem_cert and pem_key parse one PEM block from memory. */
+static X509 *pem_cert(const char *pem) {
+    BIO *b = BIO_new_mem_buf(pem, -1);
+    if (!b) return NULL;
+    X509 *x = PEM_read_bio_X509(b, NULL, NULL, NULL);
+    BIO_free(b);
+    return x;
+}
+
+static EVP_PKEY *pem_key(const char *pem) {
+    BIO *b = BIO_new_mem_buf(pem, -1);
+    if (!b) return NULL;
+    EVP_PKEY *k = PEM_read_bio_PrivateKey(b, NULL, NULL, NULL);
+    BIO_free(b);
+    return k;
+}
+
+static const char *tls_load(void) {
+    const fz_identity_t *id = fz_handoff_identity();
+    if (!id) return "no handoff identity";
+    if (!id->caller[0]) return "identity names no caller";
+    tls_caller = id->caller;
+    SSL_CTX *ctx = SSL_CTX_new(TLS_server_method());
+    if (!ctx) return "SSL_CTX_new failed";
+    SSL_CTX_set_min_proto_version(ctx, TLS1_3_VERSION);
+    SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT, tls_any_chain);
+    /* No resumption: every connection presents the caller's certificate. */
+    SSL_CTX_set_session_cache_mode(ctx, SSL_SESS_CACHE_OFF);
+    SSL_CTX_set_options(ctx, SSL_OP_NO_TICKET);
+    SSL_CTX_set_num_tickets(ctx, 0);
+    X509 *cert = pem_cert(id->cert_pem);
+    EVP_PKEY *key = pem_key(id->key_pem);
+    int ok = cert && key &&
+             SSL_CTX_use_certificate(ctx, cert) == 1 &&
+             SSL_CTX_use_PrivateKey(ctx, key) == 1 &&
+             SSL_CTX_check_private_key(ctx) == 1;
+    if (cert) X509_free(cert);
+    if (key) EVP_PKEY_free(key);
+    if (!ok) {
+        ERR_print_errors_fp(stderr);
+        SSL_CTX_free(ctx);
+        return "cannot load the grant's certificate and key";
+    }
+    tls_ctx = ctx;
+    return NULL;
+}
+
+/* tls_caller_ok: the peer's certificate is the grant's caller (RFC 8705
+ * x5t#S256, the base64url SHA-256 of its DER). */
+static int tls_caller_ok(SSL *s) {
+    X509 *peer = SSL_get1_peer_certificate(s);
+    if (!peer) return 0;
+    unsigned char md[EVP_MAX_MD_SIZE];
+    unsigned int mdn = 0;
+    int ok = X509_digest(peer, EVP_sha256(), md, &mdn) == 1;
+    X509_free(peer);
+    if (!ok) return 0;
+    char b64[4 * ((EVP_MAX_MD_SIZE + 2) / 3) + 1];
+    int n = EVP_EncodeBlock((unsigned char *)b64, md, (int)mdn);
+    while (n > 0 && b64[n - 1] == '=') n--;
+    b64[n] = 0;
+    for (int i = 0; i < n; i++) { if (b64[i] == '+') b64[i] = '-'; else if (b64[i] == '/') b64[i] = '_'; }
+    return strcmp(b64, tls_caller) == 0;
+}
+
+/* tls_start runs the handshake on c and checks the caller. Forked fibers
+ * and fibers restored from one checkpoint start with the same DRBG
+ * state, so each handshake first mixes in fresh kernel entropy. A caller
+ * that stalls the handshake is dropped after 5 s. */
+static int tls_start(conn_t *c) {
+    unsigned char seed[32];
+    if (getrandom(seed, sizeof seed, 0) != (ssize_t)sizeof seed) return -1;
+    EVP_RAND_CTX *drbg[2] = { RAND_get0_public(NULL), RAND_get0_private(NULL) };
+    for (int i = 0; i < 2; i++)
+        if (!drbg[i] || EVP_RAND_reseed(drbg[i], 0, NULL, 0, seed, sizeof seed) != 1) return -1;
+    struct timeval tv = { .tv_sec = 5 }, none = { 0 };
+    setsockopt(c->fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+    setsockopt(c->fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
+    SSL *s = SSL_new(tls_ctx);
+    if (!s) return -1;
+    if (SSL_set_fd(s, c->fd) != 1 || SSL_accept(s) != 1 || !tls_caller_ok(s)) { SSL_free(s); return -1; }
+    setsockopt(c->fd, SOL_SOCKET, SO_RCVTIMEO, &none, sizeof none);
+    setsockopt(c->fd, SOL_SOCKET, SO_SNDTIMEO, &none, sizeof none);
+    c->ssl = s;
+    return 0;
+}
+#endif
+
+static int serve_client(conn_t *c, const char *fence, unsigned long *counter) {
+    char line[256];
+    while (conn_line(c, line, sizeof line)) {
+        line[strcspn(line, "\r")] = 0;
         char out[256];
         if (strcmp(line, "ping") == 0) snprintf(out, sizeof out, "pong\n");
         else if (strncmp(line, "dirty ", 6) == 0) { size_t n = dirty((size_t)strtoull(line + 6, NULL, 10)); snprintf(out, sizeof out, "ok %zu\n", n); }
@@ -254,6 +579,7 @@ static int serve_client(int c, const char *fence, unsigned long *counter) {
         else if (strcmp(line, "get") == 0) snprintf(out, sizeof out, "%lu\n", *counter);
         else if (strcmp(line, "fence") == 0) snprintf(out, sizeof out, "%s\n", fence);
         else if (strcmp(line, "pid") == 0) snprintf(out, sizeof out, "%d\n", (int)getpid());
+        else if (strcmp(line, "random") == 0) snprintf(out, sizeof out, "%ld\n", random());
         else if (strcmp(line, "rss") == 0) {
             /* resident bytes as this process's kernel sees them */
             long size = 0, pages = 0; FILE *sm = fopen("/proc/self/statm", "r");
@@ -261,13 +587,20 @@ static int serve_client(int c, const char *fence, unsigned long *counter) {
             snprintf(out, sizeof out, "%ld\n", pages * 4096L);
         }
         else if (strncmp(line, "getenv ", 7) == 0) { const char *v = getenv(line + 7); snprintf(out, sizeof out, "%s\n", v ? v : "-"); }
+        else if (strncmp(line, "status ", 7) == 0) status_field(line + 7, out, sizeof out);
+        else if (strncmp(line, "read ", 5) == 0) first_line(line + 5, out, sizeof out);
+        else if (strncmp(line, "wopen ", 6) == 0) wopen_errno(line + 6, out, sizeof out);
+        else if (strncmp(line, "stat ", 5) == 0) stat_kind(line + 5, out, sizeof out);
+        else if (strncmp(line, "connect ", 8) == 0) connect_errno(line + 8, out, sizeof out);
+        else if (strcmp(line, "unshare user") == 0) unshare_errno(out, sizeof out);
+        else if (strncmp(line, "mount ", 6) == 0) mount_errno(line + 6, out, sizeof out);
+        else if (strncmp(line, "mkdir ", 6) == 0) mkdir_errno(line + 6, out, sizeof out);
         else if (strncmp(line, "reserve ", 8) == 0) { char rp[128]; snprintf(out, sizeof out, "%s\n", device_reserve(strtoull(line + 8, NULL, 10), rp, sizeof rp)); }
         else if (strcmp(line, "devfree") == 0) { char rp[128]; snprintf(out, sizeof out, "%s\n", device_reserve(0, rp, sizeof rp)); }
         else if (strcmp(line, "quit") == 0) break;
         else snprintf(out, sizeof out, "err unknown command\n");
-        if (write(c, out, strlen(out)) < 0) break;
+        if (conn_write(c, out, strlen(out)) < 0) break;
     }
-    fclose(in);
     return 0;
 }
 
@@ -275,19 +608,19 @@ static int serve_client(int c, const char *fence, unsigned long *counter) {
  * the same state the line protocol serves. */
 static int http_mode;
 
-static void http_reply(int c, int status, const char *reason, const char *body) {
+static void http_reply(conn_t *c, int status, const char *reason, const char *body) {
     char head[256];
     int n = snprintf(head, sizeof head, "HTTP/1.1 %d %s\r\nContent-Type: text/plain\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n",
                      status, reason, strlen(body));
-    if (write(c, head, (size_t)n) < 0) return;
-    (void)!write(c, body, strlen(body));
+    if (conn_write(c, head, (size_t)n) < 0) return;
+    (void)conn_write(c, body, strlen(body));
 }
 
-static int serve_http(int c, const char *fence, unsigned long *counter) {
+static int serve_http(conn_t *c, const char *fence, unsigned long *counter) {
     char req[4096]; size_t n = 0;
     /* Read the head (up to the blank line); the body, if any, is ignored. */
     while (n < sizeof req - 1) {
-        ssize_t r = read(c, req + n, sizeof req - 1 - n);
+        ssize_t r = conn_read(c, req + n, sizeof req - 1 - n);
         if (r <= 0) break;
         n += (size_t)r; req[n] = 0;
         if (strstr(req, "\r\n\r\n") || strstr(req, "\n\n")) break;
@@ -357,14 +690,34 @@ static int listen_endpoint(const char *ep) {
 static int on_fiber(const fz_fiber_t *f) {
     cur_endpoint = f->endpoint;
     cur_fence = f->fence;
-    int s = listen_endpoint(f->endpoint);
-    if (s < 0) {
+    int handoff = getenv("FIBERD_HANDOFF_FD") != NULL;
+    if (handoff) {
+#ifdef FZ_TLS
+        const char *why = tls_load();
+#else
+        const char *why = "built without TLS (-DFZ_TLS)";
+#endif
+        if (why) {
+            fprintf(stderr, "refzygote %s: handoff: %s\n", f->fence, why);
+            return 6;
+        }
+    }
+    int s = handoff ? -1 : listen_endpoint(f->endpoint);
+    if (!handoff && s < 0) {
         fprintf(stderr, "refzygote %s: listen %s: %s\n", f->fence, f->endpoint, strerror(errno));
         return 4;
     }
     /* "ready_delay_ms" lets tests make a fiber miss its deadline. */
     unsigned long long delay = payload_num(f->payload, f->payload_len, "\"ready_delay_ms\"");
     if (delay) usleep((useconds_t)(delay * 1000));
+    /* "ready_misuse" is a buggy workload's treatment of fd 3, for tests
+     * of the zygote: it must not take the zygote down with the fiber. */
+    switch (payload_num(f->payload, f->payload_len, "\"ready_misuse\"")) {
+    case 1: (void)!write(3, "x", 1); break;
+    case 2: close(3); break;
+    case 3: if (fz_report("DEVICE %s 1 0", f->fence) == 0) return 7; break;
+    default: break;
+    }
     fz_fiber_ready();
 
     /* Birth payload: grow the working set as instructed. Over the grant's
@@ -378,11 +731,15 @@ static int on_fiber(const fz_fiber_t *f) {
 
     unsigned long counter = 0;
     for (;;) {
-        int c = accept4(s, NULL, NULL, SOCK_CLOEXEC);
-        if (c < 0) { if (errno == EINTR) continue; return 5; }
-        if (http_mode) serve_http(c, f->fence, &counter);
-        else serve_client(c, f->fence, &counter);
-        close(c);
+        int fd = handoff ? fz_accept() : accept4(s, NULL, NULL, SOCK_CLOEXEC);
+        if (fd < 0) { if (errno == EINTR) continue; return 5; }
+        conn_t c = { .fd = fd };
+#ifdef FZ_TLS
+        if (handoff && tls_start(&c) < 0) { close(fd); continue; }
+#endif
+        if (http_mode) serve_http(&c, f->fence, &counter);
+        else serve_client(&c, f->fence, &counter);
+        conn_close(&c);
     }
 }
 
@@ -461,8 +818,9 @@ static int gvisor_serve_once(const char *fence, const char *ep, const unsigned c
         if (r <= 0) continue;
         int c = accept4(s, NULL, NULL, SOCK_CLOEXEC);
         if (c < 0) continue;
-        serve_client(c, fence, counter);
-        close(c);
+        conn_t cc = { .fd = c };
+        serve_client(&cc, fence, counter);
+        conn_close(&cc);
     }
     close(s);
     unlink(ep);
@@ -548,6 +906,10 @@ int main(int argc, char **argv) {
     }
     heavy_init(heap_mb);
     if (gvisor) return gvisor_main();
+#ifdef FZ_TLS
+    /* Library setup is paid once here and shared by every fiber. */
+    OPENSSL_init_ssl(OPENSSL_INIT_LOAD_SSL_STRINGS | OPENSSL_INIT_LOAD_CRYPTO_STRINGS, NULL);
+#endif
     if (device_mb) engine_start(device_mb); /* the engine thread reports once fz_serve is up */
     int rc = fz_serve(ctl_fd, on_fiber);
     if (rc < 0) { perror("refzygote: fz_serve"); return 1; }
