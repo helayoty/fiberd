@@ -1,20 +1,28 @@
 //go:build linux
 
 // Package runc is the fork backend's zygote inside an OCI container. It
-// is the proc backend with a launcher: `runc run` starts the zygote as
+// is the proc backend with a launcher. `runc run` starts the zygote as
 // the container's init with the control socket preserved as fd 3, the
 // grant's run directory bind-mounted at /host and the zygote's cgroup as
-// the container's. Everything else is the proc backend: fibers are
+// the container's. Everything else is the proc backend. Fibers are
 // forked by the zygote into their leaves (the container shares the
 // host's cgroup namespace, so clone3 into a leaf works as it does for
 // plain processes), checkpointed with criu from outside as trees living
-// in the container's mount namespace (the root filesystem and /host are
-// external mounts), and restored with the same root. Tier
-// FIBER_CHECKPOINT, deltas over the zygote's self-checkpoint.
+// in the container's mount namespace (the root filesystem, /host and
+// runc's device binds are external mounts), and restored with the same
+// root. Tier FIBER_CHECKPOINT, deltas over the zygote's self-checkpoint.
 //
 // What the container adds over proc is a root filesystem of its own and
-// pid/mount/ipc/uts namespaces around the zygote and its fibers: the
-// template ships as a rootfs, and a fiber cannot see the home.
+// user, pid, mount, network, ipc and uts namespaces around the zygote
+// and its fibers. The user namespace maps the container's ids to a range
+// of host ids derived from the grant uid (see IDPool), so the zygote and
+// every fiber are an unprivileged host uid. The kernel then refuses them
+// the host's sysctls, sysfs knobs and cgroup limits by ownership, and the
+// read-only mounts are a second line. The root filesystem is a per-grant
+// copy of the configured one, chowned to the range. The network
+// namespace holds the loopback alone, so a fiber reaches neither the
+// network nor the host's loopback, and fibers serve unix sockets or
+// handed-off connections only.
 package runc
 
 import (
@@ -22,29 +30,42 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"io/fs"
+	"log"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
+	"time"
 
 	"github.com/helayoty/fiberd/pkg/artifact"
 	"github.com/helayoty/fiberd/pkg/backend"
 	"github.com/helayoty/fiberd/pkg/backend/proc"
+	"github.com/helayoty/fiberd/pkg/sys/netns"
 )
 
 // Options configure the runc backend.
 type Options struct {
 	// Runc names the runc binary (default "runc").
 	Runc string
-	// Rootfs is the directory every container uses as its root
-	// filesystem; template commands are paths inside it. Required.
+	// Rootfs is the directory every grant's root filesystem is copied
+	// from; template commands are paths inside it. Required.
 	Rootfs string
-	// StateDir holds runc's container state and the bundles (default
-	// /var/lib/fiberd/runc).
+	// StateDir holds runc's container state, the bundles and the
+	// per-grant root filesystem copies (default /var/lib/fiberd/runc).
 	StateDir string
 	// CRIU names the criu binary (default "criu").
 	CRIU string
+	// Pool is the host id space grants' user namespaces map into
+	// (default DefaultPool).
+	Pool IDPool
+	// SubIDFiles are the host's subordinate id files the pool must not
+	// overlap (default DefaultSubIDFiles). For tests.
+	SubIDFiles []string
 }
 
 // Backend is the proc backend with the runc launcher.
@@ -54,26 +75,116 @@ type Backend struct {
 }
 
 type launcher struct {
-	opt Options
+	opt    Options
+	claims *claims
+
+	// fsMu serialises taking and giving back one grant's hold on its id
+	// range together with making and removing its root filesystem copy.
+	// The copy lives exactly as long as the grant holds the range here.
+	fsMu    sync.Mutex
+	fsLocks map[string]*sync.Mutex
+}
+
+// fsLock is the grant's lock for its hold and root filesystem copy.
+func (l *launcher) fsLock(spec backend.WarmSpec) *sync.Mutex {
+	l.fsMu.Lock()
+	defer l.fsMu.Unlock()
+	if l.fsLocks == nil {
+		l.fsLocks = map[string]*sync.Mutex{}
+	}
+	m, ok := l.fsLocks[l.cid(spec)]
+	if !ok {
+		m = &sync.Mutex{}
+		l.fsLocks[l.cid(spec)] = m
+	}
+	return m
 }
 
 // New opens the backend. Without runc or the rootfs it opens as a
-// backend that cannot warm anything.
-func New(o Options) backend.Backend {
+// backend that cannot warm anything. It refuses a pool that is not a
+// usable id space or that overlaps a range the host has handed out in
+// /etc/subuid or /etc/subgid.
+//
+// Nothing of a previous agent holds a range when the backend opens: the
+// agent kills every fiber of a prior epoch at reconcile, and a stale
+// container is ended here and again when its grant is warmed. So the
+// claims start empty, and every root filesystem copy and bundle under
+// the state directory is a leftover and is swept.
+func New(o Options) (backend.Backend, error) {
 	if o.Runc == "" {
 		o.Runc = "runc"
 	}
 	if o.StateDir == "" {
 		o.StateDir = "/var/lib/fiberd/runc"
 	}
-	l := &launcher{opt: o}
-	return &Backend{Backend: proc.NewBackend(proc.Options{CRIU: o.CRIU, Launcher: l}), l: l}
+	if o.Pool == (IDPool{}) {
+		o.Pool, _ = ParsePool(DefaultPool)
+	}
+	if err := o.Pool.Validate(); err != nil {
+		return nil, fmt.Errorf("runc: userns pool: %w", err)
+	}
+	if err := o.Pool.CheckSubIDs(o.SubIDFiles...); err != nil {
+		return nil, fmt.Errorf("runc: %w", err)
+	}
+	// The mapped root walks through the state directory to its root
+	// filesystem copy, so the directory is made here, searchable, before
+	// runc gets to make it as its own private 0700 state root.
+	if err := os.MkdirAll(o.StateDir, 0o755); err != nil {
+		return nil, fmt.Errorf("runc: state directory: %w", err)
+	}
+	l := &launcher{opt: o, claims: newClaims(o.Pool)}
+	l.sweep()
+	return &Backend{Backend: proc.NewBackend(proc.Options{CRIU: o.CRIU, Launcher: l}), l: l}, nil
+}
+
+// sweep ends the containers a previous life left in runc's state and
+// removes every bundle and root filesystem copy. A copy whose grant is
+// warmed or resumed again is made afresh.
+func (l *launcher) sweep() {
+	ctx := context.Background()
+	if _, err := os.Stat(l.root()); err == nil {
+		// Only with a state root from before. Asking runc about one that
+		// does not exist would have it make the directory.
+		if out, err := l.runc(ctx, "list", "-q"); err == nil {
+			for _, id := range strings.Fields(out) {
+				_, _ = l.runc(ctx, "kill", id, "KILL")
+				_, _ = l.runc(ctx, "delete", "-f", id)
+			}
+		}
+	}
+	for _, sub := range []string{"rootfs", "bundles"} {
+		ents, err := os.ReadDir(filepath.Join(l.opt.StateDir, sub))
+		if err != nil {
+			continue
+		}
+		for _, e := range ents {
+			p := filepath.Join(l.opt.StateDir, sub, e.Name())
+			if err := os.RemoveAll(p); err != nil {
+				log.Printf("runc: sweep %s: %v", p, err)
+			} else {
+				log.Printf("runc: swept leftover %s", p)
+			}
+		}
+	}
 }
 
 // Platform: the checkpoints depend on the host kernel like proc's, and
 // on the rootfs the zygote was built against rather than the host libc.
 func (b *Backend) Platform() artifact.Platform {
 	return artifact.Platform{Libc: "rootfs-" + filepath.Base(b.l.opt.Rootfs)}
+}
+
+// EndpointSchemes: the container's network namespace has no route out,
+// so a tcp endpoint could never be dialled. Fibers serve unix sockets
+// under /host (and handed-off connections, see proc.Backend.Handoff).
+func (b *Backend) EndpointSchemes() []string { return []string{"unix"} }
+
+// MappedRoot implements backend.IDMapper.
+func (b *Backend) MappedRoot(grantUID string) (uint32, error) {
+	if err := b.l.claims.check(grantUID); err != nil {
+		return 0, err
+	}
+	return b.l.opt.Pool.Range(grantUID).Start, nil
 }
 
 func (l *launcher) Name() string { return "runc" }
@@ -88,6 +199,11 @@ func (l *launcher) bundle(spec backend.WarmSpec) string {
 	return filepath.Join(l.opt.StateDir, "bundles", l.cid(spec))
 }
 
+// rootfs is where the grant's copy of the root filesystem lives.
+func (l *launcher) rootfs(spec backend.WarmSpec) string {
+	return filepath.Join(l.opt.StateDir, "rootfs", l.cid(spec))
+}
+
 func (l *launcher) runc(ctx context.Context, args ...string) (string, error) {
 	out, err := exec.CommandContext(ctx, l.opt.Runc, append([]string{"--root", l.root()}, args...)...).CombinedOutput()
 	if err != nil {
@@ -97,7 +213,7 @@ func (l *launcher) runc(ctx context.Context, args ...string) (string, error) {
 }
 
 // cgroupPath resolves an open cgroup directory fd to the path runc's
-// cgroupsPath wants: relative to the cgroup v2 mount.
+// cgroupsPath wants, relative to the cgroup v2 mount.
 func cgroupPath(fd int) (string, error) {
 	p, err := os.Readlink(fmt.Sprintf("/proc/self/fd/%d", fd))
 	if err != nil {
@@ -114,10 +230,90 @@ func cgroupPath(fd int) (string, error) {
 	return rel, nil
 }
 
+// deviceBinds are the device nodes runc bind-mounts into a container
+// with a user namespace, where mknod is not allowed. Each is a mount from
+// outside the container, named for criu on both sides of a checkpoint.
+var deviceBinds = []string{"null", "zero", "full", "random", "urandom", "tty"}
+
+// containerCaps is what the zygote holds inside its user namespace. They
+// are capabilities over the namespace's own resources only. SYS_ADMIN
+// for clone3 into a pid namespace and the mounts, SYS_RESOURCE for the
+// zygote to cap nested user namespaces at init (it drops it before
+// serving, see zygote/libfiberzygote.c), and the rest as runc's defaults
+// for an init that forks and signals children.
+var containerCaps = []string{"CAP_SYS_ADMIN", "CAP_KILL", "CAP_SETPCAP", "CAP_SETUID", "CAP_SETGID", "CAP_SYS_PTRACE",
+	"CAP_DAC_OVERRIDE", "CAP_CHOWN", "CAP_FOWNER", "CAP_SYS_RESOURCE"}
+
+// nestedUsernsEnv tells libfiberzygote to set user.max_user_namespaces
+// to 0 inside its user namespace before it serves, so a fiber cannot
+// make a namespace of its own and be capable again. rebindEnv tells it
+// to take its control socket from a REBIND message on the bootstrap one
+// first (see Channel).
+const (
+	nestedUsernsEnv = "FIBERD_USERNS_NESTED=deny"
+	rebindEnv       = "FIBERD_CTL_REBIND=1"
+)
+
+// hold takes the grant's id range for one user, its warm zygote (warm)
+// or one fiber about to be restored here, and makes sure the grant's
+// root filesystem copy is there. The hold is given back by drop, and
+// the copy goes with the last hold. Taking the hold and making the copy
+// happen under one lock, so a drop that finds the grant free never
+// removes a copy a new hold has just found in place.
+func (l *launcher) hold(spec backend.WarmSpec, warm bool) (string, error) {
+	mu := l.fsLock(spec)
+	mu.Lock()
+	defer mu.Unlock()
+	if err := l.claims.acquire(spec.GrantUID, warm); err != nil {
+		return "", err
+	}
+	rootfs, err := l.ensureRootfs(spec, l.opt.Pool.Range(spec.GrantUID))
+	if err != nil {
+		if l.claims.release(spec.GrantUID, warm) {
+			_ = os.RemoveAll(l.rootfs(spec))
+		}
+		return "", err
+	}
+	return rootfs, nil
+}
+
+// drop gives one user's hold on the grant's id range back and removes
+// the root filesystem copy with the last one.
+func (l *launcher) drop(spec backend.WarmSpec, warm bool) {
+	mu := l.fsLock(spec)
+	mu.Lock()
+	defer mu.Unlock()
+	if l.claims.release(spec.GrantUID, warm) {
+		_ = os.RemoveAll(l.rootfs(spec))
+	}
+}
+
 // Command writes the bundle and builds `runc run` with fd 3 preserved.
-func (l *launcher) Command(spec backend.WarmSpec, argv []string, ctl, logf *os.File) (*exec.Cmd, error) {
+// It holds the grant's id range as the zygote until Release.
+func (l *launcher) Command(spec backend.WarmSpec, argv []string, ctl, logf *os.File) (cmd *exec.Cmd, err error) {
 	if st, err := os.Stat(l.opt.Rootfs); err != nil || !st.IsDir() {
 		return nil, fmt.Errorf("runc: rootfs %q unusable", l.opt.Rootfs)
+	}
+	rootfs, err := l.hold(spec, true)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if err != nil {
+			l.drop(spec, true)
+		}
+	}()
+	rng := l.opt.Pool.Range(spec.GrantUID)
+	if err := prepareWorkDir(spec.WorkDir, rng); err != nil {
+		return nil, err
+	}
+	// The host opened the log as root. The zygote reopens it from inside
+	// as the mapped root, which needs group write.
+	if err := logf.Chmod(0o664); err != nil {
+		return nil, fmt.Errorf("runc: chmod zygote log: %w", err)
+	}
+	if err := logf.Chown(-1, int(rng.Start)); err != nil {
+		return nil, fmt.Errorf("runc: chown zygote log: %w", err)
 	}
 	cgPath := ""
 	if spec.CgroupFD >= 0 {
@@ -131,6 +327,7 @@ func (l *launcher) Command(spec backend.WarmSpec, argv []string, ctl, logf *os.F
 	if err := os.MkdirAll(b, 0o755); err != nil {
 		return nil, err
 	}
+	idMap := []map[string]uint32{{"containerID": 0, "hostID": rng.Start, "size": rng.Count}}
 	cfg := map[string]any{
 		"ociVersion": "1.0.2",
 		"process": map[string]any{
@@ -138,28 +335,43 @@ func (l *launcher) Command(spec backend.WarmSpec, argv []string, ctl, logf *os.F
 			"user":     map[string]int{"uid": 0, "gid": 0},
 			"cwd":      "/host", // criu's parasite scratch lands on the bind mount, not the rootfs
 			"args":     append(append([]string{}, argv...), "--log", "/host/zygote.log"),
-			"env":      []string{"PATH=/usr/bin:/bin"},
-			"capabilities": map[string][]string{ // the zygote forks into cgroups and pid namespaces
-				"bounding":    {"CAP_SYS_ADMIN", "CAP_KILL", "CAP_SETPCAP", "CAP_SETUID", "CAP_SETGID", "CAP_SYS_PTRACE", "CAP_DAC_OVERRIDE", "CAP_CHOWN", "CAP_FOWNER"},
-				"effective":   {"CAP_SYS_ADMIN", "CAP_KILL", "CAP_SETPCAP", "CAP_SETUID", "CAP_SETGID", "CAP_SYS_PTRACE", "CAP_DAC_OVERRIDE", "CAP_CHOWN", "CAP_FOWNER"},
-				"permitted":   {"CAP_SYS_ADMIN", "CAP_KILL", "CAP_SETPCAP", "CAP_SETUID", "CAP_SETGID", "CAP_SYS_PTRACE", "CAP_DAC_OVERRIDE", "CAP_CHOWN", "CAP_FOWNER"},
+			"env":      []string{"PATH=/usr/bin:/bin", nestedUsernsEnv, rebindEnv},
+			"capabilities": map[string][]string{
+				"bounding":    containerCaps,
+				"effective":   containerCaps,
+				"permitted":   containerCaps,
 				"inheritable": {},
 			},
 			"noNewPrivileges": false,
 		},
-		"root":     map[string]any{"path": l.opt.Rootfs, "readonly": false},
+		"root":     map[string]any{"path": rootfs, "readonly": false},
 		"hostname": "fiber",
 		"mounts": []map[string]any{
 			{"destination": "/proc", "type": "proc", "source": "proc"},
 			{"destination": "/dev", "type": "tmpfs", "source": "tmpfs", "options": []string{"nosuid", "strictatime", "mode=755", "size=65536k"}},
+			// sysfs read-only. The grant's user namespace owns the
+			// network namespace, which is what lets it mount sysfs at
+			// all, and the kernel refuses the mapped root every knob by
+			// ownership before the mount flag is looked at. No cgroup
+			// mount. The zygote is handed each leaf as a descriptor and
+			// never needs the hierarchy by path.
+			{"destination": "/sys", "type": "sysfs", "source": "sysfs", "options": []string{"nosuid", "noexec", "nodev", "ro"}},
 			{"destination": "/host", "type": "bind", "source": spec.WorkDir, "options": []string{"rbind", "rw"}},
 		},
 		"linux": map[string]any{
-			// No cgroup namespace: the zygote's clone3 into a leaf needs
-			// to see the host's hierarchy. No network namespace: fibers
-			// serve unix sockets and there is nothing to checkpoint.
-			"namespaces":  []map[string]string{{"type": "pid"}, {"type": "mount"}, {"type": "ipc"}, {"type": "uts"}},
+			// No cgroup namespace, since the zygote's clone3 into a leaf
+			// needs to see the host's hierarchy. The network namespace is
+			// new and empty but for the loopback runc brings up.
+			"namespaces":  []map[string]string{{"type": "user"}, {"type": "pid"}, {"type": "mount"}, {"type": "network"}, {"type": "ipc"}, {"type": "uts"}},
+			"uidMappings": idMap,
+			"gidMappings": idMap,
 			"cgroupsPath": cgPath,
+			// The runc/Docker defaults, kept as the second line behind the
+			// user namespace. runc skips a path the rootfs or this kernel
+			// lacks.
+			"readonlyPaths": []string{"/proc/bus", "/proc/fs", "/proc/irq", "/proc/sys", "/proc/sysrq-trigger"},
+			"maskedPaths": []string{"/proc/kcore", "/proc/keys", "/proc/latency_stats", "/proc/timer_list", "/proc/timer_stats",
+				"/proc/sched_debug", "/proc/scsi", "/sys/firmware", "/sys/devices/virtual/powercap"},
 		},
 	}
 	data, err := json.MarshalIndent(cfg, "", "  ")
@@ -173,17 +385,292 @@ func (l *launcher) Command(spec backend.WarmSpec, argv []string, ctl, logf *os.F
 		return nil, err
 	}
 	_, _ = l.runc(context.Background(), "delete", "-f", l.cid(spec)) // a stale one from a previous life
-	cmd := exec.Command(l.opt.Runc, "--root", l.root(), "run", "--preserve-fds", "1", "--bundle", b, l.cid(spec))
+	cmd = exec.Command(l.opt.Runc, "--root", l.root(), "run", "--preserve-fds", "1", "--bundle", b, l.cid(spec))
 	cmd.ExtraFiles = []*os.File{ctl} // fd 3 in the container's init
 	devnull, err := os.OpenFile(os.DevNull, os.O_RDONLY, 0)
 	if err != nil {
 		return nil, err
 	}
-	// runc's own stdio; the zygote reopens its stdio inside (--log), so
+	// runc's own stdio. The zygote reopens its stdio inside (--log), so
 	// no descriptor of a host file survives into the container.
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = devnull, logf, logf
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	log.Printf("runc: grant %s runs as host ids %d-%d", spec.GrantUID, rng.Start, uint64(rng.Start)+uint64(rng.Count)-1)
 	return cmd, nil
+}
+
+// prepareWorkDir lets the mapped root create its sockets in the grant's
+// run directory. The directory stays root's with the grant's mapped gid
+// and group write, so the zygote can bind in it but cannot change the
+// directory's mode or owner (it does not own it, and its DAC_OVERRIDE
+// does not reach an inode owned by an id outside its namespace). The
+// agent connects to the sockets the mapped root creates through its own
+// DAC_OVERRIDE.
+func prepareWorkDir(dir string, rng IDRange) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	if err := os.Chown(dir, 0, int(rng.Start)); err != nil {
+		return fmt.Errorf("runc: chown run directory %s: %w", dir, err)
+	}
+	if err := os.Chmod(dir, 0o775); err != nil {
+		return fmt.Errorf("runc: chmod run directory %s: %w", dir, err)
+	}
+	return nil
+}
+
+// rootfsMarker, inside a copy, says what it is a copy of and for which
+// ids. A copy with a different marker is remade.
+const rootfsMarker = ".fiberd-rootfs.json"
+
+type rootfsRecord struct {
+	Source string `json:"source"`
+	Start  uint32 `json:"start"`
+	Count  uint32 `json:"count"`
+}
+
+// mountpoints are the directories the container's mounts need in the
+// root filesystem. runc makes them in the copy when it starts the
+// container, and a restore with --root needs them there before any
+// container has run on this home.
+var mountpoints = []string{"proc", "dev", "sys", "host", "tmp"}
+
+// ensureRootfs makes the grant's copy of the root filesystem, chowned
+// to its range, or keeps the one an earlier hold left when it matches.
+// The caller holds the grant's fsLock. Idmapped mounts would avoid the
+// copy and are not available on the runc 1.1 line fiberd targets.
+func (l *launcher) ensureRootfs(spec backend.WarmSpec, rng IDRange) (string, error) {
+	dst := l.rootfs(spec)
+	want := rootfsRecord{Source: l.opt.Rootfs, Start: rng.Start, Count: rng.Count}
+	if have, err := readRootfsMarker(dst); err == nil && have == want {
+		return dst, nil
+	}
+	_ = os.RemoveAll(dst)
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return "", err
+	}
+	if err := copyTree(l.opt.Rootfs, dst, rng); err != nil {
+		_ = os.RemoveAll(dst)
+		return "", fmt.Errorf("runc: copy rootfs for %s: %w", spec.GrantUID, err)
+	}
+	for _, d := range mountpoints {
+		p := filepath.Join(dst, d)
+		if err := os.Mkdir(p, 0o755); err != nil && !errors.Is(err, fs.ErrExist) {
+			_ = os.RemoveAll(dst)
+			return "", err
+		}
+		if err := os.Lchown(p, int(rng.Start), int(rng.Start)); err != nil {
+			_ = os.RemoveAll(dst)
+			return "", err
+		}
+	}
+	data, err := json.Marshal(want)
+	if err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(filepath.Join(dst, rootfsMarker), data, 0o644); err != nil {
+		_ = os.RemoveAll(dst)
+		return "", err
+	}
+	return dst, nil
+}
+
+func readRootfsMarker(dir string) (rootfsRecord, error) {
+	var rec rootfsRecord
+	b, err := os.ReadFile(filepath.Join(dir, rootfsMarker))
+	if err != nil {
+		return rec, err
+	}
+	err = json.Unmarshal(b, &rec)
+	return rec, err
+}
+
+// copyTree copies src to dst, shifting every owner into rng. Directories,
+// regular files and symlinks are copied. Device nodes, fifos and sockets
+// are skipped, since runc binds the devices a container needs and the
+// rest have no place in a template root. An id past the range is left
+// as it is and reads as nobody inside the namespace. Every mode is set
+// before the owner, since changing the mode of a file another uid owns
+// would need CAP_FOWNER.
+func copyTree(src, dst string, rng IDRange) error {
+	shift := func(id uint32) int {
+		if id < rng.Count {
+			return int(rng.Start + id)
+		}
+		return int(id)
+	}
+	type owned struct {
+		rel      string
+		uid, gid int
+	}
+	var dirs []owned
+	err := filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dst, rel)
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		st, _ := info.Sys().(*syscall.Stat_t)
+		uid, gid := 0, 0
+		if st != nil {
+			uid, gid = shift(st.Uid), shift(st.Gid)
+		}
+		switch {
+		case d.IsDir():
+			// Writable while the tree is filled in. Mode and owner are set
+			// after the walk, deepest first.
+			if err := os.Mkdir(target, 0o700); err != nil && (rel != "." || !errors.Is(err, fs.ErrExist)) {
+				return err
+			}
+			dirs = append(dirs, owned{rel, uid, gid})
+			return nil
+		case info.Mode()&fs.ModeSymlink != 0:
+			link, err := os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			if err := os.Symlink(link, target); err != nil {
+				return err
+			}
+			return os.Lchown(target, uid, gid)
+		case info.Mode().IsRegular():
+			if err := copyFile(path, target, info.Mode().Perm()); err != nil {
+				return err
+			}
+			return os.Lchown(target, uid, gid)
+		default:
+			return nil
+		}
+	})
+	if err != nil {
+		return err
+	}
+	for i := len(dirs) - 1; i >= 0; i-- {
+		info, err := os.Lstat(filepath.Join(src, dirs[i].rel))
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dst, dirs[i].rel)
+		if err := os.Chmod(target, info.Mode().Perm()); err != nil {
+			return err
+		}
+		if err := os.Lchown(target, dirs[i].uid, dirs[i].gid); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func copyFile(src, dst string, perm fs.FileMode) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = in.Close() }()
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, perm)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		return err
+	}
+	if err := out.Chmod(perm); err != nil {
+		_ = out.Close()
+		return err
+	}
+	return out.Close()
+}
+
+// Channel moves the control conversation onto a pair made in the
+// container's network namespace. The bootstrap pair was made in the
+// agent's, and criu, when it checkpoints the zygote, only finds the
+// sockets of the namespaces it dumps. The zygote's end goes to it over
+// the bootstrap socket as a REBIND message, which libfiberzygote reads
+// before READY (FIBERD_CTL_REBIND), and the agent's end is returned.
+func (l *launcher) Channel(ctx context.Context, spec backend.WarmSpec, cmd *exec.Cmd, boot *net.UnixConn) (*net.UnixConn, error) {
+	pid, err := l.waitPID(ctx, spec, cmd)
+	if err != nil {
+		return nil, err
+	}
+	fds, err := netns.Socketpair(pid, syscall.SOCK_STREAM)
+	if err != nil {
+		return nil, err
+	}
+	theirs := os.NewFile(uintptr(fds[1]), "zygote-ctl-rebind")
+	defer func() { _ = theirs.Close() }()
+	if _, _, err := boot.WriteMsgUnix([]byte("REBIND\n"), syscall.UnixRights(int(theirs.Fd())), nil); err != nil {
+		_ = syscall.Close(fds[0])
+		return nil, fmt.Errorf("runc: send REBIND: %w", err)
+	}
+	ours := os.NewFile(uintptr(fds[0]), "zygote-ctl")
+	defer func() { _ = ours.Close() }()
+	conn, err := net.FileConn(ours)
+	if err != nil {
+		return nil, err
+	}
+	uc, ok := conn.(*net.UnixConn)
+	if !ok {
+		_ = conn.Close()
+		return nil, errors.New("runc: rebound control socket is not unix")
+	}
+	return uc, nil
+}
+
+// waitPID polls runc for the container's init until it is known, the
+// context ends or runc exits. Nobody waits on `runc run` until the
+// channel is up, so its exit is read from /proc, where it is a zombie.
+func (l *launcher) waitPID(ctx context.Context, spec backend.WarmSpec, cmd *exec.Cmd) (int, error) {
+	for {
+		pid, err := l.PID(ctx, spec, cmd)
+		if err == nil {
+			return pid, nil
+		}
+		if cmd.ProcessState != nil || exited(cmd.Process.Pid) {
+			return 0, fmt.Errorf("runc: exited before the container was up (see the zygote log): %w", err)
+		}
+		select {
+		case <-ctx.Done():
+			return 0, fmt.Errorf("runc: waiting for the container of %s: %w (%w)", spec.GrantUID, ctx.Err(), err)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
+// exited reports whether pid is gone or a zombie nobody has reaped yet.
+// The state is the field after the parenthesised command name in
+// /proc/<pid>/stat.
+func exited(pid int) bool {
+	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return true
+	}
+	s := string(b)
+	i := strings.LastIndexByte(s, ')')
+	if i < 0 || i+2 >= len(s) {
+		return true
+	}
+	return s[i+2] == 'Z' || s[i+2] == 'X'
+}
+
+// Socketpair makes a pair in the container's network namespace, so a
+// fiber holding one end can be checkpointed with it.
+func (l *launcher) Socketpair(_ backend.WarmSpec, pid int, typ int) ([2]int, error) {
+	return netns.Socketpair(pid, typ)
+}
+
+// Restored brings the loopback up in the restored tree's network
+// namespace. The namespace is a fresh one criu made empty (see
+// emptyNet), and the fiber had a loopback when it was parked.
+func (l *launcher) Restored(_ backend.WarmSpec, pid int) error {
+	return netns.LoopbackUp(pid)
 }
 
 // PID is the container's init as the host sees it.
@@ -201,30 +688,118 @@ func (l *launcher) PID(ctx context.Context, spec backend.WarmSpec, _ *exec.Cmd) 
 	return st.PID, nil
 }
 
+// Release ends the container, removes its bundle and gives the zygote's
+// hold on the grant's id range back. The root filesystem copy goes with
+// it unless a fiber restored on this home still runs in the range.
 func (l *launcher) Release(spec backend.WarmSpec) {
 	ctx := context.Background()
 	_, _ = l.runc(ctx, "kill", l.cid(spec), "KILL")
 	_, _ = l.runc(ctx, "delete", "-f", l.cid(spec))
 	_ = os.RemoveAll(l.bundle(spec))
+	l.drop(spec, true)
 }
+
+// RestoredGone gives a restored fiber's hold on the grant's id range
+// back, once for every RestoreExtra.
+func (l *launcher) RestoredGone(spec backend.WarmSpec) { l.drop(spec, false) }
 
 func (l *launcher) Endpoint(spec backend.WarmSpec, hostPath string) string {
 	return "/host/" + strings.TrimPrefix(hostPath, spec.WorkDir+"/")
 }
 
-// DumpExtra: the run directory is a bind mount from outside the
-// container's mount namespace.
-func (l *launcher) DumpExtra(backend.WarmSpec) []string {
-	return []string{"--external", "mnt[/host]:host"}
+// emptyNet: criu neither dumps nor restores the contents of the network
+// namespace. The container's namespace holds the loopback and the
+// tunnel devices the kernel puts in every new namespace, which criu
+// cannot dump. The restored tree gets a fresh, empty namespace of its
+// own, never the host's, and Restored brings its loopback up. criu
+// cannot restore the tree into the container's namespaces either. The
+// restored user namespace is a new one from the image, and from there
+// the container's are a sibling's, so the fiber's own seccomp filter is
+// what keeps nested user namespaces denied after a resume (see
+// zygote/libfiberzygote.c). On dump the network lock is skipped too. It
+// keeps TCP peers quiet while established connections are dumped and
+// needs iptables on the home, and a fiber's endpoints are unix sockets.
+var (
+	emptyNet = []string{"--empty-ns", "net"}
+	netExtra = append(append([]string{}, emptyNet...), "--network-lock", "skip")
+)
+
+// shareImages lets the restored tree read its own images. criu opens
+// the image directory as root, but the tasks it brings back open some
+// images themselves with the identity they are restored with, the
+// grant's mapped root. The directory and its files get the grant's
+// mapped gid with group read and nothing for others.
+func shareImages(dir string, rng IDRange) error {
+	gid := int(rng.Start)
+	if err := os.Chown(dir, -1, gid); err != nil {
+		return fmt.Errorf("runc: share images %s: %w", dir, err)
+	}
+	if err := os.Chmod(dir, 0o750); err != nil {
+		return err
+	}
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	for _, e := range ents {
+		if !e.Type().IsRegular() {
+			continue
+		}
+		p := filepath.Join(dir, e.Name())
+		if err := os.Chown(p, -1, gid); err != nil {
+			return fmt.Errorf("runc: share image %s: %w", p, err)
+		}
+		if err := os.Chmod(p, 0o640); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
-// RestoreExtra: the same root filesystem and run directory.
-func (l *launcher) RestoreExtra(spec backend.WarmSpec) []string {
-	return []string{"--root", l.opt.Rootfs, "--external", "mnt[host]:" + spec.WorkDir}
+// DumpExtra names the mounts that come from outside the container's
+// mount namespace, the run directory and runc's device binds.
+func (l *launcher) DumpExtra(backend.WarmSpec) []string {
+	extra := append([]string{"--external", "mnt[/host]:host"}, netExtra...)
+	for _, d := range deviceBinds {
+		extra = append(extra, "--external", "mnt[/dev/"+d+"]:dev-"+d)
+	}
+	return extra
+}
+
+// RestoreExtra gives the restored tree the grant's root filesystem copy
+// on this home, its run directory at /host and the host's device nodes.
+// The tree maps the grant's id range, so it takes a hold on it, which
+// refuses a restore while another grant holds the slot and keeps the
+// range and the copy for as long as the tree runs (until RestoredGone).
+// The copy is made when this home has not warmed the grant.
+func (l *launcher) RestoreExtra(spec backend.WarmSpec, dir string) (extra []string, err error) {
+	rootfs, err := l.hold(spec, false)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if err != nil {
+			l.drop(spec, false)
+		}
+	}()
+	rng := l.opt.Pool.Range(spec.GrantUID)
+	if err := prepareWorkDir(spec.WorkDir, rng); err != nil {
+		return nil, err
+	}
+	if err := shareImages(dir, rng); err != nil {
+		return nil, err
+	}
+	extra = append([]string{"--root", rootfs, "--external", "mnt[host]:" + spec.WorkDir}, emptyNet...)
+	for _, d := range deviceBinds {
+		extra = append(extra, "--external", "mnt[dev-"+d+"]:/dev/"+d)
+	}
+	return extra, nil
 }
 
 var (
-	_ backend.Backend    = (*Backend)(nil)
-	_ backend.Platformer = (*Backend)(nil)
-	_ proc.Launcher      = (*launcher)(nil)
+	_ backend.Backend         = (*Backend)(nil)
+	_ backend.Platformer      = (*Backend)(nil)
+	_ backend.EndpointSchemer = (*Backend)(nil)
+	_ backend.IDMapper        = (*Backend)(nil)
+	_ proc.Launcher           = (*launcher)(nil)
 )

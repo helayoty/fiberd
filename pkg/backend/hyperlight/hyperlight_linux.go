@@ -46,24 +46,59 @@ type Options struct {
 	// Guest is the guest binary the helper loads; template commands from
 	// -template are appended to the helper's arguments after it.
 	Guest string
-	// Facts names the platform the helper's snapshots depend on
-	// (default "hyperlight"): the hypervisor and the helper's version
-	// once the helper reports them.
-	Facts string
 }
 
 const (
 	createDeadline = 500 * time.Millisecond
 	resumeDeadline = 2 * time.Second
+	versionTimeout = 5 * time.Second
 )
 
 var ErrHelper = errors.New("hyperlight: helper error")
 
+// facts is what a helper's snapshots depend on, as the helper reports
+// it on `--version` and on READY: one token each, in this order.
+//
+//	helper      the helper and its version ("fiberd-hyperlight-helper/0.1.0")
+//	hyperlight  the hyperlight_host crate the helper was built with
+//	hypervisor  the one in use on this host (kvm, mshv)
+//	cpu         the CPU vendor string (GenuineIntel, AuthenticAMD)
+//
+// Hyperlight refuses to load a snapshot from another version,
+// hypervisor or CPU vendor, and the helper's park layout is the
+// helper's; recorded as the platform, a mismatch is refused before the
+// resume instead of failing inside it.
+type facts struct {
+	helper, hyperlight, hypervisor, cpu string
+}
+
+// parseFacts reads the four tokens after READY or from `--version`.
+func parseFacts(tokens []string) (facts, error) {
+	if len(tokens) != 4 {
+		return facts{}, fmt.Errorf("%w: want 4 facts (helper hyperlight hypervisor cpu), got %q", ErrHelper, strings.Join(tokens, " "))
+	}
+	for _, t := range tokens {
+		if t == "" {
+			return facts{}, fmt.Errorf("%w: empty fact in %q", ErrHelper, strings.Join(tokens, " "))
+		}
+	}
+	return facts{helper: tokens[0], hyperlight: tokens[1], hypervisor: tokens[2], cpu: tokens[3]}, nil
+}
+
+// platform maps the facts onto the parity fields: the Hyperlight
+// version where a kernel release goes (kernel=series relaxes it to a
+// minor series), everything else exact, where libc goes. The host keeps
+// the architecture.
+func (f facts) platform() artifact.Platform {
+	return artifact.Platform{Kernel: "hyperlight-" + f.hyperlight, Libc: f.helper + "+" + f.hypervisor + "+" + f.cpu}
+}
+
 // Backend implements backend.Backend, Platformer, DeadlineAdvisor and
 // WReporter.
 type Backend struct {
-	opt  Options
-	tier core.Tier
+	opt   Options
+	tier  core.Tier
+	facts facts // from `helper --version` at open; every READY must agree
 
 	mu     sync.Mutex
 	warms  map[string]*helper
@@ -72,13 +107,12 @@ type Backend struct {
 }
 
 type helper struct {
-	id      string
-	cmd     *exec.Cmd
-	ctl     *net.UnixConn
-	version string
-	pmu     sync.Mutex
-	pend    map[string]chan reply // fence -> reply
-	gone    chan struct{}
+	id   string
+	cmd  *exec.Cmd
+	ctl  *net.UnixConn
+	pmu  sync.Mutex
+	pend map[string]chan reply // fence -> reply
+	gone chan struct{}
 }
 
 type reply struct {
@@ -92,14 +126,12 @@ type fiber struct {
 	w      uint64
 }
 
-// New opens the backend; the tier is FIBER_SNAPSHOT when the helper and
-// guest exist.
+// New opens the backend; the tier is FIBER_SNAPSHOT when the helper
+// answers `--version` and the guest exists.
 func New(o Options) backend.Backend {
-	if o.Facts == "" {
-		o.Facts = "hyperlight"
-	}
 	b := &Backend{opt: o, warms: map[string]*helper{}, fibers: map[string]*fiber{}, exits: make(chan backend.Exit, 1024)}
-	if _, err := os.Stat(o.Helper); err != nil {
+	f, err := probeFacts(o.Helper)
+	if err != nil {
 		log.Printf("hyperlight: helper %q unusable: %v", o.Helper, err)
 		return b
 	}
@@ -109,17 +141,38 @@ func New(o Options) backend.Backend {
 			return b
 		}
 	}
+	b.facts = f
 	b.tier = core.TierSnapshot
 	return b
+}
+
+// probeFacts runs `helper --version`: the facts a snapshot made through
+// this helper depends on, known before any grant is warmed because the
+// host records them at open.
+func probeFacts(helper string) (facts, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), versionTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, helper, "--version").Output()
+	if err != nil {
+		return facts{}, fmt.Errorf("--version: %w", err)
+	}
+	return parseFacts(strings.Fields(strings.SplitN(string(out), "\n", 2)[0]))
 }
 
 func (b *Backend) Name() string    { return "hyperlight" }
 func (b *Backend) Tier() core.Tier { return b.tier }
 
-// Platform: a snapshot depends on the helper (its Hyperlight version and
-// hypervisor), not on the host kernel or libc.
+// IsolatesTenants: a fiber is a micro-VM guest behind the hypervisor.
+func (b *Backend) IsolatesTenants() bool { return true }
+
+// Platform: a snapshot depends on the helper's facts, not on the host
+// kernel or libc. A backend without a usable helper warms nothing, and
+// says so here.
 func (b *Backend) Platform() artifact.Platform {
-	return artifact.Platform{Kernel: b.opt.Facts, Libc: "n/a"}
+	if b.tier < core.TierSnapshot {
+		return artifact.Platform{Kernel: "hyperlight-unusable", Libc: "n/a"}
+	}
+	return b.facts.platform()
 }
 
 func (b *Backend) DefaultDeadlines() (time.Duration, time.Duration) {
@@ -149,7 +202,6 @@ func (b *Backend) Warm(ctx context.Context, sp backend.WarmSpec) (backend.Warm, 
 	}
 	parentF := os.NewFile(uintptr(fds[0]), "helper-ctl")
 	childF := os.NewFile(uintptr(fds[1]), "helper-ctl-child")
-	defer func() { _ = childF.Close() }()
 
 	args := []string{}
 	if b.opt.Guest != "" {
@@ -179,14 +231,19 @@ func (b *Backend) Warm(ctx context.Context, sp backend.WarmSpec) (backend.Warm, 
 		cmd.SysProcAttr.UseCgroupFD = true
 		cmd.SysProcAttr.CgroupFD = sp.CgroupFD
 	}
-	if err := cmd.Start(); err != nil {
+	err = cmd.Start()
+	// The helper holds its own copy of its end now. Ours goes, so a
+	// helper that dies before READY is read as EOF below rather than
+	// waited for until the caller's deadline.
+	_ = childF.Close()
+	if err != nil {
 		_ = parentF.Close()
 		return backend.Warm{}, fmt.Errorf("hyperlight: start helper: %w", err)
 	}
 	conn, err := net.FileConn(parentF)
 	_ = parentF.Close()
 	if err != nil {
-		_ = cmd.Process.Kill()
+		end(cmd)
 		return backend.Warm{}, err
 	}
 	uc, _ := conn.(*net.UnixConn)
@@ -205,20 +262,28 @@ func (b *Backend) Warm(ctx context.Context, sp backend.WarmSpec) (backend.Warm, 
 			ready <- fmt.Errorf("%w: expected READY, got %q", ErrHelper, strings.TrimSpace(line))
 			return
 		}
-		if len(f) > 1 {
-			h.version = f[1]
+		// The facts recorded at open are what this warm's snapshots
+		// are filed under: a helper replaced since then must not warm.
+		got, err := parseFacts(f[1:])
+		if err != nil {
+			ready <- err
+			return
+		}
+		if got != b.facts {
+			ready <- fmt.Errorf("%w: READY reports %v, the helper reported %v at open", ErrHelper, got, b.facts)
+			return
 		}
 		ready <- nil
 	}()
 	select {
 	case err := <-ready:
 		if err != nil {
-			_ = cmd.Process.Kill()
+			end(cmd)
 			_ = uc.Close()
 			return backend.Warm{}, fmt.Errorf("hyperlight: helper for %s did not become ready: %w", sp.GrantUID, err)
 		}
 	case <-ctx.Done():
-		_ = cmd.Process.Kill()
+		end(cmd)
 		_ = uc.Close()
 		return backend.Warm{}, ctx.Err()
 	}
@@ -228,6 +293,14 @@ func (b *Backend) Warm(ctx context.Context, sp backend.WarmSpec) (backend.Warm, 
 	go b.read(h, rd)
 	go func() { _ = cmd.Wait() }()
 	return backend.Warm{ID: h.id, PID: cmd.Process.Pid}, nil
+}
+
+// end kills a helper that did not come up and reaps it, so a failed
+// warm leaves no zombie behind. A helper that did come up is reaped by
+// the goroutine Warm starts for it.
+func end(cmd *exec.Cmd) {
+	_ = cmd.Process.Kill()
+	_ = cmd.Wait()
 }
 
 func (b *Backend) read(h *helper, rd *bufio.Reader) {
@@ -246,7 +319,13 @@ func (b *Backend) read(h *helper, rd *bufio.Reader) {
 		case "CLONED":
 			h.reply(f[1], reply{})
 		case "PARKED":
-			n, _ := strconv.ParseUint(f[2], 10, 64)
+			// The bytes are what the park costs to move. A line without
+			// them is still the answer to the park, not a reason to stop
+			// reading the helper.
+			var n uint64
+			if len(f) >= 3 {
+				n, _ = strconv.ParseUint(f[2], 10, 64)
+			}
 			h.reply(f[1], reply{bytes: n})
 		case "ERROR":
 			h.reply(f[1], reply{err: fmt.Errorf("%w: %s", ErrHelper, strings.Join(f[2:], " "))})
@@ -419,13 +498,18 @@ func (b *Backend) Park(ctx context.Context, fiberID string, sp backend.ParkSpec)
 	// own, and a helper that misses the command, or is stuck serving the
 	// fiber's endpoint, would hold it forever. Snapshotting is hundreds
 	// of milliseconds; this is generous and still an answer.
-	if _, ok := ctx.Deadline(); !ok {
+	_, callers := ctx.Deadline()
+	if !callers {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, parkTimeout)
 		defer cancel()
 	}
 	if _, err = b.ask(ctx, h, fiberID, fmt.Sprintf("PARK %s %s %s", fiberID, sp.Dir, sync)); err != nil {
+		// Name the deadline that fired: the caller's, or this one.
 		if errors.Is(err, context.DeadlineExceeded) {
+			if callers {
+				return fmt.Errorf("%w: no answer to PARK %s before the caller's deadline: %w", ErrHelper, fiberID, err)
+			}
 			return fmt.Errorf("%w: no answer to PARK %s within %s", ErrHelper, fiberID, parkTimeout)
 		}
 		return err
@@ -433,8 +517,9 @@ func (b *Backend) Park(ctx context.Context, fiberID string, sp backend.ParkSpec)
 	return nil
 }
 
-// parkTimeout bounds a park whose caller set no deadline.
-const parkTimeout = 15 * time.Second
+// parkTimeout bounds a park whose caller set no deadline. A variable so
+// a test can shorten it.
+var parkTimeout = 15 * time.Second
 
 // Resume asks the helper for a fiber from a park directory.
 func (b *Backend) Resume(ctx context.Context, sp backend.ResumeSpec) (backend.Fiber, error) {

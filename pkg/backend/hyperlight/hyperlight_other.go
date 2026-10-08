@@ -16,7 +16,6 @@ import (
 type Options struct {
 	Helper string
 	Guest  string
-	Facts  string
 }
 
 type unsupported struct{}

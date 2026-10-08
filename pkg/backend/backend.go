@@ -15,6 +15,7 @@ package backend
 import (
 	"context"
 	"errors"
+	"os"
 	"time"
 
 	"github.com/helayoty/fiberd/pkg/artifact"
@@ -52,6 +53,9 @@ type WarmSpec struct {
 	// starting one there and reading the cgroup; the host removes it
 	// afterwards. -1 when the host offers none.
 	ProbeCgroupFD int
+	// Hide lists absolute directories a fiber must not see: a backend
+	// that gives fibers a mount namespace of their own covers them there.
+	Hide []string
 }
 
 // Warm is a warm template instance.
@@ -83,6 +87,11 @@ type FiberSpec struct {
 	// so its checkpoint restores anywhere. Backends that always isolate
 	// ignore it.
 	OwnPIDNS bool
+	// Handoff, when set, is the fiber's end of a SOCK_SEQPACKET pair the
+	// host passes connections over; the fiber serves those instead of
+	// Endpoint. Only a backend that is a Handoffer is given one. The
+	// backend does not keep it: the caller closes it after Clone.
+	Handoff *os.File
 }
 
 // Fiber is a running fiber.
@@ -111,6 +120,9 @@ type ResumeSpec struct {
 	WarmID string
 	// WorkDir is the grant's run directory (WarmSpec.WorkDir).
 	WorkDir string
+	// Handoff replaces the handoff channel of a checkpoint taken from a
+	// handoff fiber (FiberSpec.Handoff); nil for any other checkpoint.
+	Handoff *os.File
 }
 
 // EndpointSchemer is implemented by backends that can serve fibers on
@@ -118,6 +130,13 @@ type ResumeSpec struct {
 // speaks "unix" only, and the host refuses a policy it cannot honour.
 type EndpointSchemer interface {
 	EndpointSchemes() []string
+}
+
+// Handoffer is implemented by backends whose fibers can serve
+// connections the host passes them (FiberSpec.Handoff), across park and
+// resume. The host refuses a handoff grant on any other backend.
+type Handoffer interface {
+	Handoff() bool
 }
 
 // Exit reports the end of a fiber (FiberID set) or of a warm instance
@@ -147,9 +166,49 @@ type Backend interface {
 	Kill(fiberID string) error
 	// Exits delivers every fiber and warm-instance end, including those
 	// the host asked for through Park or Kill: the host is what knows
-	// whether an end was a death, and it cleans up on this signal.
+	// whether an end was a death, and it cleans up on this signal. An
+	// Unwarm may or may not be followed by the instance's Exit (proc
+	// reports the zygote's end, gVisor reaps a deregistered template
+	// silently), so a host that unwarms treats that Exit as cleanup it
+	// has already done.
 	Exits() <-chan Exit
 	Close()
+}
+
+// Isolator is implemented by backends whose fibers run behind a kernel
+// of their own (gVisor's Sentry, a Hyperlight micro-VM) rather than on
+// the host kernel under the agent's uid. Only these serve untrusted
+// grants; a backend that does not implement it does not isolate.
+type Isolator interface {
+	IsolatesTenants() bool
+}
+
+// ChannelMaker is implemented by backends whose fibers live in a network
+// namespace of their own, where a unix socket the host made in its own
+// namespace cannot be checkpointed with them (criu finds only the
+// sockets of the namespaces it dumps). The host asks the backend for
+// every socket pair it shares with a fiber, the handoff channel, and
+// the backend makes it where the fiber's checkpoint can carry it. A
+// backend without it shares the host's namespace and plain socketpair(2)
+// does.
+type ChannelMaker interface {
+	// Socketpair makes a close-on-exec AF_UNIX pair of the given type
+	// (SOCK_SEQPACKET for a handoff channel) for a fiber of the warm
+	// instance.
+	Socketpair(warmID string, typ int) ([2]int, error)
+}
+
+// IDMapper is implemented by backends whose warm instance and fibers run
+// in a user namespace of the grant's own, mapped to a range of host ids
+// with the grant's root at its start. The host hands that uid the one
+// thing the instance must write on its own, the cgroup.procs of the
+// grant's cgroup and of each fiber leaf, so clone3 into a leaf works.
+// Every limit stays the host's.
+type IDMapper interface {
+	// MappedRoot is the host uid the grant's root maps to. It fails when
+	// the grant cannot have its range on this home because another
+	// admitted grant holds it.
+	MappedRoot(grantUID string) (uint32, error)
 }
 
 // Platformer is implemented by backends whose checkpoints depend on

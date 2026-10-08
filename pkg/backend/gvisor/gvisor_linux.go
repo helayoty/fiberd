@@ -37,6 +37,7 @@ package gvisor
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -56,6 +57,18 @@ import (
 	"github.com/helayoty/fiberd/pkg/core"
 )
 
+const (
+	// Every sandbox runs on the systrap platform (no KVM needed), and every
+	// image is written and read with O_DIRECT so its pages are never charged
+	// to the leaf that made it.
+	runscPlatform = "systrap"
+	directIO      = "--direct"
+
+	createDeadline = 500 * time.Millisecond
+	resumeDeadline = 2 * time.Second
+	readyMarker    = "warm.ready"
+)
+
 // Options configure the gVisor backend.
 type Options struct {
 	// Runsc names the runsc binary (default "runsc").
@@ -67,25 +80,7 @@ type Options struct {
 	// (default /var/lib/fiberd/gvisor). Not a tmpfs: images are memory
 	// otherwise.
 	StateDir string
-	// Platform is the runsc platform (default "systrap": no KVM needed).
-	Platform string
-	// OverheadBytes is the fixed footprint of one restored sandbox: the
-	// sentry plus the template's pages. Added to every fiber's
-	// memory.max, subtracted from its measured W. 0 (the default) lets
-	// the host measure it as the warm template sandbox's resident size.
-	OverheadBytes uint64
-	// NoDirectIO writes park images through the page cache instead of
-	// O_DIRECT (for filesystems without O_DIRECT support).
-	NoDirectIO bool
-	// Debug writes runsc debug logs under StateDir/log.
-	Debug bool
 }
-
-const (
-	createDeadline = 500 * time.Millisecond
-	resumeDeadline = 2 * time.Second
-	readyMarker    = "warm.ready"
-)
 
 // Backend implements backend.Backend, Platformer, DeadlineAdvisor and
 // Overheader.
@@ -97,6 +92,7 @@ type Backend struct {
 	mu    sync.Mutex
 	warms map[string]*warm // warm id
 	boxes map[string]*box  // fiber id
+	gen   uint64           // incarnations started, the suffix of every cid
 	exits chan backend.Exit
 }
 
@@ -125,9 +121,6 @@ func New(o Options) backend.Backend {
 	if o.StateDir == "" {
 		o.StateDir = "/var/lib/fiberd/gvisor"
 	}
-	if o.Platform == "" {
-		o.Platform = "systrap"
-	}
 	b := &Backend{opt: o, warms: map[string]*warm{}, boxes: map[string]*box{}, exits: make(chan backend.Exit, 1024)}
 	out, err := exec.Command(o.Runsc, "--version").Output()
 	if err != nil {
@@ -135,6 +128,7 @@ func New(o Options) backend.Backend {
 		return b
 	}
 	b.version = strings.TrimSpace(strings.TrimPrefix(strings.SplitN(string(out), "\n", 2)[0], "runsc version "))
+	b.sweep()
 	if st, err := os.Stat(o.Rootfs); err != nil || !st.IsDir() {
 		log.Printf("gvisor: rootfs %q unusable: %v", o.Rootfs, err)
 		return b
@@ -146,6 +140,10 @@ func New(o Options) backend.Backend {
 func (b *Backend) Name() string    { return "gvisor" }
 func (b *Backend) Tier() core.Tier { return b.tier }
 
+// IsolatesTenants: a fiber's syscalls are served by its sandbox's
+// Sentry, not by the host kernel.
+func (b *Backend) IsolatesTenants() bool { return true }
+
 // Platform: a gVisor image depends on the runsc release and the rootfs,
 // not on the host kernel or libc.
 func (b *Backend) Platform() artifact.Platform {
@@ -155,7 +153,11 @@ func (b *Backend) Platform() artifact.Platform {
 func (b *Backend) DefaultDeadlines() (time.Duration, time.Duration) {
 	return createDeadline, resumeDeadline
 }
-func (b *Backend) FiberOverheadBytes() uint64 { return b.opt.OverheadBytes }
+
+// FiberOverheadBytes: one restored sandbox costs the sentry plus the
+// template's pages. 0 asks the host to measure that as the warm template
+// sandbox's resident size.
+func (b *Backend) FiberOverheadBytes() uint64 { return 0 }
 
 // EndpointSchemes: unix only. A TCP listener inside a sandbox is a host
 // socket (not checkpointable) unless the sandbox runs netstack in a
@@ -167,13 +169,15 @@ func (b *Backend) EndpointSchemes() []string { return []string{"unix"} }
 // different in every sandbox) is not the fiber's working set.
 func (b *Backend) WCounter() string { return "shmem" }
 
+// globalArgs are the flags every runsc command runs with. Huge pages for
+// the guest's memory are off: W is the leaf's shmem above the template's
+// measured footprint, and with 2 MiB pages a fresh sandbox lands several
+// MiB from that measurement in either direction (one CI host read a
+// fresh fiber at exactly 8 MiB), which is wider than a small budget and
+// hides a real overrun.
 func (b *Backend) globalArgs() []string {
-	args := []string{"--root=" + filepath.Join(b.opt.StateDir, "root"), "--platform=" + b.opt.Platform,
-		"--network=none", "--ignore-cgroups", "--host-uds=all", "--overlay2=none"}
-	if b.opt.Debug {
-		args = append(args, "--debug", "--debug-log="+filepath.Join(b.opt.StateDir, "log")+"/", "--log-format=text")
-	}
-	return args
+	return []string{"--root=" + filepath.Join(b.opt.StateDir, "root"), "--platform=" + runscPlatform,
+		"--network=none", "--ignore-cgroups", "--host-uds=all", "--overlay2=none", "--app-huge-pages=false"}
 }
 
 // runsc runs one runsc command. cgroupFD >= 0 starts it (and so the
@@ -182,6 +186,10 @@ func (b *Backend) globalArgs() []string {
 // it leaves behind inherits the descriptors and a pipe would never close.
 func (b *Backend) runsc(ctx context.Context, cgroupFD int, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, b.opt.Runsc, append(b.globalArgs(), args...)...)
+	// A command that is not detached writes to a pipe. Should a process
+	// it leaves behind hold that pipe open, Run returns this long after
+	// the command itself has exited instead of waiting for the pipe.
+	cmd.WaitDelay = time.Second
 	if cgroupFD >= 0 {
 		cmd.SysProcAttr = &syscall.SysProcAttr{UseCgroupFD: true, CgroupFD: cgroupFD}
 	}
@@ -199,13 +207,11 @@ func (b *Backend) runsc(ctx context.Context, cgroupFD int, args ...string) (stri
 		if err != nil {
 			return "", err
 		}
-		// The sandbox's own stdio follows: the file stays under Debug so a
-		// workload's stderr can be read after the fact.
+		// The sandbox's own stdio follows the file, which goes once runsc
+		// returns.
 		defer func() {
 			_ = f.Close()
-			if !b.opt.Debug {
-				_ = os.Remove(f.Name())
-			}
+			_ = os.Remove(f.Name())
 		}()
 		cmd.Stdout, cmd.Stderr = f, f
 		err = cmd.Run()
@@ -306,8 +312,50 @@ func (b *Backend) writeBundle(dir string, argv, env []string, workDir, images st
 	return os.WriteFile(filepath.Join(dir, "config.json"), data, 0o644)
 }
 
+// cid makes a grant uid or fence usable in a container id: runsc accepts
+// letters, digits, "_", "." and "-", and everything else becomes "-".
 func cid(s string) string {
-	return strings.NewReplacer("/", "-", ":", "-", " ", "-").Replace(s)
+	return strings.Map(func(r rune) rune {
+		if r == '_' || r == '.' || r == '-' || (r >= '0' && r <= '9') || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
+			return r
+		}
+		return '-'
+	}, s)
+}
+
+// maxCID bounds a container id. runsc names the sandbox's control socket
+// after it in the abstract namespace, which fails from 93 bytes.
+const maxCID = 64
+
+// newCID names one incarnation of a sandbox: the kind ("w" or "f"), the
+// grant or fence, and a number no other sandbox of this backend has had.
+// A reaper that deletes its own cid after the sandbox exited can then
+// never hit a successor of the same grant or fence. A long name keeps a
+// hash of itself instead of its tail.
+func (b *Backend) newCID(kind, name string) string {
+	b.mu.Lock()
+	b.gen++
+	suffix := fmt.Sprintf("-%d", b.gen)
+	b.mu.Unlock()
+	base := cid(name)
+	if room := maxCID - len(kind) - 1 - len(suffix); len(base) > room {
+		sum := sha256.Sum256([]byte(base))
+		base = base[:room-9] + "-" + hex.EncodeToString(sum[:4])
+	}
+	return kind + "-" + base + suffix
+}
+
+// sweep ends every sandbox a previous life of this backend left in its
+// root. Nothing there is this life's, since no incarnation has started
+// yet, and a cid is never reused across lives.
+func (b *Backend) sweep() {
+	out, err := b.runsc(context.Background(), -1, "list", "-quiet")
+	if err != nil {
+		return
+	}
+	for _, id := range strings.Fields(out) {
+		_, _ = b.runsc(context.Background(), -1, "delete", "-force", id)
+	}
 }
 
 // pidOf reads the sandbox process pid from `runsc state`.
@@ -368,7 +416,7 @@ func (b *Backend) Warm(ctx context.Context, sp backend.WarmSpec) (backend.Warm, 
 		return backend.Warm{}, err
 	}
 	tdir := filepath.Join(b.opt.StateDir, "templates", cid(sp.GrantUID))
-	w := &warm{id: sp.GrantUID, cid: "w-" + cid(sp.GrantUID), argv: sp.Template.Argv, workDir: sp.WorkDir,
+	w := &warm{id: sp.GrantUID, cid: b.newCID("w", sp.GrantUID), argv: sp.Template.Argv, workDir: sp.WorkDir,
 		images: filepath.Join(tdir, "images")}
 	_ = os.RemoveAll(tdir)
 	if err := os.MkdirAll(tdir, 0o755); err != nil {
@@ -382,7 +430,6 @@ func (b *Backend) Warm(ctx context.Context, sp backend.WarmSpec) (backend.Warm, 
 	if err := b.writeBundle(bundle, w.argv, []string{"FIBERD_FENCE=none"}, sp.WorkDir, ""); err != nil {
 		return backend.Warm{}, err
 	}
-	_, _ = b.runsc(ctx, -1, "delete", "-force", w.cid) // a stale one from a previous life
 	if _, err := b.runsc(ctx, sp.CgroupFD, "run", "--detach", "--bundle", bundle, w.cid); err != nil {
 		return backend.Warm{}, err
 	}
@@ -394,11 +441,7 @@ func (b *Backend) Warm(ctx context.Context, sp backend.WarmSpec) (backend.Warm, 
 		return backend.Warm{}, fmt.Errorf("gvisor: template did not become ready: %w", err)
 	}
 	time.Sleep(20 * time.Millisecond) // let it reach the read after dropping the marker
-	args := []string{"checkpoint", "--leave-running", "--image-path", w.images}
-	if !b.opt.NoDirectIO {
-		args = append(args, "--direct")
-	}
-	if _, err := b.runsc(ctx, -1, append(args, w.cid)...); err != nil {
+	if _, err := b.runsc(ctx, -1, "checkpoint", "--leave-running", "--image-path", w.images, directIO, w.cid); err != nil {
 		_, _ = b.runsc(context.Background(), -1, "delete", "-force", w.cid)
 		return backend.Warm{}, fmt.Errorf("gvisor: template checkpoint: %w", err)
 	}
@@ -430,11 +473,7 @@ func (b *Backend) probeFootprint(ctx context.Context, w *warm, cgroupFD int) (sh
 		return 0, 0
 	}
 	_ = os.Remove(ep)
-	args := []string{"restore", "--detach", "--image-path", w.images, "--bundle", bundle}
-	if !b.opt.NoDirectIO {
-		args = append(args, "--direct")
-	}
-	if _, err := b.runsc(ctx, cgroupFD, append(args, cid)...); err != nil {
+	if _, err := b.runsc(ctx, cgroupFD, "restore", "--detach", "--image-path", w.images, "--bundle", bundle, directIO, cid); err != nil {
 		log.Printf("gvisor: footprint probe: %v", err)
 	} else {
 		// Serving is the state a fiber is measured in.
@@ -554,17 +593,16 @@ func (b *Backend) start(ctx context.Context, images, workDir string, argv []stri
 	if len(payload) > 0 {
 		env = append(env, "FIBERD_PAYLOAD="+hex.EncodeToString(payload))
 	}
-	x := &box{id: fence, cid: "f-" + cid(fence), bundle: filepath.Join(workDir, "bundles", cid(fence)), endpoint: endpoint, done: make(chan struct{})}
+	// The bundle is the sandbox's own, named after its cid, so the reaper
+	// of an earlier incarnation under the same fence never removes it.
+	x := &box{id: fence, cid: b.newCID("f", fence), endpoint: endpoint, done: make(chan struct{})}
+	x.bundle = filepath.Join(workDir, "bundles", x.cid)
 	if err := b.writeBundle(x.bundle, argv, env, workDir, ""); err != nil {
 		return backend.Fiber{}, err
 	}
 	_ = os.Remove(endpoint)
-	_, _ = b.runsc(ctx, -1, "delete", "-force", x.cid)
-	args := []string{"restore", "--detach", "--image-path", images, "--bundle", x.bundle}
-	if !b.opt.NoDirectIO {
-		args = append(args, "--direct") // the image is read, not cached, in the fiber's leaf
-	}
-	if _, err := b.runsc(ctx, cgroupFD, append(args, x.cid)...); err != nil {
+	// The image is read, not cached, in the fiber's leaf.
+	if _, err := b.runsc(ctx, cgroupFD, "restore", "--detach", "--image-path", images, "--bundle", x.bundle, directIO, x.cid); err != nil {
 		return backend.Fiber{}, fmt.Errorf("%w (%s)", err, leafDiag(cgroupFD))
 	}
 	b.mu.Lock()
@@ -631,22 +669,24 @@ func (b *Backend) Park(ctx context.Context, fiberID string, sp backend.ParkSpec)
 	if err := waitFile(wctx, x.endpoint, true); err != nil {
 		return fmt.Errorf("gvisor: %s did not close its endpoint for the checkpoint: %w", fiberID, err)
 	}
+	// The bundle is what a resume needs to reproduce the args. It is read
+	// now, because the checkpoint ends the sandbox and the reaper removes
+	// the bundle as soon as it sees that, which may be before runsc has
+	// returned.
+	bundle, err := os.ReadFile(filepath.Join(x.bundle, "config.json"))
+	if err != nil {
+		return err
+	}
 	// Sync is moot here: the endpoint is already closed, and a
 	// --leave-running checkpoint restores the sandbox in place, which
 	// doubles its memory inside a leaf sized for one. The checkpoint ends
 	// the sandbox; the images are complete when runsc returns. Direct I/O
 	// keeps the image's pages out of the leaf's page cache, where a fiber
 	// near its budget would be killed for writing its own checkpoint.
-	args := []string{"checkpoint", "--image-path", sp.Dir}
-	if !b.opt.NoDirectIO {
-		args = append(args, "--direct")
-	}
-	// The bundle is what a resume needs to reproduce the args; keep a copy.
-	_, err := b.runsc(ctx, -1, append(args, x.cid)...)
-	if err != nil {
+	if _, err := b.runsc(ctx, -1, "checkpoint", "--image-path", sp.Dir, directIO, x.cid); err != nil {
 		return err
 	}
-	return copyFile(filepath.Join(x.bundle, "config.json"), filepath.Join(sp.Dir, "config.json"))
+	return os.WriteFile(filepath.Join(sp.Dir, "config.json"), bundle, 0o644)
 }
 
 // Resume restores a park image under a new fence and endpoint.
@@ -691,14 +731,6 @@ func (b *Backend) Close() {
 	for _, c := range cids {
 		_, _ = b.runsc(context.Background(), -1, "kill", c, "KILL")
 	}
-}
-
-func copyFile(src, dst string) error {
-	data, err := os.ReadFile(src)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(dst, data, 0o644)
 }
 
 var (
