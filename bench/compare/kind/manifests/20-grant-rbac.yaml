@@ -1,0 +1,36 @@
+# What a grant Pod's agent may do in the compare namespace, and what the
+# issuer may do here. Copies of the tenant bindings in
+# examples/kubernetes/kind/manifests/30-grant-rbac.yaml for this namespace.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: fiberd-grant
+  namespace: compare
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: fiberd-grant
+  namespace: compare
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: fiberd-grant
+subjects:
+  - kind: ServiceAccount
+    name: fiberd-grant
+    namespace: compare
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: fiberd-grant-issuer
+  namespace: compare
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: fiberd-grant-issuer-tenant
+subjects:
+  - kind: ServiceAccount
+    name: grant-issuer
+    namespace: fiberd-system

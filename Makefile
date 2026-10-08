@@ -6,8 +6,9 @@ GO      ?= go
 TOOLS   := $(GO) tool -modfile=$(CURDIR)/hack/tools/go.mod
 BIN     ?= bin
 PKGS    := ./...
-# Integrations are their own modules; test and lint run in each.
-EXAMPLES := examples/kubernetes examples/slurm examples/knative examples/kata examples/substrate
+# Integrations are their own modules; test and lint run in each. The
+# activation comparison benchmark (bench/compare) is one more.
+EXAMPLES := examples/kubernetes examples/slurm examples/knative examples/kata examples/substrate bench/compare
 
 # Hardening for every build of the zygote, refzygote and the library. The
 # flags are defined here once. The Dockerfiles, hack/gvisor/rootfs.sh, the
@@ -27,7 +28,8 @@ endif
 .PHONY: all build test vet lint proto proto-lint proto-check clean \
         bench zygote conform-stub conform-signed conform-proc conform-gvisor conform-runc conform-hyperlight-fake conform-hyperlight \
         hyperlight-helper linux-hyperlight-check overcommit kind-up kind-down kind-image conform-kind slurm-up slurm-down conform-slurm example-knative example-knative-kvm example-kata example-substrate \
-        registry-start mobility linux-shell linux-check linux-gvisor-check linux-test linux-lint bench-e2e
+        registry-start mobility linux-shell linux-check linux-gvisor-check linux-test linux-lint bench-e2e \
+        compare-phase0 compare-phase1 compare-phase2 compare-phase3 compare-phase4 compare-down
 
 all: build
 
@@ -191,6 +193,29 @@ bench-e2e: ## time Clone over gRPC end to end, per stage, in the container (audi
 	FIBERD_DEV_DOCKER_ARGS="-v fiberd-bench:/bench" hack/dev/run.sh env FIBERD_BENCH=1 FIBERD_BENCH_STATE=/bench \
 	  go test -count=1 -v -run TestE2ECloneNumbers ./tests/proc/
 
+## The activation comparison (bench/compare, its own module): fiberd
+## against Pods, agent-sandbox, Firecracker and Hyperlight, one phase per
+## target as docs/design/compare.md lays them out. Results land in
+## bin/compare-state/. Every phase refuses to run on a loaded host.
+
+compare-phase0: ## host facts and load; exits 3 when load exceeds the core count
+	bench/compare/run/phase0.sh
+
+compare-phase1: ## kind cluster "compare": Pod warm and cold, fiberd proc and runc, agent-sandbox under runc, control-plane deltas
+	bench/compare/run/phase1.sh
+
+compare-phase2: ## dev container: fiberd proc, runc and gVisor standalone over loopback, with resume and density
+	bench/compare/run/phase2.sh
+
+compare-phase3: ## kind cluster "compare": Pod gVisor, agent-sandbox gVisor, fiberd gVisor through the relay
+	bench/compare/run/phase3.sh
+
+compare-phase4: ## a KVM host: phases 1 to 3 plus Firecracker and fiberd Hyperlight (COMPARE_GROUPS picks classes)
+	bench/compare/run/phase4.sh
+
+compare-down: ## delete the "compare" kind cluster and its registry
+	bench/compare/kind/cluster.sh down
+
 help:
-	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
+	@grep -E '^[a-zA-Z0-9_-]+:.*?## ' $(MAKEFILE_LIST) | \
 	  awk 'BEGIN {FS = ":.*?## "}; {printf "  %-14s %s\n", $$1, $$2}'
