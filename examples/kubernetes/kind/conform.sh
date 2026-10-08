@@ -17,6 +17,8 @@
 #   examples/kubernetes/kind/conform.sh run       (everything; needs docker, kind, kubectl, go)
 #   examples/kubernetes/kind/conform.sh gvisor    (step 6 alone, on a deployed cluster)
 #   examples/kubernetes/kind/conform.sh up|down   (just the cluster)
+#   examples/kubernetes/kind/conform.sh runc-logs [pod]
+#                                                 (runc's log and the zygote log inside a runc grant Pod)
 #   examples/kubernetes/kind/conform.sh restart|lane up|down|audit <event> <fence>|engine-kill <uid>|scope-lost
 #                                                 (the hooks grant-conform calls)
 #
@@ -80,6 +82,7 @@ deploy() {
   if ! "${KC[@]}" -n "$NS" wait --for=condition=Ready pod/conform-runc-grant --timeout=180s; then
     "${KC[@]}" -n "$NS" describe pod conform-runc-grant || true
     "${KC[@]}" -n "$NS" logs conform-runc-grant --tail=100 || true
+    runc_logs conform-runc-grant
     exit 1
   fi
   wait_for 30 "status.ready on the CapacityGrant" cg_ready conform
@@ -88,6 +91,17 @@ deploy() {
 }
 
 cg_ready() { [ "$("${KC[@]}" -n "$NS" get cg "$1" -o jsonpath='{.status.ready}')" = true ]; }
+
+# runc_logs <pod>: the end of runc's own log and of the zygote log of
+# every grant the Pod's agent warmed. runc's log is beside the bundle
+# under the state volume, and the zygote log is in the grant's run
+# directory (pkg/backend/runc). `runc run` removes its container on the
+# way out, so these are the evidence when a runc grant never warms.
+runc_logs() {
+  echo "--- runc and zygote logs in $1:"
+  "${KC[@]}" -n "$NS" exec "$1" -c agent -- sh -c \
+    'for f in /var/lib/fiberd/runc/bundles/*.runc.log /run/fiberd/*/zygote.log; do [ -f "$f" ] || continue; echo "--- $f"; tail -c 4096 "$f"; done' || true
+}
 
 restart_count() { "${KC[@]}" -n "$NS" get pod "$POD" -o jsonpath='{.status.containerStatuses[0].restartCount}'; }
 
@@ -192,8 +206,9 @@ case "${1:-}" in
   conform) conform ;;
   storm) storm ;;
   gvisor) gvisor ;;
+  runc-logs) runc_logs "${2:-conform-runc-grant}" ;;
   run)
     up; image; deploy; conform; storm; gvisor
     ;;
-  *) echo "usage: $0 run|up|down|image|deploy|conform|storm|gvisor|restart|lane up|down|audit <event> <fence>|engine-kill <uid>|scope-lost" >&2; exit 2 ;;
+  *) echo "usage: $0 run|up|down|image|deploy|conform|storm|gvisor|runc-logs [pod]|restart|lane up|down|audit <event> <fence>|engine-kill <uid>|scope-lost" >&2; exit 2 ;;
 esac

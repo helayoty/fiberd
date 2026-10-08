@@ -193,6 +193,37 @@ func (l *launcher) bundle(spec backend.WarmSpec) string {
 	return filepath.Join(l.opt.StateDir, "bundles", l.cid(spec))
 }
 
+// runcLog is runc's own log for the grant's `runc run`, at debug level,
+// beside the bundle rather than in it, so it outlives Release and a
+// failure dump can read it. It is in the state directory, which the
+// container never sees, so nothing inside can plant a link there. The
+// sweep at the next start removes it with the bundles.
+func (l *launcher) runcLog(spec backend.WarmSpec) string {
+	return filepath.Join(l.opt.StateDir, "bundles", l.cid(spec)+".runc.log")
+}
+
+// logTails is what runc and the zygote last wrote, for an error about a
+// container that never came up. runc's log holds its error and the
+// stages before it. The zygote log holds runc's stdio and the template's
+// (the zygote reopens its stdio to it inside). Both are bounded, and
+// neither holds a secret, since the zygote's log is the template's own
+// stdio and runc's is runc's.
+func (l *launcher) logTails(spec backend.WarmSpec) string {
+	var b strings.Builder
+	for _, f := range []struct{ name, path string }{
+		{"runc log", l.runcLog(spec)},
+		{"zygote log", filepath.Join(spec.WorkDir, "zygote.log")},
+	} {
+		tail := tailFile(f.path, tailLimit)
+		if tail == "" {
+			fmt.Fprintf(&b, "\n%s %s: empty or missing", f.name, f.path)
+			continue
+		}
+		fmt.Fprintf(&b, "\n%s %s (last %d bytes):\n%s", f.name, f.path, len(tail), strings.TrimRight(tail, "\n"))
+	}
+	return b.String()
+}
+
 // rootfs is where the grant's copy of the root filesystem lives.
 func (l *launcher) rootfs(spec backend.WarmSpec) string {
 	return filepath.Join(l.opt.StateDir, "rootfs", l.cid(spec))
@@ -443,7 +474,13 @@ func (l *launcher) Command(spec backend.WarmSpec, argv []string, ctl, logf *os.F
 		return nil, err
 	}
 	_, _ = l.runc(context.Background(), "delete", "-f", l.cid(spec)) // a stale one from a previous life
-	cmd = exec.Command(l.opt.Runc, "--root", l.root(), "run", "--preserve-fds", "1", "--bundle", b, l.cid(spec))
+	// runc's own log, fresh for this run and at debug level, so a
+	// container that never comes up says which stage it died in.
+	if err := os.Remove(l.runcLog(spec)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return nil, fmt.Errorf("runc: remove old runc log: %w", err)
+	}
+	cmd = exec.Command(l.opt.Runc, "--root", l.root(), "--log", l.runcLog(spec), "--debug",
+		"run", "--preserve-fds", "1", "--bundle", b, l.cid(spec))
 	cmd.ExtraFiles = []*os.File{ctl} // fd 3 in the container's init
 	devnull, err := os.OpenFile(os.DevNull, os.O_RDONLY, 0)
 	if err != nil {
@@ -704,18 +741,24 @@ func (l *launcher) Channel(ctx context.Context, spec backend.WarmSpec, cmd *exec
 // waitPID polls runc for the container's init until it is known, the
 // context ends or runc exits. Nobody waits on `runc run` until the
 // channel is up, so its exit is read from /proc, where it is a zombie.
+// An error about a container that never came up carries the tails of
+// runc's log and the zygote's, since `runc run` tears its state down on
+// the way out and `runc state` only says the container does not exist.
 func (l *launcher) waitPID(ctx context.Context, spec backend.WarmSpec, cmd *exec.Cmd) (int, error) {
 	for {
 		pid, err := l.PID(ctx, spec, cmd)
 		if err == nil {
 			return pid, nil
 		}
-		if cmd.ProcessState != nil || exited(cmd.Process.Pid) {
-			return 0, fmt.Errorf("runc: exited before the container was up (see the zygote log): %w", err)
+		if cmd.ProcessState != nil {
+			return 0, fmt.Errorf("runc: exited before the container was up (%s): %w%s", cmd.ProcessState, err, l.logTails(spec))
+		}
+		if exited(cmd.Process.Pid) {
+			return 0, fmt.Errorf("runc: exited before the container was up: %w%s", err, l.logTails(spec))
 		}
 		select {
 		case <-ctx.Done():
-			return 0, fmt.Errorf("runc: waiting for the container of %s: %w (%w)", spec.GrantUID, ctx.Err(), err)
+			return 0, fmt.Errorf("runc: waiting for the container of %s: %w (%w)%s", spec.GrantUID, ctx.Err(), err, l.logTails(spec))
 		case <-time.After(10 * time.Millisecond):
 		}
 	}

@@ -161,6 +161,13 @@ jobs:
             $kc -n compare logs "$pod" --all-containers --tail=200 || true
             $kc -n compare logs "$pod" --all-containers --previous --tail=100 2>/dev/null || true
             echo "::endgroup::"
+            # A runc grant Pod keeps runc's own log beside the bundle and the
+            # zygote log in the grant's run directory (pkg/backend/runc). Any
+            # other Pod has neither, and the exec fails quietly.
+            echo "::group::$pod runc and zygote logs"
+            $kc -n compare exec "$pod" -c agent -- sh -c \
+              'for f in /var/lib/fiberd/runc/bundles/*.runc.log /run/fiberd/*/zygote.log; do [ -f "$f" ] || continue; echo "--- $f"; tail -c 4096 "$f"; done' 2>/dev/null || true
+            echo "::endgroup::"
           done
           sudo tail -n 50 bin/compare-state/phase4/fc-work/*.log 2>/dev/null || true
       - name: delete the compare cluster

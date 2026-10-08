@@ -228,6 +228,8 @@ jobs:
           kubectl --context kind-fiberd -n tenant-a logs conform-grant --tail=200 || true
           kubectl --context kind-fiberd -n tenant-a logs conform-grant --previous --tail=100 || true
           kubectl --context kind-fiberd -n tenant-a logs storm-grant --tail=100 || true
+          kubectl --context kind-fiberd -n tenant-a logs conform-runc-grant --tail=100 || true
+          KIND_CLUSTER=fiberd examples/kubernetes/kind/conform.sh runc-logs conform-runc-grant || true
 
   example-kata:
     name: example - Kata-shaped containerd shim in kind (Pod containers are fibers)
@@ -252,6 +254,8 @@ jobs:
           kubectl --context kind-fiberd -n tenant-a describe pod kata-1 kata-2 || true
           docker exec fiberd-control-plane journalctl -u containerd --no-pager -n 100 || true
           kubectl --context kind-fiberd -n tenant-a logs conform-grant --tail=100 || true
+          kubectl --context kind-fiberd -n tenant-a logs conform-runc-grant --tail=100 || true
+          KIND_CLUSTER=fiberd examples/kubernetes/kind/conform.sh runc-logs conform-runc-grant || true
 
   example-knative:
     name: example - Knative scale-from-zero over Hyperlight (KVM)

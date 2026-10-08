@@ -74,6 +74,16 @@ type fib struct {
 	gone         bool
 }
 
+// roundsOver reports whether the storm can stop sampling: every fiber is
+// gone, or the demand is reached and the ladder has parked one. Reaching
+// the demand alone is not enough. The ladder is often still parking then,
+// since a checkpoint of a fiber throttled under memory.high takes a while
+// on a loaded host, and the rounds keep sampling, without dirtying more,
+// until the park shows or the deadline ends them.
+func roundsOver(allDone bool, running uint32, parked bool) bool {
+	return running == 0 || allDone && parked
+}
+
 func run(o opts) int {
 	if o.issuerKey == "" || o.issuerURL == "" {
 		return fatal("need -issuer-key and -issuer")
@@ -212,7 +222,7 @@ func run(o opts) int {
 			firstPark = time.Now()
 			firstParkPSI = psi.SomeAvg10
 		}
-		if allDone || running == 0 {
+		if roundsOver(allDone, running, !firstPark.IsZero()) {
 			break
 		}
 		time.Sleep(o.round)

@@ -49,6 +49,7 @@ To scale out, create another `CapacityGrant`. The controller never decides to ad
 - A [consumer](glossary.md#consumer) sends the grant's JWT with every `Clone`. It reads the JWT from the grant Secret `<name>-grant`, key `grant.jwt`.
 - The controller renews that Secret in place, so read the JWT again after each renewal.
 - A successful `Clone` returns a separate endpoint for the fiber ([networking.md](networking.md)).
+- A Pod that never passes the gate has the reason in its agent log (`kubectl logs <name>-grant`).
 
 ## Persistence
 

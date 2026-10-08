@@ -328,9 +328,13 @@ func TestCommand(t *testing.T) {
 			}},
 		{name: "the command: runc run with the control socket as fd 3, in a session of its own", grant: "team/a:1",
 			check: func(t *testing.T, l *launcher, spec backend.WarmSpec, _ ociConfig, cmd *exec.Cmd) {
-				want := []string{l.opt.Runc, "--root", l.root(), "run", "--preserve-fds", "1", "--bundle", l.bundle(spec), "w-team-a-1"}
+				want := []string{l.opt.Runc, "--root", l.root(), "--log", l.runcLog(spec), "--debug",
+					"run", "--preserve-fds", "1", "--bundle", l.bundle(spec), "w-team-a-1"}
 				if !reflect.DeepEqual(cmd.Args, want) {
 					t.Errorf("args = %v, want %v", cmd.Args, want)
+				}
+				if dir := filepath.Dir(l.runcLog(spec)); dir != filepath.Dir(l.bundle(spec)) || strings.HasPrefix(l.runcLog(spec), l.bundle(spec)+"/") {
+					t.Errorf("runc log %s is not beside the bundle %s", l.runcLog(spec), l.bundle(spec))
 				}
 				if len(cmd.ExtraFiles) != 1 || cmd.ExtraFiles[0].Name() != "ctl" {
 					t.Errorf("extra files = %v, want the control socket alone", cmd.ExtraFiles)
@@ -387,6 +391,20 @@ func TestCommand(t *testing.T) {
 			check: func(t *testing.T, l *launcher, _ backend.WarmSpec, _ ociConfig, _ *exec.Cmd) {
 				if got := runcCalls(t, l); !reflect.DeepEqual(got, []string{"delete -f w-g1"}) {
 					t.Errorf("runc calls = %v, want the stale delete alone", got)
+				}
+			}},
+		{name: "runc's log from the last run is gone, so this run's is read alone", grant: "g1",
+			setup: func(t *testing.T, l *launcher, spec *backend.WarmSpec, _ *os.File) {
+				if err := os.MkdirAll(filepath.Dir(l.runcLog(*spec)), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(l.runcLog(*spec), []byte("from the last life\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+			check: func(t *testing.T, l *launcher, spec backend.WarmSpec, _ ociConfig, _ *exec.Cmd) {
+				if exists(l.runcLog(spec)) {
+					t.Errorf("%s is still there", l.runcLog(spec))
 				}
 			}},
 		{name: "the cgroup root maps to /", grant: "g1",

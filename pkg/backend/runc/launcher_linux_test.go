@@ -6,6 +6,7 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -72,19 +73,44 @@ func TestWaitPIDEnds(t *testing.T) {
 		reap    bool   // wait on it before asking, so ProcessState is set
 		runc    string // the fake runc's body. "" fails `runc state` as for a container that never came up
 		cancel  bool   // cancel the context after a moment
+		logs    bool   // runc's log and the zygote's hold a line each
 		wantPID bool   // the init is reported
 		wantErr string
+		wantIn  []string // what else the error must quote
 	}{
 		{name: "runc run exits early", run: "true", wantErr: "exited before the container was up"},
 		{name: "runc run was reaped already", run: "true", reap: true, wantErr: "exited before the container was up"},
 		{name: "runc run lives and the caller gives up", run: "sleep", cancel: true, wantErr: "context canceled"},
 		{name: "runc reports the init", run: "sleep", runc: stateBody(4242), wantPID: true},
+		// The logs are the only evidence once runc has torn its state down.
+		{name: "an early exit quotes runc's log and the zygote's", run: "true", logs: true, wantErr: "exited before the container was up",
+			wantIn: []string{"runc log ", "(last 36 bytes):\nlevel=error msg=\"mount proc: EPERM\"", "zygote log ", "(last 11 bytes):\nzygote: hi"}},
+		{name: "an early exit says which logs are missing", run: "true", wantErr: "exited before the container was up",
+			wantIn: []string{"runc log ", ".runc.log: empty or missing", "zygote log ", "zygote.log: empty or missing"}},
+		{name: "a reaped exit carries the exit status and the logs", run: "false", reap: true, logs: true, wantErr: "exited before the container was up (exit status 1)",
+			wantIn: []string{"mount proc: EPERM", "zygote: hi"}},
+		{name: "giving up quotes the logs too", run: "sleep", cancel: true, logs: true, wantErr: "context canceled",
+			wantIn: []string{"mount proc: EPERM", "zygote: hi"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			l := &launcher{opt: Options{Runc: "false", StateDir: t.TempDir()}}
 			if tc.runc != "" {
 				l.opt.Runc, _ = fakeRunc(t, tc.runc)
+			}
+			spec := backend.WarmSpec{GrantUID: "g", WorkDir: filepath.Join(t.TempDir(), "g")}
+			if tc.logs {
+				for path, line := range map[string]string{
+					l.runcLog(spec): "level=error msg=\"mount proc: EPERM\"\n",
+					filepath.Join(spec.WorkDir, "zygote.log"): "zygote: hi\n",
+				} {
+					if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(path, []byte(line), 0o644); err != nil {
+						t.Fatal(err)
+					}
+				}
 			}
 			args := []string{}
 			if tc.run == "sleep" {
@@ -109,7 +135,7 @@ func TestWaitPIDEnds(t *testing.T) {
 			}
 			done := make(chan result, 1)
 			go func() {
-				pid, err := l.waitPID(ctx, backend.WarmSpec{GrantUID: "g"}, cmd)
+				pid, err := l.waitPID(ctx, spec, cmd)
 				done <- result{pid, err}
 			}()
 			select {
@@ -122,6 +148,11 @@ func TestWaitPIDEnds(t *testing.T) {
 				}
 				if r.err == nil || !strings.Contains(r.err.Error(), tc.wantErr) {
 					t.Fatalf("waitPID = %v, want an error containing %q", r.err, tc.wantErr)
+				}
+				for _, want := range tc.wantIn {
+					if !strings.Contains(r.err.Error(), want) {
+						t.Errorf("waitPID = %v, want it to quote %q", r.err, want)
+					}
 				}
 			case <-time.After(5 * time.Second):
 				t.Fatal("waitPID did not return")
