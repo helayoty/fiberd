@@ -112,9 +112,14 @@ func TestSetup(t *testing.T) {
 				old["spec"].(map[string]any)["replicas"] = 99
 				srv.Put(poolPath, old)
 			}
+			// The controller fills the pool once Setup has made it, however
+			// late that is under load.
 			go func() {
-				time.Sleep(20 * time.Millisecond)
-				srv.Update(poolPath, func(obj map[string]any) { obj["status"] = map[string]any{"readyReplicas": tc.ready} })
+				for end := time.Now().Add(2 * time.Second); time.Now().Before(end); time.Sleep(time.Millisecond) {
+					if srv.Update(poolPath, func(obj map[string]any) { obj["status"] = map[string]any{"readyReplicas": tc.ready} }) {
+						return
+					}
+				}
 			}()
 			err := a.Setup(context.Background())
 			if (err != nil) != tc.wantErr {
