@@ -7,6 +7,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -46,6 +49,15 @@ func TestMain(m *testing.M) {
 	build.Stderr = os.Stderr
 	if err := build.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "skipping gvisor tests: cannot build the rootfs: %v\n", err)
+		os.Exit(0)
+	}
+	// The probe the template tests run inside a sandbox (runsc exec),
+	// static, since the rootfs has no libraries.
+	probe := exec.Command("go", "build", "-o", filepath.Join(rootfs, "bin", "probe"), "./testdata/probe")
+	probe.Env = append(os.Environ(), "CGO_ENABLED=0")
+	probe.Stderr = os.Stderr
+	if err := probe.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "skipping gvisor tests: cannot build the sandbox probe: %v\n", err)
 		os.Exit(0)
 	}
 	code := m.Run()
@@ -300,5 +312,54 @@ func TestDeadlineAndOOM(t *testing.T) {
 		}
 	case <-time.After(15 * time.Second):
 		t.Fatal("no exit after dirtying past the budget")
+	}
+}
+
+// TestHTTPMode checks that a sandbox template started with --http serves
+// HTTP on its endpoint, as the fork zygote does. Consumers that proxy web
+// traffic to fibers (the Substrate example's ingress) depend on it.
+func TestHTTPMode(t *testing.T) {
+	rt := newRuntimeWith(t, "/bin/refzygote --heap-mb 16 --gvisor --http")
+	ctx := context.Background()
+	g := core.Grant{UID: "g4", TemplateDigest: "sha256:ref", FiberMax: 4, WBudgetBytes: 64 << 20}
+	if err := rt.PrepareTemplate(ctx, g); err != nil {
+		t.Fatal(err)
+	}
+	h, err := rt.Clone(ctx, core.CloneSpec{Grant: g, Fence: core.Fence{GrantUID: "g4", Epoch: 1, Seq: 1}, Deadline: 2 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = rt.Release(ctx, h.ID, false) })
+	tr := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return fiberendpoint.Dial(ctx, h.Endpoint)
+	}}
+	t.Cleanup(tr.CloseIdleConnections)
+	cases := []struct {
+		name, method, path string
+		status             int
+		body               string
+	}{
+		{name: "readiness", method: http.MethodGet, path: "/readyz", status: 200, body: "ok"},
+		{name: "an increment", method: http.MethodPost, path: "/incr", status: 200, body: "1"},
+		{name: "the count after it", method: http.MethodGet, path: "/count", status: 200, body: "1"},
+		{name: "the fence", method: http.MethodGet, path: "/fence", status: 200, body: h.ID},
+		{name: "an unknown path", method: http.MethodGet, path: "/nope", status: 404, body: "not found"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req, err := http.NewRequestWithContext(ctx, tc.method, "http://fiber"+tc.path, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp, err := tr.RoundTrip(req)
+			if err != nil {
+				t.Fatalf("%s %s: %v", tc.method, tc.path, err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+			b, _ := io.ReadAll(resp.Body)
+			if resp.StatusCode != tc.status || strings.TrimSpace(string(b)) != tc.body {
+				t.Fatalf("%s %s = %d %q, want %d %q", tc.method, tc.path, resp.StatusCode, b, tc.status, tc.body)
+			}
+		})
 	}
 }

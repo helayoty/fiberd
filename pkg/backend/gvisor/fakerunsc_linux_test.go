@@ -31,7 +31,7 @@ const (
 // knobs script the fake runsc. They are read from <cfg>/knobs on every
 // invocation.
 type knobs struct {
-	Fail        map[string]bool // commands that fail: run, restore, checkpoint, state, kill, wait
+	Fail        map[string]bool // commands that fail, out of run, restore, checkpoint, state, kill and wait
 	LongOutput  bool            // a failing command prints more than the error tail keeps
 	NoMarker    bool            // the template sandbox never drops its ready marker
 	NoServe     bool            // a fiber sandbox never serves its endpoint
@@ -42,12 +42,12 @@ type knobs struct {
 	BadWaitJSON bool            // `wait` prints something that is not JSON
 	// GateDelete holds the first `delete` that runs after the knob is set
 	// until <cfg>/gate.open exists, and marks <cfg>/gate.passed once that
-	// delete has done its work: a reaper's late delete, placed at will.
+	// delete has done its work. It places a reaper's late delete at will.
 	GateDelete bool
 }
 
-// gateFiles are what GateDelete uses: the claim the one gated delete
-// takes, the file the test creates to let it go, and its mark.
+// gateFiles are what GateDelete uses. They are the claim the one gated
+// delete takes, the file the test creates to let it go, and its mark.
 const (
 	gateClaimed = "gate.claimed"
 	gateOpen    = "gate.open"
@@ -187,7 +187,7 @@ func fakeRunsc(cfg string, args []string) int {
 	}
 	switch cmd {
 	case "list":
-		// -quiet: one container id per line, from the state directory.
+		// With -quiet, one container id per line, from the state directory.
 		ents, _ := os.ReadDir(filepath.Join(cfg, "state"))
 		for _, e := range ents {
 			fmt.Println(strings.TrimSuffix(e.Name(), ".json"))
@@ -332,10 +332,10 @@ func endSandbox(cfg, cid string) int {
 	}
 }
 
-// fakeSandbox is the workload a sandbox runs, as the reference zygote
-// behaves under --gvisor: a template (FIBERD_FENCE=none) drops the ready
-// marker on /host and waits; a fiber serves its endpoint on /host and
-// closes it on SIGUSR1. Both record themselves while they run and go
+// fakeSandbox is the workload a sandbox runs, behaving as the reference
+// zygote does under --gvisor. A template (FIBERD_FENCE=none) drops the
+// ready marker on /host and waits. A fiber serves its endpoint on /host
+// and closes it on SIGUSR1. Both record themselves while they run and go
 // away on SIGTERM.
 func fakeSandbox(cfg, cid, bundle string) {
 	var k knobs

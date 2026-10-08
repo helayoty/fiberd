@@ -5,6 +5,7 @@ package gvisortest
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"sort"
 	"sync"
 	"testing"
@@ -17,14 +18,25 @@ import (
 // clone here is a whole sandbox restored from the template image, so
 // the storm is 10-way (each sandbox costs about 90 MiB) and the numbers
 // are expected to sit two orders of magnitude above a fork's.
-// FIBERD_BENCH=1 enables it.
+// FIBERD_BENCH=1 enables it. FIBERD_BENCH_REGISTRY=1 takes the template
+// from a registry artifact, bound into every sandbox, instead of the
+// rootfs.
 func TestStormNumbers(t *testing.T) {
 	if os.Getenv("FIBERD_BENCH") == "" {
 		t.Skip("set FIBERD_BENCH=1 to run the storm measurement")
 	}
-	rt := newRuntime(t)
-	ctx := context.Background()
+	var rt core.Runtime
 	g := core.Grant{UID: "bench", TemplateDigest: "sha256:ref"}
+	if os.Getenv("FIBERD_BENCH_REGISTRY") != "" {
+		repo, digest := pushTemplate(t, filepath.Join(rootfs, "bin", "refzygote"), "--heap-mb", "64", "--gvisor")
+		rt, _ = registryHome(t, repo)
+		g.TemplateDigest = digest
+		t.Logf("template: registry artifact %s", digest)
+	} else {
+		rt = newRuntime(t)
+		t.Logf("template: baked into the rootfs")
+	}
+	ctx := context.Background()
 	t0 := time.Now()
 	if err := rt.PrepareTemplate(ctx, g); err != nil {
 		t.Fatal(err)

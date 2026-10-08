@@ -32,8 +32,8 @@ func newFake(t *testing.T, k knobs) (*Backend, string) {
 	if err := os.Mkdir(b.opt.Rootfs, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	// New looked for the rootfs before it existed; make the tier what a
-	// real opening would find.
+	// New looked for the rootfs before it existed. Set the tier a real
+	// opening would find.
 	b.tier = core.TierSnapshot
 	t.Cleanup(func() {
 		b.Close()
@@ -90,8 +90,8 @@ func boxCID(t *testing.T, b *Backend, id string) string {
 	return x.cid
 }
 
-// lastField is the last space-separated word of a recorded call: the
-// container id of a run or restore.
+// lastField is the last space-separated word of a recorded call, which is
+// the container id of a run or restore.
 func lastField(call string) string {
 	f := strings.Fields(call)
 	if len(f) == 0 {
@@ -307,19 +307,21 @@ func TestRunsc(t *testing.T) {
 // tail400 is the last 400 bytes of s, as a runsc error keeps them.
 func tail400(s string) string { return s[len(s)-400:] }
 
-// TestWriteBundle: the OCI spec every sandbox is created or restored
-// with. The run directory is /host, the self-checkpoint annotations are
-// there only for a template with images.
+// TestWriteBundle checks the OCI spec every sandbox is created or restored
+// with. The run directory is /host, and the self-checkpoint annotations
+// are there only for a template with images.
 func TestWriteBundle(t *testing.T) {
 	cases := []struct {
-		name    string
-		env     []string
-		images  string
-		dir     func(t *testing.T) string
-		wantErr bool
+		name     string
+		env      []string
+		images   string
+		template string
+		dir      func(t *testing.T) string
+		wantErr  bool
 	}{
 		{name: "fiber bundle", env: []string{"FIBERD_FENCE=g/1-1", "FIBERD_ENDPOINT=/host/ep.sock"}},
 		{name: "template with self-checkpoint", images: "/img"},
+		{name: "registry template bound read-only", template: "/state/templates/g/template"},
 		{name: "directory under a file", dir: func(t *testing.T) string {
 			f := filepath.Join(t.TempDir(), "file")
 			if err := os.WriteFile(f, nil, 0o600); err != nil {
@@ -335,7 +337,7 @@ func TestWriteBundle(t *testing.T) {
 			if tc.dir != nil {
 				dir = tc.dir(t)
 			}
-			err := b.writeBundle(dir, []string{"/bin/refzygote", "--gvisor"}, tc.env, "/run/g", tc.images)
+			err := b.writeBundle(dir, []string{"/bin/refzygote", "--gvisor"}, tc.env, "/run/g", tc.images, tc.template)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("writeBundle = %v, want error %v", err, tc.wantErr)
 			}
@@ -359,8 +361,13 @@ func TestWriteBundle(t *testing.T) {
 			for _, m := range s.Mounts {
 				mounts = append(mounts, m.Destination+":"+m.Type+":"+m.Source+":"+strings.Join(m.Options, ","))
 			}
-			if got := strings.Join(mounts, " "); got != "/proc:proc:proc: /dev:tmpfs:tmpfs: /tmp:tmpfs:tmpfs: /host:bind:/run/g:rbind,rw" {
-				t.Fatalf("mounts = %s", got)
+			wantMounts := "/proc:proc:proc: /dev:tmpfs:tmpfs: /tmp:tmpfs:tmpfs: /host:bind:/run/g:rbind,rw"
+			if tc.template != "" {
+				// Read-only, after /host, at the fixed path every home uses.
+				wantMounts += " /fiberd/template:bind:" + tc.template + ":bind,ro,nosuid,nodev"
+			}
+			if got := strings.Join(mounts, " "); got != wantMounts {
+				t.Fatalf("mounts = %s, want %s", got, wantMounts)
 			}
 			var ns []string
 			for _, n := range s.Linux.Namespaces {
@@ -381,7 +388,7 @@ func TestWriteBundle(t *testing.T) {
 	}
 }
 
-// TestCID: a fence or grant uid becomes a runsc container id.
+// TestCID checks that a fence or grant uid becomes a runsc container id.
 func TestCID(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{"g/1-1", "g-1-1"},
@@ -399,7 +406,7 @@ func TestCID(t *testing.T) {
 	}
 }
 
-// TestWaitFile: a file that appears, a file that goes, and a deadline.
+// TestWaitFile covers a file that appears, a file that goes, and a deadline.
 func TestWaitFile(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -441,8 +448,8 @@ func TestWaitFile(t *testing.T) {
 	}
 }
 
-// TestWaitEndpoint: the socket starts accepting, the sandbox exits first,
-// or the deadline passes.
+// TestWaitEndpoint covers a socket that starts accepting, a sandbox that
+// exits first, or the deadline passes.
 func TestWaitEndpoint(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -504,7 +511,7 @@ func cgroupFiles(t *testing.T, files map[string]string) int {
 	return int(d.Fd())
 }
 
-// TestLeafDiag: what is said about a fiber's leaf after a failed start,
+// TestLeafDiag checks what is said about a fiber's leaf after a failed start,
 // from the files the kernel keeps there.
 func TestLeafDiag(t *testing.T) {
 	cases := []struct {
@@ -534,9 +541,9 @@ func TestLeafDiag(t *testing.T) {
 	}
 }
 
-// TestWarm: the template sandbox runs, drops its marker, is checkpointed
-// in place, and is reported gone when it exits. Every failure before that
-// leaves no sandbox behind.
+// TestWarm checks that the template sandbox runs, drops its marker, is
+// checkpointed in place, and is reported gone when it exits. Every failure
+// before that leaves no sandbox behind.
 func TestWarm(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -603,7 +610,8 @@ func TestWarm(t *testing.T) {
 					t.Fatalf("%d templates registered after a failed warm", n)
 				}
 				if tc.started {
-					// Started, so it must have been ended: a delete after the run.
+					// Started, so it must have been ended by a delete after
+					// the run.
 					calls := runscCalls(t, cfg)
 					ran := false
 					for _, c := range calls {
@@ -652,9 +660,9 @@ func TestWarm(t *testing.T) {
 			b.Unwarm("nobody")
 			b.Unwarm(w.ID)
 			waitFor(t, "the template sandbox to be gone", func() bool { return !sandboxAlive(cfg, wc) })
-			// The reaper cleans up after it and, the instance being
-			// unregistered already, says nothing: an end the host asked
-			// for through Unwarm is not news to it.
+			// The reaper cleans up after it and says nothing, since the
+			// instance is already unregistered. An end the host asked for
+			// through Unwarm is not news to it.
 			waitFor(t, "the reaper's delete", func() bool {
 				return len(runscCalls(t, cfg)) > 0 && strings.HasSuffix(runscCalls(t, cfg)[len(runscCalls(t, cfg))-1], "delete -force "+wc)
 			})
@@ -718,10 +726,10 @@ func cgroupLeaf(t *testing.T) int {
 	return fd
 }
 
-// TestProbeFootprint: the template image is restored once into the probe
-// cgroup as a fiber would be, measured serving, and ended, leaving
-// nothing in the leaf or the run directory. A probe that cannot restore
-// or serve measures nothing.
+// TestProbeFootprint checks that the template image is restored once into the
+// probe cgroup as a fiber would be, measured serving, and ended, leaving
+// nothing in the leaf or the run directory. A probe that cannot restore or
+// serve measures nothing.
 func TestProbeFootprint(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -790,7 +798,7 @@ func TestProbeFootprint(t *testing.T) {
 	}
 }
 
-// TestProbeWithoutABundle: a probe whose bundle cannot be written
+// TestProbeWithoutABundle checks that a probe whose bundle cannot be written
 // measures nothing and runs nothing.
 func TestProbeWithoutABundle(t *testing.T) {
 	cases := []struct {
@@ -815,8 +823,8 @@ func TestProbeWithoutABundle(t *testing.T) {
 	}
 }
 
-// TestClone: a fiber is a sandbox restored from the template image with
-// the fence, endpoint and payload in its environment, serving before
+// TestClone checks that a fiber is a sandbox restored from the template image
+// with the fence, endpoint and payload in its environment, serving before
 // Clone returns, and its end is reported with runsc's status.
 func TestClone(t *testing.T) {
 	cases := []struct {
@@ -847,7 +855,7 @@ func TestClone(t *testing.T) {
 			if !dialable(ep) {
 				t.Fatalf("%s does not accept connections", ep)
 			}
-			bundle := filepath.Join(workDir, "bundles", fc)
+			bundle := b.bundleDir(fc)
 			cfgJSON, err := os.ReadFile(filepath.Join(bundle, "config.json"))
 			if err != nil {
 				t.Fatal(err)
@@ -887,7 +895,7 @@ func TestClone(t *testing.T) {
 	}
 }
 
-// TestCloneRefusals: what Clone refuses or cannot bring up, and the
+// TestCloneRefusals checks what Clone refuses or cannot bring up, and the
 // sandbox it ends when the fiber never serves.
 func TestCloneRefusals(t *testing.T) {
 	cases := []struct {
@@ -895,7 +903,7 @@ func TestCloneRefusals(t *testing.T) {
 		knobs    knobs
 		warmID   string
 		endpoint string // relative to the run directory unless absolute
-		bundles  bool   // the bundles directory is a file
+		bundles  bool   // the state directory's bundles entry is a file
 		deadline time.Duration
 		wantErr  error
 		wantText string
@@ -922,7 +930,7 @@ func TestCloneRefusals(t *testing.T) {
 				ep = filepath.Join(workDir, ep)
 			}
 			if tc.bundles {
-				if err := os.WriteFile(filepath.Join(workDir, "bundles"), nil, 0o600); err != nil {
+				if err := os.WriteFile(filepath.Join(b.opt.StateDir, "bundles"), nil, 0o600); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -943,9 +951,66 @@ func TestCloneRefusals(t *testing.T) {
 	}
 }
 
-// TestParkAndResume: a park asks the workload to close its endpoint,
-// checkpoints the sandbox (which ends it) and keeps the bundle beside the
-// image; a resume brings the image back under a new fence and endpoint.
+// TestBundleOutsideRunDir pins that a fiber's bundle is written under
+// the state directory, never under the grant's run directory. Every
+// sandbox of the grant has that directory as /host, read and write, so
+// a bundle there could be rewritten by a sibling before runsc read it,
+// and a name there may be a link a sandbox planted for the agent to
+// write through. Here the run directory's "bundles" entry is planted
+// before the clone, as a sandbox could plant it.
+func TestBundleOutsideRunDir(t *testing.T) {
+	cases := []struct {
+		name  string
+		plant func(t *testing.T, workDir, victim string)
+	}{
+		{name: "a link to a directory of the planter's choice", plant: func(t *testing.T, workDir, victim string) {
+			if err := os.Symlink(victim, filepath.Join(workDir, "bundles")); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "a plain file, so nothing could be made under it", plant: func(t *testing.T, workDir, _ string) {
+			if err := os.WriteFile(filepath.Join(workDir, "bundles"), nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b, _, w, workDir := warmed(t, knobs{})
+			victim := filepath.Join(t.TempDir(), "victim")
+			if err := os.Mkdir(victim, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			tc.plant(t, workDir, victim)
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			ep := filepath.Join(workDir, "ep.sock")
+			if _, err := b.Clone(ctx, w.ID, backend.FiberSpec{Fence: "g/1-1", Endpoint: ep, CgroupFD: -1, Deadline: 2 * time.Second}); err != nil {
+				t.Fatalf("Clone: %v", err)
+			}
+			fc := boxCID(t, b, "g/1-1")
+			bundle := b.bundleDir(fc)
+			if rel, err := filepath.Rel(workDir, bundle); err == nil && !strings.HasPrefix(rel, "..") {
+				t.Fatalf("bundle %s is under the run directory %s", bundle, workDir)
+			}
+			if _, err := os.Stat(filepath.Join(bundle, "config.json")); err != nil {
+				t.Fatalf("bundle under the state directory: %v", err)
+			}
+			if ents, _ := os.ReadDir(victim); len(ents) != 0 {
+				t.Fatalf("the agent wrote through the planted link: %v", ents)
+			}
+			if err := b.Kill("g/1-1"); err != nil {
+				t.Fatalf("Kill: %v", err)
+			}
+			waitExit(t, b)
+		})
+	}
+}
+
+// TestParkAndResume checks that a park asks the workload to close its
+// endpoint, checkpoints the sandbox (which ends it) and keeps the bundle
+// beside the image. A resume brings the image back under a new fence and
+// endpoint.
 func TestParkAndResume(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -965,9 +1030,9 @@ func TestParkAndResume(t *testing.T) {
 			if err := b.Park(context.Background(), "g/1-1", backend.ParkSpec{Dir: dir}); err != nil {
 				t.Fatalf("Park: %v", err)
 			}
-			if _, err := os.Stat(filepath.Join(workDir, "bundles", fc)); err == nil {
+			if _, err := os.Stat(b.bundleDir(fc)); err == nil {
 				waitFor(t, "the reaper to remove the bundle", func() bool {
-					_, err := os.Stat(filepath.Join(workDir, "bundles", fc))
+					_, err := os.Stat(b.bundleDir(fc))
 					return err != nil
 				})
 			}
@@ -1003,10 +1068,10 @@ func TestParkAndResume(t *testing.T) {
 			if serr != nil || f.ID != "g/2-1" || f.PID != st.PID || !dialable(ep) {
 				t.Fatalf("Resume = %+v (%v), want g/2-1 serving on %s", f, serr, ep)
 			}
-			if findCall(runscCalls(t, cfg), "restore --detach --image-path "+dir+" --bundle "+filepath.Join(workDir, "bundles", fc2)+" --direct "+fc2) == "" {
+			if findCall(runscCalls(t, cfg), "restore --detach --image-path "+dir+" --bundle "+b.bundleDir(fc2)+" --direct "+fc2) == "" {
 				t.Fatal("the resume did not restore the park image")
 			}
-			cfgJSON, err := os.ReadFile(filepath.Join(workDir, "bundles", fc2, "config.json"))
+			cfgJSON, err := os.ReadFile(filepath.Join(b.bundleDir(fc2), "config.json"))
 			if err != nil || !strings.Contains(string(cfgJSON), `"/bin/refzygote"`) || !strings.Contains(string(cfgJSON), `"FIBERD_FENCE=g/2-1"`) {
 				t.Fatalf("resumed bundle = %s (%v)", cfgJSON, err)
 			}
@@ -1020,7 +1085,7 @@ func TestParkAndResume(t *testing.T) {
 	}
 }
 
-// TestParkRefusals: a park of an unknown fiber, one whose workload cannot
+// TestParkRefusals covers a park of an unknown fiber, one whose workload cannot
 // be signalled, one that keeps its endpoint, and one whose checkpoint
 // fails.
 func TestParkRefusals(t *testing.T) {
@@ -1041,12 +1106,12 @@ func TestParkRefusals(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			b, cfg, workDir, _ := cloned(t, tc.before)
+			b, cfg, _, _ := cloned(t, tc.before)
 			fc := boxCID(t, b, "g/1-1")
 			setKnobs(t, cfg, tc.after)
 			t.Cleanup(func() { setKnobs(t, cfg, knobs{}) })
 			if tc.noBundle {
-				if err := os.RemoveAll(filepath.Join(workDir, "bundles", fc)); err != nil {
+				if err := os.RemoveAll(b.bundleDir(fc)); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -1061,8 +1126,8 @@ func TestParkRefusals(t *testing.T) {
 	}
 }
 
-// TestResumeRefusals: a park image without its bundle, or with one that
-// cannot be read, is not resumed.
+// TestResumeRefusals checks that a park image without its bundle, or with one
+// that cannot be read, is not resumed.
 func TestResumeRefusals(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -1089,7 +1154,7 @@ func TestResumeRefusals(t *testing.T) {
 	}
 }
 
-// TestClose: closing kills the template and every fiber, and each is
+// TestClose checks that closing kills the template and every fiber, and each is
 // reported gone.
 func TestClose(t *testing.T) {
 	cases := []struct {
@@ -1115,8 +1180,8 @@ func TestClose(t *testing.T) {
 	}
 }
 
-// TestPidOf: the sandbox pid from `runsc state`, or 0 when runsc cannot
-// say.
+// TestPidOf checks the sandbox pid from `runsc state`, or 0 when runsc
+// cannot say.
 func TestPidOf(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -1146,9 +1211,9 @@ func TestPidOf(t *testing.T) {
 	}
 }
 
-// TestNewCID: every incarnation gets a cid of its own, the kind and name
-// stay readable, a long name is cut to a hash within runsc's limit, and
-// what runsc refuses in a name is replaced.
+// TestNewCID checks that every incarnation gets a cid of its own, the kind
+// and name stay readable, a long name is cut to a hash within runsc's limit,
+// and what runsc refuses in a name is replaced.
 func TestNewCID(t *testing.T) {
 	long := strings.Repeat("abcdefghij", 10)
 	cases := []struct {
@@ -1188,8 +1253,8 @@ func TestNewCID(t *testing.T) {
 	}
 }
 
-// TestSweep: opening the backend ends every sandbox a previous life left
-// in its root, and leaves them alone when runsc cannot list them.
+// TestSweep checks that opening the backend ends every sandbox a previous
+// life left in its root, and leaves them alone when runsc cannot list them.
 func TestSweep(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -1203,10 +1268,10 @@ func TestSweep(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			bin, cfg := fakeRunscBin(t, tc.knobs)
 			t.Cleanup(func() { endAllSandboxes(t, cfg) })
-			// A sandbox of a previous life: started outside any backend.
+			// A sandbox of a previous life, started outside any backend.
 			old := &Backend{opt: Options{Rootfs: "/rootfs"}}
 			bundle := filepath.Join(t.TempDir(), "bundle")
-			if err := old.writeBundle(bundle, []string{"/bin/refzygote"}, []string{"FIBERD_FENCE=none"}, t.TempDir(), ""); err != nil {
+			if err := old.writeBundle(bundle, []string{"/bin/refzygote"}, []string{"FIBERD_FENCE=none"}, t.TempDir(), "", ""); err != nil {
 				t.Fatal(err)
 			}
 			if code := startSandbox(cfg, "w-old-7", bundle); code != 0 || !sandboxAlive(cfg, "w-old-7") {
@@ -1228,12 +1293,11 @@ func TestSweep(t *testing.T) {
 	}
 }
 
-// TestCIDReuse: the reaper of an exited sandbox deletes it after `runsc
-// wait` returns, which can be long after the host has warmed the same
-// grant, or cloned the same fence, again. The successor is a different
-// incarnation with a cid of its own, so the late delete cannot touch it
-// or its bundle. The gate holds the reaper's delete until the successor
-// is up.
+// TestCIDReuse checks that a reaper's late delete cannot touch a successor
+// under the same grant or fence. The reaper deletes after `runsc wait`
+// returns, which can be long after the host warmed or cloned again. The
+// successor has a cid of its own. The gate holds the delete until the
+// successor is up.
 func TestCIDReuse(t *testing.T) {
 	cases := []struct {
 		name string
@@ -1282,7 +1346,7 @@ func TestCIDReuse(t *testing.T) {
 					t.Fatalf("second Clone: %v", err)
 				}
 				cid := boxCID(t, b, "g/1-1")
-				return cid, filepath.Join(workDir, "bundles", cid)
+				return cid, b.bundleDir(cid)
 			},
 			settle: func(t *testing.T, b *Backend, _, _ string) {
 				if err := b.Kill("g/1-1"); err != nil {
@@ -1300,7 +1364,7 @@ func TestCIDReuse(t *testing.T) {
 			if !sandboxAlive(cfg, second) {
 				t.Fatalf("the successor %s is not running", second)
 			}
-			// The old reaper's delete lands now.
+			// The old reaper's delete lands here.
 			if err := os.WriteFile(filepath.Join(cfg, gateOpen), nil, 0o644); err != nil {
 				t.Fatal(err)
 			}
