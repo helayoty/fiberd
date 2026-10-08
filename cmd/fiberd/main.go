@@ -10,7 +10,10 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"flag"
+	"io"
 	"log"
 	"os"
 
@@ -18,12 +21,32 @@ import (
 )
 
 func main() {
+	os.Exit(run(context.Background(), os.Args[1:], os.Stderr))
+}
+
+// run is fiberd until ctx ends, SIGINT or SIGTERM. It returns the exit
+// code: 0 for a clean stop or -h, 2 for bad flags, 1 when the agent
+// fails.
+func run(ctx context.Context, args []string, stderr io.Writer) int {
+	fs := flag.NewFlagSet("fiberd", flag.ContinueOnError)
+	fs.SetOutput(stderr)
 	var c agent.Config
-	c.Bind(flag.CommandLine)
-	flag.Parse()
-	c.Finish()
-	if err := agent.Run(&c, agent.Standalone); err != nil {
-		log.Fatal(err)
+	c.Bind(fs)
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
 	}
-	os.Exit(0)
+	c.Finish()
+	logger := log.New(stderr, "", log.LstdFlags)
+	if err := c.NarrowCaps(); err != nil {
+		logger.Print(err)
+		return 1
+	}
+	if err := agent.RunContext(ctx, &c, agent.Standalone); err != nil {
+		logger.Print(err)
+		return 1
+	}
+	return 0
 }

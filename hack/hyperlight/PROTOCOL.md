@@ -4,12 +4,17 @@ A backend whose mechanism is not reachable from Go (Hyperlight has a Rust
 host API only) plugs into fiberd through a **helper process**. fiberd
 starts one helper per warm template, inside the grant's cgroup, with a
 unix socketpair as the helper's fd 3, and speaks this line protocol on
-it. It is the zygote protocol of `hack/zygote/libfiberzygote.h` extended
+it. It is the zygote protocol of `zygote/libfiberzygote.h` extended
 with park and resume, and with fibers named by fence rather than pid,
 because the helper's fibers are sandboxes inside one process, not
 processes of their own.
 
-![fiberd starts one helper per warm template and exchanges lifecycle messages over an fd 3 Unix socketpair; the helper owns the warm snapshot and sandboxes, while fiberd performs host-side durability work after a synchronous park.](../../docs/images/hyperlight-helper-protocol.svg)
+![Runtime/helper sequence: PARKED acknowledges snapshot writing, the host fsyncs before KILL, and Park returns after manifest writing and exit cleanup. A later RESUME restores state under a new fence.](../../docs/images/hyperlight-helper-protocol.svg)
+
+The diagram shows the current host implementation, not a complete durability
+guarantee: `syncDir` syncs top-level files and their directory before teardown,
+but `manifest.json` is written afterward without another sync, and nested
+snapshot files are not recursively synced.
 
 Every message is one line, fields separated by single spaces, no field
 contains a space. Paths are absolute host paths. One operation per fence
@@ -19,12 +24,16 @@ is outstanding at a time.
 
 | line | meaning |
 | --- | --- |
-| `READY <version>` | the template is warm: the guest is loaded, its init ran, and the warm snapshot is taken |
+| `READY <helper> <hyperlight> <hypervisor> <cpu>` | the template is warm: the guest is loaded, its init ran, and the warm snapshot is taken. The four facts are what its snapshots depend on (the helper's version, the hyperlight_host crate, the hypervisor in use, the CPU vendor); fiberd records them as the platform of every park |
 | `CLONED <fence>` | the fiber serves on the endpoint it was given |
-| `PARKED <fence> <bytes>` | snapshot creation completed in the directory it was given; `bytes` is what it costs to move. Crash durability is not implied until fiberd completes its host-side sync path |
+| `PARKED <fence> <bytes>` | snapshot creation completed in the directory it was given; `bytes` is what it costs to move. Host-side sync is separate; the current crash-durability limitations are described above |
 | `ERROR <fence> <text...>` | the operation on that fence failed (text may contain spaces) |
 | `EXITED <fence> exit:<n>\|signal:<name>\|oom` | the fiber is gone; sent for every end, asked for or not |
 | `W <fence> <bytes>` | the fiber's working set changed: bytes dirtied since the warm snapshot |
+
+Before any of this, `helper --version` prints the same four facts on
+one line and exits: fiberd reads them at open, and refuses a READY that
+disagrees.
 
 ## fiberd -> helper
 

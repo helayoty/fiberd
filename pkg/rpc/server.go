@@ -28,23 +28,18 @@ type Server struct {
 	// control plane to fall back through.
 	Issuer     string
 	RetryAfter time.Duration
-	Now        func() time.Time
 }
 
-// NewGRPCServer builds a grpc.Server with the admission interceptor and the
-// Fibers service registered.
+// NewGRPCServer builds a grpc.Server with the caller and admission
+// interceptors and the Fibers service registered. Pass
+// grpc.Creds(credentials.NewTLS(cfg)) for mutual TLS.
 func NewGRPCServer(s *Server, opts ...grpc.ServerOption) *grpc.Server {
-	opts = append(opts, grpc.ChainUnaryInterceptor(AdmissionInterceptor()))
+	opts = append(opts,
+		grpc.ChainUnaryInterceptor(CallerInterceptor(), AdmissionInterceptor()),
+		grpc.ChainStreamInterceptor(CallerStreamInterceptor()))
 	gs := grpc.NewServer(opts...)
 	grantv1.RegisterFibersServer(gs, s)
 	return gs
-}
-
-func (s *Server) now() time.Time {
-	if s.Now != nil {
-		return s.Now()
-	}
-	return time.Now()
 }
 
 func (s *Server) retryAfter() time.Duration {
@@ -58,30 +53,67 @@ func (s *Server) Clone(ctx context.Context, req *grantv1.CloneRequest) (*grantv1
 	// No deadline on the wire: the agent picks the action's default
 	// (fork-scale for create, sub-second for resume).
 	var deadline time.Duration
-	if d, ok := grant.Deadline(req.GetDeadline(), s.now()); ok {
+	if d, ok := grant.Deadline(req.GetDeadline(), time.Now()); ok {
 		if d <= 0 {
 			return nil, s.ToError(core.Invalid, errNoDeadline)
 		}
 		deadline = d
 	}
-	resp, code, err := s.Agent.Clone(ctx, core.CloneRequest{
+	creq := core.CloneRequest{
 		GrantJWT: []byte(req.GetGrantJwt()),
 		Session:  req.GetSession(),
 		Deadline: deadline,
 		Payload:  req.GetPayload(),
-	})
+	}
+	if c, ok := CallerFrom(ctx); ok {
+		creq.CallerThumbprint = c.Thumbprint
+	}
+	resp, code, err := s.Agent.Clone(ctx, creq)
 	if code != core.OK {
 		return nil, s.ToError(code, err)
 	}
 	return &grantv1.CloneResponse{
-		FiberId:  resp.FiberID,
-		Endpoint: resp.Endpoint,
-		Fence:    fenceToProto(resp.Fence),
-		Kind:     kindToProto(resp.Kind),
+		FiberId:         resp.FiberID,
+		Endpoint:        resp.Endpoint,
+		Fence:           fenceToProto(resp.Fence),
+		Kind:            kindToProto(resp.Kind),
+		RoutingKey:      resp.RoutingKey,
+		ServerKeySha256: resp.ServerKeySHA256,
 	}, nil
 }
 
+// owns reports whether the request's caller may see or act on grant uid,
+// which holds when the grant is bound to the caller's certificate. A
+// plaintext request has no caller identity and sees everything.
+func (s *Server) owns(ctx context.Context, grantUID string) bool {
+	c, ok := CallerFrom(ctx)
+	return !ok || s.Agent.Ledger.GrantBoundTo(grantUID, c.Thumbprint)
+}
+
+// ownsFiber is owns for a running fiber's grant. An unknown fiber is left
+// to the agent, which answers NotFound itself.
+func (s *Server) ownsFiber(ctx context.Context, fiberID string) bool {
+	f, ok := s.Agent.Ledger.Fiber(fiberID)
+	return !ok || s.owns(ctx, f.GrantUID)
+}
+
+// visible filters statuses down to the caller's grants.
+func (s *Server) visible(ctx context.Context, sts []core.Status) []core.Status {
+	out := sts[:0:0]
+	for _, st := range sts {
+		if s.owns(ctx, st.GrantUID) {
+			out = append(out, st)
+		}
+	}
+	return out
+}
+
+// Park and Release answer NotFound, never PermissionDenied, for another
+// caller's fiber, so a fiber ID reveals nothing about who holds it.
 func (s *Server) Park(ctx context.Context, req *grantv1.ParkRequest) (*emptypb.Empty, error) {
+	if !s.ownsFiber(ctx, req.GetFiberId()) {
+		return nil, s.ToError(core.NotFound, core.ErrFiberUnknown)
+	}
 	_, code, err := s.Agent.Park(ctx, req.GetFiberId(), req.GetSync())
 	if code != core.OK {
 		return nil, s.ToError(code, err)
@@ -90,6 +122,9 @@ func (s *Server) Park(ctx context.Context, req *grantv1.ParkRequest) (*emptypb.E
 }
 
 func (s *Server) Release(ctx context.Context, req *grantv1.ReleaseRequest) (*emptypb.Empty, error) {
+	if !s.ownsFiber(ctx, req.GetFiberId()) {
+		return nil, s.ToError(core.NotFound, core.ErrFiberUnknown)
+	}
 	code, err := s.Agent.Release(ctx, req.GetFiberId(), req.GetDiscard())
 	if code != core.OK {
 		return nil, s.ToError(code, err)
@@ -97,12 +132,12 @@ func (s *Server) Release(ctx context.Context, req *grantv1.ReleaseRequest) (*emp
 	return &emptypb.Empty{}, nil
 }
 
-// Watch streams one Status per admitted grant on every change and at least
-// every status interval, until the client goes away.
+// Watch streams one Status per admitted grant of the caller on every
+// change and at least every status interval, until the client goes away.
 func (s *Server) Watch(_ *emptypb.Empty, stream grantv1.Fibers_WatchServer) error {
 	ctx := stream.Context()
 	for batch := range s.Agent.Watch(ctx) {
-		for _, st := range batch {
+		for _, st := range s.visible(ctx, batch) {
 			if err := stream.Send(StatusToProto(st)); err != nil {
 				return err
 			}

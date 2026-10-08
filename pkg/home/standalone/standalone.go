@@ -36,8 +36,6 @@ type Config struct {
 	// (paths or ids): the standalone home's fabric channel. Empty means
 	// no devices.
 	Devices []string
-	// DieAfter simulates the issuer disappearing after this long (demos).
-	DieAfter time.Duration
 }
 
 type Home struct {
@@ -110,19 +108,8 @@ func (h *Home) SetLane(healthy bool) {
 }
 
 // Run keeps the liveness signal flowing: issuer key refreshes when there
-// is an issuer, a plain timer otherwise. DieAfter stops the signal for
-// demos of the SHED path.
+// is an issuer, a plain timer otherwise.
 func (h *Home) Run(ctx context.Context) {
-	if h.cfg.DieAfter > 0 {
-		go func() {
-			select {
-			case <-ctx.Done():
-			case <-time.After(h.cfg.DieAfter):
-				log.Printf("standalone: simulated issuer death (-lane-dies-after=%s)", h.cfg.DieAfter)
-				h.SetLane(false)
-			}
-		}()
-	}
 	every := h.cfg.StaleTTL / 2
 	if h.cfg.Cache != nil {
 		h.cfg.Cache.Run(ctx, every)

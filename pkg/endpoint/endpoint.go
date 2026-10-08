@@ -158,7 +158,7 @@ func Parse(s string) (Endpoint, error) {
 		}
 		return Endpoint{Scheme: "tcp", Host: host, Port: n}, nil
 	}
-	return Endpoint{}, fmt.Errorf("endpoint %q: scheme must be unix or tcp", s)
+	return Endpoint{}, fmt.Errorf("endpoint %q: scheme must be unix or tcp: %w", s, ErrUnsupported)
 }
 
 // Validate is what the conformance suite asks of every endpoint a home

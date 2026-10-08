@@ -20,8 +20,9 @@ const (
 	// GrantAdded carries a signed token to pre-admit (warm the template
 	// before the first Clone). The agent verifies it like any other.
 	GrantAdded EventKind = iota
-	// GrantRemoved names a grant the home no longer holds. Its fibers
-	// drain by lease non-renewal; this only stops new admissions early.
+	// GrantRemoved names a grant the home no longer holds. Its running
+	// fibers are released and the UID is refused until every token for
+	// it has expired, or the lane delivers it again.
 	GrantRemoved
 )
 
@@ -62,9 +63,9 @@ type Home interface {
 	Run(ctx context.Context)
 }
 
-// Drive consumes the home's grant lane into the agent: verify and admit
-// on GrantAdded, revoke on GrantRemoved. Returns when the lane closes or
-// ctx ends.
+// Drive consumes the home's grant lane into the agent. On GrantAdded it
+// verifies, lifts any denial and admits. On GrantRemoved it removes. It
+// returns when the lane closes or ctx ends.
 func Drive(ctx context.Context, h Home, a *core.Agent) {
 	ch, err := h.Grants(ctx)
 	if err != nil {
@@ -89,13 +90,15 @@ func Drive(ctx context.Context, h Home, a *core.Agent) {
 					log.Printf("home %s: grant on the lane did not verify: %v", h.Name(), err)
 					continue
 				}
+				g.Token = string(ev.Token)
+				a.Redeliver(ctx, g.UID)
 				if code, err := a.Admit(ctx, g); err != nil {
 					log.Printf("home %s: admit %s: %v (%d)", h.Name(), g.UID, err, code)
 					continue
 				}
 				_ = h.PublishReady(ctx, g.UID, true)
 			case GrantRemoved:
-				a.Revoke(ev.UID)
+				a.Remove(ctx, ev.UID)
 				_ = h.PublishReady(ctx, ev.UID, false)
 			}
 		}

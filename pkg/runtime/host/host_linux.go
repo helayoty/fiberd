@@ -27,6 +27,16 @@ var (
 	// ErrParity: an artifact's images or a published delta were made on
 	// a host this one cannot restore them on (see artifact.Parity).
 	ErrParity = errors.New("host: platform parity")
+	// ErrNoHandoff: the grant's fibers are reached by handoff and this
+	// home cannot pass them connections: its backend has no way to, or
+	// it routes none (no Config.Handoff).
+	ErrNoHandoff = errors.New("host: this home does not hand connections to fibers")
+	// ErrNotHandoff: a connection was handed to a fiber that does not
+	// take them (unknown, gone, or reached directly).
+	ErrNotHandoff = errors.New("host: fiber does not take handed-off connections")
+	// ErrHandoffBusy: the fiber's queue of handed-off connections is
+	// full; it is not accepting.
+	ErrHandoffBusy = errors.New("host: fiber is not accepting handed-off connections")
 )
 
 // Runtime implements core.Runtime over one warm template instance per
@@ -35,13 +45,17 @@ type Runtime struct {
 	cfg  Config
 	be   backend.Backend
 	root cgroup.Dir
+	tier core.Tier         // what the backend offers
 	host artifact.Platform // what checkpoints made here record, and what pulled ones must match
+	hide []string          // directories fibers must not see
 
 	mu     sync.Mutex
 	warms  map[string]*warm  // grant uid
 	fibers map[string]*fiber // fiber id (fence string)
 	ports  map[int]string    // tcp endpoints: port -> fiber id holding it
 	exits  chan core.FiberExit
+	// identities: grant uid -> the handoff identity its fibers are given.
+	identities map[string]handoffIdentity
 
 	// parents is the content-addressed store of template checkpoints:
 	// <TemplateCache>/parents/<sha256>/ (a self-checkpoint, or a symlink
@@ -50,6 +64,10 @@ type Runtime struct {
 	// the same artifact warmed another home, across homes.
 	parentsMu sync.Mutex
 	parents   map[string]backend.Parent
+
+	// templateMu serialises pulls and re-verification of the template
+	// cache, which replace files other warms of the same digest read.
+	templateMu sync.Mutex
 
 	fabricMu sync.Mutex
 	fabrics  map[string]core.FabricChannel // grant uid -> what the home provisioned
@@ -86,6 +104,7 @@ type warm struct {
 	parentSHA string
 	cg        cgroup.Dir // <root>/<grant>
 	zcg       cgroup.Dir // <root>/<grant>/zygote
+	minBytes  uint64     // memory.min held for the instance's pages
 }
 
 type fiber struct {
@@ -96,23 +115,30 @@ type fiber struct {
 	endpoint string // the URL Clone returned
 	port     int    // tcp endpoints: the port held while running or parked
 	fenceFn  string // where a resumed fiber's new fence is published, "" for a fresh one
-	started  time.Time
 	budget   uint64 // w_budget_bytes; 0 = unlimited
 	devMax   uint64 // device_budget bytes; 0 = none
+	quota    uint64 // the grant's parked-delta bytes on this home; 0 = none
 	overWhy  string // why the host killed it, for the exit's detail
 	released bool   // Release or Park in progress: do not report the exit
 	parked   bool   // the end in progress is a park: the port stays with the delta
 	overW    bool   // killed by the host for exceeding its W budget
 	ready    bool   // the backend has answered: before that, W is a restore in flight, not the fiber's
-	done     chan struct{}
+	// handoff is the host's end of a handoff fiber's channel; nil for a
+	// fiber reached directly.
+	handoff *os.File
+	done    chan struct{}
 }
 
-func New(cfg Config) (core.Runtime, error) {
+// New opens the runtime over cfg.Backend.
+func New(cfg Config) (*Runtime, error) {
 	if cfg.Backend == nil {
 		return nil, errors.New("host: Backend is required")
 	}
 	if cfg.CgroupRoot == "" {
 		return nil, errors.New("host: CgroupRoot is required")
+	}
+	if cfg.Handoff != nil && len(cfg.HandoffKey) < 32 {
+		return nil, errors.New("host: Handoff needs a HandoffKey of at least 32 bytes")
 	}
 	if cfg.RunDir == "" {
 		cfg.RunDir = "/run/fiberd"
@@ -125,17 +151,17 @@ func New(cfg Config) (core.Runtime, error) {
 	}
 	// Restores change directory, so every path handed down must be
 	// absolute; RunDir too, since endpoints are recorded in manifests.
-	for _, p := range []*string{&cfg.RunDir, &cfg.DeltaDir, &cfg.CgroupRoot, &cfg.TemplateCache} {
+	for _, p := range []*string{&cfg.RunDir, &cfg.DeltaDir, &cfg.CgroupRoot, &cfg.TemplateCache, &cfg.PrivateDir} {
+		if *p == "" {
+			continue // PrivateDir is optional; the others have defaults above
+		}
 		abs, err := filepath.Abs(*p)
 		if err != nil {
 			return nil, err
 		}
 		*p = abs
 	}
-	detected := cfg.Backend.Tier()
-	if cfg.Tier == core.TierUnspecified || cfg.Tier > detected {
-		cfg.Tier = detected
-	}
+	tier := cfg.Backend.Tier()
 	root := cgroup.Root(cfg.CgroupRoot)
 	if err := root.Ensure("memory", "pids"); err != nil {
 		return nil, err
@@ -164,6 +190,11 @@ func New(cfg Config) (core.Runtime, error) {
 	if err := cfg.Endpoints.Validate(); err != nil {
 		return nil, fmt.Errorf("host: %w", err)
 	}
+	if cfg.DeltaRegistry != "" {
+		if err := cfg.checkDeltaRegistry(); err != nil {
+			return nil, err
+		}
+	}
 	if scheme := cfg.Endpoints.Family.Scheme(); scheme != "unix" {
 		// Every backend serves unix sockets under the run directory; a
 		// tcp family needs the backend to say it can bind one.
@@ -177,9 +208,16 @@ func New(cfg Config) (core.Runtime, error) {
 			return nil, fmt.Errorf("host: backend %s cannot serve %s endpoints (family %s)", cfg.Backend.Name(), scheme, cfg.Endpoints.Family)
 		}
 	}
-	log.Printf("host: backend %s tier %s platform %s parity %s endpoints %s", host.Backend, cfg.Tier, host, cfg.Parity, cfg.Endpoints.Family.Scheme())
+	hide, skipped, err := cfg.fiberHide()
+	if err != nil {
+		return nil, err
+	}
+	if len(skipped) > 0 {
+		log.Printf("host: not hiding %v from fibers: relative, or holding the run directory %s", skipped, cfg.RunDir)
+	}
+	log.Printf("host: backend %s tier %s platform %s parity %s endpoints %s", host.Backend, tier, host, cfg.Parity, cfg.Endpoints.Family.Scheme())
 	r := &Runtime{
-		cfg: cfg, be: cfg.Backend, root: root, host: host,
+		cfg: cfg, be: cfg.Backend, root: root, tier: tier, host: host, hide: hide,
 		warms: map[string]*warm{}, fibers: map[string]*fiber{}, ports: map[int]string{},
 		exits:   make(chan core.FiberExit, 1024),
 		parents: map[string]backend.Parent{},
@@ -192,6 +230,12 @@ func New(cfg Config) (core.Runtime, error) {
 		go r.enforceW()
 	}
 	return r, nil
+}
+
+// IsolatesTenants implements core.Isolator with the backend's answer.
+func (r *Runtime) IsolatesTenants() bool {
+	iso, ok := r.be.(backend.Isolator)
+	return ok && iso.IsolatesTenants()
 }
 
 // OffersDevice implements core.DeviceCapable: the grant's warm instance
@@ -243,13 +287,11 @@ func (r *Runtime) enforceW() {
 		}
 		r.mu.Unlock()
 		dr, _ := r.be.(backend.DeviceReporter)
+		_, overhead := r.be.(backend.Overheader)
+		_, reports := r.be.(backend.WReporter)
 		for _, f := range fs {
 			why := ""
-			if _, ok := r.be.(backend.Overheader); ok || dr == nil {
-				if w, err := r.wBytes(f); err == nil && f.budget > 0 && w > f.budget {
-					why = fmt.Sprintf("W=%d over budget %d", w, f.budget)
-				}
-			} else if _, ok := r.be.(backend.WReporter); ok {
+			if overhead || reports || dr == nil {
 				if w, err := r.wBytes(f); err == nil && f.budget > 0 && w > f.budget {
 					why = fmt.Sprintf("W=%d over budget %d", w, f.budget)
 				}
@@ -273,9 +315,6 @@ func (r *Runtime) enforceW() {
 }
 
 func (r *Runtime) codec() backend.DeltaCodec {
-	if r.cfg.NoDeltas {
-		return nil
-	}
 	c, _ := r.be.(backend.DeltaCodec)
 	return c
 }
@@ -338,6 +377,9 @@ var ErrParentMissing = errors.New("host: parent checkpoint not in the store")
 
 // parent finds a checkpoint by hash: in memory, or on disk in the store.
 func (r *Runtime) parent(sha string) (backend.Parent, error) {
+	if !isHex64(sha) {
+		return nil, fmt.Errorf("host: parent hash %q is not a sha256", sha)
+	}
 	codec := r.codec()
 	if codec == nil {
 		return nil, errors.New("host: backend has no delta codec")
@@ -371,7 +413,7 @@ func (r *Runtime) parent(sha string) (backend.Parent, error) {
 	return p, nil
 }
 
-func (r *Runtime) Tier() core.Tier { return r.cfg.Tier }
+func (r *Runtime) Tier() core.Tier { return r.tier }
 
 // CgroupRoot is where the runtime carves grant and fiber cgroups.
 func (r *Runtime) CgroupRoot() string { return r.cfg.CgroupRoot }
@@ -385,17 +427,15 @@ func (r *Runtime) DefaultDeadlines() (create, resume time.Duration) {
 }
 
 // overhead is the fixed per-fiber footprint for a grant's fibers, added
-// to every leaf's memory.max and subtracted from measured W: what the
-// backend declares, or, when it declares 0 while saying it has one, the
-// warm template's own resident size as measured after it became ready
-// (a sandbox restored from the template pays for those pages itself).
+// to every leaf's memory.max and subtracted from measured W. A backend
+// that is an Overheader asks for it, and it is the warm template's own
+// resident size as measured after it became ready (a sandbox restored
+// from the template pays for those pages itself). Every Overheader today
+// reports FiberOverheadBytes() == 0, so there is no declared value to
+// prefer over the measurement.
 func (r *Runtime) overhead(grantUID string) uint64 {
-	o, ok := r.be.(backend.Overheader)
-	if !ok {
+	if _, ok := r.be.(backend.Overheader); !ok {
 		return 0
-	}
-	if n := o.FiberOverheadBytes(); n > 0 {
-		return n
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -448,37 +488,138 @@ func (r *Runtime) leafMax(g core.Grant) uint64 {
 		return g.WBudgetBytes
 	}
 	var total uint64
-	if o, ok := r.be.(backend.Overheader); ok && o.FiberOverheadBytes() > 0 {
-		total = o.FiberOverheadBytes()
-	} else {
-		r.mu.Lock()
-		if z := r.warms[g.UID]; z != nil {
-			total = z.total
-		}
-		r.mu.Unlock()
+	r.mu.Lock()
+	if z := r.warms[g.UID]; z != nil {
+		total = z.total
 	}
+	r.mu.Unlock()
 	if total == 0 {
 		return g.WBudgetBytes
 	}
 	return g.WBudgetBytes + total + total/2 + 32<<20
 }
 
+// grantCgroup makes the grant's cgroup with its controllers and its
+// task limit.
+func (r *Runtime) grantCgroup(g core.Grant) (cgroup.Dir, error) {
+	gcg := r.root.Child(g.UID)
+	if err := gcg.Ensure("memory", "pids"); err != nil {
+		return cgroup.Dir{}, err
+	}
+	if r.limitsTasks() {
+		if err := gcg.SetPidsMax(grantPids(g)); err != nil {
+			return cgroup.Dir{}, err
+		}
+	}
+	if err := r.delegateProcs(g.UID, gcg); err != nil {
+		return cgroup.Dir{}, err
+	}
+	return gcg, nil
+}
+
+// fiberLeaf makes a fiber's leaf under parent: its memory ceiling, group
+// OOM and task limit.
+func (r *Runtime) fiberLeaf(parent cgroup.Dir, g core.Grant, fence core.Fence) (cgroup.Dir, error) {
+	leaf := parent.Child(leafName(fence))
+	if err := leaf.Create(r.leafMax(g), true); err != nil {
+		return leaf, err
+	}
+	if r.limitsTasks() {
+		if err := leaf.SetPidsMax(fiberPidsMax); err != nil {
+			_ = leaf.Remove()
+			return leaf, err
+		}
+	}
+	if err := r.delegateProcs(g.UID, leaf); err != nil {
+		_ = leaf.Remove()
+		return leaf, err
+	}
+	return leaf, nil
+}
+
+// delegateProcs hands the grant's mapped root, when the backend maps
+// one, the cgroup.procs of d and nothing else. clone3 into a leaf checks
+// write permission on the leaf's cgroup.procs and on the common
+// ancestor's, the grant's cgroup. The limits stay root's. A grant that
+// could write its own memory.max or make cgroups would be out of its
+// budget.
+func (r *Runtime) delegateProcs(grantUID string, d cgroup.Dir) error {
+	m, ok := r.be.(backend.IDMapper)
+	if !ok {
+		return nil
+	}
+	uid, err := m.MappedRoot(grantUID)
+	if err != nil {
+		return err
+	}
+	if err := os.Chown(filepath.Join(d.Path, "cgroup.procs"), int(uid), -1); err != nil {
+		return fmt.Errorf("host: delegate cgroup.procs of %s to uid %d: %w", d.Path, uid, err)
+	}
+	return nil
+}
+
+// limitsTasks: task limits bound a fork backend's fiber, which is the
+// processes it forks. A sandbox's fiber is the sandbox, whose own threads
+// (gVisor's Sentry and Gofer) a limit sized for a forked workload would
+// count and starve.
+func (r *Runtime) limitsTasks() bool { return !r.IsolatesTenants() }
+
+// pidsPressure names a failed birth as the grant's own pressure when its
+// cgroup refused a fork since before was read: the caller is shed, not
+// sent to another home.
+func pidsPressure(gcg cgroup.Dir, before uint64, grantUID string, err error) error {
+	if after, _ := gcg.PidsMaxHits(); after > before {
+		return fmt.Errorf("%w: grant %s is at pids.max: %w", core.ErrPressure, grantUID, err)
+	}
+	return err
+}
+
+// protectTemplates keeps every warm template's pages out of reclaim:
+// memory.min on the delegation root is the sum of the warm instances',
+// since the kernel caps a child's protection at its parent's.
+func (r *Runtime) protectTemplates() {
+	r.mu.Lock()
+	var sum uint64
+	for _, z := range r.warms {
+		sum += z.minBytes
+	}
+	r.mu.Unlock()
+	if err := r.root.SetMemoryMin(sum); err != nil {
+		log.Printf("host: protect warm templates: %v", err)
+	}
+}
+
 // PrepareTemplate warms the grant's template: its cgroup, the backend's
 // warm instance, the delta parent, the block ceiling. Idempotent per grant.
 func (r *Runtime) PrepareTemplate(ctx context.Context, g core.Grant) error {
+	if g.Policy.EndpointMode == core.EndpointHandoff {
+		if !r.canHandoff() {
+			return fmt.Errorf("%w: grant %s on backend %s", ErrNoHandoff, g.UID, r.be.Name())
+		}
+		if err := r.prepareIdentity(g.UID, g.CallerThumbprint); err != nil {
+			return err
+		}
+	}
 	r.mu.Lock()
 	if _, ok := r.warms[g.UID]; ok {
 		r.mu.Unlock()
 		return nil
 	}
 	r.mu.Unlock()
+	if m, ok := r.be.(backend.IDMapper); ok {
+		// Before anything is made for the grant. A grant whose id range
+		// another admitted grant holds cannot run on this home.
+		if _, err := m.MappedRoot(g.UID); err != nil {
+			return err
+		}
+	}
 	tpl, err := r.resolveTemplate(ctx, g.TemplateDigest)
 	if err != nil {
 		return err
 	}
 
-	gcg := r.root.Child(g.UID)
-	if err := gcg.Ensure("memory", "pids"); err != nil {
+	gcg, err := r.grantCgroup(g)
+	if err != nil {
 		return err
 	}
 	zcg := gcg.Child("zygote")
@@ -500,18 +641,11 @@ func (r *Runtime) PrepareTemplate(ctx context.Context, g core.Grant) error {
 			defer func() { _ = pf.Close() }()
 		}
 	}
-	defer func() {
-		for i := 0; i < 20; i++ {
-			if err := pcg.Remove(); err == nil {
-				break
-			}
-			time.Sleep(5 * time.Millisecond)
-		}
-	}()
+	defer func() { _ = removeSoon(pcg) }()
 
 	workDir := filepath.Join(r.cfg.RunDir, g.UID)
 	w, err := r.be.Warm(ctx, backend.WarmSpec{GrantUID: g.UID, Template: tpl, CgroupFD: int(zfd.Fd()), WorkDir: workDir, ProbeCgroupFD: probeFD,
-		Devices: r.fabricOf(g.UID).Devices})
+		Devices: r.fabricOf(g.UID).Devices, Hide: r.hide})
 	if err != nil {
 		return err
 	}
@@ -521,7 +655,7 @@ func (r *Runtime) PrepareTemplate(ctx context.Context, g core.Grant) error {
 	// is one; otherwise checkpoint the warm instance now, leaving it
 	// running. Deltas over a self-checkpoint are exact on this home and
 	// portable to any home whose template pages hash the same.
-	if r.codec() != nil && r.cfg.Tier >= core.TierCheckpoint {
+	if r.codec() != nil && r.tier >= core.TierCheckpoint {
 		if tpl.ImagesDir != "" {
 			sha, err := r.registerParent(tpl.ImagesDir, false)
 			if err != nil {
@@ -554,9 +688,18 @@ func (r *Runtime) PrepareTemplate(ctx context.Context, g core.Grant) error {
 			z.total = z.bytes
 		}
 	}
+	// The template's pages are shared by every fiber; reclaiming them
+	// would make each fiber fault them back in.
+	for _, d := range []cgroup.Dir{zcg, gcg} {
+		if err := d.SetMemoryMin(zbytes); err != nil {
+			log.Printf("host: protect template of %s: %v", g.UID, err)
+		}
+	}
+	z.minBytes = zbytes
 	r.mu.Lock()
 	r.warms[g.UID] = z
 	r.mu.Unlock()
+	r.protectTemplates()
 
 	// The block ceiling, now that the warm instance's footprint is known.
 	ceiling := r.cfg.Ceiling
@@ -584,11 +727,20 @@ func (r *Runtime) resolveTemplate(ctx context.Context, digest string) (backend.T
 	if r.cfg.Registry == "" {
 		return backend.Template{}, fmt.Errorf("%w %q (no -template entry and no registry)", ErrNoTemplate, digest)
 	}
-	if !strings.HasPrefix(digest, "sha256:") {
-		return backend.Template{}, fmt.Errorf("%w %q: registry templates are addressed by sha256 digest", ErrNoTemplate, digest)
+	hex, ok := sha256Hex(digest)
+	if !ok {
+		return backend.Template{}, fmt.Errorf("%w %q: registry templates are addressed by sha256: and 64 lowercase hex characters", ErrNoTemplate, digest)
 	}
-	dir := filepath.Join(r.cfg.TemplateCache, strings.TrimPrefix(digest, "sha256:"))
+	dir := filepath.Join(r.cfg.TemplateCache, hex)
+	r.templateMu.Lock()
+	defer r.templateMu.Unlock()
 	cfg, err := artifact.ReadConfig(dir)
+	if err == nil {
+		if cfg, err = artifact.Reverify(ctx, dir, digest); err != nil {
+			log.Printf("host: cached template %s failed verification, pulling it again: %v", digest, err)
+			_ = os.RemoveAll(dir)
+		}
+	}
 	if err != nil {
 		log.Printf("host: pulling template %s from %s", digest, r.cfg.Registry)
 		cfg, err = artifact.Pull(ctx, r.cfg.Registry+"@"+digest, dir, r.cfg.RegistryPlainHTTP)
@@ -613,6 +765,31 @@ func (r *Runtime) resolveTemplate(ctx context.Context, digest string) (backend.T
 		tpl.ImagesDir = artifact.ImagesDir(dir)
 	}
 	return tpl, nil
+}
+
+// sha256Hex returns the hex of a digest that is exactly "sha256:" and 64
+// lowercase hex characters. Anything else could name a path outside the
+// template cache once joined to it.
+func sha256Hex(digest string) (string, bool) {
+	hex, ok := strings.CutPrefix(digest, "sha256:")
+	if !ok || !isHex64(hex) {
+		return "", false
+	}
+	return hex, true
+}
+
+// isHex64 reports whether s is 64 lowercase hex characters, the only form
+// of a hash that is safe to join into a path.
+func isHex64(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	for _, c := range s {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // Pressure implements core.PressureSource: PSI memory "some avg10" on the
@@ -667,6 +844,8 @@ func (r *Runtime) warmGone(grantUID string) {
 		}
 	}
 	r.mu.Unlock()
+	r.forgetIdentity(grantUID)
+	r.protectTemplates()
 	for _, f := range orphans {
 		_ = f.cg.Kill()
 		r.finish(f, "signal", "template instance exited")
@@ -686,13 +865,12 @@ func (r *Runtime) finish(f *fiber, reason, detail string) {
 	if p := endpoint.UnixPath(f.endpoint); p != "" {
 		_ = os.Remove(p)
 	}
-	// The leaf may still be tearing down; retry briefly.
-	for i := 0; i < 20; i++ {
-		if err := f.cg.Remove(); err == nil {
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
+	if f.handoff != nil {
+		r.unroute(f)
+		_ = f.handoff.Close()
 	}
+	// The leaf may still be tearing down; retry briefly.
+	_ = removeSoon(f.cg)
 	// A parked fiber keeps its port: the restored listener needs the same
 	// one. Every other end frees it.
 	r.mu.Lock()
@@ -803,8 +981,8 @@ func (r *Runtime) Clone(ctx context.Context, spec core.CloneSpec) (core.FiberHan
 		}
 	}
 
-	leaf := z.cg.Child(leafName(spec.Fence))
-	if err := leaf.Create(r.leafMax(spec.Grant), true); err != nil {
+	leaf, err := r.fiberLeaf(z.cg, spec.Grant, spec.Fence)
+	if err != nil {
 		return core.FiberHandle{}, err
 	}
 	lfd, err := leaf.Open()
@@ -818,29 +996,49 @@ func (r *Runtime) Clone(ctx context.Context, spec core.CloneSpec) (core.FiberHan
 		_ = leaf.Remove()
 		return core.FiberHandle{}, err
 	}
-	url, bind, port, err := r.mintEndpoint(spec.Fence)
+	url, bind, port := "", handoffEndpoint, 0
+	var hostEnd, fiberEnd *os.File
+	if spec.Grant.Policy.EndpointMode == core.EndpointHandoff {
+		hostEnd, fiberEnd, err = r.handoffPair(spec.Grant.UID)
+		if err == nil {
+			defer func() { _ = fiberEnd.Close() }()
+			// The grant's TLS identity waits in the channel for the
+			// fiber to be born; it is never a file.
+			if err = r.sendIdentity(hostEnd, spec.Grant.UID); err != nil {
+				_ = hostEnd.Close()
+			}
+		}
+	} else {
+		url, bind, port, err = r.mintEndpoint(spec.Fence)
+	}
 	if err != nil {
 		_ = leaf.Remove()
 		return core.FiberHandle{}, err
 	}
 	f := &fiber{id: spec.Fence.String(), grantUID: spec.Grant.UID, cg: leaf, endpoint: url, port: port,
-		started: time.Now(), budget: spec.Grant.WBudgetBytes, devMax: spec.Grant.DeviceBudget.Bytes, done: make(chan struct{})}
+		budget: spec.Grant.WBudgetBytes, devMax: spec.Grant.DeviceBudget.Bytes,
+		quota: deltaQuota(spec.Grant), handoff: hostEnd, done: make(chan struct{})}
 	// Registered before the backend answers so an exit that races the
 	// reply is not lost.
 	r.mu.Lock()
 	r.fibers[f.id] = f
 	r.mu.Unlock()
+	refused, _ := z.cg.PidsMaxHits()
 	fb, err := r.be.Clone(ctx, z.id, backend.FiberSpec{
 		Fence: f.id, Endpoint: bind, CgroupFD: int(lfd.Fd()), Deadline: spec.Deadline,
-		Payload: spec.Payload, OwnPIDNS: !r.cfg.NoFiberPIDNS,
+		Payload: spec.Payload, OwnPIDNS: true, Handoff: fiberEnd,
 	})
 	if err != nil {
+		err = pidsPressure(z.cg, refused, spec.Grant.UID, err)
 		r.mu.Lock()
 		if r.fibers[f.id] == f {
 			delete(r.fibers, f.id)
 		}
 		r.mu.Unlock()
 		r.freePort(port, f.id)
+		if hostEnd != nil {
+			_ = hostEnd.Close()
+		}
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 			// The backend enforces the same deadline and kills the child.
 			_ = leaf.Kill()
@@ -850,11 +1048,17 @@ func (r *Runtime) Clone(ctx context.Context, spec core.CloneSpec) (core.FiberHan
 		}
 		return core.FiberHandle{}, err
 	}
+	ep, err := r.route(f)
+	if err != nil {
+		_ = r.Release(ctx, f.id, false)
+		return core.FiberHandle{}, err
+	}
 	r.mu.Lock()
 	f.pid = fb.PID
+	f.endpoint = ep
 	f.ready = true
 	r.mu.Unlock()
-	return core.FiberHandle{ID: f.id, Endpoint: f.endpoint, Started: f.started}, nil
+	return core.FiberHandle{ID: f.id, Endpoint: f.endpoint}, nil
 }
 
 // manifest sits beside the images so a delta is self-describing.
@@ -862,6 +1066,8 @@ type manifest struct {
 	Fence    string `json:"fence"`
 	GrantUID string `json:"grant_uid"`
 	Endpoint string `json:"endpoint"`
+	// Handoff: the fiber served handed-off connections, not Endpoint.
+	Handoff  bool   `json:"handoff,omitempty"`
 	Template string `json:"template_digest"`
 	Backend  string `json:"backend"`
 	// WBytes is what the park costs to move: the delta's bytes when the
@@ -881,8 +1087,8 @@ func (r *Runtime) deltaDir(f core.Fence) string {
 // (fsync), then is killed; otherwise the checkpoint ends it. Returns the
 // delta directory as the ref.
 func (r *Runtime) Park(ctx context.Context, fiberID string, sync bool) (string, error) {
-	if r.cfg.Tier < core.TierCheckpoint {
-		return "", fmt.Errorf("host: park needs %s (backend %s offers %s)", core.TierCheckpoint, r.be.Name(), r.cfg.Tier)
+	if r.tier < core.TierCheckpoint {
+		return "", fmt.Errorf("host: park needs %s (backend %s offers %s)", core.TierCheckpoint, r.be.Name(), r.tier)
 	}
 	r.mu.Lock()
 	f, ok := r.fibers[fiberID]
@@ -901,6 +1107,18 @@ func (r *Runtime) Park(ctx context.Context, fiberID string, sync bool) (string, 
 	dir := r.deltaDir(fence)
 	_ = os.RemoveAll(dir)
 	w, _ := r.wBytes(f)
+	// Checked before the dump: an async park ends the fiber, so a delta
+	// refused afterwards would take the session with it. W is what the
+	// delta will roughly weigh.
+	if f.quota > 0 {
+		if used := treeBytes(filepath.Join(r.cfg.DeltaDir, f.grantUID)); used+w > f.quota {
+			r.mu.Lock()
+			f.released, f.parked = false, false
+			r.mu.Unlock()
+			return "", fmt.Errorf("%w: grant %s holds %d bytes, parking %s adds about %d, quota %d",
+				core.ErrDeltaQuota, f.grantUID, used, fiberID, w, f.quota)
+		}
+	}
 	// Devices are renegotiated on resume: the engine drops the slice
 	// before the CPU side is checkpointed (the continuity contract).
 	if dr, ok := r.be.(backend.DeviceReporter); ok && f.devMax > 0 {
@@ -918,13 +1136,24 @@ func (r *Runtime) Park(ctx context.Context, fiberID string, sync bool) (string, 
 		return "", err
 	}
 	if sync {
+		// The fiber still runs until the images are durable: a failure
+		// here leaves it running, so it is a running fiber again.
 		if err := syncDir(dir); err != nil {
+			r.mu.Lock()
+			f.released, f.parked = false, false
+			r.mu.Unlock()
+			_ = os.RemoveAll(dir + ".failed")
+			_ = os.Rename(dir, dir+".failed")
 			return "", err
 		}
 		_ = r.be.Kill(f.id)
 		_ = f.cg.Kill()
 	}
-	m := manifest{Fence: f.id, GrantUID: f.grantUID, Endpoint: f.endpoint, Backend: r.be.Name(),
+	// From here the fiber is gone or going and the delta is what is left
+	// of it: whatever fails below, the ref goes back with the error, so the
+	// ledger parks the session rather than counting a fiber that no longer
+	// runs (and that nothing could park or release again).
+	m := manifest{Fence: f.id, GrantUID: f.grantUID, Endpoint: f.endpoint, Handoff: f.handoff != nil, Backend: r.be.Name(),
 		ParkedAt: time.Now().UTC().Format(time.RFC3339Nano)}
 	z := r.warmOf(f.grantUID)
 	if z != nil {
@@ -952,15 +1181,19 @@ func (r *Runtime) Park(ctx context.Context, fiberID string, sync bool) (string, 
 		}
 	}
 	if err := writeJSON(filepath.Join(dir, "manifest.json"), m); err != nil {
-		return "", err
+		return dir, fmt.Errorf("host: %s parked to %s, but its manifest: %w", fiberID, dir, err)
 	}
-	// The exit is on its way (or already handled); wait for cleanup.
+	// The exit is on its way (or already handled); wait for cleanup. The
+	// park is complete either way: a wait that ends early is logged, not
+	// failed.
 	select {
 	case <-f.done:
 	case <-ctx.Done():
-		return dir, ctx.Err()
+		log.Printf("host: parked %s -> %s; not waiting for its exit: %v", fiberID, dir, ctx.Err())
+		return dir, nil
 	case <-time.After(5 * time.Second):
-		return dir, fmt.Errorf("host: %s did not exit after park", fiberID)
+		log.Printf("host: parked %s -> %s; it has not exited after 5s, cleanup continues", fiberID, dir)
+		return dir, nil
 	}
 	log.Printf("host: parked %s cgroup W=%d full image=%d delta=%v W bytes=%d -> %s", fiberID, w, full, m.Delta, m.WBytes, dir)
 	return dir, nil
@@ -969,8 +1202,8 @@ func (r *Runtime) Park(ctx context.Context, fiberID string, sync bool) (string, 
 // resume restores a parked delta into a fresh leaf under the new fence.
 // The restored fiber serves on the endpoint it had when parked.
 func (r *Runtime) resume(ctx context.Context, spec core.CloneSpec) (core.FiberHandle, error) {
-	if r.cfg.Tier < core.TierCheckpoint {
-		return core.FiberHandle{}, fmt.Errorf("host: resume needs %s (backend %s offers %s)", core.TierCheckpoint, r.be.Name(), r.cfg.Tier)
+	if r.tier < core.TierCheckpoint {
+		return core.FiberHandle{}, fmt.Errorf("host: resume needs %s (backend %s offers %s)", core.TierCheckpoint, r.be.Name(), r.tier)
 	}
 	dir := spec.Ref
 	var m manifest
@@ -996,12 +1229,12 @@ func (r *Runtime) resume(ctx context.Context, spec core.CloneSpec) (core.FiberHa
 			return core.FiberHandle{}, fmt.Errorf("host: merge delta %s: %w", dir, err)
 		}
 	}
-	gcg := r.root.Child(spec.Grant.UID)
-	if err := gcg.Ensure("memory", "pids"); err != nil {
+	gcg, err := r.grantCgroup(spec.Grant)
+	if err != nil {
 		return core.FiberHandle{}, err
 	}
-	leaf := gcg.Child(leafName(spec.Fence))
-	if err := leaf.Create(r.leafMax(spec.Grant), true); err != nil {
+	leaf, err := r.fiberLeaf(gcg, spec.Grant, spec.Fence)
+	if err != nil {
 		return core.FiberHandle{}, err
 	}
 	lfd, err := leaf.Open()
@@ -1010,25 +1243,51 @@ func (r *Runtime) resume(ctx context.Context, spec core.CloneSpec) (core.FiberHa
 		return core.FiberHandle{}, err
 	}
 	defer func() { _ = lfd.Close() }()
-	// The restored listener serves on the endpoint it was parked with: a
-	// unix socket that binds its path again, or the tcp port, which must
-	// still be this fiber's (or free) on this home.
-	parked, err := endpoint.Parse(m.Endpoint)
-	if err != nil {
-		_ = leaf.Remove()
-		return core.FiberHandle{}, fmt.Errorf("host: delta %s: %w", dir, err)
-	}
-	if parked.Scheme != r.cfg.Endpoints.Family.Scheme() {
-		_ = leaf.Remove()
-		return core.FiberHandle{}, fmt.Errorf("host: delta %s was parked on a %s endpoint, this home serves %s", dir, parked.Scheme, r.cfg.Endpoints.Family.Scheme())
-	}
 	workDir := filepath.Join(r.cfg.RunDir, spec.Grant.UID)
 	_ = os.MkdirAll(workDir, 0o755)
-	bind, port := m.Endpoint, 0
-	if parked.Scheme == "unix" {
-		bind = parked.Path
-		_ = os.Remove(bind) // the restored socket binds it again
+	// A handoff fiber gets a new channel in place of the one it was
+	// parked with. Otherwise the restored listener serves on the endpoint
+	// it was parked with: a unix socket that binds its path again, or the
+	// tcp port, which must still be this fiber's (or free) on this home.
+	var parked endpoint.Endpoint
+	var hostEnd, fiberEnd *os.File
+	if m.Handoff {
+		// The restored fiber holds its identity in memory; the pin is
+		// recorded here for HandoffRoute, and nothing is sent on the
+		// new channel but connections.
+		if err := r.prepareIdentity(spec.Grant.UID, spec.Grant.CallerThumbprint); err != nil {
+			_ = leaf.Remove()
+			return core.FiberHandle{}, err
+		}
+		if hostEnd, fiberEnd, err = r.handoffPair(spec.Grant.UID); err != nil {
+			_ = leaf.Remove()
+			return core.FiberHandle{}, err
+		}
+		defer func() { _ = fiberEnd.Close() }()
 	} else {
+		if parked, err = endpoint.Parse(m.Endpoint); err != nil {
+			_ = leaf.Remove()
+			return core.FiberHandle{}, fmt.Errorf("host: delta %s: %w", dir, err)
+		}
+		if parked.Scheme != r.cfg.Endpoints.Family.Scheme() {
+			_ = leaf.Remove()
+			return core.FiberHandle{}, fmt.Errorf("host: delta %s was parked on a %s endpoint, this home serves %s", dir, parked.Scheme, r.cfg.Endpoints.Family.Scheme())
+		}
+	}
+	bind, port := m.Endpoint, 0
+	switch {
+	case m.Handoff:
+		bind = handoffEndpoint
+	case parked.Scheme == "unix":
+		// The restored listener binds the path it was parked with, in
+		// a mount namespace where that path's directory is the run
+		// directory of the grant resuming it (the backend binds this
+		// grant's workDir there), so the socket surfaces under workDir
+		// by its parked name.
+		bind = filepath.Join(workDir, filepath.Base(parked.Path))
+		parked.Path = bind
+		_ = os.Remove(bind) // the restored socket binds it again
+	default:
 		// The port the parked listener holds. The fiber id changes on
 		// resume; the manifest's fence held it while parked.
 		if port, err = r.allocPort(spec.Fence.String(), parked.Port); err != nil {
@@ -1044,29 +1303,46 @@ func (r *Runtime) resume(ctx context.Context, spec core.CloneSpec) (core.FiberHa
 	fenceFn := r.fenceFile(parked, spec.Fence)
 	_ = os.WriteFile(fenceFn, []byte(spec.Fence.String()+"\n"), 0o644)
 
+	served := m.Endpoint
+	if parked.Scheme == "unix" {
+		served = "unix://" + bind
+	}
 	f := &fiber{id: spec.Fence.String(), grantUID: spec.Grant.UID, cg: leaf, port: port, fenceFn: fenceFn,
-		endpoint: m.Endpoint, started: time.Now(), budget: spec.Grant.WBudgetBytes, devMax: spec.Grant.DeviceBudget.Bytes, done: make(chan struct{})}
+		endpoint: served, budget: spec.Grant.WBudgetBytes, devMax: spec.Grant.DeviceBudget.Bytes,
+		quota: deltaQuota(spec.Grant), handoff: hostEnd, done: make(chan struct{})}
 	r.mu.Lock()
 	r.fibers[f.id] = f
 	r.mu.Unlock()
-	fb, err := r.be.Resume(ctx, backend.ResumeSpec{Dir: dir, Fence: f.id, Endpoint: bind, CgroupFD: int(lfd.Fd()), Deadline: spec.Deadline, WarmID: spec.Grant.UID, WorkDir: workDir})
+	refused, _ := gcg.PidsMaxHits()
+	fb, err := r.be.Resume(ctx, backend.ResumeSpec{Dir: dir, Fence: f.id, Endpoint: bind, CgroupFD: int(lfd.Fd()), Deadline: spec.Deadline,
+		WarmID: spec.Grant.UID, WorkDir: workDir, Handoff: fiberEnd})
 	if err != nil {
+		err = pidsPressure(gcg, refused, spec.Grant.UID, err)
 		r.mu.Lock()
 		if r.fibers[f.id] == f {
 			delete(r.fibers, f.id)
 		}
 		r.mu.Unlock()
 		r.freePort(port, f.id)
+		if hostEnd != nil {
+			_ = hostEnd.Close()
+		}
 		_ = leaf.Kill()
 		_ = leaf.Remove()
 		return core.FiberHandle{}, err
 	}
+	ep, err := r.route(f)
+	if err != nil {
+		_ = r.Release(ctx, f.id, false)
+		return core.FiberHandle{}, err
+	}
 	r.mu.Lock()
 	f.pid = fb.PID
+	f.endpoint = ep
 	f.ready = true
 	r.mu.Unlock()
 	log.Printf("host: resumed %s from %s pid=%d", f.id, dir, fb.PID)
-	return core.FiberHandle{ID: f.id, Endpoint: f.endpoint, Started: f.started}, nil
+	return core.FiberHandle{ID: f.id, Endpoint: f.endpoint}, nil
 }
 
 // HasDelta implements core.DeltaChecker: a parked ref is usable while its
@@ -1145,8 +1421,9 @@ func (r *Runtime) killOrphan(ctx context.Context, fence core.Fence) error {
 }
 
 // PruneGrants removes leftover cgroups of grants not in keep: the warm
-// instance's cgroup (its process is gone or killed here) and empty fiber
-// leaves.
+// instance's cgroup (its process is gone or killed here) and its fiber
+// leaves. A task killed here is still exiting when its cgroup is
+// removed, so each removal is retried briefly.
 func (r *Runtime) PruneGrants(keep map[string]bool) {
 	grants, err := r.root.Children("")
 	if err != nil {
@@ -1160,10 +1437,12 @@ func (r *Runtime) PruneGrants(keep map[string]bool) {
 		leaves, _ := g.Children("")
 		for _, l := range leaves {
 			_ = l.Kill()
-			_ = l.Remove()
+			_ = removeSoon(l)
 		}
-		if err := g.Remove(); err == nil {
+		if err := removeSoon(g); err == nil {
 			log.Printf("host: pruned stale grant cgroup %s", g.Name())
+		} else {
+			log.Printf("host: stale grant cgroup %s not pruned: %v", g.Name(), err)
 		}
 	}
 }
@@ -1201,6 +1480,35 @@ func dirBytes(dir string) uint64 {
 		}
 	}
 	return n
+}
+
+// treeBytes is the size of every regular file under dir, at any depth:
+// what a grant's parked deltas take, each in a directory of its own.
+func treeBytes(dir string) uint64 {
+	var n uint64
+	_ = filepath.WalkDir(dir, func(_ string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil // what cannot be read weighs nothing
+		}
+		if info, err := d.Info(); err == nil && info.Mode().IsRegular() {
+			n += uint64(info.Size())
+		}
+		return nil
+	})
+	return n
+}
+
+// removeSoon removes a cgroup whose tasks were just killed and may still
+// be tearing down, retrying briefly.
+func removeSoon(d cgroup.Dir) error {
+	var err error
+	for i := 0; i < 20; i++ {
+		if err = d.Remove(); err == nil {
+			return nil
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return err
 }
 
 // syncDir fsyncs every file in dir and the directory itself: the delta is

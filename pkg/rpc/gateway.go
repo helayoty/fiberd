@@ -55,9 +55,9 @@ func (g *Gateway) Handler() http.Handler {
 		resp, err := g.Server.Release(r.Context(), &req)
 		g.reply(w, resp, err)
 	})
-	mux.HandleFunc("GET /v1/status", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("GET /v1/status", func(w http.ResponseWriter, r *http.Request) {
 		out := make([]json.RawMessage, 0)
-		for _, st := range g.Server.Agent.Ledger.Statuses() {
+		for _, st := range g.Server.visible(r.Context(), g.Server.Agent.Ledger.Statuses()) {
 			b, _ := protojson.Marshal(StatusToProto(st))
 			out = append(out, b)
 		}
@@ -72,7 +72,7 @@ func (g *Gateway) Handler() http.Handler {
 		}
 		_ = json.NewEncoder(w).Encode(g.Health())
 	})
-	return mux
+	return httpCaller(mux)
 }
 
 func (g *Gateway) decode(w http.ResponseWriter, r *http.Request, m proto.Message) bool {

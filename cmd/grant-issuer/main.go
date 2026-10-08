@@ -5,7 +5,7 @@
 //	grant-issuer keygen -alg EdDSA -out key.json
 //	grant-issuer mint   -key key.json -issuer http://issuer:8686 -aud node-a \
 //	                    -template sha256:... -max 8 -warm 2 -w-budget 64Mi \
-//	                    -min-tier FIBER_WARM -ttl 10m > grant.jwt
+//	                    -min-tier FIBER_WARM -isolation TRUSTED -ttl 10m > grant.jwt
 //	grant-issuer serve  -key key.json -addr :8686 [-issuer http://issuer:8686]
 //
 // An integration runs the same issuer inside its control plane; the
@@ -19,7 +19,9 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -30,57 +32,53 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 
+	"github.com/helayoty/fiberd/internal/cli"
+	"github.com/helayoty/fiberd/pkg/artifact"
 	"github.com/helayoty/fiberd/pkg/core"
 	"github.com/helayoty/fiberd/pkg/grant"
+	"github.com/helayoty/fiberd/pkg/tlsconf"
 )
 
 func main() {
-	if len(os.Args) < 2 {
-		usage()
-		os.Exit(2)
-	}
-	var err error
-	switch os.Args[1] {
-	case "keygen":
-		err = keygen(os.Args[2:])
-	case "mint":
-		err = mint(os.Args[2:])
-	case "serve":
-		err = serve(os.Args[2:])
-	case "-h", "--help", "help":
-		usage()
-		return
-	default:
-		usage()
-		err = fmt.Errorf("unknown subcommand %q", os.Args[1])
-	}
-	if err != nil {
-		log.Fatal(err)
-	}
+	os.Exit(run(context.Background(), os.Args[1:], os.Stdout, os.Stderr))
 }
 
-func usage() {
-	fmt.Fprintln(os.Stderr, "usage: grant-issuer keygen|mint|serve [flags]; -h on a subcommand for its flags")
+// run dispatches a subcommand and returns the exit code: 0 on success
+// or -h, 2 for a usage error, 1 when the subcommand fails.
+func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	return cli.Run(args, "usage: grant-issuer keygen|mint|serve [flags]; -h on a subcommand for its flags", map[string]cli.Command{
+		"keygen": func(a []string) error { return keygen(a, stdout, stderr) },
+		"mint":   func(a []string) error { return mint(a, stdout, stderr) },
+		"serve":  func(a []string) error { return serve(ctx, a, stderr) },
+	}, stderr)
 }
 
-func keygen(args []string) error {
-	fs := flag.NewFlagSet("keygen", flag.ExitOnError)
-	alg := fs.String("alg", "EdDSA", "signature algorithm: EdDSA or ES256")
+func keygen(args []string, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("keygen", flag.ContinueOnError)
+	alg := fs.String("alg", "EdDSA", "signature algorithm: EdDSA or ES256; A256GCM writes a delta seal key (-delta-seal-key) instead")
 	out := fs.String("out", "key.json", "where to write the private JWK (mode 0600)")
-	_ = fs.Parse(args)
-	key, err := grant.GenerateKey(jose.SignatureAlgorithm(*alg))
+	if err := cli.ParseFlags(fs, args, stderr); err != nil {
+		return err
+	}
+	var key *jose.JSONWebKey
+	var err error
+	if *alg == "A256GCM" {
+		key, err = artifact.GenerateSealKey()
+	} else {
+		key, err = grant.GenerateKey(jose.SignatureAlgorithm(*alg))
+	}
 	if err != nil {
 		return err
 	}
 	if err := grant.SaveKey(*out, key); err != nil {
 		return err
 	}
-	fmt.Printf("wrote %s kid=%s alg=%s\n", *out, key.KeyID, key.Algorithm)
+	_, _ = fmt.Fprintf(stdout, "wrote %s kid=%s alg=%s\n", *out, key.KeyID, key.Algorithm)
 	return nil
 }
 
-func mint(args []string) error {
-	fs := flag.NewFlagSet("mint", flag.ExitOnError)
+func mint(args []string, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("mint", flag.ContinueOnError)
 	keyPath := fs.String("key", "key.json", "private JWK from keygen")
 	issuer := fs.String("issuer", "", "issuer URL (iss; where serve publishes the keys)")
 	aud := fs.String("aud", "", "audience: the home's node id")
@@ -96,7 +94,12 @@ func mint(args []string) error {
 	psiPark := fs.Float64("psi-park", 0, "PSI memory some avg10 (%) at which the home parks sessions")
 	devBudget := fs.String("device-budget", "0", "per-fiber slice of the engine's device state, bytes with optional Ki/Mi/Gi suffix (0 = no device)")
 	devClass := fs.String("device-class", "", "device class the budget is for (gpu, sim; empty = any)")
-	_ = fs.Parse(args)
+	bindCert := fs.String("bind-cert", "", "PEM client certificate the grant is bound to (cnf x5t#S256); required by homes serving mutual TLS")
+	isolation := fs.String("isolation", "UNTRUSTED", "UNTRUSTED (only gvisor or hyperlight homes serve it) or TRUSTED (any home, including proc and runc)")
+	endpointMode := fs.String("endpoint-mode", "DIRECT", "DIRECT (each fiber listens) or HANDOFF (the home routes TLS connections to fibers, which check the -bind-cert caller; proc and runc homes)")
+	if err := cli.ParseFlags(fs, args, stderr); err != nil {
+		return err
+	}
 
 	if *issuer == "" || *aud == "" {
 		return errors.New("mint: -issuer and -aud are required")
@@ -108,6 +111,14 @@ func mint(args []string) error {
 	tier, err := core.ParseTier(*minTier)
 	if err != nil {
 		return err
+	}
+	iso, err := core.ParseIsolation(*isolation)
+	if err != nil {
+		return fmt.Errorf("-isolation: %w", err)
+	}
+	mode, err := core.ParseEndpointMode(*endpointMode)
+	if err != nil {
+		return fmt.Errorf("-endpoint-mode: %w", err)
 	}
 	w, err := parseBytes(*wBudget)
 	if err != nil {
@@ -136,45 +147,61 @@ func mint(args []string) error {
 		UID: *uid, Audience: *aud, TemplateDigest: *template,
 		FiberMax: int(*maxF), FiberWarm: int(*warm), WBudgetBytes: w, MinTier: tier,
 		LeaseExpiry:  now.Add(*ttl).Truncate(time.Second),
-		Policy:       core.Policy{Durability: d, PSISomeAvg10Shed: *psiShed, PSISomeAvg10Park: *psiPark},
+		Policy:       core.Policy{Durability: d, PSISomeAvg10Shed: *psiShed, PSISomeAvg10Park: *psiPark, Isolation: iso, EndpointMode: mode},
 		DeviceBudget: core.DeviceBudget{Bytes: dev, Class: *devClass},
+	}
+	if *bindCert != "" {
+		if g.CallerThumbprint, err = tlsconf.ThumbprintFile(*bindCert); err != nil {
+			return fmt.Errorf("-bind-cert: %w", err)
+		}
 	}
 	is := &grant.Issuer{Key: key, URL: *issuer}
 	tok, err := is.Mint(g)
 	if err != nil {
 		return err
 	}
-	fmt.Println(tok)
+	_, _ = fmt.Fprintln(stdout, tok)
 	return nil
 }
 
-func serve(args []string) error {
-	fs := flag.NewFlagSet("serve", flag.ExitOnError)
+func serve(ctx context.Context, args []string, stderr io.Writer) error {
+	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	keyPath := fs.String("key", "key.json", "private JWK from keygen")
 	addr := fs.String("addr", ":8686", "listen address")
 	issuer := fs.String("issuer", "", "issuer URL as verifiers will name it (default http://<addr>)")
-	_ = fs.Parse(args)
+	if err := cli.ParseFlags(fs, args, stderr); err != nil {
+		return err
+	}
 	key, err := grant.LoadKey(*keyPath)
 	if err != nil {
 		return err
 	}
 	if *issuer == "" {
-		host := *addr
-		if strings.HasPrefix(host, ":") {
-			host = "localhost" + host
-		}
-		*issuer = "http://" + host
+		*issuer = defaultIssuer(*addr)
 	}
 	is := &grant.Issuer{Key: key, URL: *issuer}
-	srv := &http.Server{Addr: *addr, Handler: is.Handler(), ReadHeaderTimeout: 5 * time.Second}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ln, err := net.Listen("tcp", *addr)
+	if err != nil {
+		return err
+	}
+	srv := &http.Server{Handler: is.Handler(), ReadHeaderTimeout: 5 * time.Second}
+	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go func() { <-ctx.Done(); _ = srv.Close() }()
-	log.Printf("grant-issuer serving %s (kid=%s alg=%s) on %s", *issuer, key.KeyID, key.Algorithm, *addr)
-	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	log.New(stderr, "", log.LstdFlags).Printf("grant-issuer serving %s (kid=%s alg=%s) on %s", *issuer, key.KeyID, key.Algorithm, ln.Addr())
+	if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
 	return nil
+}
+
+// defaultIssuer is the issuer URL for a listen address: http://<addr>,
+// with localhost for an address that names no host.
+func defaultIssuer(addr string) string {
+	if strings.HasPrefix(addr, ":") {
+		addr = "localhost" + addr
+	}
+	return "http://" + addr
 }
 
 func parseBytes(s string) (uint64, error) {

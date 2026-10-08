@@ -11,7 +11,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
-	"time"
 
 	"github.com/helayoty/fiberd/pkg/core"
 )
@@ -27,7 +26,6 @@ type Runtime struct {
 	fibers    map[string]fiber
 	parked    map[string]uint64 // deltaRef -> W the delta carries
 	templates map[string]bool
-	pressure  map[string]float64
 	port      int
 	exits     chan core.FiberExit
 }
@@ -49,6 +47,10 @@ func NewWithTier(t core.Tier) *Runtime {
 }
 
 func (r *Runtime) Tier() core.Tier { return r.tier }
+
+// IsolatesTenants implements core.Isolator: the stub runs no code, so no
+// fiber can reach the host and untrusted grants are admitted.
+func (r *Runtime) IsolatesTenants() bool { return true }
 
 func (r *Runtime) PrepareTemplate(_ context.Context, g core.Grant) error {
 	r.mu.Lock()
@@ -90,7 +92,6 @@ func (r *Runtime) Clone(_ context.Context, spec core.CloneSpec) (core.FiberHandl
 	h := core.FiberHandle{
 		ID:       spec.Fence.String(),
 		Endpoint: fmt.Sprintf("tcp://127.0.0.1:%d", r.port),
-		Started:  time.Now(),
 	}
 	r.fibers[h.ID] = fiber{h: h, w: w}
 
@@ -165,19 +166,6 @@ func (r *Runtime) HasDelta(ref string) bool {
 	return ok
 }
 
-// SetPressure fakes PSI for a grant; Pressure implements
-// core.PressureSource so the ladder can be exercised without a kernel.
-func (r *Runtime) SetPressure(grantUID string, someAvg10 float64) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.pressure == nil {
-		r.pressure = map[string]float64{}
-	}
-	r.pressure[grantUID] = someAvg10
-}
-
-func (r *Runtime) Pressure(grantUID string) (float64, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.pressure[grantUID], nil
-}
+// Pressure implements core.PressureSource: the stub has no kernel and
+// no memory, so no grant is ever under pressure.
+func (r *Runtime) Pressure(string) (float64, error) { return 0, nil }

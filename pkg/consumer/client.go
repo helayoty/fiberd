@@ -10,18 +10,21 @@ package consumer
 
 import (
 	"context"
-	"errors"
+	"crypto/tls"
 	"fmt"
+	"strings"
 	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/emptypb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	grantv1 "github.com/helayoty/fiberd/api/grant/v1"
+	"github.com/helayoty/fiberd/pkg/handoff"
 	"github.com/helayoty/fiberd/pkg/rpc"
 )
 
@@ -38,8 +41,32 @@ const (
 type Fiber struct {
 	ID       string
 	Endpoint string // a URL to dial as given (unix://..., tcp://...)
-	Fence    Fence
-	Kind     Kind
+	// RoutingKey and ServerKeySHA256 are set only under a HANDOFF grant.
+	// Reach such a fiber with DialHandoff.
+	RoutingKey      string
+	ServerKeySHA256 string
+	Fence           Fence
+	Kind            Kind
+}
+
+// DialHandoff opens a TLS connection to a handoff fiber through its
+// home's router. cert must be the certificate the grant is bound to, the
+// same one used on the control API. The fiber refuses any other. The
+// fiber's key must match ServerKeySHA256 (handoff.ErrKeyMismatch).
+func (f Fiber) DialHandoff(ctx context.Context, cert tls.Certificate) (*tls.Conn, error) {
+	if f.RoutingKey == "" {
+		return nil, fmt.Errorf("%w: %s", ErrNotHandoff, f.ID)
+	}
+	addr, ok := strings.CutPrefix(f.Endpoint, "tcp://")
+	if !ok {
+		return nil, fmt.Errorf("%w: endpoint %q is not tcp://", ErrNotHandoff, f.Endpoint)
+	}
+	d := tls.Dialer{Config: handoff.ClientConfig(f.RoutingKey, f.ServerKeySHA256, cert)}
+	c, err := d.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+	return c.(*tls.Conn), nil
 }
 
 // Fence is the fiber's incarnation.
@@ -92,11 +119,21 @@ type Client struct {
 	api  grantv1.FibersClient
 }
 
-// Dial connects to a home's gRPC address (plaintext: the grant carries
-// the authorization, and the home is reached inside the environment
-// that placed it).
+// Dial connects to a home's gRPC address in plaintext. It works only
+// against a home started with -insecure-plaintext. Use DialTLS otherwise.
 func Dial(ctx context.Context, target string) (*Client, error) {
-	conn, err := grpc.NewClient(target, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	return dial(target, insecure.NewCredentials())
+}
+
+// DialTLS connects to a home over mutual TLS. cfg carries the home's CA
+// and this caller's certificate. Grants bound to that certificate work
+// only on this connection.
+func DialTLS(ctx context.Context, target string, cfg *tls.Config) (*Client, error) {
+	return dial(target, credentials.NewTLS(cfg))
+}
+
+func dial(target string, creds credentials.TransportCredentials) (*Client, error) {
+	conn, err := grpc.NewClient(target, grpc.WithTransportCredentials(creds))
 	if err != nil {
 		return nil, err
 	}
@@ -122,33 +159,11 @@ func (c *Client) Clone(ctx context.Context, grantJWT, session string, deadline t
 	if err != nil {
 		return Fiber{}, classify(err)
 	}
-	f := Fiber{ID: r.GetFiberId(), Endpoint: r.GetEndpoint(), Kind: r.GetKind()}
+	f := Fiber{ID: r.GetFiberId(), Endpoint: r.GetEndpoint(), RoutingKey: r.GetRoutingKey(), ServerKeySHA256: r.GetServerKeySha256(), Kind: r.GetKind()}
 	if fe := r.GetFence(); fe != nil {
 		f.Fence = Fence{GrantUID: fe.GetGrantUid(), Epoch: fe.GetEpoch(), Seq: fe.GetSeq()}
 	}
 	return f, nil
-}
-
-// CloneRetry is Clone that waits out SHED: it retries after each
-// retry_after until ctx ends. DEFERRED and everything else return at
-// once.
-func (c *Client) CloneRetry(ctx context.Context, grantJWT, session string, deadline time.Duration, payload []byte) (Fiber, error) {
-	for {
-		f, err := c.Clone(ctx, grantJWT, session, deadline, payload)
-		var shed *Shed
-		if !errors.As(err, &shed) {
-			return f, err
-		}
-		wait := shed.RetryAfter
-		if wait <= 0 {
-			wait = time.Second
-		}
-		select {
-		case <-ctx.Done():
-			return Fiber{}, fmt.Errorf("%w (last: %w)", ctx.Err(), err)
-		case <-time.After(wait):
-		}
-	}
 }
 
 // Park checkpoints the fiber; with sync the reply waits for the delta

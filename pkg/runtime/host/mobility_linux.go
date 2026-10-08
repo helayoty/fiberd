@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/helayoty/fiberd/pkg/artifact"
@@ -39,8 +40,8 @@ func (r *Runtime) domainRepo(g core.Grant) string { return domainRepoFor(r.cfg.D
 
 // PublishDelta implements core.DeltaPublisher.
 func (r *Runtime) PublishDelta(ctx context.Context, deltaRef string, g core.Grant, session string) (string, error) {
-	if r.cfg.DeltaRegistry == "" {
-		return "", errors.New("host: no delta registry configured")
+	if err := r.cfg.checkDeltaRegistry(); err != nil {
+		return "", err
 	}
 	var m manifest
 	if err := readJSON(filepath.Join(deltaRef, "manifest.json"), &m); err != nil {
@@ -55,15 +56,14 @@ func (r *Runtime) PublishDelta(ctx context.Context, deltaRef string, g core.Gran
 	}
 	ref := repo + ":" + sessionTag(session)
 	ann := map[string]string{
-		artifact.AnnotationWBytes:  strconv.FormatUint(m.WBytes, 10),
-		artifact.AnnotationParent:  m.Parent,
-		artifact.AnnotationHome:    r.cfg.HomeID,
-		artifact.AnnotationFence:   m.Fence,
-		artifact.AnnotationGrant:   grantUID,
-		artifact.AnnotationSession: session,
+		artifact.AnnotationWBytes: strconv.FormatUint(m.WBytes, 10),
+		artifact.AnnotationParent: m.Parent,
+		artifact.AnnotationHome:   r.cfg.HomeID,
+		artifact.AnnotationFence:  m.Fence,
+		artifact.AnnotationGrant:  grantUID,
 	}
 	r.host.Annotate(ann) // what a claiming home must be able to restore
-	digest, err := artifact.PushDir(ctx, deltaRef, ref, artifact.ArtifactTypeDelta, ann, r.cfg.RegistryPlainHTTP)
+	digest, err := pushDelta(ctx, r.cfg, deltaRef, ref, ann, r.cfg.sealContext(g, session, m.Fence, time.Now()))
 	if err != nil {
 		return "", err
 	}
@@ -89,7 +89,7 @@ func (r *Runtime) publishParent(ctx context.Context, repo, sha string) error {
 	}
 	ann := map[string]string{artifact.AnnotationParent: sha, artifact.AnnotationHome: r.cfg.HomeID}
 	r.host.Annotate(ann)
-	_, err := artifact.PushDir(ctx, dir, ref, artifact.ArtifactTypeParent, ann, r.cfg.RegistryPlainHTTP)
+	_, err := artifact.PushDir(ctx, dir, ref, artifact.ArtifactTypeParent, ann, r.cfg.DeltaKeys.Signer, r.cfg.RegistryPlainHTTP)
 	if err == nil {
 		log.Printf("host: published parent checkpoint %s", sha[:12])
 	}
@@ -98,7 +98,7 @@ func (r *Runtime) publishParent(ctx context.Context, repo, sha string) error {
 
 // FindDelta implements core.DeltaFinder: the manifest only.
 func (r *Runtime) FindDelta(ctx context.Context, g core.Grant, session string) (core.RemoteDelta, bool, error) {
-	if r.cfg.DeltaRegistry == "" {
+	if r.cfg.checkDeltaRegistry() != nil {
 		return core.RemoteDelta{}, false, nil
 	}
 	ref := r.domainRepo(g) + ":" + sessionTag(session)
@@ -108,6 +108,14 @@ func (r *Runtime) FindDelta(ctx context.Context, g core.Grant, session string) (
 	}
 	if loc.ArtifactType != artifact.ArtifactTypeDelta {
 		return core.RemoteDelta{}, false, fmt.Errorf("host: %s is %q, not a delta", ref, loc.ArtifactType)
+	}
+	// Nothing in the manifest is believed before its signature is: found,
+	// but not taken, and no home named from its annotations.
+	if err := r.cfg.DeltaKeys.Verify(loc); err != nil {
+		return core.RemoteDelta{}, true, &core.RemoteMiss{Err: fmt.Errorf("host: refusing %s/%s: %w", g.UID, session, err)}
+	}
+	if err := checkSigned(loc.Annotations, g.SessionDomain(), session, time.Now()); err != nil {
+		return core.RemoteDelta{}, true, &core.RemoteMiss{Err: fmt.Errorf("host: refusing %s/%s: %w", g.UID, session, err)}
 	}
 	w, _ := strconv.ParseUint(loc.Annotations[artifact.AnnotationWBytes], 10, 64)
 	rd := core.RemoteDelta{WBytes: w, Home: loc.Annotations[artifact.AnnotationHome], Handle: loc.Digest}
@@ -125,8 +133,10 @@ func (r *Runtime) FindDelta(ctx context.Context, g core.Grant, session string) (
 }
 
 // ClaimDelta implements core.DeltaFinder: pull by the digest that was
-// found, fetch the parent if this home lacks it, then delete the tag so
-// no other home can claim the same state.
+// found (and verified: content addressing makes what is pulled what
+// FindDelta checked the signature of), open it for this session, fetch
+// the parent if this home lacks it, then delete the tag so no other home
+// can claim the same state.
 func (r *Runtime) ClaimDelta(ctx context.Context, g core.Grant, session string, rd core.RemoteDelta) (string, error) {
 	grantUID := g.UID
 	repo := r.domainRepo(g)
@@ -135,6 +145,10 @@ func (r *Runtime) ClaimDelta(ctx context.Context, g core.Grant, session string, 
 	if _, err := artifact.PullDir(ctx, repo+"@"+rd.Handle, dst, r.cfg.RegistryPlainHTTP); err != nil {
 		_ = os.RemoveAll(dst)
 		return "", err
+	}
+	if _, err := artifact.OpenDir(dst, r.cfg.DeltaKeys.Seal, g.SessionDomain(), session, time.Now()); err != nil {
+		_ = os.RemoveAll(dst)
+		return "", fmt.Errorf("host: claim %s/%s: %w", grantUID, session, err)
 	}
 	_ = os.Remove(filepath.Join(dst, remoteFile)) // the publisher's record, not ours
 	if codec := r.codec(); codec != nil && codec.HasDelta(dst) {
@@ -146,7 +160,7 @@ func (r *Runtime) ClaimDelta(ctx context.Context, g core.Grant, session string, 
 		if _, err := r.parent(info.ParentSHA256); err != nil {
 			if err := r.pullParent(ctx, repo, info.ParentSHA256); err != nil {
 				_ = os.RemoveAll(dst)
-				return "", fmt.Errorf("host: delta needs parent %s: %w", info.ParentSHA256[:12], err)
+				return "", fmt.Errorf("host: delta needs its parent: %w", err)
 			}
 		}
 	}
@@ -168,13 +182,40 @@ func (r *Runtime) ClaimDelta(ctx context.Context, g core.Grant, session string, 
 	return dst, nil
 }
 
+// DiscardDelta implements core.DeltaDiscarder: a claimed copy that
+// nothing will resume, because the session was already here, is removed.
+// Only a path inside this home's delta store is touched.
+func (r *Runtime) DiscardDelta(_ context.Context, ref string) error {
+	rel, err := filepath.Rel(r.cfg.DeltaDir, ref)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, "../") {
+		return fmt.Errorf("host: %s is not a delta of this home", ref)
+	}
+	return os.RemoveAll(ref)
+}
+
 // pullParent fetches a zygote checkpoint into the store and verifies it
 // hashes to what the delta expects.
 func (r *Runtime) pullParent(ctx context.Context, repo, sha string) error {
+	if !isHex64(sha) {
+		return fmt.Errorf("parent hash %q is not a sha256", sha)
+	}
 	dst := filepath.Join(r.parentsDir(), sha)
 	tmp := dst + ".pull"
 	_ = os.RemoveAll(tmp)
-	if _, err := artifact.PullDir(ctx, repo+":"+parentTag(sha), tmp, r.cfg.RegistryPlainHTTP); err != nil {
+	loc, found, err := artifact.Resolve(ctx, repo+":"+parentTag(sha), r.cfg.RegistryPlainHTTP)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return fmt.Errorf("parent %s is not published", sha[:12])
+	}
+	if loc.ArtifactType != artifact.ArtifactTypeParent {
+		return fmt.Errorf("parent %s is %q, not a parent checkpoint", sha[:12], loc.ArtifactType)
+	}
+	if err := r.cfg.DeltaKeys.Verify(loc); err != nil {
+		return fmt.Errorf("parent %s: %w", sha[:12], err)
+	}
+	if _, err := artifact.PullDir(ctx, repo+"@"+loc.Digest, tmp, r.cfg.RegistryPlainHTTP); err != nil {
 		_ = os.RemoveAll(tmp)
 		return err
 	}
