@@ -49,13 +49,13 @@ func write(t *testing.T, dir string, files map[string]string) {
 // A delta published by one home (a file registry standing in for it)
 // exported as files, then imported by another home under a new session
 // name: the second registry resolves the new name, with the parent, and
-// the first no longer holds the session. Steps run in order; each builds
-// on the last.
+// the first no longer holds the session. Steps run in order, each
+// building on the last.
 func TestExportImportDelta(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
-	// Each home signs with its own key; b and d trust a, c trusts no one
-	// else. a and b share a seal key, d has one of its own.
+	// Each home signs with its own key. b and d trust a, and c trusts no
+	// one else. a and b share a seal key, and d has one of its own.
 	keyA, keyB, keyC := signingKey(t, "home-a"), signingKey(t, "home-b"), signingKey(t, "home-c")
 	sealAB, sealD := &artifact.SealKey{ID: "seal-ab", Key: make([]byte, 32)}, &artifact.SealKey{ID: "seal-d", Key: make([]byte, 32)}
 	sealD.Key[0] = 1
@@ -82,7 +82,7 @@ func TestExportImportDelta(t *testing.T) {
 	if _, err := pushDelta(ctx, a, filepath.Join(root, "delta"), repo+":"+sessionTag("S"), ann, a.sealContext(g, "S", "g1/1/1", time.Now())); err != nil {
 		t.Fatal(err)
 	}
-	// The same delta parked two days ago under E: past the default TTL.
+	// The same delta parked two days ago under E, past the default TTL.
 	if _, err := pushDelta(ctx, a, filepath.Join(root, "delta"), repo+":"+sessionTag("E"), ann,
 		a.sealContext(g, "E", "g1/1/1", time.Now().Add(-2*deltaTTL))); err != nil {
 		t.Fatal(err)
@@ -185,7 +185,7 @@ func TestExportImportDelta(t *testing.T) {
 			cases := []struct {
 				name     string
 				sha      string
-				signedAs string // the checkpoint the parent's manifest names; "" = sha
+				signedAs string // the checkpoint the parent's manifest names ("" = sha)
 				signer   *jose.JSONWebKey
 			}{
 				{name: "an unsigned parent", sha: strings.Repeat("1", 64)},
@@ -263,8 +263,8 @@ func TestExportImportDelta(t *testing.T) {
 				t.Fatalf("import = %v, want ErrUntrusted", err)
 			}
 		}},
-		// The parent's files and its signed manifest travel in the clear;
-		// an import must take neither a parent rewritten in transit (same
+		// The parent's files and its signed manifest travel in the clear.
+		// An import must take neither a parent rewritten in transit (same
 		// pages, rearranged) nor one shipped without the manifest the
 		// exporter signed it under.
 		{"an export whose parent does not verify is refused", func(t *testing.T) {
@@ -326,7 +326,7 @@ func TestExportImportDelta(t *testing.T) {
 				t.Fatalf("import = %v, want ErrSealed", err)
 			}
 		}},
-		// The info file says which domain the session came from; a grant
+		// The info file says which domain the session came from. A grant
 		// of another domain must not take it, whatever the file claims.
 		{"importing into a grant of another domain is refused", func(t *testing.T) {
 			if err := ImportDelta(ctx, b, g3, "S2", out); !errors.Is(err, artifact.ErrUntrusted) {
@@ -441,7 +441,7 @@ func TestExportImportDelta(t *testing.T) {
 	}
 }
 
-// TestRepositoryNames: where a grant's sessions live in the registry, a
+// TestRepositoryNames checks where a grant's sessions live in the registry, a
 // name safe for any registry and distinct per domain.
 func TestRepositoryNames(t *testing.T) {
 	long := strings.Repeat("abcdefghij", 5)
@@ -478,7 +478,7 @@ func TestRepositoryNames(t *testing.T) {
 	}
 }
 
-// TestCheckSigned: what a verified manifest must still say before its
+// TestCheckSigned checks what a verified manifest must still say before its
 // delta is believed to be the session asked for.
 func TestCheckSigned(t *testing.T) {
 	now := time.Date(2026, 10, 6, 12, 0, 0, 0, time.UTC)
@@ -508,7 +508,7 @@ func TestCheckSigned(t *testing.T) {
 	}
 }
 
-// TestExportImportRefusals: what ExportDelta and ImportDelta refuse
+// TestExportImportRefusals checks what ExportDelta and ImportDelta refuse
 // before they touch the registry or the files, and the files they need.
 func TestExportImportRefusals(t *testing.T) {
 	ctx := context.Background()
@@ -574,7 +574,7 @@ func TestExportImportRefusals(t *testing.T) {
 	if _, err := ExportDelta(ctx, a, g, withParent, exported); err != nil {
 		t.Fatalf("export %s: %v", withParent, err)
 	}
-	// A home that trusts a, with a registry of its own; and one whose
+	// A home that trusts a, with a registry of its own, and one whose
 	// registry cannot be reached.
 	trustA := []jose.JSONWebKey{keyA.Public()}
 	b := Config{DeltaRegistry: artifact.FileScheme + filepath.Join(root, "b"), DeltaDir: filepath.Join(root, "b-deltas"),
@@ -627,7 +627,7 @@ func TestExportImportRefusals(t *testing.T) {
 	cases := []struct {
 		name string
 		run  func(t *testing.T) error
-		// wantErr is matched with errors.Is when set; errText is a fragment.
+		// wantErr is matched with errors.Is when set. errText is a fragment.
 		wantErr error
 		errText string
 	}{
@@ -741,7 +741,7 @@ func TestExportImportRefusals(t *testing.T) {
 	}
 }
 
-// TestPushDeltaErrors: a delta that cannot be sealed is not pushed.
+// TestPushDeltaErrors checks that a delta that cannot be sealed is not pushed.
 func TestPushDeltaErrors(t *testing.T) {
 	cfg := Config{DeltaKeys: artifact.Keys{Signer: signingKey(t, "k"), Seal: &artifact.SealKey{ID: "seal", Key: make([]byte, 32)}}}
 	cases := []struct {

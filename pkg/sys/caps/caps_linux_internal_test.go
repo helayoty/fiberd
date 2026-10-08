@@ -51,9 +51,9 @@ func raiseInheritable(mask uint64) error {
 	return nil
 }
 
-// TestMaskInheritable: on one locked thread, the inheritable set is cut
-// to keep and nothing else about it changes. Narrow does this just
-// before it execs, so it cannot be watched from the API.
+// TestMaskInheritable checks that on one locked thread the inheritable set is
+// cut to keep and nothing else about it changes. Narrow does this just before
+// it execs, so it cannot be watched from the API.
 func TestMaskInheritable(t *testing.T) {
 	cases := []struct {
 		name  string

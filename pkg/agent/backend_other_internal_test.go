@@ -4,7 +4,7 @@ package agent
 
 import "testing"
 
-// TestProcOptions: off Linux the fork backend only gets -criu.
+// TestProcOptions checks that off Linux the fork backend only gets -criu.
 func TestProcOptions(t *testing.T) {
 	cases := []struct {
 		name, criu string

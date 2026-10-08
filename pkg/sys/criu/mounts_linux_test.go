@@ -66,8 +66,8 @@ func mountNSChild(t *testing.T) (int, string) {
 	return cmd.Process.Pid, dst
 }
 
-// TestOwnMountNS: only a process in another mount namespace has one of
-// its own, and a process that is not there has none.
+// TestOwnMountNS checks that only a process in another mount namespace has
+// one of its own, and a process that is not there has none.
 func TestOwnMountNS(t *testing.T) {
 	pid, _ := mountNSChild(t)
 	cases := []struct {
@@ -88,7 +88,7 @@ func TestOwnMountNS(t *testing.T) {
 	}
 }
 
-// TestDumpMounts: a tree in its own mount namespace has each of its
+// TestDumpMounts checks that a tree in its own mount namespace has each of its
 // single-file mounts named in the dump arguments and recorded beside
 // the images, so RestoreMounts can hand them back by name. A tree in
 // the caller's namespace needs nothing.

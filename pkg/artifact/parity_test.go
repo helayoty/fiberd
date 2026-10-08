@@ -16,7 +16,7 @@ func TestParityCheck(t *testing.T) {
 	cases := []struct {
 		name   string
 		parity artifact.Parity
-		local  artifact.Platform // the restoring side; zero = host
+		local  artifact.Platform // the restoring side, zero for the host
 		want   artifact.Platform // what the artifact was built on
 		ok     bool
 	}{

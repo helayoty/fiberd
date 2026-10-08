@@ -50,14 +50,14 @@ func writeLog(name string, n int) string {
 	return "printf '" + strings.Join(lines, `\n`) + `\n' > DIR/` + name + "\n"
 }
 
-// TestAvailable: `criu check` passing is availability, its output comes
-// back on failure, and the binary is the one named or `criu` on PATH.
+// TestAvailable checks that `criu check` passing is availability, its output
+// comes back on failure, and the binary is the one named or `criu` on PATH.
 func TestAvailable(t *testing.T) {
 	cases := []struct {
 		name     string
-		body     string // the fake's script; "" for no binary at all
+		body     string // the fake's script, "" for no binary at all
 		fromPath bool   // name no binary and find the fake as `criu` on PATH
-		wantErr  string // substring of the error; "" for success
+		wantErr  string // substring of the error, "" for success
 		wantIs   error
 	}{
 		{name: "check passes", body: "exit 0"},
@@ -97,7 +97,7 @@ func TestAvailable(t *testing.T) {
 	}
 }
 
-// TestDumpWith: the image directory is made, criu gets the dump
+// TestDumpWith checks that the image directory is made, criu gets the dump
 // arguments the package promises, and a failure carries criu's output
 // and the tail of its log.
 func TestDumpWith(t *testing.T) {
@@ -109,11 +109,11 @@ func TestDumpWith(t *testing.T) {
 		leaveRunning bool
 		extra        []string
 		body         string
-		log          int  // lines of dump.log the fake writes first; 0 for none
+		log          int  // lines of dump.log the fake writes first, 0 for none
 		dirUnderFile bool // the image directory has a regular file as parent
 		cancelled    bool // the context is already done
 		wantTail     []string
-		wantErr      []string // substrings of the error; nil for success
+		wantErr      []string // substrings of the error, nil for success
 		wantNotErr   []string
 		wantIs       error
 	}{
@@ -184,7 +184,8 @@ func TestDumpWith(t *testing.T) {
 	}
 }
 
-// TestImageBytes: the pages files are summed and nothing else counts.
+// TestImageBytes checks that the pages files are summed and nothing else
+// counts.
 func TestImageBytes(t *testing.T) {
 	cases := []struct {
 		name    string

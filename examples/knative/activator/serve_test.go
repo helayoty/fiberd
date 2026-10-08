@@ -77,8 +77,8 @@ func TestNew(t *testing.T) {
 		dial    func(context.Context, string) (net.Conn, error)
 		tcp     bool   // the home hands out a real TCP endpoint
 		wantErr string // a substring of New's error, "" for success
-		// For a config New accepts: one request on each of the first
-		// revision's sessions, in order. Each must be served by the named
+		// For a config New accepts, one request goes to each of the first
+		// revision's sessions in order. Each must be served by the named
 		// session and get the reply.
 		sessions []string
 		reply    string
@@ -208,7 +208,7 @@ func TestRoute(t *testing.T) {
 		host    string // overrides the Host when set
 		code    int
 		session string // X-Fiberd-Session, for a request that is served
-		body    string // what the guest saw: "<host> <path>"
+		body    string // what the guest saw, as "<host> <path>"
 	}{
 		{name: "the first path segment names the revision and is stripped",
 			revs: two, target: "/web/items/7", host: "10.0.0.1:8080",
@@ -258,9 +258,9 @@ func TestRoute(t *testing.T) {
 	}
 }
 
-// TestProxyLine checks the line protocol leg: what reaches the guest,
-// what comes back, and that a fiber that fails is dropped so the next
-// request clones a fresh one instead of reusing a dead endpoint.
+// TestProxyLine checks what reaches a line protocol guest and what comes
+// back. A fiber that fails is dropped, so the next request clones a fresh
+// one instead of reusing a dead endpoint.
 func TestProxyLine(t *testing.T) {
 	// pipeTo dials a guest that runs fn on its end of the connection.
 	pipeTo := func(fn func(c net.Conn)) func(context.Context, string) (net.Conn, error) {
@@ -345,14 +345,14 @@ func bufioReadLine(c net.Conn) (string, error) {
 	}
 }
 
-// TestProxyHTTP checks the HTTP leg: the guest's response reaches the
-// caller as it was, a guest that cannot be reached drops the fiber, and
-// no connection to a guest outlives its request.
+// TestProxyHTTP checks that an HTTP guest's response reaches the caller as
+// it was, that a guest that cannot be reached drops the fiber, and that no
+// connection to a guest outlives its request.
 func TestProxyHTTP(t *testing.T) {
 	cases := []struct {
 		name     string
 		handler  http.HandlerFunc
-		dial     bool // false: the guest is unreachable
+		dial     bool // false when the guest is unreachable
 		code     int
 		bodyHas  string
 		header   map[string]string
@@ -401,8 +401,8 @@ func TestProxyHTTP(t *testing.T) {
 				}
 			}
 			// Every connection to the guest closes once its request is
-			// done; one left idle would be a socket and two goroutines
-			// held for as long as the activator runs.
+			// done. One left idle would hold a socket and two goroutines
+			// for as long as the activator runs.
 			deadline := time.Now().Add(3 * time.Second)
 			for open.Load() != 0 {
 				if time.Now().After(deadline) {
@@ -503,8 +503,8 @@ func TestSlots(t *testing.T) {
 }
 
 // TestConcurrentRequests runs many requests at once over a revision's
-// fibers. Run it with -race: picking a fiber must read every slot's load
-// under that slot's lock.
+// fibers. Run it with -race, because picking a fiber must read every
+// slot's load under that slot's lock.
 func TestConcurrentRequests(t *testing.T) {
 	cases := []struct {
 		name        string
@@ -546,8 +546,8 @@ func TestConcurrentRequests(t *testing.T) {
 }
 
 // TestSlowHomeCall checks that a revision whose Clone or Park is slow
-// holds up only its own requests: another revision, already serving,
-// answers at once.
+// holds up only its own requests. Another revision that is already
+// serving answers at once.
 func TestSlowHomeCall(t *testing.T) {
 	cases := []struct {
 		name string

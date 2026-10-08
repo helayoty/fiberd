@@ -10,8 +10,8 @@ import (
 	"github.com/helayoty/fiberd/pkg/home"
 )
 
-// testHooks is empty in a release build: no -admin-unsafe flag and no
-// test-only admin handlers. Build with -tags fiberd_testhooks for them.
+// testHooks is empty in a release build, with no -admin-unsafe flag and
+// no test-only admin handlers. Build with -tags fiberd_testhooks for them.
 type testHooks struct{}
 
 func (*testHooks) bind(*flag.FlagSet) {}

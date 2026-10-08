@@ -7,13 +7,12 @@ import (
 	"path/filepath"
 )
 
-// PrivateDir is where the agent keeps what no fiber may read: its keys,
-// the ledger snapshot, the deny-list, the epoch, the audit spool and the
-// admin socket. It is <state>/private, mode 0700, and every fiber with a
-// mount namespace of its own has it hidden. Fibers run as the agent's
-// uid, so a 0600 file beside the templates would not stop them. The
-// templates and the parked deltas stay directly under -state, where
-// fibers and CRIU need them.
+// PrivateDir is where the agent keeps what no fiber may read, such as its
+// keys, ledger snapshot, deny-list, epoch, audit spool and admin socket.
+// It is <state>/private, mode 0700, hidden from every fiber with its own
+// mount namespace. Fibers run as the agent's uid, so file modes alone
+// would not stop them. Templates and deltas stay directly under -state,
+// where fibers and CRIU need them.
 func (c *Config) PrivateDir() string { return filepath.Join(c.StateDir, "private") }
 
 // ensurePrivate creates PrivateDir, or checks the one that is there.

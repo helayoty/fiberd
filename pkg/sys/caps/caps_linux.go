@@ -45,21 +45,20 @@ func boundingExtra(keep []int) []int {
 	}
 }
 
-// Narrow re-executes the process with only keep in its bounding set, and
-// with its inheritable set masked to keep and its ambient set emptied.
-// Capabilities are per thread and the Go runtime runs several, so the
-// sets are narrowed on one locked thread that then execs: the new
-// process starts with that thread's sets on every thread. Call it first
-// in main, before anything that must not run twice. It returns nil
-// without exec when nothing outside keep is held. Nothing is ever added:
-// the effective and permitted sets are left as they are, and the
-// bounding, inheritable and ambient sets only lose what keep omits.
+// Narrow re-executes the process with only keep in its bounding set, its
+// inheritable set masked to keep and its ambient set emptied.
+// Capabilities are per thread and the Go runtime runs several, so one
+// locked thread narrows its sets and then execs, and the new process
+// starts with them on every thread. Call it first in main, before anything
+// that must not run twice. It returns nil without exec when nothing
+// outside keep is held. It never adds a capability, and leaves the
+// effective and permitted sets as they are.
 func Narrow(keep []int) error {
 	if len(Extra(keep)) == 0 {
 		return nil
 	}
-	// The thread stays locked on every path but the first-drop refusal:
-	// the others exec or exit.
+	// The thread stays locked on every path but the first-drop refusal,
+	// because the others exec or exit.
 	runtime.LockOSThread()
 	for i, c := range boundingExtra(keep) {
 		if _, _, errno := syscall.RawSyscall(syscall.SYS_PRCTL, syscall.PR_CAPBSET_DROP, uintptr(c), 0); errno != 0 {
@@ -67,8 +66,8 @@ func Narrow(keep []int) error {
 				runtime.UnlockOSThread()
 				return ErrCannotNarrow
 			}
-			// Part of this thread's set is gone: carrying on would leave
-			// threads that disagree.
+			// Part of this thread's set is gone, and carrying on would
+			// leave threads that disagree.
 			fmt.Fprintf(os.Stderr, "caps: drop capability %d: %v\n", c, errno)
 			os.Exit(1)
 		}
@@ -95,7 +94,7 @@ func Narrow(keep []int) error {
 const (
 	prCapAmbient         = 47
 	prCapAmbientClearAll = 4
-	capabilityVersion3   = 0x20080522 // _LINUX_CAPABILITY_VERSION_3: two 32-bit words per set
+	capabilityVersion3   = 0x20080522 // _LINUX_CAPABILITY_VERSION_3, two 32-bit words per set
 )
 
 type capHeader struct {

@@ -13,8 +13,8 @@
 # State lives in $CONFORM_STATE (default bin/conform-state), so the
 # restart hook keeps the epoch file and the audit spool across restarts.
 #
-# The agent is bin/fiberd-testhooks: fiberd built with -tags
-# fiberd_testhooks, for -admin-unsafe and the lane and scope-lost hooks.
+# The agent is bin/fiberd-testhooks, fiberd built with -tags
+# fiberd_testhooks so -admin-unsafe and the lane and scope-lost hooks exist.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
@@ -32,7 +32,7 @@ CGROOT=${FIBERD_CGROUP_ROOT:-/sys/fs/cgroup/fiberd}
 # fork backends only. --device-mb gives the reference zygote a simulated
 # device, which is what C8 budgets.
 ENGINE_HOOK=()
-# proc and runc fibers share the host kernel: they serve trusted grants only.
+# proc and runc fibers share the host kernel, so they serve trusted grants only.
 ISOLATION=UNTRUSTED
 if [ "$RUNTIME" = proc ] || [ "$RUNTIME" = runc ]; then ISOLATION=TRUSTED; fi
 if [ "$RUNTIME" = proc ]; then

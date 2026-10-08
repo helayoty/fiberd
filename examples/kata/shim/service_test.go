@@ -367,13 +367,10 @@ func TestPodContainersAreFibers(t *testing.T) {
 	}
 }
 
-// TestCreateMisses checks every way Create refuses a container: a bundle
-// it cannot read, a container without a grant, a home it cannot reach, and
-// a clone the home answers with a miss. A refused container is not
-// recorded, in the shim or in its bundle. The steps share one shim and run
-// in order, because the real home's grant is full only after the first
-// container. The shim dials the real home at DefaultHome and the scripted
-// one at its own address.
+// TestCreateMisses checks every way Create refuses a container, and that a
+// refused container is recorded neither in the shim nor in its bundle. The
+// steps share one shim and run in order, because the real home's grant is
+// full only after the first container.
 func TestCreateMisses(t *testing.T) {
 	h := newHome(t)
 	fake := newFakeHome(t)
@@ -396,7 +393,7 @@ func TestCreateMisses(t *testing.T) {
 		name        string
 		id          string
 		annotations map[string]string
-		config      *string // raw config.json instead of the annotations; empty writes none
+		config      *string // raw config.json instead of the annotations, or empty for none
 		cloneErr    error   // the scripted home's answer to Clone
 		errHas      string  // the error must name this
 		is          func(error) bool
@@ -472,7 +469,7 @@ func TestCreateRecordsTheFiber(t *testing.T) {
 		n           int // containers created with these annotations
 		wantDials   []string
 		wantPayload string
-		want        *fshim.State // the bundle's record; nil means a sandbox: no clone, no record
+		want        *fshim.State // the bundle's record, or nil for a sandbox, which is neither cloned nor recorded
 	}{
 		{name: "the Pod's annotations name the home, session, on-stop and payload",
 			annotations: appAnnotations(map[string]string{fshim.AnnotHome: "home-a:8484", fshim.AnnotSession: "s1",
@@ -564,7 +561,7 @@ func TestCreateRecordsTheFiber(t *testing.T) {
 }
 
 // TestStopEndsTheFiber checks Start, Kill, Wait and Delete on one app
-// container: what the home is asked, the container's exit, and the
+// container. It pins what the home is asked, the container's exit, and the
 // events.
 func TestStopEndsTheFiber(t *testing.T) {
 	kill := func(sig syscall.Signal) func(context.Context, *testing.T, *fshim.Service) error {
@@ -628,8 +625,8 @@ func TestStopEndsTheFiber(t *testing.T) {
 		{name: "Delete after Kill keeps the Kill's exit status and stops the fiber once",
 			verbs: []verb{kill(syscall.SIGTERM), del(0)}, wantGone: true, wantReleases: []string{"fiber-1"},
 			wantTopics: []string{"/tasks/create", "/tasks/exit", "/tasks/delete"}},
-		// A regression test: Wait returned the bare context error, unlike
-		// the shim's other refusals.
+		// Wait must answer an ended context as the shim's other refusals
+		// do, not with the bare context error.
 		{name: "Wait gives up when its context ends", verbs: []verb{func(ctx context.Context, _ *testing.T, s *fshim.Service) error {
 			cctx, cancel := context.WithCancel(ctx)
 			cancel()
@@ -709,9 +706,9 @@ func TestStopEndsTheFiber(t *testing.T) {
 	}
 }
 
-// TestRefusals checks the verbs the shim refuses: anything about a
-// container it does not have, any exec, and the home's own verbs. A
-// refusal leaves the running container as it was.
+// TestRefusals checks that the shim refuses anything about a container it
+// does not have, any exec, and the home's own verbs. A refusal leaves the
+// running container as it was.
 func TestRefusals(t *testing.T) {
 	notFound, notImpl := errdefs.IsNotFound, errdefs.IsNotImplemented
 	cases := []struct {
@@ -800,7 +797,7 @@ func TestRefusals(t *testing.T) {
 			if _, err := s.Start(ctx, &taskAPI.StartRequest{ID: "c1"}); err != nil {
 				t.Fatal(err)
 			}
-			// A verb that waits for the container would block: the
+			// A verb that waits for the container would block. The
 			// deadline turns that into a failure.
 			cctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 			defer cancel()
@@ -818,7 +815,7 @@ func TestRefusals(t *testing.T) {
 	}
 }
 
-// TestAnswers checks the verbs the shim answers without a fiber: the
+// TestAnswers checks the verbs the shim answers without a fiber. The
 // shim's own pid stands for the task, and closing IO or updating
 // resources is accepted and changes nothing.
 func TestAnswers(t *testing.T) {
@@ -860,9 +857,9 @@ func TestAnswers(t *testing.T) {
 	}
 }
 
-// TestPublishNamespace checks the namespace events carry: the shim's own
-// when containerd gave it one, the request's otherwise. A shim without a
-// publisher still serves.
+// TestPublishNamespace checks that events carry the shim's own namespace
+// when containerd gave it one, and the request's otherwise. A shim without
+// a publisher still serves.
 func TestPublishNamespace(t *testing.T) {
 	cases := []struct {
 		name        string
@@ -926,9 +923,9 @@ func TestPublishNamespace(t *testing.T) {
 	}
 }
 
-// TestShutdownClosesConnections checks the callback the service leaves
-// with containerd's shutdown service: it closes every home connection and
-// the publisher.
+// TestShutdownClosesConnections checks that the callback the service
+// leaves with containerd's shutdown service closes every home connection
+// and the publisher.
 func TestShutdownClosesConnections(t *testing.T) {
 	cases := []struct {
 		name        string
@@ -971,7 +968,8 @@ func TestShutdownClosesConnections(t *testing.T) {
 }
 
 // endContext is the ttrpc metadata key TestRegisterTTRPC's interceptor
-// reads: "cancel" or "deadline" ends the handler's context that way.
+// reads. A value of "cancel" or "deadline" ends the handler's context that
+// way.
 const endContext = "test-end-context"
 
 // TestRegisterTTRPC serves the task service as containerd reaches it, over
@@ -1095,9 +1093,9 @@ func fifoLines(t *testing.T, path string) <-chan string {
 	return lines
 }
 
-// TestStdoutNamesTheFiber checks the lines the shim writes to the
-// container's stdout, which kubectl logs shows: the fiber Create made, and
-// a stop the home failed.
+// TestStdoutNamesTheFiber checks that the container's stdout, which
+// kubectl logs shows, names the fiber Create made and any stop the home
+// failed.
 func TestStdoutNamesTheFiber(t *testing.T) {
 	cases := []struct {
 		name    string

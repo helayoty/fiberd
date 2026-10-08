@@ -1,8 +1,8 @@
-/* noclone3 runs its arguments on a kernel that, as far as they can tell,
- * has no clone3: a seccomp filter answers __NR_clone3 with ENOSYS and lets
- * every other syscall through. The filter is inherited across fork and
- * exec, so a zygote started this way, and every fiber it forks, lives
- * without clone3 and takes libfiberzygote's fork fallback.
+/* noclone3 runs its arguments as if the kernel had no clone3. A seccomp
+ * filter answers __NR_clone3 with ENOSYS and lets every other syscall
+ * through. The filter is inherited across fork and exec, so a zygote
+ * started this way, and every fiber it forks, takes libfiberzygote's fork
+ * fallback.
  *
  *   noclone3 <command> [args...]
  *
@@ -32,8 +32,8 @@ int main(int argc, char **argv) {
         return 2;
     }
     struct sock_filter filter[] = {
-        /* A process of another architecture (a 32-bit binary) has other
-         * syscall numbers; nothing here is one, so it is ended. */
+        /* A process of another architecture, such as a 32-bit binary, has
+         * other syscall numbers. None is expected here, so one is killed. */
         BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, arch)),
         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, NOCLONE3_ARCH, 1, 0),
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS),

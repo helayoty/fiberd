@@ -43,8 +43,8 @@ func strangerPEM(t *testing.T) []byte {
 }
 
 // TestInCluster checks the client a Pod gets from its environment and its
-// projected service account: the API server's address, the token, and
-// TLS trusting the projected CA only.
+// projected service account. It pins the API server's address, the token,
+// and TLS that trusts only the projected CA.
 func TestInCluster(t *testing.T) {
 	api := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.WriteString(w, `{"auth":"`+r.Header.Get("Authorization")+`"}`)

@@ -222,11 +222,10 @@ func TestSnapshotRoundTripAndReconcile(t *testing.T) {
 }
 
 // TestSnapshotPersistsWhatBootReads checks that the snapshot is written
-// only on transitions Reconcile reads back (grants, parked sessions, the
-// epoch), so the warm path writes no file. A resume must write, or a
-// restart would resume the session again. Watch subscribers wake on every
-// ledger change, written or not. The steps run in order against one agent,
-// and each starts with no file.
+// only on transitions Reconcile reads back, so the warm path writes no
+// file. A resume must write, or a restart would resume the session again.
+// Watch subscribers wake on every ledger change. The steps run in order
+// against one agent, and each starts with no file.
 func TestSnapshotPersistsWhatBootReads(t *testing.T) {
 	g := core.Grant{UID: "g1", Audience: "node-a", FiberMax: 4}
 	a := newAgent(t, "up", core.TierCheckpoint, g)
@@ -308,12 +307,9 @@ func TestSnapshotPersistsWhatBootReads(t *testing.T) {
 
 // TestReconcileReverifiesSnapshotGrants checks that boot re-admits a
 // snapshot grant only when its token verifies again, for the same grant
-// and this home. The snapshot is a file on the home's disk, so an entry
-// edited into it with an unsigned token or none at all is dropped and
-// counted. A verifier that cannot decide yet is different from a token
-// that fails. Its entries are held, not admitted, and the snapshot written
-// at the end of boot still carries them and their parked sessions, so the
-// token presented once the verifier is back resumes the session.
+// and this home. Other entries are dropped and counted. Entries a verifier
+// cannot check yet are held with their parked sessions, so the token
+// presented once the verifier is back resumes the session.
 func TestReconcileReverifiesSnapshotGrants(t *testing.T) {
 	now := time.Now()
 	lease := now.Add(time.Hour)

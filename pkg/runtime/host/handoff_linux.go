@@ -14,34 +14,33 @@ import (
 	"github.com/helayoty/fiberd/pkg/handoff"
 )
 
-// handoffEndpoint is what a handoff fiber is told to serve on: nothing
-// it binds, the connections come through fz_accept.
+// handoffEndpoint is what a handoff fiber is told to serve on. It binds
+// nothing, because connections come through fz_accept.
 const handoffEndpoint = "handoff"
 
 // identityTag opens the one message a fresh handoff fiber reads from its
-// channel before any connection: the grant's TLS identity, as
-// libfiberzygote's fz_handoff_identity returns it. A connection message
-// is a zero byte with the socket in SCM_RIGHTS, so the two never look
-// alike.
+// channel before any connection, the grant's TLS identity. A connection
+// message is a zero byte with the socket in SCM_RIGHTS, so the two never
+// look alike.
 const identityTag = 'k'
 
-// handoffIdentity is what a grant's fibers are given: the identity
-// derived for it and the caller they accept, kept so the pin is at hand
-// for HandoffRoute and the derivation is paid once.
+// handoffIdentity is the identity derived for a grant and the caller its
+// fibers accept. It is kept so HandoffRoute has the pin at hand and the
+// derivation runs once.
 type handoffIdentity struct {
 	id     handoff.Identity
 	caller string
 }
 
-// canHandoff: the backend can pass connections to fibers and there is a
-// router to take them from.
+// canHandoff reports whether the backend can pass connections to fibers
+// and a router exists to take them from.
 func (r *Runtime) canHandoff() bool {
 	h, ok := r.be.(backend.Handoffer)
 	return ok && h.Handoff() && r.cfg.Handoff != nil
 }
 
-// handoffPair makes a handoff fiber's channel: the host keeps the first
-// end, the backend hands the second to the fiber. A backend whose fibers
+// handoffPair makes a handoff fiber's channel. The host keeps the first
+// end and the backend hands the second to the fiber. A backend whose fibers
 // live in a network namespace of their own makes the pair itself, where
 // the fiber's checkpoint can carry it.
 func (r *Runtime) handoffPair(grantUID string) (host, fiber *os.File, err error) {
@@ -62,7 +61,7 @@ func (r *Runtime) handoffPair(grantUID string) (host, fiber *os.File, err error)
 
 // prepareIdentity derives the grant's TLS identity (once) and records
 // the caller its fibers accept, so HandoffRoute can name the pin. It
-// writes nothing: the identity reaches each fiber through sendIdentity.
+// writes nothing, because sendIdentity carries the identity to each fiber.
 func (r *Runtime) prepareIdentity(grantUID, caller string) error {
 	r.mu.Lock()
 	had, ok := r.identities[grantUID]
@@ -95,9 +94,9 @@ func (r *Runtime) forgetIdentity(grantUID string) {
 	r.mu.Unlock()
 }
 
-// identityMessage frames an identity for the fiber: the tag, then the
-// key PEM, the certificate PEM and the caller thumbprint, each ended by
-// a NUL. It is what fz_handoff_identity parses.
+// identityMessage frames an identity the way fz_handoff_identity parses
+// it. That is the tag, then the key PEM, the certificate PEM and the
+// caller thumbprint, each ended by a NUL.
 func identityMessage(id handoff.Identity, caller string) ([]byte, error) {
 	for _, f := range []struct{ name, v string }{{"key", string(id.KeyPEM)}, {"certificate", string(id.CertPEM)}, {"caller", caller}} {
 		if f.v == "" || strings.ContainsRune(f.v, 0) {
@@ -113,13 +112,11 @@ func identityMessage(id handoff.Identity, caller string) ([]byte, error) {
 	return b.Bytes(), nil
 }
 
-// sendIdentity gives a fresh handoff fiber its grant's identity: one
-// message on the host's end of its channel, queued before the fiber is
-// born so it is the first thing fz_accept's channel yields. A resumed
-// fiber already holds the identity in its restored memory and is sent
-// none. The key is never a file: fibers of every grant run as the
-// agent's user, so no file mode would keep one grant's fibers out of
-// another's.
+// sendIdentity queues a fresh handoff fiber's grant identity on the
+// host's end of its channel before the fiber is born, so it is the first
+// thing fz_accept reads. A resumed fiber holds it in memory and gets none.
+// The key is never a file, because fibers of every grant run as the
+// agent's user and no file mode would keep grants apart.
 func (r *Runtime) sendIdentity(ch *os.File, grantUID string) error {
 	r.mu.Lock()
 	had, ok := r.identities[grantUID]
@@ -149,7 +146,7 @@ func (r *Runtime) sendIdentity(ch *os.File, grantUID string) error {
 }
 
 // route gives a ready handoff fiber its routing key and returns the
-// endpoint its handle names: the router's address.
+// endpoint its handle names, which is the router's address.
 func (r *Runtime) route(f *fiber) (string, error) {
 	if f.handoff == nil || r.cfg.Handoff == nil {
 		return f.endpoint, nil
@@ -169,8 +166,8 @@ func (r *Runtime) unroute(f *fiber) {
 // HandsOff implements core.HandoffRouter.
 func (r *Runtime) HandsOff() bool { return r.canHandoff() }
 
-// HandoffRoute implements core.HandoffRouter: the routing key of a
-// handoff fiber and the pin of the key it serves TLS with.
+// HandoffRoute implements core.HandoffRouter. It returns a handoff
+// fiber's routing key and the pin of the key it serves TLS with.
 func (r *Runtime) HandoffRoute(fiberID string) (key, pin string, ok bool) {
 	if r.cfg.Handoff == nil {
 		return "", "", false
@@ -190,8 +187,8 @@ func (r *Runtime) HandoffRoute(fiberID string) (key, pin string, ok bool) {
 }
 
 // Deliver passes a connected socket to a handoff fiber, which serves it
-// from fz_accept. It never blocks: a fiber whose queue is full is
-// ErrHandoffBusy. The caller still owns conn and closes its copy.
+// from fz_accept. It never blocks, so a full queue is ErrHandoffBusy.
+// The caller still owns conn and closes its copy.
 func (r *Runtime) Deliver(fiberID string, conn *os.File) error {
 	r.mu.Lock()
 	var ch *os.File

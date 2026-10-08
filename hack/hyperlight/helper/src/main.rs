@@ -28,12 +28,12 @@ use anyhow::{Context, Result, anyhow};
 use hyperlight_host::sandbox::snapshot::{OciTag, Snapshot};
 use hyperlight_host::{HostFunctions, MultiUseSandbox, SandboxBuilder};
 
-/// The facts a snapshot made here depends on, one token each: this
+/// The facts a snapshot made here depends on, one token each. This
 /// helper's version (its park layout), the hyperlight_host crate (its
 /// snapshot format, from Cargo.lock through build.rs), the hypervisor in
 /// use and the CPU vendor. Hyperlight refuses to load a snapshot from
-/// another crate version, hypervisor or vendor; fiberd records these as
-/// the platform of every park so the refusal happens before a resume.
+/// another crate version, hypervisor or vendor, so fiberd records these as
+/// the platform of every park and the refusal happens before a resume.
 fn facts() -> String {
     format!(
         "fiberd-hyperlight-helper/{} hyperlight_host/{} {} {}",
@@ -56,7 +56,7 @@ fn hypervisor() -> &'static str {
     }
 }
 
-/// The CPU vendor as Hyperlight tags it: CPUID leaf 0 on x86_64
+/// The CPU vendor as Hyperlight tags it. CPUID leaf 0 on x86_64
 /// ("GenuineIntel", "AuthenticAMD"), the MIDR_EL1 implementer on
 /// aarch64 ("0x41").
 fn cpu_vendor() -> String {

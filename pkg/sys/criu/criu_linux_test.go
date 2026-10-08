@@ -15,7 +15,7 @@ import (
 	"github.com/helayoty/fiberd/pkg/sys/criu"
 )
 
-// TestSocketInode: the inode a unix socket's fd link names is the
+// TestSocketInode checks that the inode a unix socket's fd link names is the
 // socket's inode, and anything else on the descriptor is refused.
 func TestSocketInode(t *testing.T) {
 	fds, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_STREAM|syscall.SOCK_CLOEXEC, 0)

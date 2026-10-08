@@ -183,7 +183,7 @@ func TestRun(t *testing.T) {
 		// args is the command line. $HOME is the test home's address and
 		// $JWT the grant file.
 		args    []string
-		wantErr func(error) bool // nil: run serves until cancelled, then returns nil
+		wantErr func(error) bool // nil when run serves until cancelled, then returns nil
 		out     string           // a substring of the flag output
 		// serve exercises a run that is serving on addr.
 		serve func(t *testing.T, addr net.Addr, h *home)
@@ -282,8 +282,8 @@ func TestRun(t *testing.T) {
 	}
 }
 
-// TestMainExit runs main in a child process and checks its exit status:
-// 0 for -h, 2 for a bad command line, 1 for any other failure.
+// TestMainExit runs main in a child process and checks its exit status.
+// It is 0 for -h, 2 for a bad command line and 1 for any other failure.
 func TestMainExit(t *testing.T) {
 	if args, ok := os.LookupEnv("FIBERD_ACTIVATOR_ARGS"); ok {
 		os.Args = append([]string{"fiberd-activator"}, strings.Fields(args)...)

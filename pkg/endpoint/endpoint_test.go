@@ -152,8 +152,8 @@ func TestPolicy(t *testing.T) {
 	}
 }
 
-// Validate refuses what Parse accepts but no home may return: a tcp
-// host that is neither an IP literal nor a plain name.
+// Validate refuses what Parse accepts but no home may return, which is a
+// tcp host that is neither an IP literal nor a plain name.
 func TestValidate(t *testing.T) {
 	cases := []struct {
 		name    string

@@ -34,7 +34,7 @@ func parse(args ...string) (*agent.Config, error) {
 	return &c, nil
 }
 
-// TestBind: the flags' defaults, what parsing makes of repeatable and
+// TestBind checks the flags' defaults, what parsing makes of repeatable and
 // list flags, and the values Bind refuses.
 func TestBind(t *testing.T) {
 	hostname, _ := os.Hostname()
@@ -94,7 +94,7 @@ func TestBind(t *testing.T) {
 	}
 }
 
-// TestFinishIsIdempotent: finishing twice does not repeat the device
+// TestFinishIsIdempotent checks that finishing twice does not repeat the device
 // list.
 func TestFinishIsIdempotent(t *testing.T) {
 	cases := []struct {
@@ -166,7 +166,7 @@ func TestFamily(t *testing.T) {
 	}
 }
 
-// TestPaths: the private directory and the admin socket sit under
+// TestPaths checks that the private directory and the admin socket sit under
 // -state.
 func TestPaths(t *testing.T) {
 	cases := []struct {
@@ -215,9 +215,9 @@ func writeKey(t *testing.T, alg jose.SignatureAlgorithm) (string, string) {
 	return path, k.KeyID
 }
 
-// TestLoadDeltaKeys: no registry needs no keys. With one, the home signs
-// and seals with the keys the flags name, or with keys of its own that it
-// generates once under <state>/private, mode 0600, and reuses.
+// TestLoadDeltaKeys checks that no registry needs no keys. With one, the home
+// signs and seals with the keys the flags name, or with keys of its own that
+// it generates once under <state>/private, mode 0600, and reuses.
 func TestLoadDeltaKeys(t *testing.T) {
 	signer, signerKID := writeKey(t, jose.EdDSA)
 	seal, sealKID := writeKey(t, "")

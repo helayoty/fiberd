@@ -16,7 +16,7 @@ import (
 	"github.com/helayoty/fiberd/pkg/handoff"
 )
 
-// TestIdentityMessage: the one message a fresh handoff fiber reads
+// TestIdentityMessage checks that the one message a fresh handoff fiber reads
 // before any connection is the tag, then the key, the certificate and
 // the caller, each ended by a NUL, as libfiberzygote parses it. A field
 // that is empty or holds a NUL cannot be framed.
@@ -26,8 +26,8 @@ func TestIdentityMessage(t *testing.T) {
 		name   string
 		id     handoff.Identity
 		caller string
-		// fields, when set, are what the message must carry in order;
-		// otherwise framing must fail.
+		// fields, when set, are what the message must carry in order.
+		// Otherwise framing must fail.
 		fields [][]byte
 	}{
 		{name: "key, certificate, caller", id: id, caller: "x5t", fields: [][]byte{id.KeyPEM, id.CertPEM, []byte("x5t")}},
@@ -60,7 +60,7 @@ func TestIdentityMessage(t *testing.T) {
 					t.Fatalf("field %d = %q, want %q", i, got[i], tc.fields[i])
 				}
 			}
-			// A connection message is a zero byte: the two must never
+			// A connection message is a zero byte, and the two must never
 			// be confused.
 			if msg[0] == 0 {
 				t.Fatal("identity message starts like a connection message")
@@ -69,14 +69,14 @@ func TestIdentityMessage(t *testing.T) {
 	}
 }
 
-// TestIdentityLifecycle: a grant's identity is held from PrepareTemplate
-// until its warm instance ends, then dropped so the home does not keep
-// every admitted grant's key for its lifetime. It is derived from the
-// home's key, so a grant prepared again gets the same one.
+// TestIdentityLifecycle checks that a grant's identity is held from
+// PrepareTemplate until its warm instance ends, then dropped so the home does
+// not keep every admitted grant's key for its lifetime. It is derived from
+// the home's key, so a grant prepared again gets the same one.
 func TestIdentityLifecycle(t *testing.T) {
 	cases := []struct {
 		name string
-		// steps run in order: "prepare" or "forget", for grant ga.
+		// steps run in order, each "prepare" or "forget" for grant ga.
 		steps []string
 		// held is whether ga's identity must be in memory afterwards.
 		held bool
@@ -114,7 +114,7 @@ func TestIdentityLifecycle(t *testing.T) {
 	}
 }
 
-// TestCanHandoff: a home hands connections to fibers only when its
+// TestCanHandoff checks that a home hands connections to fibers only when its
 // backend can take them and a router gives them out.
 func TestCanHandoff(t *testing.T) {
 	cases := []struct {
@@ -153,7 +153,7 @@ func TestCanHandoff(t *testing.T) {
 	}
 }
 
-// recvHandoff reads one message from a handoff channel's fiber end: the
+// recvHandoff reads one message from a handoff channel's fiber end, the
 // bytes and the file descriptors passed with them.
 func recvHandoff(t *testing.T, fd int) ([]byte, []int) {
 	t.Helper()
@@ -179,13 +179,13 @@ func recvHandoff(t *testing.T, fd int) ([]byte, []int) {
 	return buf[:n], fds
 }
 
-// TestSendIdentity: the identity is one message queued on the host's end
-// of a fresh channel, and nothing is sent when there is none to send or
-// nowhere to send it.
+// TestSendIdentity checks that the identity is one message queued on the
+// host's end of a fresh channel, and nothing is sent when there is none to
+// send or nowhere to send it.
 func TestSendIdentity(t *testing.T) {
 	cases := []struct {
 		name string
-		// prepare sets the runtime up; closeHost and closePeer end a
+		// prepare sets the runtime up. closeHost and closePeer close a
 		// channel end before the send.
 		caller               string
 		prepared             bool
@@ -239,9 +239,9 @@ func TestSendIdentity(t *testing.T) {
 	}
 }
 
-// TestDeliver: a connection reaches a ready handoff fiber as one zero byte
-// with the socket attached, and every other fiber or state is refused
-// without blocking.
+// TestDeliver checks that a connection reaches a ready handoff fiber as one
+// zero byte with the socket attached, and every other fiber or state is
+// refused without blocking.
 func TestDeliver(t *testing.T) {
 	g := core.Grant{UID: "g1", TemplateDigest: "sha256:tmpl", WBudgetBytes: 64 << 20, Policy: core.Policy{EndpointMode: core.EndpointHandoff}, CallerThumbprint: "x5t"}
 	direct := core.Grant{UID: "g2", TemplateDigest: "sha256:tmpl", WBudgetBytes: 64 << 20}
@@ -273,7 +273,7 @@ func TestDeliver(t *testing.T) {
 			return h
 		}, wantErr: ErrNotHandoff},
 		{name: "a fiber that is not accepting", target: func(t *testing.T, r *Runtime, _ *sandboxBackend, h, _ string) string {
-			// Fill its queue: the kernel bounds unread SEQPACKET messages.
+			// Fill its queue, since the kernel bounds unread SEQPACKET messages.
 			conn := pipeEnd(t)
 			for i := 0; i < 10000; i++ {
 				if err := r.Deliver(h, conn); errors.Is(err, ErrHandoffBusy) {
@@ -325,8 +325,8 @@ func TestDeliver(t *testing.T) {
 			if !bytes.Equal(msg, []byte{0}) || len(fds) != 1 {
 				t.Fatalf("the fiber read %q with %d fds, want one zero byte with the socket", msg, len(fds))
 			}
-			// What arrived is the very socket: a byte written to it is read
-			// from the other end.
+			// What arrived is the very socket, so a byte written to it is
+			// read from the other end.
 			if _, err := syscall.Write(fds[0], []byte("hi")); err != nil {
 				t.Fatal(err)
 			}
@@ -336,7 +336,7 @@ func TestDeliver(t *testing.T) {
 			if n, err := other.Read(buf); err != nil || string(buf[:n]) != "hi" {
 				t.Fatalf("read from the handed connection = %q %v", buf[:n], err)
 			}
-			// The fiber's end is gone with its finish; the route too.
+			// The fiber's end and its route are gone with its finish.
 			if err := r.Release(ctx, h.ID, false); err != nil {
 				t.Fatal(err)
 			}
@@ -351,7 +351,7 @@ func TestDeliver(t *testing.T) {
 }
 
 // pipeEnd is one end of a stream socket pair, as a caller's accepted
-// connection; connPeer returns the other end of the pair made last.
+// connection. connPeer returns the other end of the pair made last.
 var pipePeers = map[*os.File]*os.File{}
 
 func pipeEnd(t *testing.T) *os.File {

@@ -60,10 +60,10 @@ func main() {
 	flag.StringVar(&o.cgRoot, "cgroup-root", envOr("FIBERD_CGROUP_ROOT", "/sys/fs/cgroup/fiberd"), "home's cgroup root")
 	flag.StringVar(&o.rootEvents, "container-events", "/sys/fs/cgroup/memory.events", "container-level memory.events (OOM counter)")
 	flag.DurationVar(&o.timeout, "timeout", 90*time.Second, "give up after")
-	flag.StringVar(&o.tlsCA, "tls-ca", "", "PEM CA bundle the home's certificate chains to (mutual TLS; empty dials plaintext)")
+	flag.StringVar(&o.tlsCA, "tls-ca", "", "PEM CA bundle the home's certificate chains to (empty dials plaintext)")
 	flag.StringVar(&o.tlsCert, "tls-cert", "", "PEM client certificate presented to the home")
 	flag.StringVar(&o.tlsKey, "tls-key", "", "PEM private key of -tls-cert")
-	flag.StringVar(&o.isolation, "isolation", "UNTRUSTED", "the grant's isolation: UNTRUSTED (gvisor, hyperlight homes) or TRUSTED (any home)")
+	flag.StringVar(&o.isolation, "isolation", "UNTRUSTED", "the grant's isolation, UNTRUSTED or TRUSTED")
 	flag.Parse()
 	os.Exit(run(o))
 }

@@ -43,8 +43,8 @@ func main() {
 	os.Exit(run(context.Background(), os.Args[1:], os.Stdout, os.Stderr))
 }
 
-// run dispatches a subcommand and returns the exit code: 0 on success
-// or -h, 2 for a usage error, 1 when the subcommand fails.
+// run dispatches a subcommand. It returns exit code 0 on success or -h,
+// 2 for a usage error, and 1 when the subcommand fails.
 func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	return cli.Run(args, "usage: grant-issuer keygen|mint|serve [flags]; -h on a subcommand for its flags", map[string]cli.Command{
 		"keygen": func(a []string) error { return keygen(a, stdout, stderr) },
@@ -55,7 +55,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 
 func keygen(args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("keygen", flag.ContinueOnError)
-	alg := fs.String("alg", "EdDSA", "signature algorithm: EdDSA or ES256; A256GCM writes a delta seal key (-delta-seal-key) instead")
+	alg := fs.String("alg", "EdDSA", "signature algorithm, EdDSA or ES256. A256GCM writes a delta seal key (-delta-seal-key) instead")
 	out := fs.String("out", "key.json", "where to write the private JWK (mode 0600)")
 	if err := cli.ParseFlags(fs, args, stderr); err != nil {
 		return err
@@ -94,9 +94,9 @@ func mint(args []string, stdout, stderr io.Writer) error {
 	psiPark := fs.Float64("psi-park", 0, "PSI memory some avg10 (%) at which the home parks sessions")
 	devBudget := fs.String("device-budget", "0", "per-fiber slice of the engine's device state, bytes with optional Ki/Mi/Gi suffix (0 = no device)")
 	devClass := fs.String("device-class", "", "device class the budget is for (gpu, sim; empty = any)")
-	bindCert := fs.String("bind-cert", "", "PEM client certificate the grant is bound to (cnf x5t#S256); required by homes serving mutual TLS")
+	bindCert := fs.String("bind-cert", "", "PEM client certificate the grant is bound to (cnf x5t#S256). Homes serving mutual TLS require it")
 	isolation := fs.String("isolation", "UNTRUSTED", "UNTRUSTED (only gvisor or hyperlight homes serve it) or TRUSTED (any home, including proc and runc)")
-	endpointMode := fs.String("endpoint-mode", "DIRECT", "DIRECT (each fiber listens) or HANDOFF (the home routes TLS connections to fibers, which check the -bind-cert caller; proc and runc homes)")
+	endpointMode := fs.String("endpoint-mode", "DIRECT", "DIRECT (each fiber listens) or HANDOFF (proc and runc homes route TLS connections to fibers, which check the -bind-cert caller)")
 	if err := cli.ParseFlags(fs, args, stderr); err != nil {
 		return err
 	}
@@ -195,7 +195,7 @@ func serve(ctx context.Context, args []string, stderr io.Writer) error {
 	return nil
 }
 
-// defaultIssuer is the issuer URL for a listen address: http://<addr>,
+// defaultIssuer is the issuer URL http://<addr> for a listen address,
 // with localhost for an address that names no host.
 func defaultIssuer(addr string) string {
 	if strings.HasPrefix(addr, ":") {

@@ -8,9 +8,8 @@ import (
 )
 
 // criuSysctls are the files `criu check` must write. An unprivileged Pod
-// gets them read-only with the rest of /proc/sys. Each belongs to the
-// container's own pid or ipc namespace. The rest of /proc/sys stays
-// read-only.
+// gets all of /proc/sys read-only. Only these are made writable, and each
+// belongs to the container's own pid or ipc namespace.
 var criuSysctls = []string{
 	"/proc/sys/kernel/ns_last_pid",
 	"/proc/sys/kernel/sem_next_id",

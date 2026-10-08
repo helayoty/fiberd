@@ -41,7 +41,7 @@ func TestOwnFromStripsTheAgentLeaf(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(mount, step, "cgroup.procs"), nil, 0o644)
 	cases := []struct {
 		name, procSelf string
-		want           string // relative to the mount; "" = the mount root
+		want           string // relative to the mount, "" for the mount root
 	}{
 		{name: "from the agent leaf, the step", procSelf: "0::/system.slice/slurmstepd.scope/job_2/step_batch/user/task_0/agent\n", want: step},
 		{name: "from the step, the step", procSelf: "0::/system.slice/slurmstepd.scope/job_2/step_batch/user/task_0\n", want: step},
@@ -61,11 +61,11 @@ func TestOwnFromStripsTheAgentLeaf(t *testing.T) {
 	}
 }
 
-// TestDelegate: on a fake cgroup root (plain file operations, so it runs
-// on any OS) that has processes and lacks controllers, the processes are
-// moved to the agent leaf and the missing controllers are enabled for the
-// subtree; only those the root's cgroup.controllers lists (all when it is
-// absent), and memory is a must. A root already delegated is not touched.
+// TestDelegate uses a fake cgroup root with processes and missing
+// controllers. Plain file operations let it run on any OS. The processes
+// move to the agent leaf, and the missing controllers that the root's
+// cgroup.controllers lists (all when it is absent) are enabled for the
+// subtree. Memory is a must. A root already delegated is not touched.
 func TestDelegate(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -73,9 +73,9 @@ func TestDelegate(t *testing.T) {
 		// Each enable is a write that replaces a plain file's contents, so
 		// subtree_control holds the last controller enabled.
 		control    string
-		agentProcs string // last pid moved into the agent leaf; "" = no leaf
+		agentProcs string // last pid moved into the agent leaf, "" for no leaf
 		prepare    func(t *testing.T, root string)
-		err        string // substring of the refusal; "" = success
+		err        string // substring of the refusal, "" for success
 	}{
 		{name: "processes move to the agent leaf, then memory and pids are enabled",
 			files:   map[string]string{"cgroup.subtree_control": "", "cgroup.procs": "1\n42\n"},
@@ -104,7 +104,7 @@ func TestDelegate(t *testing.T) {
 		{name: "a process that cannot be moved",
 			files: map[string]string{"cgroup.subtree_control": "", "cgroup.procs": "42\n"},
 			prepare: func(t *testing.T, root string) {
-				// A file where the agent leaf should be: making it is
+				// A file where the agent leaf should be. Making it is
 				// "already there", and moving a pid into it fails.
 				if err := os.WriteFile(filepath.Join(root, "agent"), nil, 0o644); err != nil {
 					t.Fatal(err)
@@ -166,8 +166,8 @@ func TestDelegate(t *testing.T) {
 	}
 }
 
-// TestPidsLimitAndEvents: pids.max is written only where the controller
-// is present, and pids.events max reads as the refused-fork count.
+// TestPidsLimitAndEvents checks that pids.max is written only where the
+// controller is present, and pids.events max reads as the refused-fork count.
 func TestPidsLimitAndEvents(t *testing.T) {
 	cases := []struct {
 		name     string

@@ -141,8 +141,8 @@ func TestServer(t *testing.T) {
 		{name: "POST without a name is Invalid",
 			method: "POST", path: "/api/v1/namespaces/ns/pods", body: `{"metadata":{}}`,
 			code: 422, wantStatusFrom: "Invalid"},
-		// A regression test: the handler type-asserted metadata without
-		// checking, and an object without one dropped the connection.
+		// An object without metadata must be refused as Invalid, not drop
+		// the connection.
 		{name: "POST without metadata is Invalid",
 			method: "POST", path: "/api/v1/namespaces/ns/pods", body: `{"kind":"Pod"}`,
 			code: 422, wantStatusFrom: "Invalid"},
@@ -195,7 +195,7 @@ func TestServer(t *testing.T) {
 					t.Fatalf("pod = %v", got)
 				}
 			}},
-		// A regression test: a status patch without a status deleted it.
+		// A status patch without a status must leave the status in place.
 		{name: "a PATCH of the status subresource without a status leaves it",
 			seed: seedPod, method: "PATCH", path: podPath + "/status", ctype: "application/merge-patch+json",
 			body: `{"metadata":{"labels":{"x":"y"}}}`, code: 200,
@@ -260,7 +260,7 @@ func TestServer(t *testing.T) {
 }
 
 // TestServerState checks the methods a test drives the server with
-// directly: seeding, reading, changing, failing and the request log.
+// directly, for seeding, reading, changing and failing, and the request log.
 func TestServerState(t *testing.T) {
 	cases := []struct {
 		name string

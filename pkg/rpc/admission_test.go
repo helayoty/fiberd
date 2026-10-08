@@ -17,9 +17,9 @@ import (
 	"github.com/helayoty/fiberd/pkg/rpc"
 )
 
-// nodeDescriptor is a message with every shape RejectUnknown walks: a
-// nested message, a list of messages, maps of messages and of scalars, and
-// scalar fields.
+// nodeDescriptor is a message with every shape RejectUnknown walks. It
+// has a nested message, a list of messages, maps of messages and of
+// scalars, and scalar fields.
 //
 //	message Node {
 //	  Node child = 1;
@@ -77,7 +77,7 @@ func nodeDescriptor(t *testing.T) protoreflect.MessageDescriptor {
 	return fd.Messages().ByName("Node")
 }
 
-// RejectUnknown finds a smuggled field at any depth: in the message
+// RejectUnknown finds a smuggled field at any depth, in the message
 // itself, a nested message, any item of a list, or a map value.
 func TestRejectUnknown(t *testing.T) {
 	md := nodeDescriptor(t)

@@ -33,9 +33,9 @@ func newRegistry(t *testing.T) string {
 	return strings.TrimPrefix(srv.URL, "http://")
 }
 
-// The command dispatches subcommands and maps outcomes to exit codes: 0
-// for success and help, 2 for usage errors, 1 for failures. Each
-// subcommand refuses to run without its required flags.
+// The command dispatches subcommands and maps outcomes to exit codes. It
+// returns 0 for success and help, 2 for usage errors and 1 for failures.
+// Each subcommand refuses to run without its required flags.
 func TestRunDispatch(t *testing.T) {
 	cases := []struct {
 		name       string

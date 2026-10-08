@@ -137,18 +137,18 @@ func TestManagerIdentity(t *testing.T) {
 	}
 }
 
-// TestManagerStart checks how containerd gets a shim for a container: the
-// Pod's running shim when there is one, a freshly spawned one otherwise.
-// Cases that make sockets under containerd's state dir need root.
+// TestManagerStart checks how containerd gets a shim for a container. It
+// reuses the Pod's running shim when there is one, and spawns a fresh one
+// otherwise. Cases that make sockets under containerd's state dir need root.
 func TestManagerStart(t *testing.T) {
 	cases := []struct {
 		name        string
 		noNS        bool
 		goneCwd     bool
-		annotations map[string]string // the bundle's config.json; nil writes none
+		annotations map[string]string // the bundle's config.json, or nil for none
 		debug       bool
-		existing    string // what is at the socket path first: "live", "stale" or "dir"
-		group       string // the id the address derives from; empty means the container's
+		existing    string // what is at the socket path first, "live", "stale" or "dir"
+		group       string // the id the address derives from, or empty for the container's
 		spawn       bool
 		errIs       func(error) bool
 		errHas      string
@@ -264,13 +264,13 @@ func TestManagerStart(t *testing.T) {
 }
 
 // TestManagerStop checks the cleanup containerd runs for a container whose
-// shim is gone: the fiber the bundle records is stopped as the Pod asked,
-// and the record removed.
+// shim is gone. The fiber the bundle records is stopped as the Pod asked,
+// and the record is removed.
 func TestManagerStop(t *testing.T) {
 	fake := newFakeHome(t)
 	cases := []struct {
 		name         string
-		record       string // fiberd.json; empty writes none
+		record       string // fiberd.json, or empty for none
 		goneCwd      bool
 		wantParks    []string
 		wantReleases []string
@@ -341,8 +341,8 @@ func pluginOf(t *testing.T, set *plugin.Set, typ plugin.Type, id string, inst an
 func TestRegisterPlugin(t *testing.T) {
 	cases := []struct {
 		name      string
-		publisher any // the event plugin's instance; nil registers none
-		shutdown  any // the internal shutdown plugin's instance; nil registers none
+		publisher any // the event plugin's instance, or nil for none
+		shutdown  any // the internal shutdown plugin's instance, or nil for none
 		errIs     func(error) bool
 	}{
 		{name: "with containerd's publisher and shutdown service it serves tasks",

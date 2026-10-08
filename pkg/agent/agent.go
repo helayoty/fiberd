@@ -131,12 +131,12 @@ func (c *Config) Bind(fs *flag.FlagSet) {
 	fs.StringVar(&c.TLSKey, "tls-key", "", "PEM private key of -tls-cert")
 	fs.StringVar(&c.ClientCA, "client-ca", "", "PEM CA bundle every caller's client certificate must chain to")
 	fs.BoolVar(&c.InsecurePlaintext, "insecure-plaintext", false, "serve the API without TLS and without caller identity (development and tests only)")
-	fs.StringVar(&c.StateDir, "state", "/var/lib/fiberd", "state directory: templates and deltas, and under private/ (mode 0700, hidden from fibers) the keys, epoch, ledger, deny-list, audit spool and admin socket")
-	fs.StringVar(&c.NodeID, "node-id", hostname, "this home's identity; a grant's audience must match it")
+	fs.StringVar(&c.StateDir, "state", "/var/lib/fiberd", "state directory for templates and deltas. Keys, epoch, ledger, deny-list, audit spool and admin socket live under private/ (mode 0700, hidden from fibers)")
+	fs.StringVar(&c.NodeID, "node-id", hostname, "this home's identity, which a grant's audience must match")
 	fs.StringVar(&c.Issuer, "issuer", "", "issuer URL: OIDC discovery root for -verifier=jwks, and what Miss details report")
 	fs.StringVar(&c.Verifier, "verifier", "", "grant verifier: jwks (signed JWTs, keys from -issuer) or insecure-json (development only); required")
 	fs.DurationVar(&c.JWKSMaxStale, "jwks-max-stale", time.Hour, "refuse to verify when the key set is older than this (set to the lease TTL)")
-	fs.DurationVar(&c.MaxLease, "max-lease", 0, "-verifier=jwks: refuse grants signed for longer than this (exp - iat), or without a lease; 0 accepts any")
+	fs.DurationVar(&c.MaxLease, "max-lease", 0, "-verifier=jwks: refuse grants signed for longer than this (exp - iat) or without a lease (0 accepts any)")
 	fs.StringVar(&c.GrantsDir, "grants-dir", "", "directory polled for *.jwt files to pre-admit (warm before the first Clone)")
 	fs.StringVar(&c.CgroupRoot, "cgroup-root", "/sys/fs/cgroup/fiberd", "delegated cgroup v2 subtree the runtime may carve (homes that own their cgroup ignore it)")
 	fs.StringVar(&c.RuntimeName, "runtime", "stub", "runtime: stub (in-memory), or a sandbox backend on the host runtime: proc (fork zygote + criu), runc (the zygote as an OCI container's init), gvisor (runsc sandbox per fiber), hyperlight (micro-VM snapshots through a helper process)")
@@ -149,20 +149,20 @@ func (c *Config) Bind(fs *flag.FlagSet) {
 	fs.StringVar(&c.EndpointHost, "endpoint-host", "", "inet4/inet6: the one address the grant's fibers share and callers dial (default: what the home knows, else the loopback of the family)")
 	fs.StringVar(&c.CRIUBin, "criu", "criu", "proc: criu binary; park/resume (FIBER_CHECKPOINT) is offered when `criu check` passes")
 	fs.Uint64Var(&c.GrantCeiling, "grant-ceiling", 0, "proc: fixed block ceiling per grant in bytes (memory.high); 0 = fibers.max * w_budget + zygote + 25%")
-	fs.BoolVar(&c.AllCaps, "all-caps", false, "proc and runc: keep every capability the agent started with; by default it re-executes with only what the runtime was measured to need in its bounding set (proc: SYS_ADMIN, SYS_PTRACE, SYS_RESOURCE, SYS_TIME, SYS_CHROOT, NET_ADMIN, SETPCAP; runc adds CHOWN, DAC_OVERRIDE, SETGID, SETUID), which criu and the zygote inherit, and refuses to start when it cannot drop the rest")
-	fs.StringVar(&c.UsernsPool, "userns-pool", runcbackend.DefaultPool, "runc: START:SLOTS, the host ids grants' user namespaces are carved from in 65536-id slots; a grant's slot is a hash of its uid, so homes with the same pool give it the same ids; the default sits above every /etc/subuid convention, and a pool overlapping an /etc/subuid or /etc/subgid entry is refused at start")
+	fs.BoolVar(&c.AllCaps, "all-caps", false, "proc and runc: keep every capability. By default the agent re-executes with only the measured set its runtime needs, and refuses to start if it cannot drop the rest")
+	fs.StringVar(&c.UsernsPool, "userns-pool", runcbackend.DefaultPool, "runc: START:SLOTS host id pool that grants' user namespaces take 65536-id slots from, picked by a hash of the grant uid. A pool overlapping /etc/subuid or /etc/subgid is refused")
 	fs.Func("fiber-hide", "proc: directory fibers must not see, besides the service-account token, <state>/private, <state>/deltas and -grants-dir (repeatable)",
 		func(v string) error { c.FiberHide = append(c.FiberHide, v); return nil })
-	fs.StringVar(&c.Registry, "registry", "", "proc: OCI repository (host/repo) to pull zygote artifacts from by template digest")
-	fs.BoolVar(&c.RegistryPlain, "registry-plain-http", false, "proc: the registry speaks http, not https")
+	fs.StringVar(&c.Registry, "registry", "", "proc, gvisor: OCI repository (host/repo) to pull zygote artifacts from by template digest. A gvisor home binds the pulled executable read-only at /fiberd/template in every sandbox, so it must be static")
+	fs.BoolVar(&c.RegistryPlain, "registry-plain-http", false, "the registry speaks http, not https")
 	fs.StringVar(&c.DeltaRegistry, "delta-registry", "", "proc: OCI repository prefix (host/prefix) where parked sessions are published and claimed by other homes")
-	fs.StringVar(&c.DeltaKey, "delta-key", "", "proc: private Ed25519 JWK every published delta is signed with (grant-issuer keygen -alg EdDSA); default <state>/private/delta-key.json, generated when missing")
-	fs.StringVar(&c.DeltaTrust, "delta-trust", "", "proc: JWKS of further public keys whose deltas this home claims and imports; -delta-key's own is always trusted")
-	fs.StringVar(&c.DeltaSealKey, "delta-seal-key", "", "proc: 32-byte symmetric JWK every delta is encrypted with before it leaves the home (grant-issuer keygen -alg A256GCM); homes that move sessions between them share it; default <state>/private/delta-seal-key.json, generated when missing")
-	fs.StringVar(&c.AuditKey, "audit-key", "", "private Ed25519 JWK the audit spool's checkpoints are signed with (grant-issuer keygen -alg EdDSA); default <state>/private/audit-key.json, generated when missing")
-	fs.StringVar(&c.HandoffListen, "handoff-listen", "", "proc, runc: TCP address the home accepts callers' TLS connections on for grants whose endpoint mode is HANDOFF, routed to fibers by server name (off when empty; such grants are then refused)")
+	fs.StringVar(&c.DeltaKey, "delta-key", "", "proc: private Ed25519 JWK that signs every published delta (grant-issuer keygen -alg EdDSA). Default <state>/private/delta-key.json, generated when missing")
+	fs.StringVar(&c.DeltaTrust, "delta-trust", "", "proc: JWKS of further public keys whose deltas this home claims and imports (-delta-key's own is always trusted)")
+	fs.StringVar(&c.DeltaSealKey, "delta-seal-key", "", "proc: 32-byte symmetric JWK that encrypts every delta before it leaves the home (grant-issuer keygen -alg A256GCM). Homes that move sessions between them share it. Default <state>/private/delta-seal-key.json, generated when missing")
+	fs.StringVar(&c.AuditKey, "audit-key", "", "private Ed25519 JWK that signs the audit spool's checkpoints (grant-issuer keygen -alg EdDSA). Default <state>/private/audit-key.json, generated when missing")
+	fs.StringVar(&c.HandoffListen, "handoff-listen", "", "proc, runc: TCP address for callers' TLS connections to HANDOFF-mode grants, routed to fibers by server name. Empty turns it off and refuses such grants")
 	fs.StringVar(&c.HandoffAdvertise, "handoff-advertise", "", "host:port callers dial for -handoff-listen (default the listen address, its host filled from -endpoint-host or the home when it is a wildcard)")
-	fs.StringVar(&c.HandoffKey, "handoff-key", "", "32-byte symmetric JWK each handoff grant's TLS key is derived from (grant-issuer keygen -alg A256GCM); homes that move sessions between them share it; default <state>/private/handoff-key.json, generated when missing")
+	fs.StringVar(&c.HandoffKey, "handoff-key", "", "32-byte symmetric JWK that handoff grants' TLS keys are derived from (grant-issuer keygen -alg A256GCM). Homes that move sessions between them share it. Default <state>/private/handoff-key.json, generated when missing")
 	fs.StringVar(&c.GvisorRootfs, "gvisor-rootfs", "", "gvisor: rootfs directory every sandbox runs in; -template commands are paths inside it")
 	fs.StringVar(&c.Runsc, "runsc", "runsc", "gvisor: runsc binary")
 	fs.StringVar(&c.RuncRootfs, "runc-rootfs", "", "runc: rootfs directory the zygote container runs in; -template commands are paths inside it")
@@ -202,11 +202,9 @@ func (c *Config) ListenPort() (string, error) {
 
 // NarrowCaps re-executes the agent with only what its runtime needs in
 // its capability bounding set, unless -all-caps. Call it in main right
-// after Finish, since the process starts over. The proc and runc sets
-// are measured (hack/test/caps.sh, tests/runc). The other runtimes keep
-// what they have. It fails closed. An agent that holds more than its
-// runtime needs but cannot drop it returns an error instead of running
-// with everything, and the caller should exit.
+// after Finish, since the process starts over. Only proc and runc have
+// measured sets. It fails closed. If it cannot drop the extra, it returns
+// an error and the caller should exit.
 func (c *Config) NarrowCaps() error {
 	keep, measured := caps.ForRuntime(c.RuntimeName)
 	if c.AllCaps || !measured || len(capsExtra(keep)) == 0 {
@@ -230,11 +228,10 @@ var (
 	capsNarrow = caps.Narrow
 )
 
-// LoadDeltaKeys reads -delta-key, -delta-trust and -delta-seal-key;
-// without a delta registry there is nothing to sign or seal. Without
-// -delta-key or -delta-seal-key the home uses a key of its own under
-// -state, generated on first use, which no other home trusts or can open
-// with until it is shared.
+// LoadDeltaKeys reads -delta-key, -delta-trust and -delta-seal-key. It
+// returns no keys without a delta registry, since nothing is signed or
+// sealed. A missing key is generated under -state on first use, and no
+// other home trusts or opens with it until it is shared.
 func (c *Config) LoadDeltaKeys() (artifact.Keys, error) {
 	if c.DeltaRegistry == "" {
 		return artifact.Keys{}, nil
@@ -258,9 +255,9 @@ func (c *Config) LoadDeltaKeys() (artifact.Keys, error) {
 	return k, nil
 }
 
-// loadAuditKey reads -audit-key; without it the home signs checkpoints
-// with a key of its own under -state, generated on first use, whose public
-// half audit-verify needs.
+// loadAuditKey reads -audit-key. Without it the home signs checkpoints
+// with a key of its own under -state, generated on first use, whose
+// public half audit-verify needs.
 func (c *Config) loadAuditKey() (*core.Checkpoints, error) {
 	path, err := c.stateKey(c.AuditKey, "audit-key.json", func() (*jose.JSONWebKey, error) { return grant.GenerateKey(jose.EdDSA) },
 		"audit checkpoint key", "keep its public half for audit-verify")
@@ -274,10 +271,9 @@ func (c *Config) loadAuditKey() (*core.Checkpoints, error) {
 	return &core.Checkpoints{KeyID: k.Signer.KeyID, Key: k.Signer.Key.(ed25519.PrivateKey)}, nil
 }
 
-// loadHandoffKey reads -handoff-key; without it the home derives handoff
-// identities from a key of its own under -state, generated on first use,
-// so a session resumed on a home without the same key fails its caller's
-// pin.
+// loadHandoffKey reads -handoff-key. Without it the home derives handoff
+// identities from a key of its own under -state, generated on first use.
+// A session resumed on a home without the same key fails its caller's pin.
 func (c *Config) loadHandoffKey() ([]byte, error) {
 	path, err := c.stateKey(c.HandoffKey, "handoff-key.json", artifact.GenerateSealKey,
 		"handoff key", "share one with -handoff-key")
@@ -292,8 +288,8 @@ func (c *Config) loadHandoffKey() ([]byte, error) {
 }
 
 // handoffAdvertise is the tcp:// address callers dial for the handoff
-// listener at addr: -handoff-advertise, or addr with a wildcard host
-// replaced by -endpoint-host (else the loopback).
+// listener at addr. It is -handoff-advertise, or addr with a wildcard
+// host replaced by -endpoint-host (else the loopback).
 func (c *Config) handoffAdvertise(addr net.Addr) (string, error) {
 	if c.HandoffAdvertise != "" {
 		if _, _, err := net.SplitHostPort(c.HandoffAdvertise); err != nil {
@@ -362,15 +358,15 @@ func (c *Config) endpointPolicy() (endpoint.Policy, error) {
 // AdminSocket is the admin unix socket, <state>/private/admin.sock.
 func (c *Config) AdminSocket() string { return filepath.Join(c.PrivateDir(), "admin.sock") }
 
-// Run is the agent: it returns when the RPC server stops, on SIGINT or
+// Run is the agent. It returns when the RPC server stops, on SIGINT or
 // SIGTERM.
 func Run(c *Config, newHome HomeFactory) error { return RunContext(context.Background(), c, newHome) }
 
 // RunContext is Run that also stops when ctx ends. A binary that owns its
 // process's lifetime, and a test, stop the agent through ctx.
 func RunContext(ctx context.Context, c *Config, newHome HomeFactory) error {
-	// Transport before anything starts: a misconfigured TLS setup must not
-	// leave a half-started agent behind.
+	// Transport comes before anything starts, so a misconfigured TLS setup
+	// never leaves a half-started agent behind.
 	serverTLS, err := tlsconf.Server(c.TLSCert, c.TLSKey, c.ClientCA, c.InsecurePlaintext)
 	if err != nil {
 		return err
@@ -423,7 +419,7 @@ func RunContext(ctx context.Context, c *Config, newHome HomeFactory) error {
 	}
 
 	var rt core.Runtime
-	var hrt *host.Runtime // the host runtime; nil for the stub
+	var hrt *host.Runtime // the host runtime, nil for the stub
 	var router *handoff.Router
 	var handoffLn net.Listener
 	switch c.RuntimeName {

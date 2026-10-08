@@ -43,13 +43,12 @@ func mountAt(t *testing.T, path string) ([]string, bool) {
 	return opts, found
 }
 
-// TestRootBindIsPrivateAndCleaned: the restore root is a bind of / the
-// fork backend mounts for CRIU's --root. It must not follow a symlink
-// planted at its path, must be a private mount, and must be gone, mount
-// and directory, when the backend closes. One a previous run left behind
-// (a crash) is unmounted when a backend opens at the same path, since a
-// fiber only drops the current root from its namespace and a stale one
-// would show it the host's / without the hidden paths covered.
+// TestRootBindIsPrivateAndCleaned pins the bind of / that the fork backend
+// mounts for CRIU's --root. It must not follow a planted symlink, must be
+// private, and must be unmounted and removed when the backend closes. A
+// fiber drops only the current bind from its namespace, so one a crashed
+// run left behind is unmounted at open, or it would show the host's / with
+// the hidden paths uncovered.
 func TestRootBindIsPrivateAndCleaned(t *testing.T) {
 	base := filepath.Join("/tmp", fmt.Sprintf("fz-root-%d", os.Getpid()))
 	if err := os.MkdirAll(base, 0o700); err != nil {

@@ -105,7 +105,7 @@ func (d Dir) SetMemoryMin(b uint64) error {
 	return nil
 }
 
-// SetPidsMax caps the tasks in the group and its descendants; 0 leaves
+// SetPidsMax caps the tasks in the group and its descendants. 0 leaves
 // it unlimited. A group whose parent offers no pids controller (a Slurm
 // step) has no pids.max and is left alone.
 func (d Dir) SetPidsMax(n uint64) error {
@@ -122,7 +122,7 @@ func (d Dir) SetPidsMax(n uint64) error {
 }
 
 // PidsMaxHits counts forks refused because this group was at pids.max
-// (pids.events max); 0 without a pids controller.
+// (pids.events max). It is 0 without a pids controller.
 func (d Dir) PidsMaxHits() (uint64, error) {
 	f, err := os.Open(d.file("pids.events"))
 	if errors.Is(err, os.ErrNotExist) {

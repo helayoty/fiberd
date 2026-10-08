@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// TestStatusCaps: the inheritable and ambient masks come out of a
+// TestStatusCaps checks that the inheritable and ambient masks come out of a
 // /proc/<pid>/status text as the kernel writes them, and the lines that
 // are not there (CapAmb on an old kernel) or not well formed are told
 // apart.
@@ -58,8 +58,8 @@ func TestStatusCaps(t *testing.T) {
 	}
 }
 
-// TestOutside: what a mask holds beyond keep, ascending, and nothing
-// when it holds only keep.
+// TestOutside checks what a mask holds beyond keep, ascending, and
+// nothing when it holds only keep.
 func TestOutside(t *testing.T) {
 	cases := []struct {
 		name string
@@ -83,7 +83,7 @@ func TestOutside(t *testing.T) {
 	}
 }
 
-// TestForRuntime: the measured keep lists. runc's holds everything
+// TestForRuntime checks the measured keep lists. runc's holds everything
 // proc's does and the four the user namespace costs the agent.
 func TestForRuntime(t *testing.T) {
 	cases := []struct {
@@ -108,7 +108,7 @@ func TestForRuntime(t *testing.T) {
 	}
 }
 
-// TestRuncSet: what runc adds over proc, each named for Kubernetes, and
+// TestRuncSet checks what runc adds over proc, each named for Kubernetes, and
 // what stays out. DAC_READ_SEARCH is covered by DAC_OVERRIDE and KILL by
 // cgroup.kill, as the measurement showed.
 func TestRuncSet(t *testing.T) {

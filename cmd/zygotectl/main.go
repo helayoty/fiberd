@@ -26,8 +26,8 @@ func main() {
 	os.Exit(run(context.Background(), os.Args[1:], os.Stdout, os.Stderr))
 }
 
-// run dispatches a subcommand and returns the exit code: 0 on success
-// or -h, 2 for a usage error, 1 when the subcommand fails.
+// run dispatches a subcommand. It returns exit code 0 on success or -h,
+// 2 for a usage error, and 1 when the subcommand fails.
 func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	return cli.Run(args, "usage: zygotectl build|push|pull|inspect [flags]; -h on a subcommand for its flags", map[string]cli.Command{
 		"build":   func(a []string) error { return build(ctx, a, stdout, stderr) },

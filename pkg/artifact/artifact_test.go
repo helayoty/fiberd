@@ -197,7 +197,7 @@ func TestBuildPushPullRoundTrip(t *testing.T) {
 				{name: "zygote missing", mutate: func(t *testing.T, dir string, _ *string) {
 					remove(t, artifact.ZygotePath(dir))
 				}},
-				// The next two pack to the digest asked for: what fails is
+				// The next two pack to the digest asked for. What fails is
 				// the content under it.
 				{name: "a config naming another zygote", mutate: func(t *testing.T, dir string, digest *string) {
 					editConfig(t, dir, func(c *artifact.Config) { c.ZygoteSHA256 = strings.Repeat("0", 64) })
@@ -426,7 +426,7 @@ func TestUntar(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		// A truncated entry leaves the writer short; keep what it wrote.
+		// A truncated entry leaves the writer short. Keep what it wrote.
 		_ = tw.Flush()
 		path := filepath.Join(t.TempDir(), "in.tar")
 		writeFile(t, path, buf.String())
@@ -443,7 +443,7 @@ func TestUntar(t *testing.T) {
 		name string
 		src  func(t *testing.T) string
 		dst  func(t *testing.T, root string) string
-		want map[string]string // the unpacked directory; nil when it must fail
+		want map[string]string // the unpacked directory, nil when it must fail
 	}{
 		{name: "regular entries unpack by name", want: map[string]string{"a.img": "A", "b.img": "B"},
 			src: func(t *testing.T) string {
@@ -570,7 +570,7 @@ func TestPush(t *testing.T) {
 		edit  func(t *testing.T, dir string)
 		mw    middleware
 		ref   string // under the registry
-		want  string // a substring of the error; "" for success
+		want  string // a substring of the error, "" for success
 		check func(t *testing.T, reg, digest string)
 	}{
 		{name: "a push without a tag is pulled by its digest", ref: "z",
@@ -640,9 +640,9 @@ func TestPull(t *testing.T) {
 	cases := []struct {
 		name    string
 		setup   func(t *testing.T, reg string)
-		ref     string // under the registry; z:t by default
+		ref     string // under the registry, z:t by default
 		dstFile bool   // the destination is under a regular file
-		want    string // a substring of the error; "" for success
+		want    string // a substring of the error, "" for success
 	}{
 		{name: "the images are unpacked beside the zygote", setup: func(t *testing.T, reg string) {
 			dir, _ := imagesArtifact(t)

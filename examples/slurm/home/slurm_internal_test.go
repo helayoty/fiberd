@@ -84,9 +84,9 @@ func TestPoll(t *testing.T) {
 	}
 }
 
-// TestDefaults checks what New fills in when the config leaves it open:
-// the grants dir, the poll period, scontrol as the probe, and SIGTERM to
-// the agent when the job ends.
+// TestDefaults checks what New fills in when the config leaves it open.
+// That is the grants dir, the poll period, scontrol as the probe, and
+// SIGTERM to the agent when the job ends.
 func TestDefaults(t *testing.T) {
 	cases := []struct {
 		name string

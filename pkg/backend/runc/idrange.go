@@ -18,9 +18,9 @@ const SlotIDs = 65536
 
 // DefaultPool is the -userns-pool default. It starts at 2^30, above every
 // id a host hands out by convention (useradd's /etc/subuid ranges end at
-// SUB_UID_MAX, 600100000, and LXC and kubelet pod ranges sit lower still),
-// stays below 2^31 so no tool ever reads an id as negative, and reaches
-// the top of the 32-bit id space, so two grants rarely hash to one slot.
+// SUB_UID_MAX, 600100000, and LXC and kubelet pod ranges sit lower still).
+// It holds the most slots that end below the kernel's overflow id
+// 4294967294, so two grants rarely hash to one slot.
 const DefaultPool = "1073741824:49151"
 
 // DefaultSubIDFiles are the files CheckSubIDs reads when none are given.
@@ -149,18 +149,16 @@ func (p IDPool) slot(grantUID string) uint32 {
 	return uint32(h.Sum64() % uint64(p.Slots))
 }
 
-// ErrRangeCollision: another grant admitted on this home holds the
+// ErrRangeCollision means another grant admitted on this home holds the
 // slot the grant hashes to. The grant can run on a home that does not
 // hold the other one.
 var ErrRangeCollision = errors.New("runc: user namespace id range is held by another grant on this home")
 
-// claims records which grant holds each slot and who of the grant uses
-// it on this home. A slot is held for as long as anything of the grant
-// maps the range here: its warm zygote, and every fiber criu restored on
-// this home, since a restored tree is a pid namespace of its own and
-// outlives the zygote. Nothing else of the grant may map the range, so a
-// fiber the zygote forked is covered by the zygote's hold (it dies with
-// its init).
+// claims records which grant holds each slot and which of its users map
+// it on this home. The users are the warm zygote and every fiber criu
+// restored here, since a restored tree is a pid namespace of its own and
+// outlives the zygote. A fiber the zygote forked dies with its init, so
+// the zygote's hold covers it.
 type claims struct {
 	mu   sync.Mutex
 	pool IDPool
@@ -173,7 +171,7 @@ type holder struct {
 	fibers int  // trees restored here and still running
 }
 
-// busy: someone still uses the range.
+// busy reports whether someone still uses the range.
 func (h *holder) busy() bool { return h.warm || h.fibers > 0 }
 
 func newClaims(p IDPool) *claims { return &claims{pool: p, held: map[uint32]*holder{}} }
@@ -186,9 +184,9 @@ func (c *claims) check(grantUID string) error {
 	return err
 }
 
-// acquire takes the grant's slot for one user: its warm zygote (warm,
-// which may be acquired again while held and counts once) or one
-// restored fiber (counted). A grant may hold its slot as both.
+// acquire takes the grant's slot for one user. The warm zygote (warm) may
+// be acquired again while held and counts once. Each restored fiber
+// counts. A grant may hold its slot as both.
 func (c *claims) acquire(grantUID string, warm bool) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -224,7 +222,7 @@ func (c *claims) find(grantUID string) (*holder, error) {
 }
 
 // release gives one user's hold back and reports whether the grant's
-// slot is now free, so the caller can remove what the grant left on this
+// slot became free, so the caller can remove what the grant left on this
 // home. A release by a grant that does not hold the slot, or of a user
 // it does not have, changes nothing.
 func (c *claims) release(grantUID string, warm bool) (free bool) {

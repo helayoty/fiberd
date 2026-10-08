@@ -141,7 +141,7 @@ func TestHomeFromItsPod(t *testing.T) {
 		name  string
 		pod   func(p map[string]any) // changes the seeded Pod
 		cfg   func(c *home.Config)
-		token string // the token file's content; "" keeps a valid one
+		token string // the token file's content, or "" for a valid one
 		got   func(t *testing.T, h *home.Home, srv *kubetest.Server) string
 		want  string
 	}{
@@ -377,7 +377,8 @@ func TestNew(t *testing.T) {
 	}
 }
 
-// TestGrants checks the grant lane: *.jwt files in the projected volume.
+// TestGrants checks the grant lane, which reads *.jwt files from the
+// projected volume.
 func TestGrants(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -437,10 +438,9 @@ func TestGrants(t *testing.T) {
 }
 
 // TestReadinessGate checks the gate, one Pod condition over every grant the
-// agent holds. It reads False only once no grant is warm. Its transition
+// agent holds. It reads False only once no grant is warm, and its transition
 // time moves only when its status does. The Pod starts with the gate open,
-// as an agent before a restart left it. Each step is one PublishReady and
-// the one status patch it makes.
+// as an agent left it before a restart.
 func TestReadinessGate(t *testing.T) {
 	const opened = "2020-01-01T00:00:00Z"
 	srv := newCluster(t)
@@ -459,7 +459,7 @@ func TestReadinessGate(t *testing.T) {
 		message string
 		moved   bool // the transition time is now, else the one before
 	}{
-		// A regression test: every publish rewrote the transition time.
+		// A publish that keeps the status must keep the transition time.
 		{"the first grant warm keeps the gate open, and its time", "g1", true, false, "True", "ZygoteWarm", "grant g1 template is warm", false},
 		{"a second grant warm keeps it open, and its time", "g2", true, false, "True", "ZygoteWarm", "grant g2 template is warm", false},
 		{"one grant cold while another is warm keeps it open, and its time", "g1", false, false, "True", "ZygoteWarm", "grant g1 template is warm", false},
@@ -532,9 +532,9 @@ func podReads(srv *kubetest.Server) int {
 }
 
 // TestLivenessAndScopeLoss checks that the lane is healthy while the API
-// server answers. Each trip below must be reported as scope loss exactly
-// once. The others, which an API server failing or a same-issuer token
-// rotation cause, must not be reported.
+// server answers, and that each trip is reported as scope loss exactly
+// once. A failing API server or a token rotated by the same issuer is not
+// scope loss.
 func TestLivenessAndScopeLoss(t *testing.T) {
 	cases := []struct {
 		name       string

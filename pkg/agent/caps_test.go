@@ -8,7 +8,7 @@ import (
 	"github.com/helayoty/fiberd/pkg/sys/caps"
 )
 
-// TestNarrowCaps: the agent narrows only for a measured runtime that
+// TestNarrowCaps checks that the agent narrows only for a measured runtime that
 // holds more than it needs, and fails closed when it cannot. -all-caps is
 // the only way to run on with every capability.
 func TestNarrowCaps(t *testing.T) {

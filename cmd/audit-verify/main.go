@@ -3,13 +3,9 @@
 //
 //	audit-verify -spool /var/lib/fiberd/private/audit.jsonl -trust audit-key.json
 //
-// -trust is a JWK or a JWKS of Ed25519 keys. A private JWK (the home's
-// -audit-key) is accepted for its public half. It exits 1 when the spool
-// does not verify. It also exits 1 when a spool with records has no
-// checkpoint, or has records before its chain started, because no
-// signature covers those. Records cut after the last checkpoint cannot be
-// detected from the spool alone. That takes an anchor kept elsewhere, such
-// as a copy of the spool held off the host.
+// It exits 1 when the spool does not verify, has records but no
+// checkpoint, or has records before its chain started. Records cut after
+// the last checkpoint need an anchor kept off the host.
 package main
 
 import (
@@ -35,7 +31,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("audit-verify", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	spool := fs.String("spool", "/var/lib/fiberd/private/audit.jsonl", "the audit spool to check")
-	trust := fs.String("trust", "", "JWK or JWKS of the Ed25519 keys checkpoints may be signed with; required")
+	trust := fs.String("trust", "", "JWK or JWKS of the Ed25519 keys checkpoints may be signed with (required). A private JWK counts as its public half")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}

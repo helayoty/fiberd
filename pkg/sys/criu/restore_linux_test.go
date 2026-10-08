@@ -48,11 +48,11 @@ func testCgroupLeaf(t *testing.T) string {
 	return leaf
 }
 
-// TestRestoreWith: the tree is up once criu writes the pid file, which
-// a stale one or a half-written one cannot fake. criu exiting first is
-// the failure it reported, with its log. The context ends a restore
-// that hangs. Extra arguments, descriptors and the cgroup all reach
-// criu as promised.
+// TestRestoreWith checks that the tree is up once criu writes the pid file,
+// which a stale one or a half-written one cannot fake. criu exiting first is
+// the failure it reported, with its log. The context ends a restore that
+// hangs. Extra arguments, descriptors and the cgroup all reach criu as
+// promised.
 func TestRestoreWith(t *testing.T) {
 	common := []string{"restore", "--no-default-config", "-D", "DIR", "--pidfile", "DIR/restore.pid",
 		"--ext-unix-sk", "--manage-cgroups=ignore", "-v2", "--log-file", "restore.log"}
@@ -65,7 +65,7 @@ func TestRestoreWith(t *testing.T) {
 		cgroup     bool   // start criu in a cgroup leaf of the test's
 		missingBin bool
 		timeout    time.Duration
-		wantPID    int // 0 for an error; -1 for the fake's own pid
+		wantPID    int // 0 for an error, -1 for the fake's own pid
 		wantErr    []string
 		wantNotErr []string
 		wantIs     error

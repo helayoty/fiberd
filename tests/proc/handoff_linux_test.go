@@ -14,14 +14,10 @@ import (
 	"github.com/helayoty/fiberd/pkg/core"
 )
 
-// TestHandoffKeyNeverOnDisk: a grant's TLS key reaches its fibers over
-// their handoff channel, not through a file. Every fiber runs as the
-// agent's user without capabilities, so a file under the run directory
-// (which fibers must see, they serve their endpoints there) is readable
-// by every grant's fibers whatever its mode. Here a fiber of grant A
-// looks for grant B's key where the agent used to write it and finds
-// nothing, while B's fibers still terminate TLS with the key its caller
-// pins.
+// TestHandoffKeyNeverOnDisk pins that a grant's TLS key reaches its fibers
+// over their handoff channel, never through a file. Every fiber runs as
+// the agent's user without capabilities, so any file under the run
+// directory is readable by every grant's fibers, whatever its mode.
 func TestHandoffKeyNeverOnDisk(t *testing.T) {
 	rt := newRuntime(t)
 	ctx := context.Background()
@@ -51,8 +47,8 @@ func TestHandoffKeyNeverOnDisk(t *testing.T) {
 		// grant's identity.
 		reader core.FiberHandle
 		caller tls.Certificate
-		// cmd is the refzygote command; want its reply. "read" answers
-		// the first line of a file, "-" when it cannot be read.
+		// cmd is the refzygote command and want its reply. "read" answers
+		// the first line of a file, or "-" when it cannot be read.
 		cmd, want string
 	}{
 		{name: "A serves its caller", reader: fa, caller: callerA, cmd: "ping", want: "pong"},
@@ -69,8 +65,8 @@ func TestHandoffKeyNeverOnDisk(t *testing.T) {
 			}
 		})
 	}
-	// And the host wrote none: a key file, however it is protected, is
-	// what this guards against.
+	// The host wrote no key file either. Such a file, however it is
+	// protected, is what this guards against.
 	for _, g := range []core.Grant{ga, gb} {
 		if _, err := os.Stat(filepath.Join(run, g.UID, "handoff.key")); err == nil {
 			t.Fatalf("%s/handoff.key exists on the host", g.UID)

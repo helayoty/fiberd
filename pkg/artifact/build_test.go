@@ -61,7 +61,7 @@ func TestPack(t *testing.T) {
 	cases := []struct {
 		name string
 		edit func(t *testing.T, dir string)
-		want string // a substring of the error; "" for success
+		want string // a substring of the error, "" for success
 	}{
 		{name: "a zygote and its config pack, without images", want: ""},
 		{name: "a missing config", want: "config.json",

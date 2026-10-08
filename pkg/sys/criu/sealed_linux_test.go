@@ -12,7 +12,7 @@ import (
 )
 
 // sealedFile puts a file with the given contents at path that reads
-// fine and refuses every write, even root's: a write-sealed memfd
+// fine and refuses every write, even root's. It is a write-sealed memfd
 // reached through a symlink into /proc/self/fd.
 func sealedFile(t *testing.T, path string, contents []byte) {
 	t.Helper()

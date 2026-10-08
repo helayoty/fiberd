@@ -8,20 +8,16 @@ import (
 	"testing"
 )
 
-// TestMisusedReadinessPipeDoesNotWedgeZygote: the readiness pipe sits at
-// the fiber's fd 3, and a workload that writes to it, closes it or calls
-// fz_report (which wrote to it, since the child inherited the zygote's
-// control descriptor number) used to leave the zygote blocked in waitpid
-// on a child that was alive and well, with every later clone of the
-// grant behind it. The zygote now refuses such a fiber with an ERROR and
-// serves the next clone. Each case ends with a plain clone on the same
-// zygote, bounded by the clone deadline, so a wedge fails rather than
-// hangs.
+// TestMisusedReadinessPipeDoesNotWedgeZygote pins that a fiber which
+// writes to or closes the readiness pipe at its fd 3 is refused, and that
+// fz_report from a fiber fails instead of reaching the pipe. The zygote
+// must not block in waitpid on a live child, so each case ends with a plain
+// clone on the same zygote, bounded by the clone deadline.
 func TestMisusedReadinessPipeDoesNotWedgeZygote(t *testing.T) {
 	cases := []struct {
 		name    string
 		payload string
-		// wantErr is a fragment of the clone error, "" when the clone
+		// wantErr is a fragment of the clone error, or "" when the clone
 		// must succeed.
 		wantErr string
 	}{

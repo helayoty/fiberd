@@ -29,7 +29,7 @@ func serveIssuer(t *testing.T, key *jose.JSONWebKey, now func() time.Time) *gran
 	return is
 }
 
-// The reference issuer is what a Cache and Verifier expect: a grant it
+// The reference issuer is what a Cache and Verifier expect. A grant it
 // mints verifies through its own discovery and key set, with the issuer
 // claim forced to its URL and iat taken from its clock.
 func TestIssuerServesItsOwnVerifier(t *testing.T) {

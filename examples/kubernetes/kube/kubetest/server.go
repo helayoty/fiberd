@@ -35,7 +35,7 @@ type Call struct {
 
 type fault struct {
 	code  int
-	times int // requests left to fail; 0 or less fails every one
+	times int // requests left to fail, where 0 or less fails every one
 }
 
 func New() *Server {
@@ -47,8 +47,8 @@ func New() *Server {
 func (s *Server) URL() string { return s.srv.URL }
 func (s *Server) Close()      { s.srv.Close() }
 
-// Put stores a copy of obj at path (a test's seed); the uid is assigned
-// if missing. The copy is what the wire would carry, so typed slices and
+// Put stores a copy of obj at path as a test's seed, and assigns a uid if
+// it has none. The copy is what the wire would carry, so typed slices and
 // maps read back as JSON values.
 func (s *Server) Put(path string, obj map[string]any) {
 	s.mu.Lock()

@@ -49,9 +49,9 @@ func (t *testHooks) register(admin *http.ServeMux, h home.Home, ag *core.Agent, 
 		_ = json.NewEncoder(w).Encode(healthz())
 	})
 	admin.HandleFunc("POST /scope-lost", func(w http.ResponseWriter, r *http.Request) {
-		// A stand-in for a scope the home can lose while running: what a
-		// Kubernetes home does on its own when its namespace, issuer or
-		// claim goes away under it.
+		// A stand-in for a scope the home can lose while running, as a
+		// Kubernetes home does when its namespace, issuer or claim goes
+		// away under it.
 		if !t.adminUnsafe {
 			http.Error(w, "admin controls disabled; start with -admin-unsafe", http.StatusForbidden)
 			return

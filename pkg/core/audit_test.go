@@ -245,11 +245,9 @@ func TestSpoolSequenceAndDurability(t *testing.T) {
 }
 
 // TestSpoolGroupCommit checks that N concurrent sync appends cost fewer
-// than N fsyncs. Each still returns only once an fsync covering its record
-// has completed. A best-effort append never waits on an fsync in flight,
-// and the journal stays in sequence and chained. The test holds the first
-// fsync until every record is written, so the other appends pile up
-// behind it.
+// than N fsyncs, and each returns only once an fsync covering it is done.
+// A best-effort append never waits, and the journal stays in sequence and
+// chained. The first fsync is held until every record is written.
 func TestSpoolGroupCommit(t *testing.T) {
 	cases := []struct {
 		name       string

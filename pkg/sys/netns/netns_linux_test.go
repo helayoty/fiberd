@@ -114,7 +114,7 @@ func connectLoopback() error {
 	return syscall.Connect(s, &syscall.SockaddrInet4{Port: 1, Addr: [4]byte{127, 0, 0, 1}})
 }
 
-// TestDo: fn runs on a thread inside the target's network namespace,
+// TestDo checks that fn runs on a thread inside the target's network namespace,
 // its error comes back, and no thread of ours stays in that namespace
 // afterwards. A process that is not there is an error before fn runs.
 func TestDo(t *testing.T) {
@@ -162,8 +162,8 @@ func TestDo(t *testing.T) {
 	}
 }
 
-// TestSocketpair: the pair is made in the target's namespace, connected
-// and close-on-exec.
+// TestSocketpair checks that the pair is made in the target's namespace,
+// connected and close-on-exec.
 func TestSocketpair(t *testing.T) {
 	child := newNetNS(t)
 	cases := []struct {
@@ -208,8 +208,8 @@ func TestSocketpair(t *testing.T) {
 	}
 }
 
-// TestLoopbackUp: a fresh namespace has no route to 127.0.0.1 until lo
-// is up. One that is up already stays as it is.
+// TestLoopbackUp checks that a fresh namespace has no route to 127.0.0.1
+// until lo is up. One that is up already stays as it is.
 func TestLoopbackUp(t *testing.T) {
 	needRoot(t)
 	cases := []struct {
@@ -282,7 +282,7 @@ func TestHelperProcess(t *testing.T) {
 	}
 }
 
-// TestWithoutCapabilities: entering a namespace needs CAP_SYS_ADMIN
+// TestWithoutCapabilities checks that entering a namespace needs CAP_SYS_ADMIN
 // and bringing lo up CAP_NET_ADMIN. A process without them is refused
 // with EPERM, and the refusal says which step failed.
 func TestWithoutCapabilities(t *testing.T) {

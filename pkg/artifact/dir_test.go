@@ -147,10 +147,10 @@ func TestDelete(t *testing.T) {
 	cases := []struct {
 		name string
 		mw   middleware
-		ref  string // under the registry; r:t by default
-		want string // a substring of the error; "" for success
+		ref  string // under the registry, r:t by default
+		want string // a substring of the error, "" for success
 		// gone and kept are references under the registry that must and
-		// must not resolve afterwards; "@" stands for r@<digest>.
+		// must not resolve afterwards. "@" stands for r@<digest>.
 		gone, kept []string
 	}{
 		{name: "a tag goes, and the manifest with it", gone: []string{"r:t", "@"}},
@@ -277,7 +277,7 @@ func TestDirRegistryTransfers(t *testing.T) {
 		name string
 		mw   middleware
 		op   string // push or pull
-		// ref is under the registry; for a pull, r:t holds the pushed
+		// ref is under the registry. For a pull, r:t holds the pushed
 		// artifact.
 		ref     string
 		ann     map[string]string

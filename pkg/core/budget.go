@@ -10,16 +10,16 @@ import (
 // node, never the fleet. Routers translate it to 429 + Retry-After.
 var ErrBudget = errors.New("budget: clone rate over f(W), retry later")
 
-// The agent's thrash budget: DefaultBaseRate clones/sec at W -> 0, halved
-// at DefaultRefW bytes of working set.
+// The agent's thrash budget is DefaultBaseRate clones/sec at W -> 0. It
+// halves at DefaultRefW bytes of working set.
 const (
 	DefaultBaseRate = 200
 	DefaultRefW     = 256 << 20
 )
 
-// Budget enforces the thrash budget: the maximum sustainable activation
-// rate as a function of working-set size W. Density is stock; this is
-// flow — the same measured quantity (dirtied working set) prices both
+// Budget enforces the thrash budget, the maximum sustainable activation
+// rate as a function of working-set size W. Density is stock and this is
+// flow. The same measured quantity, the dirtied working set, prices both
 // churn and parking.
 //
 // Model (placeholder until the fork-storm rig produces the real curve):

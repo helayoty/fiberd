@@ -17,9 +17,9 @@ import (
 // promotes only the interface's methods, so SetLane is not one of them.
 type bareHome struct{ home.Home }
 
-// TestAdminControls: the test-only admin controls refuse unless the agent
-// runs with -admin-unsafe. With it, POST /lane drives the home's lane and
-// POST /scope-lost bumps the epoch.
+// TestAdminControls checks that the test-only admin controls refuse unless
+// the agent runs with -admin-unsafe. With it, POST /lane drives the home's
+// lane and POST /scope-lost bumps the epoch.
 func TestAdminControls(t *testing.T) {
 	cases := []struct {
 		name       string

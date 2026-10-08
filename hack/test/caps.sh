@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Measure which capabilities the proc runtime needs (security plan, t9).
-# Run it as root inside the dev container.
+# Measure which capabilities the proc runtime needs. Run it as root inside
+# the dev container.
 #
 #   hack/dev/run.sh hack/test/caps.sh
 #
@@ -8,13 +8,12 @@
 # the reference. Then with every candidate in the bounding set, as the
 # baseline, which must pass what the reference passes. Then once per
 # candidate with only that one left out. Last with only the ones found
-# needed.
+# needed, which catches capabilities that stand in for each other
+# (CAP_SYS_ADMIN covers CAP_CHECKPOINT_RESTORE).
 #
 # A capability is needed when a test that passed in the baseline fails
 # without it. A skipped test counts as failed, since tests skip when criu
-# is not usable. Leaving one out at a time misses capabilities that stand
-# in for each other (CAP_SYS_ADMIN covers CAP_CHECKPOINT_RESTORE). The last
-# run catches those.
+# is not usable.
 #
 # Run it on a host with Yama (kernel.yama.ptrace_scope=1, the Ubuntu
 # default). Docker Desktop's kernel has no Yama, so CRIU attaches without

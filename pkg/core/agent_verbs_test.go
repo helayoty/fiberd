@@ -212,11 +212,9 @@ func (r *admitRuntime) AttachFabric(_ string, fc core.FabricChannel) {
 }
 
 // TestAdmitOutcomes checks what Admit answers and what becomes of the
-// grant's fabric channel. The channel is provisioned before the template
-// is warmed and handed to a runtime that takes one. A grant Admit refuses
-// after provisioning gives its channel back, and a re-delivery releases
-// the channel it replaces. A device budget is admitted only where the warm
-// template offers the class.
+// grant's fabric channel. A grant refused after provisioning gives its
+// channel back, a re-delivery releases the channel it replaces, and a
+// device budget is admitted only where the template offers the class.
 func TestAdmitOutcomes(t *testing.T) {
 	gpu := core.DeviceBudget{Bytes: 1 << 30, Class: "gpu"}
 	cases := []struct {

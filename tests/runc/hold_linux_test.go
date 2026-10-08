@@ -49,12 +49,10 @@ func (h *home) killZygote(t *testing.T, grant string) {
 	waitFor(t, "zygote bundle released", func() bool { return gone(filepath.Join(h.stateDir, "bundles", "w-"+grant)) })
 }
 
-// TestResumedFiberHoldsRange: a fiber restored on this home maps the
-// grant's id range and holds its slot for as long as it runs, zygote or
-// no zygote. Another grant hashing to the slot is refused meanwhile, so
-// the two never share a host uid, and is admitted once the last user of
-// the range is gone. With the zygote up, the slot stays held after the
-// fiber goes.
+// TestResumedFiberHoldsRange pins that a fiber restored on this home holds
+// its grant's id range slot for as long as it runs, zygote or no zygote.
+// Another grant hashing to the slot is refused meanwhile, so the two never
+// share a host uid.
 func TestResumedFiberHoldsRange(t *testing.T) {
 	cases := []struct {
 		name          string
@@ -133,9 +131,9 @@ func TestResumedFiberHoldsRange(t *testing.T) {
 	}
 }
 
-// TestResumeOnlyCopyReleased: the root filesystem copy a resume makes on
-// a home that never warmed the grant goes when the resumed fiber does.
-// A home whose zygote is up keeps the copy, since the zygote uses it.
+// TestResumeOnlyCopyReleased pins that the root filesystem copy a resume
+// makes on a home that never warmed the grant goes when the resumed fiber
+// does. A home whose zygote is up keeps the copy, because the zygote uses it.
 func TestResumeOnlyCopyReleased(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -197,9 +195,9 @@ func TestResumeOnlyCopyReleased(t *testing.T) {
 	}
 }
 
-// TestSweepAtOpen: whatever a previous life left under the state
-// directory, root filesystem copies and bundles, is removed when the
-// backend opens. Nothing of a prior epoch may still use it.
+// TestSweepAtOpen pins that root filesystem copies and bundles a previous
+// life left under the state directory are removed when the backend opens.
+// Nothing of a prior epoch may still use them.
 func TestSweepAtOpen(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -231,9 +229,9 @@ func TestSweepAtOpen(t *testing.T) {
 	}
 }
 
-// TestSubIDOverlapRefusedAtOpen: a pool that overlaps a subordinate id
-// range the host handed out is refused when the backend opens, naming
-// the entry. A pool clear of every entry opens.
+// TestSubIDOverlapRefusedAtOpen pins that a pool overlapping a subordinate
+// id range the host handed out is refused at open, naming the entry. A
+// pool clear of every entry opens.
 func TestSubIDOverlapRefusedAtOpen(t *testing.T) {
 	pool, err := runcbackend.ParsePool("200000:4")
 	if err != nil {

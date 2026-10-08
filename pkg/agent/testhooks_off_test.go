@@ -10,8 +10,8 @@ import (
 	"github.com/helayoty/fiberd/pkg/agent"
 )
 
-// TestReleaseHasNoAdminControls: a release build has no -admin-unsafe
-// flag, and its admin socket serves no test-only control.
+// TestReleaseHasNoAdminControls checks that a release build has no
+// -admin-unsafe flag, and its admin socket serves no test-only control.
 func TestReleaseHasNoAdminControls(t *testing.T) {
 	cases := []struct {
 		name, path string

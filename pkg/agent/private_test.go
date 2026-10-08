@@ -7,10 +7,9 @@ import (
 	"testing"
 )
 
-// TestEnsurePrivate: <state>/private exists afterwards, is a real
+// TestEnsurePrivate checks that <state>/private exists afterwards, is a real
 // directory of mode 0700, and nothing a fiber may have left at that name
-// is written through. Files under -state are never moved. There is no
-// legacy layout to migrate from.
+// is written through. Files under -state are never moved.
 func TestEnsurePrivate(t *testing.T) {
 	cases := []struct {
 		name      string

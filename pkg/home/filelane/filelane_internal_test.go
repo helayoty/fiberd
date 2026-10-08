@@ -142,7 +142,7 @@ func TestScanStopsWithContext(t *testing.T) {
 			}
 			ctx, cancel := context.WithCancel(context.Background())
 			cancel()
-			ch := make(chan home.GrantEvent) // nobody reads: every send blocks
+			ch := make(chan home.GrantEvent) // nobody reads, so every send blocks
 			done := make(chan struct{})
 			go func() { defer close(done); scan(ctx, dir, c.seen, ch) }()
 			select {

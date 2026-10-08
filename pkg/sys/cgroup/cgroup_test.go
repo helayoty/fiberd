@@ -47,8 +47,8 @@ func fileIn(t *testing.T, d cgroup.Dir, name string) string {
 	return string(b)
 }
 
-// TestDirPaths: a Dir is its path, a child is a path below it, and only
-// a directory exists.
+// TestDirPaths checks that a Dir is its path, a child is a path below it, and
+// only a directory exists.
 func TestDirPaths(t *testing.T) {
 	base := t.TempDir()
 	if err := os.WriteFile(filepath.Join(base, "file"), nil, 0o644); err != nil {
@@ -74,8 +74,8 @@ func TestDirPaths(t *testing.T) {
 	}
 }
 
-// TestEnsure: the directory is made, the controllers the parent offers
-// are enabled one by one, and a parent without memory or an unwritable
+// TestEnsure checks that the directory is made, the controllers the parent
+// offers are enabled one by one, and a parent without memory or an unwritable
 // subtree_control is an error.
 func TestEnsure(t *testing.T) {
 	cases := []struct {
@@ -84,7 +84,7 @@ func TestEnsure(t *testing.T) {
 		underFile   bool // the path has a regular file as parent
 		blocked     bool // cgroup.subtree_control is a directory
 		controllers []string
-		wantControl string // the last enable written; "" for none
+		wantControl string // the last enable written, "" for none
 		wantErr     string
 		wantIs      error
 	}{
@@ -140,8 +140,8 @@ func TestEnsure(t *testing.T) {
 	}
 }
 
-// TestCreate: a leaf gets a memory ceiling with swap closed, and group
-// OOM when asked. Each setting that fails is named.
+// TestCreate checks that a leaf gets a memory ceiling with swap closed, and
+// group OOM when asked. Each setting that fails is named.
 func TestCreate(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -204,8 +204,8 @@ func TestCreate(t *testing.T) {
 	}
 }
 
-// TestSetCeiling: memory.high is the throttle, memory.max the stop when
-// given, swap is always closed.
+// TestSetCeiling checks that memory.high is the throttle, memory.max the
+// stop when given, and swap is always closed.
 func TestSetCeiling(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -250,7 +250,8 @@ func TestSetCeiling(t *testing.T) {
 	}
 }
 
-// TestSetMemoryMin: the protection is written, or its refusal named.
+// TestSetMemoryMin checks that the protection is written, or its refusal
+// named.
 func TestSetMemoryMin(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -285,9 +286,9 @@ func TestSetMemoryMin(t *testing.T) {
 	}
 }
 
-// counterCases are the shapes a one-counter read takes: the value, a
-// missing file, a file that is not readable and a value that is not a
-// number.
+// counterCases are the shapes a one-counter read takes. They are the
+// value, a missing file, a file that is not readable and a value that is
+// not a number.
 type counterCase struct {
 	name    string
 	file    string // "" for a missing file
@@ -323,7 +324,7 @@ func readCounter(t *testing.T, tc counterCase, file string, read func(cgroup.Dir
 	}
 }
 
-// TestMemoryCurrent: the charge, trimmed, or why it cannot be read.
+// TestMemoryCurrent checks the charge, trimmed, or why it cannot be read.
 func TestMemoryCurrent(t *testing.T) {
 	cases := []counterCase{
 		{name: "the charge", file: "123456\n", want: 123456},
@@ -338,7 +339,7 @@ func TestMemoryCurrent(t *testing.T) {
 	}
 }
 
-// TestStat: one counter out of memory.stat, by key.
+// TestStat checks reading one counter out of memory.stat, by key.
 func TestStat(t *testing.T) {
 	stat := "anon 4096\nfile 8192\nshmem 12288\nanon_thp 0\n"
 	cases := []struct {
@@ -360,8 +361,8 @@ func TestStat(t *testing.T) {
 	}
 }
 
-// TestOOMKills: the oom_kill count of memory.events, 0 when the line is
-// not there.
+// TestOOMKills checks the oom_kill count of memory.events, 0 when the line
+// is not there.
 func TestOOMKills(t *testing.T) {
 	cases := []counterCase{
 		{name: "kills counted", file: "low 0\nhigh 3\nmax 9\noom 2\noom_kill 2\noom_group_kill 1\n", want: 2},
@@ -377,7 +378,7 @@ func TestOOMKills(t *testing.T) {
 	}
 }
 
-// TestPSI: avg10 of the some and full lines, and nothing from lines
+// TestPSI checks avg10 of the some and full lines, and nothing from lines
 // that are neither.
 func TestPSI(t *testing.T) {
 	cases := []struct {
@@ -423,7 +424,8 @@ func TestPSI(t *testing.T) {
 	}
 }
 
-// TestProcs: the pids of cgroup.procs, anything else on the lines skipped.
+// TestProcs checks the pids of cgroup.procs, with anything else on the
+// lines skipped.
 func TestProcs(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -456,7 +458,8 @@ func TestProcs(t *testing.T) {
 	}
 }
 
-// TestKillWritesTheKnob: Kill is a 1 in cgroup.kill, or the refusal.
+// TestKillWritesTheKnob checks that Kill is a 1 in cgroup.kill, or the
+// refusal.
 func TestKillWritesTheKnob(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -486,8 +489,8 @@ func TestKillWritesTheKnob(t *testing.T) {
 	}
 }
 
-// TestRemove: a leaf goes, one already gone is fine, one with children
-// stays.
+// TestRemove checks that a leaf goes, one already gone is fine, and one
+// with children stays.
 func TestRemove(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -524,7 +527,7 @@ func TestRemove(t *testing.T) {
 	}
 }
 
-// TestChildren: the sub-cgroups with the prefix, files skipped.
+// TestChildren checks the sub-cgroups with the prefix, with files skipped.
 func TestChildren(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -578,7 +581,8 @@ func TestChildren(t *testing.T) {
 	}
 }
 
-// TestOpen: a directory descriptor on the leaf, or the missing-leaf error.
+// TestOpen checks a directory descriptor on the leaf, or the missing-leaf
+// error.
 func TestOpen(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -614,7 +618,7 @@ func TestOpen(t *testing.T) {
 	}
 }
 
-// TestOwn: the cgroup this process runs in, under a mount of the
+// TestOwn checks the cgroup this process runs in, under a mount of the
 // caller's choosing. Without /proc/self/cgroup (not Linux) or in the
 // root of a private namespace that is the mount itself. Otherwise it
 // is the scope /proc/self/cgroup names, when it exists under the mount.

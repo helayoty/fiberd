@@ -14,16 +14,12 @@ import (
 	fiberendpoint "github.com/helayoty/fiberd/pkg/endpoint"
 )
 
-// TestFiberSeesOnlyItsRunDir: every grant's run directory sits under the
-// agent's one run directory, and a proc fiber is euid 0, so until the
-// zygote narrowed the view a fiber of one grant could stat, unlink and
-// rebind another grant's endpoint sockets and fence files. Now the
-// fiber's mount namespace covers the run directory with an empty
-// read-only tmpfs and binds its own grant's directory back, so another
-// grant's directory does not exist for it while its own endpoint still
-// serves and the fence file the host writes beside it is readable. A
-// park and resume keep the view: CRIU restores the cover and binds the
-// resuming grant's directory.
+// TestFiberSeesOnlyItsRunDir pins that a proc fiber, which is euid 0,
+// cannot see another grant's endpoint sockets or fence files. Its mount
+// namespace covers the agent's run directory with an empty read-only tmpfs
+// and binds back only its own grant's directory. A park and resume keep
+// the view, because CRIU restores the cover and binds the resuming grant's
+// directory.
 func TestFiberSeesOnlyItsRunDir(t *testing.T) {
 	cases := []struct {
 		name     string

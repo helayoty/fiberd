@@ -105,7 +105,7 @@ func TestStage(t *testing.T) {
 		args     []string // flags, before -grants-dir
 		grant    func(t *testing.T) string
 		grantDir func(t *testing.T) string // nil is a fresh directory
-		staged   string                    // the token staged; empty when stage must fail
+		staged   string                    // the token staged, or empty when stage must fail
 		err      string
 		is       error
 	}{
@@ -377,8 +377,8 @@ func TestRunLeavesWithTheJob(t *testing.T) {
 	}
 }
 
-// TestMainExit runs main in a child process and checks its exit status:
-// 0 for -h, 2 for a bad command line, 1 for any other failure.
+// TestMainExit runs main in a child process and checks its exit status.
+// It is 0 for -h, 2 for a bad command line and 1 for any other failure.
 func TestMainExit(t *testing.T) {
 	if args, ok := os.LookupEnv("FIBERD_SLURM_TEST_ARGS"); ok {
 		os.Args = append([]string{"fiberd-slurm"}, strings.Fields(args)...)

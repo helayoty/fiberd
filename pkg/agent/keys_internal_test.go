@@ -46,8 +46,9 @@ func stateFor(t *testing.T, unusable bool) string {
 	return filepath.Join(f, "state")
 }
 
-// TestLoadAuditKey: the audit checkpoints are signed with -audit-key, or
-// with a key the home generates once under <state>/private and reuses.
+// TestLoadAuditKey checks that the audit checkpoints are signed with
+// -audit-key, or with a key the home generates once under <state>/private and
+// reuses.
 func TestLoadAuditKey(t *testing.T) {
 	given, givenKID := saveKey(t, edKey)
 	seal, _ := saveKey(t, artifact.GenerateSealKey)
@@ -101,8 +102,8 @@ func TestLoadAuditKey(t *testing.T) {
 	}
 }
 
-// TestLoadHandoffKey: handoff identities derive from -handoff-key, or
-// from a 32-byte key the home generates once and reuses.
+// TestLoadHandoffKey checks that handoff identities derive from -handoff-key,
+// or from a 32-byte key the home generates once and reuses.
 func TestLoadHandoffKey(t *testing.T) {
 	given, _ := saveKey(t, artifact.GenerateSealKey)
 	signing, _ := saveKey(t, edKey)
@@ -146,7 +147,7 @@ func TestLoadHandoffKey(t *testing.T) {
 	}
 }
 
-// TestStateKey: the flag's path wins. Otherwise an existing file is
+// TestStateKey checks that the flag's path wins. Otherwise an existing file is
 // reused, a missing one generated, and a failure to make or save one is
 // returned.
 func TestStateKey(t *testing.T) {
@@ -232,7 +233,7 @@ type badAddr struct{}
 func (badAddr) Network() string { return "tcp" }
 func (badAddr) String() string  { return "no-port" }
 
-// TestHandoffAdvertise: -handoff-advertise wins. Otherwise the bound
+// TestHandoffAdvertise checks that -handoff-advertise wins. Otherwise the bound
 // address is advertised, its wildcard host replaced by -endpoint-host or
 // the loopback.
 func TestHandoffAdvertise(t *testing.T) {
@@ -274,8 +275,8 @@ func TestHandoffAdvertise(t *testing.T) {
 	}
 }
 
-// TestEndpointPolicy: unix needs nothing more. inet4 and inet6 take the
-// declared host, or the family's loopback, and the fixed port range.
+// TestEndpointPolicy checks that unix needs nothing more. inet4 and inet6
+// take the declared host, or the family's loopback, and the fixed port range.
 func TestEndpointPolicy(t *testing.T) {
 	cases := []struct {
 		name, family, host string

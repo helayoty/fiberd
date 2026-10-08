@@ -14,7 +14,7 @@ import (
 )
 
 // TestSealFullDevice seals into /dev/full, where every write fails as on
-// a full disk: the seal must fail, not leave a short file unnoticed.
+// a full disk. The seal must fail, not leave a short file unnoticed.
 func TestSealFullDevice(t *testing.T) {
 	key := &artifact.SealKey{ID: "k", Key: make([]byte, 32)}
 	sc := artifact.SealContext{Domain: "D", Session: "S", Expires: time.Now().Add(time.Hour)}

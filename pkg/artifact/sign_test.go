@@ -51,7 +51,7 @@ func TestLoadKeys(t *testing.T) {
 	good := jwkJSON(t, *signer)
 	cases := []struct {
 		name          string
-		signer, trust string // file contents; "-" for no file
+		signer, trust string // file contents, "-" for no file
 		wantTrust     []string
 		ok            bool
 	}{

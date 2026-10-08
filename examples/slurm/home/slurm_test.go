@@ -292,11 +292,11 @@ func TestNewReadsTheProcessEnvironment(t *testing.T) {
 }
 
 // TestEndpointHost checks the address callers dial when no host is
-// configured: the node name's address of the family, else one of this
-// host's own addresses of the family.
+// configured. It is the node name's address of the family, else one of
+// this host's own addresses of the family.
 func TestEndpointHost(t *testing.T) {
-	// own reports whether ip is one of this host's non-loopback
-	// addresses of the family, or "" when it has none.
+	// own checks that the address got is one of this host's non-loopback
+	// addresses of the family, or "" when the host has none.
 	own := func(v4 bool) func(string) error {
 		return func(got string) error {
 			addrs, err := net.InterfaceAddrs()
@@ -337,7 +337,7 @@ func TestEndpointHost(t *testing.T) {
 		family endpoint.Family
 		port   string
 		check  func(string) error
-		adv    string // the advertised endpoint; "-" skips the check
+		adv    string // the advertised endpoint, or "-" to skip the check
 	}{
 		{name: "an IPv4 node address for inet4", node: "10.1.2.3", family: endpoint.Inet4, port: "8484", check: is("10.1.2.3"), adv: "10.1.2.3:8484"},
 		{name: "an IPv6 node address for inet6", node: "2001:db8::7", family: endpoint.Inet6, port: "8484", check: is("2001:db8::7"), adv: "[2001:db8::7]:8484"},
@@ -364,8 +364,8 @@ func TestEndpointHost(t *testing.T) {
 	}
 }
 
-// TestGrants checks the grant lane: a *.jwt file in the grants directory
-// is a grant added, and a directory that cannot exist is an error.
+// TestGrants checks that a *.jwt file in the grants directory is a grant
+// added, and that a directory that cannot exist is an error.
 func TestGrants(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -426,9 +426,9 @@ func TestGrants(t *testing.T) {
 }
 
 // TestProbeIsLivenessAndTerminalStateIsScopeLoss checks that the lane is
-// healthy while the job is RUNNING. A move to another live state changes
-// nothing. A move to a terminal state is scope loss, reported once, and then
-// the agent leaves with the job.
+// healthy while the job is RUNNING, and another live state changes nothing.
+// A terminal state is scope loss, reported once, and then the agent leaves
+// with the job.
 func TestProbeIsLivenessAndTerminalStateIsScopeLoss(t *testing.T) {
 	cases := []struct {
 		name   string

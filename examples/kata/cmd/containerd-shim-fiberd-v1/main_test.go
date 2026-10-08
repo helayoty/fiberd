@@ -46,9 +46,9 @@ func runMain(t *testing.T, args ...string) []byte {
 	return b
 }
 
-// TestMainProbes checks the binary's answers to containerd's probes,
-// which need no running containerd: -info for the runtime's identity and
-// -v for its version.
+// TestMainProbes checks the binary's answers to containerd's -info and -v
+// probes. They report the runtime's identity and version, and need no
+// running containerd.
 func TestMainProbes(t *testing.T) {
 	cases := []struct {
 		name  string

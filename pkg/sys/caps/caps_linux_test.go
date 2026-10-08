@@ -70,7 +70,7 @@ func bits(mask uint64, keep []int) []int {
 	return out
 }
 
-// TestExtra: what this process holds beyond keep, in its bounding,
+// TestExtra checks what this process holds beyond keep, in its bounding,
 // inheritable or ambient set, as /proc/self/status reports those sets.
 func TestExtra(t *testing.T) {
 	sets := selfSets(t)
@@ -168,9 +168,9 @@ func parseHelper(t *testing.T, line string) helperSets {
 	return r
 }
 
-// helperRun is what one TestNarrowHelper process did: the sets the
-// first generation started with, those the last generation ended with
-// (when it got that far) and how the process ended.
+// helperRun is what one TestNarrowHelper process did. It holds the sets
+// the first generation started with, those the last generation ended with
+// (when it got that far), and how the process ended.
 type helperRun struct {
 	before, after helperSets
 	ended         bool // an "after" line was printed
@@ -232,15 +232,15 @@ func keepMask(keep []int) uint64 {
 	return m
 }
 
-// TestNarrow: a process with more than keep re-executes with its
+// TestNarrow checks that a process with more than keep re-executes with its
 // bounding set cut to keep, its inheritable set masked to keep and its
 // ambient set empty. One with nothing beyond keep is left alone, one
 // without CAP_SETPCAP is told it cannot narrow, and one whose re-exec
 // fails exits rather than run half narrowed.
 func TestNarrow(t *testing.T) {
 	setpriv, _ := exec.LookPath("setpriv")
-	// The effective set, not the bounding set: a normal user keeps a full
-	// bounding set but cannot use any of it.
+	// The effective set, not the bounding set, because a normal user keeps
+	// a full bounding set but cannot use any of it.
 	if selfSets(t)["CapEff"]&(1<<caps.SetPCAP) == 0 {
 		t.Skip("this process lacks CAP_SETPCAP")
 	}

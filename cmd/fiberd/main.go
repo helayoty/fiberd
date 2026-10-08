@@ -24,9 +24,8 @@ func main() {
 	os.Exit(run(context.Background(), os.Args[1:], os.Stderr))
 }
 
-// run is fiberd until ctx ends, SIGINT or SIGTERM. It returns the exit
-// code: 0 for a clean stop or -h, 2 for bad flags, 1 when the agent
-// fails.
+// run is fiberd until ctx ends, SIGINT or SIGTERM. It returns exit code
+// 0 for a clean stop or -h, 2 for bad flags, and 1 when the agent fails.
 func run(ctx context.Context, args []string, stderr io.Writer) int {
 	fs := flag.NewFlagSet("fiberd", flag.ContinueOnError)
 	fs.SetOutput(stderr)

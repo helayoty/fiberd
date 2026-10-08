@@ -1,8 +1,8 @@
-// Package caps narrows the capabilities of the agent, and so of
-// everything it starts (criu, the zygote, a backend's helpers): a process
-// started as root gets exactly its bounding set, and one that execs a
-// file with inheritable file capabilities gets what the inheritable and
-// ambient sets allow, so those are narrowed with it.
+// Package caps narrows the capabilities of the agent and of everything it
+// starts, such as criu, the zygote and a backend's helpers. A process
+// started as root gets exactly its bounding set. One that execs a file
+// with inheritable file capabilities gets what the inheritable and ambient
+// sets allow, so those are narrowed too.
 package caps
 
 import (
@@ -30,13 +30,12 @@ const (
 	SysTime       = 25
 )
 
-// Proc is what the proc runtime needs, as hack/test/caps.sh measured it:
-// namespaces, mounts and cgroups (SysAdmin), CRIU restoring a fiber's
-// time and mount namespaces (SysTime, SysChroot), TCP repair (NetAdmin),
-// and emptying each fiber's bounding set (SetPCAP). CRIU also attaches
-// to fibers it did not start (SysPtrace), which Yama's default
-// ptrace_scope 1 allows only with that capability, and raises its own
-// open-file limit (SysResource).
+// Proc is what the proc runtime needs, as hack/test/caps.sh measured it.
+// SysAdmin covers namespaces, mounts and cgroups. SysTime and SysChroot
+// let CRIU restore a fiber's time and mount namespaces. NetAdmin is for
+// TCP repair, and SetPCAP empties each fiber's bounding set. CRIU attaches
+// to fibers it did not start, which Yama's default ptrace_scope 1 allows
+// only with SysPtrace, and raises its own open-file limit (SysResource).
 var Proc = []int{SetPCAP, NetAdmin, SysChroot, SysPtrace, SysAdmin, SysResource, SysTime}
 
 // Runc is what the runc runtime needs, measured by running tests/runc
@@ -68,13 +67,13 @@ func ForRuntime(name string) ([]int, bool) {
 	return nil, false
 }
 
-// ErrCannotNarrow: the process holds capabilities outside the set but not
-// CAP_SETPCAP, which dropping them needs.
+// ErrCannotNarrow means the process holds capabilities outside the set but
+// not CAP_SETPCAP, which dropping them needs.
 var ErrCannotNarrow = errors.New("caps: cannot narrow the bounding set without CAP_SETPCAP")
 
 // statusCaps reads the inheritable (CapInh) and ambient (CapAmb) masks
 // from the text of a /proc/<pid>/status file. A kernel without ambient
-// capabilities has no CapAmb line, which reads as an empty set; a
+// capabilities has no CapAmb line, which reads as an empty set. A
 // missing CapInh line is an error, since the file always has one.
 func statusCaps(status string) (inh, amb uint64, err error) {
 	haveInh := false

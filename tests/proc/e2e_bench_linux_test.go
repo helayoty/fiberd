@@ -24,30 +24,23 @@ import (
 	"github.com/helayoty/fiberd/pkg/runtime/host"
 )
 
-// TestE2ECloneNumbers measures Clone the way a consumer sees it: over
-// gRPC on loopback TCP, with a grant signed by an issuer and verified
-// through its JWKS, the agent's ledger, budget, audit spool and snapshot
-// store wired as fiberd wires them, the host runtime and the fork
-// backend. Each stage is timed where it runs and keyed by the fiber it
-// births, so every clone's round trip splits into:
+// TestE2ECloneNumbers measures Clone as a consumer sees it, over gRPC on
+// loopback TCP with a JWKS-verified grant and the agent, host runtime and
+// fork backend wired as fiberd wires them. It prints numbers rather than
+// asserting them, and splits each round trip into stages keyed by fiber.
 //
-//	host     host runtime work around the backend: cgroup leaf and limits,
-//	         run directory, endpoint
-//	zygote   the backend round trip: CLONE on the control socket to CLONED,
-//	         including any wait behind other clones
-//	audit    the create record (best effort: written; sync: also fsynced)
-//	agent    everything else: gRPC, protobuf, admission, verify, budget,
-//	         ledger, snapshot store
+//	host     host runtime work around the backend, such as the cgroup
+//	         leaf, run directory and endpoint
+//	zygote   CLONE to CLONED on the control socket, with any wait behind
+//	         other clones
+//	audit    the create record, also fsynced when durability is sync
+//	agent    everything else, including verify, which is also shown alone
 //
-// verify is reported on its own too (the JWKS is cached after warm-up);
-// it cannot be keyed by fiber, so agent includes it.
-//
-// Like TestStormNumbers it prints numbers rather than asserting them; set
-// FIBERD_BENCH=1 and run with -v under make linux-test. The audit spool
-// and snapshot live in FIBERD_BENCH_STATE (default a test temp dir): in
-// the dev container /tmp is a tmpfs, where fsync is free, so point it at
-// a disk to see what a sync record costs. The transport is plaintext:
-// fiberd serves mutual TLS, whose handshake is per connection.
+// FIBERD_BENCH=1 enables it. The audit spool and snapshot live in
+// FIBERD_BENCH_STATE. Point it at a disk to see what a sync record costs,
+// because /tmp in the dev container is a tmpfs where fsync is free. The
+// transport is plaintext, because the mutual TLS handshake is per
+// connection, not per clone.
 func TestE2ECloneNumbers(t *testing.T) {
 	if os.Getenv("FIBERD_BENCH") == "" {
 		t.Skip("set FIBERD_BENCH=1 to run the end-to-end clone measurement")
@@ -56,7 +49,7 @@ func TestE2ECloneNumbers(t *testing.T) {
 		name       string
 		durability core.Durability
 		clones     int  // per round
-		burst      bool // issue a round's clones at once; otherwise one after another
+		burst      bool // issue a round's clones at once, otherwise one after another
 		rounds     int  // bursts, each released before the next
 		noStore    bool // run without the ledger snapshot store
 	}{
@@ -79,7 +72,7 @@ func TestE2ECloneNumbers(t *testing.T) {
 			}
 
 			// The first clone admits the grant, boots the zygote and
-			// fetches the JWKS: paid once per grant, reported apart.
+			// fetches the JWKS. That is paid once per grant and reported apart.
 			f, d, err := clone()
 			if err != nil {
 				t.Fatalf("first clone: %v", err)
@@ -243,7 +236,7 @@ func (b timedBackend) Clone(ctx context.Context, warmID string, spec backend.Fib
 	return b.Backend.Clone(ctx, warmID, spec)
 }
 
-// timedAuditor times create records only: exits and releases write
+// timedAuditor times only create records. Exits and releases write
 // records of their own that are no clone's cost.
 type timedAuditor struct {
 	core.Auditor
@@ -268,12 +261,12 @@ type e2eHome struct {
 }
 
 // newE2EHome wires a home as pkg/agent does for -runtime proc
-// -verifier jwks, with the timed seams in place; store adds the ledger
+// -verifier jwks, with the timed seams in place. store adds the ledger
 // snapshot store fiberd keeps under its state directory.
 func newE2EHome(t *testing.T, store bool) *e2eHome {
 	t.Helper()
 	clock := &stageClock{}
-	// The run directory holds unix sockets: keep its path short.
+	// The run directory holds unix sockets, so its path must stay short.
 	run, err := os.MkdirTemp("/tmp", "fz-e2e-")
 	if err != nil {
 		t.Fatal(err)

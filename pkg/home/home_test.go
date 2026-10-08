@@ -111,7 +111,7 @@ func TestDriveEvents(t *testing.T) {
 			done := make(chan struct{})
 			go func() { defer close(done); home.Drive(context.Background(), h, a) }()
 			for _, ev := range c.events {
-				h.lane <- ev // unbuffered: Drive took the previous event
+				h.lane <- ev // unbuffered, so Drive took the previous event
 			}
 			close(h.lane)
 			waitDone(t, done)

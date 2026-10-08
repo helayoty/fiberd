@@ -58,8 +58,8 @@ func keyFile(t *testing.T, alg string) string {
 	return path
 }
 
-// The command dispatches subcommands and maps outcomes to exit codes: 0
-// for success and help, 2 for usage errors, 1 for failures.
+// The command dispatches subcommands and maps outcomes to exit codes. It
+// returns 0 for success and help, 2 for usage errors and 1 for failures.
 func TestRunDispatch(t *testing.T) {
 	cases := []struct {
 		name       string

@@ -48,8 +48,8 @@ var (
 
 func say(format string, a ...any) { out <- fmt.Sprintf(format, a...) }
 
-// facts is what the Rust helper reports as its snapshot facts (helper,
-// hyperlight_host, hypervisor, cpu); the fake has none of the last three.
+// facts mirrors the Rust helper's snapshot facts (helper, hyperlight_host,
+// hypervisor, cpu). The fake has none of the last three.
 const facts = "fakehelper/1 none none none"
 
 func main() {

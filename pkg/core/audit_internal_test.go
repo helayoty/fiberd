@@ -7,18 +7,14 @@ import (
 	"testing"
 )
 
-// TestFailedFsyncIsNotForgivenByALaterSuccess drives syncThrough
-// deterministically through the fsyncgate scenario. The fsync covering a
-// write fails. A later fsync would succeed. On Linux the kernel dropped
-// the pages the failed fsync could not write, so that later success is
-// not durability for the earlier write. The waiter for that write must
-// get the failure, the later sync append must be refused without an
-// fsync, and only a write an earlier successful fsync covered stays
-// durable.
+// TestFailedFsyncIsNotForgivenByALaterSuccess drives syncThrough through
+// the fsyncgate scenario. On Linux a failed fsync drops the pages it could
+// not write, so a later success does not make the earlier write durable.
+// Its waiter must get the failure, a later sync append is refused without
+// an fsync, and only writes an earlier fsync covered stay durable.
 //
 // prewritten records stand for waiters that wrote before the leader's
-// fsync began and have not re-checked yet. Their re-check is the direct
-// syncThrough call at the end.
+// fsync began. Their re-check is the direct syncThrough call at the end.
 func TestFailedFsyncIsNotForgivenByALaterSuccess(t *testing.T) {
 	cases := []struct {
 		name       string

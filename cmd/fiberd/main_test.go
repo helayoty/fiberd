@@ -47,7 +47,7 @@ func adminHealthy(sock string) bool {
 	return resp.StatusCode == http.StatusOK
 }
 
-// TestRun: fiberd's exit codes and what it says on stderr, and a full
+// TestRun checks fiberd's exit codes and what it says on stderr, and a full
 // start and clean stop of the standalone agent.
 func TestRun(t *testing.T) {
 	cases := []struct {

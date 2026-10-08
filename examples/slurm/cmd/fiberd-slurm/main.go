@@ -42,7 +42,7 @@ func main() {
 
 // run is the agent under a Slurm allocation. env reads the job's
 // environment. cgroupMount is the cgroup v2 mount the home delegates the
-// job step's cgroup under; empty means the home's default, /sys/fs/cgroup.
+// job step's cgroup under. Empty means the home's default, /sys/fs/cgroup.
 // Tests point it at a fake mount, so they never touch the host's cgroups.
 func run(c *agent.Config, grantArg, probe string, env func(string) string, cgroupMount string) error {
 	job, err := home.ReadJob(env)

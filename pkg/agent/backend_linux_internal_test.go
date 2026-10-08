@@ -7,8 +7,8 @@ import (
 	"testing"
 )
 
-// TestProcOptions: the fork backend gets -criu and the bind of the host's
-// root a resume restores under, inside the private directory.
+// TestProcOptions checks that the fork backend gets -criu and the bind of the
+// host's root a resume restores under, inside the private directory.
 func TestProcOptions(t *testing.T) {
 	cases := []struct {
 		name, state, criu string

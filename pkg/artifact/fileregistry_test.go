@@ -419,11 +419,11 @@ func TestFileRegistryFaults(t *testing.T) {
 		corrupt func(t *testing.T, repoDir, digest string)
 		op      string // push, resolve, pull or delete
 		// ref is the reference the operation takes, given the repository
-		// reference and the pushed digest; tag t by default.
+		// reference and the pushed digest. The tag is t by default.
 		ref   func(repo, digest string) string
 		noSrc bool // the source directory is gone
 		ok    bool
-		found bool // resolve: whether the artifact was found
+		found bool // whether resolve found the artifact
 		after func(t *testing.T, repoDir, digest string)
 	}{
 		{name: "push refuses a relative reference", op: "push", ref: func(string, string) string { return "file://rel/r:t" }},

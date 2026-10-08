@@ -8,8 +8,8 @@ import (
 	"github.com/helayoty/fiberd/pkg/sys/caps"
 )
 
-// TestNoCapabilities: off Linux there are no capabilities to hold or
-// to narrow.
+// TestNoCapabilities checks that off Linux there are no capabilities to
+// hold or to narrow.
 func TestNoCapabilities(t *testing.T) {
 	cases := []struct {
 		name string

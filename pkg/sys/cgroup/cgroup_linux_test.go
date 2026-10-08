@@ -102,7 +102,7 @@ func startIn(t *testing.T, d cgroup.Dir, cmd *exec.Cmd) *exec.Cmd {
 	return cmd
 }
 
-// TestLeafLifecycle: on a real cgroup, the settings land in the
+// TestLeafLifecycle checks that on a real cgroup the settings land in the
 // kernel's files, a process placed in the leaf is listed and charged,
 // the counters read, Kill ends it and Remove takes the leaf away.
 func TestLeafLifecycle(t *testing.T) {
@@ -220,7 +220,7 @@ func TestLeafLifecycle(t *testing.T) {
 	}
 }
 
-// TestGroupOOM: a leaf over its ceiling is killed as a whole and the
+// TestGroupOOM checks that a leaf over its ceiling is killed as a whole and the
 // kill is counted, which is what a parked fiber's ladder reads.
 func TestGroupOOM(t *testing.T) {
 	cases := []struct {
@@ -258,8 +258,8 @@ func TestGroupOOM(t *testing.T) {
 	}
 }
 
-// TestPidsMaxRefusesForks: with pids.max at one, the one process in the
-// leaf cannot fork, and the refusal is counted.
+// TestPidsMaxRefusesForks checks that with pids.max at one, the one process
+// in the leaf cannot fork, and the refusal is counted.
 func TestPidsMaxRefusesForks(t *testing.T) {
 	cases := []struct {
 		name string
@@ -290,9 +290,9 @@ func TestPidsMaxRefusesForks(t *testing.T) {
 	}
 }
 
-// TestDelegateOnARealCgroup: a cgroup with a process and no controllers
-// enabled gets the process moved into the agent leaf and memory and
-// pids enabled below it. Doing it again changes nothing. A cgroup that
+// TestDelegateOnARealCgroup checks that a cgroup with a process and no
+// controllers enabled gets the process moved into the agent leaf and memory
+// and pids enabled below it. Doing it again changes nothing. A cgroup that
 // may have no children cannot take the agent leaf, and says so.
 func TestDelegateOnARealCgroup(t *testing.T) {
 	cases := []struct {

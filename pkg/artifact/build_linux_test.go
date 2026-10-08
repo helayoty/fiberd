@@ -42,7 +42,7 @@ func TestBuildCheckpoint(t *testing.T) {
 		fail     string // the fake criu fails with this
 		timeout  time.Duration
 		canceled bool
-		want     string // a substring of the error; "" for success
+		want     string // a substring of the error, "" for success
 		external bool   // the control socket is named external to criu
 		// taken names a path under the output directory that something
 		// else holds before the build.
@@ -174,7 +174,7 @@ func TestHostInfo(t *testing.T) {
 	}
 	cases := []struct {
 		name string
-		ldd  string // the stand-in's script; "" for no ldd at all
+		ldd  string // the stand-in's script, "" for no ldd at all
 		libc string
 	}{
 		{name: "glibc names itself", ldd: "#!/bin/sh\necho 'ldd (GNU libc) 2.36'\necho 'Copyright'\n", libc: "(gnu libc) 2.36"},

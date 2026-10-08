@@ -15,7 +15,7 @@ import (
 	"github.com/helayoty/fiberd/pkg/backend/runc"
 )
 
-// TestNew: what the backend refuses at open, the defaults it fills in,
+// TestNew checks what the backend refuses at open, the defaults it fills in,
 // and the surface it offers the host.
 func TestNew(t *testing.T) {
 	cases := []struct {

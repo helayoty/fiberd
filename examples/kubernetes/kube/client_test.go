@@ -26,8 +26,8 @@ type roundTrip func(*http.Request) (*http.Response, error)
 
 func (f roundTrip) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
-// TestClient checks each call the client makes: the request it sends and
-// what it makes of the answer.
+// TestClient checks the request each client call sends and what it makes
+// of the answer.
 func TestClient(t *testing.T) {
 	ctx := context.Background()
 	type obj struct {
@@ -35,9 +35,9 @@ func TestClient(t *testing.T) {
 	}
 	cases := []struct {
 		name string
-		// answer is the server's handler; nil answers 200 {"name":"x"}.
+		// answer is the server's handler. Nil answers 200 {"name":"x"}.
 		answer func(w http.ResponseWriter, r *http.Request)
-		// setup adjusts the client; token is the path of a token file
+		// setup adjusts the client. token is the path of a token file
 		// holding " tok\n".
 		setup func(c *kube.Client, token string, srv *httptest.Server)
 		call  func(c *kube.Client) (any, error)

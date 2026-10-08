@@ -64,8 +64,8 @@ func appendRecords(t *testing.T, dir string, cp *core.Checkpoints, n int) {
 	}
 }
 
-// chained hashes rec onto prev the way the spool does: SHA-256 of the
-// record's JSON with Hash empty.
+// chained hashes rec onto prev the way the spool does, as the SHA-256 of
+// the record's JSON with Hash empty.
 func chained(t *testing.T, rec core.AuditRecord, prev string) (core.AuditRecord, []byte) {
 	t.Helper()
 	rec.PrevHash, rec.Hash = prev, ""
@@ -126,7 +126,7 @@ func TestRun(t *testing.T) {
 		name string
 		// spool builds the spool in dir and returns its path.
 		spool func(t *testing.T, dir string) string
-		trust any // written as the -trust file; nil passes no -trust
+		trust any // written as the -trust file, nil for no -trust
 		args  []string
 		want  int
 		// wantOut and wantErr are substrings of stdout and stderr.

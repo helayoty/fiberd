@@ -119,7 +119,7 @@ func (a *Activator) Run(ctx context.Context) {
 		<-ctx.Done()
 		return
 	}
-	// A tick of at least a millisecond: a shorter one gains nothing, and
+	// The tick is at least a millisecond. A shorter one gains nothing, and
 	// an idle under 4ns would make a zero tick, which panics.
 	t := time.NewTicker(max(a.cfg.Idle/4, time.Millisecond))
 	defer t.Stop()
@@ -185,9 +185,9 @@ func (a *Activator) route(r *http.Request) (*revision, string) {
 // pick chooses the slot for a request: the least busy slot that already
 // serves a fiber, unless every serving slot is busy and an empty one is
 // free, in which case the empty one (a second fiber is cloned only when
-// the first cannot take the request). Each slot's state is read under its
-// own lock and only there: no lock spans the revisions, so a slot held
-// through a slow Clone or Park delays only requests that wait on it.
+// the first cannot take the request). Each slot's state is read only under
+// its own lock. No lock spans the revisions, so a slot held through a slow
+// Clone or Park delays only the requests that wait on it.
 func (a *Activator) pick(rv *revision) *slot {
 	var serving, empty *slot
 	busy := 0 // serving's inUse when it was read
@@ -335,8 +335,8 @@ func (a *Activator) proxyLine(w http.ResponseWriter, r *http.Request, f consumer
 // endpoint.
 func (a *Activator) proxyHTTP(w http.ResponseWriter, r *http.Request, f consumer.Fiber, path string) bool {
 	gone := false
-	// A transport per request, so it must not keep the connection: an
-	// idle one would hold a socket and two goroutines for good.
+	// Each request gets its own transport, so it must not keep the
+	// connection. An idle one would hold a socket and two goroutines for good.
 	tr := &http.Transport{
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) { return a.cfg.Dial(ctx, f.Endpoint) },
 	}

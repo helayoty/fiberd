@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-// TestParsePool: the flag's spelling, and the bounds that keep every
+// TestParsePool checks the flag's spelling, and the bounds that keep every
 // slot inside the 32-bit id space and off the host's own ids.
 func TestParsePool(t *testing.T) {
 	cases := []struct {
@@ -43,8 +43,8 @@ func TestParsePool(t *testing.T) {
 	}
 }
 
-// TestDefaultPoolClearsConventions: the default sits above every id a
-// host hands out by convention and below 2^31, and reaches the top of
+// TestDefaultPoolClearsConventions checks that the default sits above every
+// id a host hands out by convention and below 2^31, and reaches the top of
 // the id space minus the overflow ids.
 func TestDefaultPoolClearsConventions(t *testing.T) {
 	def, err := ParsePool(DefaultPool)
@@ -77,9 +77,9 @@ func TestDefaultPoolClearsConventions(t *testing.T) {
 	}
 }
 
-// TestCheckSubIDs: a pool that overlaps a subordinate id range of the
-// host is refused with the entry named, a missing file is no check, and
-// a line that does not parse is refused too.
+// TestCheckSubIDs checks that a pool that overlaps a subordinate id range of
+// the host is refused with the entry named, a missing file is no check, and a
+// line that does not parse is refused too.
 func TestCheckSubIDs(t *testing.T) {
 	pool := IDPool{Start: 1 << 20, Slots: 16} // host ids 1048576-2097151
 	cases := []struct {
@@ -133,7 +133,7 @@ func TestCheckSubIDs(t *testing.T) {
 	}
 }
 
-// TestRange: a grant's range is a function of its uid and the pool,
+// TestRange checks that a grant's range is a function of its uid and the pool,
 // aligned to a slot, inside the pool, and the same on every call.
 func TestRange(t *testing.T) {
 	def, _ := ParsePool(DefaultPool)
@@ -173,7 +173,7 @@ func TestRange(t *testing.T) {
 	}
 }
 
-// TestRangeSameAcrossHomes: two pools configured alike are two homes.
+// TestRangeSameAcrossHomes treats two pools configured alike as two homes.
 // They agree on every grant, and a home with another pool does not.
 func TestRangeSameAcrossHomes(t *testing.T) {
 	a, _ := ParsePool(DefaultPool)
@@ -209,11 +209,11 @@ func colliding(p IDPool, grant string) string {
 	}
 }
 
-// TestClaims: a slot is held by one grant at a time and for as long as
-// any user of the grant has it, the warm zygote or a restored fiber.
+// TestClaims checks that a slot is held by one grant at a time and for as
+// long as any user of the grant has it, the warm zygote or a restored fiber.
 // The zygote's hold counts once however often it is taken, each fiber's
-// counts, the slot is free once the last user lets go, and a release
-// by a grant that does not hold the slot changes nothing.
+// counts, the slot is free once the last user lets go, and a release by a
+// grant that does not hold the slot changes nothing.
 func TestClaims(t *testing.T) {
 	pool := IDPool{Start: 100000, Slots: 4}
 	const warm, fiber = true, false
@@ -370,7 +370,7 @@ func TestClaims(t *testing.T) {
 	}
 }
 
-// TestCheckSubIDsUnreadable: a subordinate id file that exists but
+// TestCheckSubIDsUnreadable checks that a subordinate id file that exists but
 // cannot be read hides ranges, so it is an error rather than no check.
 func TestCheckSubIDsUnreadable(t *testing.T) {
 	pool := IDPool{Start: 1 << 20, Slots: 16}

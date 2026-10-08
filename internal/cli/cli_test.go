@@ -18,7 +18,7 @@ func TestRun(t *testing.T) {
 		name       string
 		args       []string
 		want       int
-		wantArgs   []string // what the command was given; nil if not run
+		wantArgs   []string // what the command was given, nil if not run
 		wantStderr string   // a pattern stderr must match
 	}{
 		{name: "no subcommand is a usage error", want: 2, wantStderr: `^` + usage + `\n$`},

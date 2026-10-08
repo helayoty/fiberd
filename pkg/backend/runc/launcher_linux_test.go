@@ -70,7 +70,7 @@ func TestWaitPIDEnds(t *testing.T) {
 		name    string
 		run     string // the stand-in for `runc run`
 		reap    bool   // wait on it before asking, so ProcessState is set
-		runc    string // the fake runc's body; "" fails `runc state` as for a container that never came up
+		runc    string // the fake runc's body. "" fails `runc state` as for a container that never came up
 		cancel  bool   // cancel the context after a moment
 		wantPID bool   // the init is reported
 		wantErr string

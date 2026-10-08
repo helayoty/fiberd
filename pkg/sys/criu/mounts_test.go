@@ -35,7 +35,7 @@ func TestMountPoints(t *testing.T) {
 func TestRestoreMounts(t *testing.T) {
 	cases := []struct {
 		name    string
-		sidecar string // contents of MountsFile; "" for none
+		sidecar string // contents of MountsFile, "" for none
 		asDir   bool   // MountsFile is a directory, so it cannot be read
 		want    []string
 		wantErr bool

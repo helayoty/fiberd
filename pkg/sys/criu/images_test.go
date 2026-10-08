@@ -58,8 +58,8 @@ func pagemapImage(pagesID uint32, entries []criu.PagemapEntry) []byte {
 // page is one page filled with b.
 func page(b byte) []byte { return bytes.Repeat([]byte{b}, int(criu.PageSize)) }
 
-// checkpoint is one task's images: its entries and, for the present
-// ones, their pages in order. The pages file id is the pid.
+// checkpoint is one task's images. It holds the entries and, for the
+// present ones, their pages in order. The pages file id is the pid.
 type checkpoint struct {
 	pid     int
 	entries []criu.PagemapEntry
@@ -115,8 +115,8 @@ func inParent(addr uint64, n uint32) criu.PagemapEntry {
 // host's page size, which differs between machines.
 func va(n uint64) uint64 { return n * criu.PageSize }
 
-// zygote is the parent checkpoint every delta test builds on: pages a,
-// b and c at pages 1, 2 and 3, and a lazy run at page 9.
+// zygote is the parent checkpoint every delta test builds on. It has
+// pages a, b and c at pages 1, 2 and 3, and a lazy run at page 9.
 var zygote = checkpoint{pid: 1,
 	entries: []criu.PagemapEntry{present(va(1), 3), lazy(va(9), 1)},
 	pages:   [][]byte{page('a'), page('b'), page('c')}}
@@ -156,7 +156,7 @@ func loadZygote(t *testing.T) *criu.Parent {
 	return p
 }
 
-// TestReadPagemap: the head's pages id and every entry come out of a
+// TestReadPagemap checks that the head's pages id and every entry come out of a
 // well-formed image, unknown fields are skipped, and each way an image
 // can be cut short or malformed is named.
 func TestReadPagemap(t *testing.T) {
@@ -226,8 +226,8 @@ func TestReadPagemap(t *testing.T) {
 	}
 }
 
-// TestFindPagemaps: the pagemap images of a directory, sorted, and the
-// one way the lookup itself can fail.
+// TestFindPagemaps checks the pagemap images of a directory, sorted, and
+// the one way the lookup itself can fail.
 func TestFindPagemaps(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -269,8 +269,8 @@ func TestFindPagemaps(t *testing.T) {
 	}
 }
 
-// TestLoadParent: a parent is identified by the hash of its pages files
-// in name order, an empty one maps nothing, and every way its images
+// TestLoadParent checks that a parent is identified by the hash of its pages
+// files in name order, an empty one maps nothing, and every way its images
 // can be missing, cut short or unmappable is an error.
 func TestLoadParent(t *testing.T) {
 	two := []checkpoint{
@@ -281,7 +281,7 @@ func TestLoadParent(t *testing.T) {
 		name    string
 		subdir  string // the parent directory's name under the temp dir
 		setup   func(t *testing.T, dir string)
-		wantSHA string // hex; "" when the setup fails
+		wantSHA string // hex, "" when the setup fails
 		wantErr string
 		wantIs  error
 	}{
@@ -348,13 +348,13 @@ func hexSHA(b []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// TestDeltaInfo: delta.json is what tells a delta from a checkpoint,
+// TestDeltaInfo checks that delta.json is what tells a delta from a checkpoint,
 // and it reads back or fails by name.
 func TestDeltaInfo(t *testing.T) {
 	info := criu.DeltaInfo{PageSize: 4096, ParentSHA256: "ab", TotalPages: 10, KeptPages: 3, Files: []string{"pagemap-1.img"}}
 	cases := []struct {
 		name     string
-		contents string // of delta.json; "" for none
+		contents string // of delta.json, "" for none
 		asDir    bool   // delta.json is a directory
 		want     criu.DeltaInfo
 		hasDelta bool
@@ -408,9 +408,9 @@ func mustJSON(t *testing.T, v any) string {
 	return string(b)
 }
 
-// TestComputeDelta: pages equal to the parent's at the same address are
-// dropped and marked, the rest are kept in order, runs are split and
-// re-merged, and the delta records what it covers. Each way the images
+// TestComputeDelta checks that pages equal to the parent's at the same
+// address are dropped and marked, the rest are kept in order, runs are split
+// and re-merged, and the delta records what it covers. Each way the images
 // can be unusable is an error that leaves no temporary file behind.
 func TestComputeDelta(t *testing.T) {
 	cases := []struct {
@@ -541,14 +541,14 @@ func TestComputeDelta(t *testing.T) {
 	}
 }
 
-// TestMergeDelta: a delta merged with its parent is the checkpoint it
-// was computed from, byte for byte, and a delta is refused with a
-// parent that is not the one it names.
+// TestMergeDelta checks that a delta merged with its parent is the checkpoint
+// it was computed from, byte for byte, and a delta is refused with a parent
+// that is not the one it names.
 func TestMergeDelta(t *testing.T) {
 	child := checkpoint{pid: 5,
 		entries: []criu.PagemapEntry{present(va(1), 4), lazy(va(9), 1)},
 		pages:   [][]byte{page('a'), page('x'), page('c'), page('d')}}
-	// delta writes a hand-made delta over the parent: the sidecar names
+	// delta writes a hand-made delta over the parent. The sidecar names
 	// files, and the pagemap and pages given stand for pid 5.
 	delta := func(t *testing.T, dir, sha string, files []string, entries []criu.PagemapEntry, pages []byte) {
 		t.Helper()
