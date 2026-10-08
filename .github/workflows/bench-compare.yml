@@ -172,8 +172,11 @@ jobs:
           done
           # The node's own view: a containerd or kubelet crash, or an OOM kill.
           echo "::group::node journal"
-          docker exec compare-control-plane journalctl -u containerd -u kubelet --since "-20min" --no-pager 2>/dev/null \
-            | grep -iE "panic|fatal|error|oom|killed|started|stopped" | tail -n 200 || true
+          # systemd's own lines say how containerd ended (exit status or signal).
+          docker exec compare-control-plane journalctl -u containerd --since "-20min" --no-pager -o short-precise 2>/dev/null \
+            | grep -E "systemd\[1\]|level=(fatal|panic)|^panic|fatal error|goroutine [0-9]+ \[running\]|signal" \
+            | grep -v "remains running" | head -n 120 || true
+          docker exec compare-control-plane systemctl show containerd -p NRestarts -p ExecMainStatus -p Result 2>/dev/null || true
           sudo dmesg 2>/dev/null | grep -iE "oom|killed process" | tail -n 20 || true
           echo "::endgroup::"
           sudo tail -n 50 bin/compare-state/phase4/fc-work/*.log 2>/dev/null || true
