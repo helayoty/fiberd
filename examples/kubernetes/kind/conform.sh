@@ -8,9 +8,14 @@
 #   4. run grant-conform C1-C10 from the host against the Pod's NodePort,
 #      with every hook reaching into the Pod through kubectl exec;
 #   5. run the 2x overcommit storm inside a second grant Pod under a
-#      384 MiB limit: a park must fire before any OOM kill.
+#      384 MiB limit: a park must fire before any OOM kill;
+#   6. run sessioncheck from a client Pod against an UNTRUSTED gVisor
+#      grant: a Clone from another Pod reaches the fiber over the Pod IP
+#      (the agent relays the port to the sandbox's unix socket), and a
+#      park and resume keep its state.
 #
 #   examples/kubernetes/kind/conform.sh run       (everything; needs docker, kind, kubectl, go)
+#   examples/kubernetes/kind/conform.sh gvisor    (step 6 alone, on a deployed cluster)
 #   examples/kubernetes/kind/conform.sh up|down   (just the cluster)
 #   examples/kubernetes/kind/conform.sh restart|lane up|down|audit <event> <fence>|engine-kill <uid>|scope-lost
 #                                                 (the hooks grant-conform calls)
@@ -144,6 +149,28 @@ storm() {
   [ "$("${KC[@]}" -n "$NS" get pod storm-grant -o jsonpath='{.status.containerStatuses[0].restartCount}')" = 0 ] || { echo "storm pod was restarted (OOM killed?)" >&2; return 1; }
 }
 
+# gvisor: an UNTRUSTED grant whose fibers are runsc sandboxes behind the
+# Pod IP, checked from a second Pod. The grant Pod's endpoint family is
+# inet4, which the gvisor runtime serves through the agent's relay.
+gvisor() {
+  local gpod=conform-gvisor-grant client=sessioncheck-client ip
+  mkdir -p "$STATE"
+  [ -s "$STATE/issuer-key.json" ] || "${KC[@]}" -n fiberd-system get secret grant-issuer-key -o jsonpath='{.data.key\.json}' | base64 -d >"$STATE/issuer-key.json"
+  "${KC[@]}" apply -f "$KIND_DIR/manifests/60-gvisor.yaml"
+  wait_for 60 "gvisor grant pod created" "${KC[@]}" -n "$NS" get pod "$gpod"
+  "${KC[@]}" -n "$NS" wait --for=condition=Ready "pod/$gpod" --timeout=300s
+  ip=$("${KC[@]}" -n "$NS" get pod "$gpod" -o jsonpath='{.status.podIP}')
+  "${KC[@]}" -n "$NS" delete pod "$client" --ignore-not-found --wait=true >/dev/null
+  "${KC[@]}" -n "$NS" run "$client" --image="$IMAGE" --image-pull-policy=Never --restart=Never --command -- sleep 600
+  "${KC[@]}" -n "$NS" wait --for=condition=Ready "pod/$client" --timeout=120s
+  "${KC[@]}" -n "$NS" cp --no-preserve "$STATE/issuer-key.json" "$client:/tmp/issuer-key.json"
+  "${KC[@]}" -n "$NS" exec "$client" -- sessioncheck -target "$ip:8484" -node-id "$gpod" -issuer-key /tmp/issuer-key.json \
+    -issuer "$ISSUER_URL" -isolation UNTRUSTED -want-scheme tcp
+  echo "--- gvisor grant pod agent log (relay lines):"
+  "${KC[@]}" -n "$NS" logs "$gpod" -c agent | grep -i "relay\|endpoints" | tail -5 || true
+  "${KC[@]}" -n "$NS" delete pod "$client" --wait=false >/dev/null
+}
+
 case "${1:-}" in
   up) up ;;
   down) down ;;
@@ -156,8 +183,9 @@ case "${1:-}" in
   scope-lost) scope_lost ;;
   conform) conform ;;
   storm) storm ;;
+  gvisor) gvisor ;;
   run)
-    up; image; deploy; conform; storm
+    up; image; deploy; conform; storm; gvisor
     ;;
-  *) echo "usage: $0 run|up|down|image|deploy|conform|storm|restart|lane up|down|audit <event> <fence>|engine-kill <uid>|scope-lost" >&2; exit 2 ;;
+  *) echo "usage: $0 run|up|down|image|deploy|conform|storm|gvisor|restart|lane up|down|audit <event> <fence>|engine-kill <uid>|scope-lost" >&2; exit 2 ;;
 esac

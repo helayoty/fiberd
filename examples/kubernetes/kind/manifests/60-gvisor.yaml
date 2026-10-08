@@ -1,0 +1,31 @@
+# An UNTRUSTED grant on gVisor: every fiber is a runsc sandbox with no
+# network of its own, and the agent relays a port of the Pod IP to each
+# sandbox's unix socket, so a consumer in another Pod dials
+# tcp://<pod-ip>:<port> as it would a proc fiber. The template is the
+# reference zygote in HTTP mode, which sessioncheck speaks
+# (examples/kubernetes/kind/conform.sh gvisor).
+apiVersion: fiberd.io/v1alpha1
+kind: CapacityGrant
+metadata:
+  name: conform-gvisor
+  namespace: tenant-a
+spec:
+  template: sha256:conform-gvisor
+  fibers: { max: 4, warm: 1 }
+  wBudget: 64Mi
+  minTier: FIBER_SNAPSHOT
+  isolation: UNTRUSTED
+  lease: 10m
+  pod:
+    image: fiberd:kind
+    runtime: gvisor
+    endpointFamily: inet4
+    args:
+      - -gvisor-rootfs
+      - /usr/share/fiberd/gvisor-rootfs
+      - -template
+      - default=/bin/refzygote --heap-mb 16 --gvisor --http
+    resources:
+      # A sandbox is about 90 MiB restored; a few of them plus the warm
+      # template and its image.
+      limits: { memory: 1Gi }
