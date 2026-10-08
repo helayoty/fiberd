@@ -16,6 +16,11 @@ import (
 // Options select the binary and the flags common to every call.
 type Options struct {
 	Bin string // default "criu"
+	// Wrap is a command a restore runs through, given criu and its
+	// arguments after its own: for a restore that needs mounts of its
+	// own (the runc backend's /sys bind). It must exec criu in place,
+	// so the pid stays criu's.
+	Wrap []string
 }
 
 func (o Options) bin() string {

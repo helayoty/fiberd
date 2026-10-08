@@ -126,7 +126,7 @@ func New(o Options) (backend.Backend, error) {
 	}
 	l := &launcher{opt: o, claims: newClaims(o.Pool)}
 	l.sweep()
-	return &Backend{Backend: proc.NewBackend(proc.Options{CRIU: o.CRIU, Launcher: l}), l: l}, nil
+	return &Backend{Backend: proc.NewBackend(proc.Options{CRIU: o.CRIU, CRIUWrap: l.sysWrap(), Launcher: l}), l: l}, nil
 }
 
 // sweep ends the containers a previous life left in runc's state and
@@ -227,6 +227,38 @@ func (l *launcher) logTails(spec backend.WarmSpec) string {
 // rootfs is where the grant's copy of the root filesystem lives.
 func (l *launcher) rootfs(spec backend.WarmSpec) string {
 	return filepath.Join(l.opt.StateDir, "rootfs", l.cid(spec))
+}
+
+// sysDir is where runc and criu find the bind of the host's /sys mount
+// that sysWrap makes them, the source of every container's /sys.
+func (l *launcher) sysDir() string { return filepath.Join(l.opt.StateDir, "sys") }
+
+// sysWrap is the command `runc run` and `criu restore` run through (its
+// argv follows): a private mount namespace of their own with the host's
+// top /sys mount alone bound at sysDir, read-only, nosuid, nodev and
+// noexec. A container gets its /sys as a bind of that directory rather
+// than a sysfs mount of its own, because the kernel lets a user
+// namespace mount sysfs only while an existing sysfs mount is fully
+// visible to it, and a Pod's /sys can have a locked mount covering part
+// of it (the mount then fails with EPERM). The bind is of the top mount
+// alone, so no cgroup or other mount under the host's /sys comes with
+// it, and a restore needs it for the same reason: a bind of the host's
+// /sys from inside the restored tree's namespace trips over the same
+// locks. It lives in the wrapper's namespace alone, so the agent's own
+// mounts, which a proc fiber's namespace copies, stay as they were. The
+// container's copy of the bind carries the flags locked, so the mapped
+// root cannot lift them.
+func (l *launcher) sysWrap() []string {
+	return []string{"unshare", "--mount", "--propagation", "private", "sh", "-c",
+		`mount --bind /sys "$0" && mount -o remount,bind,ro,nosuid,nodev,noexec "$0" && exec "$@"`, l.sysDir()}
+}
+
+// sysMountPoint makes sure sysDir is there for sysWrap to bind at.
+func (l *launcher) sysMountPoint() error {
+	if err := os.MkdirAll(l.sysDir(), 0o755); err != nil {
+		return fmt.Errorf("runc: /sys bind: %w", err)
+	}
+	return nil
 }
 
 // templateDir is where the grant's verified copy of its registry
@@ -374,6 +406,9 @@ func (l *launcher) Command(spec backend.WarmSpec, argv []string, ctl, logf *os.F
 	if err := prepareWorkDir(spec.WorkDir, rng); err != nil {
 		return nil, err
 	}
+	if err := l.sysMountPoint(); err != nil {
+		return nil, err
+	}
 	// A registry template lives in the host's cache, outside the rootfs.
 	// The launcher's own verified copy of its executable is bound
 	// read-only at backend.TemplateMount, and the command runs from
@@ -382,13 +417,14 @@ func (l *launcher) Command(spec backend.WarmSpec, argv []string, ctl, logf *os.F
 	mounts := []map[string]any{
 		{"destination": "/proc", "type": "proc", "source": "proc"},
 		{"destination": "/dev", "type": "tmpfs", "source": "tmpfs", "options": []string{"nosuid", "strictatime", "mode=755", "size=65536k"}},
-		// sysfs read-only. The grant's user namespace owns the
-		// network namespace, which is what lets it mount sysfs at
-		// all, and the kernel refuses the mapped root every knob by
-		// ownership before the mount flag is looked at. No cgroup
-		// mount. The zygote is handed each leaf as a descriptor and
-		// never needs the hierarchy by path.
-		{"destination": "/sys", "type": "sysfs", "source": "sysfs", "options": []string{"nosuid", "noexec", "nodev", "ro"}},
+		// /sys is a read-only bind of the host's sysfs that sysWrap
+		// makes runc, not a sysfs mount of the container's own, which
+		// the kernel refuses a user namespace in some Pods. The kernel
+		// refuses the mapped root every knob by ownership before the
+		// mount flag is looked at. No cgroup mount. The zygote is
+		// handed each leaf as a descriptor and never needs the
+		// hierarchy by path.
+		{"destination": "/sys", "type": "bind", "source": l.sysDir(), "options": []string{"rbind", "nosuid", "noexec", "nodev", "ro"}},
 		{"destination": "/host", "type": "bind", "source": spec.WorkDir, "options": []string{"rbind", "rw"}},
 	}
 	tdir := l.templateDir(spec)
@@ -479,8 +515,9 @@ func (l *launcher) Command(spec backend.WarmSpec, argv []string, ctl, logf *os.F
 	if err := os.Remove(l.runcLog(spec)); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return nil, fmt.Errorf("runc: remove old runc log: %w", err)
 	}
-	cmd = exec.Command(l.opt.Runc, "--root", l.root(), "--log", l.runcLog(spec), "--debug",
-		"run", "--preserve-fds", "1", "--bundle", b, l.cid(spec))
+	wrap := l.sysWrap()
+	cmd = exec.Command(wrap[0], append(wrap[1:], l.opt.Runc, "--root", l.root(), "--log", l.runcLog(spec), "--debug",
+		"run", "--preserve-fds", "1", "--bundle", b, l.cid(spec))...)
 	cmd.ExtraFiles = []*os.File{ctl} // fd 3 in the container's init
 	devnull, err := os.OpenFile(os.DevNull, os.O_RDONLY, 0)
 	if err != nil {
@@ -876,11 +913,12 @@ func shareImages(dir string, rng IDRange) error {
 }
 
 // DumpExtra names the mounts that come from outside the container's
-// mount namespace, the run directory, runc's device binds and, for a
-// grant on a registry template, the template bind, which it also
-// records beside the images in dir so the restore knows to bind one.
+// mount namespace, the run directory, the /sys bind, runc's device
+// binds and, for a grant on a registry template, the template bind,
+// which it also records beside the images in dir so the restore knows
+// to bind one.
 func (l *launcher) DumpExtra(spec backend.WarmSpec, dir string) ([]string, error) {
-	extra := append([]string{"--external", "mnt[/host]:host"}, netExtra...)
+	extra := append([]string{"--external", "mnt[/host]:host", "--external", "mnt[/sys]:sys"}, netExtra...)
 	for _, d := range deviceBinds {
 		extra = append(extra, "--external", "mnt[/dev/"+d+"]:dev-"+d)
 	}
@@ -925,7 +963,8 @@ func (l *launcher) templateBind(spec backend.WarmSpec, dir string) ([]string, er
 }
 
 // RestoreExtra gives the restored tree the grant's root filesystem copy
-// on this home, its run directory at /host and the host's device nodes.
+// on this home, its run directory at /host, this home's /sys bind and
+// the host's device nodes.
 // The tree maps the grant's id range, so it takes a hold on it, which
 // refuses a restore while another grant holds the slot and keeps the
 // range and the copy for as long as the tree runs (until RestoredGone).
@@ -947,7 +986,10 @@ func (l *launcher) RestoreExtra(spec backend.WarmSpec, dir string) (extra []stri
 	if err := shareImages(dir, rng); err != nil {
 		return nil, err
 	}
-	extra = append([]string{"--root", rootfs, "--external", "mnt[host]:" + spec.WorkDir}, emptyNet...)
+	if err := l.sysMountPoint(); err != nil {
+		return nil, err
+	}
+	extra = append([]string{"--root", rootfs, "--external", "mnt[host]:" + spec.WorkDir, "--external", "mnt[sys]:" + l.sysDir()}, emptyNet...)
 	for _, d := range deviceBinds {
 		extra = append(extra, "--external", "mnt[dev-"+d+"]:/dev/"+d)
 	}

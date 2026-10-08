@@ -64,6 +64,10 @@ import (
 type Options struct {
 	// CRIU names the criu binary (default "criu").
 	CRIU string
+	// CRIUWrap is a command `criu restore` runs through, with criu's
+	// argv after its own (criu.Options.Wrap). A launcher whose restores
+	// need mounts of their own sets it.
+	CRIUWrap []string
 	// Launcher, when set, starts the zygote some other way than a plain
 	// exec: inside an OCI container (pkg/backend/runc). Fibers are still
 	// forked by the zygote over the control socket, checkpointed with
@@ -535,7 +539,7 @@ func NewBackend(o Options) *Backend {
 		o.RootBind = filepath.Join(os.TempDir(), rootName+strconv.Itoa(os.Getpid()))
 	}
 	o.RootBind = filepath.Clean(o.RootBind)
-	b := &Backend{opt: o, criu: criu.Options{Bin: o.CRIU}, tier: core.TierWarm, defaultRoot: defaultRoot,
+	b := &Backend{opt: o, criu: criu.Options{Bin: o.CRIU, Wrap: o.CRIUWrap}, tier: core.TierWarm, defaultRoot: defaultRoot,
 		zygotes: map[string]*zygote{}, fibers: map[string]*fiber{}, byPID: map[pidKey]*fiber{},
 		exits: make(chan backend.Exit, 1024)}
 	if o.Launcher == nil {

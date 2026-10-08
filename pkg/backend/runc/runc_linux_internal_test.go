@@ -188,6 +188,42 @@ func stateFile(t *testing.T, path string) {
 	}
 }
 
+// mountEnt is a /proc/self/mountinfo line: root, mount point, options
+// and filesystem type.
+type mountEnt struct{ root, point, opts, fstype string }
+
+// mountsUnder lists this process's mounts at dir and below it.
+func mountsUnder(t *testing.T, dir string) []mountEnt {
+	t.Helper()
+	b, err := os.ReadFile("/proc/self/mountinfo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return mountsIn(string(b), dir)
+}
+
+// mountsIn lists the mounts of a mountinfo table at dir and below it.
+func mountsIn(info, dir string) []mountEnt {
+	var out []mountEnt
+	for _, line := range strings.Split(info, "\n") {
+		f := strings.Fields(line)
+		sep := -1
+		for i, w := range f {
+			if w == "-" {
+				sep = i
+				break
+			}
+		}
+		if sep < 6 || sep+1 >= len(f) {
+			continue
+		}
+		if f[4] == dir || strings.HasPrefix(f[4], dir+"/") {
+			out = append(out, mountEnt{root: f[3], point: f[4], opts: f[5], fstype: f[sep+1]})
+		}
+	}
+	return out
+}
+
 // cgroupDir makes a cgroup under the v2 root for the test and opens it.
 func cgroupDir(t *testing.T, name string) *os.File {
 	t.Helper()
@@ -280,14 +316,17 @@ func TestCommand(t *testing.T) {
 				for _, m := range cfg.Mounts {
 					dests = append(dests, m.Destination+"="+m.Type)
 				}
-				if want := []string{"/proc=proc", "/dev=tmpfs", "/sys=sysfs", "/host=bind"}; !reflect.DeepEqual(dests, want) {
+				if want := []string{"/proc=proc", "/dev=tmpfs", "/sys=bind", "/host=bind"}; !reflect.DeepEqual(dests, want) {
 					t.Errorf("mounts = %v, want %v", dests, want)
 				}
 				if m := cfg.Mounts[3]; m.Source != spec.WorkDir || !reflect.DeepEqual(m.Options, []string{"rbind", "rw"}) {
 					t.Errorf("/host mount = %+v, want a rw rbind of %s", m, spec.WorkDir)
 				}
-				if m := cfg.Mounts[2]; !reflect.DeepEqual(m.Options, []string{"nosuid", "noexec", "nodev", "ro"}) {
-					t.Errorf("/sys options = %v, want read-only", m.Options)
+				// Not a sysfs mount of the container's own: the kernel refuses
+				// one to a user namespace when a locked mount covers part of
+				// the host's /sys, as in some Pods. A bind of the agent's bind.
+				if m := cfg.Mounts[2]; m.Source != l.sysDir() || !reflect.DeepEqual(m.Options, []string{"rbind", "nosuid", "noexec", "nodev", "ro"}) {
+					t.Errorf("/sys mount = %+v, want a read-only rbind of the agent's /sys bind %s", m, l.sysDir())
 				}
 				if want := []string{"/proc/bus", "/proc/fs", "/proc/irq", "/proc/sys", "/proc/sysrq-trigger"}; !reflect.DeepEqual(cfg.Linux.Readonly, want) {
 					t.Errorf("readonlyPaths = %v, want %v", cfg.Linux.Readonly, want)
@@ -328,8 +367,10 @@ func TestCommand(t *testing.T) {
 			}},
 		{name: "the command: runc run with the control socket as fd 3, in a session of its own", grant: "team/a:1",
 			check: func(t *testing.T, l *launcher, spec backend.WarmSpec, _ ociConfig, cmd *exec.Cmd) {
-				want := []string{l.opt.Runc, "--root", l.root(), "--log", l.runcLog(spec), "--debug",
-					"run", "--preserve-fds", "1", "--bundle", l.bundle(spec), "w-team-a-1"}
+				// Through sysWrap: a mount namespace of runc's own holding
+				// the /sys bind, then runc.
+				want := append(l.sysWrap(), l.opt.Runc, "--root", l.root(), "--log", l.runcLog(spec), "--debug",
+					"run", "--preserve-fds", "1", "--bundle", l.bundle(spec), "w-team-a-1")
 				if !reflect.DeepEqual(cmd.Args, want) {
 					t.Errorf("args = %v, want %v", cmd.Args, want)
 				}
@@ -536,6 +577,36 @@ func TestCommand(t *testing.T) {
 			}},
 		{name: "the state root is a file", grant: "g1", wantErr: "not a directory",
 			setup: func(t *testing.T, l *launcher, _ *backend.WarmSpec, _ *os.File) { stateFile(t, l.root()) }},
+		// The wrapper's bind is of the host's top sysfs mount alone, so no
+		// cgroup or other mount under /sys comes with it, and it is
+		// read-only, nosuid, nodev and noexec, which the container's copy
+		// inherits as locked flags. It is in the wrapper's own mount
+		// namespace, never the agent's.
+		{name: "the /sys bind: the top sysfs mount alone, read-only, in runc's namespace, not the agent's", grant: "g1",
+			check: func(t *testing.T, l *launcher, _ backend.WarmSpec, _ ociConfig, cmd *exec.Cmd) {
+				wrap := cmd.Args[:len(l.sysWrap())]
+				out, err := exec.Command(wrap[0], append(wrap[1:], "sh", "-c", "cat /proc/self/mountinfo; ls -A "+l.sysDir()+"/fs/cgroup")...).CombinedOutput()
+				if err != nil {
+					t.Fatalf("the wrapper: %v\n%s", err, out)
+				}
+				ents := mountsIn(string(out), l.sysDir())
+				if len(ents) != 1 || ents[0].point != l.sysDir() || ents[0].fstype != "sysfs" || ents[0].root != "/" {
+					t.Fatalf("mounts under %s in the wrapper = %+v, want one sysfs with root / and nothing below it", l.sysDir(), ents)
+				}
+				for _, o := range []string{"ro", "nosuid", "nodev", "noexec"} {
+					if !strings.Contains(","+ents[0].opts+",", ","+o+",") {
+						t.Errorf("/sys bind options %q lack %s", ents[0].opts, o)
+					}
+				}
+				if strings.Contains(string(out), "cgroup.procs") {
+					t.Errorf("the host's cgroup mount came with the bind:\n%s", out)
+				}
+				if ents := mountsUnder(t, l.sysDir()); len(ents) != 0 {
+					t.Errorf("the agent's own namespace has the bind: %+v", ents)
+				}
+			}},
+		{name: "the /sys bind cannot be made", grant: "g1", wantErr: "not a directory",
+			setup: func(t *testing.T, l *launcher, _ *backend.WarmSpec, _ *os.File) { stateFile(t, l.sysDir()) }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1237,7 +1308,7 @@ func TestEndpoint(t *testing.T) {
 // template has its template bind named too and recorded beside the
 // images for the restore.
 func TestDumpExtra(t *testing.T) {
-	base := []string{"--external", "mnt[/host]:host", "--empty-ns", "net", "--network-lock", "skip"}
+	base := []string{"--external", "mnt[/host]:host", "--external", "mnt[/sys]:sys", "--empty-ns", "net", "--network-lock", "skip"}
 	for _, d := range []string{"null", "zero", "full", "random", "urandom", "tty"} {
 		base = append(base, "--external", "mnt[/dev/"+d+"]:dev-"+d)
 	}
@@ -1357,7 +1428,10 @@ func TestRestoreExtra(t *testing.T) {
 			if err != nil {
 				t.Fatalf("RestoreExtra: %v", err)
 			}
-			want := []string{"--root", l.rootfs(spec), "--external", "mnt[host]:" + spec.WorkDir, "--empty-ns", "net"}
+			want := []string{"--root", l.rootfs(spec), "--external", "mnt[host]:" + spec.WorkDir, "--external", "mnt[sys]:" + l.sysDir(), "--empty-ns", "net"}
+			if st, err := os.Stat(l.sysDir()); err != nil || !st.IsDir() {
+				t.Errorf("the restore did not make the /sys bind's mount point %s: %v", l.sysDir(), err)
+			}
 			for _, d := range deviceBinds {
 				want = append(want, "--external", "mnt[dev-"+d+"]:/dev/"+d)
 			}

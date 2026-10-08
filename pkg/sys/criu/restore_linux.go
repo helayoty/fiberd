@@ -30,7 +30,8 @@ func (o Options) RestoreWith(ctx context.Context, dir string, cgroupFD int, extr
 		"--ext-unix-sk", "--manage-cgroups=ignore",
 		"-v2", "--log-file", "restore.log"}
 	args = append(args, extra...)
-	cmd := exec.Command(o.bin(), args...)
+	argv := append(append(append([]string{}, o.Wrap...), o.bin()), args...)
+	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.ExtraFiles = files
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if cgroupFD >= 0 {
