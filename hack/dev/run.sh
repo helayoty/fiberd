@@ -15,10 +15,11 @@ NAME=${FIBERD_DEV_NAME:-fiberd-dev}
 # Rebuild when the Dockerfile or entrypoint changed: their hash is kept as
 # a label on the image, so the check does not depend on clocks or on how
 # this host's `date` parses timestamps.
-want=$(cat hack/dev/Dockerfile hack/dev/entrypoint.sh | shasum -a 256 | cut -c1-16)
+want=$(cat docker/criu/Dockerfile hack/dev/entrypoint.sh hack/dev/install-criu.sh \
+  hack/dev/criu-4b7398595-passcred-families.patch | shasum -a 256 | cut -c1-16)
 have=$(docker image inspect -f '{{index .Config.Labels "io.fiberd.dev.hash"}}' "$IMAGE" 2>/dev/null || true)
 if [ "$want" != "$have" ]; then
-  docker build -t "$IMAGE" -f hack/dev/Dockerfile --label "io.fiberd.dev.hash=$want" . >&2
+  docker build -t "$IMAGE" -f docker/criu/Dockerfile --label "io.fiberd.dev.hash=$want" . >&2
 fi
 
 tty=""

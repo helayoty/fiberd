@@ -1,0 +1,494 @@
+name: release
+
+on:
+  # Pushing a release tag releases it as it is.
+  push:
+    tags: ["v*"]
+  # A manual run releases the tag it is given, creating it if it is new.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag, for example v0.1, v2.3, v1.9-rc or v1.9.2"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+# One release at a time. Cleanup deletes every image version pushed since
+# its run started, so no other run may push in that window.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+  # The input on a manual run, the pushed tag otherwise.
+  TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  validate-tag:
+    name: validate release tag
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+      sha: ${{ steps.version.outputs.sha }}
+      image-tags: ${{ steps.version.outputs.image-tags }}
+      new-tag: ${{ steps.version.outputs.new-tag }}
+      started: ${{ steps.version.outputs.started }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - id: version
+        name: validate the tag, its commit and its branch
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          echo "started=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+          # vMAJOR.MINOR or vMAJOR.MINOR.PATCH, with an optional pre-release
+          # suffix, such as v0.1, v1.9.2 or v2.0-rc.1.
+          re='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(\.(0|[1-9][0-9]*))?(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$'
+          if [[ ! "$TAG" =~ $re ]]; then
+            echo "release tags look like v0.1, v2.3, v1.9-rc or v1.9.2" >&2
+            exit 1
+          fi
+          major=${BASH_REMATCH[1]} minor=${BASH_REMATCH[2]} patch=${BASH_REMATCH[4]} pre=${BASH_REMATCH[5]}
+          # Fail before building if the tag is already released, for example by
+          # a tag push and a manual run for the same tag.
+          if [[ $(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null) == false ]]; then
+            echo "$TAG is already released" >&2
+            exit 1
+          fi
+          # An existing tag is released as it is. A new tag points at the commit
+          # the run started from. It is created only when the release is
+          # published, so a failed run leaves no tag.
+          if sha=$(git rev-parse --verify --quiet "refs/tags/$TAG^{commit}"); then
+            echo "new-tag=false" >> "$GITHUB_OUTPUT"
+            echo "releasing existing tag $TAG at $sha"
+          else
+            sha=$GITHUB_SHA
+            echo "new-tag=true" >> "$GITHUB_OUTPUT"
+            echo "tag $TAG does not exist yet: it will be created at $sha ($GITHUB_REF_NAME)"
+          fi
+          if ! git merge-base --is-ancestor "$sha" origin/main; then
+            echo "$TAG would release $sha, which is not on main: start the run from main" >&2
+            exit 1
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          version=${TAG#v}
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          # Every release tags the image with its exact version. A final release
+          # also moves MAJOR.MINOR, MAJOR and latest. MAJOR is skipped for 0.x,
+          # which promises no stability. A pre-release moves none of them.
+          tags=("type=raw,value=$version")
+          if [[ -z "$pre" ]]; then
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+            [[ -n "$patch" ]] && tags+=("type=raw,value=$major.$minor")
+            [[ "$major" != 0 ]] && tags+=("type=raw,value=$major")
+            tags+=("type=raw,value=latest")
+          else
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          fi
+          {
+            echo "image-tags<<EOF"
+            printf '%s\n' "${tags[@]}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          printf 'image tags: %s\n' "${tags[*]}"
+
+  ci:
+    name: ci
+    needs: validate-tag
+    uses: ./.github/workflows/ci.yml
+    with:
+      ref: ${{ needs.validate-tag.outputs.sha }}
+
+  build-assets:
+    name: build release archives
+    needs: [validate-tag, ci]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.validate-tag.outputs.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: install the arm64 C cross compiler
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu
+      - name: build archives
+        env:
+          VERSION: ${{ needs.validate-tag.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Fixed file times, owners and order, and no build id, make the
+          # archives reproducible. The same commit always yields the same bytes.
+          export SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+          mkdir -p dist
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
+            export GOOS="${target%/*}" GOARCH="${target#*/}"
+            staging="$(mktemp -d)"
+            for command in fiberd grant-issuer zygotectl audit-verify; do
+              CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -buildid=" \
+                -o "$staging/$command" "./cmd/$command"
+            done
+            cp LICENSE README.md "$staging/"
+            tar -C "$staging" --sort=name --mtime="@$SOURCE_DATE_EPOCH" \
+              --owner=0 --group=0 --numeric-owner -cf - . \
+              | gzip -9n > "dist/fiberd_${VERSION}_${GOOS}_${GOARCH}.tar.gz"
+            rm -rf "$staging"
+          done
+          # Ship the zygote library that templates link, as source and as a
+          # static library per Linux architecture. arm64 builds without pointer
+          # authentication because CRIU-restored processes cannot use it.
+          pack() { # pack <archive> <dir>
+            tar -C "$2" --sort=name --mtime="@$SOURCE_DATE_EPOCH" \
+              --owner=0 --group=0 --numeric-owner -cf - . | gzip -9n > "dist/$1"
+          }
+          lib="$(mktemp -d)"
+          cp zygote/libfiberzygote.c zygote/libfiberzygote.h zygote/README.md LICENSE "$lib/"
+          pack "libfiberzygote_${VERSION}_src.tar.gz" "$lib"
+          rm "$lib/libfiberzygote.c"
+          for arch in amd64 arm64; do
+            cc=gcc flags=""
+            if [[ "$arch" == arm64 ]]; then
+              cc=aarch64-linux-gnu-gcc flags=-mbranch-protection=none
+            fi
+            "$cc" -O2 -Wall -Wextra -pthread $flags -ffile-prefix-map="$PWD"=. \
+              -c zygote/libfiberzygote.c -o "$lib/libfiberzygote.o"
+            rm -f "$lib/libfiberzygote.a"
+            ar rcsD "$lib/libfiberzygote.a" "$lib/libfiberzygote.o"
+            rm "$lib/libfiberzygote.o"
+            pack "libfiberzygote_${VERSION}_linux_${arch}.tar.gz" "$lib"
+          done
+          rm -rf "$lib"
+          (cd dist && sha256sum -- *.tar.gz > SHA256SUMS)
+      - name: attest archive provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-checksums: dist/SHA256SUMS
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-assets
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  build-image:
+    name: build image ${{ matrix.platform }}
+    needs: [validate-tag, ci]
+    # Each platform builds on a native runner. Emulating arm64 under QEMU
+    # makes the image's CRIU build many times slower.
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - platform: linux/amd64
+            arch: amd64
+            runner: ubuntu-24.04
+          - platform: linux/arm64
+            arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.validate-tag.outputs.sha }}
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: metadata
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ env.IMAGE }}
+          # Version and revision of the tag, not of the branch the run was
+          # started on.
+          tags: type=raw,value=${{ needs.validate-tag.outputs.version }}
+          labels: org.opencontainers.image.revision=${{ needs.validate-tag.outputs.sha }}
+      - id: build
+        name: build and push by digest
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: docker/fiberd/Dockerfile
+          platforms: ${{ matrix.platform }}
+          labels: ${{ steps.metadata.outputs.labels }}
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=image-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=image-${{ matrix.arch }}
+          provenance: mode=max
+          sbom: true
+      - name: record digest
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/digests"
+          digest="${{ steps.build.outputs.digest }}"
+          touch "$RUNNER_TEMP/digests/${digest#sha256:}"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: digest-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # The steps that are hard to undo come last. The release is drafted
+  # first, which makes no git tag. Then the image tags move. Publishing the
+  # release creates the tag. Cleanup undoes what a failed or cancelled run
+  # left behind.
+  release-draft:
+    name: draft GitHub release
+    needs: [validate-tag, build-assets, build-image]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-assets
+          path: dist
+      - name: create or refresh the draft
+        uses: ncipollo/release-action@339a81892b84b4eeb0f6e744e4574d79d0d9b8dd # v1.21.0
+        with:
+          tag: ${{ env.TAG }}
+          name: ${{ env.TAG }}
+          # Used only for a new tag. Publishing creates it at the commit that
+          # was built and tested. A draft makes no tag.
+          commit: ${{ needs.validate-tag.outputs.sha }}
+          draft: true
+          prerelease: ${{ needs.validate-tag.outputs.prerelease }}
+          generateReleaseNotes: true
+          artifacts: dist/*
+          artifactErrorsFailBuild: true
+          # A rerun refreshes its own draft. A published release is refused.
+          allowUpdates: true
+          updateOnlyUnreleased: true
+          replacesArtifacts: true
+
+  publish-image:
+    name: publish multi-arch image
+    needs: [validate-tag, build-image, release-draft]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    outputs:
+      digest: ${{ steps.manifest.outputs.digest }}
+      previous: ${{ steps.previous.outputs.tags }}
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: digest-*
+          path: ${{ runner.temp }}/digests
+          merge-multiple: true
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: previous
+        name: record where each tag points before moving it
+        shell: bash
+        env:
+          TAGS: ${{ needs.validate-tag.outputs.image-tags }}
+        run: |
+          set -euo pipefail
+          # tag=digest for a tag that exists, tag= for one this run creates.
+          prev=""
+          while read -r line; do
+            tag=${line#type=raw,value=}
+            [[ -n "$tag" ]] || continue
+            if d=$(docker buildx imagetools inspect "$IMAGE:$tag" --format '{{json .Manifest}}' 2>/dev/null | jq -er .digest); then
+              prev+="$tag=$d "
+            else
+              prev+="$tag= "
+            fi
+          done <<< "$TAGS"
+          echo "tags=$prev" >> "$GITHUB_OUTPUT"
+          echo "before: $prev"
+      - id: metadata
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ env.IMAGE }}
+          # validate-tag computes these because semver patterns refuse v0.1.
+          tags: ${{ needs.validate-tag.outputs.image-tags }}
+      - id: manifest
+        name: create the multi-arch manifest
+        shell: bash
+        env:
+          VERSION: ${{ needs.validate-tag.outputs.version }}
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          set -euo pipefail
+          tags=$(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON")
+          # shellcheck disable=SC2046,SC2086
+          docker buildx imagetools create $tags $(printf "$IMAGE@sha256:%s " *)
+          digest=$(docker buildx imagetools inspect "$IMAGE:$VERSION" --format '{{json .Manifest}}' | jq -r .digest)
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+      - name: attest image provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.manifest.outputs.digest }}
+          push-to-registry: true
+
+  publish-release:
+    name: publish GitHub release
+    needs: [validate-tag, release-draft, publish-image]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: add the image to the release notes
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.validate-tag.outputs.version }}
+          IMAGE_DIGEST: ${{ needs.publish-image.outputs.digest }}
+        run: |
+          set -euo pipefail
+          {
+            cat <<EOF
+          ## Container image
+
+          \`${IMAGE}:${VERSION}\`
+
+          Digest: \`${IMAGE_DIGEST}\`
+
+          ## Verify
+
+          \`\`\`bash
+          sha256sum -c SHA256SUMS
+          gh attestation verify fiberd_${VERSION}_linux_amd64.tar.gz --repo ${GITHUB_REPOSITORY}
+          gh attestation verify oci://${IMAGE}@${IMAGE_DIGEST} --repo ${GITHUB_REPOSITORY}
+          \`\`\`
+
+          EOF
+            gh release view "$TAG" --json body --jq .body
+          } > release-notes.md
+      - name: publish the release
+        uses: ncipollo/release-action@339a81892b84b4eeb0f6e744e4574d79d0d9b8dd # v1.21.0
+        with:
+          tag: ${{ env.TAG }}
+          draft: false
+          bodyFile: release-notes.md
+          allowUpdates: true
+          updateOnlyUnreleased: true
+          omitNameDuringUpdate: true
+          omitPrereleaseDuringUpdate: true
+          # A pre-release never becomes the repository's latest release.
+          makeLatest: ${{ needs.validate-tag.outputs.prerelease == 'true' && 'false' || 'legacy' }}
+
+  cleanup:
+    name: clean up a failed or cancelled release
+    needs: [validate-tag, ci, build-assets, build-image, release-draft, publish-image, publish-release]
+    if: >-
+      always() && needs.validate-tag.result == 'success' &&
+      (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      packages: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      PREVIOUS: ${{ needs.publish-image.outputs.previous }}
+      STARTED: ${{ needs.validate-tag.outputs.started }}
+    steps:
+      - id: release
+        name: delete the draft release
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Ask GitHub whether the release is live. The publish job can fail
+          # after flipping it live, so its result is not proof either way.
+          if ! draft=$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null); then
+            echo "no release for $TAG"
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          elif [[ "$draft" == true ]]; then
+            # A draft never created the git tag, so there is no tag to remove.
+            gh release delete "$TAG" --yes
+            echo "deleted the draft release $TAG"
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "$TAG is published, so its image and tags stay"
+            echo "published=true" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        if: steps.release.outputs.published == 'false'
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        if: steps.release.outputs.published == 'false'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: move image tags back and delete what this run pushed
+        if: steps.release.outputs.published == 'false'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Tags that existed point back where they were. A tag this run
+          # created goes away with the version that carries it.
+          kept=()
+          for pair in $PREVIOUS; do
+            tag=${pair%%=*} digest=${pair#*=}
+            [[ -n "$digest" ]] || continue
+            if docker buildx imagetools create -t "$IMAGE:$tag" "$IMAGE@$digest"; then
+              echo "moved $tag back to $digest"
+            else
+              echo "::warning::could not move $tag back to $digest"
+            fi
+            kept+=("$tag")
+          done
+          owner=${GITHUB_REPOSITORY%/*} pkg=${GITHUB_REPOSITORY#*/}
+          if [[ $(gh api "repos/$GITHUB_REPOSITORY" --jq .owner.type) == Organization ]]; then
+            base="orgs/$owner/packages/container/$pkg/versions"
+          else
+            base="users/$owner/packages/container/$pkg/versions"
+          fi
+          # Every version created since this run started is this run's, because
+          # one release runs at a time. A version that still holds an older tag
+          # is kept, since deleting it would remove that tag.
+          keep=$(printf '%s\n' "${kept[@]}" | jq -R . | jq -sc .)
+          if ! ids=$(gh api --paginate "$base" --jq ".[] | select(.created_at >= \"$STARTED\")
+              | select((.metadata.container.tags - $keep) == .metadata.container.tags) | .id" 2>/dev/null); then
+            echo "no image package yet; nothing pushed"
+            exit 0
+          fi
+          # GHCR refuses to delete a package's last tagged version (a failed
+          # first release). Report it and go on with the rest.
+          for id in $ids; do
+            if gh api -X DELETE "$base/$id"; then
+              echo "deleted image version $id"
+            else
+              echo "::warning::could not delete image version $id; remove it by hand"
+            fi
+          done

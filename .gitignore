@@ -13,5 +13,9 @@
 # Rust build output of the Hyperlight guest and helper
 hack/hyperlight/*/target/
 
-fiberd
-zb
+# Binaries built at the repository root. Anchored, so cmd/fiberd and
+# docker/fiberd are never ignored.
+/fiberd
+
+# go build output of the substrate example worker
+examples/substrate/ateom-fiberd

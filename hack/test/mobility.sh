@@ -25,13 +25,20 @@ DIGEST=$(bin/zygotectl push -dir "$STATE/art" -ref "$REG/zygotes/ref:mob" -plain
 echo "template $DIGEST"
 
 bin/grant-issuer keygen -alg EdDSA -out "$STATE/issuer-key.json" >/dev/null
+# Both homes share one delta key, because each claims only what a key it
+# trusts signed.
+bin/grant-issuer keygen -alg EdDSA -out "$STATE/delta-key.json" >/dev/null
+# Both homes share one seal key, because each opens only what was sealed
+# with it.
+bin/grant-issuer keygen -alg A256GCM -out "$STATE/delta-seal-key.json" >/dev/null
 bin/grant-issuer serve -key "$STATE/issuer-key.json" -addr "$ISSUER_ADDR" -issuer "$ISSUER_URL" >"$STATE/issuer.log" 2>&1 &
 PIDS=$!
 
 start_home() { # name grpc http
-  bin/fiberd -state "$STATE/$1" -node-id "$1" -verifier jwks -issuer "$ISSUER_URL" -jwks-max-stale 10m \
+  bin/fiberd -state "$STATE/$1" -node-id "$1" -verifier jwks -issuer "$ISSUER_URL" -jwks-max-stale 10m -insecure-plaintext \
     -listen "127.0.0.1:$2" -http "127.0.0.1:$3" -runtime proc -run-dir "/tmp/fz-$1" \
-    -registry "$REG/zygotes/ref" -delta-registry "$REG/deltas" -registry-plain-http \
+    -registry "$REG/zygotes/ref" -delta-registry "$REG/deltas" -delta-key "$STATE/delta-key.json" \
+    -delta-seal-key "$STATE/delta-seal-key.json" -registry-plain-http \
     -status-interval 100ms >"$STATE/$1.log" 2>&1 &
   PIDS="$PIDS $!"
   for _ in $(seq 1 100); do curl -sf "http://127.0.0.1:$3/healthz" >/dev/null 2>&1 && return 0; sleep 0.1; done
@@ -41,7 +48,7 @@ trap 'kill $PIDS 2>/dev/null; wait $PIDS 2>/dev/null || true' EXIT
 start_home home-a 18484 18485
 start_home home-b 18486 18487
 
-mint() { bin/grant-issuer mint -key "$STATE/issuer-key.json" -issuer "$ISSUER_URL" -aud "$1" -template "$DIGEST" -max 4 -w-budget 64Mi -min-tier FIBER_CHECKPOINT -ttl 1h; }
+mint() { bin/grant-issuer mint -key "$STATE/issuer-key.json" -issuer "$ISSUER_URL" -aud "$1" -template "$DIGEST" -max 4 -w-budget 64Mi -min-tier FIBER_CHECKPOINT -isolation TRUSTED -ttl 1h; }
 TA=$(mint home-a); TB=$(mint home-b)
 j() { python3 -c 'import json,sys;print(json.dumps(sys.argv[1]))' "$1" 2>/dev/null || printf '"%s"' "$1"; }
 clone() { curl -s -X POST "http://127.0.0.1:$1/v1/clone" -d "{\"grantJwt\":$(j "$2"),\"session\":\"S\"}"; }

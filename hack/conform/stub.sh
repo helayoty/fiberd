@@ -12,6 +12,9 @@
 #
 # State lives in $CONFORM_STATE (default bin/conform-state), so the
 # restart hook keeps the epoch file and the audit spool across restarts.
+#
+# The agent is bin/fiberd-testhooks: fiberd built with -tags
+# fiberd_testhooks, for -admin-unsafe and the lane and scope-lost hooks.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
@@ -29,6 +32,9 @@ CGROOT=${FIBERD_CGROUP_ROOT:-/sys/fs/cgroup/fiberd}
 # fork backends only. --device-mb gives the reference zygote a simulated
 # device, which is what C8 budgets.
 ENGINE_HOOK=()
+# proc and runc fibers share the host kernel: they serve trusted grants only.
+ISOLATION=UNTRUSTED
+if [ "$RUNTIME" = proc ] || [ "$RUNTIME" = runc ]; then ISOLATION=TRUSTED; fi
 if [ "$RUNTIME" = proc ]; then
   TIER=${CONFORM_TIER:-FIBER_CHECKPOINT}   # what proc offers when criu check passes
   RUNTIME_FLAGS=(-runtime proc -template "default=$PWD/bin/refzygote --heap-mb 32 --device-mb 64" -run-dir /tmp/fz-conform)
@@ -56,7 +62,7 @@ fi
 
 wait_healthy() {
   for _ in $(seq 1 100); do
-    if curl -sf --unix-socket "$STATE/admin.sock" http://x/healthz >/dev/null 2>&1; then return 0; fi
+    if curl -sf --unix-socket "$STATE/private/admin.sock" http://x/healthz >/dev/null 2>&1; then return 0; fi
     sleep 0.1
   done
   echo "fiberd did not become healthy; log:" >&2; tail -20 "$LOG" >&2; return 1
@@ -79,7 +85,7 @@ start() {
   if [ "$SIGNED" = 1 ]; then
     verify=(-verifier jwks -issuer "$ISSUER_URL" -jwks-max-stale 10m)
   fi
-  bin/fiberd -state "$STATE" -node-id "$NODE" "${verify[@]}" \
+  bin/fiberd-testhooks -state "$STATE" -node-id "$NODE" "${verify[@]}" -insecure-plaintext \
     -listen "$ADDR" "${RUNTIME_FLAGS[@]}" -admin-unsafe \
     -stale-ttl 5s -status-interval 50ms >>"$LOG" 2>&1 &
   echo $! >"$STATE/pid"
@@ -98,8 +104,8 @@ stop() { stop_pidfile "$STATE/pid"; }
 
 lane() {
   case "$1" in
-    up)   curl -sf --unix-socket "$STATE/admin.sock" -X POST http://x/lane -d '{"healthy":true}' >/dev/null ;;
-    down) curl -sf --unix-socket "$STATE/admin.sock" -X POST http://x/lane -d '{"healthy":false}' >/dev/null ;;
+    up)   curl -sf --unix-socket "$STATE/private/admin.sock" -X POST http://x/lane -d '{"healthy":true}' >/dev/null ;;
+    down) curl -sf --unix-socket "$STATE/private/admin.sock" -X POST http://x/lane -d '{"healthy":false}' >/dev/null ;;
     *) echo "lane up|down" >&2; return 2 ;;
   esac
 }
@@ -108,7 +114,7 @@ lane() {
 # running (a namespace, a fabric claim): the agent bumps its epoch in
 # place, which revokes every fence at once.
 scope_lost() {
-  curl -sf --unix-socket "$STATE/admin.sock" -X POST http://x/scope-lost >/dev/null
+  curl -sf --unix-socket "$STATE/private/admin.sock" -X POST http://x/scope-lost >/dev/null
 }
 
 # engine-kill <grant>: end the grant's zygote (its engine) as a crash
@@ -128,7 +134,8 @@ case "${1:-}" in
   scope-lost) scope_lost ;;
   run)
     rm -rf "$STATE"; mkdir -p "$STATE"
-    go build -o bin/ ./cmd/fiberd ./cmd/grant-issuer
+    go build -o bin/ ./cmd/grant-issuer
+    go build -tags fiberd_testhooks -o bin/fiberd-testhooks ./cmd/fiberd
     # bin/ is shared between the macOS host and the Linux container; go
     # refuses to overwrite a test binary built for the other OS.
     rm -f bin/grant-conform
@@ -147,8 +154,8 @@ case "${1:-}" in
       trap stop EXIT
     fi
     start
-    bin/grant-conform -test.v -target "$ADDR" -target-tier "$TIER" -node-id "$NODE" "${mint[@]}" \
-      -restart-cmd "$0 restart" -cp-health-cmd "$0 lane \$1" -audit-file "$STATE/audit.jsonl" \
+    bin/grant-conform -test.v -target "$ADDR" -target-tier "$TIER" -node-id "$NODE" -isolation "$ISOLATION" "${mint[@]}" \
+      -restart-cmd "$0 restart" -cp-health-cmd "$0 lane \$1" -audit-file "$STATE/private/audit.jsonl" \
       -scope-cmd "$0 scope-lost" ${ENGINE_HOOK[@]+"${ENGINE_HOOK[@]}"} "${@:2}"
     ;;
   *) echo "usage: $0 run|start|stop|restart|lane up|down" >&2; exit 2 ;;

@@ -10,9 +10,9 @@ PKGS    := ./...
 EXAMPLES := examples/kubernetes examples/slurm examples/knative examples/kata examples/substrate
 
 .PHONY: all build test vet lint proto proto-lint proto-check clean \
-        bench zygote conform-bin conform-stub conform-signed conform-proc conform-gvisor conform-runc conform-hyperlight-fake conform-hyperlight \
+        bench zygote conform-stub conform-signed conform-proc conform-gvisor conform-runc conform-hyperlight-fake conform-hyperlight \
         hyperlight-helper linux-hyperlight-check overcommit kind-up kind-down kind-image conform-kind slurm-up slurm-down conform-slurm example-knative example-knative-kvm example-kata example-substrate \
-        registry-start registry-stop zygote-artifact mobility linux-shell linux-check linux-gvisor-check linux-test linux-lint
+        registry-start mobility linux-shell linux-check linux-gvisor-check linux-test linux-lint bench-e2e
 
 all: build
 
@@ -21,10 +21,6 @@ all: build
 build: ## build every binary under cmd/ into $(BIN)/
 	@mkdir -p $(BIN)
 	$(GO) build -o $(BIN)/ ./cmd/...
-
-conform-bin: ## build the conformance test binary
-	@mkdir -p $(BIN)
-	$(GO) test -c -o $(BIN)/grant-conform ./tests/conform
 
 conform-stub: ## run C1-C10 against a stub-runtime fiberd (all hooks wired)
 	hack/conform/stub.sh run
@@ -118,16 +114,8 @@ overcommit: ## 2x overcommit storm under a 384 MiB container cap: park must fire
 registry-start: ## registry:2 at 127.0.0.1:5000 (fiberd-registry:5000 inside the dev container)
 	hack/registry/run.sh start
 
-registry-stop:
-	hack/registry/run.sh stop
-
 mobility: ## a session moves home-a -> home-b -> home-a through the registry (needs registry-start)
 	hack/dev/run.sh hack/test/mobility.sh
-
-zygote-artifact: ## build the reference zygote artifact (with CRIU images) in the dev container and push it
-	hack/dev/run.sh sh -c 'make -s zygote && go build -o bin/ ./cmd/zygotectl && \
-	  bin/zygotectl build -zygote bin/refzygote -args "--heap-mb 32" -out bin/zygote-artifact && \
-	  bin/zygotectl push -dir bin/zygote-artifact -ref fiberd-registry:5000/zygotes/ref:latest -plain-http'
 
 test: ## unit tests (host OS; Linux-only packages compile to stubs elsewhere), fiberd and the examples
 	$(GO) test -race -count=1 $(PKGS)
@@ -156,16 +144,12 @@ proto-check: proto proto-lint ## fail if generated code is out of date (CI)
 	@git diff --exit-code -- api/ || \
 	  (echo "generated proto code is stale: run 'make proto' and commit" && exit 1)
 
-## C: the zygote library + reference workload, and the fork/CoW bench.
+## C: the zygote library + reference workload.
 ## Linux only (clone3, close_range); build them inside the dev container.
 
-zygote: ## build bin/refzygote (the reference zygote; conformance template)
+zygote: ## build bin/refzygote, the reference zygote and conformance template, with TLS for handoff grants
 	@mkdir -p $(BIN)
-	$(CC) -O2 -Wall -Wextra -pthread -o $(BIN)/refzygote hack/zygote/refzygote.c hack/zygote/libfiberzygote.c
-
-bench: ## build the fork/CoW bench
-	@mkdir -p $(BIN)
-	$(CC) -O2 -o $(BIN)/zb zygote_bench.c
+	$(CC) -O2 -Wall -Wextra -pthread -DFZ_TLS -o $(BIN)/refzygote zygote/refzygote.c zygote/libfiberzygote.c -lssl -lcrypto
 
 ## Linux-only work runs in the dev container (hack/dev): privileged,
 ## private cgroup namespace, criu installed. Needs Docker.
@@ -184,6 +168,13 @@ linux-test: ## unit tests inside the container (Linux-only packages included), f
 
 linux-lint: ## golangci-lint inside the container, so the Linux-only files are analysed too (what CI runs)
 	hack/dev/run.sh make lint
+
+bench: ## the 50-way storm and throughput through the proc runtime (TestStormNumbers), in the container
+	hack/dev/run.sh env FIBERD_BENCH=1 go test -count=1 -v -run TestStormNumbers ./tests/proc/
+
+bench-e2e: ## time Clone over gRPC end to end, per stage, in the container (audit and snapshot on a disk volume)
+	FIBERD_DEV_DOCKER_ARGS="-v fiberd-bench:/bench" hack/dev/run.sh env FIBERD_BENCH=1 FIBERD_BENCH_STATE=/bench \
+	  go test -count=1 -v -run TestE2ECloneNumbers ./tests/proc/
 
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
