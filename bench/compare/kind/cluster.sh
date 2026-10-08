@@ -27,6 +27,9 @@ RUNSC_SHA512_AARCH64=6394fd161a4af0dc9a2c29f75c3016d05275a55744f124e12023fa7666a
 SHIM_SHA512_X86_64=b60d1c418b841ab046951cc7a91f490a221198fbe81ec55dc364432578fddd44e97063793ce6651be397af2f64ec47170dff77a45db277819c3fb08fec9f3ced
 SHIM_SHA512_AARCH64=a7c0147f635938225e41c9660b95ba5235121a142c11830794e2a52b472783547e2b089bdba4f1344d30f65aeee651b377a1cafadd262a134f5e1ac10c6bf4bb
 STATE=${COMPARE_STATE:-$PWD/bin/compare-state}
+# kind v0.30.0's node image. Its containerd 2.1.3 replaces 2.1.1, which
+# segfaulted under bursts of Pods.
+NODE_IMAGE=kindest/node:v1.34.0@sha256:7416a61b42b1662ca6ca89f02028ac133a309a2a30ba309614e8ec94d976dc5a
 NODE="$CLUSTER-control-plane"
 KC=(kubectl --context "kind-$CLUSTER")
 
@@ -94,7 +97,7 @@ nodes:
             bind-address: "0.0.0.0"
             authorization-always-allow-paths: /healthz,/readyz,/livez,/metrics
 EOF
-  kind get clusters 2>/dev/null | grep -qx "$CLUSTER" || kind create cluster --name "$CLUSTER" --config "$STATE/kind.yaml" --wait 120s
+  kind get clusters 2>/dev/null | grep -qx "$CLUSTER" || kind create cluster --name "$CLUSTER" --image "$NODE_IMAGE" --config "$STATE/kind.yaml" --wait 120s
   # journald's per-service rate limit can drop the goroutine dump of a
   # containerd crash under a burst, so the node keeps every line.
   docker exec "$NODE" sh -c 'test -f /etc/systemd/journald.conf.d/compare.conf || {

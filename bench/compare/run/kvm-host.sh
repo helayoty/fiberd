@@ -20,12 +20,12 @@ sudo apt-get install -y -q cpu-checker && sudo kvm-ok
 
 # kind, kubectl and Go, each pinned by version and sha256 (from
 # kind-linux-amd64.sha256sum, kubectl.sha256 and go.dev/dl), so a changed
-# download fails. kubectl matches the node image kind v0.29.0 defaults to.
+# download fails. kubectl matches the node image of kind/cluster.sh.
 [ "$ARCH" = x86_64 ] || { echo "the tool pins below are x86_64 only" >&2; exit 1; }
-KIND_VERSION=v0.29.0
-KIND_SHA256=c72eda46430f065fb45c5f70e7c957cc9209402ef309294821978677c8fb3284
-KUBE_VERSION=v1.33.1
-KUBECTL_SHA256=5de4e9f2266738fd112b721265a0c1cd7f4e5208b670f811861f699474a100a3
+KIND_VERSION=v0.30.0
+KIND_SHA256=517ab7fc89ddeed5fa65abf71530d90648d9638ef0c4cde22c2c11f8097b8889
+KUBE_VERSION=v1.34.0
+KUBECTL_SHA256=cfda68cba5848bc3b6c6135ae2f20ba2c78de20059f68789c090166d6abc3e2c
 GO_VERSION=1.26.7
 GO_SHA256=ffb5f8de10c62550dfddab66b36b57030721e0a44a3218e9e1181d7b59f121ca
 curl -fsSLo /tmp/kind "https://kind.sigs.k8s.io/dl/$KIND_VERSION/kind-linux-amd64"

@@ -91,7 +91,7 @@ jobs:
       - uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa # v1.15.1
         if: inputs.groups != 'microvm'
         with:
-          version: v0.29.0
+          version: v0.30.0
           install_only: true
       # Firecracker and a guest kernel, the steps of
       # bench/compare/run/kvm-host.sh that apply to a runner.
@@ -130,6 +130,17 @@ jobs:
             echo "## Results (medians of ${COMPARE_RUNS} runs, cold run discarded)"
             cd bench/compare && go run ./cmd/summarize -markdown ../../bin/compare-state/phase*/*.jsonl
           } >> "$GITHUB_STEP_SUMMARY" || echo "no results to summarize" >> "$GITHUB_STEP_SUMMARY"
+      # The runner's systemd-coredump keeps the core of a node process that
+      # died on a signal. A Go core opens in dlv beside its own binary.
+      - name: keep containerd's core on failure
+        if: failure()
+        run: |
+          sudo coredumpctl list --no-pager 2>/dev/null | tail -n 20 || true
+          sudo coredumpctl info --no-pager containerd 2>/dev/null | head -n 80 || true
+          mkdir -p bin/compare-state/cores
+          sudo coredumpctl dump --no-pager -o bin/compare-state/cores/containerd.core containerd >/dev/null 2>&1 || true
+          bin=$(docker exec compare-control-plane sh -c 'command -v containerd' 2>/dev/null) &&
+            docker cp "compare-control-plane:$bin" bin/compare-state/cores/containerd || true
       - name: make the state readable for the upload (Firecracker ran as root)
         if: always()
         run: sudo chmod -R a+rX bin/compare-state 2>/dev/null || true
@@ -142,6 +153,7 @@ jobs:
             bin/compare-state/**/*.jsonl
             bin/compare-state/**/summary.txt
             bin/compare-state/host.txt
+            bin/compare-state/cores/*
           if-no-files-found: warn
       # Every Pod of the compare namespace, not a fixed list, so a home
       # that never became ready (a grant Pod of any runtime, the client)
