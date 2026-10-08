@@ -16,6 +16,7 @@ import (
 
 	"github.com/helayoty/fiberd/pkg/core"
 	"github.com/helayoty/fiberd/pkg/grant"
+	"github.com/helayoty/fiberd/pkg/tlsconf"
 )
 
 var (
@@ -23,6 +24,7 @@ var (
 	targetTier = flag.String("target-tier", "FIBER_CHECKPOINT", "tier the target advertises")
 	nodeID     = flag.String("node-id", "", "audience for minted grants: the target's node id (required)")
 	template   = flag.String("template", "sha256:conform", "template digest for minted grants")
+	isolation  = flag.String("isolation", "UNTRUSTED", "isolation for minted grants: TRUSTED for a target on proc or runc")
 	mint       = flag.String("mint", "insecure-json", "how to mint grants: jwt (sign with -issuer-key as -issuer) or insecure-json")
 	issuerKey  = flag.String("issuer-key", "", "private JWK for -mint=jwt (from grant-issuer keygen)")
 	issuerURL  = flag.String("issuer", "", "issuer URL for -mint=jwt: what the target verifies against")
@@ -33,6 +35,9 @@ var (
 	engineCmd  = flag.String("engine-kill-cmd", "", "hook: $1 = grant uid; end the grant's warm template instance (its engine) as a crash would")
 	scopeCmd   = flag.String("scope-cmd", "", "hook: the home's scope is lost while it runs (namespace, fabric claim); it must revoke every fence")
 	caseTO     = flag.Duration("case-timeout", 15*time.Second, "per-case timeout")
+	tlsCA      = flag.String("tls-ca", "", "PEM CA bundle the target's certificate chains to (mutual TLS; empty dials plaintext)")
+	tlsCert    = flag.String("tls-cert", "", "PEM client certificate presented to the target")
+	tlsKey     = flag.String("tls-key", "", "PEM private key of -tls-cert")
 )
 
 func TestMain(m *testing.M) {
@@ -57,7 +62,14 @@ func TestConformance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	d := Driver{Target: *target, TargetTier: tier, NodeID: *nodeID, Template: *template, Timeout: *caseTO}
+	iso, err := core.ParseIsolation(*isolation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := Driver{Target: *target, TargetTier: tier, NodeID: *nodeID, Template: *template, Isolation: iso, Timeout: *caseTO}
+	if d.TLS, err = tlsconf.Client(*tlsCA, *tlsCert, *tlsKey); err != nil {
+		t.Fatal(err)
+	}
 
 	switch *mint {
 	case "insecure-json":

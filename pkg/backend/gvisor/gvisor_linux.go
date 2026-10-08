@@ -37,6 +37,7 @@ package gvisor
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -56,6 +57,18 @@ import (
 	"github.com/helayoty/fiberd/pkg/core"
 )
 
+const (
+	// Every sandbox runs on the systrap platform (no KVM needed), and every
+	// image is written and read with O_DIRECT so its pages are never charged
+	// to the leaf that made it.
+	runscPlatform = "systrap"
+	directIO      = "--direct"
+
+	createDeadline = 500 * time.Millisecond
+	resumeDeadline = 2 * time.Second
+	readyMarker    = "warm.ready"
+)
+
 // Options configure the gVisor backend.
 type Options struct {
 	// Runsc names the runsc binary (default "runsc").
@@ -67,36 +80,20 @@ type Options struct {
 	// (default /var/lib/fiberd/gvisor). Not a tmpfs: images are memory
 	// otherwise.
 	StateDir string
-	// Platform is the runsc platform (default "systrap": no KVM needed).
-	Platform string
-	// OverheadBytes is the fixed footprint of one restored sandbox: the
-	// sentry plus the template's pages. Added to every fiber's
-	// memory.max, subtracted from its measured W. 0 (the default) lets
-	// the host measure it as the warm template sandbox's resident size.
-	OverheadBytes uint64
-	// NoDirectIO writes park images through the page cache instead of
-	// O_DIRECT (for filesystems without O_DIRECT support).
-	NoDirectIO bool
-	// Debug writes runsc debug logs under StateDir/log.
-	Debug bool
 }
 
-const (
-	createDeadline = 500 * time.Millisecond
-	resumeDeadline = 2 * time.Second
-	readyMarker    = "warm.ready"
-)
-
-// Backend implements backend.Backend, Platformer, DeadlineAdvisor and
-// Overheader.
+// Backend implements backend.Backend, Platformer, DeadlineAdvisor,
+// Overheader and Prober.
 type Backend struct {
 	opt     Options
 	version string
 	tier    core.Tier
+	why     error // why tier is unspecified, nil when it is not
 
 	mu    sync.Mutex
 	warms map[string]*warm // warm id
 	boxes map[string]*box  // fiber id
+	gen   uint64           // incarnations started, the suffix of every cid
 	exits chan backend.Exit
 }
 
@@ -106,6 +103,11 @@ type warm struct {
 	argv    []string
 	workDir string
 	images  string // template checkpoint
+	// template is the host directory bound at backend.TemplateMount in
+	// every sandbox of this instance: the backend's own verified copy of
+	// the registry template's executable. Empty for a template that
+	// lives in the rootfs.
+	template string
 }
 
 type box struct {
@@ -116,8 +118,8 @@ type box struct {
 	done     chan struct{} // closed when the sandbox has exited
 }
 
-// New opens the backend; the tier is FIBER_SNAPSHOT when runsc answers
-// and the rootfs exists, else the backend refuses to warm anything.
+// New opens the backend. The tier is FIBER_SNAPSHOT when runsc answers
+// and the rootfs exists. Otherwise it offers none, and ProbeErr says why.
 func New(o Options) backend.Backend {
 	if o.Runsc == "" {
 		o.Runsc = "runsc"
@@ -125,26 +127,35 @@ func New(o Options) backend.Backend {
 	if o.StateDir == "" {
 		o.StateDir = "/var/lib/fiberd/gvisor"
 	}
-	if o.Platform == "" {
-		o.Platform = "systrap"
-	}
 	b := &Backend{opt: o, warms: map[string]*warm{}, boxes: map[string]*box{}, exits: make(chan backend.Exit, 1024)}
 	out, err := exec.Command(o.Runsc, "--version").Output()
 	if err != nil {
-		log.Printf("gvisor: %s unavailable: %v", o.Runsc, err)
+		b.why = fmt.Errorf("runsc %s unavailable: %w", o.Runsc, err)
 		return b
 	}
 	b.version = strings.TrimSpace(strings.TrimPrefix(strings.SplitN(string(out), "\n", 2)[0], "runsc version "))
-	if st, err := os.Stat(o.Rootfs); err != nil || !st.IsDir() {
-		log.Printf("gvisor: rootfs %q unusable: %v", o.Rootfs, err)
+	b.sweep()
+	if st, err := os.Stat(o.Rootfs); err != nil {
+		b.why = fmt.Errorf("rootfs unusable: %w", err)
+		return b
+	} else if !st.IsDir() {
+		b.why = fmt.Errorf("rootfs %s is not a directory", o.Rootfs)
 		return b
 	}
 	b.tier = core.TierSnapshot
 	return b
 }
 
+// ProbeErr is why New found no tier: runsc does not answer, or the
+// rootfs is not a directory.
+func (b *Backend) ProbeErr() error { return b.why }
+
 func (b *Backend) Name() string    { return "gvisor" }
 func (b *Backend) Tier() core.Tier { return b.tier }
+
+// IsolatesTenants is true because a fiber's syscalls are served by its
+// sandbox's Sentry, not by the host kernel.
+func (b *Backend) IsolatesTenants() bool { return true }
 
 // Platform: a gVisor image depends on the runsc release and the rootfs,
 // not on the host kernel or libc.
@@ -155,11 +166,15 @@ func (b *Backend) Platform() artifact.Platform {
 func (b *Backend) DefaultDeadlines() (time.Duration, time.Duration) {
 	return createDeadline, resumeDeadline
 }
-func (b *Backend) FiberOverheadBytes() uint64 { return b.opt.OverheadBytes }
 
-// EndpointSchemes: unix only. A TCP listener inside a sandbox is a host
-// socket (not checkpointable) unless the sandbox runs netstack in a
-// network namespace of its own, which this backend does not set up.
+// FiberOverheadBytes is 0, so the host measures the warm template
+// sandbox's resident size. One restored sandbox costs the Sentry plus the
+// template's pages.
+func (b *Backend) FiberOverheadBytes() uint64 { return 0 }
+
+// EndpointSchemes: unix only. The sandbox has no network
+// (--network=none), so a tcp endpoint policy is served by the host's
+// relay in front of the unix socket, and the sandbox stays network-free.
 func (b *Backend) EndpointSchemes() []string { return []string{"unix"} }
 
 // WCounter: the guest's memory is the sentry's memfd, which the leaf
@@ -167,13 +182,14 @@ func (b *Backend) EndpointSchemes() []string { return []string{"unix"} }
 // different in every sandbox) is not the fiber's working set.
 func (b *Backend) WCounter() string { return "shmem" }
 
+// globalArgs are the flags every runsc command runs with. Huge pages for
+// the guest's memory are off. W is the leaf's shmem above the template's
+// measured footprint, and with 2 MiB pages a fresh sandbox lands several
+// MiB off that in either direction. That is wider than a small budget and
+// hides a real overrun.
 func (b *Backend) globalArgs() []string {
-	args := []string{"--root=" + filepath.Join(b.opt.StateDir, "root"), "--platform=" + b.opt.Platform,
-		"--network=none", "--ignore-cgroups", "--host-uds=all", "--overlay2=none"}
-	if b.opt.Debug {
-		args = append(args, "--debug", "--debug-log="+filepath.Join(b.opt.StateDir, "log")+"/", "--log-format=text")
-	}
-	return args
+	return []string{"--root=" + filepath.Join(b.opt.StateDir, "root"), "--platform=" + runscPlatform,
+		"--network=none", "--ignore-cgroups", "--host-uds=all", "--overlay2=none", "--app-huge-pages=false"}
 }
 
 // runsc runs one runsc command. cgroupFD >= 0 starts it (and so the
@@ -182,6 +198,10 @@ func (b *Backend) globalArgs() []string {
 // it leaves behind inherits the descriptors and a pipe would never close.
 func (b *Backend) runsc(ctx context.Context, cgroupFD int, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, b.opt.Runsc, append(b.globalArgs(), args...)...)
+	// A command that is not detached writes to a pipe. Should a process
+	// it leaves behind hold that pipe open, Run returns this long after
+	// the command itself has exited instead of waiting for the pipe.
+	cmd.WaitDelay = time.Second
 	if cgroupFD >= 0 {
 		cmd.SysProcAttr = &syscall.SysProcAttr{UseCgroupFD: true, CgroupFD: cgroupFD}
 	}
@@ -199,13 +219,11 @@ func (b *Backend) runsc(ctx context.Context, cgroupFD int, args ...string) (stri
 		if err != nil {
 			return "", err
 		}
-		// The sandbox's own stdio follows: the file stays under Debug so a
-		// workload's stderr can be read after the fact.
+		// The sandbox's own stdio follows the file, which goes once runsc
+		// returns.
 		defer func() {
 			_ = f.Close()
-			if !b.opt.Debug {
-				_ = os.Remove(f.Name())
-			}
+			_ = os.Remove(f.Name())
 		}()
 		cmd.Stdout, cmd.Stderr = f, f
 		err = cmd.Run()
@@ -262,8 +280,9 @@ type spec struct {
 }
 
 // writeBundle creates <dir>/config.json. workDir is bind-mounted at
-// /host; images, when set, turns on the workload-triggered checkpoint.
-func (b *Backend) writeBundle(dir string, argv, env []string, workDir, images string) error {
+// /host, template (when set) read-only at backend.TemplateMount, and
+// images, when set, turns on the workload-triggered checkpoint.
+func (b *Backend) writeBundle(dir string, argv, env []string, workDir, images, template string) error {
 	var s spec
 	s.OCIVersion = "1.0.2"
 	s.Process.Cwd = "/"
@@ -284,6 +303,9 @@ func (b *Backend) writeBundle(dir string, argv, env []string, workDir, images st
 	add("/dev", "tmpfs", "tmpfs")
 	add("/tmp", "tmpfs", "tmpfs")
 	add("/host", "bind", workDir, "rbind", "rw")
+	if template != "" {
+		add(backend.TemplateMount, "bind", template, backend.TemplateMountOptions...)
+	}
 	if images != "" {
 		s.Annotations = map[string]string{
 			"dev.gvisor.internal.checkpoint.path":   images,
@@ -306,8 +328,56 @@ func (b *Backend) writeBundle(dir string, argv, env []string, workDir, images st
 	return os.WriteFile(filepath.Join(dir, "config.json"), data, 0o644)
 }
 
+// bundleDir is where a fiber sandbox's bundle is written, under the
+// backend's state directory by the sandbox's cid.
+func (b *Backend) bundleDir(cid string) string {
+	return filepath.Join(b.opt.StateDir, "bundles", cid)
+}
+
+// cid makes a grant uid or fence usable in a container id. runsc accepts
+// letters, digits, "_", "." and "-", and everything else becomes "-".
 func cid(s string) string {
-	return strings.NewReplacer("/", "-", ":", "-", " ", "-").Replace(s)
+	return strings.Map(func(r rune) rune {
+		if r == '_' || r == '.' || r == '-' || (r >= '0' && r <= '9') || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
+			return r
+		}
+		return '-'
+	}, s)
+}
+
+// maxCID bounds a container id. runsc names the sandbox's control socket
+// after it in the abstract namespace, which fails from 93 bytes.
+const maxCID = 64
+
+// newCID names one incarnation of a sandbox by its kind ("w" or "f"), the
+// grant or fence, and a number no other sandbox of this backend has had.
+// So a reaper that deletes its own cid after the sandbox exited never hits
+// a successor of the same grant or fence. A long name keeps a hash of
+// itself instead of its tail.
+func (b *Backend) newCID(kind, name string) string {
+	b.mu.Lock()
+	b.gen++
+	suffix := fmt.Sprintf("-%d", b.gen)
+	b.mu.Unlock()
+	base := cid(name)
+	if room := maxCID - len(kind) - 1 - len(suffix); len(base) > room {
+		sum := sha256.Sum256([]byte(base))
+		base = base[:room-9] + "-" + hex.EncodeToString(sum[:4])
+	}
+	return kind + "-" + base + suffix
+}
+
+// sweep ends every sandbox a previous life of this backend left in its
+// root. Nothing there is this life's, since no incarnation has started
+// yet, and a cid is never reused across lives.
+func (b *Backend) sweep() {
+	out, err := b.runsc(context.Background(), -1, "list", "-quiet")
+	if err != nil {
+		return
+	}
+	for _, id := range strings.Fields(out) {
+		_, _ = b.runsc(context.Background(), -1, "delete", "-force", id)
+	}
 }
 
 // pidOf reads the sandbox process pid from `runsc state`.
@@ -368,21 +438,30 @@ func (b *Backend) Warm(ctx context.Context, sp backend.WarmSpec) (backend.Warm, 
 		return backend.Warm{}, err
 	}
 	tdir := filepath.Join(b.opt.StateDir, "templates", cid(sp.GrantUID))
-	w := &warm{id: sp.GrantUID, cid: "w-" + cid(sp.GrantUID), argv: sp.Template.Argv, workDir: sp.WorkDir,
+	w := &warm{id: sp.GrantUID, cid: b.newCID("w", sp.GrantUID), argv: sp.Template.Argv, workDir: sp.WorkDir,
 		images: filepath.Join(tdir, "images")}
 	_ = os.RemoveAll(tdir)
 	if err := os.MkdirAll(tdir, 0o755); err != nil {
 		return backend.Warm{}, err
+	}
+	if sp.Template.Dir != "" {
+		// The backend's own verified copy of the executable, bound into
+		// every sandbox of this instance (backend.StageTemplate).
+		dir := filepath.Join(tdir, "template")
+		argv, err := backend.StageTemplate(sp.Template, dir)
+		if err != nil {
+			return backend.Warm{}, fmt.Errorf("gvisor: %w", err)
+		}
+		w.template, w.argv = dir, argv
 	}
 	// Restore validates that mounts match the checkpoint's, so the warm
 	// sandbox and every fiber share the grant's run directory as /host.
 	marker := filepath.Join(sp.WorkDir, readyMarker)
 	_ = os.Remove(marker)
 	bundle := filepath.Join(tdir, "bundle")
-	if err := b.writeBundle(bundle, w.argv, []string{"FIBERD_FENCE=none"}, sp.WorkDir, ""); err != nil {
+	if err := b.writeBundle(bundle, w.argv, []string{"FIBERD_FENCE=none"}, sp.WorkDir, "", w.template); err != nil {
 		return backend.Warm{}, err
 	}
-	_, _ = b.runsc(ctx, -1, "delete", "-force", w.cid) // a stale one from a previous life
 	if _, err := b.runsc(ctx, sp.CgroupFD, "run", "--detach", "--bundle", bundle, w.cid); err != nil {
 		return backend.Warm{}, err
 	}
@@ -394,11 +473,7 @@ func (b *Backend) Warm(ctx context.Context, sp backend.WarmSpec) (backend.Warm, 
 		return backend.Warm{}, fmt.Errorf("gvisor: template did not become ready: %w", err)
 	}
 	time.Sleep(20 * time.Millisecond) // let it reach the read after dropping the marker
-	args := []string{"checkpoint", "--leave-running", "--image-path", w.images}
-	if !b.opt.NoDirectIO {
-		args = append(args, "--direct")
-	}
-	if _, err := b.runsc(ctx, -1, append(args, w.cid)...); err != nil {
+	if _, err := b.runsc(ctx, -1, "checkpoint", "--leave-running", "--image-path", w.images, directIO, w.cid); err != nil {
 		_, _ = b.runsc(context.Background(), -1, "delete", "-force", w.cid)
 		return backend.Warm{}, fmt.Errorf("gvisor: template checkpoint: %w", err)
 	}
@@ -426,15 +501,11 @@ func (b *Backend) probeFootprint(ctx context.Context, w *warm, cgroupFD int) (sh
 	cid := w.cid + "-probe"
 	bundle := filepath.Join(filepath.Dir(w.images), "probe-bundle")
 	ep := filepath.Join(w.workDir, "probe.sock")
-	if err := b.writeBundle(bundle, w.argv, []string{"FIBERD_FENCE=probe", "FIBERD_ENDPOINT=/host/probe.sock"}, w.workDir, ""); err != nil {
+	if err := b.writeBundle(bundle, w.argv, []string{"FIBERD_FENCE=probe", "FIBERD_ENDPOINT=/host/probe.sock"}, w.workDir, "", w.template); err != nil {
 		return 0, 0
 	}
 	_ = os.Remove(ep)
-	args := []string{"restore", "--detach", "--image-path", w.images, "--bundle", bundle}
-	if !b.opt.NoDirectIO {
-		args = append(args, "--direct")
-	}
-	if _, err := b.runsc(ctx, cgroupFD, append(args, cid)...); err != nil {
+	if _, err := b.runsc(ctx, cgroupFD, "restore", "--detach", "--image-path", w.images, "--bundle", bundle, directIO, cid); err != nil {
 		log.Printf("gvisor: footprint probe: %v", err)
 	} else {
 		// Serving is the state a fiber is measured in.
@@ -540,8 +611,9 @@ func (b *Backend) Unwarm(id string) {
 }
 
 // start restores an image as a new sandbox and waits for its endpoint,
-// under the deadline when one is given.
-func (b *Backend) start(ctx context.Context, images, workDir string, argv []string, fence, endpoint string, payload []byte, cgroupFD int, deadline time.Duration) (backend.Fiber, error) {
+// under the deadline when one is given. template is the warm instance's
+// bound template directory, or empty.
+func (b *Backend) start(ctx context.Context, images, workDir, template string, argv []string, fence, endpoint string, payload []byte, cgroupFD int, deadline time.Duration) (backend.Fiber, error) {
 	if deadline > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, deadline)
@@ -554,17 +626,20 @@ func (b *Backend) start(ctx context.Context, images, workDir string, argv []stri
 	if len(payload) > 0 {
 		env = append(env, "FIBERD_PAYLOAD="+hex.EncodeToString(payload))
 	}
-	x := &box{id: fence, cid: "f-" + cid(fence), bundle: filepath.Join(workDir, "bundles", cid(fence)), endpoint: endpoint, done: make(chan struct{})}
-	if err := b.writeBundle(x.bundle, argv, env, workDir, ""); err != nil {
+	// The bundle is the sandbox's own, named after its cid, so the reaper
+	// of an earlier incarnation under the same fence never removes it. It
+	// lives in the state directory, which is the agent's alone. The
+	// grant's run directory is every sandbox's /host, read and write, so
+	// a bundle there could be rewritten by a sibling before runsc read
+	// it, or planted as a link for the agent to write through.
+	x := &box{id: fence, cid: b.newCID("f", fence), endpoint: endpoint, done: make(chan struct{})}
+	x.bundle = b.bundleDir(x.cid)
+	if err := b.writeBundle(x.bundle, argv, env, workDir, "", template); err != nil {
 		return backend.Fiber{}, err
 	}
 	_ = os.Remove(endpoint)
-	_, _ = b.runsc(ctx, -1, "delete", "-force", x.cid)
-	args := []string{"restore", "--detach", "--image-path", images, "--bundle", x.bundle}
-	if !b.opt.NoDirectIO {
-		args = append(args, "--direct") // the image is read, not cached, in the fiber's leaf
-	}
-	if _, err := b.runsc(ctx, cgroupFD, append(args, x.cid)...); err != nil {
+	// The image is read, not cached, in the fiber's leaf.
+	if _, err := b.runsc(ctx, cgroupFD, "restore", "--detach", "--image-path", images, "--bundle", x.bundle, directIO, x.cid); err != nil {
 		return backend.Fiber{}, fmt.Errorf("%w (%s)", err, leafDiag(cgroupFD))
 	}
 	b.mu.Lock()
@@ -612,7 +687,7 @@ func (b *Backend) Clone(ctx context.Context, warmID string, sp backend.FiberSpec
 	if !ok {
 		return backend.Fiber{}, fmt.Errorf("gvisor: no warm template %q", warmID)
 	}
-	return b.start(ctx, w.images, w.workDir, w.argv, sp.Fence, sp.Endpoint, sp.Payload, sp.CgroupFD, sp.Deadline)
+	return b.start(ctx, w.images, w.workDir, w.template, w.argv, sp.Fence, sp.Endpoint, sp.Payload, sp.CgroupFD, sp.Deadline)
 }
 
 // Park asks the workload to close its endpoint, then checkpoints.
@@ -631,22 +706,23 @@ func (b *Backend) Park(ctx context.Context, fiberID string, sp backend.ParkSpec)
 	if err := waitFile(wctx, x.endpoint, true); err != nil {
 		return fmt.Errorf("gvisor: %s did not close its endpoint for the checkpoint: %w", fiberID, err)
 	}
+	// The bundle is what a resume needs to reproduce the args. It is read
+	// before the checkpoint, which ends the sandbox, and the reaper may
+	// remove the bundle before runsc has returned.
+	bundle, err := os.ReadFile(filepath.Join(x.bundle, "config.json"))
+	if err != nil {
+		return err
+	}
 	// Sync is moot here: the endpoint is already closed, and a
 	// --leave-running checkpoint restores the sandbox in place, which
 	// doubles its memory inside a leaf sized for one. The checkpoint ends
 	// the sandbox; the images are complete when runsc returns. Direct I/O
 	// keeps the image's pages out of the leaf's page cache, where a fiber
 	// near its budget would be killed for writing its own checkpoint.
-	args := []string{"checkpoint", "--image-path", sp.Dir}
-	if !b.opt.NoDirectIO {
-		args = append(args, "--direct")
-	}
-	// The bundle is what a resume needs to reproduce the args; keep a copy.
-	_, err := b.runsc(ctx, -1, append(args, x.cid)...)
-	if err != nil {
+	if _, err := b.runsc(ctx, -1, "checkpoint", "--image-path", sp.Dir, directIO, x.cid); err != nil {
 		return err
 	}
-	return copyFile(filepath.Join(x.bundle, "config.json"), filepath.Join(sp.Dir, "config.json"))
+	return os.WriteFile(filepath.Join(sp.Dir, "config.json"), bundle, 0o644)
 }
 
 // Resume restores a park image under a new fence and endpoint.
@@ -661,8 +737,32 @@ func (b *Backend) Resume(ctx context.Context, sp backend.ResumeSpec) (backend.Fi
 	if err := json.Unmarshal(data, &s); err != nil {
 		return backend.Fiber{}, err
 	}
+	// The template mount, when the checkpoint has one, comes from this
+	// home's own warm instance: the sandbox path is fixed and the host
+	// path is wherever this home verified its copy. A checkpoint and a
+	// home that disagree about having one cannot restore, since runsc
+	// requires the mounts to match, so that is refused here by name.
+	parked := false
+	for _, m := range s.Mounts {
+		if m.Destination == backend.TemplateMount {
+			parked = true
+		}
+	}
+	b.mu.Lock()
+	w := b.warms[sp.WarmID]
+	b.mu.Unlock()
+	template := ""
+	if w != nil {
+		template = w.template
+	}
+	switch {
+	case parked && template == "":
+		return backend.Fiber{}, fmt.Errorf("gvisor: park image was taken with a registry template at %s, which warm instance %q does not have here", backend.TemplateMount, sp.WarmID)
+	case !parked && template != "":
+		return backend.Fiber{}, fmt.Errorf("gvisor: park image was taken without a template at %s, which warm instance %q binds here", backend.TemplateMount, sp.WarmID)
+	}
 	workDir := filepath.Dir(sp.Endpoint)
-	return b.start(ctx, sp.Dir, workDir, s.Process.Args, sp.Fence, sp.Endpoint, nil, sp.CgroupFD, sp.Deadline)
+	return b.start(ctx, sp.Dir, workDir, template, s.Process.Args, sp.Fence, sp.Endpoint, nil, sp.CgroupFD, sp.Deadline)
 }
 
 func (b *Backend) Kill(fiberID string) error {
@@ -691,14 +791,6 @@ func (b *Backend) Close() {
 	for _, c := range cids {
 		_, _ = b.runsc(context.Background(), -1, "kill", c, "KILL")
 	}
-}
-
-func copyFile(src, dst string) error {
-	data, err := os.ReadFile(src)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(dst, data, 0o644)
 }
 
 var (

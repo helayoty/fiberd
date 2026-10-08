@@ -9,6 +9,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/hex"
 	"fmt"
 	"testing"
@@ -16,6 +17,7 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
@@ -31,6 +33,8 @@ import (
 type Driver struct {
 	// Target is host:port of the Fibers service under test.
 	Target string
+	// TLS dials Target over mutual TLS. Nil dials plaintext.
+	TLS *tls.Config
 	// TargetTier is the tier the target advertises; C7 mints a grant one
 	// tier above it, C2 needs at least FIBER_CHECKPOINT.
 	TargetTier core.Tier
@@ -38,6 +42,10 @@ type Driver struct {
 	NodeID string
 	// Template is the template digest to put in minted grants.
 	Template string
+	// Isolation goes into every minted grant. A target whose runtime shares
+	// the host kernel (proc, runc) refuses the default untrusted grant, so
+	// it needs Trusted.
+	Isolation core.Isolation
 	// Mint turns a grant into whatever the target's verifier accepts (a
 	// signed JWT, or protobuf JSON for the insecure development verifier).
 	Mint func(g core.Grant) (string, error)
@@ -98,7 +106,11 @@ type client struct {
 
 func newClient(t *testing.T, d Driver) *client {
 	t.Helper()
-	conn, err := grpc.NewClient(d.Target, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	creds := insecure.NewCredentials()
+	if d.TLS != nil {
+		creds = credentials.NewTLS(d.TLS)
+	}
+	conn, err := grpc.NewClient(d.Target, grpc.WithTransportCredentials(creds))
 	if err != nil {
 		t.Fatalf("conform: dial %s: %v", d.Target, err)
 	}
@@ -128,6 +140,7 @@ func (c *client) grant(t *testing.T, prefix string, mut func(g *core.Grant)) (co
 		FiberMax:       2,
 		MinTier:        core.TierBasic,
 		LeaseExpiry:    time.Now().Add(10 * time.Minute),
+		Policy:         core.Policy{Isolation: c.d.Isolation},
 	}
 	if mut != nil {
 		mut(&g)

@@ -20,7 +20,6 @@
 # Runs from the repository root: the image build needs fiberd's tree.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
-DIR=examples/slurm
 NAME=${SLURM_CONTAINER:-fiberd-slurm}
 IMAGE=${FIBERD_SLURM_IMAGE:-fiberd:slurm}
 NODE=slurmnode
@@ -33,7 +32,7 @@ KEY=/var/spool/fiberd/issuer-key.json
 dexec() { docker exec "$NAME" "$@"; }
 # The conformance job's id and state directory, remembered by `job`.
 job_id() { cat "$STATE/job.id"; }
-admin() { dexec curl -sf --unix-socket "/var/lib/fiberd/job-$(job_id)/admin.sock" "$@"; }
+admin() { dexec curl -sf --unix-socket "/var/lib/fiberd/job-$(job_id)/private/admin.sock" "$@"; }
 healthy() { admin http://x/healthz; }
 
 wait_for() { # wait_for <seconds> <description> <cmd...>
@@ -49,7 +48,7 @@ wait_for() { # wait_for <seconds> <description> <cmd...>
 up() {
   if ! docker ps --format '{{.Names}}' | grep -qx "$NAME"; then
     hack/dev/run.sh true # the builder stage is the dev image
-    docker build -t "$IMAGE" -f "$DIR/docker/Dockerfile" .
+    docker build -t "$IMAGE" -f docker/slurm/Dockerfile .
     docker rm -f "$NAME" >/dev/null 2>&1 || true
     docker run -d --name "$NAME" --hostname "$NODE" --privileged --cgroupns=private \
       --tmpfs /run --tmpfs /tmp:exec -p "$PORT:8484" "$IMAGE" >/dev/null
@@ -76,12 +75,12 @@ issuer() {
 job() {
   local tok
   tok=$(dexec grant-issuer mint -key "$KEY" -issuer "$ISSUER_URL" -aud "$NODE" -template sha256:conform \
-        -max 4 -warm 1 -w-budget 32Mi -min-tier FIBER_CHECKPOINT -ttl 2h)
+        -max 4 -warm 1 -w-budget 32Mi -min-tier FIBER_CHECKPOINT -isolation TRUSTED -ttl 2h)
   local id
   # The suite's grants ask for 4 fibers; the allocation must have 4 CPUs.
   id=$(dexec sbatch --parsable --ntasks=1 --cpus-per-task=4 --mem=1G --job-name=fiberd-conform \
         --export=ALL,FIBERD_GRANT="$tok" -o /var/log/fiberd-conform.out /usr/local/bin/fiberd-job.sh \
-        -verifier jwks -issuer "$ISSUER_URL" -runtime proc \
+        -verifier jwks -issuer "$ISSUER_URL" -insecure-plaintext -runtime proc \
         -template "default=/usr/local/bin/refzygote --heap-mb 16 --device-mb 64" \
         -endpoint-family inet4 -admin-unsafe -stale-ttl 20s)
   echo "$id" > "$STATE/job.id"
@@ -110,7 +109,7 @@ lane() {
 audit() {
   local event=$1 fence=$2 uid epoch seq
   IFS=/ read -r uid epoch seq <<<"$fence"
-  dexec grep -q "\"event\":\"$event\".*\"fence\":{\"GrantUID\":\"$uid\",\"Epoch\":$epoch,\"Seq\":$seq}" "/var/lib/fiberd/job-$(job_id)/audit.jsonl"
+  dexec grep -q "\"event\":\"$event\".*\"fence\":{\"GrantUID\":\"$uid\",\"Epoch\":$epoch,\"Seq\":$seq}" "/var/lib/fiberd/job-$(job_id)/private/audit.jsonl"
 }
 
 # The fiberd subtree sits under the job step's cgroup; find the grant's
@@ -124,7 +123,7 @@ scope_lost() { admin -X POST http://x/scope-lost >/dev/null; }
 conform() {
   rm -f bin/grant-conform
   go test -c -o bin/grant-conform ./tests/conform
-  bin/grant-conform -test.v -target "$TARGET" -target-tier FIBER_CHECKPOINT -node-id "$NODE" \
+  bin/grant-conform -test.v -target "$TARGET" -target-tier FIBER_CHECKPOINT -node-id "$NODE" -isolation TRUSTED \
     -mint jwt -issuer-key "$STATE/issuer-key.json" -issuer "$ISSUER_URL" \
     -restart-cmd "$0 restart" -cp-health-cmd "$0 lane \$1" -audit-cmd "$0 audit \$1 \$2" \
     -engine-kill-cmd "$0 engine-kill \$1" -scope-cmd "$0 scope-lost" -case-timeout 60s
@@ -140,20 +139,20 @@ storm() {
   fi
   dexec scontrol update nodename="$NODE" state=resume >/dev/null 2>&1 || true
   tok=$(dexec grant-issuer mint -key "$KEY" -issuer "$ISSUER_URL" -aud "$NODE" -template sha256:storm-ready \
-        -max 1 -warm 1 -w-budget 16Mi -min-tier FIBER_CHECKPOINT -ttl 2h)
+        -max 1 -warm 1 -w-budget 16Mi -min-tier FIBER_CHECKPOINT -isolation TRUSTED -ttl 2h)
   # The storm's grant asks for 8 fibers; the allocation must have 8 CPUs.
   id=$(dexec sbatch --parsable --ntasks=1 --cpus-per-task=8 --mem=384M --job-name=fiberd-storm \
         --export=ALL,FIBERD_GRANT="$tok" -o /var/log/fiberd-storm.out /usr/local/bin/fiberd-job.sh \
-        -verifier jwks -issuer "$ISSUER_URL" -runtime proc -listen :8485 \
+        -verifier jwks -issuer "$ISSUER_URL" -insecure-plaintext -runtime proc -listen :8485 \
         -template "sha256:storm=/usr/local/bin/refzygote --heap-mb 64" -template "default=/usr/local/bin/refzygote --heap-mb 8" \
         -grant-ceiling 167772160 -pressure-interval 200ms -status-interval 100ms -stale-ttl 20s)
-  wait_for 90 "agent in storm job $id" dexec curl -sf --unix-socket "/var/lib/fiberd/job-$id/admin.sock" http://x/healthz
+  wait_for 90 "agent in storm job $id" dexec curl -sf --unix-socket "/var/lib/fiberd/job-$id/private/admin.sock" http://x/healthz
   # The job's cgroup carries Slurm's memory limit; its OOM counter is the
   # one the storm must leave untouched.
   dexec sh -c "pid=\$(pgrep -f '^fiberd-slurm -state /var/lib/fiberd/job-$id' | head -1); own=/sys/fs/cgroup\$(grep -m1 '^0::' /proc/\$pid/cgroup | cut -d: -f3); own=\${own%/agent};
     job=\$(echo \$own | sed 's#\(/job_[0-9]*\).*#\1#');
     echo \"job cgroup \$job memory.max=\$(cat \$job/memory.max)\";
-    exec storm -target 127.0.0.1:8485 -node-id $NODE -issuer-key $KEY -issuer $ISSUER_URL \
+    exec storm -target 127.0.0.1:8485 -node-id $NODE -issuer-key $KEY -issuer $ISSUER_URL -isolation TRUSTED \
       -cgroup-root \$own/fiberd -container-events \$job/memory.events \
       -fibers 8 -ceiling 167772160 -overcommit 2 -step 2097152 -round 250ms"
   echo "--- storm job:"

@@ -10,10 +10,17 @@ import (
 // node, never the fleet. Routers translate it to 429 + Retry-After.
 var ErrBudget = errors.New("budget: clone rate over f(W), retry later")
 
-// Budget enforces and advertises the thrash budget: the maximum sustainable
-// activation rate as a function of working-set size W. Density is stock;
-// this is flow — the same measured quantity (dirtied working set) prices
-// both churn and parking.
+// The agent's thrash budget is DefaultBaseRate clones/sec at W -> 0. It
+// halves at DefaultRefW bytes of working set.
+const (
+	DefaultBaseRate = 200
+	DefaultRefW     = 256 << 20
+)
+
+// Budget enforces the thrash budget, the maximum sustainable activation
+// rate as a function of working-set size W. Density is stock and this is
+// flow. The same measured quantity, the dirtied working set, prices both
+// churn and parking.
 //
 // Model (placeholder until the fork-storm rig produces the real curve):
 //
@@ -39,8 +46,7 @@ func NewBudget(baseClonesPerSec, refWBytes float64) *Budget {
 }
 
 // ObserveWorkingSet feeds the current W estimate (from park-delta sizes and
-// PSI-adjacent stats). The advertised maxClonesPerSec in grant status is
-// Rate() at the same instant.
+// PSI-adjacent stats).
 func (b *Budget) ObserveWorkingSet(bytes float64) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -55,13 +61,6 @@ func (b *Budget) rateLocked() float64 {
 		return b.base
 	}
 	return b.base / (1 + b.w/b.refW)
-}
-
-// Rate is what grant.status advertises so routers and autoscalers can plan.
-func (b *Budget) Rate() float64 {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.rateLocked()
 }
 
 // Take is called by the frontend before any work happens.

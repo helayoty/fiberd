@@ -24,15 +24,13 @@ import (
 type Verifier struct {
 	Cache    *Cache
 	Audience string
-	// Issuer defaults to Cache.IssuerURL.
-	Issuer string
 	// MaxStale is how old the key set may be (default one hour). Set it
 	// to the lease TTL grants are minted with.
 	MaxStale time.Duration
+	// MaxLease bounds a grant's signed lifetime. Zero accepts any.
+	MaxLease time.Duration
 	Now      func() time.Time
 }
-
-var ErrJWKSStale = errors.New("grant: key set older than the lease TTL")
 
 func (v *Verifier) now() time.Time {
 	if v.Now != nil {
@@ -48,12 +46,18 @@ func (v *Verifier) maxStale() time.Duration {
 	return time.Hour
 }
 
+// Verify checks token against the issuer at Cache.IssuerURL. It parses
+// the token once, for the key lookup and the signature check.
 func (v *Verifier) Verify(ctx context.Context, token []byte) (core.Grant, error) {
-	hdr, err := Parse(string(token))
+	tok, err := parse(string(token))
 	if err != nil {
 		return core.Grant{}, err
 	}
-	key, err := v.Cache.Key(ctx, hdr.KeyID)
+	kid := tok.Headers[0].KeyID
+	if kid == "" {
+		return core.Grant{}, ErrNoKID
+	}
+	key, err := v.Cache.Key(ctx, kid)
 	if err != nil {
 		if errors.Is(err, ErrNeverLoaded) {
 			return core.Grant{}, fmt.Errorf("%w: %w", core.ErrVerifyUnavailable, err)
@@ -66,13 +70,9 @@ func (v *Verifier) Verify(ctx context.Context, token []byte) (core.Grant, error)
 		if age = v.now().Sub(v.Cache.LastRefresh()); age > v.maxStale() {
 			return core.Grant{}, fmt.Errorf("%w: %w (age %s)", core.ErrVerifyUnavailable, ErrJWKSStale, age.Round(time.Second))
 		}
-		if key, err = v.Cache.Key(ctx, hdr.KeyID); err != nil {
+		if key, err = v.Cache.Key(ctx, kid); err != nil {
 			return core.Grant{}, err
 		}
 	}
-	issuer := v.Issuer
-	if issuer == "" {
-		issuer = v.Cache.IssuerURL
-	}
-	return Verify(string(token), key, VerifyOptions{Audience: v.Audience, Issuer: issuer})
+	return verifyParsed(tok, key, VerifyOptions{Audience: v.Audience, Issuer: v.Cache.IssuerURL, MaxLease: v.MaxLease})
 }

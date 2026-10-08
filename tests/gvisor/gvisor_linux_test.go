@@ -7,6 +7,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -48,6 +51,15 @@ func TestMain(m *testing.M) {
 		fmt.Fprintf(os.Stderr, "skipping gvisor tests: cannot build the rootfs: %v\n", err)
 		os.Exit(0)
 	}
+	// The probe the template tests run inside a sandbox (runsc exec),
+	// static, since the rootfs has no libraries.
+	probe := exec.Command("go", "build", "-o", filepath.Join(rootfs, "bin", "probe"), "./testdata/probe")
+	probe.Env = append(os.Environ(), "CGO_ENABLED=0")
+	probe.Stderr = os.Stderr
+	if err := probe.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "skipping gvisor tests: cannot build the sandbox probe: %v\n", err)
+		os.Exit(0)
+	}
 	code := m.Run()
 	_ = os.RemoveAll(work)
 	os.Exit(code)
@@ -57,34 +69,33 @@ var name string // the current runtime's name: its cgroup and directories
 
 func newRuntime(t *testing.T) core.Runtime {
 	t.Helper()
+	return newRuntimeWith(t, "/bin/refzygote --heap-mb 64 --gvisor")
+}
+
+// newRuntimeWith is newRuntime with the given command as the template,
+// and mods applied to the configuration.
+func newRuntimeWith(t *testing.T, template string, mods ...func(*host.Config)) core.Runtime {
+	t.Helper()
 	name = fmt.Sprintf("gv%d", time.Now().UnixNano()%1_000_000)
 	state := filepath.Join(work, name)
-	t.Cleanup(func() {
-		if !t.Failed() {
-			return
-		}
-		// The workloads' stderr, for a post-mortem.
-		outs, _ := filepath.Glob(filepath.Join(state, "runsc-*.out"))
-		for _, o := range outs {
-			if data, err := os.ReadFile(o); err == nil && len(data) > 0 {
-				t.Logf("%s:\n%s", filepath.Base(o), data)
-			}
-		}
-	})
-	rt, err := host.New(host.Config{
-		Backend:    gvisorbackend.New(gvisorbackend.Options{Rootfs: rootfs, StateDir: state, Debug: true}),
-		Templates:  map[string]string{"default": "/bin/refzygote --heap-mb 64 --gvisor"},
+	cfg := host.Config{
+		Backend:    gvisorbackend.New(gvisorbackend.Options{Rootfs: rootfs, StateDir: state}),
+		Templates:  map[string]string{"default": template},
 		CgroupRoot: filepath.Join(cgRoot, name),
 		RunDir:     filepath.Join("/tmp", "fz-"+name),
 		DeltaDir:   filepath.Join(work, name, "deltas"),
-	})
+	}
+	for _, mod := range mods {
+		mod(&cfg)
+	}
+	rt, err := host.New(cfg)
+	if errors.Is(err, host.ErrNoTier) {
+		t.Skipf("gvisor backend not usable here: %v", err)
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { rt.(interface{ Close() }).Close() })
-	if rt.Tier() < core.TierSnapshot {
-		t.Skip("gvisor backend not usable here")
-	}
+	t.Cleanup(rt.Close)
 	return rt
 }
 
@@ -301,5 +312,54 @@ func TestDeadlineAndOOM(t *testing.T) {
 		}
 	case <-time.After(15 * time.Second):
 		t.Fatal("no exit after dirtying past the budget")
+	}
+}
+
+// TestHTTPMode checks that a sandbox template started with --http serves
+// HTTP on its endpoint, as the fork zygote does. Consumers that proxy web
+// traffic to fibers (the Substrate example's ingress) depend on it.
+func TestHTTPMode(t *testing.T) {
+	rt := newRuntimeWith(t, "/bin/refzygote --heap-mb 16 --gvisor --http")
+	ctx := context.Background()
+	g := core.Grant{UID: "g4", TemplateDigest: "sha256:ref", FiberMax: 4, WBudgetBytes: 64 << 20}
+	if err := rt.PrepareTemplate(ctx, g); err != nil {
+		t.Fatal(err)
+	}
+	h, err := rt.Clone(ctx, core.CloneSpec{Grant: g, Fence: core.Fence{GrantUID: "g4", Epoch: 1, Seq: 1}, Deadline: 2 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = rt.Release(ctx, h.ID, false) })
+	tr := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return fiberendpoint.Dial(ctx, h.Endpoint)
+	}}
+	t.Cleanup(tr.CloseIdleConnections)
+	cases := []struct {
+		name, method, path string
+		status             int
+		body               string
+	}{
+		{name: "readiness", method: http.MethodGet, path: "/readyz", status: 200, body: "ok"},
+		{name: "an increment", method: http.MethodPost, path: "/incr", status: 200, body: "1"},
+		{name: "the count after it", method: http.MethodGet, path: "/count", status: 200, body: "1"},
+		{name: "the fence", method: http.MethodGet, path: "/fence", status: 200, body: h.ID},
+		{name: "an unknown path", method: http.MethodGet, path: "/nope", status: 404, body: "not found"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req, err := http.NewRequestWithContext(ctx, tc.method, "http://fiber"+tc.path, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp, err := tr.RoundTrip(req)
+			if err != nil {
+				t.Fatalf("%s %s: %v", tc.method, tc.path, err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+			b, _ := io.ReadAll(resp.Body)
+			if resp.StatusCode != tc.status || strings.TrimSpace(string(b)) != tc.body {
+				t.Fatalf("%s %s = %d %q, want %d %q", tc.method, tc.path, resp.StatusCode, b, tc.status, tc.body)
+			}
+		})
 	}
 }

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/helayoty/fiberd/pkg/backend"
+	procbackend "github.com/helayoty/fiberd/pkg/backend/proc"
 	"github.com/helayoty/fiberd/pkg/core"
 	fiberendpoint "github.com/helayoty/fiberd/pkg/endpoint"
 	"github.com/helayoty/fiberd/pkg/runtime/host"
@@ -154,17 +155,49 @@ func (unixOnly) Kill(string) error          { return nil }
 func (unixOnly) Exits() <-chan backend.Exit { return nil }
 func (unixOnly) Close()                     {}
 
-// TestEndpointPolicyRefusedByBackend: a backend that only serves unix
-// sockets is refused a tcp family at open, never at the first Clone.
-func TestEndpointPolicyRefusedByBackend(t *testing.T) {
-	_, err := host.New(host.Config{
-		Backend:    unixOnly{},
-		Templates:  map[string]string{"default": zygoteBin},
-		CgroupRoot: filepath.Join(cgRoot, fmt.Sprintf("ep-refuse%d", time.Now().UnixNano()%1_000_000)),
-		RunDir:     "/tmp/fz-ep-refuse",
-		Endpoints:  fiberendpoint.Policy{Family: fiberendpoint.Inet4, Host: "127.0.0.1"},
-	})
-	if err == nil || !strings.Contains(err.Error(), "cannot serve tcp") {
-		t.Fatalf("err = %v, want a refusal of tcp endpoints", err)
+// TestEndpointPolicyRelayedForUnixOnlyBackend: a backend that only
+// serves unix sockets opens under a tcp family all the same. The host
+// decides at open to relay each fiber's port to its socket, so the
+// first Clone is never the place a tcp policy is found wanting. A
+// backend that binds tcp itself, and any backend under a unix family,
+// is not relayed. relay_linux_test.go has the bytes going through.
+func TestEndpointPolicyRelayedForUnixOnlyBackend(t *testing.T) {
+	cases := []struct {
+		name   string
+		be     backend.Backend
+		family fiberendpoint.Family
+		relays bool
+	}{
+		{name: "unix-only backend, inet4 family: relayed", be: unixOnly{}, family: fiberendpoint.Inet4, relays: true},
+		{name: "unix-only backend, inet6 family: relayed", be: unixOnly{}, family: fiberendpoint.Inet6, relays: true},
+		{name: "unix-only backend, unix family: nothing to relay", be: unixOnly{}, family: fiberendpoint.Unix},
+		{name: "the fork backend binds tcp itself", be: procbackend.NewBackend(procbackend.Options{}), family: fiberendpoint.Inet4},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			name := fmt.Sprintf("ep-relay%d", time.Now().UnixNano()%1_000_000)
+			pol := fiberendpoint.Policy{Family: tc.family}
+			if tc.family != fiberendpoint.Unix {
+				pol.Host = "127.0.0.1"
+				if tc.family == fiberendpoint.Inet6 {
+					pol.Host = "::1"
+				}
+			}
+			rt, err := host.New(host.Config{
+				Backend:    tc.be,
+				Templates:  map[string]string{"default": zygoteBin},
+				CgroupRoot: filepath.Join(cgRoot, name),
+				RunDir:     filepath.Join("/tmp", "fz-"+name),
+				DeltaDir:   t.TempDir(),
+				Endpoints:  pol,
+			})
+			if err != nil {
+				t.Fatalf("New = %v, want the home to open", err)
+			}
+			defer rt.Close()
+			if rt.Relays() != tc.relays {
+				t.Fatalf("Relays = %v, want %v", rt.Relays(), tc.relays)
+			}
+		})
 	}
 }

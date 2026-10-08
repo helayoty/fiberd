@@ -1,8 +1,32 @@
-# Build contexts: hack/dev (copies one script) and hack/kind (copies the
-# tree to build inside the dev image). Keep the large, generated or
-# host-specific parts out of both.
+# Every Dockerfile under docker/ builds from the repository root. Keeping
+# generated and host-specific files out keeps the context small. It also
+# stops local test state, binaries and keys in bin/ from reaching an image
+# through COPY . .
 .git
+.github
+.gitignore
+.dockerignore
+
+# Build output and test state. bin/ also holds local binaries and keys.
 bin/
+out/
+build/
+fiberd
+examples/substrate/ateom-fiberd
 hack/hyperlight/guest/target
 hack/hyperlight/helper/target
+**/*.test
 **/*.log
+
+# Documentation is not built into any image.
+docs/
+
+# Editor and tool state.
+.DS_Store
+**/.DS_Store
+.idea
+.vscode
+.cursor
+.claude
+**/*.swp
+**/*~

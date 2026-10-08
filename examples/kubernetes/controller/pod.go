@@ -5,6 +5,8 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/helayoty/fiberd/pkg/sys/caps"
+
 	"github.com/helayoty/fiberd/examples/kubernetes/kube"
 )
 
@@ -72,6 +74,8 @@ type Container struct {
 	SecurityContext *SecurityContext  `json:"securityContext,omitempty"`
 	VolumeMounts    []VolumeMount     `json:"volumeMounts"`
 	ReadinessProbe  *Probe            `json:"readinessProbe,omitempty"`
+	StartupProbe    *Probe            `json:"startupProbe,omitempty"`
+	LivenessProbe   *Probe            `json:"livenessProbe,omitempty"`
 	Labels          map[string]string `json:"-"`
 }
 
@@ -93,7 +97,18 @@ type ContainerPort struct {
 }
 
 type SecurityContext struct {
-	Privileged bool `json:"privileged"`
+	Privileged     bool            `json:"privileged"`
+	Capabilities   *Capabilities   `json:"capabilities,omitempty"`
+	SeccompProfile *SeccompProfile `json:"seccompProfile,omitempty"`
+}
+
+type Capabilities struct {
+	Add  []string `json:"add,omitempty"`
+	Drop []string `json:"drop,omitempty"`
+}
+
+type SeccompProfile struct {
+	Type string `json:"type"`
 }
 
 type VolumeMount struct {
@@ -103,11 +118,25 @@ type VolumeMount struct {
 }
 
 type Probe struct {
-	TCPSocket struct {
-		Port int `json:"port"`
-	} `json:"tcpSocket"`
-	PeriodSeconds int `json:"periodSeconds,omitempty"`
+	Exec             *ExecAction      `json:"exec,omitempty"`
+	TCPSocket        *TCPSocketAction `json:"tcpSocket,omitempty"`
+	PeriodSeconds    int              `json:"periodSeconds,omitempty"`
+	TimeoutSeconds   int              `json:"timeoutSeconds,omitempty"`
+	FailureThreshold int              `json:"failureThreshold,omitempty"`
 }
+
+type ExecAction struct {
+	Command []string `json:"command"`
+}
+
+type TCPSocketAction struct {
+	Port int `json:"port"`
+}
+
+// healthz is the exec probe of the agent's /healthz on its admin socket.
+// It fails on the 503 a poisoned audit spool answers, and on a socket
+// that is not up yet. -state matches the agent's.
+var healthz = []string{"fiberd-k8s", "-state", "/var/lib/fiberd", "-healthz"}
 
 // PodName is the grant Pod's name for a CapacityGrant.
 func PodName(cg *CapacityGrant) string { return cg.Metadata.Name + "-grant" }
@@ -128,15 +157,37 @@ func ownerOf(cg *CapacityGrant) []kube.OwnerReference {
 		Controller: true, BlockOwnerDeletion: true}}
 }
 
+// securityContext is the agent container's security context. It is
+// privileged when asked, and for every runtime but proc. That is a known
+// gap. caps.Runc measures what runc needs but is not applied here, and
+// gVisor's and Hyperlight's needs are not measured. A proc Pod gets only
+// caps.Proc and no seccomp filter, because criu cannot dump from under one.
+func securityContext(runtime string, privileged *bool) *SecurityContext {
+	if privileged != nil && *privileged || privileged == nil && runtime != "proc" {
+		return &SecurityContext{Privileged: true}
+	}
+	add := make([]string, 0, len(caps.Proc))
+	for _, c := range caps.Proc {
+		add = append(add, caps.Names[c])
+	}
+	return &SecurityContext{Capabilities: &Capabilities{Add: add, Drop: []string{"ALL"}},
+		SeccompProfile: &SeccompProfile{Type: "Unconfined"}}
+}
+
+// runtimeOf is the agent's -runtime for ps. It defaults to proc.
+func runtimeOf(ps PodSpec) string {
+	if ps.Runtime == "" {
+		return "proc"
+	}
+	return ps.Runtime
+}
+
 // BuildPod is the Pod spec for a CapacityGrant: fiberd-k8s as PID 1, the
 // projected grant volume, the readiness gate, the cgroup and criu
 // privileges, the block ceiling as the container's limits.
 func BuildPod(cg *CapacityGrant, issuerURL string, lease time.Duration) *Pod {
 	ps := cg.Spec.Pod
-	runtime := ps.Runtime
-	if runtime == "" {
-		runtime = "proc"
-	}
+	runtime := runtimeOf(ps)
 	family := ps.EndpointFamily
 	if family == "" {
 		family = "inet4"
@@ -145,11 +196,14 @@ func BuildPod(cg *CapacityGrant, issuerURL string, lease time.Duration) *Pod {
 	if sa == "" {
 		sa = "fiberd-grant"
 	}
-	privileged := ps.Privileged == nil || *ps.Privileged
 	args := []string{
 		"-verifier", "jwks", "-issuer", issuerURL, "-jwks-max-stale", lease.String(),
+		"-insecure-plaintext",
 		"-listen", ":" + strconv.Itoa(agentPort),
 		"-runtime", runtime,
+		// The Pod's name, from FIBERD_NODE_ID below, which Kubernetes
+		// expands in args.
+		"-node-id", "$(FIBERD_NODE_ID)",
 		"-state", "/var/lib/fiberd", "-run-dir", "/run/fiberd",
 		"-grants-dir", GrantsMount,
 		"-endpoint-family", family,
@@ -161,12 +215,19 @@ func BuildPod(cg *CapacityGrant, issuerURL string, lease time.Duration) *Pod {
 		args = append(args, "-admin-unsafe")
 	}
 	args = append(args, ps.Args...)
-	labels := map[string]string{GrantLabel: cg.Metadata.Name}
+	// The grant label is set last. Services select a grant's Pod by it, so
+	// the spec's labels must not move it.
+	labels := map[string]string{}
 	for k, v := range ps.Labels {
 		labels[k] = v
 	}
-	probe := &Probe{PeriodSeconds: 2}
-	probe.TCPSocket.Port = agentPort
+	labels[GrantLabel] = cg.Metadata.Name
+	// Readiness is the agent's port. Liveness is /healthz, so a poisoned
+	// audit spool restarts the agent, which is what clears it. The startup
+	// probe holds liveness off while the agent waits for its Pod IP.
+	ready := &Probe{TCPSocket: &TCPSocketAction{Port: agentPort}, PeriodSeconds: 2}
+	startup := &Probe{Exec: &ExecAction{Command: healthz}, PeriodSeconds: 2, TimeoutSeconds: 5, FailureThreshold: 60}
+	live := &Probe{Exec: &ExecAction{Command: healthz}, PeriodSeconds: 10, TimeoutSeconds: 5, FailureThreshold: 3}
 	return &Pod{
 		APIVersion: "v1", Kind: "Pod",
 		Metadata: kube.ObjectMeta{Name: PodName(cg), Namespace: cg.Metadata.Namespace, Labels: labels,
@@ -193,13 +254,15 @@ func BuildPod(cg *CapacityGrant, issuerURL string, lease time.Duration) *Pod {
 				},
 				Ports:           []ContainerPort{{Name: "grpc", ContainerPort: agentPort}},
 				Resources:       ps.Resources,
-				SecurityContext: &SecurityContext{Privileged: privileged},
+				SecurityContext: securityContext(runtime, ps.Privileged),
 				VolumeMounts: []VolumeMount{
 					{Name: "grants", MountPath: GrantsMount, ReadOnly: true},
 					{Name: "state", MountPath: "/var/lib/fiberd"},
 					{Name: "run", MountPath: "/run/fiberd"},
 				},
-				ReadinessProbe: probe,
+				ReadinessProbe: ready,
+				StartupProbe:   startup,
+				LivenessProbe:  live,
 			}},
 		},
 	}

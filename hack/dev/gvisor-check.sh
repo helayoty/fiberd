@@ -19,7 +19,7 @@ warn() { printf 'WARN  %s\n' "$*"; }
 bad()  { printf 'FAIL  %s\n' "$*"; fail=1; }
 # The restore probes run this host's /bin/sh inside the sandbox, so the
 # host's userland must be restorable: on aarch64 that means no pointer
-# authentication (see hack/dev/Dockerfile for why the image is bookworm).
+# authentication (see docker/criu/Dockerfile for why the image is bookworm).
 
 command -v runsc >/dev/null || { bad "runsc not installed"; exit 1; }
 ok "runsc $(runsc --version | head -1)"

@@ -68,6 +68,13 @@ type Config struct {
 	TokenFile string
 }
 
+// New waits up to podIPWait for the kubelet to write the Pod's IP,
+// reading the Pod again every podIPRetry. Tests shorten them.
+var (
+	podIPWait  = 90 * time.Second
+	podIPRetry = 500 * time.Millisecond
+)
+
 type Home struct {
 	cfg    Config
 	api    *kube.Client
@@ -84,6 +91,12 @@ type Home struct {
 	lost      string // last scope-loss reason delivered
 	ready     map[string]bool
 	scopeLost func(ctx context.Context, reason string)
+
+	// pubMu orders PublishReady calls, so the gate's patches land in the
+	// order the agent made them. gate is the readiness condition the Pod
+	// carries, read at start and then kept as last published.
+	pubMu sync.Mutex
+	gate  kube.Condition
 }
 
 func New(cfg Config) (*Home, error) {
@@ -120,7 +133,7 @@ func New(cfg Config) (*Home, error) {
 		cfg.PodName, _ = os.Hostname()
 	}
 	h := &Home{cfg: cfg, api: cfg.Client, health: core.NewSourceHealth(cfg.StaleTTL, time.Now()), ready: map[string]bool{}}
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), podIPWait)
 	defer cancel()
 	for {
 		if err := h.api.Get(ctx, h.podPath(), &h.self); err != nil {
@@ -134,8 +147,13 @@ func New(cfg Config) (*Home, error) {
 		}
 		select {
 		case <-ctx.Done():
-			return nil, fmt.Errorf("k8s: the Pod got no %s address within %s", cfg.Family, 90*time.Second)
-		case <-time.After(500 * time.Millisecond):
+			return nil, fmt.Errorf("k8s: the Pod got no %s address within %s", cfg.Family, podIPWait)
+		case <-time.After(podIPRetry):
+		}
+	}
+	for _, c := range h.self.Status.Conditions {
+		if c.Type == ReadyCondition {
+			h.gate = c
 		}
 	}
 	h.claims = boundClaims(h.self)
@@ -145,6 +163,9 @@ func New(cfg Config) (*Home, error) {
 	h.scope = h.buildScope()
 	// The container's cgroup (the kubelet's memory.max on the Pod above it
 	// is the block ceiling), with a subtree delegated to the runtime.
+	if err := writableMounts(cfg.CgroupRoot); err != nil {
+		return nil, fmt.Errorf("k8s: %w", err)
+	}
 	root, err := cgroup.Delegate(cgroup.Own(cfg.CgroupRoot))
 	if err != nil {
 		return nil, fmt.Errorf("k8s: %w", err)
@@ -294,6 +315,8 @@ func (h *Home) Grants(ctx context.Context) (<-chan home.GrantEvent, error) {
 // PublishReady sets the Pod's readiness gate: True while any admitted
 // grant has a warm template, False once none has.
 func (h *Home) PublishReady(ctx context.Context, grantUID string, ready bool) error {
+	h.pubMu.Lock()
+	defer h.pubMu.Unlock()
 	h.mu.Lock()
 	if ready {
 		h.ready[grantUID] = true
@@ -302,16 +325,22 @@ func (h *Home) PublishReady(ctx context.Context, grantUID string, ready bool) er
 	}
 	warm := len(h.ready) > 0
 	h.mu.Unlock()
-	cond := kube.Condition{Type: ReadyCondition, Status: "False", Reason: "NoWarmTemplate", Message: "no grant has a warm template",
-		LastTransitionTime: time.Now().UTC().Format(time.RFC3339)}
+	cond := kube.Condition{Type: ReadyCondition, Status: "False", Reason: "NoWarmTemplate", Message: "no grant has a warm template"}
 	if warm {
 		cond.Status, cond.Reason, cond.Message = "True", "ZygoteWarm", "grant "+grantUID+" template is warm"
+	}
+	// The transition time moves only when the status does, as the
+	// Kubernetes condition convention asks.
+	cond.LastTransitionTime = h.gate.LastTransitionTime
+	if cond.Status != h.gate.Status || cond.LastTransitionTime == "" {
+		cond.LastTransitionTime = time.Now().UTC().Format(time.RFC3339)
 	}
 	patch := map[string]any{"status": map[string]any{"conditions": []kube.Condition{cond}}}
 	if err := h.api.PatchStrategic(ctx, h.podPath()+"/status", patch); err != nil {
 		log.Printf("k8s: readiness gate: %v", err)
 		return err
 	}
+	h.gate = cond
 	return nil
 }
 

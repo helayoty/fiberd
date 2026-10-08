@@ -35,6 +35,8 @@ func FromProto(p *grantv1.CapacityGrant) core.Grant {
 			AuditClass:       pol.GetAuditClass(),
 			PSISomeAvg10Shed: float64(pol.GetPsiSomeAvg10Shed()),
 			PSISomeAvg10Park: float64(pol.GetPsiSomeAvg10Park()),
+			Isolation:        core.Isolation(pol.GetIsolation()),
+			EndpointMode:     core.EndpointMode(pol.GetEndpointMode()),
 		}
 	}
 	if d := p.GetDeviceBudget(); d != nil {
@@ -59,6 +61,8 @@ func ToProto(g core.Grant) *grantv1.CapacityGrant {
 			AuditClass:       g.Policy.AuditClass,
 			PsiSomeAvg10Shed: float32(g.Policy.PSISomeAvg10Shed),
 			PsiSomeAvg10Park: float32(g.Policy.PSISomeAvg10Park),
+			Isolation:        grantv1.Isolation(g.Policy.Isolation),
+			EndpointMode:     grantv1.EndpointMode(g.Policy.EndpointMode),
 		},
 	}
 	if !g.LeaseExpiry.IsZero() {

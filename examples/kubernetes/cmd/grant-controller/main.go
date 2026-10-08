@@ -12,6 +12,7 @@ import (
 	"errors"
 	"flag"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -24,47 +25,66 @@ import (
 	"github.com/helayoty/fiberd/examples/kubernetes/kube"
 )
 
+// Where the cluster client and this Pod's namespace come from, and a hook
+// told the address discovery is served on. Tests replace them.
+var (
+	inCluster    = kube.InCluster
+	podNamespace = kube.Namespace
+	serving      = func(net.Addr) {}
+)
+
 func main() {
-	if err := run(); err != nil {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	err := run(ctx, flag.CommandLine, os.Args[1:])
+	stop()
+	if err != nil {
 		log.Fatal(err)
 	}
 }
 
-func run() error {
-	addr := flag.String("addr", ":8080", "listen address for discovery and the JWKS")
-	issuer := flag.String("issuer", "", "issuer URL as grant Pods verify it (default http://grant-issuer.<namespace>.svc:8080)")
-	ns := flag.String("namespace", "", "namespace holding the key Secret (default: this Pod's)")
-	keySecret := flag.String("key-secret", "grant-issuer-key", "Secret holding the private JWK as key.json; generated when missing")
-	poll := flag.Duration("poll", 2*time.Second, "reconcile cadence")
-	flag.Parse()
-	client, err := kube.InCluster()
+// run is the controller with its flags bound on fs and parsed from args.
+// It returns once ctx ends.
+func run(ctx context.Context, fs *flag.FlagSet, args []string) error {
+	addr := fs.String("addr", ":8080", "listen address for discovery and the JWKS")
+	issuer := fs.String("issuer", "", "issuer URL as grant Pods verify it (default http://grant-issuer.<namespace>.svc:8080)")
+	ns := fs.String("namespace", "", "namespace holding the key Secret (default: this Pod's)")
+	keySecret := fs.String("key-secret", "grant-issuer-key", "Secret holding the private JWK as key.json; generated when missing")
+	poll := fs.Duration("poll", 2*time.Second, "reconcile cadence")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	client, err := inCluster()
 	if err != nil {
 		return err
 	}
 	if *ns == "" {
-		if *ns, err = kube.Namespace(); err != nil {
+		if *ns, err = podNamespace(); err != nil {
 			return err
 		}
 	}
 	if *issuer == "" {
 		*issuer = "http://grant-issuer." + *ns + ".svc:8080"
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 	key, err := controller.EnsureKey(ctx, client, *ns, *keySecret)
 	if err != nil {
 		return err
 	}
 	is := &grant.Issuer{Key: key, URL: *issuer}
-	srv := &http.Server{Addr: *addr, Handler: is.Handler(), ReadHeaderTimeout: 5 * time.Second}
-	go func() { <-ctx.Done(); _ = srv.Close() }()
+	// Listen before reconciling. A grant minted while nothing serves the
+	// JWKS is one no grant Pod can verify.
+	ln, err := net.Listen("tcp", *addr)
+	if err != nil {
+		return err
+	}
+	srv := &http.Server{Handler: is.Handler(), ReadHeaderTimeout: 5 * time.Second}
 	go func() {
-		log.Printf("grant-controller serving %s (kid=%s alg=%s) on %s", *issuer, key.KeyID, key.Algorithm, *addr)
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Printf("controller: serve: %v", err)
 		}
 	}()
+	log.Printf("grant-controller serving %s (kid=%s alg=%s) on %s", *issuer, key.KeyID, key.Algorithm, ln.Addr())
+	serving(ln.Addr())
 	c := &controller.Controller{Client: client, Issuer: is, Poll: *poll}
 	c.Run(ctx)
-	return nil
+	return srv.Close()
 }

@@ -101,14 +101,17 @@ func (Tier) EnumDescriptor() ([]byte, []int) {
 	return file_grant_v1_grant_proto_rawDescGZIP(), []int{0}
 }
 
-// Durability selects when the audit record for an operation must be remote.
+// Durability selects when the audit record for an operation must be
+// durable. It is priced as activation latency.
 type Durability int32
 
 const (
 	Durability_DURABILITY_UNSPECIFIED Durability = 0
-	// Append locally, ack the caller, ship later. Loss window = flush interval.
+	// Append the record and ack without an fsync. A crash can lose records
+	// the OS has not flushed yet.
 	Durability_BEST_EFFORT Durability = 1
-	// Block until the record is remote, then ack. Paid as activation latency.
+	// Ack only once the record is durable on local disk. After a failed
+	// fsync, every SYNC operation fails until the agent restarts.
 	Durability_SYNC Durability = 2
 )
 
@@ -153,6 +156,114 @@ func (Durability) EnumDescriptor() ([]byte, []int) {
 	return file_grant_v1_grant_proto_rawDescGZIP(), []int{1}
 }
 
+// Isolation is whether the issuer trusts the grant's code with the host
+// kernel. Unset is UNTRUSTED. Only a home whose backend sandboxes fibers
+// from the host (gVisor, Hyperlight) may serve it. Other homes refuse the
+// grant with FailedPrecondition.
+type Isolation int32
+
+const (
+	Isolation_ISOLATION_UNSPECIFIED Isolation = 0
+	Isolation_UNTRUSTED             Isolation = 1
+	Isolation_TRUSTED               Isolation = 2
+)
+
+// Enum value maps for Isolation.
+var (
+	Isolation_name = map[int32]string{
+		0: "ISOLATION_UNSPECIFIED",
+		1: "UNTRUSTED",
+		2: "TRUSTED",
+	}
+	Isolation_value = map[string]int32{
+		"ISOLATION_UNSPECIFIED": 0,
+		"UNTRUSTED":             1,
+		"TRUSTED":               2,
+	}
+)
+
+func (x Isolation) Enum() *Isolation {
+	p := new(Isolation)
+	*p = x
+	return p
+}
+
+func (x Isolation) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (Isolation) Descriptor() protoreflect.EnumDescriptor {
+	return file_grant_v1_grant_proto_enumTypes[2].Descriptor()
+}
+
+func (Isolation) Type() protoreflect.EnumType {
+	return &file_grant_v1_grant_proto_enumTypes[2]
+}
+
+func (x Isolation) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use Isolation.Descriptor instead.
+func (Isolation) EnumDescriptor() ([]byte, []int) {
+	return file_grant_v1_grant_proto_rawDescGZIP(), []int{2}
+}
+
+// EndpointMode is how callers reach a grant's fibers. HANDOFF needs a
+// grant bound to a caller certificate and a home whose backend can pass
+// connections to fibers (proc, runc). Other homes refuse the grant with
+// FailedPrecondition.
+type EndpointMode int32
+
+const (
+	// Each fiber listens on an endpoint of its own.
+	EndpointMode_DIRECT EndpointMode = 0
+	// The home accepts each TLS connection on one address, routes it by
+	// the TLS server name (CloneResponse.routing_key) and passes the
+	// socket to the fiber, which terminates TLS and accepts only the
+	// grant's caller certificate.
+	EndpointMode_HANDOFF EndpointMode = 1
+)
+
+// Enum value maps for EndpointMode.
+var (
+	EndpointMode_name = map[int32]string{
+		0: "DIRECT",
+		1: "HANDOFF",
+	}
+	EndpointMode_value = map[string]int32{
+		"DIRECT":  0,
+		"HANDOFF": 1,
+	}
+)
+
+func (x EndpointMode) Enum() *EndpointMode {
+	p := new(EndpointMode)
+	*p = x
+	return p
+}
+
+func (x EndpointMode) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (EndpointMode) Descriptor() protoreflect.EnumDescriptor {
+	return file_grant_v1_grant_proto_enumTypes[3].Descriptor()
+}
+
+func (EndpointMode) Type() protoreflect.EnumType {
+	return &file_grant_v1_grant_proto_enumTypes[3]
+}
+
+func (x EndpointMode) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use EndpointMode.Descriptor instead.
+func (EndpointMode) EnumDescriptor() ([]byte, []int) {
+	return file_grant_v1_grant_proto_rawDescGZIP(), []int{3}
+}
+
 type CloneKind int32
 
 const (
@@ -186,11 +297,11 @@ func (x CloneKind) String() string {
 }
 
 func (CloneKind) Descriptor() protoreflect.EnumDescriptor {
-	return file_grant_v1_grant_proto_enumTypes[2].Descriptor()
+	return file_grant_v1_grant_proto_enumTypes[4].Descriptor()
 }
 
 func (CloneKind) Type() protoreflect.EnumType {
-	return &file_grant_v1_grant_proto_enumTypes[2]
+	return &file_grant_v1_grant_proto_enumTypes[4]
 }
 
 func (x CloneKind) Number() protoreflect.EnumNumber {
@@ -199,7 +310,7 @@ func (x CloneKind) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use CloneKind.Descriptor instead.
 func (CloneKind) EnumDescriptor() ([]byte, []int) {
-	return file_grant_v1_grant_proto_rawDescGZIP(), []int{2}
+	return file_grant_v1_grant_proto_rawDescGZIP(), []int{4}
 }
 
 // MissCode is the one thing a caller needs to decide what to do next.
@@ -237,11 +348,11 @@ func (x MissCode) String() string {
 }
 
 func (MissCode) Descriptor() protoreflect.EnumDescriptor {
-	return file_grant_v1_grant_proto_enumTypes[3].Descriptor()
+	return file_grant_v1_grant_proto_enumTypes[5].Descriptor()
 }
 
 func (MissCode) Type() protoreflect.EnumType {
-	return &file_grant_v1_grant_proto_enumTypes[3]
+	return &file_grant_v1_grant_proto_enumTypes[5]
 }
 
 func (x MissCode) Number() protoreflect.EnumNumber {
@@ -250,10 +361,11 @@ func (x MissCode) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use MissCode.Descriptor instead.
 func (MissCode) EnumDescriptor() ([]byte, []int) {
-	return file_grant_v1_grant_proto_rawDescGZIP(), []int{3}
+	return file_grant_v1_grant_proto_rawDescGZIP(), []int{5}
 }
 
-// Policy is the per-grant session, durability and pressure class.
+// Policy is the per-grant session, durability, pressure, isolation and
+// endpoint class.
 type Policy struct {
 	state        protoimpl.MessageState `protogen:"open.v1"`
 	Durability   Durability             `protobuf:"varint,1,opt,name=durability,proto3,enum=fiberd.grant.v1.Durability" json:"durability,omitempty"`
@@ -261,8 +373,10 @@ type Policy struct {
 	AuditClass   string                 `protobuf:"bytes,3,opt,name=audit_class,json=auditClass,proto3" json:"audit_class,omitempty"`
 	// PSI memory "some avg10" watermarks on the grant's cgroup, in percent.
 	// The home sets them below its own eviction threshold so park fires first.
-	PsiSomeAvg10Shed float32 `protobuf:"fixed32,4,opt,name=psi_some_avg10_shed,json=psiSomeAvg10Shed,proto3" json:"psi_some_avg10_shed,omitempty"`
-	PsiSomeAvg10Park float32 `protobuf:"fixed32,5,opt,name=psi_some_avg10_park,json=psiSomeAvg10Park,proto3" json:"psi_some_avg10_park,omitempty"`
+	PsiSomeAvg10Shed float32      `protobuf:"fixed32,4,opt,name=psi_some_avg10_shed,json=psiSomeAvg10Shed,proto3" json:"psi_some_avg10_shed,omitempty"`
+	PsiSomeAvg10Park float32      `protobuf:"fixed32,5,opt,name=psi_some_avg10_park,json=psiSomeAvg10Park,proto3" json:"psi_some_avg10_park,omitempty"`
+	Isolation        Isolation    `protobuf:"varint,6,opt,name=isolation,proto3,enum=fiberd.grant.v1.Isolation" json:"isolation,omitempty"`
+	EndpointMode     EndpointMode `protobuf:"varint,7,opt,name=endpoint_mode,json=endpointMode,proto3,enum=fiberd.grant.v1.EndpointMode" json:"endpoint_mode,omitempty"`
 	unknownFields    protoimpl.UnknownFields
 	sizeCache        protoimpl.SizeCache
 }
@@ -330,6 +444,20 @@ func (x *Policy) GetPsiSomeAvg10Park() float32 {
 		return x.PsiSomeAvg10Park
 	}
 	return 0
+}
+
+func (x *Policy) GetIsolation() Isolation {
+	if x != nil {
+		return x.Isolation
+	}
+	return Isolation_ISOLATION_UNSPECIFIED
+}
+
+func (x *Policy) GetEndpointMode() EndpointMode {
+	if x != nil {
+		return x.EndpointMode
+	}
+	return EndpointMode_DIRECT
 }
 
 // FiberLimits is `fibers: {max, warm}`. (Named FiberLimits rather than
@@ -711,13 +839,20 @@ func (x *CloneRequest) GetPayload() []byte {
 }
 
 type CloneResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	FiberId       string                 `protobuf:"bytes,1,opt,name=fiber_id,json=fiberId,proto3" json:"fiber_id,omitempty"`
-	Endpoint      string                 `protobuf:"bytes,2,opt,name=endpoint,proto3" json:"endpoint,omitempty"`
-	Fence         *Fence                 `protobuf:"bytes,3,opt,name=fence,proto3" json:"fence,omitempty"`
-	Kind          CloneKind              `protobuf:"varint,4,opt,name=kind,proto3,enum=fiberd.grant.v1.CloneKind" json:"kind,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	FiberId  string                 `protobuf:"bytes,1,opt,name=fiber_id,json=fiberId,proto3" json:"fiber_id,omitempty"`
+	Endpoint string                 `protobuf:"bytes,2,opt,name=endpoint,proto3" json:"endpoint,omitempty"`
+	Fence    *Fence                 `protobuf:"bytes,3,opt,name=fence,proto3" json:"fence,omitempty"`
+	Kind     CloneKind              `protobuf:"varint,4,opt,name=kind,proto3,enum=fiberd.grant.v1.CloneKind" json:"kind,omitempty"`
+	// Set when the grant's endpoint mode is HANDOFF. The caller opens TLS
+	// to endpoint with server name "<routing_key>.fiberd", presents the
+	// grant's client certificate, and accepts only a server key whose
+	// SubjectPublicKeyInfo hashes (SHA-256, base64url) to
+	// server_key_sha256.
+	RoutingKey      string `protobuf:"bytes,5,opt,name=routing_key,json=routingKey,proto3" json:"routing_key,omitempty"`
+	ServerKeySha256 string `protobuf:"bytes,6,opt,name=server_key_sha256,json=serverKeySha256,proto3" json:"server_key_sha256,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *CloneResponse) Reset() {
@@ -776,6 +911,20 @@ func (x *CloneResponse) GetKind() CloneKind {
 		return x.Kind
 	}
 	return CloneKind_CREATE
+}
+
+func (x *CloneResponse) GetRoutingKey() string {
+	if x != nil {
+		return x.RoutingKey
+	}
+	return ""
+}
+
+func (x *CloneResponse) GetServerKeySha256() string {
+	if x != nil {
+		return x.ServerKeySha256
+	}
+	return ""
 }
 
 // Miss is attached to every miss error as a google.rpc.Status detail.
@@ -1038,7 +1187,7 @@ var File_grant_v1_grant_proto protoreflect.FileDescriptor
 
 const file_grant_v1_grant_proto_rawDesc = "" +
 	"\n" +
-	"\x14grant/v1/grant.proto\x12\x0ffiberd.grant.v1\x1a\x1bgoogle/protobuf/empty.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\xe9\x01\n" +
+	"\x14grant/v1/grant.proto\x12\x0ffiberd.grant.v1\x1a\x1bgoogle/protobuf/empty.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\xe7\x02\n" +
 	"\x06Policy\x12;\n" +
 	"\n" +
 	"durability\x18\x01 \x01(\x0e2\x1b.fiberd.grant.v1.DurabilityR\n" +
@@ -1047,7 +1196,9 @@ const file_grant_v1_grant_proto_rawDesc = "" +
 	"\vaudit_class\x18\x03 \x01(\tR\n" +
 	"auditClass\x12-\n" +
 	"\x13psi_some_avg10_shed\x18\x04 \x01(\x02R\x10psiSomeAvg10Shed\x12-\n" +
-	"\x13psi_some_avg10_park\x18\x05 \x01(\x02R\x10psiSomeAvg10Park\"3\n" +
+	"\x13psi_some_avg10_park\x18\x05 \x01(\x02R\x10psiSomeAvg10Park\x128\n" +
+	"\tisolation\x18\x06 \x01(\x0e2\x1a.fiberd.grant.v1.IsolationR\tisolation\x12B\n" +
+	"\rendpoint_mode\x18\a \x01(\x0e2\x1d.fiberd.grant.v1.EndpointModeR\fendpointMode\"3\n" +
 	"\vFiberLimits\x12\x10\n" +
 	"\x03max\x18\x01 \x01(\rR\x03max\x12\x12\n" +
 	"\x04warm\x18\x02 \x01(\rR\x04warm\":\n" +
@@ -1074,12 +1225,15 @@ const file_grant_v1_grant_proto_rawDesc = "" +
 	"\tgrant_jwt\x18\x01 \x01(\tR\bgrantJwt\x12\x18\n" +
 	"\asession\x18\x02 \x01(\tR\asession\x126\n" +
 	"\bdeadline\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\bdeadline\x12\x18\n" +
-	"\apayload\x18\x04 \x01(\fR\apayload\"\xa4\x01\n" +
+	"\apayload\x18\x04 \x01(\fR\apayload\"\xf1\x01\n" +
 	"\rCloneResponse\x12\x19\n" +
 	"\bfiber_id\x18\x01 \x01(\tR\afiberId\x12\x1a\n" +
 	"\bendpoint\x18\x02 \x01(\tR\bendpoint\x12,\n" +
 	"\x05fence\x18\x03 \x01(\v2\x16.fiberd.grant.v1.FenceR\x05fence\x12.\n" +
-	"\x04kind\x18\x04 \x01(\x0e2\x1a.fiberd.grant.v1.CloneKindR\x04kind\"\x98\x01\n" +
+	"\x04kind\x18\x04 \x01(\x0e2\x1a.fiberd.grant.v1.CloneKindR\x04kind\x12\x1f\n" +
+	"\vrouting_key\x18\x05 \x01(\tR\n" +
+	"routingKey\x12*\n" +
+	"\x11server_key_sha256\x18\x06 \x01(\tR\x0fserverKeySha256\"\x98\x01\n" +
 	"\x04Miss\x12-\n" +
 	"\x04code\x18\x01 \x01(\x0e2\x19.fiberd.grant.v1.MissCodeR\x04code\x12\"\n" +
 	"\rretry_after_s\x18\x02 \x01(\rR\vretryAfterS\x12\x16\n" +
@@ -1110,7 +1264,15 @@ const file_grant_v1_grant_proto_rawDesc = "" +
 	"Durability\x12\x1a\n" +
 	"\x16DURABILITY_UNSPECIFIED\x10\x00\x12\x0f\n" +
 	"\vBEST_EFFORT\x10\x01\x12\b\n" +
-	"\x04SYNC\x10\x02*/\n" +
+	"\x04SYNC\x10\x02*B\n" +
+	"\tIsolation\x12\x19\n" +
+	"\x15ISOLATION_UNSPECIFIED\x10\x00\x12\r\n" +
+	"\tUNTRUSTED\x10\x01\x12\v\n" +
+	"\aTRUSTED\x10\x02*'\n" +
+	"\fEndpointMode\x12\n" +
+	"\n" +
+	"\x06DIRECT\x10\x00\x12\v\n" +
+	"\aHANDOFF\x10\x01*/\n" +
 	"\tCloneKind\x12\n" +
 	"\n" +
 	"\x06CREATE\x10\x00\x12\n" +
@@ -1139,52 +1301,56 @@ func file_grant_v1_grant_proto_rawDescGZIP() []byte {
 	return file_grant_v1_grant_proto_rawDescData
 }
 
-var file_grant_v1_grant_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
+var file_grant_v1_grant_proto_enumTypes = make([]protoimpl.EnumInfo, 6)
 var file_grant_v1_grant_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
 var file_grant_v1_grant_proto_goTypes = []any{
 	(Tier)(0),                     // 0: fiberd.grant.v1.Tier
 	(Durability)(0),               // 1: fiberd.grant.v1.Durability
-	(CloneKind)(0),                // 2: fiberd.grant.v1.CloneKind
-	(MissCode)(0),                 // 3: fiberd.grant.v1.MissCode
-	(*Policy)(nil),                // 4: fiberd.grant.v1.Policy
-	(*FiberLimits)(nil),           // 5: fiberd.grant.v1.FiberLimits
-	(*DeviceBudget)(nil),          // 6: fiberd.grant.v1.DeviceBudget
-	(*CapacityGrant)(nil),         // 7: fiberd.grant.v1.CapacityGrant
-	(*Fence)(nil),                 // 8: fiberd.grant.v1.Fence
-	(*CloneRequest)(nil),          // 9: fiberd.grant.v1.CloneRequest
-	(*CloneResponse)(nil),         // 10: fiberd.grant.v1.CloneResponse
-	(*Miss)(nil),                  // 11: fiberd.grant.v1.Miss
-	(*ParkRequest)(nil),           // 12: fiberd.grant.v1.ParkRequest
-	(*ReleaseRequest)(nil),        // 13: fiberd.grant.v1.ReleaseRequest
-	(*Status)(nil),                // 14: fiberd.grant.v1.Status
-	(*timestamppb.Timestamp)(nil), // 15: google.protobuf.Timestamp
-	(*emptypb.Empty)(nil),         // 16: google.protobuf.Empty
+	(Isolation)(0),                // 2: fiberd.grant.v1.Isolation
+	(EndpointMode)(0),             // 3: fiberd.grant.v1.EndpointMode
+	(CloneKind)(0),                // 4: fiberd.grant.v1.CloneKind
+	(MissCode)(0),                 // 5: fiberd.grant.v1.MissCode
+	(*Policy)(nil),                // 6: fiberd.grant.v1.Policy
+	(*FiberLimits)(nil),           // 7: fiberd.grant.v1.FiberLimits
+	(*DeviceBudget)(nil),          // 8: fiberd.grant.v1.DeviceBudget
+	(*CapacityGrant)(nil),         // 9: fiberd.grant.v1.CapacityGrant
+	(*Fence)(nil),                 // 10: fiberd.grant.v1.Fence
+	(*CloneRequest)(nil),          // 11: fiberd.grant.v1.CloneRequest
+	(*CloneResponse)(nil),         // 12: fiberd.grant.v1.CloneResponse
+	(*Miss)(nil),                  // 13: fiberd.grant.v1.Miss
+	(*ParkRequest)(nil),           // 14: fiberd.grant.v1.ParkRequest
+	(*ReleaseRequest)(nil),        // 15: fiberd.grant.v1.ReleaseRequest
+	(*Status)(nil),                // 16: fiberd.grant.v1.Status
+	(*timestamppb.Timestamp)(nil), // 17: google.protobuf.Timestamp
+	(*emptypb.Empty)(nil),         // 18: google.protobuf.Empty
 }
 var file_grant_v1_grant_proto_depIdxs = []int32{
 	1,  // 0: fiberd.grant.v1.Policy.durability:type_name -> fiberd.grant.v1.Durability
-	5,  // 1: fiberd.grant.v1.CapacityGrant.fibers:type_name -> fiberd.grant.v1.FiberLimits
-	0,  // 2: fiberd.grant.v1.CapacityGrant.min_tier:type_name -> fiberd.grant.v1.Tier
-	15, // 3: fiberd.grant.v1.CapacityGrant.lease_expiry:type_name -> google.protobuf.Timestamp
-	4,  // 4: fiberd.grant.v1.CapacityGrant.policy:type_name -> fiberd.grant.v1.Policy
-	6,  // 5: fiberd.grant.v1.CapacityGrant.device_budget:type_name -> fiberd.grant.v1.DeviceBudget
-	15, // 6: fiberd.grant.v1.CloneRequest.deadline:type_name -> google.protobuf.Timestamp
-	8,  // 7: fiberd.grant.v1.CloneResponse.fence:type_name -> fiberd.grant.v1.Fence
-	2,  // 8: fiberd.grant.v1.CloneResponse.kind:type_name -> fiberd.grant.v1.CloneKind
-	3,  // 9: fiberd.grant.v1.Miss.code:type_name -> fiberd.grant.v1.MissCode
-	8,  // 10: fiberd.grant.v1.Status.latest:type_name -> fiberd.grant.v1.Fence
-	9,  // 11: fiberd.grant.v1.Fibers.Clone:input_type -> fiberd.grant.v1.CloneRequest
-	12, // 12: fiberd.grant.v1.Fibers.Park:input_type -> fiberd.grant.v1.ParkRequest
-	13, // 13: fiberd.grant.v1.Fibers.Release:input_type -> fiberd.grant.v1.ReleaseRequest
-	16, // 14: fiberd.grant.v1.Fibers.Watch:input_type -> google.protobuf.Empty
-	10, // 15: fiberd.grant.v1.Fibers.Clone:output_type -> fiberd.grant.v1.CloneResponse
-	16, // 16: fiberd.grant.v1.Fibers.Park:output_type -> google.protobuf.Empty
-	16, // 17: fiberd.grant.v1.Fibers.Release:output_type -> google.protobuf.Empty
-	14, // 18: fiberd.grant.v1.Fibers.Watch:output_type -> fiberd.grant.v1.Status
-	15, // [15:19] is the sub-list for method output_type
-	11, // [11:15] is the sub-list for method input_type
-	11, // [11:11] is the sub-list for extension type_name
-	11, // [11:11] is the sub-list for extension extendee
-	0,  // [0:11] is the sub-list for field type_name
+	2,  // 1: fiberd.grant.v1.Policy.isolation:type_name -> fiberd.grant.v1.Isolation
+	3,  // 2: fiberd.grant.v1.Policy.endpoint_mode:type_name -> fiberd.grant.v1.EndpointMode
+	7,  // 3: fiberd.grant.v1.CapacityGrant.fibers:type_name -> fiberd.grant.v1.FiberLimits
+	0,  // 4: fiberd.grant.v1.CapacityGrant.min_tier:type_name -> fiberd.grant.v1.Tier
+	17, // 5: fiberd.grant.v1.CapacityGrant.lease_expiry:type_name -> google.protobuf.Timestamp
+	6,  // 6: fiberd.grant.v1.CapacityGrant.policy:type_name -> fiberd.grant.v1.Policy
+	8,  // 7: fiberd.grant.v1.CapacityGrant.device_budget:type_name -> fiberd.grant.v1.DeviceBudget
+	17, // 8: fiberd.grant.v1.CloneRequest.deadline:type_name -> google.protobuf.Timestamp
+	10, // 9: fiberd.grant.v1.CloneResponse.fence:type_name -> fiberd.grant.v1.Fence
+	4,  // 10: fiberd.grant.v1.CloneResponse.kind:type_name -> fiberd.grant.v1.CloneKind
+	5,  // 11: fiberd.grant.v1.Miss.code:type_name -> fiberd.grant.v1.MissCode
+	10, // 12: fiberd.grant.v1.Status.latest:type_name -> fiberd.grant.v1.Fence
+	11, // 13: fiberd.grant.v1.Fibers.Clone:input_type -> fiberd.grant.v1.CloneRequest
+	14, // 14: fiberd.grant.v1.Fibers.Park:input_type -> fiberd.grant.v1.ParkRequest
+	15, // 15: fiberd.grant.v1.Fibers.Release:input_type -> fiberd.grant.v1.ReleaseRequest
+	18, // 16: fiberd.grant.v1.Fibers.Watch:input_type -> google.protobuf.Empty
+	12, // 17: fiberd.grant.v1.Fibers.Clone:output_type -> fiberd.grant.v1.CloneResponse
+	18, // 18: fiberd.grant.v1.Fibers.Park:output_type -> google.protobuf.Empty
+	18, // 19: fiberd.grant.v1.Fibers.Release:output_type -> google.protobuf.Empty
+	16, // 20: fiberd.grant.v1.Fibers.Watch:output_type -> fiberd.grant.v1.Status
+	17, // [17:21] is the sub-list for method output_type
+	13, // [13:17] is the sub-list for method input_type
+	13, // [13:13] is the sub-list for extension type_name
+	13, // [13:13] is the sub-list for extension extendee
+	0,  // [0:13] is the sub-list for field type_name
 }
 
 func init() { file_grant_v1_grant_proto_init() }
@@ -1197,7 +1363,7 @@ func file_grant_v1_grant_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_grant_v1_grant_proto_rawDesc), len(file_grant_v1_grant_proto_rawDesc)),
-			NumEnums:      4,
+			NumEnums:      6,
 			NumMessages:   11,
 			NumExtensions: 0,
 			NumServices:   1,

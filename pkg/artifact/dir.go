@@ -5,12 +5,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
+	"github.com/go-jose/go-jose/v4"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"oras.land/oras-go/v2"
 	"oras.land/oras-go/v2/content"
@@ -41,15 +44,15 @@ const (
 )
 
 // PushDir uploads every regular file in dir (logs excluded) as the
-// artifact at ref, with the annotations on the manifest. Returns the
-// manifest digest.
-func PushDir(ctx context.Context, dir, ref, artifactType string, annotations map[string]string, plainHTTP bool) (string, error) {
+// artifact at ref, with the annotations on the manifest. It signs with
+// signer when that is set, and returns the manifest digest.
+func PushDir(ctx context.Context, dir, ref, artifactType string, annotations map[string]string, signer *jose.JSONWebKey, plainHTTP bool) (string, error) {
 	dir, err := filepath.Abs(dir)
 	if err != nil {
 		return "", err
 	}
 	if IsFileRef(ref) {
-		return filePushDir(dir, ref, artifactType, annotations)
+		return filePushDir(dir, ref, artifactType, annotations, signer)
 	}
 	fs, err := file.New(dir)
 	if err != nil {
@@ -62,7 +65,7 @@ func PushDir(ctx context.Context, dir, ref, artifactType string, annotations map
 	}
 	var names []string
 	for _, e := range entries {
-		if e.Type().IsRegular() && !strings.HasSuffix(e.Name(), ".log") && !strings.HasSuffix(e.Name(), ".tmp") {
+		if pushable(e) {
 			names = append(names, e.Name())
 		}
 	}
@@ -74,6 +77,18 @@ func PushDir(ctx context.Context, dir, ref, artifactType string, annotations map
 			return "", err
 		}
 		layers = append(layers, d)
+	}
+	// PackManifest adds a created annotation when there is none. Set it
+	// first so the signature covers the manifest as pushed.
+	if annotations[ocispec.AnnotationCreated] == "" {
+		annotations = maps.Clone(annotations)
+		if annotations == nil {
+			annotations = map[string]string{}
+		}
+		annotations[ocispec.AnnotationCreated] = time.Now().UTC().Format(time.RFC3339)
+	}
+	if annotations, err = signed(signer, artifactType, annotations, layerFiles(layers)); err != nil {
+		return "", err
 	}
 	desc, err := oras.PackManifest(ctx, fs, oras.PackManifestVersion1_1, artifactType,
 		oras.PackManifestOptions{Layers: layers, ManifestAnnotations: annotations})
@@ -101,6 +116,16 @@ type Located struct {
 	Digest       string
 	ArtifactType string
 	Annotations  map[string]string
+	Files        []File
+}
+
+// layerFiles names a manifest's layers by their titles.
+func layerFiles(layers []ocispec.Descriptor) []File {
+	files := make([]File, 0, len(layers))
+	for _, l := range layers {
+		files = append(files, File{Name: l.Annotations[ocispec.AnnotationTitle], Digest: l.Digest.String(), Size: l.Size})
+	}
+	return files
 }
 
 // Resolve fetches only the manifest at ref (repo:tag or repo@digest).
@@ -133,7 +158,7 @@ func Resolve(ctx context.Context, ref string, plainHTTP bool) (Located, bool, er
 	if err := json.Unmarshal(mb, &m); err != nil {
 		return Located{}, false, err
 	}
-	return Located{Digest: desc.Digest.String(), ArtifactType: m.ArtifactType, Annotations: m.Annotations}, true, nil
+	return Located{Digest: desc.Digest.String(), ArtifactType: m.ArtifactType, Annotations: m.Annotations, Files: layerFiles(m.Layers)}, true, nil
 }
 
 // PullDir downloads the artifact at ref into dst (files land under their

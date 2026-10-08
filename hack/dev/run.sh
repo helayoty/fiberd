@@ -5,7 +5,9 @@
 #   hack/dev/run.sh bash                 interactive shell
 #   hack/dev/run.sh go test ./...        anything else
 #
-# Module and build caches live in named volumes so rebuilds are fast.
+# Module, build and cargo registry caches live in named volumes so
+# rebuilds are fast. The fiberd-conform volume at /conform holds
+# conformance state and logs on macOS (see CONFORM_DIR in the Makefile).
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
@@ -15,10 +17,11 @@ NAME=${FIBERD_DEV_NAME:-fiberd-dev}
 # Rebuild when the Dockerfile or entrypoint changed: their hash is kept as
 # a label on the image, so the check does not depend on clocks or on how
 # this host's `date` parses timestamps.
-want=$(cat hack/dev/Dockerfile hack/dev/entrypoint.sh | shasum -a 256 | cut -c1-16)
+want=$(cat docker/criu/Dockerfile hack/dev/entrypoint.sh hack/dev/install-criu.sh \
+  hack/dev/criu-4b7398595-passcred-families.patch | shasum -a 256 | cut -c1-16)
 have=$(docker image inspect -f '{{index .Config.Labels "io.fiberd.dev.hash"}}' "$IMAGE" 2>/dev/null || true)
 if [ "$want" != "$have" ]; then
-  docker build -t "$IMAGE" -f hack/dev/Dockerfile --label "io.fiberd.dev.hash=$want" . >&2
+  docker build -t "$IMAGE" -f docker/criu/Dockerfile --label "io.fiberd.dev.hash=$want" . >&2
 fi
 
 tty=""
@@ -36,6 +39,8 @@ exec docker run --rm $tty $net ${FIBERD_DEV_DOCKER_ARGS:-} \
   -v "$PWD:/src" \
   -v fiberd-gomod:/go/pkg/mod \
   -v fiberd-gocache:/root/.cache/go-build \
+  -v fiberd-cargo-registry:/usr/local/cargo/registry \
+  -v fiberd-conform:/conform \
   -e GOTOOLCHAIN=auto \
   -w /src \
   "$IMAGE" "$@"

@@ -41,6 +41,10 @@ type Spec struct {
 	// WBudget is the per-fiber dirtied working set ceiling (32Mi).
 	WBudget string `json:"wBudget,omitempty"`
 	MinTier string `json:"minTier,omitempty"`
+	// Isolation is UNTRUSTED or TRUSTED. UNTRUSTED is the default, and only
+	// a gvisor or hyperlight Pod serves it, so the controller refuses it on
+	// any other runtime. Any runtime serves TRUSTED, including proc and runc.
+	Isolation string `json:"isolation,omitempty"`
 	// Lease is how long each minted grant is valid; the controller renews
 	// at half-life. Default 10m.
 	Lease        string `json:"lease,omitempty"`
@@ -73,10 +77,13 @@ type PodSpec struct {
 	EndpointFamily string            `json:"endpointFamily,omitempty"`
 	NodeSelector   map[string]string `json:"nodeSelector,omitempty"`
 	NodeName       string            `json:"nodeName,omitempty"`
-	// Privileged runs the agent privileged (cgroup writes, criu). Default
-	// true; false only works with a runtime that needs neither.
+	// Privileged runs the agent privileged. When unset, the proc runtime gets
+	// only the capabilities in caps.Proc and no seccomp filter, because criu
+	// cannot dump from under one. Every other runtime runs privileged, a
+	// known gap, even though caps.Runc measures what runc needs.
 	Privileged *bool `json:"privileged,omitempty"`
-	// UnsafeAdmin enables the agent's test-only admin controls.
+	// UnsafeAdmin enables the agent's test-only admin controls. It needs
+	// an image whose agent is built with -tags fiberd_testhooks.
 	UnsafeAdmin bool              `json:"unsafeAdmin,omitempty"`
 	Labels      map[string]string `json:"labels,omitempty"`
 	Annotations map[string]string `json:"annotations,omitempty"`

@@ -4,7 +4,11 @@ This page is the canonical source for fiberd performance measurements. It separa
 
 The values below are historical results already recorded in this repository. They were not rerun during the documentation rewrite. Results from different runs should not be combined because the harness, concurrency, backend, and environment change the outcome.
 
-![Benchmark results are meaningful only with their operation boundary, concurrency, backend, environment, commit, raw output, and statistical method; historical runs must not be combined or treated as service-level objectives.](./images/benchmark-methodology.svg)
+![One uncached activation, with nested measurement spans: runtime call to ready sits inside the activator's Clone RPC, which sits inside the client's HTTP request and response. Verification and ledger work precede activation; audit and commit precede the Clone result; workload connection and execution follow.](./images/benchmark-methodology.svg)
+
+The diagram compares **measurement boundaries**, not durations. It shows a
+representative CREATE or RESUME path; ATTACH and cached routes can skip
+activation. The methodology and per-run qualifications remain below.
 
 ## How to read the results
 
@@ -72,23 +76,16 @@ The burst sizes differ because each gVisor sandbox has a much larger fixed footp
 
 ## Run B: fork and copy-on-write mechanism
 
-This C benchmark isolates `fork()` and copy-on-write behavior. It does not use the fiberd agent, protocol, ledger, cgroups, or CRIU.
+These numbers came from a standalone C microbenchmark that isolated `fork()` and copy-on-write behavior. It did not use the fiberd agent, protocol, ledger, cgroups, or CRIU. That benchmark has since been removed. [`tests/proc/bench_linux_test.go`](../tests/proc/bench_linux_test.go) now measures the same shapes through the real proc runtime (Run A).
 
 **Environment**
 
 - Apple Silicon Mac using the Linux development container under Docker Desktop.
 - The exact Mac model, Docker version, kernel version, date, and separate commit identifier were not recorded.
 
-**Commands**
+**Method**
 
-```bash
-make linux-shell
-make bench
-./bin/zb warm 50 128 4
-./bin/zb cold 10 128
-```
-
-The warm command initializes a 128 MiB parent, starts 50 children concurrently, and dirties 4 MiB in each child. The cold command initializes the same 128 MiB independently for each of 10 processes.
+The warm run initialized a 128 MiB parent, started 50 children concurrently, and dirtied 4 MiB in each child. The cold run initialized the same 128 MiB independently for each of 10 processes.
 
 | Measurement | Historical result |
 | --- | ---: |
@@ -98,9 +95,9 @@ The warm command initializes a 128 MiB parent, starts 50 children concurrently, 
 | Total PSS for parent and 50 children | 180 to 330 MiB |
 | Memory without sharing | 6.5 GiB |
 
-The broad PSS range reflects repeated development runs rather than one archived output file. Use this benchmark to validate the mechanism on a machine, not as a fiberd end-to-end latency claim.
+The broad PSS range reflects repeated development runs rather than one archived output file. Read these numbers as a check of the mechanism, not as a fiberd end-to-end latency claim.
 
-The source and output definitions are in [`zygote_bench.c`](../zygote_bench.c).
+To measure these shapes today, run `make bench`. It runs `TestStormNumbers` from [`tests/proc/bench_linux_test.go`](../tests/proc/bench_linux_test.go) in the development container. Its results are not comparable with this table. They include the agent, the control socket and cgroups, and the zygote heap is 32 MiB. There is no cold run.
 
 ## Run C: Knative-shaped activator
 
@@ -169,6 +166,70 @@ The measured path is implemented by
 It demonstrates the example's mapping to fiberd and does not include object
 storage or a Substrate control plane.
 
+## Run F: end-to-end Clone over gRPC
+
+This run measures Clone the way a consumer sees it and splits each round trip into stages. The client calls the Fibers service over loopback TCP. The grant is signed by an in-process issuer and verified through its JWKS. The agent uses the production ledger, budget, audit spool, and snapshot store with the proc backend.
+
+**Environment**
+
+- Apple M3 Mac (Mac15,3) with 16 GiB of memory.
+- Docker Desktop 29.1.3 running the repository's Linux development container with 3 CPUs and 5.8 GiB of memory.
+- Linux 6.12.54-linuxkit on arm64, Go 1.26.8, and glibc 2.36.
+- Commit 6e58535 with uncommitted changes in the tree, run on 2026-10-06.
+- The audit spool and snapshot were on a Docker named volume, so fsync reached a disk. The development container's `/tmp` is a tmpfs, where fsync costs nothing.
+- Two kind clusters, a registry, and a proxy were running in the same Docker virtual machine and competed for its CPUs.
+
+**Command**
+
+```bash
+make bench-e2e
+```
+
+**Harness**
+
+- [`tests/proc/e2e_bench_linux_test.go`](../tests/proc/e2e_bench_linux_test.go)
+- Every stage is timed where it runs and matched to the fiber it creates.
+- Host is the host runtime's work around the backend. That covers the cgroup leaf and its limits, the run directory, and the endpoint.
+- Zygote is the backend round trip from `CLONE` to `CLONED`, including any wait behind other clones.
+- Audit is the create record. A sync record also waits for fsync.
+- Agent is everything else. That covers gRPC, protobuf, admission, grant verification, the budget, the ledger, and the snapshot store.
+- Verify is also reported on its own because it is a part of agent.
+- Each case warms its grant with one clone first, which is reported separately and excluded from the quantiles. Sequential cases run 100 clones and release each one before the next. Burst cases run 5 rounds of 50 concurrent clones and release each round before the next.
+
+| Case, p50 (p99) | Round trip | Host | Zygote | Audit | Agent | Of which verify |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Sequential, best-effort audit | 1.81 ms (9.01 ms) | 0.15 ms | 0.93 ms | 0.02 ms | 0.50 ms | 0.18 ms |
+| Sequential, sync audit | 2.49 ms (21.87 ms) | 0.13 ms | 0.72 ms | 0.65 ms (14.42 ms) | 0.39 ms | 0.13 ms |
+| Sequential, no snapshot store | 1.47 ms (22.34 ms) | 0.14 ms | 0.86 ms | 0.02 ms | 0.33 ms | 0.16 ms |
+| 50-way burst, best-effort audit | 25.19 ms (48.49 ms) | 0.22 ms | 13.23 ms | 0.01 ms | 9.62 ms | 0.09 ms |
+| 50-way burst, sync audit | 51.56 ms (124.37 ms) | 0.47 ms | 7.21 ms | 28.07 ms | 12.32 ms | 0.09 ms |
+| 50-way burst, no snapshot store | 14.69 ms (29.84 ms) | 0.18 ms | 6.22 ms | 0.00 ms | 6.74 ms | 0.08 ms |
+
+The stage columns are each stage's own p50, so they do not add up to the round trip. A 50-way burst took 45 ms of wall time at p50 with the snapshot store and 20 ms without it. The first clone of each grant took 116 to 259 ms. That covers admitting the grant, warming the template, and fetching the JWKS.
+
+**What the run shows**
+
+- One clone is about 2 ms end to end. The zygote round trip is half of that. The agent's own work, including signature verification, is about 0.5 ms.
+- Under a burst, time is spent waiting rather than computing. Zygote time grows because the zygote handles `CLONE` requests one at a time. Agent time grows to several milliseconds while verification stays under 0.1 ms.
+- The snapshot store writes the whole ledger after every clone. Without it, a burst finished in less than half the wall time.
+- Sync audit records wait for fsync one at a time, which made audit the largest stage in the sync burst.
+- Concurrent snapshot saves shared one temporary file. During bursts some saves failed with `rename ... ledger.json.tmp: no such file or directory`.
+- Burst results vary between runs on this shared 3-CPU virtual machine. A second run of the same command had burst p90 values above 200 ms. Compare cases from the same run only.
+
+## Run G: end-to-end Clone after the audit group commit
+
+This rerun of Run F measures the change that lets concurrent sync audit records share one fsync. The environment and command match Run F. The commit was 252bb7e with uncommitted changes, and the run was on 2026-10-06.
+
+The machine was busier than during Run F, with a load average of 7 to 15. Only the audit stage compares cleanly between the two runs. The other stages moved with the load.
+
+| 50-way burst, sync audit, p50 | Run F | Run G |
+| --- | ---: | ---: |
+| Audit | 28.07 ms | 3.53 ms |
+| Round trip | 51.56 ms | 34.92 ms |
+| Burst wall time | 81.92 ms | 56.13 ms |
+
+Sequential sync audit records took 0.56 ms at p50, against 0.65 ms in Run F. A single record still waits for its own fsync, so group commit helps bursts and not single clones.
+
 ## Overcommit acceptance
 
 `make overcommit` is a pass or fail resource test rather than a latency benchmark. It runs a proc home inside a container with a 384 MiB memory and swap limit, sets the grant ceiling to 160 MiB, and drives eight fibers toward twice that grant ceiling.
@@ -191,4 +252,10 @@ make linux-shell
 FIBERD_BENCH=1 go test -v -run TestStormNumbers ./tests/proc
 FIBERD_BENCH=1 go test -v -run TestStormNumbers ./tests/runc
 FIBERD_BENCH=1 go test -v -run TestStormNumbers ./tests/gvisor
+```
+
+The end-to-end Clone breakdown has its own target. It mounts a Docker volume for the audit spool and snapshot so that fsync reaches a disk.
+
+```bash
+make bench-e2e
 ```

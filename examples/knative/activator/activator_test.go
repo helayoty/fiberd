@@ -20,6 +20,7 @@ import (
 
 	"github.com/helayoty/fiberd/pkg/consumer"
 	"github.com/helayoty/fiberd/pkg/core"
+	"github.com/helayoty/fiberd/pkg/core/coretest"
 	"github.com/helayoty/fiberd/pkg/grant"
 	"github.com/helayoty/fiberd/pkg/rpc"
 	"github.com/helayoty/fiberd/pkg/runtime/stub"
@@ -86,7 +87,7 @@ func newWorld(t *testing.T) *world {
 	health := core.NewSourceHealth(10*time.Second, time.Now())
 	ag := &core.Agent{
 		NodeID: "home-a", Ledger: core.NewLedger(1), Budget: core.NewBudget(1000, 256<<20),
-		Runtime: stub.NewWithTier(core.TierSnapshot), Audit: core.NopAuditor{}, Verify: grant.InsecureJSONVerifier{},
+		Runtime: stub.NewWithTier(core.TierSnapshot), Verify: grant.InsecureJSONVerifier{},
 		Health: health, StatusInterval: 20 * time.Millisecond,
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -137,109 +138,131 @@ func call(t *testing.T, srv *httptest.Server, path, body string) (string, http.H
 	return strings.TrimSpace(string(b)), resp.Header, resp.StatusCode
 }
 
-func TestScaleFromZeroAttachParkResume(t *testing.T) {
-	w := newWorld(t)
-	g := jsonGrant(t, core.Grant{UID: "rev-a", Audience: "home-a", FiberMax: 4})
-	act, err := activator.New(w.client, activator.Config{
-		Revisions: []activator.Revision{{Name: "hello", Grant: g}},
-		Idle:      200 * time.Millisecond, Dial: w.dial,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go act.Run(ctx)
-	srv := httptest.NewServer(act)
-	defer srv.Close()
-
-	// First request: scale from zero is a CREATE, in the same request.
-	body, hdr, code := call(t, srv, "/hello", "")
-	if code != 200 || body != "pong" || hdr.Get("X-Fiberd-Clone") != "CREATE" {
-		t.Fatalf("first = %d %q %v", code, body, hdr)
-	}
-	// Second: attaches to the same fiber; the guest's state carries.
-	body, hdr, _ = call(t, srv, "/hello", "incr")
-	if body != "1" || hdr.Get("X-Fiberd-Clone") != "ATTACH" {
-		t.Fatalf("second = %q %v", body, hdr)
-	}
-	call(t, srv, "/hello", "incr")
-	// Idle: the activator parks the revision; the ledger shows it parked.
+// waitParked waits for the activator to park an idle grant's one fiber.
+func waitParked(t *testing.T, w *world, uid string) {
+	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
 	for {
-		st, _ := w.agent.Ledger.Status("rev-a")
+		st, _ := coretest.GrantStatus(w.agent.Ledger, uid)
 		if st.Parked == 1 && st.Running == 0 {
-			break
+			return
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("revision not parked when idle: %+v", st)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	// Next request resumes it under a new fence.
-	body, hdr, code = call(t, srv, "/hello", "")
-	if code != 200 || hdr.Get("X-Fiberd-Clone") != "RESUME" || !strings.HasSuffix(hdr.Get("X-Fiberd-Fence"), "/1/2") {
-		t.Fatalf("after idle = %d %q %v", code, body, hdr)
-	}
 }
 
-func TestMissesBecomeKnativeFallbacks(t *testing.T) {
-	w := newWorld(t)
-	// Two revisions on one grant that allows a single fiber.
-	g := jsonGrant(t, core.Grant{UID: "rev-b", Audience: "home-a", FiberMax: 1})
-	act, err := activator.New(w.client, activator.Config{
-		Revisions: []activator.Revision{{Name: "one", Grant: g}, {Name: "two", Grant: g}}, Dial: w.dial,
-	})
-	if err != nil {
-		t.Fatal(err)
+// TestActivator runs scenarios. Each is one activator over a stub home, fed
+// a sequence of requests, and each step names what its request must get
+// back. A scenario's steps share its activator and run in order.
+func TestActivator(t *testing.T) {
+	type step struct {
+		name       string
+		before     func(t *testing.T, w *world) // changes the world first. May be nil
+		path, body string                       // the request. An empty body is a GET
+		code       int
+		reply      string // the exact body, unchecked when empty
+		replyHas   string // a substring of the body, unchecked when empty
+		clone      string // X-Fiberd-Clone, unchecked when empty
+		fence      string // suffix of X-Fiberd-Fence, unchecked when empty
+		retryAfter string // Retry-After, unchecked when empty
 	}
-	srv := httptest.NewServer(act)
-	defer srv.Close()
-	if _, _, code := call(t, srv, "/one", ""); code != 200 {
-		t.Fatalf("first revision = %d", code)
+	cases := []struct {
+		name   string
+		config func(t *testing.T, w *world) activator.Config
+		steps  []step
+	}{
+		{
+			name: "scale from zero, attach, park when idle, resume",
+			config: func(t *testing.T, w *world) activator.Config {
+				g := jsonGrant(t, core.Grant{UID: "rev-a", Audience: "home-a", FiberMax: 4})
+				return activator.Config{Revisions: []activator.Revision{{Name: "hello", Grant: g}}, Idle: 200 * time.Millisecond, Dial: w.dial}
+			},
+			steps: []step{
+				{name: "the first request scales from zero: a CREATE in the same request",
+					path: "/hello", code: 200, reply: "pong", clone: "CREATE"},
+				{name: "the second attaches to the same fiber; the guest's state carries",
+					path: "/hello", body: "incr", code: 200, reply: "1", clone: "ATTACH"},
+				{name: "the third still counts on the same guest",
+					path: "/hello", body: "incr", code: 200, reply: "2", clone: "ATTACH"},
+				{name: "once parked when idle, the next request resumes it under a new fence",
+					before: func(t *testing.T, w *world) { waitParked(t, w, "rev-a") },
+					path:   "/hello", code: 200, reply: "pong", clone: "RESUME", fence: "/1/2"},
+			},
+		},
+		{
+			// Two revisions on one grant that allows a single fiber.
+			name: "misses become Knative fallbacks",
+			config: func(t *testing.T, w *world) activator.Config {
+				g := jsonGrant(t, core.Grant{UID: "rev-b", Audience: "home-a", FiberMax: 1})
+				return activator.Config{Revisions: []activator.Revision{{Name: "one", Grant: g}, {Name: "two", Grant: g}}, Dial: w.dial}
+			},
+			steps: []step{
+				{name: "the first revision is served", path: "/one", code: 200, clone: "CREATE"},
+				{name: "an idle fiber takes the next request instead of a second clone",
+					path: "/one", code: 200, clone: "ATTACH"},
+				{name: "the other revision needs a second fiber the grant lacks: with the lane healthy, 503 deferred",
+					path: "/two", code: 503, replyHas: "deferred"},
+				{name: "with the lane down, 503 shed with Retry-After",
+					before: func(_ *testing.T, w *world) { w.health.MarkSync(time.Now().Add(-time.Hour)) },
+					path:   "/two", code: 503, replyHas: "shed", retryAfter: "1"},
+				{name: "an unknown revision is 404", path: "/nope", code: 404},
+			},
+		},
+		{
+			name: "http mode proxies to the guest",
+			config: func(t *testing.T, w *world) activator.Config {
+				g := jsonGrant(t, core.Grant{UID: "rev-c", Audience: "home-a", FiberMax: 1})
+				// An HTTP guest behind the endpoint.
+				guestSrv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+					_, _ = fmt.Fprintf(rw, "hello from %s", r.URL.Path)
+				}))
+				t.Cleanup(guestSrv.Close)
+				dial := func(ctx context.Context, _ string) (net.Conn, error) {
+					return (&net.Dialer{}).DialContext(ctx, "tcp", strings.TrimPrefix(guestSrv.URL, "http://"))
+				}
+				return activator.Config{Revisions: []activator.Revision{{Name: "web", Grant: g, Mode: "http"}}, Dial: dial}
+			},
+			steps: []step{
+				{name: "the request path past the revision reaches the guest",
+					path: "/web/items/7", code: 200, reply: "hello from /items/7", clone: "CREATE"},
+			},
+		},
 	}
-	// An idle fiber takes the next request instead of a second clone.
-	if _, hdr, _ := call(t, srv, "/one", ""); hdr.Get("X-Fiberd-Clone") != "ATTACH" {
-		t.Fatalf("second request to a served revision = %v, want ATTACH", hdr)
-	}
-	// The other revision needs a second fiber; the grant allows one: with
-	// the lane healthy that is DEFERRED, the ordinary path.
-	body, _, code := call(t, srv, "/two", "")
-	if code != 503 || !strings.Contains(body, "deferred") {
-		t.Fatalf("over capacity = %d %q, want 503 deferred", code, body)
-	}
-	// Lane down: SHED with Retry-After.
-	w.health.MarkSync(time.Now().Add(-time.Hour))
-	body, hdr, code := call(t, srv, "/two", "")
-	if code != 503 || !strings.Contains(body, "shed") || hdr.Get("Retry-After") != "1" {
-		t.Fatalf("lane down = %d %q retry=%q", code, body, hdr.Get("Retry-After"))
-	}
-	if _, _, code := call(t, srv, "/nope", ""); code != 404 {
-		t.Fatalf("unknown revision = %d", code)
-	}
-}
-
-func TestHTTPModeProxiesToTheGuest(t *testing.T) {
-	w := newWorld(t)
-	g := jsonGrant(t, core.Grant{UID: "rev-c", Audience: "home-a", FiberMax: 1})
-	// An HTTP guest behind the endpoint.
-	guestSrv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
-		_, _ = fmt.Fprintf(rw, "hello from %s", r.URL.Path)
-	}))
-	defer guestSrv.Close()
-	dial := func(ctx context.Context, _ string) (net.Conn, error) {
-		return (&net.Dialer{}).DialContext(ctx, "tcp", strings.TrimPrefix(guestSrv.URL, "http://"))
-	}
-	act, err := activator.New(w.client, activator.Config{
-		Revisions: []activator.Revision{{Name: "web", Grant: g, Mode: "http"}}, Dial: dial,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	srv := httptest.NewServer(act)
-	defer srv.Close()
-	body, hdr, code := call(t, srv, "/web/items/7", "")
-	if code != 200 || body != "hello from /items/7" || hdr.Get("X-Fiberd-Clone") != "CREATE" {
-		t.Fatalf("http mode = %d %q %v", code, body, hdr)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			w := newWorld(t)
+			act, err := activator.New(w.client, tc.config(t, w))
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			go act.Run(ctx)
+			srv := httptest.NewServer(act)
+			defer srv.Close()
+			for _, st := range tc.steps {
+				ok := t.Run(st.name, func(t *testing.T) {
+					if st.before != nil {
+						st.before(t, w)
+					}
+					body, hdr, code := call(t, srv, st.path, st.body)
+					if code != st.code ||
+						(st.reply != "" && body != st.reply) ||
+						(st.replyHas != "" && !strings.Contains(body, st.replyHas)) ||
+						(st.clone != "" && hdr.Get("X-Fiberd-Clone") != st.clone) ||
+						(st.fence != "" && !strings.HasSuffix(hdr.Get("X-Fiberd-Fence"), st.fence)) ||
+						(st.retryAfter != "" && hdr.Get("Retry-After") != st.retryAfter) {
+						t.Fatalf("%s %s = %d %q %v, want %d body %q (has %q) clone %q fence *%s retry-after %q",
+							st.path, st.body, code, body, hdr, st.code, st.reply, st.replyHas, st.clone, st.fence, st.retryAfter)
+					}
+				})
+				if !ok {
+					return // later steps build on this one
+				}
+			}
+		})
 	}
 }

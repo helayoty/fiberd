@@ -32,6 +32,12 @@ const (
 	TokenFile = defaultTokenFile
 )
 
+// The files InCluster and Namespace read. Tests point them elsewhere.
+var (
+	caFile        = defaultCAFile
+	namespaceFile = NamespaceFile
+)
+
 // Client talks to one API server.
 type Client struct {
 	// Base is the API server URL (https://host:port).
@@ -49,13 +55,13 @@ func InCluster() (*Client, error) {
 	if host == "" || port == "" {
 		return nil, errors.New("kube: not in a cluster (KUBERNETES_SERVICE_HOST/PORT unset)")
 	}
-	ca, err := os.ReadFile(defaultCAFile)
+	ca, err := os.ReadFile(caFile)
 	if err != nil {
 		return nil, fmt.Errorf("kube: %w", err)
 	}
 	pool := x509.NewCertPool()
 	if !pool.AppendCertsFromPEM(ca) {
-		return nil, errors.New("kube: no certificate in " + defaultCAFile)
+		return nil, errors.New("kube: no certificate in " + caFile)
 	}
 	tr := http.DefaultTransport.(*http.Transport).Clone()
 	tr.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
@@ -68,7 +74,7 @@ func InCluster() (*Client, error) {
 
 // Namespace is the Pod's own namespace from the projected file.
 func Namespace() (string, error) {
-	b, err := os.ReadFile(NamespaceFile)
+	b, err := os.ReadFile(namespaceFile)
 	if err != nil {
 		return "", fmt.Errorf("kube: namespace: %w", err)
 	}

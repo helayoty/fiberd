@@ -7,7 +7,7 @@
 // replaces -cgroup-root and the node's address fills -endpoint-host.
 //
 //	srun --ntasks=1 fiberd-slurm -grant "$FIBERD_GRANT" -verifier jwks -issuer http://issuer:8686 \
-//	    -runtime proc -template default=/usr/local/bin/refzygote
+//	    -insecure-plaintext -runtime proc -template default=/usr/local/bin/refzygote
 package main
 
 import (
@@ -22,7 +22,6 @@ import (
 	"time"
 
 	"github.com/helayoty/fiberd/pkg/agent"
-	"github.com/helayoty/fiberd/pkg/core"
 	"github.com/helayoty/fiberd/pkg/grant"
 	fhome "github.com/helayoty/fiberd/pkg/home"
 
@@ -36,13 +35,17 @@ func main() {
 	probe := flag.String("slurm-probe", "", "command reporting the job's state as JobState=<STATE> (default: scontrol show job -o $SLURM_JOB_ID; `none` = a timer)")
 	flag.Parse()
 	c.Finish()
-	if err := run(&c, *grantArg, *probe); err != nil {
+	if err := run(&c, *grantArg, *probe, os.Getenv, ""); err != nil {
 		log.Fatal(err)
 	}
 }
 
-func run(c *agent.Config, grantArg, probe string) error {
-	job, err := home.ReadJob(os.Getenv)
+// run is the agent under a Slurm allocation. env reads the job's
+// environment. cgroupMount is the cgroup v2 mount the home delegates the
+// job step's cgroup under. Empty means the home's default, /sys/fs/cgroup.
+// Tests point it at a fake mount, so they never touch the host's cgroups.
+func run(c *agent.Config, grantArg, probe string, env func(string) string, cgroupMount string) error {
+	job, err := home.ReadJob(env)
 	if err != nil {
 		return err
 	}
@@ -54,16 +57,8 @@ func run(c *agent.Config, grantArg, probe string) error {
 			return err
 		}
 	}
-	var p []string
-	switch probe {
-	case "":
-		p = nil // the home's default
-	case "none":
-		p = []string{}
-	default:
-		p = strings.Fields(probe)
-	}
-	return agent.Run(c, func(c *agent.Config, _ core.Verifier, _ *grant.Cache) (fhome.Home, error) {
+	p := probeCommand(probe)
+	return agent.Run(c, func(c *agent.Config, _ *grant.Cache) (fhome.Home, error) {
 		fam, err := c.Family()
 		if err != nil {
 			return nil, err
@@ -73,10 +68,24 @@ func run(c *agent.Config, grantArg, probe string) error {
 			return nil, err
 		}
 		return home.New(home.Config{
-			GrantsDir: c.GrantsDir, StaleTTL: c.StaleTTL, Devices: c.Devices, Family: fam, Host: c.EndpointHost,
-			ListenPort: port, Probe: p,
+			Env: env, GrantsDir: c.GrantsDir, StaleTTL: c.StaleTTL, CgroupMount: cgroupMount, Devices: c.Devices,
+			Family: fam, Host: c.EndpointHost, ListenPort: port, Probe: p,
 		})
 	})
+}
+
+// probeCommand reads -slurm-probe. Empty is nil, the home's default
+// (scontrol). `none` is an empty command, so liveness comes from a timer.
+// Anything else is split into the command and its arguments.
+func probeCommand(probe string) []string {
+	switch probe {
+	case "":
+		return nil
+	case "none":
+		return []string{}
+	default:
+		return strings.Fields(probe)
+	}
 }
 
 // stage verifies the grant the job was given and writes it where the

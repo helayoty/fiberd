@@ -5,12 +5,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/helayoty/fiberd/pkg/artifact"
 	"github.com/helayoty/fiberd/pkg/core"
@@ -49,11 +50,54 @@ func parentTag(sha string) string {
 	return "p-" + sha
 }
 
-type remoteRecord struct {
-	Ref    string `json:"ref"`
-	Digest string `json:"digest"`
+// pushDelta seals the delta in src for its domain and session under
+// cfg's seal key and pushes the sealed copy to ref, signed. The plaintext
+// never leaves this home.
+func pushDelta(ctx context.Context, cfg Config, src, ref string, ann map[string]string, c artifact.SealContext) (string, error) {
+	tmp, err := os.MkdirTemp(filepath.Dir(src), ".seal-")
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = os.RemoveAll(tmp) }()
+	if err := artifact.SealDir(src, tmp, cfg.DeltaKeys.Seal, c); err != nil {
+		return "", err
+	}
+	ann = maps.Clone(ann)
+	ann[artifact.AnnotationDomain] = c.Domain
+	ann[artifact.AnnotationSession] = c.Session
+	ann[artifact.AnnotationExpires] = c.Expires.UTC().Format(time.RFC3339)
+	ann[artifact.AnnotationSealKey] = cfg.DeltaKeys.Seal.ID
+	return artifact.PushDir(ctx, tmp, ref, artifact.ArtifactTypeDelta, ann, cfg.DeltaKeys.Signer, cfg.RegistryPlainHTTP)
 }
 
+// sealContext is what a delta for session of g pushed now is sealed for.
+func (c Config) sealContext(g core.Grant, session, fence string, now time.Time) artifact.SealContext {
+	return artifact.SealContext{Domain: g.SessionDomain(), Session: session, Fence: fence,
+		Expires: now.Add(deltaTTL).UTC().Truncate(time.Second)}
+}
+
+// checkSigned refuses a signed delta whose annotations name another
+// domain or session than the one asked for (a manifest copied onto
+// another tag), or whose expiry has passed. Call it after the signature
+// is verified, because nothing in the annotations is believed before.
+func checkSigned(ann map[string]string, domain, session string, now time.Time) error {
+	if ann[artifact.AnnotationDomain] != domain || ann[artifact.AnnotationSession] != session {
+		return fmt.Errorf("%w: signed for %s/%s, not %s/%s", artifact.ErrUntrusted,
+			ann[artifact.AnnotationDomain], ann[artifact.AnnotationSession], domain, session)
+	}
+	exp, err := time.Parse(time.RFC3339, ann[artifact.AnnotationExpires])
+	if err != nil {
+		return fmt.Errorf("%w: no expiry", artifact.ErrUntrusted)
+	}
+	if !now.Before(exp) {
+		return fmt.Errorf("%w: at %s", artifact.ErrExpired, exp.Format(time.RFC3339))
+	}
+	return nil
+}
+
+// remoteFile, beside a published delta's images, records the tag and
+// digest it was pushed as. mobility_linux.go writes and reads it, and
+// ImportDelta strips it from an archive.
 const remoteFile = "remote.json"
 
 // Export and import: a parked session as portable files.
@@ -78,13 +122,56 @@ const (
 	ExportInfoFile   = "fiberd-delta.json"
 )
 
-// ExportInfo is what ExportDelta writes beside the archives.
+// ExportInfo is what ExportDelta writes beside the archives. Domain tells
+// whoever ships the files where the session came from. ImportDelta never
+// believes it, because the destination grant's domain decides that.
+// Annotations and ParentAnnotations are the signed manifests of the delta
+// and its parent, which ImportDelta checks the archives against. An
+// export without ParentAnnotations has its parent refused.
 type ExportInfo struct {
-	Session     string            `json:"session"`
-	Domain      string            `json:"domain"`
-	Digest      string            `json:"digest"`
-	Annotations map[string]string `json:"annotations"`
-	Parent      string            `json:"parent_sha256,omitempty"`
+	Session           string            `json:"session"`
+	Domain            string            `json:"domain"`
+	Digest            string            `json:"digest"`
+	Annotations       map[string]string `json:"annotations"`
+	Parent            string            `json:"parent_sha256,omitempty"`
+	ParentAnnotations map[string]string `json:"parent_annotations,omitempty"`
+}
+
+// platformAnnotations are the facts about the platform a checkpoint was
+// made on that a parent pushed by an import carries along.
+var platformAnnotations = []string{artifact.AnnotationArch, artifact.AnnotationKernel, artifact.AnnotationLibc, artifact.AnnotationBackend}
+
+// resolveParent finds the parent checkpoint sha under repo and checks
+// that a trusted home signed it as that checkpoint. Nothing in its
+// manifest is believed before the signature is, and a signed parent
+// copied onto another checkpoint's tag is not that checkpoint.
+func resolveParent(ctx context.Context, cfg Config, repo, sha string) (artifact.Located, error) {
+	loc, found, err := artifact.Resolve(ctx, repo+":"+parentTag(sha), cfg.RegistryPlainHTTP)
+	if err != nil {
+		return artifact.Located{}, err
+	}
+	if !found {
+		return artifact.Located{}, fmt.Errorf("parent %s is not published", sha[:12])
+	}
+	if loc.ArtifactType != artifact.ArtifactTypeParent {
+		return artifact.Located{}, fmt.Errorf("parent %s is %q, not a parent checkpoint", sha[:12], loc.ArtifactType)
+	}
+	if err := cfg.DeltaKeys.Verify(loc); err != nil {
+		return artifact.Located{}, fmt.Errorf("parent %s: %w", sha[:12], err)
+	}
+	if err := checkParentSigned(loc.Annotations, sha); err != nil {
+		return artifact.Located{}, err
+	}
+	return loc, nil
+}
+
+// checkParentSigned refuses a verified parent manifest that names
+// another checkpoint than the one it stands for.
+func checkParentSigned(ann map[string]string, sha string) error {
+	if ann[artifact.AnnotationParent] != sha {
+		return fmt.Errorf("%w: parent %s is signed as checkpoint %q", artifact.ErrUntrusted, sha[:12], ann[artifact.AnnotationParent])
+	}
+	return nil
 }
 
 // ExportDelta moves the published delta of session under grant g from
@@ -93,8 +180,8 @@ type ExportInfo struct {
 // exported it forgets its copy on its next Clone of the name, and only
 // what dir holds can bring the session back.
 func ExportDelta(ctx context.Context, cfg Config, g core.Grant, session, dir string) ([]string, error) {
-	if cfg.DeltaRegistry == "" {
-		return nil, errors.New("host: no delta registry configured")
+	if err := cfg.checkDeltaRegistry(); err != nil {
+		return nil, err
 	}
 	repo := domainRepoFor(cfg.DeltaRegistry, g)
 	ref := repo + ":" + sessionTag(session)
@@ -107,6 +194,12 @@ func ExportDelta(ctx context.Context, cfg Config, g core.Grant, session, dir str
 	}
 	if loc.ArtifactType != artifact.ArtifactTypeDelta {
 		return nil, fmt.Errorf("host: %s is %q, not a delta", ref, loc.ArtifactType)
+	}
+	if err := cfg.DeltaKeys.Verify(loc); err != nil {
+		return nil, fmt.Errorf("host: refusing to export %s/%s: %w", g.UID, session, err)
+	}
+	if err := checkSigned(loc.Annotations, g.SessionDomain(), session, time.Now()); err != nil {
+		return nil, fmt.Errorf("host: refusing to export %s/%s: %w", g.UID, session, err)
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
@@ -126,10 +219,17 @@ func ExportDelta(ctx context.Context, cfg Config, g core.Grant, session, dir str
 	info := ExportInfo{Session: session, Domain: g.SessionDomain(), Digest: loc.Digest, Annotations: loc.Annotations,
 		Parent: loc.Annotations[artifact.AnnotationParent]}
 	if info.Parent != "" {
-		pref := repo + ":" + parentTag(info.Parent)
-		if _, err := artifact.PullDir(ctx, pref, filepath.Join(tmp, "parent"), cfg.RegistryPlainHTTP); err != nil {
+		// The parent travels with the delta, and so does its signed
+		// manifest. The importing home checks the files against it rather
+		// than trusting this home's word.
+		ploc, err := resolveParent(ctx, cfg, repo, info.Parent)
+		if err != nil {
+			return nil, fmt.Errorf("host: refusing to export %s/%s: delta needs %w", g.UID, session, err)
+		}
+		if _, err := artifact.PullDir(ctx, repo+"@"+ploc.Digest, filepath.Join(tmp, "parent"), cfg.RegistryPlainHTTP); err != nil {
 			return nil, fmt.Errorf("host: delta needs parent %s: %w", info.Parent[:12], err)
 		}
+		info.ParentAnnotations = ploc.Annotations
 		if err := artifact.TarDir(filepath.Join(tmp, "parent"), filepath.Join(dir, ExportParentFile)); err != nil {
 			return nil, err
 		}
@@ -153,8 +253,8 @@ func ExportDelta(ctx context.Context, cfg Config, g core.Grant, session, dir str
 // resumes it. The session name may differ from the exported one: a
 // template's golden state imported under many names is many sessions.
 func ImportDelta(ctx context.Context, cfg Config, g core.Grant, session, dir string) error {
-	if cfg.DeltaRegistry == "" {
-		return errors.New("host: no delta registry configured")
+	if err := cfg.checkDeltaRegistry(); err != nil {
+		return err
 	}
 	var info ExportInfo
 	b, err := os.ReadFile(filepath.Join(dir, ExportInfoFile))
@@ -165,11 +265,53 @@ func ImportDelta(ctx context.Context, cfg Config, g core.Grant, session, dir str
 		return fmt.Errorf("host: import %s: %w", ExportInfoFile, err)
 	}
 	repo := domainRepoFor(cfg.DeltaRegistry, g)
-	tmp, err := os.MkdirTemp("", "fiberd-import-")
+	// The delta is opened in the clear below, so the working directory
+	// goes under DeltaDir, which fibers never see, and not the system temp
+	// dir, which they share. A caller without a DeltaDir (one that is not
+	// a home, like a control plane shipping snapshots) works beside the
+	// export files, as ExportDelta does, where it already keeps them.
+	base := cfg.DeltaDir
+	if base == "" {
+		base = dir
+	}
+	if err := os.MkdirAll(base, 0o755); err != nil {
+		return fmt.Errorf("host: import: %w", err)
+	}
+	tmp, err := os.MkdirTemp(base, ".import-")
 	if err != nil {
-		return err
+		return fmt.Errorf("host: import: %w", err)
 	}
 	defer func() { _ = os.RemoveAll(tmp) }()
+	// The delta must carry a trusted home's signature over these files and
+	// open with this home's seal key for its exported session before this
+	// home signs it as its own. The parent is template state, so it is not
+	// sealed, but it must be signed too. This home signs what it pushes, so
+	// an unverified parent would become a trusted one here.
+	//
+	// The domain is g's, never the export's. Every home derives seal keys
+	// from one master, so any domain's delta opens here, and the unsigned
+	// info file must not move one tenant's session into another's grant.
+	// The session name is the export's, so a golden snapshot can be
+	// imported as many sessions.
+	if err := artifact.Untar(filepath.Join(dir, ExportDeltaFile), filepath.Join(tmp, "delta")); err != nil {
+		return fmt.Errorf("host: import delta: %w", err)
+	}
+	if err := cfg.DeltaKeys.VerifyDir(filepath.Join(tmp, "delta"), artifact.ArtifactTypeDelta, info.Annotations); err != nil {
+		return fmt.Errorf("host: import %s/%s: %w", g.UID, session, err)
+	}
+	now := time.Now()
+	domain := g.SessionDomain()
+	if err := checkSigned(info.Annotations, domain, info.Session, now); err != nil {
+		return fmt.Errorf("host: import %s/%s: %w", g.UID, session, err)
+	}
+	sealed, err := artifact.OpenDir(filepath.Join(tmp, "delta"), cfg.DeltaKeys.Seal, domain, info.Session, now)
+	if err != nil {
+		return fmt.Errorf("host: import %s/%s: %w", g.UID, session, err)
+	}
+	if info.Parent != "" && info.Parent != info.Annotations[artifact.AnnotationParent] {
+		return fmt.Errorf("host: import %s/%s: %s names parent %s, the signed delta %s", g.UID, session, ExportInfoFile,
+			info.Parent, info.Annotations[artifact.AnnotationParent])
+	}
 	if info.Parent != "" {
 		pref := repo + ":" + parentTag(info.Parent)
 		if _, found, err := artifact.Resolve(ctx, pref, cfg.RegistryPlainHTTP); err != nil {
@@ -178,32 +320,37 @@ func ImportDelta(ctx context.Context, cfg Config, g core.Grant, session, dir str
 			if err := artifact.Untar(filepath.Join(dir, ExportParentFile), filepath.Join(tmp, "parent")); err != nil {
 				return fmt.Errorf("host: import parent: %w", err)
 			}
-			// The parent carries the platform facts the delta was made on.
+			if err := cfg.DeltaKeys.VerifyDir(filepath.Join(tmp, "parent"), artifact.ArtifactTypeParent, info.ParentAnnotations); err != nil {
+				return fmt.Errorf("host: import %s/%s: parent %s: %w", g.UID, session, info.Parent[:12], err)
+			}
+			if err := checkParentSigned(info.ParentAnnotations, info.Parent); err != nil {
+				return fmt.Errorf("host: import %s/%s: %w", g.UID, session, err)
+			}
+			// The parent carries the platform facts it was made on, from its
+			// own signed manifest where it has them, else from the delta's.
 			ann := map[string]string{artifact.AnnotationParent: info.Parent, artifact.AnnotationHome: cfg.HomeID}
-			for _, k := range []string{artifact.AnnotationArch, artifact.AnnotationKernel, artifact.AnnotationLibc, artifact.AnnotationBackend} {
-				if v, ok := info.Annotations[k]; ok {
+			for _, k := range platformAnnotations {
+				if v, ok := info.ParentAnnotations[k]; ok {
+					ann[k] = v
+				} else if v, ok := info.Annotations[k]; ok {
 					ann[k] = v
 				}
 			}
-			if _, err := artifact.PushDir(ctx, filepath.Join(tmp, "parent"), pref, artifact.ArtifactTypeParent, ann, cfg.RegistryPlainHTTP); err != nil {
+			if _, err := artifact.PushDir(ctx, filepath.Join(tmp, "parent"), pref, artifact.ArtifactTypeParent, ann, cfg.DeltaKeys.Signer, cfg.RegistryPlainHTTP); err != nil {
 				return err
 			}
 		}
 	}
-	if err := artifact.Untar(filepath.Join(dir, ExportDeltaFile), filepath.Join(tmp, "delta")); err != nil {
-		return fmt.Errorf("host: import delta: %w", err)
-	}
 	_ = os.Remove(filepath.Join(tmp, "delta", remoteFile))
 	ann := make(map[string]string, len(info.Annotations)+3)
 	for k, v := range info.Annotations {
-		ann[k] = v
+		if k != artifact.AnnotationSignature && k != artifact.AnnotationSigner {
+			ann[k] = v
+		}
 	}
-	ann[artifact.AnnotationSession] = session
 	ann[artifact.AnnotationGrant] = g.UID
 	ann[artifact.AnnotationHome] = cfg.HomeID
 	ref := repo + ":" + sessionTag(session)
-	if _, err := artifact.PushDir(ctx, filepath.Join(tmp, "delta"), ref, artifact.ArtifactTypeDelta, ann, cfg.RegistryPlainHTTP); err != nil {
-		return err
-	}
-	return nil
+	_, err = pushDelta(ctx, cfg, filepath.Join(tmp, "delta"), ref, ann, cfg.sealContext(g, session, sealed.Fence, now))
+	return err
 }

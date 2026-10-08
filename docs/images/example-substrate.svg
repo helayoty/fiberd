@@ -1,59 +1,80 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="780" viewBox="0 0 1200 780" role="img" aria-labelledby="substrate-title substrate-desc">
-  <title id="substrate-title">Agent Substrate example with embedded fiberd workers</title>
-  <desc id="substrate-desc">Substrate provides its control plane, router, atelet supervisor, and snapshot movement. The router reaches each worker ingress over mutual TLS. atelet drives the herder over a shared local Unix socket. The herder embeds fiberd, obtains a grant, keeps one template warm, and routes the actor to a local fiber endpoint. Checkpointing parks and exports state from one worker; atelet or the Substrate snapshot path moves files for import and resume on another worker.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="995" viewBox="0 0 1440 995" role="img" aria-labelledby="example-substrate-title example-substrate-desc">
+  <title id="example-substrate-title">Substrate owns placement and transport; fiberd owns actor lifecycles</title>
+  <desc id="example-substrate-desc">Two separate views distinguish responsibilities from movement of state. Above, atelet sends Ateom lifecycle calls over a shared local Unix socket to a worker's herder with embedded fiberd. Independently, atenet-router sends workload traffic over mTLS to the worker ingress, which ends mTLS and proxies plain HTTP to the actor's local fiber. Below, a suspend and restore transfers data between workers. Worker A disables routing, parks synchronously and publishes the session; Export writes portable archives and metadata and deletes the source session's registry tag. Substrate and atelet transport those files. Worker B's import verifies the signature, expiry and destination grant's session domain, opens the sealed state, then re-seals and publishes it for the destination session. Clone finds and claims that imported publication and resumes the actor under a new fence. Each worker runs one actor at a time.</desc>
   <style>
-    :root{--bg:#f7f9fc;--panel:#fff;--ink:#172033;--muted:#5d6b7d;--line:#b8c4d4;--blue:#3165b5;--blue-bg:#eaf1ff;--teal:#13776f;--teal-bg:#e8f7f4;--violet:#704aa1;--violet-bg:#f2edfa;--amber:#a76500;--amber-bg:#fff3d6;--green:#287a4d;--green-bg:#e8f6ed}
-    @media(prefers-color-scheme:dark){:root{--bg:#0d1117;--panel:#161b22;--ink:#e6edf3;--muted:#a3adba;--line:#3d4652;--blue:#79a7ff;--blue-bg:#17243d;--teal:#53c7b8;--teal-bg:#102923;--violet:#c09cff;--violet-bg:#251b35;--amber:#f0b44d;--amber-bg:#30240f;--green:#63cf8e;--green-bg:#142b1e}}
-    text{font-family:ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;fill:var(--ink)}.bg{fill:var(--bg)}.panel{fill:var(--panel);stroke:var(--line);stroke-width:1.5}.worker{fill:var(--teal-bg);stroke:var(--teal);stroke-width:2}.bluebox{fill:var(--blue-bg);stroke:var(--blue);stroke-width:1.5}.violetbox{fill:var(--violet-bg);stroke:var(--violet);stroke-width:1.5}.amberbox{fill:var(--amber-bg);stroke:var(--amber);stroke-width:1.5}.greenbox{fill:var(--green-bg);stroke:var(--green);stroke-width:1.5}.title{font-size:27px;font-weight:750}.subtitle{font-size:14px;fill:var(--muted)}.h{font-size:16px;font-weight:700}.b{font-size:13px}.s{font-size:11px;fill:var(--muted)}.cap{font-size:12px;font-weight:700;letter-spacing:.5px}.blue{fill:var(--blue)}.teal{fill:var(--teal)}.violet{fill:var(--violet)}.amber{fill:var(--amber)}.green{fill:var(--green)}.arrow{fill:none;stroke:var(--muted);stroke-width:2}.route{fill:none;stroke:var(--green);stroke-width:2.5}.move{fill:none;stroke:var(--amber);stroke-width:2.5;stroke-dasharray:8 5}
+    :root{--bg:#f7f9fc;--panel:#fff;--ink:#172033;--muted:#5d6b7d;--border:#b8c4d4;--blue:#3165b5;--blue-bg:#eaf1ff;--teal:#13776f;--teal-bg:#e8f7f4;--violet:#704aa1;--violet-bg:#f2edfa;--amber:#a76500;--amber-bg:#fff3d6;--green:#287a4d;--green-bg:#e8f6ed}
+    @media(prefers-color-scheme:dark){:root{--bg:#0d1117;--panel:#161b22;--ink:#e6edf3;--muted:#a3adba;--border:#3d4652;--blue:#79a7ff;--blue-bg:#17243d;--teal:#53c7b8;--teal-bg:#102923;--violet:#c09cff;--violet-bg:#251b35;--amber:#f0b44d;--amber-bg:#30240f;--green:#63cf8e;--green-bg:#142b1e}}
+    text{font-family:ui-sans-serif,-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;fill:var(--ink)}.bg{fill:var(--bg)}.title{font-size:30px;font-weight:700}.heading{font-size:22px;font-weight:700}.label{font-size:20px;font-weight:600}.secondary{font-size:17px}.muted{fill:var(--muted)}.blue{fill:var(--blue)}.teal{fill:var(--teal)}.violet{fill:var(--violet)}.amber{fill:var(--amber)}.center{text-anchor:middle}
+    .scope{fill:none;stroke:var(--teal);stroke-width:1.5}.service{fill:var(--panel);stroke:var(--blue);stroke-width:2}.router{stroke:var(--teal)}.fiber{fill:var(--violet-bg);stroke:var(--violet);stroke-width:2}.document{fill:var(--amber-bg);stroke:var(--amber);stroke-width:1.5}.divider{fill:none;stroke:var(--border);stroke-width:1.5}.flow{fill:none;stroke-width:2;stroke-linejoin:round;stroke-linecap:round}.control{stroke:var(--blue)}.data{stroke:var(--teal)}.transfer{stroke:var(--amber)}.activation{stroke:var(--violet)}.note{fill:var(--blue-bg)}
+    text.amber{fill:#9e5e00}@media(prefers-color-scheme:dark){text.amber{fill:var(--amber)}}
   </style>
-  <defs><marker id="substrate-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M1 1l8 4-8 4z" fill="#7b8794"/></marker><marker id="substrate-green-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M1 1l8 4-8 4z" fill="#287a4d"/></marker><marker id="substrate-amber-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M1 1l8 4-8 4z" fill="#a76500"/></marker></defs>
-  <rect class="bg" width="1200" height="780"/>
-  <text class="title" x="42" y="48">Agent Substrate example: actors as fibers</text>
-  <text class="subtitle" x="42" y="74">Substrate supplies orchestration and routing; the worker image supplies herder, ingress, and embedded fiberd.</text>
-  <rect class="panel" x="42" y="106" width="1116" height="144" rx="20"/>
-  <text class="cap blue" x="68" y="140">SUBSTRATE-OWNED CONTROL AND DATA PLANE</text>
-  <rect class="bluebox" x="68" y="164" width="230" height="62" rx="14"/><text class="h blue" x="183" y="190" text-anchor="middle">Control plane</text><text class="s" x="183" y="212" text-anchor="middle">schedule · suspend · restore</text>
-  <rect class="violetbox" x="368" y="164" width="230" height="62" rx="14"/><text class="h violet" x="483" y="190" text-anchor="middle">atenet-router</text><text class="s" x="483" y="212" text-anchor="middle">actor assignment + request route</text>
-  <rect class="bluebox" x="668" y="164" width="230" height="62" rx="14"/><text class="h blue" x="783" y="190" text-anchor="middle">atelet</text><text class="s" x="783" y="212" text-anchor="middle">drives worker lifecycle</text>
-  <rect class="amberbox" x="968" y="164" width="164" height="62" rx="14"/><text class="h amber" x="1050" y="190" text-anchor="middle">Snapshot path</text><text class="s" x="1050" y="212" text-anchor="middle">upload / download</text>
-  <path class="arrow" d="M298 195h70M598 195h70M898 195h70" marker-end="url(#substrate-arrow)"/>
+  <defs>
+    <marker id="example-substrate-blue-arrow" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="12" markerHeight="12" markerUnits="userSpaceOnUse" orient="auto"><path d="M1 1 11 6 1 11Z" fill="var(--blue)"/></marker>
+    <marker id="example-substrate-teal-arrow" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="12" markerHeight="12" markerUnits="userSpaceOnUse" orient="auto"><path d="M1 1 11 6 1 11Z" fill="var(--teal)"/></marker>
+    <marker id="example-substrate-amber-arrow" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="12" markerHeight="12" markerUnits="userSpaceOnUse" orient="auto"><path d="M1 1 11 6 1 11Z" fill="var(--amber)"/></marker>
+    <marker id="example-substrate-violet-arrow" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="12" markerHeight="12" markerUnits="userSpaceOnUse" orient="auto"><path d="M1 1 11 6 1 11Z" fill="var(--violet)"/></marker>
+  </defs>
+  <rect class="bg" width="1440" height="995"/>
+  <text class="title" x="48" y="66">Substrate moves actors; fiberd restores their state.</text>
+  <text class="secondary muted" x="48" y="100">Placement and request routing stay in Substrate. Local lifecycle and snapshot mechanics stay in the worker.</text>
+  <path class="divider" d="M48 130H1392"/>
 
-  <rect class="worker" x="42" y="304" width="532" height="362" rx="22"/>
-  <text class="h teal" x="70" y="339">WORKER A · one actor in current phase</text>
-  <rect class="violetbox" x="70" y="374" width="198" height="84" rx="14"/>
-  <text class="h violet" x="169" y="405" text-anchor="middle">ingress :443</text><text class="b" x="169" y="433" text-anchor="middle">router mTLS verified</text>
-  <rect class="bluebox" x="320" y="374" width="226" height="84" rx="14"/>
-  <text class="h blue" x="433" y="405" text-anchor="middle">herder · Ateom gRPC</text><text class="s" x="433" y="433" text-anchor="middle">atelet → shared local Unix socket</text>
-  <rect class="panel" x="70" y="494" width="476" height="140" rx="16"/>
-  <text class="cap teal" x="92" y="523">EMBEDDED FIBERD + WORKER HOME</text>
-  <rect class="amberbox" x="92" y="545" width="182" height="66" rx="13"/><text class="h amber" x="183" y="572" text-anchor="middle">Warm template</text><text class="s" x="183" y="595" text-anchor="middle">grant sized for actor</text>
-  <rect class="greenbox" x="326" y="545" width="198" height="66" rx="13"/><text class="h green" x="425" y="572" text-anchor="middle">Actor fiber</text><text class="s" x="425" y="595" text-anchor="middle">local Unix / TCP endpoint</text>
-  <path class="arrow" d="M274 578h52" marker-end="url(#substrate-arrow)"/>
-  <path class="route" d="M169 458v120h157" marker-end="url(#substrate-green-arrow)"/>
-  <text class="s" x="232" y="568">proxy locally</text>
-  <path class="arrow" d="M433 458v36" marker-end="url(#substrate-arrow)"/>
+  <text class="heading blue" x="48" y="181">Control is not workload traffic</text>
+  <rect class="scope" x="872" y="166" width="520" height="322" rx="14"/>
+  <text class="label teal" x="900" y="200">Worker · one actor at a time</text>
+  <rect class="service" x="48" y="211" width="310" height="99" rx="4"/>
+  <text class="label blue" x="72" y="249">atelet</text>
+  <text class="secondary" x="72" y="282">Substrate lifecycle driver</text>
+  <rect class="service" x="904" y="224" width="456" height="89" rx="4"/>
+  <text class="label blue" x="928" y="259">herder + embedded fiberd</text>
+  <text class="secondary" x="928" y="290">Actor-sized grant · warm template</text>
+  <path class="flow control" d="M358 268H904" marker-end="url(#example-substrate-blue-arrow)"/>
+  <text class="secondary blue" x="454" y="249">Ateom lifecycle · shared Unix socket</text>
 
-  <rect class="worker" x="626" y="304" width="532" height="362" rx="22"/>
-  <text class="h teal" x="654" y="339">WORKER B · restore destination</text>
-  <rect class="violetbox" x="654" y="374" width="198" height="84" rx="14"/>
-  <text class="h violet" x="753" y="405" text-anchor="middle">ingress :443</text><text class="b" x="753" y="433" text-anchor="middle">router mTLS verified</text>
-  <rect class="bluebox" x="904" y="374" width="226" height="84" rx="14"/>
-  <text class="h blue" x="1017" y="405" text-anchor="middle">herder · Ateom gRPC</text><text class="s" x="1017" y="433" text-anchor="middle">ImportDelta → Clone = RESUME</text>
-  <rect class="panel" x="654" y="494" width="476" height="140" rx="16"/>
-  <text class="cap teal" x="676" y="523">EMBEDDED FIBERD + WORKER HOME</text>
-  <rect class="amberbox" x="676" y="545" width="182" height="66" rx="13"/><text class="h amber" x="767" y="572" text-anchor="middle">Warm template</text><text class="s" x="767" y="595" text-anchor="middle">compatible parent</text>
-  <rect class="greenbox" x="910" y="545" width="198" height="66" rx="13"/><text class="h green" x="1009" y="572" text-anchor="middle">Resumed fiber</text><text class="s" x="1009" y="595" text-anchor="middle">new local endpoint + fence</text>
-  <path class="arrow" d="M858 578h52" marker-end="url(#substrate-arrow)"/>
-  <path class="route" d="M753 458v120h157" marker-end="url(#substrate-green-arrow)"/>
-  <path class="arrow" d="M1017 458v36" marker-end="url(#substrate-arrow)"/>
+  <rect class="service router" x="48" y="365" width="310" height="92" rx="4"/>
+  <text class="label teal" x="72" y="405">atenet-router</text>
+  <text class="secondary" x="72" y="436">Route assigned actor</text>
+  <rect class="service router" x="904" y="374" width="236" height="83" rx="4"/>
+  <text class="label teal" x="926" y="410">Worker ingress</text>
+  <text class="secondary" x="926" y="439">Ends mTLS · proxies</text>
+  <circle class="fiber" cx="1290" cy="416" r="44"/>
+  <text class="label violet center" x="1290" y="422">Fiber</text>
+  <path class="flow data" d="M358 416H904" marker-end="url(#example-substrate-teal-arrow)"/>
+  <text class="secondary teal" x="454" y="397">mTLS workload traffic</text>
+  <path class="flow data" d="M1140 416H1246" marker-end="url(#example-substrate-teal-arrow)"/>
+  <text class="secondary teal center" x="1191" y="402">HTTP</text>
+  <path class="flow activation" d="M1290 313V372" marker-end="url(#example-substrate-violet-arrow)"/>
+  <text class="secondary violet" x="978" y="346">Clone · Park · Release</text>
 
-  <path class="route" d="M483 226v46H169v102" marker-end="url(#substrate-green-arrow)"/>
-  <text class="s" x="330" y="264" text-anchor="middle">mTLS request tunnel</text>
-  <path class="arrow" d="M783 226v46H433v102" marker-end="url(#substrate-arrow)"/>
-  <text class="s" x="608" y="289" text-anchor="middle">Run / Checkpoint / Restore / Terminate</text>
-  <path class="move" d="M433 634v58h617v-466" marker-end="url(#substrate-amber-arrow)"/>
-  <text class="b amber" x="742" y="688" text-anchor="middle">Park(sync) + ExportDelta → atelet / snapshot path → ImportDelta</text>
-  <path class="move" d="M1050 226v58h-33v90" marker-end="url(#substrate-amber-arrow)"/>
-  <text class="s" x="600" y="734" text-anchor="middle">Checkpoint files contain full process-memory scope in this example; Substrate moves them, while fiberd owns the local park/resume mechanics.</text>
-  <text class="s" x="600" y="754" text-anchor="middle">The integration is a consumer example, not a fork of Substrate and not a production control plane.</text>
+  <path class="divider" d="M48 520H1392"/>
+  <text class="heading" x="48" y="561">Suspend / restore · state travels as files, not as a live fiber</text>
+  <rect class="scope" x="48" y="590" width="410" height="365" rx="14"/>
+  <text class="heading teal" x="80" y="628">Worker A · suspend</text>
+  <text class="label blue" x="80" y="682">1 · Park(sync)</text>
+  <text class="secondary" x="80" y="713">Disable routing; publish session</text>
+  <text class="label blue" x="80" y="778">2 · Export</text>
+  <text class="secondary" x="80" y="809">Write files; retire source registry tag</text>
+  <path class="divider" d="M80 851H426"/>
+  <text class="secondary muted" x="80" y="889">Source is no longer serving</text>
+  <text class="secondary muted" x="80" y="920">Exported files carry the state</text>
+
+  <path class="document" d="M566 717H846L874 745V853H566Z"/>
+  <path class="flow transfer" d="M846 717V745H874"/>
+  <text class="label amber" x="590" y="759">Snapshot files</text>
+  <text class="secondary" x="590" y="791">sealed delta + metadata</text>
+  <text class="secondary" x="590" y="822">parent archive, when needed</text>
+  <text class="label amber center" x="720" y="640">3 · Substrate / atelet</text>
+  <text class="secondary center" x="720" y="672">upload + download</text>
+  <path class="flow transfer" d="M458 789H566" marker-end="url(#example-substrate-amber-arrow)"/>
+  <path class="flow transfer" d="M874 789H934V682H982" marker-end="url(#example-substrate-amber-arrow)"/>
+
+  <rect class="scope" x="982" y="590" width="410" height="365" rx="14"/>
+  <text class="heading teal" x="1014" y="628">Worker B · restore</text>
+  <text class="label blue" x="1014" y="682">4 · Import</text>
+  <text class="secondary" x="1014" y="713">Verify + open; re-seal and publish</text>
+  <text class="label violet" x="1014" y="778">5 · Clone → RESUME</text>
+  <text class="secondary" x="1014" y="809">Find + claim imported session</text>
+  <path class="divider" d="M1014 851H1360"/>
+  <text class="secondary" x="1014" y="889">State continues under a new fence</text>
+  <text class="secondary muted" x="1014" y="920">Route to destination endpoint</text>
 </svg>

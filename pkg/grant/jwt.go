@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"time"
 
 	"github.com/go-jose/go-jose/v4"
@@ -29,19 +30,21 @@ import (
 // ledger turns into a capacity miss keyed on control-plane health (SHED
 // or DEFERRED_FALLBACK); an Unauthenticated error would send the caller
 // down the wrong path. The lease is copied into Grant.LeaseExpiry.
+//
+// A grant bound to a caller also carries the RFC 8705 confirmation
+// claim, copied into Grant.CallerThumbprint.
 
 type grantClaim struct {
 	Grant json.RawMessage `json:"grant"`
+	Cnf   *cnfClaim       `json:"cnf,omitempty"`
 }
 
-var (
-	ErrNoKID          = errors.New("grant: token has no kid header")
-	ErrClaimMismatch  = errors.New("grant: registered claims disagree with the grant claim")
-	ErrWrongAudience  = errors.New("grant: audience mismatch")
-	ErrWrongIssuer    = errors.New("grant: issuer mismatch")
-	ErrMissingGrant   = errors.New("grant: token carries no grant claim")
-	ErrKeyMismatchAlg = errors.New("grant: key algorithm does not match token")
-)
+type cnfClaim struct {
+	X5tS256 string `json:"x5t#S256"`
+}
+
+// MaxTokenBytes bounds a token before any parsing.
+const MaxTokenBytes = 8 << 10
 
 // Sign mints the token for g with key (a private JWK from GenerateKey or
 // LoadKey). The key's kid lands in the header so verifiers can pick it
@@ -49,6 +52,10 @@ var (
 func Sign(g core.Grant, key *jose.JSONWebKey, now time.Time) (string, error) {
 	if g.UID == "" || g.Issuer == "" || g.Audience == "" {
 		return "", errors.New("grant: uid, issuer and audience are required to sign")
+	}
+	// Every home would refuse this UID, so the issuer learns at mint time.
+	if err := checkUID(g.UID); err != nil {
+		return "", err
 	}
 	if key == nil || key.IsPublic() {
 		return "", errors.New("grant: signing needs a private key")
@@ -75,52 +82,53 @@ func Sign(g core.Grant, key *jose.JSONWebKey, now time.Time) (string, error) {
 	if !g.LeaseExpiry.IsZero() {
 		std.Expiry = jwt.NewNumericDate(g.LeaseExpiry)
 	}
-	return jwt.Signed(signer).Claims(std).Claims(grantClaim{Grant: body}).Serialize()
+	gc := grantClaim{Grant: body}
+	if g.CallerThumbprint != "" {
+		gc.Cnf = &cnfClaim{X5tS256: g.CallerThumbprint}
+	}
+	return jwt.Signed(signer).Claims(std).Claims(gc).Serialize()
 }
 
-// Header is what Parse reads before any verification: enough to choose
-// a key.
-type Header struct {
-	KeyID     string
-	Algorithm jose.SignatureAlgorithm
-}
-
-// Parse reads the header without verifying anything. The algorithm
+// parse reads the token without verifying anything. The algorithm
 // allow-list is enforced here already, so an unsupported alg never
-// reaches key lookup.
-func Parse(token string) (Header, error) {
+// reaches key lookup. The token has exactly one header.
+func parse(token string) (*jwt.JSONWebToken, error) {
+	if len(token) > MaxTokenBytes {
+		return nil, ErrTokenTooLarge
+	}
 	tok, err := jwt.ParseSigned(token, AllowedAlgorithms)
 	if err != nil {
-		return Header{}, fmt.Errorf("grant: parse: %w", err)
+		return nil, fmt.Errorf("grant: parse: %w", err)
 	}
 	if len(tok.Headers) != 1 {
-		return Header{}, errors.New("grant: token must carry exactly one signature")
+		return nil, errors.New("grant: token must carry exactly one signature")
 	}
-	h := tok.Headers[0]
-	if h.KeyID == "" {
-		return Header{}, ErrNoKID
-	}
-	return Header{KeyID: h.KeyID, Algorithm: jose.SignatureAlgorithm(h.Algorithm)}, nil
+	return tok, nil
 }
 
 // VerifyOptions constrain Verify. Audience is required: a home only
-// accepts grants addressed to it. Issuer, when set, must match.
+// accepts grants addressed to it. Issuer, when set, must match. MaxLease,
+// when set, bounds the signed lifetime (exp - iat). A grant missing either
+// claim is then refused.
 type VerifyOptions struct {
 	Audience string
 	Issuer   string
+	MaxLease time.Duration
 }
 
 // Verify checks the signature with pub (a public JWK), then the
 // registered claims against opts and against the grant claim, and returns
 // the grant. It does not reject an expired token; see the package note.
 func Verify(token string, pub *jose.JSONWebKey, opts VerifyOptions) (core.Grant, error) {
-	tok, err := jwt.ParseSigned(token, AllowedAlgorithms)
+	tok, err := parse(token)
 	if err != nil {
-		return core.Grant{}, fmt.Errorf("grant: parse: %w", err)
+		return core.Grant{}, err
 	}
-	if len(tok.Headers) != 1 {
-		return core.Grant{}, errors.New("grant: token must carry exactly one signature")
-	}
+	return verifyParsed(tok, pub, opts)
+}
+
+// verifyParsed is Verify on a token parse already read.
+func verifyParsed(tok *jwt.JSONWebToken, pub *jose.JSONWebKey, opts VerifyOptions) (core.Grant, error) {
 	if pub == nil {
 		return core.Grant{}, errors.New("grant: no key")
 	}
@@ -140,8 +148,17 @@ func Verify(token string, pub *jose.JSONWebKey, opts VerifyOptions) (core.Grant,
 		return core.Grant{}, fmt.Errorf("grant: decode grant claim: %w", err)
 	}
 	g := FromProto(&p)
+	if gc.Cnf != nil {
+		if gc.Cnf.X5tS256 == "" {
+			return core.Grant{}, errors.New("grant: cnf claim carries no x5t#S256")
+		}
+		g.CallerThumbprint = gc.Cnf.X5tS256
+	}
 
 	// Registered claims are the cross-check; the grant claim is the content.
+	if err := checkUID(g.UID); err != nil {
+		return core.Grant{}, err
+	}
 	if std.ID != g.UID || std.Issuer != g.Issuer || len(std.Audience) != 1 || std.Audience[0] != g.Audience {
 		return core.Grant{}, ErrClaimMismatch
 	}
@@ -154,7 +171,33 @@ func Verify(token string, pub *jose.JSONWebKey, opts VerifyOptions) (core.Grant,
 	if opts.Issuer != "" && g.Issuer != opts.Issuer {
 		return core.Grant{}, fmt.Errorf("%w: token from %q, expected %q", ErrWrongIssuer, g.Issuer, opts.Issuer)
 	}
+	if opts.MaxLease > 0 {
+		if std.Expiry == nil || std.IssuedAt == nil {
+			return core.Grant{}, fmt.Errorf("%w: grant has no exp or iat", ErrLeaseTooLong)
+		}
+		if life := std.Expiry.Time().Sub(std.IssuedAt.Time()); life > opts.MaxLease {
+			return core.Grant{}, fmt.Errorf("%w: %s, at most %s", ErrLeaseTooLong, life, opts.MaxLease)
+		}
+	}
 	return g, nil
+}
+
+// uidPattern is the Kubernetes DNS-1123 label rule. The UID becomes a
+// cgroup and run-directory name beside kernel files like memory.max, so it
+// must be one plain path segment ("." and ".." never match). Lowercase keeps
+// names distinct on case-insensitive filesystems. The length bound keeps
+// paths under the unix socket limit.
+var uidPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
+
+// checkUID is the single check every verified grant passes through.
+func checkUID(uid string) error {
+	if uid == "" {
+		return ErrEmptyGrant
+	}
+	if !uidPattern.MatchString(uid) {
+		return fmt.Errorf("%w: %q", ErrBadUID, uid)
+	}
+	return nil
 }
 
 func allowed(alg jose.SignatureAlgorithm) bool {

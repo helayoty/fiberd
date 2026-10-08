@@ -13,105 +13,98 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"log"
+	"io"
 	"os"
 	"strings"
 
+	"github.com/helayoty/fiberd/internal/cli"
 	"github.com/helayoty/fiberd/pkg/artifact"
 	"github.com/helayoty/fiberd/pkg/sys/criu"
 )
 
 func main() {
-	if len(os.Args) < 2 {
-		usage()
-		os.Exit(2)
-	}
-	var err error
-	switch os.Args[1] {
-	case "build":
-		err = build(os.Args[2:])
-	case "push":
-		err = push(os.Args[2:])
-	case "pull":
-		err = pull(os.Args[2:])
-	case "inspect":
-		err = inspect(os.Args[2:])
-	case "-h", "--help", "help":
-		usage()
-		return
-	default:
-		usage()
-		err = fmt.Errorf("unknown subcommand %q", os.Args[1])
-	}
-	if err != nil {
-		log.Fatal(err)
-	}
+	os.Exit(run(context.Background(), os.Args[1:], os.Stdout, os.Stderr))
 }
 
-func usage() {
-	fmt.Fprintln(os.Stderr, "usage: zygotectl build|push|pull|inspect [flags]; -h on a subcommand for its flags")
+// run dispatches a subcommand. It returns exit code 0 on success or -h,
+// 2 for a usage error, and 1 when the subcommand fails.
+func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	return cli.Run(args, "usage: zygotectl build|push|pull|inspect [flags]; -h on a subcommand for its flags", map[string]cli.Command{
+		"build":   func(a []string) error { return build(ctx, a, stdout, stderr) },
+		"push":    func(a []string) error { return push(ctx, a, stdout, stderr) },
+		"pull":    func(a []string) error { return pull(ctx, a, stdout, stderr) },
+		"inspect": func(a []string) error { return inspect(a, stdout, stderr) },
+	}, stderr)
 }
 
-func build(args []string) error {
-	fs := flag.NewFlagSet("build", flag.ExitOnError)
+func build(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("build", flag.ContinueOnError)
 	zygote := fs.String("zygote", "", "zygote executable (linked with libfiberzygote)")
 	argv := fs.String("args", "", "arguments the home passes to the zygote")
 	out := fs.String("out", "", "artifact directory to write")
 	skip := fs.Bool("skip-images", false, "do not checkpoint the zygote (no criu here)")
 	criuBin := fs.String("criu", "criu", "criu binary")
-	_ = fs.Parse(args)
+	if err := cli.ParseFlags(fs, args, stderr); err != nil {
+		return err
+	}
 	if *zygote == "" || *out == "" {
 		return fmt.Errorf("build: -zygote and -out are required")
 	}
-	digest, err := artifact.Build(context.Background(), artifact.BuildOptions{
+	digest, err := artifact.Build(ctx, artifact.BuildOptions{
 		Zygote: *zygote, Args: strings.Fields(*argv), Out: *out, SkipImages: *skip,
 		CRIU: criu.Options{Bin: *criuBin},
 	})
 	if err != nil {
 		return err
 	}
-	fmt.Println(digest)
+	_, _ = fmt.Fprintln(stdout, digest)
 	return nil
 }
 
-func push(args []string) error {
-	fs := flag.NewFlagSet("push", flag.ExitOnError)
+func push(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("push", flag.ContinueOnError)
 	dir := fs.String("dir", "", "artifact directory from build")
 	ref := fs.String("ref", "", "registry reference host/repo:tag")
 	plain := fs.Bool("plain-http", false, "registry speaks http, not https")
-	_ = fs.Parse(args)
+	if err := cli.ParseFlags(fs, args, stderr); err != nil {
+		return err
+	}
 	if *dir == "" || *ref == "" {
 		return fmt.Errorf("push: -dir and -ref are required")
 	}
-	digest, err := artifact.Push(context.Background(), *dir, *ref, *plain)
+	digest, err := artifact.Push(ctx, *dir, *ref, *plain)
 	if err != nil {
 		return err
 	}
-	fmt.Println(digest)
+	_, _ = fmt.Fprintln(stdout, digest)
 	return nil
 }
 
-func pull(args []string) error {
-	fs := flag.NewFlagSet("pull", flag.ExitOnError)
+func pull(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("pull", flag.ContinueOnError)
 	ref := fs.String("ref", "", "registry reference host/repo@digest or host/repo:tag")
 	out := fs.String("out", "", "directory to unpack into")
 	plain := fs.Bool("plain-http", false, "registry speaks http, not https")
-	_ = fs.Parse(args)
+	if err := cli.ParseFlags(fs, args, stderr); err != nil {
+		return err
+	}
 	if *ref == "" || *out == "" {
 		return fmt.Errorf("pull: -ref and -out are required")
 	}
-	cfg, err := artifact.Pull(context.Background(), *ref, *out, *plain)
+	cfg, err := artifact.Pull(ctx, *ref, *out, *plain)
 	if err != nil {
 		return err
 	}
-	return print(cfg)
+	return printJSON(stdout, cfg)
 }
 
-func inspect(args []string) error {
-	fs := flag.NewFlagSet("inspect", flag.ExitOnError)
+func inspect(args []string, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("inspect", flag.ContinueOnError)
 	dir := fs.String("dir", "", "artifact directory")
 	level := fs.String("parity", "strict", "parity level to judge the artifact against this host with (strict, off, kernel=series,...)")
-	_ = fs.Parse(args)
+	if err := cli.ParseFlags(fs, args, stderr); err != nil {
+		return err
+	}
 	if *dir == "" {
 		return fmt.Errorf("inspect: -dir is required")
 	}
@@ -135,7 +128,7 @@ func inspect(args []string) error {
 	if err := parity.Check(artifact.Host(), want); err != nil {
 		verdict = err.Error()
 	}
-	return print(struct {
+	return printJSON(stdout, struct {
 		Digest string            `json:"digest"`
 		Config artifact.Config   `json:"config"`
 		Host   artifact.Platform `json:"host"`
@@ -144,11 +137,11 @@ func inspect(args []string) error {
 	}{cfg.Digest, cfg, artifact.Host(), parity.String(), verdict})
 }
 
-func print(v any) error {
+func printJSON(w io.Writer, v any) error {
 	b, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		return err
 	}
-	fmt.Println(string(b))
+	_, _ = fmt.Fprintln(w, string(b))
 	return nil
 }

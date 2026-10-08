@@ -1,103 +1,28 @@
-# fiberd on Slurm: the integration, worked
+# fiberd on Slurm
 
-This directory is an example of integrating fiberd with Slurm, not part of
-fiberd. It is its own Go module and builds against the checkout it sits
-in (`replace github.com/helayoty/fiberd => ../..`). Nothing under it is
-imported by fiberd, and nothing in `pkg/core` changed for it.
+This example runs the fiberd [agent](../../docs/glossary.md#agent) inside a Slurm allocation, as the allocation's job. It is for anyone who wants to run fiberd on a batch cluster. It is its own Go module and is not imported by fiberd.
 
-![A signed grant is submitted with sbatch. fiberd-slurm verifies it inside the allocation, watches job state, warms one template, and serves fibers on the node address.](../../docs/images/example-slurm.svg)
+![One sbatch creates a bounded Slurm allocation; the job script starts fiberd-slurm inside it, and repeated Clone calls activate fibers under the same resource ceiling without new scheduler submissions.](../../docs/images/example-slurm.svg)
 
-The generic execution, resource, endpoint, and trust models are documented in
-[Runtime model](../../docs/runtime-model.md),
-[Resources](../../docs/resources.md), [Networking](../../docs/networking.md),
-and [Identity](../../docs/identity.md). This page covers only the Slurm
-mapping.
+## What it proves
 
-## The shape
+- One `sbatch` is enough. Repeated [Clone](../../docs/glossary.md#clone) calls start [fibers](../../docs/glossary.md#fiber) under the allocation's ceiling with no new submission.
+- A [home](../../docs/glossary.md#home) for Slurm needs only the home seam. fiberd is unmodified.
+- The agent passes fiberd's conformance suite inside a one-node Slurm-in-Docker cluster.
+- Under a 384 MiB job memory limit, a burst of clones that asks for more memory than the job has [parks](../../docs/glossary.md#park) fibers before any out-of-memory (OOM) kill.
 
-fiberd asks an environment for a **home** (`pkg/home.Home`, plus the
-optional interfaces `pkg/agent` looks for) and builds a binary from
-`pkg/agent` plus that home. Under Slurm the environment is an
-allocation:
+This example runs the agent with `-insecure-plaintext`.
 
-| fiberd asks | Slurm answers (`home/`) |
-| --- | --- |
-| how grants arrive | `*.jwt` files in `/run/fiberd/job-<id>/grants`, put there by `fiberd-slurm -grant` after verifying the grant offline against the issuer's keys, or by the prolog from the node's spool |
-| control-plane liveness | `scontrol show job <id>` answering with RUNNING, CONFIGURING, PENDING, SUSPENDED, or RESIZING, every half stale-TTL |
-| readiness | the allocation's own state plus the `Watch` stream; nothing to publish |
-| the cgroup subtree | the job step's cgroup (`/proc/self/cgroup`), which `task/cgroup` bounds with the job's memory limit: that limit is fiberd's block ceiling |
-| endpoints | the node's address of the declared family, a port per fiber |
-| fabric | the allocation's GRES, the GPUs Slurm exposed as devices |
-| scope | job id and name, user, account, partition, node, nodelist, GRES, CPUs, stamped on every audit record |
-| capacity bound | a positive `fibers.max` above the allocation CPU count is refused before warm; zero is unlimited at this layer and bypasses that comparison |
-| scope loss | the job entering a state outside the accepted liveness set while the agent lives: the agent bumps its epoch |
+## Run it
 
-`cmd/fiberd-slurm` is the binary: every fiberd flag, plus `-grant` (a JWT
-or `@file`, default `$FIBERD_GRANT`) and `-slurm-probe`.
-
-## The job
-
-`prolog/fiberd-job.sh` is the job script: it runs `fiberd-slurm` for as
-long as the allocation lasts and restarts it in place if it exits (the
-epoch bumps; the allocation, its cgroup and the state directory stay).
-`prolog/fiberd-prolog.sh` is an optional Slurm prolog (`PrologFlags=Alloc`)
-that stages grants an issuer left in `/var/spool/fiberd/grants/<job id>/`
-or `<user>/` into the job's grants directory.
-
-```bash
-tok=$(grant-issuer mint -key key.json -issuer http://issuer:8686 -aud "$(hostname -s)" \
-      -template sha256:app -max 4 -warm 1 -w-budget 32Mi -min-tier FIBER_CHECKPOINT -ttl 2h)
-sbatch --ntasks=1 --cpus-per-task=4 --mem=1G --export=ALL,FIBERD_GRANT="$tok" fiberd-job.sh \
-    -verifier jwks -issuer http://issuer:8686 -runtime proc \
-    -template "default=/usr/local/bin/refzygote --heap-mb 32" -endpoint-family inet4
-```
-
-The grant's audience is the node name; `fiberd-slurm` refuses to start
-on a grant it cannot verify for its node.
-
-## Slurm in Docker and the acceptance
-
-`docker/` builds a one-node cluster (Debian's `slurm-wlm`, munge,
-`cgroup/v2` with `task/cgroup`, criu, fiberd's binaries) that runs
-privileged with a private cgroup namespace. `conform.sh` (from the
-repository root) brings it up, runs the issuer inside as the cluster's
-control plane, submits the agent as a job, runs fiberd's conformance suite
-C1 to C10 from the host against the published port with every hook through
-`docker exec`, and runs the overcommit storm inside a second allocation
-with a 384 MiB job memory limit.
+Run it from the repository root. It needs Docker and Go.
 
 ```bash
 make conform-slurm
 ```
 
-`make slurm-up` and `make slurm-down` are the pieces; tests that need no
-cluster:
+The latest result is in [benchmarks](../../docs/benchmarks.md).
 
-```bash
-cd examples/slurm && go test ./...
-```
+## Design
 
-The historical duration and pressure observation for this acceptance run are
-recorded with their environment in
-[Benchmarks](../../docs/benchmarks.md#run-d-slurm-acceptance).
-
-Two things Slurm taught the example: slurmstepd signals the job script and
-the cgroups it made, not the ones fiberd carves beneath the step, so
-`fiberd-job.sh` forwards SIGTERM to the agent and the agent leaves with
-the allocation (an agent that lingers gets the node drained with "Kill
-task failed"); and a job allowed to swap lets the zygote's pages slip out
-under the grant ceiling instead of stalling, which hides the pressure the
-ladder acts on, so fiberd closes swap on the grant cgroup and `cgroup.conf`
-gives jobs none.
-
-Two things about running slurmd without systemd: the entrypoint enables
-the controllers on `system.slice` by hand, since slurmd's `cgroup/v2`
-plugin builds its hierarchy there, and a job step's cgroup offers cpuset,
-cpu and memory but no pids controller, which fiberd tolerates (memory is
-what it needs). At step end slurmstepd logs that it cannot move itself to
-the root cgroup; that root holds controllers and so no processes, and the
-message is harmless.
-
-The reference control listener is plaintext and grant removal is not a hard
-revocation mechanism. Production hardening requirements are collected in
-[Production readiness](../../docs/production-readiness.md).
+How the home, the job script and the prolog work, and the known gaps, are in [the Slurm design](../../docs/design/slurm.md).

@@ -2,8 +2,10 @@ package rpc_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -21,15 +23,27 @@ import (
 	"github.com/helayoty/fiberd/pkg/grant"
 	"github.com/helayoty/fiberd/pkg/rpc"
 	"github.com/helayoty/fiberd/pkg/runtime/stub"
+	"github.com/helayoty/fiberd/pkg/tlsconf"
 )
 
 type harness struct {
 	agent  *core.Agent
 	health *core.SourceHealth
+	server *rpc.Server
 	client grantv1.FibersClient
 }
 
-func newHarness(t *testing.T, tier core.Tier) *harness {
+// boundVerifier is the insecure JSON verifier with every grant bound to
+// one caller certificate, as a signed grant with a cnf claim would be.
+type boundVerifier struct{ thumbprint string }
+
+func (v boundVerifier) Verify(ctx context.Context, token []byte) (core.Grant, error) {
+	g, err := grant.InsecureJSONVerifier{}.Verify(ctx, token)
+	g.CallerThumbprint = v.thumbprint
+	return g, err
+}
+
+func newHarness(t *testing.T, tier core.Tier, opts ...func(*core.Agent)) *harness {
 	t.Helper()
 	health := core.NewSourceHealth(10*time.Second, time.Now())
 	ag := &core.Agent{
@@ -37,17 +51,20 @@ func newHarness(t *testing.T, tier core.Tier) *harness {
 		Ledger:         core.NewLedger(1),
 		Budget:         core.NewBudget(1000, 256<<20),
 		Runtime:        stub.NewWithTier(tier),
-		Audit:          core.NopAuditor{},
 		Verify:         grant.InsecureJSONVerifier{},
 		Health:         health,
 		StatusInterval: 20 * time.Millisecond,
+	}
+	for _, o := range opts {
+		o(ag)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	go ag.Run(ctx)
 
 	lis := bufconn.Listen(1 << 20)
-	gs := rpc.NewGRPCServer(&rpc.Server{Agent: ag, Issuer: "https://issuer.test", RetryAfter: 3 * time.Second})
+	srv := &rpc.Server{Agent: ag, Issuer: "https://issuer.test", RetryAfter: 3 * time.Second}
+	gs := rpc.NewGRPCServer(srv)
 	go func() { _ = gs.Serve(lis) }()
 	t.Cleanup(gs.Stop)
 	conn, err := grpc.NewClient("passthrough:///bufconn",
@@ -57,7 +74,7 @@ func newHarness(t *testing.T, tier core.Tier) *harness {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = conn.Close() })
-	return &harness{agent: ag, health: health, client: grantv1.NewFibersClient(conn)}
+	return &harness{agent: ag, health: health, server: srv, client: grantv1.NewFibersClient(conn)}
 }
 
 func jsonGrant(t *testing.T, g core.Grant) string {
@@ -69,78 +86,108 @@ func jsonGrant(t *testing.T, g core.Grant) string {
 	return string(b)
 }
 
+// A grant at its fiber limit is a miss whose detail travels in the gRPC
+// status. It is DEFERRED_FALLBACK while the lane is healthy and SHED with
+// retry_after once it is dead.
 func TestMissCarriesDetail(t *testing.T) {
-	h := newHarness(t, core.TierCheckpoint)
-	ctx := context.Background()
-	g := jsonGrant(t, core.Grant{UID: "g1", Audience: "node-a", FiberMax: 1})
-
-	if _, err := h.client.Clone(ctx, &grantv1.CloneRequest{GrantJwt: g}); err != nil {
-		t.Fatalf("first clone: %v", err)
+	cases := []struct {
+		name      string
+		laneDead  bool
+		wantCode  codes.Code
+		wantMiss  grantv1.MissCode
+		wantRetry uint32
+	}{
+		{name: "full grant with a healthy lane defers", wantCode: codes.Unavailable,
+			wantMiss: grantv1.MissCode_DEFERRED_FALLBACK},
+		{name: "full grant with a dead lane sheds with retry_after", laneDead: true, wantCode: codes.ResourceExhausted,
+			wantMiss: grantv1.MissCode_SHED, wantRetry: 3},
 	}
-	// Healthy lane, grant full -> DEFERRED_FALLBACK with Miss.
-	_, err := h.client.Clone(ctx, &grantv1.CloneRequest{GrantJwt: g})
-	if status.Code(err) != codes.Unavailable {
-		t.Fatalf("full/healthy code = %v, want Unavailable (%v)", status.Code(err), err)
-	}
-	miss, ok := rpc.MissFromError(err)
-	if !ok || miss.GetCode() != grantv1.MissCode_DEFERRED_FALLBACK || miss.GetIssuer() != "https://issuer.test" {
-		t.Fatalf("miss = %+v ok=%v, want DEFERRED_FALLBACK from issuer", miss, ok)
-	}
-	// Dead lane, grant full -> SHED with retry_after.
-	h.health.MarkSync(time.Now().Add(-time.Minute))
-	_, err = h.client.Clone(ctx, &grantv1.CloneRequest{GrantJwt: g})
-	if status.Code(err) != codes.ResourceExhausted {
-		t.Fatalf("full/unhealthy code = %v, want ResourceExhausted (%v)", status.Code(err), err)
-	}
-	miss, ok = rpc.MissFromError(err)
-	if !ok || miss.GetCode() != grantv1.MissCode_SHED || miss.GetRetryAfterS() != 3 {
-		t.Fatalf("miss = %+v ok=%v, want SHED retry_after_s=3", miss, ok)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t, core.TierCheckpoint)
+			ctx := context.Background()
+			g := jsonGrant(t, core.Grant{UID: "g1", Audience: "node-a", FiberMax: 1})
+			if _, err := h.client.Clone(ctx, &grantv1.CloneRequest{GrantJwt: g}); err != nil {
+				t.Fatalf("first clone: %v", err)
+			}
+			if tc.laneDead {
+				h.health.MarkSync(time.Now().Add(-time.Minute))
+			}
+			_, err := h.client.Clone(ctx, &grantv1.CloneRequest{GrantJwt: g})
+			if status.Code(err) != tc.wantCode {
+				t.Fatalf("code = %v, want %v (%v)", status.Code(err), tc.wantCode, err)
+			}
+			miss, ok := rpc.MissFromError(err)
+			if !ok || miss.GetCode() != tc.wantMiss || miss.GetIssuer() != "https://issuer.test" || miss.GetRetryAfterS() != tc.wantRetry {
+				t.Fatalf("miss = %+v ok=%v, want %v from issuer with retry_after_s=%d", miss, ok, tc.wantMiss, tc.wantRetry)
+			}
+		})
 	}
 }
 
+// Every agent outcome maps to one gRPC code. Only the two capacity misses
+// carry a Miss detail, and a deferred remote miss names the home the
+// caller should prefer.
 func TestEveryOutcomeMaps(t *testing.T) {
 	s := &rpc.Server{Issuer: "iss"}
 	cases := []struct {
-		code     core.StatusCode
-		wantCode codes.Code
-		wantMiss bool
+		name         string
+		code         core.StatusCode
+		err          error
+		wantCode     codes.Code
+		wantMiss     bool
+		wantMissCode grantv1.MissCode
+		wantHome     string
+		wantRetry    uint32
 	}{
-		{core.OK, codes.OK, false},
-		{core.Shed, codes.ResourceExhausted, true},
-		{core.DeferredFallback, codes.Unavailable, true},
-		{core.NeedsTier, codes.FailedPrecondition, false},
-		{core.Invalid, codes.InvalidArgument, false},
-		{core.Unauthenticated, codes.Unauthenticated, false},
-		{core.NotFound, codes.NotFound, false},
-		{core.Internal, codes.Internal, false},
+		{name: "OK is no error", code: core.OK, wantCode: codes.OK},
+		{name: "SHED is ResourceExhausted with a miss and the default retry", code: core.Shed, wantCode: codes.ResourceExhausted,
+			wantMiss: true, wantMissCode: grantv1.MissCode_SHED, wantRetry: uint32(rpc.DefaultRetryAfter / time.Second)},
+		{name: "DEFERRED_FALLBACK is Unavailable with a miss", code: core.DeferredFallback, wantCode: codes.Unavailable,
+			wantMiss: true, wantMissCode: grantv1.MissCode_DEFERRED_FALLBACK},
+		{name: "a deferred remote miss carries the preferred home", code: core.DeferredFallback,
+			err:      &core.RemoteMiss{Err: core.ErrDeltaTooLarge, PreferredHome: "home-a"},
+			wantCode: codes.Unavailable, wantMiss: true, wantMissCode: grantv1.MissCode_DEFERRED_FALLBACK, wantHome: "home-a"},
+		{name: "NeedsTier is FailedPrecondition", code: core.NeedsTier, wantCode: codes.FailedPrecondition},
+		{name: "Invalid is InvalidArgument", code: core.Invalid, wantCode: codes.InvalidArgument},
+		{name: "Unauthenticated is Unauthenticated", code: core.Unauthenticated, wantCode: codes.Unauthenticated},
+		{name: "NotFound is NotFound", code: core.NotFound, wantCode: codes.NotFound},
+		{name: "Internal is Internal", code: core.Internal, wantCode: codes.Internal},
 	}
 	for _, tc := range cases {
-		err := s.ToError(tc.code, errors.New("x"))
-		if status.Code(err) != tc.wantCode {
-			t.Errorf("%d -> %v, want %v", tc.code, status.Code(err), tc.wantCode)
-		}
-		if _, ok := rpc.MissFromError(err); ok != tc.wantMiss {
-			t.Errorf("%d miss detail present=%v, want %v", tc.code, ok, tc.wantMiss)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			cause := tc.err
+			if cause == nil {
+				cause = errors.New("x")
+			}
+			err := s.ToError(tc.code, cause)
+			if status.Code(err) != tc.wantCode {
+				t.Fatalf("%d -> %v, want %v", tc.code, status.Code(err), tc.wantCode)
+			}
+			miss, ok := rpc.MissFromError(err)
+			if ok != tc.wantMiss {
+				t.Fatalf("%d miss detail present=%v, want %v", tc.code, ok, tc.wantMiss)
+			}
+			if ok && (miss.GetCode() != tc.wantMissCode || miss.GetPreferredHome() != tc.wantHome ||
+				miss.GetIssuer() != "iss" || miss.GetRetryAfterS() != tc.wantRetry) {
+				t.Fatalf("miss = %+v, want %v from iss preferring %q retrying after %ds", miss, tc.wantMissCode, tc.wantHome, tc.wantRetry)
+			}
+			if rpc.IsMiss(err) != tc.wantMiss {
+				t.Fatalf("IsMiss = %v, want %v", rpc.IsMiss(err), tc.wantMiss)
+			}
+		})
 	}
 }
 
-func TestDeferredMissCarriesPreferredHome(t *testing.T) {
-	s := &rpc.Server{Issuer: "iss"}
-	err := s.ToError(core.DeferredFallback, &core.RemoteMiss{Err: core.ErrDeltaTooLarge, PreferredHome: "home-a"})
-	miss, ok := rpc.MissFromError(err)
-	if !ok || miss.GetCode() != grantv1.MissCode_DEFERRED_FALLBACK || miss.GetPreferredHome() != "home-a" {
-		t.Fatalf("miss = %+v ok=%v, want DEFERRED_FALLBACK preferring home-a", miss, ok)
-	}
-}
-
+// Admission refuses fields the protocol does not define, which is what a
+// caller trying to shape a workload would send.
 func TestAdmissionRejectsUnknownFields(t *testing.T) {
 	h := newHarness(t, core.TierCheckpoint)
 	ctx := context.Background()
 	g := jsonGrant(t, core.Grant{UID: "g1", Audience: "node-a"})
 
 	// Build a wire message that carries field 99 ("image") alongside the
-	// legal fields: what a caller trying to shape a workload would send.
+	// legal fields.
 	legal, _ := proto.Marshal(&grantv1.CloneRequest{GrantJwt: g})
 	extra := append([]byte{}, legal...)
 	extra = append(extra, 0x9a, 0x06) // field 99, wire type 2
@@ -153,72 +200,289 @@ func TestAdmissionRejectsUnknownFields(t *testing.T) {
 	if len(smuggled.ProtoReflect().GetUnknown()) == 0 {
 		t.Fatal("test setup: unknown field was not preserved")
 	}
-	_, err := h.client.Clone(ctx, &smuggled)
-	if status.Code(err) != codes.InvalidArgument {
-		t.Fatalf("clone with unknown field = %v, want InvalidArgument", err)
+
+	cases := []struct {
+		name string
+		req  *grantv1.CloneRequest
+		want codes.Code
+	}{
+		{name: "a clone with an unknown field is InvalidArgument", req: &smuggled, want: codes.InvalidArgument},
+		{name: "the same clone without it is admitted", req: &grantv1.CloneRequest{GrantJwt: g}, want: codes.OK},
 	}
-	// Clean request is fine.
-	if _, err := h.client.Clone(ctx, &grantv1.CloneRequest{GrantJwt: g}); err != nil {
-		t.Fatalf("clean clone: %v", err)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := h.client.Clone(ctx, tc.req); status.Code(err) != tc.want {
+				t.Fatalf("clone = %v, want %v", err, tc.want)
+			}
+		})
 	}
 }
 
+// One session on a FIBER_WARM target runs in order. A second clone attaches
+// to the first fiber. Once parked, the session cannot resume here and is
+// never forked. A min_tier above the target and an unknown fiber are
+// refused.
 func TestIdempotentAttachAndTierFloor(t *testing.T) {
 	h := newHarness(t, core.TierWarm)
 	ctx := context.Background()
 	g := jsonGrant(t, core.Grant{UID: "g1", Audience: "node-a"})
-	r1, err := h.client.Clone(ctx, &grantv1.CloneRequest{GrantJwt: g, Session: "S"})
-	if err != nil || r1.GetKind() != grantv1.CloneKind_CREATE {
-		t.Fatalf("first: %v %v", err, r1.GetKind())
-	}
-	r2, err := h.client.Clone(ctx, &grantv1.CloneRequest{GrantJwt: g, Session: "S"})
-	if err != nil || r2.GetKind() != grantv1.CloneKind_ATTACH || r2.GetEndpoint() != r1.GetEndpoint() ||
-		!proto.Equal(r1.GetFence(), r2.GetFence()) {
-		t.Fatalf("second: %v %+v (first %+v)", err, r2, r1)
-	}
-	if _, err := h.client.Park(ctx, &grantv1.ParkRequest{FiberId: r1.GetFiberId()}); err != nil {
-		t.Fatalf("park: %v", err)
-	}
-	// Parked session on a FIBER_WARM target: FailedPrecondition, never a fork.
-	_, err = h.client.Clone(ctx, &grantv1.CloneRequest{GrantJwt: g, Session: "S"})
-	if status.Code(err) != codes.FailedPrecondition {
-		t.Fatalf("resume on warm target = %v, want FailedPrecondition", err)
-	}
-	// min_tier above the target: FailedPrecondition too.
 	gc := jsonGrant(t, core.Grant{UID: "g2", Audience: "node-a", MinTier: core.TierCheckpoint})
-	_, err = h.client.Clone(ctx, &grantv1.CloneRequest{GrantJwt: gc})
-	if status.Code(err) != codes.FailedPrecondition {
-		t.Fatalf("min_tier checkpoint on warm target = %v, want FailedPrecondition", err)
+
+	var first *grantv1.CloneResponse
+	clone := func(grantJWT, session string) func() (*grantv1.CloneResponse, error) {
+		return func() (*grantv1.CloneResponse, error) {
+			return h.client.Clone(ctx, &grantv1.CloneRequest{GrantJwt: grantJWT, Session: session})
+		}
 	}
-	// Unknown fiber: NotFound.
-	_, err = h.client.Park(ctx, &grantv1.ParkRequest{FiberId: "g1/0/1"})
-	if status.Code(err) != codes.NotFound {
-		t.Fatalf("park unknown = %v, want NotFound", err)
+	park := func(id func() string) func() (*grantv1.CloneResponse, error) {
+		return func() (*grantv1.CloneResponse, error) {
+			_, err := h.client.Park(ctx, &grantv1.ParkRequest{FiberId: id()})
+			return nil, err
+		}
+	}
+	steps := []struct {
+		name     string
+		op       func() (*grantv1.CloneResponse, error) // nil response means not a clone
+		want     codes.Code
+		wantKind grantv1.CloneKind
+		sameAs   bool // endpoint and fence equal the first clone's
+	}{
+		{name: "the first clone of a session creates", op: clone(g, "S"), wantKind: grantv1.CloneKind_CREATE},
+		{name: "a second clone of the session attaches to the same fiber", op: clone(g, "S"),
+			wantKind: grantv1.CloneKind_ATTACH, sameAs: true},
+		{name: "the session's fiber parks", op: park(func() string { return first.GetFiberId() })},
+		{name: "resuming a parked session on a warm target is FailedPrecondition, never a fork",
+			op: clone(g, "S"), want: codes.FailedPrecondition},
+		{name: "min_tier above the target is FailedPrecondition", op: clone(gc, ""), want: codes.FailedPrecondition},
+		{name: "parking an unknown fiber is NotFound", op: park(func() string { return "g1/0/1" }), want: codes.NotFound},
+	}
+	for _, st := range steps {
+		t.Run(st.name, func(t *testing.T) {
+			r, err := st.op()
+			if status.Code(err) != st.want {
+				t.Fatalf("err = %v, want %v", err, st.want)
+			}
+			if r == nil {
+				return
+			}
+			if r.GetKind() != st.wantKind {
+				t.Fatalf("kind = %v, want %v", r.GetKind(), st.wantKind)
+			}
+			if first == nil {
+				first = r
+			}
+			if st.sameAs && (r.GetEndpoint() != first.GetEndpoint() || !proto.Equal(first.GetFence(), r.GetFence())) {
+				t.Fatalf("attach = %+v, want the endpoint and fence of %+v", r, first)
+			}
+		})
 	}
 }
 
+func TestCallerOwnsItsGrantsFibers(t *testing.T) {
+	owner := tlsconf.Caller{Thumbprint: "owner-x5t"}
+	other := tlsconf.Caller{Thumbprint: "other-x5t"}
+	h := newHarness(t, core.TierCheckpoint, func(a *core.Agent) { a.Verify = boundVerifier{thumbprint: owner.Thumbprint} })
+	gw := (&rpc.Gateway{Server: h.server}).Handler()
+	g := jsonGrant(t, core.Grant{UID: "g1", Audience: "node-a"})
+
+	park := func(ctx context.Context, id string) error {
+		_, err := h.server.Park(ctx, &grantv1.ParkRequest{FiberId: id})
+		return err
+	}
+	release := func(ctx context.Context, id string) error {
+		_, err := h.server.Release(ctx, &grantv1.ReleaseRequest{FiberId: id})
+		return err
+	}
+	cases := []struct {
+		name       string
+		caller     *tlsconf.Caller // nil is plaintext with no caller identity
+		op         func(ctx context.Context, fiberID string) error
+		want       codes.Code
+		wantListed bool // GET /v1/status shows g1
+	}{
+		{name: "owner parks", caller: &owner, op: park, want: codes.OK, wantListed: true},
+		{name: "owner releases", caller: &owner, op: release, want: codes.OK, wantListed: true},
+		{name: "another caller cannot park", caller: &other, op: park, want: codes.NotFound},
+		{name: "another caller cannot release", caller: &other, op: release, want: codes.NotFound},
+		{name: "plaintext has no caller to check", op: park, want: codes.OK, wantListed: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r, err := h.server.Clone(rpc.WithCaller(context.Background(), owner), &grantv1.CloneRequest{GrantJwt: g})
+			if err != nil {
+				t.Fatalf("clone by owner: %v", err)
+			}
+			ctx := context.Background()
+			if tc.caller != nil {
+				ctx = rpc.WithCaller(ctx, *tc.caller)
+			}
+			if err := tc.op(ctx, r.GetFiberId()); status.Code(err) != tc.want {
+				t.Fatalf("op = %v, want %v", err, tc.want)
+			}
+
+			rec := httptest.NewRecorder()
+			gw.ServeHTTP(rec, httptest.NewRequest("GET", "/v1/status", nil).WithContext(ctx))
+			var sts []map[string]any
+			if err := json.Unmarshal(rec.Body.Bytes(), &sts); err != nil {
+				t.Fatalf("status body %q: %v", rec.Body.String(), err)
+			}
+			listed := false
+			for _, st := range sts {
+				listed = listed || st["grantUid"] == "g1"
+			}
+			if listed != tc.wantListed {
+				t.Fatalf("status lists g1 = %v, want %v (%s)", listed, tc.wantListed, rec.Body.String())
+			}
+		})
+	}
+}
+
+// Watch streams per-grant status until it settles. A fiber over its W
+// budget is accepted, then killed, and drops out of the running count.
 func TestWatchReportsOOM(t *testing.T) {
-	h := newHarness(t, core.TierCheckpoint)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	g := jsonGrant(t, core.Grant{UID: "g1", Audience: "node-a", FiberMax: 2, WBudgetBytes: 1 << 20})
-	if _, err := h.client.Clone(ctx, &grantv1.CloneRequest{GrantJwt: g, Payload: []byte(`{"dirty_bytes": 1024}`)}); err != nil {
-		t.Fatalf("small clone: %v", err)
+	cases := []struct {
+		name        string
+		dirty       []string // dirty_bytes payload of each clone, in order
+		wantRunning uint32
+		wantUsed    uint64
+	}{
+		{name: "a fiber within W is reported running", dirty: []string{"1024"}, wantRunning: 1, wantUsed: 1024},
+		{name: "an over-budget fiber is accepted, then killed", dirty: []string{"1024", "4194304"}, wantRunning: 1, wantUsed: 1024},
 	}
-	if _, err := h.client.Clone(ctx, &grantv1.CloneRequest{GrantJwt: g, Payload: []byte(`{"dirty_bytes": 4194304}`)}); err != nil {
-		t.Fatalf("over-budget clone should be accepted then killed: %v", err)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t, core.TierCheckpoint)
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			g := jsonGrant(t, core.Grant{UID: "g1", Audience: "node-a", FiberMax: 2, WBudgetBytes: 1 << 20})
+			for _, d := range tc.dirty {
+				if _, err := h.client.Clone(ctx, &grantv1.CloneRequest{GrantJwt: g, Payload: []byte(`{"dirty_bytes": ` + d + `}`)}); err != nil {
+					t.Fatalf("clone dirtying %s bytes: %v", d, err)
+				}
+			}
+			stream, err := h.client.Watch(ctx, &emptypb.Empty{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for {
+				st, err := stream.Recv()
+				if err != nil {
+					t.Fatalf("watch ended before running settled to %d: %v", tc.wantRunning, err)
+				}
+				if st.GetGrantUid() == "g1" && st.GetRunning() == tc.wantRunning && st.GetWUsedBytes() == tc.wantUsed {
+					return
+				}
+			}
+		})
 	}
-	stream, err := h.client.Watch(ctx, &emptypb.Empty{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	for {
-		st, err := stream.Recv()
+}
+
+// MissFromError finds the Miss among a status's details, and nothing in an
+// error that is not a status or carries no Miss.
+func TestMissFromError(t *testing.T) {
+	withDetail := func(c codes.Code, d *grantv1.Fence) error {
+		st, err := status.New(c, "x").WithDetails(d)
 		if err != nil {
-			t.Fatalf("watch ended before running settled to 1: %v", err)
+			t.Fatal(err)
 		}
-		if st.GetGrantUid() == "g1" && st.GetRunning() == 1 && st.GetWUsedBytes() == 1024 {
-			return
-		}
+		return st.Err()
+	}
+	miss := &grantv1.Miss{Code: grantv1.MissCode_DEFERRED_FALLBACK, Issuer: "iss"}
+	cases := []struct {
+		name string
+		err  error
+		want *grantv1.Miss
+	}{
+		{name: "no error", err: nil},
+		{name: "a plain error", err: errors.New("boom")},
+		{name: "a status without details", err: status.Error(codes.Unavailable, "x")},
+		{name: "a status with another detail", err: withDetail(codes.Unavailable, &grantv1.Fence{GrantUid: "g"})},
+		{name: "a status with a miss after another detail", err: func() error {
+			st, err := status.New(codes.Unavailable, "x").WithDetails(&grantv1.Fence{}, miss)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return st.Err()
+		}(), want: miss},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := rpc.MissFromError(tc.err)
+			if ok != (tc.want != nil) || !proto.Equal(got, tc.want) {
+				t.Fatalf("MissFromError = %v, %v, want %v", got, ok, tc.want)
+			}
+			if rpc.IsMiss(tc.err) != ok {
+				t.Fatalf("IsMiss = %v, want %v", rpc.IsMiss(tc.err), ok)
+			}
+		})
+	}
+}
+
+// failingWatch is a Watch stream whose Send fails, or that cancels its
+// context on the first Send.
+type failingWatch struct {
+	grpc.ServerStream
+	ctx    context.Context
+	cancel context.CancelFunc
+	err    error
+	sent   []*grantv1.Status
+}
+
+func (w *failingWatch) Context() context.Context { return w.ctx }
+
+func (w *failingWatch) Send(st *grantv1.Status) error {
+	w.sent = append(w.sent, st)
+	if w.err == nil {
+		w.cancel()
+	}
+	return w.err
+}
+
+// Watch ends with the stream's error when a Send fails, and with the
+// context's error when the client goes away.
+func TestWatchEnds(t *testing.T) {
+	errGone := errors.New("transport is closing")
+	cases := []struct {
+		name    string
+		sendErr error
+		want    error
+	}{
+		{name: "a failed send ends the watch with its error", sendErr: errGone, want: errGone},
+		{name: "a client that goes away ends the watch with its context", want: context.Canceled},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t, core.TierCheckpoint)
+			if _, err := h.client.Clone(context.Background(), &grantv1.CloneRequest{GrantJwt: jsonGrant(t, core.Grant{UID: "g1", Audience: "node-a"})}); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			w := &failingWatch{ctx: ctx, cancel: cancel, err: tc.sendErr}
+			if err := h.server.Watch(&emptypb.Empty{}, w); !errors.Is(err, tc.want) {
+				t.Fatalf("Watch = %v, want %v", err, tc.want)
+			}
+			if len(w.sent) == 0 || w.sent[0].GetGrantUid() != "g1" {
+				t.Fatalf("sent = %v, want g1's status first", w.sent)
+			}
+		})
+	}
+}
+
+func TestFenceFromProto(t *testing.T) {
+	cases := []struct {
+		name string
+		in   *grantv1.Fence
+		want core.Fence
+	}{
+		{name: "a nil fence is the zero fence", in: nil, want: core.Fence{}},
+		{name: "every field carries over", in: &grantv1.Fence{GrantUid: "g1", Epoch: 3, Seq: 9}, want: core.Fence{GrantUID: "g1", Epoch: 3, Seq: 9}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := rpc.FenceFromProto(tc.in); got != tc.want {
+				t.Fatalf("FenceFromProto = %+v, want %+v", got, tc.want)
+			}
+		})
 	}
 }

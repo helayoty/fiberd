@@ -11,7 +11,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
-	"time"
 
 	"github.com/helayoty/fiberd/pkg/core"
 )
@@ -27,7 +26,6 @@ type Runtime struct {
 	fibers    map[string]fiber
 	parked    map[string]uint64 // deltaRef -> W the delta carries
 	templates map[string]bool
-	pressure  map[string]float64
 	port      int
 	exits     chan core.FiberExit
 }
@@ -49,6 +47,10 @@ func NewWithTier(t core.Tier) *Runtime {
 }
 
 func (r *Runtime) Tier() core.Tier { return r.tier }
+
+// IsolatesTenants implements core.Isolator. The stub runs no code, so no
+// fiber can reach the host and untrusted grants are admitted.
+func (r *Runtime) IsolatesTenants() bool { return true }
 
 func (r *Runtime) PrepareTemplate(_ context.Context, g core.Grant) error {
 	r.mu.Lock()
@@ -72,11 +74,12 @@ func (r *Runtime) Clone(_ context.Context, spec core.CloneSpec) (core.FiberHandl
 	defer r.mu.Unlock()
 	var w, dev uint64
 	if spec.Source == core.SourceDelta {
+		// The delta outlives its resume, as on a host: the agent drops it
+		// through DiscardDelta at the next park or a discarding release.
 		carried, ok := r.parked[spec.Ref]
 		if !ok {
 			return core.FiberHandle{}, fmt.Errorf("stub: unknown delta %q", spec.Ref)
 		}
-		delete(r.parked, spec.Ref)
 		w = carried
 	}
 	if len(spec.Payload) > 0 {
@@ -90,7 +93,6 @@ func (r *Runtime) Clone(_ context.Context, spec core.CloneSpec) (core.FiberHandl
 	h := core.FiberHandle{
 		ID:       spec.Fence.String(),
 		Endpoint: fmt.Sprintf("tcp://127.0.0.1:%d", r.port),
-		Started:  time.Now(),
 	}
 	r.fibers[h.ID] = fiber{h: h, w: w}
 
@@ -133,6 +135,15 @@ func (r *Runtime) Release(_ context.Context, fiberID string, discard bool) error
 	return nil
 }
 
+// DiscardDelta implements core.DeltaDiscarder: the delta a session was
+// resumed from is dropped once nothing will resume it again.
+func (r *Runtime) DiscardDelta(_ context.Context, ref string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.parked, ref)
+	return nil
+}
+
 func (r *Runtime) List(context.Context) ([]core.FiberHandle, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -165,19 +176,6 @@ func (r *Runtime) HasDelta(ref string) bool {
 	return ok
 }
 
-// SetPressure fakes PSI for a grant; Pressure implements
-// core.PressureSource so the ladder can be exercised without a kernel.
-func (r *Runtime) SetPressure(grantUID string, someAvg10 float64) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.pressure == nil {
-		r.pressure = map[string]float64{}
-	}
-	r.pressure[grantUID] = someAvg10
-}
-
-func (r *Runtime) Pressure(grantUID string) (float64, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.pressure[grantUID], nil
-}
+// Pressure implements core.PressureSource. The stub has no kernel and no
+// memory, so no grant is ever under pressure.
+func (r *Runtime) Pressure(string) (float64, error) { return 0, nil }

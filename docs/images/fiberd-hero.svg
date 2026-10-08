@@ -1,66 +1,104 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1240" height="700" viewBox="0 0 1240 700" role="img" aria-labelledby="hero-title hero-desc">
-  <title id="hero-title">fiberd places capacity once and activates fibers locally</title>
-  <desc id="hero-desc">A control plane issues a signed CapacityGrant to a home. The fiberd agent verifies it, prepares a warm template, and resolves Clone requests locally. Each fiber incarnation receives an endpoint and fence while remaining inside grant and backend boundaries. Local operation during a control-plane outage depends on the grant lease, valid home scope, and healthy local runtime.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="953" viewBox="0 0 1440 953" role="img" aria-labelledby="fiberd-hero-title fiberd-hero-desc">
+  <title id="fiberd-hero-title">Place capacity once. Activate fibers locally.</title>
+  <desc id="fiberd-hero-desc">A two-phase behavior overview, not a module inventory. Capacity admission: 1, the external control plane supplies a signed CapacityGrant, an authorization document, to one fiberd agent; 2, the agent prepares the grant's shared warm template. Local requests: 3, a caller sends Clone with the grant and optional session to that same agent. CREATE reuses the template; CREATE or RESUME activates a fiber, while ATTACH reuses the existing live fiber. 4, the agent returns the selected fiber's endpoint and fence; 5, in direct endpoint mode, the caller connects to that fiber without routing workload traffic through the agent. The home and one illustrated admitted grant are resource scopes, not services; the agent can manage multiple grants. Aggregate status returns asynchronously to the control plane. Local operation requires a valid lease and home scope, current verifier state, and a healthy runtime and template.</desc>
   <style>
-    :root{--bg:#f7f9fc;--panel:#fff;--ink:#172033;--muted:#5d6b7d;--line:#b8c4d4;--blue:#3165b5;--blue-bg:#eaf1ff;--teal:#13776f;--teal-bg:#e8f7f4;--violet:#704aa1;--violet-bg:#f2edfa;--amber:#a76500;--amber-bg:#fff3d6;--green:#287a4d;--green-bg:#e8f6ed}
-    @media(prefers-color-scheme:dark){:root{--bg:#0d1117;--panel:#161b22;--ink:#e6edf3;--muted:#a3adba;--line:#3d4652;--blue:#79a7ff;--blue-bg:#17243d;--teal:#53c7b8;--teal-bg:#102923;--violet:#c09cff;--violet-bg:#251b35;--amber:#f0b44d;--amber-bg:#30240f;--green:#63cf8e;--green-bg:#142b1e}}
-    text{font-family:ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;fill:var(--ink)} .bg{fill:var(--bg)} .panel{fill:var(--panel);stroke:var(--line);stroke-width:1.5}.home{fill:var(--teal-bg);stroke:var(--teal);stroke-width:2}.control{fill:var(--blue-bg);stroke:var(--blue);stroke-width:1.5}.warm{fill:var(--amber-bg);stroke:var(--amber);stroke-width:1.5}.fiber{fill:var(--violet-bg);stroke:var(--violet);stroke-width:1.5}.note{fill:var(--green-bg);stroke:var(--green)}.title{font-size:28px;font-weight:750}.subtitle{font-size:14px;fill:var(--muted)}.h{font-size:16px;font-weight:700}.b{font-size:13px}.s{font-size:11px;fill:var(--muted)}.label{font-size:12px;font-weight:700}.blue{fill:var(--blue)}.teal{fill:var(--teal)}.violet{fill:var(--violet)}.amber{fill:var(--amber)}.arrow{fill:none;stroke:var(--muted);stroke-width:2}.dash{stroke-dasharray:7 5}
+    :root{--bg:#f7f9fc;--panel:#fff;--ink:#172033;--muted:#5d6b7d;--border:#b8c4d4;--blue:#3165b5;--blue-bg:#eaf1ff;--teal:#13776f;--teal-bg:#e8f7f4;--violet:#704aa1;--violet-bg:#f2edfa;--amber:#a76500;--amber-bg:#fff3d6;--green:#287a4d;--green-bg:#e8f6ed}
+    @media(prefers-color-scheme:dark){:root{--bg:#0d1117;--panel:#161b22;--ink:#e6edf3;--muted:#a3adba;--border:#3d4652;--blue:#79a7ff;--blue-bg:#17243d;--teal:#53c7b8;--teal-bg:#102923;--violet:#c09cff;--violet-bg:#251b35;--amber:#f0b44d;--amber-bg:#30240f;--green:#63cf8e;--green-bg:#142b1e}}
+    text{font-family:ui-sans-serif,-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;fill:var(--ink)}
+    .bg{fill:var(--bg)}.title{font-size:30px;font-weight:700}.heading{font-size:22px;font-weight:700}.label{font-size:20px;font-weight:600}.secondary{font-size:17px}.muted{fill:var(--muted)}.center{text-anchor:middle}.blue{fill:var(--blue)}.teal{fill:var(--teal)}.violet{fill:var(--violet)}.amber{fill:var(--amber)}
+    .scope{fill:none;stroke:var(--teal);stroke-width:1.5}.grant-scope{stroke-dasharray:9 6}.service{fill:var(--panel);stroke:var(--teal);stroke-width:2}.document{fill:var(--blue-bg);stroke:var(--blue);stroke-width:1.5}.template{fill:var(--amber-bg);stroke:var(--amber);stroke-width:1.5}.fiber{fill:var(--violet-bg);stroke:var(--violet);stroke-width:2}
+    .actor{fill:var(--panel);stroke-width:2}.actor-blue{stroke:var(--blue)}.actor-teal{stroke:var(--teal)}.divider{fill:none;stroke:var(--border);stroke-width:1.5}.flow{fill:none;stroke-width:2;stroke-linejoin:round;stroke-linecap:round}.blue-flow{stroke:var(--blue)}.teal-flow{stroke:var(--teal)}.violet-flow{stroke:var(--violet)}.amber-flow{stroke:var(--amber)}.async{stroke-dasharray:7 6}
+    .number{font-size:17px;font-weight:700;text-anchor:middle}.blue-number{fill:var(--blue-bg);stroke:var(--blue)}.teal-number{fill:var(--teal-bg);stroke:var(--teal)}.violet-number{fill:var(--violet-bg);stroke:var(--violet)}
+    text.amber{fill:#9e5e00}@media(prefers-color-scheme:dark){text.amber{fill:var(--amber)}}
   </style>
-  <defs><marker id="hero-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M1 1l8 4-8 4z" fill="#7b8794"/></marker></defs>
-  <rect class="bg" width="1240" height="700"/>
-  <text class="title" x="44" y="48">Place capacity once. Activate fibers locally.</text>
-  <text class="subtitle" x="44" y="74">Placement establishes a bounded grant; Clone resolves an already-admitted workload inside that boundary.</text>
+  <defs>
+    <marker id="fiberd-hero-blue-arrow" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="12" markerHeight="12" markerUnits="userSpaceOnUse" orient="auto"><path d="M1 1 11 6 1 11Z" fill="var(--blue)"/></marker>
+    <marker id="fiberd-hero-teal-arrow" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="12" markerHeight="12" markerUnits="userSpaceOnUse" orient="auto"><path d="M1 1 11 6 1 11Z" fill="var(--teal)"/></marker>
+    <marker id="fiberd-hero-violet-arrow" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="12" markerHeight="12" markerUnits="userSpaceOnUse" orient="auto"><path d="M1 1 11 6 1 11Z" fill="var(--violet)"/></marker>
+    <marker id="fiberd-hero-amber-arrow" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="12" markerHeight="12" markerUnits="userSpaceOnUse" orient="auto"><path d="M1 1 11 6 1 11Z" fill="var(--amber)"/></marker>
+  </defs>
+  <rect class="bg" width="1440" height="953"/>
+  <text class="title" x="48" y="66">Place capacity once. Activate fibers locally.</text>
+  <text class="secondary muted" x="48" y="100">Admit bounded capacity; reuse its warm template without another placement call.</text>
+  <path class="divider" d="M48 130H1392"/>
 
-  <rect class="control" x="44" y="128" width="250" height="154" rx="18"/>
-  <text class="h" x="169" y="160" text-anchor="middle">Control plane</text>
-  <text class="b" x="169" y="191" text-anchor="middle">places bounded capacity</text>
-  <text class="b" x="169" y="214" text-anchor="middle">signs CapacityGrant</text>
-  <text class="s" x="169" y="242" text-anchor="middle">lease + template + policy</text>
+  <text class="heading blue" x="48" y="178">Capacity admission · once</text>
+  <text class="heading teal" x="48" y="601">Local requests · repeat</text>
+  <path class="divider" d="M48 566H602"/>
 
-  <rect class="panel" x="44" y="374" width="250" height="154" rx="18"/>
-  <text class="h" x="169" y="406" text-anchor="middle">Caller or router</text>
-  <text class="b" x="169" y="437" text-anchor="middle">Clone(session)</text>
-  <text class="b" x="169" y="460" text-anchor="middle">retains endpoint + fence</text>
-  <text class="s" x="169" y="489" text-anchor="middle">then connects directly</text>
+  <rect class="scope" x="630" y="196" width="762" height="678" rx="16"/>
+  <text class="heading teal" x="656" y="232">Home</text>
+  <text class="secondary muted" x="752" y="232">one agent · multiple grants</text>
+  <rect class="scope grant-scope" x="984" y="262" width="376" height="584" rx="10"/>
+  <text class="heading teal" x="1012" y="297">One admitted grant</text>
 
-  <rect class="home" x="374" y="104" width="822" height="458" rx="22"/>
-  <text class="h teal" x="402" y="139">Home / resource boundary</text>
-  <text class="s" x="402" y="161">one agent can hold one or more separately bounded grants</text>
-  <rect class="panel" x="404" y="205" width="222" height="176" rx="16"/>
-  <text class="h teal" x="515" y="238" text-anchor="middle">fiberd agent</text>
-  <text class="b" x="515" y="270" text-anchor="middle">verifies grant locally</text>
-  <text class="b" x="515" y="293" text-anchor="middle">owns ledger + fences</text>
-  <text class="b" x="515" y="316" text-anchor="middle">enforces grant policy</text>
-  <text class="s" x="515" y="349" text-anchor="middle">reports aggregate status</text>
+  <circle class="actor actor-blue" cx="172" cy="333" r="16"/>
+  <path class="actor actor-blue" d="M140 386V374C140 347 204 347 204 374V386"/>
+  <text class="label center blue" x="172" y="423">Control plane</text>
+  <text class="secondary center muted" x="172" y="452">placement</text>
 
-  <rect class="panel" x="670" y="183" width="490" height="319" rx="18"/>
-  <text class="label teal" x="694" y="213">Admitted grant / backend boundary</text>
-  <rect class="warm" x="706" y="239" width="418" height="76" rx="15"/>
-  <text class="h amber" x="915" y="269" text-anchor="middle">Warm template</text>
-  <text class="b" x="915" y="294" text-anchor="middle">prepared once; forked or restored by the selected backend</text>
-  <path class="arrow" d="M915 315v34M915 349H790v32M915 349h125v32" marker-end="url(#hero-arrow)"/>
-  <rect class="fiber" x="706" y="383" width="168" height="91" rx="14"/>
-  <text class="h violet" x="790" y="411" text-anchor="middle">Fiber A</text>
-  <text class="b" x="790" y="436" text-anchor="middle">endpoint + fence</text>
-  <text class="s" x="790" y="458" text-anchor="middle">one incarnation</text>
-  <rect class="fiber" x="956" y="383" width="168" height="91" rx="14"/>
-  <text class="h violet" x="1040" y="411" text-anchor="middle">Fiber B</text>
-  <text class="b" x="1040" y="436" text-anchor="middle">endpoint + fence</text>
-  <text class="s" x="1040" y="458" text-anchor="middle">one incarnation</text>
+  <path class="document" d="M348 337H560L586 363V466H348Z"/>
+  <path class="flow blue-flow" d="M560 337V363H586"/>
+  <text class="label blue" x="367" y="389">CapacityGrant</text>
+  <text class="secondary" x="367" y="421">authorization</text>
 
-  <path class="arrow" d="M294 205h54v71h54" marker-end="url(#hero-arrow)"/>
-  <circle cx="348" cy="241" r="14" fill="var(--blue-bg)" stroke="var(--blue)"/><text class="label blue" x="348" y="245" text-anchor="middle">1</text>
-  <path class="arrow" d="M626 263h42" marker-end="url(#hero-arrow)"/>
-  <circle cx="647" cy="248" r="14" fill="var(--teal-bg)" stroke="var(--teal)"/><text class="label teal" x="647" y="252" text-anchor="middle">2</text>
-  <path class="arrow" d="M294 419h74v-92h34" marker-end="url(#hero-arrow)"/>
-  <circle cx="344" cy="419" r="14" fill="var(--violet-bg)" stroke="var(--violet)"/><text class="label violet" x="344" y="423" text-anchor="middle">3</text>
-  <path class="arrow dash" d="M404 353h-68v116h-42" marker-end="url(#hero-arrow)"/>
-  <circle cx="336" cy="438" r="14" fill="var(--violet-bg)" stroke="var(--violet)"/><text class="label violet" x="336" y="442" text-anchor="middle">4</text>
-  <path class="arrow" d="M169 528v65h621V476" marker-end="url(#hero-arrow)"/>
-  <circle cx="486" cy="593" r="14" fill="var(--violet-bg)" stroke="var(--violet)"/><text class="label violet" x="486" y="597" text-anchor="middle">5</text>
+  <rect class="service" x="660" y="336" width="280" height="474" rx="4"/>
+  <text class="heading teal" x="690" y="376">fiberd agent</text>
+  <text class="secondary" x="690" y="408">local verification</text>
+  <text class="label" x="690" y="638">Resolve session</text>
+  <text class="secondary" x="680" y="671">ATTACH reuses live fiber</text>
 
-  <rect class="note" x="44" y="625" width="1152" height="48" rx="14"/>
-  <text class="label" x="66" y="647">Outage boundary</text>
-  <text class="b" x="190" y="647">Local serving and activation can continue only while the grant lease and home scope remain valid and the local runtime/template stay healthy.</text>
-  <text class="s" x="66" y="665">1 grant → 2 warm → 3 Clone → 4 endpoint + fence → 5 direct connection. Fibers remain inside grant and backend limits.</text>
+  <rect class="template" x="1034" y="367" width="312" height="105" rx="3"/>
+  <rect class="template" x="1026" y="375" width="312" height="105" rx="3"/>
+  <rect class="template" x="1018" y="383" width="312" height="105" rx="3"/>
+  <text class="heading amber" x="1043" y="425">Warm template</text>
+  <text class="secondary" x="1043" y="456">shared state</text>
+
+  <circle class="actor actor-teal" cx="174" cy="681" r="16"/>
+  <path class="actor actor-teal" d="M142 734V722C142 695 206 695 206 722V734"/>
+  <text class="label center" x="174" y="756">Caller / router</text>
+  <text class="secondary center muted" x="174" y="783">grant + session</text>
+
+  <circle class="fiber" cx="1244" cy="738" r="80"/>
+  <circle cx="1244" cy="694" r="6" fill="var(--violet)"/>
+  <text class="label center violet" x="1244" y="739">Selected fiber</text>
+  <text class="secondary center" x="1244" y="770">live instance</text>
+
+  <path class="flow blue-flow" d="M210 389H348" marker-end="url(#fiberd-hero-blue-arrow)"/>
+  <path class="flow blue-flow" d="M586 389H660" marker-end="url(#fiberd-hero-blue-arrow)"/>
+  <circle class="blue-number" cx="343" cy="300" r="13"/>
+  <text class="number blue" x="343" y="306">1</text>
+  <text class="label blue" x="367" y="307">Signed grant / admission</text>
+
+  <path class="flow teal-flow" d="M940 435H1018" marker-end="url(#fiberd-hero-teal-arrow)"/>
+  <circle class="teal-number" cx="959" cy="340" r="13"/>
+  <text class="number teal" x="959" y="346">2</text>
+  <text class="label teal" x="1008" y="347">Prepare template</text>
+
+  <path class="flow blue-flow async" d="M660 500H288V430H252" marker-end="url(#fiberd-hero-blue-arrow)"/>
+  <text class="secondary blue" x="348" y="531">Aggregate status · async</text>
+
+  <path class="flow amber-flow" d="M1244 488V658" marker-end="url(#fiberd-hero-amber-arrow)"/>
+  <text class="secondary amber" x="1224" y="565" text-anchor="end">CREATE</text>
+  <text class="secondary amber" x="1224" y="590" text-anchor="end">reuses base</text>
+
+  <path class="flow teal-flow" d="M210 686H660" marker-end="url(#fiberd-hero-teal-arrow)"/>
+  <circle class="teal-number" cx="344" cy="639" r="13"/>
+  <text class="number teal" x="344" y="645">3</text>
+  <text class="label teal" x="368" y="646">Clone</text>
+
+  <path class="flow violet-flow" d="M940 738H1164" marker-end="url(#fiberd-hero-violet-arrow)"/>
+  <text class="secondary violet" x="1008" y="718">CREATE / RESUME</text>
+
+  <path class="flow teal-flow" d="M660 744H278V723H210" marker-end="url(#fiberd-hero-teal-arrow)"/>
+  <circle class="teal-number" cx="344" cy="782" r="13"/>
+  <text class="number teal" x="344" y="788">4</text>
+  <text class="label teal" x="368" y="789">Endpoint + fence</text>
+
+  <path class="flow violet-flow" d="M174 798V914H1244V818" marker-end="url(#fiberd-hero-violet-arrow)"/>
+  <circle class="violet-number" cx="476" cy="892" r="13"/>
+  <text class="number violet" x="476" y="898">5</text>
+  <text class="label violet" x="500" y="899">Connect directly</text>
+  <text class="secondary muted" x="701" y="899">direct endpoint mode</text>
+
 </svg>

@@ -38,21 +38,20 @@ fi
 bin/grant-issuer keygen -alg EdDSA -out "$STATE/issuer-key.json" >/dev/null
 bin/grant-issuer serve -key "$STATE/issuer-key.json" -addr "$ISSUER_ADDR" -issuer "$ISSUER_URL" >"$STATE/issuer.log" 2>&1 &
 ISSUER_PID=$!
-bin/fiberd -state "$STATE" -node-id "$NODE" -verifier jwks -issuer "$ISSUER_URL" -jwks-max-stale 10m \
+bin/fiberd -state "$STATE" -node-id "$NODE" -verifier jwks -issuer "$ISSUER_URL" -jwks-max-stale 10m -insecure-plaintext \
   -listen "$ADDR" -runtime proc -template "default=$PWD/bin/refzygote --heap-mb 64" -run-dir /tmp/fz-storm \
-  -delta-dir "$STATE/deltas" \
   -grant-ceiling "$CEILING" -pressure-interval 200ms -status-interval 100ms -stale-ttl 30s \
   >"$STATE/fiberd.log" 2>&1 &
 FIBERD_PID=$!
 trap 'kill $FIBERD_PID $ISSUER_PID 2>/dev/null; wait $FIBERD_PID $ISSUER_PID 2>/dev/null || true' EXIT
 for _ in $(seq 1 100); do
-  curl -sf --unix-socket "$STATE/admin.sock" http://x/healthz >/dev/null 2>&1 && break
+  curl -sf --unix-socket "$STATE/private/admin.sock" http://x/healthz >/dev/null 2>&1 && break
   sleep 0.1
 done
 
 echo "container memory.max: $(cat /sys/fs/cgroup/memory.max 2>/dev/null || echo unknown); deltas on $(stat -f -c %T "$STATE")"
 set +e
-bin/storm -target "$ADDR" -node-id "$NODE" -issuer-key "$STATE/issuer-key.json" -issuer "$ISSUER_URL" \
+bin/storm -target "$ADDR" -node-id "$NODE" -issuer-key "$STATE/issuer-key.json" -issuer "$ISSUER_URL" -isolation TRUSTED \
   -fibers 8 -ceiling "$CEILING" -overcommit 2 -step $((2 << 20)) -round 250ms
 rc=$?
 set -e

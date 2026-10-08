@@ -35,16 +35,44 @@ enum Tier {
   FIBER_FABRIC = 5;
 }
 
-// Durability selects when the audit record for an operation must be remote.
+// Durability selects when the audit record for an operation must be
+// durable. It is priced as activation latency.
 enum Durability {
   DURABILITY_UNSPECIFIED = 0;
-  // Append locally, ack the caller, ship later. Loss window = flush interval.
+  // Append the record and ack without an fsync. A crash can lose records
+  // the OS has not flushed yet.
   BEST_EFFORT = 1;
-  // Block until the record is remote, then ack. Paid as activation latency.
+  // Ack only once the record is durable on local disk. After a failed
+  // fsync, every SYNC operation fails until the agent restarts.
   SYNC = 2;
 }
 
-// Policy is the per-grant session, durability and pressure class.
+// Isolation is whether the issuer trusts the grant's code with the host
+// kernel. Unset is UNTRUSTED. Only a home whose backend sandboxes fibers
+// from the host (gVisor, Hyperlight) may serve it. Other homes refuse the
+// grant with FailedPrecondition.
+enum Isolation {
+  ISOLATION_UNSPECIFIED = 0;
+  UNTRUSTED = 1;
+  TRUSTED = 2;
+}
+
+// EndpointMode is how callers reach a grant's fibers. HANDOFF needs a
+// grant bound to a caller certificate and a home whose backend can pass
+// connections to fibers (proc, runc). Other homes refuse the grant with
+// FailedPrecondition.
+enum EndpointMode {
+  // Each fiber listens on an endpoint of its own.
+  DIRECT = 0;
+  // The home accepts each TLS connection on one address, routes it by
+  // the TLS server name (CloneResponse.routing_key) and passes the
+  // socket to the fiber, which terminates TLS and accepts only the
+  // grant's caller certificate.
+  HANDOFF = 1;
+}
+
+// Policy is the per-grant session, durability, pressure, isolation and
+// endpoint class.
 message Policy {
   Durability durability = 1;
   string session_class = 2;
@@ -53,6 +81,8 @@ message Policy {
   // The home sets them below its own eviction threshold so park fires first.
   float psi_some_avg10_shed = 4;
   float psi_some_avg10_park = 5;
+  Isolation isolation = 6;
+  EndpointMode endpoint_mode = 7;
 }
 
 // FiberLimits is `fibers: {max, warm}`. (Named FiberLimits rather than
@@ -132,6 +162,13 @@ message CloneResponse {
   string endpoint = 2;
   Fence fence = 3;
   CloneKind kind = 4;
+  // Set when the grant's endpoint mode is HANDOFF. The caller opens TLS
+  // to endpoint with server name "<routing_key>.fiberd", presents the
+  // grant's client certificate, and accepts only a server key whose
+  // SubjectPublicKeyInfo hashes (SHA-256, base64url) to
+  // server_key_sha256.
+  string routing_key = 5;
+  string server_key_sha256 = 6;
 }
 
 // MissCode is the one thing a caller needs to decide what to do next.
@@ -181,7 +218,8 @@ service Fibers {
   // Clone resolves a session to attach, resume or create. Every miss
   // carries a Miss detail: ResourceExhausted for SHED, Unavailable for
   // DEFERRED_FALLBACK. FailedPrecondition when min_tier exceeds the
-  // home's tier or a parked session needs a tier the home lacks.
+  // home's tier, a parked session needs a tier the home lacks, or an
+  // untrusted grant reaches a home that does not isolate tenants.
   rpc Clone(CloneRequest) returns (CloneResponse);
   rpc Park(ParkRequest) returns (google.protobuf.Empty);
   rpc Release(ReleaseRequest) returns (google.protobuf.Empty);

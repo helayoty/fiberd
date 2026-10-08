@@ -7,6 +7,7 @@
 // the Rust helper replaces it where KVM exists.
 //
 //	fakehelper --guest <path> [--init-ms N]      (fd 3 is the control socket)
+//	fakehelper --version                         (the facts READY carries)
 package main
 
 import (
@@ -47,10 +48,19 @@ var (
 
 func say(format string, a ...any) { out <- fmt.Sprintf(format, a...) }
 
+// facts mirrors the Rust helper's snapshot facts (helper, hyperlight_host,
+// hypervisor, cpu). The fake has none of the last three.
+const facts = "fakehelper/1 none none none"
+
 func main() {
 	guest := flag.String("guest", "", "guest binary (checked for existence only)")
 	initMS := flag.Int("init-ms", 20, "pretend init time")
+	version := flag.Bool("version", false, "print the snapshot facts and exit")
 	flag.Parse()
+	if *version {
+		fmt.Println(facts)
+		return
+	}
 	if _, err := os.Stat(*guest); err != nil {
 		fmt.Fprintf(os.Stderr, "fakehelper: guest: %v\n", err)
 		os.Exit(2)
@@ -64,7 +74,7 @@ func main() {
 			_ = w.Flush()
 		}
 	}()
-	say("READY fake-1")
+	say("READY " + facts)
 	sc := bufio.NewScanner(ctl)
 	for sc.Scan() {
 		f := strings.Fields(sc.Text())

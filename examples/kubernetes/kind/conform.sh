@@ -8,9 +8,14 @@
 #   4. run grant-conform C1-C10 from the host against the Pod's NodePort,
 #      with every hook reaching into the Pod through kubectl exec;
 #   5. run the 2x overcommit storm inside a second grant Pod under a
-#      384 MiB limit: a park must fire before any OOM kill.
+#      384 MiB limit: a park must fire before any OOM kill;
+#   6. run sessioncheck from a client Pod against an UNTRUSTED gVisor
+#      grant: a Clone from another Pod reaches the fiber over the Pod IP
+#      (the agent relays the port to the sandbox's unix socket), and a
+#      park and resume keep its state.
 #
 #   examples/kubernetes/kind/conform.sh run       (everything; needs docker, kind, kubectl, go)
+#   examples/kubernetes/kind/conform.sh gvisor    (step 6 alone, on a deployed cluster)
 #   examples/kubernetes/kind/conform.sh up|down   (just the cluster)
 #   examples/kubernetes/kind/conform.sh restart|lane up|down|audit <event> <fence>|engine-kill <uid>|scope-lost
 #                                                 (the hooks grant-conform calls)
@@ -31,7 +36,7 @@ STATE=${CONFORM_STATE:-bin/conform-state-kind}
 KC=(kubectl --context "kind-$CLUSTER")
 
 kexec() { "${KC[@]}" -n "$NS" exec "$POD" -c agent -- "$@"; }
-admin() { kexec curl -sf --unix-socket /var/lib/fiberd/admin.sock "$@"; }
+admin() { kexec curl -sf --unix-socket /var/lib/fiberd/private/admin.sock "$@"; }
 
 wait_for() { # wait_for <seconds> <description> <cmd...>
   local n=$1 what=$2; shift 2
@@ -55,7 +60,8 @@ down() { kind delete cluster --name "$CLUSTER"; }
 
 image() {
   hack/dev/run.sh true # the builder stage is the dev image
-  docker build -t "$IMAGE" -f "$KIND_DIR/Dockerfile" .
+  docker build -t "$IMAGE" -f docker/kubernetes/Dockerfile \
+    --build-arg "DEV_IMAGE=${FIBERD_DEV_IMAGE:-fiberd-dev:local}" .
   kind load docker-image --name "$CLUSTER" "$IMAGE"
 }
 
@@ -101,7 +107,7 @@ lane() {
 audit() {
   local event=$1 fence=$2 uid epoch seq
   IFS=/ read -r uid epoch seq <<<"$fence"
-  kexec grep -q "\"event\":\"$event\".*\"fence\":{\"GrantUID\":\"$uid\",\"Epoch\":$epoch,\"Seq\":$seq}" /var/lib/fiberd/audit.jsonl
+  kexec grep -q "\"event\":\"$event\".*\"fence\":{\"GrantUID\":\"$uid\",\"Epoch\":$epoch,\"Seq\":$seq}" /var/lib/fiberd/private/audit.jsonl
 }
 
 # The fiberd subtree sits under the container's cgroup: the mount root in
@@ -120,7 +126,7 @@ conform() {
   rm -f bin/grant-conform
   go test -c -o bin/grant-conform ./tests/conform
   "${KC[@]}" -n fiberd-system get secret grant-issuer-key -o jsonpath='{.data.key\.json}' | base64 -d >"$STATE/issuer-key.json"
-  bin/grant-conform -test.v -target "$TARGET" -target-tier FIBER_CHECKPOINT -node-id "$POD" \
+  bin/grant-conform -test.v -target "$TARGET" -target-tier FIBER_CHECKPOINT -node-id "$POD" -isolation TRUSTED \
     -mint jwt -issuer-key "$STATE/issuer-key.json" -issuer "$ISSUER_URL" \
     -restart-cmd "$0 restart" -cp-health-cmd "$0 lane \$1" -audit-cmd "$0 audit \$1 \$2" \
     -engine-kill-cmd "$0 engine-kill \$1" -scope-cmd "$0 scope-lost" -case-timeout 60s
@@ -130,17 +136,39 @@ storm() {
   "${KC[@]}" apply -f "$KIND_DIR/manifests/50-storm.yaml"
   wait_for 60 "storm pod created" "${KC[@]}" -n "$NS" get pod storm-grant
   "${KC[@]}" -n "$NS" wait --for=condition=Ready pod/storm-grant --timeout=180s
-  "${KC[@]}" -n "$NS" cp "$STATE/issuer-key.json" storm-grant:/tmp/issuer-key.json -c agent
+  "${KC[@]}" -n "$NS" cp --no-preserve "$STATE/issuer-key.json" storm-grant:/tmp/issuer-key.json -c agent
   # The container's cgroup is the mount root in a private cgroup
   # namespace and the scope /proc/1/cgroup names in the host's (what a
   # privileged Pod gets); the OOM counter and the fiberd subtree are there.
   "${KC[@]}" -n "$NS" exec storm-grant -c agent -- sh -c "$own_cgroup"'
-    exec storm -target 127.0.0.1:8484 -node-id storm-grant -issuer-key /tmp/issuer-key.json -issuer "$0" \
+    exec storm -target 127.0.0.1:8484 -node-id storm-grant -issuer-key /tmp/issuer-key.json -issuer "$0" -isolation TRUSTED \
       -cgroup-root "$own/fiberd" -container-events "$own/memory.events" \
       -fibers 8 -ceiling 167772160 -overcommit 2 -step 2097152 -round 250ms' "$ISSUER_URL"
   echo "--- storm pod:"
   "${KC[@]}" -n "$NS" get pod storm-grant -o jsonpath='restarts={.status.containerStatuses[0].restartCount} lastState={.status.containerStatuses[0].lastState}'; echo
   [ "$("${KC[@]}" -n "$NS" get pod storm-grant -o jsonpath='{.status.containerStatuses[0].restartCount}')" = 0 ] || { echo "storm pod was restarted (OOM killed?)" >&2; return 1; }
+}
+
+# gvisor: an UNTRUSTED grant whose fibers are runsc sandboxes behind the
+# Pod IP, checked from a second Pod. The grant Pod's endpoint family is
+# inet4, which the gvisor runtime serves through the agent's relay.
+gvisor() {
+  local gpod=conform-gvisor-grant client=sessioncheck-client ip
+  mkdir -p "$STATE"
+  [ -s "$STATE/issuer-key.json" ] || "${KC[@]}" -n fiberd-system get secret grant-issuer-key -o jsonpath='{.data.key\.json}' | base64 -d >"$STATE/issuer-key.json"
+  "${KC[@]}" apply -f "$KIND_DIR/manifests/60-gvisor.yaml"
+  wait_for 60 "gvisor grant pod created" "${KC[@]}" -n "$NS" get pod "$gpod"
+  "${KC[@]}" -n "$NS" wait --for=condition=Ready "pod/$gpod" --timeout=300s
+  ip=$("${KC[@]}" -n "$NS" get pod "$gpod" -o jsonpath='{.status.podIP}')
+  "${KC[@]}" -n "$NS" delete pod "$client" --ignore-not-found --wait=true >/dev/null
+  "${KC[@]}" -n "$NS" run "$client" --image="$IMAGE" --image-pull-policy=Never --restart=Never --command -- sleep 600
+  "${KC[@]}" -n "$NS" wait --for=condition=Ready "pod/$client" --timeout=120s
+  "${KC[@]}" -n "$NS" cp --no-preserve "$STATE/issuer-key.json" "$client:/tmp/issuer-key.json"
+  "${KC[@]}" -n "$NS" exec "$client" -- sessioncheck -target "$ip:8484" -node-id "$gpod" -issuer-key /tmp/issuer-key.json \
+    -issuer "$ISSUER_URL" -isolation UNTRUSTED -want-scheme tcp
+  echo "--- gvisor grant pod agent log (relay lines):"
+  "${KC[@]}" -n "$NS" logs "$gpod" -c agent | grep -i "relay\|endpoints" | tail -5 || true
+  "${KC[@]}" -n "$NS" delete pod "$client" --wait=false >/dev/null
 }
 
 case "${1:-}" in
@@ -155,8 +183,9 @@ case "${1:-}" in
   scope-lost) scope_lost ;;
   conform) conform ;;
   storm) storm ;;
+  gvisor) gvisor ;;
   run)
-    up; image; deploy; conform; storm
+    up; image; deploy; conform; storm; gvisor
     ;;
-  *) echo "usage: $0 run|up|down|image|deploy|conform|storm|restart|lane up|down|audit <event> <fence>|engine-kill <uid>|scope-lost" >&2; exit 2 ;;
+  *) echo "usage: $0 run|up|down|image|deploy|conform|storm|gvisor|restart|lane up|down|audit <event> <fence>|engine-kill <uid>|scope-lost" >&2; exit 2 ;;
 esac

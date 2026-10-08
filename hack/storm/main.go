@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/protobuf/types/known/emptypb"
 
@@ -32,10 +33,13 @@ import (
 	"github.com/helayoty/fiberd/pkg/endpoint"
 	"github.com/helayoty/fiberd/pkg/grant"
 	"github.com/helayoty/fiberd/pkg/sys/cgroup"
+	"github.com/helayoty/fiberd/pkg/tlsconf"
 )
 
 type opts struct {
 	target, nodeID, issuerKey, issuerURL, cgRoot, rootEvents string
+	tlsCA, tlsCert, tlsKey                                   string
+	isolation                                                string
 	fibers                                                   int
 	ceiling, step                                            uint64
 	overcommit                                               float64
@@ -56,6 +60,10 @@ func main() {
 	flag.StringVar(&o.cgRoot, "cgroup-root", envOr("FIBERD_CGROUP_ROOT", "/sys/fs/cgroup/fiberd"), "home's cgroup root")
 	flag.StringVar(&o.rootEvents, "container-events", "/sys/fs/cgroup/memory.events", "container-level memory.events (OOM counter)")
 	flag.DurationVar(&o.timeout, "timeout", 90*time.Second, "give up after")
+	flag.StringVar(&o.tlsCA, "tls-ca", "", "PEM CA bundle the home's certificate chains to (empty dials plaintext)")
+	flag.StringVar(&o.tlsCert, "tls-cert", "", "PEM client certificate presented to the home")
+	flag.StringVar(&o.tlsKey, "tls-key", "", "PEM private key of -tls-cert")
+	flag.StringVar(&o.isolation, "isolation", "UNTRUSTED", "the grant's isolation, UNTRUSTED or TRUSTED")
 	flag.Parse()
 	os.Exit(run(o))
 }
@@ -74,11 +82,15 @@ func run(o opts) int {
 	if err != nil {
 		return fatal("%v", err)
 	}
+	iso, err := core.ParseIsolation(o.isolation)
+	if err != nil {
+		return fatal("-isolation: %v", err)
+	}
 	perFiber := uint64(float64(o.ceiling) * o.overcommit / float64(o.fibers))
 	g := core.Grant{
 		UID: fmt.Sprintf("storm-%d", time.Now().Unix()), Audience: o.nodeID, TemplateDigest: "sha256:storm",
 		FiberMax: o.fibers, WBudgetBytes: perFiber + 8<<20, LeaseExpiry: time.Now().Add(time.Hour),
-		Policy: core.Policy{PSISomeAvg10Shed: 5, PSISomeAvg10Park: 10},
+		Policy: core.Policy{PSISomeAvg10Shed: 5, PSISomeAvg10Park: 10, Isolation: iso},
 	}
 	tok, err := (&grant.Issuer{Key: key, URL: o.issuerURL}).Mint(g)
 	if err != nil {
@@ -89,7 +101,15 @@ func run(o opts) int {
 
 	ctx, cancel := context.WithTimeout(context.Background(), o.timeout)
 	defer cancel()
-	conn, err := grpc.NewClient(o.target, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	cfg, err := tlsconf.Client(o.tlsCA, o.tlsCert, o.tlsKey)
+	if err != nil {
+		return fatal("%v", err)
+	}
+	creds := insecure.NewCredentials()
+	if cfg != nil {
+		creds = credentials.NewTLS(cfg)
+	}
+	conn, err := grpc.NewClient(o.target, grpc.WithTransportCredentials(creds))
 	if err != nil {
 		return fatal("dial: %v", err)
 	}

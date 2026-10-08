@@ -11,6 +11,7 @@
 //!
 //!   hyperlight-helper --guest <path> [--heap-mb N]     (fd 3 = control)
 //!   hyperlight-helper --guest <path> --check           (self-test, no fd 3)
+//!   hyperlight-helper --version                        (the snapshot facts)
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -27,7 +28,59 @@ use anyhow::{Context, Result, anyhow};
 use hyperlight_host::sandbox::snapshot::{OciTag, Snapshot};
 use hyperlight_host::{HostFunctions, MultiUseSandbox, SandboxBuilder};
 
-const VERSION: &str = concat!("hyperlight-helper/", env!("CARGO_PKG_VERSION"), "+hyperlight_host-0.17.0");
+/// The facts a snapshot made here depends on, one token each. This
+/// helper's version (its park layout), the hyperlight_host crate (its
+/// snapshot format, from Cargo.lock through build.rs), the hypervisor in
+/// use and the CPU vendor. Hyperlight refuses to load a snapshot from
+/// another crate version, hypervisor or vendor, so fiberd records these as
+/// the platform of every park and the refusal happens before a resume.
+fn facts() -> String {
+    format!(
+        "fiberd-hyperlight-helper/{} hyperlight_host/{} {} {}",
+        env!("CARGO_PKG_VERSION"),
+        env!("HYPERLIGHT_HOST_VERSION"),
+        hypervisor(),
+        cpu_vendor()
+    )
+}
+
+/// The hypervisor Hyperlight picks on Linux, by its device, in the
+/// order Hyperlight probes them (mshv before kvm).
+fn hypervisor() -> &'static str {
+    if Path::new("/dev/mshv").exists() {
+        "mshv"
+    } else if Path::new("/dev/kvm").exists() {
+        "kvm"
+    } else {
+        "none"
+    }
+}
+
+/// The CPU vendor as Hyperlight tags it. CPUID leaf 0 on x86_64
+/// ("GenuineIntel", "AuthenticAMD"), the MIDR_EL1 implementer on
+/// aarch64 ("0x41").
+fn cpu_vendor() -> String {
+    #[cfg(target_arch = "x86_64")]
+    {
+        let r = unsafe { core::arch::x86_64::__cpuid(0) };
+        let mut bytes = [0u8; 12];
+        bytes[0..4].copy_from_slice(&r.ebx.to_le_bytes());
+        bytes[4..8].copy_from_slice(&r.edx.to_le_bytes());
+        bytes[8..12].copy_from_slice(&r.ecx.to_le_bytes());
+        let s = String::from_utf8_lossy(&bytes).replace(char::is_whitespace, "_");
+        if s.is_empty() { "unknown".to_string() } else { s }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        let midr: u64;
+        unsafe { core::arch::asm!("mrs {}, MIDR_EL1", out(reg) midr) };
+        format!("{:#04x}", (midr >> 24) & 0xff)
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        "unknown".to_string()
+    }
+}
 
 /// The control channel back to fiberd, shared by every fiber thread.
 #[derive(Clone)]
@@ -58,6 +111,10 @@ fn parse_args() -> Result<Args> {
     let mut it = std::env::args().skip(1);
     while let Some(k) = it.next() {
         match k.as_str() {
+            "--version" => {
+                println!("{}", facts());
+                std::process::exit(0);
+            }
             "--guest" => a.guest = PathBuf::from(it.next().context("--guest needs a path")?),
             "--heap-mb" => a.heap_mb = it.next().context("--heap-mb needs a number")?.parse()?,
             "--check" => a.check = true,
@@ -273,7 +330,7 @@ fn check(args: &Args) -> Result<()> {
     if n2 != 1 {
         return Err(anyhow!("counter after resume = {n2}, want 1"));
     }
-    println!("ok: {VERSION}");
+    println!("ok: {}", facts());
     Ok(())
 }
 
@@ -294,7 +351,7 @@ fn main() -> Result<()> {
             return Err(e);
         }
     };
-    ctl.say(format!("READY {VERSION}"));
+    ctl.say(format!("READY {}", facts()));
 
     let mut fibers: HashMap<String, Sender<Cmd>> = HashMap::new();
     for line in reader.lines() {
@@ -356,3 +413,19 @@ fn main() -> Result<()> {
 // Keep Read in scope for BufReader::lines on a File clone.
 #[allow(dead_code)]
 fn _read_marker(_: &dyn Read) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn facts_are_four_tokens_fiberd_can_parse() {
+        let line = facts();
+        let f: Vec<&str> = line.split(' ').collect();
+        assert_eq!(f.len(), 4, "{line:?}");
+        assert!(f.iter().all(|t| !t.is_empty()), "{line:?}");
+        assert!(f[0].starts_with("fiberd-hyperlight-helper/"), "{line:?}");
+        assert_eq!(f[1], concat!("hyperlight_host/", env!("HYPERLIGHT_HOST_VERSION")));
+        assert!(matches!(f[2], "kvm" | "mshv" | "none"), "{line:?}");
+    }
+}

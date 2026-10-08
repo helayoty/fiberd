@@ -23,7 +23,8 @@ import (
 // embedded, and the HTTP code follows the gRPC code.
 type Gateway struct {
 	Server *Server
-	// Health is served at GET /healthz for readiness polling.
+	// Health is served at GET /healthz for readiness polling, with the
+	// status WriteHealth picks.
 	Health func() map[string]any
 }
 
@@ -55,9 +56,9 @@ func (g *Gateway) Handler() http.Handler {
 		resp, err := g.Server.Release(r.Context(), &req)
 		g.reply(w, resp, err)
 	})
-	mux.HandleFunc("GET /v1/status", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("GET /v1/status", func(w http.ResponseWriter, r *http.Request) {
 		out := make([]json.RawMessage, 0)
-		for _, st := range g.Server.Agent.Ledger.Statuses() {
+		for _, st := range g.Server.visible(r.Context(), g.Server.Agent.Ledger.Statuses()) {
 			b, _ := protojson.Marshal(StatusToProto(st))
 			out = append(out, b)
 		}
@@ -65,14 +66,14 @@ func (g *Gateway) Handler() http.Handler {
 		_ = json.NewEncoder(w).Encode(out)
 	})
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
 		if g.Health == nil {
+			w.Header().Set("Content-Type", "application/json")
 			_, _ = io.WriteString(w, "{}\n")
 			return
 		}
-		_ = json.NewEncoder(w).Encode(g.Health())
+		WriteHealth(w, g.Health())
 	})
-	return mux
+	return httpCaller(mux)
 }
 
 func (g *Gateway) decode(w http.ResponseWriter, r *http.Request, m proto.Message) bool {
@@ -131,14 +132,36 @@ func httpCode(c codes.Code) int {
 	}
 }
 
-// HealthFunc builds the standard /healthz body: the epoch, the advertised
-// tier, and grant-lane liveness (idle is not down; only staleness is).
-func HealthFunc(epoch func() uint64, health *core.SourceHealth, tier core.Tier) func() map[string]any {
+// HealthFunc builds the standard /healthz body. It holds the epoch, the
+// advertised tier, grant-lane liveness and the audit spool's state. An
+// idle lane is not down. Only a stale one is. audit is "ok" or
+// "poisoned". The fsync error is logged when it happens and never put in
+// the body, which the gateway serves without authentication, since it
+// names the spool's path. A nil health or audit omits its key.
+func HealthFunc(epoch func() uint64, health *core.SourceHealth, tier core.Tier, audit func() error) func() map[string]any {
 	return func() map[string]any {
 		m := map[string]any{"epoch": epoch(), "tier": tier.String()}
 		if health != nil {
 			m["grantLaneHealthy"] = health.Healthy(time.Now())
 		}
+		if audit != nil {
+			m["audit"] = "ok"
+			if audit() != nil {
+				m["audit"] = "poisoned"
+			}
+		}
 		return m
 	}
+}
+
+// WriteHealth writes a /healthz body. The status is 503 when the audit
+// spool is poisoned, because every Sync operation fails until the agent
+// restarts. A probe that sees it restarts the home or drains it. A stale
+// grant lane stays 200, since the agent fences it and recovers on its own.
+func WriteHealth(w http.ResponseWriter, body map[string]any) {
+	w.Header().Set("Content-Type", "application/json")
+	if a, ok := body["audit"]; ok && a != "ok" {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}
+	_ = json.NewEncoder(w).Encode(body)
 }

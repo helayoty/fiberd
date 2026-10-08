@@ -1,7 +1,6 @@
 package core
 
 import (
-	"errors"
 	"sort"
 	"sync"
 	"time"
@@ -24,7 +23,10 @@ type Session struct {
 	State    SessionState
 	Fence    Fence
 	Handle   FiberHandle // valid when StateRunning
-	DeltaRef string      // valid when StateParked
+	// DeltaRef is the parked delta, or, while running, the delta this
+	// incarnation was resumed from ("" after a create). That delta stays
+	// until the next park supersedes it or a Release discards it.
+	DeltaRef string
 }
 
 // Action is the resolved outcome of Clone(S): one verb, three costs.
@@ -46,23 +48,6 @@ func (a Action) String() string {
 		return "create"
 	}
 }
-
-var (
-	ErrGrantUnknown = errors.New("ledger: grant not held by this home")
-	// ErrGrantExpired: the lease lapsed. Revocation is lease non-renewal,
-	// so this is capacity the home no longer holds, not an auth failure.
-	ErrGrantExpired = errors.New("ledger: grant lease expired")
-	// ErrNeedsTier: the runtime's tier is below what the grant demands
-	// (min_tier) or what the session needs (a parked delta requires
-	// TierCheckpoint). Never satisfied by a lesser mechanism.
-	ErrNeedsTier = errors.New("ledger: runtime tier below what the grant or session requires")
-	// ErrGrantFull: the grant's running-fiber count is at fibers.max. The
-	// home never mints past the charged block.
-	ErrGrantFull = errors.New("ledger: grant at fibers.max, no capacity for a new fiber")
-	// ErrFiberUnknown: no running fiber by that ID in this epoch. Every
-	// fiber from before a restart is unknown by construction.
-	ErrFiberUnknown = errors.New("ledger: fiber unknown in this epoch")
-)
 
 // Status is the batched, per-grant view a home publishes. It is the only
 // thing a control plane ever sees; never individual fibers.
@@ -91,7 +76,7 @@ type Ledger struct {
 
 	// perSession serializes concurrent Clone(S) on the same name — this is
 	// what makes the verb idempotent under retry. Entries are refcounted
-	// and deleted when the last in-flight Resolve drops them, so the map is
+	// and deleted when the last in-flight resolveHeld drops them, so the map is
 	// bounded by concurrency, not by session names ever seen.
 	perSession map[string]*sessionGate
 }
@@ -104,7 +89,7 @@ type sessionGate struct {
 type grantEntry struct {
 	grant   Grant
 	nextSeq uint64
-	live    int // running fibers, reserved at Resolve, freed at park/release/exit
+	live    int // running fibers, reserved at resolveHeld, freed at park/release/exit
 }
 
 // fiberRef lets park/release/exit resolve a fiber ID back to the grant
@@ -114,7 +99,6 @@ type fiberRef struct {
 	sessionKey string // "" for anonymous fibers
 	fence      Fence
 	wUsed      uint64
-	devUsed    uint64 // the engine's device slice for the fiber, last sampled
 }
 
 func NewLedger(epoch uint64) *Ledger {
@@ -136,8 +120,9 @@ func (l *Ledger) Epoch() uint64 {
 
 // BumpEpoch moves the ledger to a new epoch in place: every fence minted
 // from here on carries it, and every fence minted before is stale by
-// construction. The agent releases the running fibers around this call;
-// parked sessions keep their deltas and resume under the new epoch.
+// construction. The agent releases the running fibers after this call,
+// and a clone in flight cannot commit under the old epoch. Parked
+// sessions keep their deltas and resume under the new epoch.
 func (l *Ledger) BumpEpoch(epoch uint64) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -172,6 +157,16 @@ func (l *Ledger) Grant(uid string) (Grant, bool) {
 	return e.grant, true
 }
 
+// GrantBoundTo reports whether the admitted grant uid is bound to the
+// client certificate with this thumbprint. An unknown grant is bound to
+// nobody.
+func (l *Ledger) GrantBoundTo(uid, thumbprint string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	e, ok := l.grants[uid]
+	return ok && e.grant.CallerThumbprint == thumbprint
+}
+
 // RevokeGrant drops the grant. Fibers under it drain by lease
 // non-renewal; the reaper (Phase 3.5) tears them down.
 func (l *Ledger) RevokeGrant(uid string) {
@@ -203,41 +198,55 @@ func (l *Ledger) releaseSession(key string, gate *sessionGate) {
 	l.mu.Unlock()
 }
 
-// Resolve decides which of the three paths Clone takes and mints the fence
-// for it. The caller performs the runtime work and then commits; holding
-// the per-session lock across both is what forbids duplicate sessions.
+// sessionHold is a session's gate taken before resolveHeld. It serializes
+// what a caller does first, such as claiming the session's parked state
+// from another home, so two first sights of one session claim it once.
+// resolveHeld takes the hold over, and the unlock it returns releases it.
+type sessionHold struct {
+	l    *Ledger
+	key  string
+	gate *sessionGate
+	once sync.Once
+}
+
+func (l *Ledger) holdSession(grantUID, session string) *sessionHold {
+	key := grantUID + "/" + session
+	return &sessionHold{l: l, key: key, gate: l.acquireSession(key)}
+}
+
+// release lets the gate go. A nil hold (an anonymous fiber) has none.
+func (h *sessionHold) release() {
+	if h != nil {
+		h.once.Do(func() { h.l.releaseSession(h.key, h.gate) })
+	}
+}
+
+// resolveHeld decides which of the three paths Clone takes and mints the
+// fence for it. The caller does the runtime work and then commits, both
+// under the session hold, so one session never runs twice.
 //
 // Capacity is RESERVED here, not at commit: the runtime clone runs for
 // milliseconds between the two, and reserving late would let a concurrent
 // burst overshoot fibers.max. If the caller never commits, unlock returns
 // the reservation.
 //
+// commit records nothing and returns false if the grant was revoked or
+// the epoch moved meanwhile, even if the grant came back. Such a fiber
+// would hold a fence nothing can revoke, so the caller releases it.
+//
 // tier is the runtime's advertised tier. A grant whose min_tier exceeds it,
 // or a parked session on a sub-checkpoint runtime, is ErrNeedsTier: never
 // a fresh fork.
-func (l *Ledger) Resolve(grantUID, session string, tier Tier) (Action, Fence, string, func(Session), func(), error) {
-	l.mu.Lock()
-	_, ok := l.grants[grantUID]
-	l.mu.Unlock()
-	if !ok {
-		return 0, Fence{}, "", nil, nil, ErrGrantUnknown
-	}
-
+//
+// hold is nil for an anonymous fiber. Every unlock returned releases it,
+// on the error paths too.
+func (l *Ledger) resolveHeld(hold *sessionHold, grantUID, session string, tier Tier) (Action, Fence, string, func(Session) bool, func(), error) {
 	key := grantUID + "/" + session
-	var sessionUnlock func()
-	if session != "" {
-		gate := l.acquireSession(key)
-		sessionUnlock = func() { l.releaseSession(key, gate) }
-	}
 
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	unlockNoReserve := func() {
-		if sessionUnlock != nil {
-			sessionUnlock()
-		}
-	}
+	unlockNoReserve := func() { hold.release() }
 
 	// Re-check under the lock we now hold: the grant may have been revoked
 	// while we waited on the session mutex.
@@ -260,18 +269,23 @@ func (l *Ledger) Resolve(grantUID, session string, tier Tier) (Action, Fence, st
 			g.live--
 			l.mu.Unlock()
 		}
-		if sessionUnlock != nil {
-			sessionUnlock()
-		}
+		hold.release()
 	}
 
 	mint := func() Fence {
 		g.nextSeq++
 		return Fence{GrantUID: grantUID, Epoch: l.epoch, Seq: g.nextSeq}
 	}
-	commit := func(s Session) {
+	commit := func(s Session) bool {
 		l.mu.Lock()
 		defer l.mu.Unlock()
+		// The check and the insert share one hold of l.mu, which
+		// RevokeGrant and BumpEpoch also take. A revocation either sees
+		// the fiber or refuses it, never neither. Comparing the entry by
+		// pointer, not presence, catches a revoke then re-admission.
+		if l.grants[grantUID] != g || s.Fence.Epoch != l.epoch {
+			return false
+		}
 		committed = true
 		if s.Handle.ID != "" {
 			ref := &fiberRef{grantUID: grantUID, fence: s.Fence}
@@ -283,6 +297,7 @@ func (l *Ledger) Resolve(grantUID, session string, tier Tier) (Action, Fence, st
 		if s.Name != "" {
 			l.sessions[key] = &s
 		}
+		return true
 	}
 
 	reserve := func() error {
@@ -393,25 +408,18 @@ func (l *Ledger) SetFiberW(fiberID string, bytes uint64) {
 	}
 }
 
-// SetFiberDevice records the fiber's latest device-slice measurement.
-func (l *Ledger) SetFiberDevice(fiberID string, bytes uint64) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if ref, ok := l.fibers[fiberID]; ok {
-		ref.devUsed = bytes
-	}
-}
-
 // OnPark records a successful runtime Park: the fiber leaves the running
 // tier (freeing its slot) and, for a named session, the delta ref is kept
 // so a later Clone(S) resolves to ActResume. Returns the session name
-// ("" for an anonymous fiber, whose delta nobody can ask for).
-func (l *Ledger) OnPark(fiberID, deltaRef string) string {
+// ("" for an anonymous fiber, whose delta nobody can ask for) and the
+// delta the parked incarnation was resumed from, which this park
+// supersedes ("" after a create).
+func (l *Ledger) OnPark(fiberID, deltaRef string) (session, superseded string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	ref, ok := l.fibers[fiberID]
 	if !ok {
-		return ""
+		return "", ""
 	}
 	delete(l.fibers, fiberID)
 	if g, ok := l.grants[ref.grantUID]; ok {
@@ -419,59 +427,52 @@ func (l *Ledger) OnPark(fiberID, deltaRef string) string {
 	}
 	if ref.sessionKey != "" {
 		if s, ok := l.sessions[ref.sessionKey]; ok {
+			superseded = s.DeltaRef
 			s.State = StateParked
 			s.DeltaRef = deltaRef
 			s.Handle = FiberHandle{}
-			return s.Name
+			return s.Name, superseded
 		}
 	}
-	return ""
+	return "", ""
 }
 
 // OnRelease records a successful runtime Release: the slot is freed and
-// the session name, if any, is forgotten.
-func (l *Ledger) OnRelease(fiberID string) {
-	l.onGone(fiberID)
+// the session name, if any, is forgotten. Returns that name and the delta
+// the released incarnation was resumed from, for a discard ("" when
+// there is none).
+func (l *Ledger) OnRelease(fiberID string) (session, deltaRef string) {
+	_, session, deltaRef, _ = l.onGone(fiberID)
+	return session, deltaRef
 }
 
 // OnFiberExit records a fiber that died on its own (OOM, exit, signal).
 // The slot is freed and a named session is forgotten: its state is gone,
 // and pretending it is parked would resume nothing. Returns the fence the
-// fiber held and the session name, for the audit record.
-func (l *Ledger) OnFiberExit(fiberID string) (Fence, string, bool) {
+// fiber held and the session name, for the audit record, and the delta
+// the fiber was resumed from, for a discard.
+func (l *Ledger) OnFiberExit(fiberID string) (fence Fence, session, deltaRef string, ok bool) {
 	return l.onGone(fiberID)
 }
 
-func (l *Ledger) onGone(fiberID string) (Fence, string, bool) {
+func (l *Ledger) onGone(fiberID string) (fence Fence, name, deltaRef string, ok bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	ref, ok := l.fibers[fiberID]
 	if !ok {
-		return Fence{}, "", false
+		return Fence{}, "", "", false
 	}
 	delete(l.fibers, fiberID)
 	if g, ok := l.grants[ref.grantUID]; ok {
 		g.live--
 	}
-	var name string
 	if ref.sessionKey != "" {
 		if s, ok := l.sessions[ref.sessionKey]; ok {
-			name = s.Name
+			name, deltaRef = s.Name, s.DeltaRef
 		}
 		delete(l.sessions, ref.sessionKey)
 	}
-	return ref.fence, name, true
-}
-
-// Status computes the batched view for one grant.
-func (l *Ledger) Status(uid string) (Status, bool) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	e, ok := l.grants[uid]
-	if !ok {
-		return Status{}, false
-	}
-	return l.statusLocked(uid, e), true
+	return ref.fence, name, deltaRef, true
 }
 
 // Statuses computes the view for every admitted grant, sorted by UID.

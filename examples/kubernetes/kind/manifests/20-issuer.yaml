@@ -7,6 +7,11 @@ metadata:
   name: grant-issuer
   namespace: fiberd-system
 ---
+# Least privilege. Cluster-wide, the issuer only reads CapacityGrants and
+# writes their status. It may touch Secrets in its own namespace only to
+# keep its signing key. It handles grant Pods and grant Secrets only in a
+# tenant namespace whose admin binds fiberd-grant-issuer-tenant there (see
+# 30-grant-rbac.yaml), so it can never read Secrets in other namespaces.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -18,12 +23,6 @@ rules:
   - apiGroups: [fiberd.io]
     resources: [capacitygrants/status]
     verbs: [patch]
-  - apiGroups: [""]
-    resources: [pods]
-    verbs: [get, create, delete]
-  - apiGroups: [""]
-    resources: [secrets]
-    verbs: [get, create, patch]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -37,6 +36,50 @@ subjects:
   - kind: ServiceAccount
     name: grant-issuer
     namespace: fiberd-system
+---
+# Its signing key. Kubernetes cannot limit create to one name, so create is
+# allowed in this namespace and get only for the key itself.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: grant-issuer-key
+  namespace: fiberd-system
+rules:
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [create]
+  - apiGroups: [""]
+    resources: [secrets]
+    resourceNames: [grant-issuer-key]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: grant-issuer-key
+  namespace: fiberd-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: grant-issuer-key
+subjects:
+  - kind: ServiceAccount
+    name: grant-issuer
+    namespace: fiberd-system
+---
+# What the issuer may do in a tenant namespace, bound there with a
+# RoleBinding: run the grant Pod and keep its grant Secret.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: fiberd-grant-issuer-tenant
+rules:
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, create, delete]
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get, create, patch]
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -52,12 +95,26 @@ spec:
       labels: { app: grant-issuer }
     spec:
       serviceAccountName: grant-issuer
+      # The controller needs none of the agent's privilege. It only talks to
+      # the API server, keeps its key in a Secret and serves on 8080. So it
+      # runs the image (root by default for fiberd-k8s) as a non-root user,
+      # with a read-only root filesystem, no capabilities and the default
+      # seccomp profile.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile: { type: RuntimeDefault }
       containers:
         - name: controller
           image: fiberd:kind
           imagePullPolicy: IfNotPresent
           command: [grant-controller]
           args: [-addr, ":8080", -poll, 1s]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
           ports:
             - name: http
               containerPort: 8080

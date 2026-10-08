@@ -34,16 +34,12 @@ func (o Options) Available(ctx context.Context) error {
 	return nil
 }
 
-// Dump checkpoints the tree rooted at pid into dir. With leaveRunning the
-// tree keeps running after the dump (the caller kills it once the images
-// are durable); otherwise criu kills it as the dump completes.
-func (o Options) Dump(ctx context.Context, pid int, dir string, leaveRunning bool) error {
-	return o.DumpWith(ctx, pid, dir, leaveRunning, nil)
-}
-
-// DumpWith is Dump with extra criu arguments, for example
-// "--external", "unix[<inode>]" to allow a socket whose peer lives outside
-// the dumped tree (the zygote's control channel at build time).
+// DumpWith checkpoints the tree rooted at pid into dir. With leaveRunning
+// the tree keeps running after the dump (the caller kills it once the
+// images are durable). Otherwise criu kills it as the dump completes.
+// extra holds more criu arguments, for example "--external",
+// "unix[<inode>]" to allow a socket whose peer lives outside the dumped
+// tree (the zygote's control channel at build time).
 func (o Options) DumpWith(ctx context.Context, pid int, dir string, leaveRunning bool, extra []string) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err

@@ -6,13 +6,43 @@ GO      ?= go
 TOOLS   := $(GO) tool -modfile=$(CURDIR)/hack/tools/go.mod
 BIN     ?= bin
 PKGS    := ./...
-# Integrations are their own modules; test and lint run in each.
-EXAMPLES := examples/kubernetes examples/slurm examples/knative examples/kata examples/substrate
+# Integrations are their own modules; test and lint run in each. The
+# activation comparison benchmark (bench/compare) is one more.
+EXAMPLES := examples/kubernetes examples/slurm examples/knative examples/kata examples/substrate bench/compare
+
+# Hardening for every build of the zygote, refzygote and the library. The
+# flags are defined here once. The Dockerfiles, hack/gvisor/rootfs.sh, the
+# release workflow and the Go tests that build refzygote mirror these
+# lines, each saying so. The static archive takes the compile flags with
+# -fPIC in place of -fPIE and no link flags. On aarch64 (arm64) every
+# build also takes -mbranch-protection=none. A restored process keeps
+# stale pointer-authentication keys, so a PAC instruction run after a
+# restore traps on a FEAT_FPAC CPU. Some toolchains default to
+# -mbranch-protection=standard, so the flag is always spelled out.
+ZYGOTE_CFLAGS  := -D_FORTIFY_SOURCE=3 -O2 -fstack-protector-strong -fstack-clash-protection -fPIE -Wformat=2 -Werror=format-security
+ZYGOTE_LDFLAGS := -pie -Wl,-z,relro,-z,now
+ifneq ($(filter aarch64 arm64,$(shell uname -m)),)
+ZYGOTE_CFLAGS += -mbranch-protection=none
+endif
+# Seconds per fuzz harness (make fuzz).
+FUZZTIME ?= 120
+# Where the conformance targets that run in the dev container keep their
+# state and logs. On macOS it is the named volume fiberd-conform, mounted
+# at /conform by hack/dev/run.sh, because bin/ in the shared folder is slow
+# enough to time tests out. The volume outlives the container, so
+# `make conform-logs` reads it. Linux and CI keep bin/, where CI uploads
+# the logs from.
+ifeq ($(shell uname -s),Darwin)
+CONFORM_DIR ?= /conform
+else
+CONFORM_DIR ?= $(BIN)
+endif
 
 .PHONY: all build test vet lint proto proto-lint proto-check clean \
-        bench zygote conform-bin conform-stub conform-signed conform-proc conform-gvisor conform-runc conform-hyperlight-fake conform-hyperlight \
+        bench zygote fuzz conform-stub conform-signed conform-logs conform-proc conform-gvisor conform-runc conform-hyperlight-fake conform-hyperlight \
         hyperlight-helper linux-hyperlight-check overcommit kind-up kind-down kind-image conform-kind slurm-up slurm-down conform-slurm example-knative example-knative-kvm example-kata example-substrate \
-        registry-start registry-stop zygote-artifact mobility linux-shell linux-check linux-gvisor-check linux-test linux-lint
+        registry-start mobility linux-shell linux-check linux-gvisor-check linux-test linux-lint bench-e2e \
+        compare-phase0 compare-phase1 compare-phase2 compare-phase3 compare-phase4 compare-down
 
 all: build
 
@@ -22,10 +52,6 @@ build: ## build every binary under cmd/ into $(BIN)/
 	@mkdir -p $(BIN)
 	$(GO) build -o $(BIN)/ ./cmd/...
 
-conform-bin: ## build the conformance test binary
-	@mkdir -p $(BIN)
-	$(GO) test -c -o $(BIN)/grant-conform ./tests/conform
-
 conform-stub: ## run C1-C10 against a stub-runtime fiberd (all hooks wired)
 	hack/conform/stub.sh run
 
@@ -33,16 +59,19 @@ conform-signed: ## same, over real signed grants: grant-issuer serve + -verifier
 	CONFORM_SIGNED=1 CONFORM_STATE=$(BIN)/conform-state-signed hack/conform/stub.sh run
 
 conform-proc: ## C1-C10 against the fork runtime with real cgroups, inside the Linux dev container
-	hack/dev/run.sh env CONFORM_RUNTIME=proc CONFORM_SIGNED=1 CONFORM_STATE=$(BIN)/conform-state-proc hack/conform/stub.sh run
+	hack/dev/run.sh env CONFORM_RUNTIME=proc CONFORM_SIGNED=1 CONFORM_STATE=$(CONFORM_DIR)/conform-state-proc hack/conform/stub.sh run
 
 conform-gvisor: ## C1-C10 against the gvisor backend (a runsc sandbox per fiber), inside the Linux dev container
-	hack/dev/run.sh env CONFORM_RUNTIME=gvisor CONFORM_SIGNED=1 CONFORM_STATE=$(BIN)/conform-state-gvisor hack/conform/stub.sh run
+	hack/dev/run.sh env CONFORM_RUNTIME=gvisor CONFORM_SIGNED=1 CONFORM_STATE=$(CONFORM_DIR)/conform-state-gvisor hack/conform/stub.sh run
 
 conform-runc: ## C1-C10 against the runc backend (the zygote as an OCI container's init), inside the Linux dev container
-	hack/dev/run.sh env CONFORM_RUNTIME=runc CONFORM_SIGNED=1 CONFORM_STATE=$(BIN)/conform-state-runc hack/conform/stub.sh run
+	hack/dev/run.sh env CONFORM_RUNTIME=runc CONFORM_SIGNED=1 CONFORM_STATE=$(CONFORM_DIR)/conform-state-runc hack/conform/stub.sh run
 
 conform-hyperlight-fake: ## C1-C10 against the hyperlight backend over the fake helper (no hypervisor), inside the Linux dev container
-	hack/dev/run.sh env CONFORM_RUNTIME=hyperlight CONFORM_SIGNED=1 CONFORM_STATE=$(BIN)/conform-state-hyperlight hack/conform/stub.sh run
+	hack/dev/run.sh env CONFORM_RUNTIME=hyperlight CONFORM_SIGNED=1 CONFORM_STATE=$(CONFORM_DIR)/conform-state-hyperlight hack/conform/stub.sh run
+
+conform-logs: ## list the logs the dev-container conformance targets left in $(CONFORM_DIR)
+	hack/dev/run.sh find $(CONFORM_DIR) -path '*conform-state-*' -name '*.log'
 
 hyperlight-helper: ## build the Hyperlight guest and helper (Rust) into bin/, inside the dev container
 	hack/dev/run.sh hack/hyperlight/build.sh
@@ -53,7 +82,7 @@ linux-hyperlight-check: ## probe /dev/kvm and run the helper's self-test (needs 
 conform-hyperlight: ## C1-C10 against the hyperlight backend with the real helper (needs /dev/kvm on the host)
 	FIBERD_DEV_DOCKER_ARGS="--device /dev/kvm" hack/dev/run.sh env CONFORM_RUNTIME=hyperlight CONFORM_SIGNED=1 \
 	  CONFORM_HL_HELPER=/src/bin/hyperlight-helper CONFORM_HL_GUEST=/src/bin/hyperlight-guest \
-	  CONFORM_STATE=$(BIN)/conform-state-hyperlight-kvm hack/conform/stub.sh run
+	  CONFORM_STATE=$(CONFORM_DIR)/conform-state-hyperlight-kvm hack/conform/stub.sh run
 
 ## The Kubernetes example (examples/kubernetes, its own module): the issuer
 ## as a controller, a grant Pod with the agent as PID 1, conformance from
@@ -66,10 +95,10 @@ kind-up: ## create the kind cluster (examples/kubernetes/kind/kind.yaml)
 kind-down: ## delete the kind cluster
 	examples/kubernetes/kind/conform.sh down
 
-kind-image: ## build fiberd:kind (fiberd-k8s, grant-controller, zygote, criu) and load it into the cluster
+kind-image: ## build fiberd:kind (fiberd-k8s, grant-controller, zygote, criu, runsc and a gVisor rootfs) and load it into the cluster
 	examples/kubernetes/kind/conform.sh image
 
-conform-kind: ## C1-C10 + the overcommit storm against grant Pods in kind (needs docker, kind, kubectl, go)
+conform-kind: ## C1-C10, the overcommit storm and an UNTRUSTED gVisor session check against grant Pods in kind (needs docker, kind, kubectl, go)
 	examples/kubernetes/kind/conform.sh run
 
 ## The Slurm example (examples/slurm, its own module): a one-node Slurm in
@@ -118,16 +147,8 @@ overcommit: ## 2x overcommit storm under a 384 MiB container cap: park must fire
 registry-start: ## registry:2 at 127.0.0.1:5000 (fiberd-registry:5000 inside the dev container)
 	hack/registry/run.sh start
 
-registry-stop:
-	hack/registry/run.sh stop
-
 mobility: ## a session moves home-a -> home-b -> home-a through the registry (needs registry-start)
 	hack/dev/run.sh hack/test/mobility.sh
-
-zygote-artifact: ## build the reference zygote artifact (with CRIU images) in the dev container and push it
-	hack/dev/run.sh sh -c 'make -s zygote && go build -o bin/ ./cmd/zygotectl && \
-	  bin/zygotectl build -zygote bin/refzygote -args "--heap-mb 32" -out bin/zygote-artifact && \
-	  bin/zygotectl push -dir bin/zygote-artifact -ref fiberd-registry:5000/zygotes/ref:latest -plain-http'
 
 test: ## unit tests (host OS; Linux-only packages compile to stubs elsewhere), fiberd and the examples
 	$(GO) test -race -count=1 $(PKGS)
@@ -156,16 +177,16 @@ proto-check: proto proto-lint ## fail if generated code is out of date (CI)
 	@git diff --exit-code -- api/ || \
 	  (echo "generated proto code is stale: run 'make proto' and commit" && exit 1)
 
-## C: the zygote library + reference workload, and the fork/CoW bench.
+## The zygote library and the reference workload.
 ## Linux only (clone3, close_range); build them inside the dev container.
 
-zygote: ## build bin/refzygote (the reference zygote; conformance template)
+zygote: ## build bin/refzygote, the reference zygote, with TLS for handoff grants
 	@mkdir -p $(BIN)
-	$(CC) -O2 -Wall -Wextra -pthread -o $(BIN)/refzygote hack/zygote/refzygote.c hack/zygote/libfiberzygote.c
+	$(CC) $(ZYGOTE_CFLAGS) $(ZYGOTE_LDFLAGS) -Wall -Wextra -pthread -DFZ_TLS -o $(BIN)/refzygote zygote/refzygote.c zygote/libfiberzygote.c -lssl -lcrypto
 
-bench: ## build the fork/CoW bench
-	@mkdir -p $(BIN)
-	$(CC) -O2 -o $(BIN)/zb zygote_bench.c
+fuzz: ## fuzz the zygote's parsers (libFuzzer) and the handoff parser (go test -fuzz), FUZZTIME seconds each
+	FUZZTIME=$(FUZZTIME) FUZZ_OUT=$(BIN)/fuzz zygote/fuzz/run.sh
+	$(GO) test -run='^$$' -fuzz=FuzzServerName -fuzztime=$(FUZZTIME)s ./pkg/handoff/
 
 ## Linux-only work runs in the dev container (hack/dev): privileged,
 ## private cgroup namespace, criu installed. Needs Docker.
@@ -185,6 +206,36 @@ linux-test: ## unit tests inside the container (Linux-only packages included), f
 linux-lint: ## golangci-lint inside the container, so the Linux-only files are analysed too (what CI runs)
 	hack/dev/run.sh make lint
 
+bench: ## the 50-way storm and throughput through the proc runtime, in the container
+	hack/dev/run.sh env FIBERD_BENCH=1 go test -count=1 -v -run TestStormNumbers ./tests/proc/
+
+bench-e2e: ## time Clone over gRPC end to end, per stage, in the container
+	FIBERD_DEV_DOCKER_ARGS="-v fiberd-bench:/bench" hack/dev/run.sh env FIBERD_BENCH=1 FIBERD_BENCH_STATE=/bench \
+	  go test -count=1 -v -run TestE2ECloneNumbers ./tests/proc/
+
+## The activation comparison (bench/compare, its own module): fiberd
+## against Pods, agent-sandbox, Firecracker and Hyperlight, one phase per
+## target as docs/design/compare.md lays them out. Results land in
+## bin/compare-state/. Every phase refuses to run on a loaded host.
+
+compare-phase0: ## host facts and load; exits 3 when load exceeds the core count
+	bench/compare/run/phase0.sh
+
+compare-phase1: ## kind cluster "compare": Pod warm and cold, fiberd proc and runc, agent-sandbox under runc, control-plane deltas
+	bench/compare/run/phase1.sh
+
+compare-phase2: ## dev container: fiberd proc, runc and gVisor standalone over loopback, with resume and density
+	bench/compare/run/phase2.sh
+
+compare-phase3: ## kind cluster "compare": Pod gVisor, agent-sandbox gVisor, fiberd gVisor through the relay
+	bench/compare/run/phase3.sh
+
+compare-phase4: ## a KVM host: phases 1 to 3 plus Firecracker and fiberd Hyperlight (COMPARE_GROUPS picks classes)
+	bench/compare/run/phase4.sh
+
+compare-down: ## delete the "compare" kind cluster and its registry
+	bench/compare/kind/cluster.sh down
+
 help:
-	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
+	@grep -E '^[a-zA-Z0-9_-]+:.*?## ' $(MAKEFILE_LIST) | \
 	  awk 'BEGIN {FS = ":.*?## "}; {printf "  %-14s %s\n", $$1, $$2}'

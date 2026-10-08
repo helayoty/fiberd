@@ -53,7 +53,6 @@ type CloneSource int
 const (
 	SourceZygote CloneSource = iota // fork the warm template
 	SourceDelta                     // restore a parked per-fiber delta
-	SourceCold                      // full create; the honest fallback
 )
 
 // CloneSpec is everything the runtime needs to birth one fiber. Grant
@@ -73,7 +72,16 @@ type CloneSpec struct {
 type FiberHandle struct {
 	ID       string
 	Endpoint string // host:port or unix socket path
-	Started  time.Time
+}
+
+// HandoffRouter is implemented by runtimes that route callers'
+// connections to fibers (endpoint mode handoff). HandsOff reports whether
+// this home can, given its backend and configuration. HandoffRoute
+// returns a handoff fiber's routing key, which the caller sends as the
+// TLS server name, and the pin of the key the fiber serves with.
+type HandoffRouter interface {
+	HandsOff() bool
+	HandoffRoute(fiberID string) (routingKey, serverKeySHA256 string, ok bool)
 }
 
 // FiberStats is the runtime's measurement of one fiber. WUsedBytes is the
@@ -91,6 +99,14 @@ type FiberStats struct {
 // class is the grant's DeviceBudget.Class ("" for any).
 type DeviceCapable interface {
 	OffersDevice(grantUID, class string) bool
+}
+
+// Isolator is implemented by runtimes that can say whether their fibers
+// are sandboxed from the host kernel (a user-space kernel, a micro-VM).
+// An untrusted grant is admitted only where this answers true. A runtime
+// that does not implement it does not isolate.
+type Isolator interface {
+	IsolatesTenants() bool
 }
 
 // FiberExit is reported when a fiber dies on its own: the kernel killed it
@@ -118,6 +134,16 @@ func (g Grant) SessionDomain() string {
 // named session; the returned handle is remembered with the session.
 type DeltaPublisher interface {
 	PublishDelta(ctx context.Context, deltaRef string, g Grant, session string) (remote string, err error)
+}
+
+// DeltaRetirer is implemented by runtimes that can withdraw a delta's
+// published copy. The agent calls it once the session resumes here, so
+// the copy in the store no longer names state another home may take or
+// a later Clone may fall back to, and again before a local delta is
+// discarded. A delta never published, or whose tag a later park has
+// replaced, is left alone.
+type DeltaRetirer interface {
+	RetireDelta(ctx context.Context, deltaRef string) error
 }
 
 // RemoteDelta is what a finder learns about a parked session elsewhere

@@ -2,6 +2,7 @@
 // for the controller and the home to be tested without a cluster: objects
 // keyed by path, collections listed by prefix, merge patches applied,
 // uids assigned on create, owner references garbage-collected on delete.
+// Every request is recorded, and a test can make chosen requests fail.
 package kubetest
 
 import (
@@ -20,12 +21,25 @@ type Server struct {
 	objects map[string]map[string]any // object path -> object
 	next    int
 	srv     *httptest.Server
-	// Requests records method + path in order.
-	Requests []string
+	calls   []Call
+	faults  map[string]*fault // "METHOD path" -> fault
+}
+
+// Call is one request the server received, as the client sent it.
+type Call struct {
+	Method, Path string
+	// ContentType and Authorization are the request's headers.
+	ContentType, Authorization string
+	Body                       string
+}
+
+type fault struct {
+	code  int
+	times int // requests left to fail, where 0 or less fails every one
 }
 
 func New() *Server {
-	s := &Server{objects: map[string]map[string]any{}}
+	s := &Server{objects: map[string]map[string]any{}, faults: map[string]*fault{}}
 	s.srv = httptest.NewServer(http.HandlerFunc(s.handle))
 	return s
 }
@@ -33,19 +47,35 @@ func New() *Server {
 func (s *Server) URL() string { return s.srv.URL }
 func (s *Server) Close()      { s.srv.Close() }
 
-// Put stores an object at path (a test's seed); the uid is assigned if
-// missing.
+// Put stores a copy of obj at path as a test's seed, and assigns a uid if
+// it has none. The copy is what the wire would carry, so typed slices and
+// maps read back as JSON values.
 func (s *Server) Put(path string, obj map[string]any) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.store(path, obj)
+	s.store(path, clone(obj))
 }
 
-// Get returns a stored object, or nil.
+// Get returns a copy of a stored object, or nil.
 func (s *Server) Get(path string) map[string]any {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.objects[path]
+	if obj, ok := s.objects[path]; ok {
+		return clone(obj)
+	}
+	return nil
+}
+
+// Update changes a stored object in place, the way another client of the
+// API server would. It reports whether the object exists.
+func (s *Server) Update(path string, fn func(obj map[string]any)) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	obj, ok := s.objects[path]
+	if ok {
+		fn(obj)
+	}
+	return ok
 }
 
 // Delete removes an object the way the API server would, with its
@@ -54,6 +84,40 @@ func (s *Server) Delete(path string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.remove(path)
+}
+
+// Calls is every request received so far, in order.
+func (s *Server) Calls() []Call {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]Call(nil), s.calls...)
+}
+
+// Fail makes requests with method and path answer code with a Status
+// body instead of being served. times is how many requests fail, and 0
+// or less means every one. A code of 0 removes the fault.
+func (s *Server) Fail(method, path string, code, times int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := method + " " + path
+	if code == 0 {
+		delete(s.faults, key)
+		return
+	}
+	s.faults[key] = &fault{code: code, times: times}
+}
+
+// clone is a deep copy of obj through JSON.
+func clone(obj map[string]any) map[string]any {
+	b, err := json.Marshal(obj)
+	if err != nil {
+		panic(fmt.Sprintf("kubetest: object does not marshal: %v", err))
+	}
+	var out map[string]any
+	if err := json.Unmarshal(b, &out); err != nil || out == nil {
+		out = map[string]any{}
+	}
+	return out
 }
 
 func (s *Server) store(path string, obj map[string]any) {
@@ -80,10 +144,12 @@ func (s *Server) remove(path string) {
 	if !ok {
 		return
 	}
-	uid, _ := obj["metadata"].(map[string]any)["uid"].(string)
+	meta, _ := obj["metadata"].(map[string]any)
+	uid, _ := meta["uid"].(string)
 	delete(s.objects, path)
 	for p, o := range s.objects {
-		refs, _ := o["metadata"].(map[string]any)["ownerReferences"].([]any)
+		meta, _ := o["metadata"].(map[string]any)
+		refs, _ := meta["ownerReferences"].([]any)
 		for _, r := range refs {
 			if rm, _ := r.(map[string]any); rm != nil && rm["uid"] == uid {
 				s.remove(p)
@@ -93,13 +159,34 @@ func (s *Server) remove(path string) {
 	}
 }
 
+// failed answers the request from a fault set for it, if any.
+func (s *Server) failed(w http.ResponseWriter, method, path string) bool {
+	key := method + " " + path
+	f, ok := s.faults[key]
+	if !ok {
+		return false
+	}
+	if f.times > 0 {
+		if f.times--; f.times == 0 {
+			delete(s.faults, key)
+		}
+	}
+	w.WriteHeader(f.code)
+	_, _ = fmt.Fprintf(w, `{"kind":"Status","reason":"Injected","message":"injected %d for %s","code":%d}`, f.code, key, f.code)
+	return true
+}
+
 func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	path := strings.TrimSuffix(r.URL.Path, "/")
-	s.Requests = append(s.Requests, r.Method+" "+path)
 	body, _ := io.ReadAll(r.Body)
+	s.calls = append(s.calls, Call{Method: r.Method, Path: path, ContentType: r.Header.Get("Content-Type"),
+		Authorization: r.Header.Get("Authorization"), Body: string(body)})
 	w.Header().Set("Content-Type", "application/json")
+	if s.failed(w, r.Method, path) {
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
 		if obj, ok := s.objects[path]; ok {
@@ -109,16 +196,16 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		// A collection: everything one level (or, for a cluster-wide list
 		// of a namespaced resource, "namespaces/<ns>/<resource>/<name>")
 		// below the path.
-		items := []map[string]any{}
+		if !isCollection(path) {
+			notFound(w, path)
+			return
+		}
 		keys := make([]string, 0, len(s.objects))
 		for p := range s.objects {
 			keys = append(keys, p)
 		}
 		sort.Strings(keys)
-		if !isCollection(path) {
-			notFound(w, path)
-			return
-		}
+		items := []map[string]any{}
 		resource := path[strings.LastIndex(path, "/")+1:]
 		base := path[:strings.LastIndex(path, "/")] // group/version root for a cluster-wide list
 		for _, p := range keys {
@@ -139,9 +226,11 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		name, _ := obj["metadata"].(map[string]any)["name"].(string)
+		meta, _ := obj["metadata"].(map[string]any)
+		name, _ := meta["name"].(string)
 		if name == "" {
-			http.Error(w, `{"message":"metadata.name required"}`, http.StatusUnprocessableEntity)
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			_, _ = w.Write([]byte(`{"kind":"Status","reason":"Invalid","message":"metadata.name required","code":422}`))
 			return
 		}
 		p := path + "/" + name
@@ -166,7 +255,12 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if strings.HasSuffix(path, "/status") {
-			patch = map[string]any{"status": patch["status"]}
+			// The status subresource changes the status and nothing else.
+			st, ok := patch["status"]
+			patch = map[string]any{}
+			if ok {
+				patch["status"] = st
+			}
 		}
 		merge(obj, patch, r.Header.Get("Content-Type") == "application/strategic-merge-patch+json")
 		_ = json.NewEncoder(w).Encode(obj)

@@ -5,39 +5,112 @@ package proctest
 import (
 	"bufio"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/big"
+	"net"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
+	"github.com/go-jose/go-jose/v4"
 	"github.com/google/go-containerregistry/pkg/registry"
 
 	"github.com/helayoty/fiberd/pkg/artifact"
+	"github.com/helayoty/fiberd/pkg/backend"
 	procbackend "github.com/helayoty/fiberd/pkg/backend/proc"
 	"github.com/helayoty/fiberd/pkg/core"
 	fiberendpoint "github.com/helayoty/fiberd/pkg/endpoint"
+	"github.com/helayoty/fiberd/pkg/grant"
+	"github.com/helayoty/fiberd/pkg/handoff"
 	"github.com/helayoty/fiberd/pkg/runtime/host"
+	"github.com/helayoty/fiberd/pkg/tlsconf"
 )
 
 // newHost opens the host runtime over the fork backend, as fiberd
-// -runtime proc does.
+// -runtime proc does. A fiber that cannot get its namespaces or drop its
+// privileges is refused. A caller may pass its own fork backend, such as a
+// timed one for the benchmarks.
 func newHost(c host.Config) (core.Runtime, error) {
-	c.Backend = procbackend.New(procbackend.Options{})
+	if c.Backend == nil {
+		c.Backend = procbackend.New(procbackend.Options{})
+	}
+	c.FiberHide = append(c.FiberHide, hiddenDir)
+	if c.Handoff == nil {
+		// Routes handoff fibers without listening. Tests hand them
+		// connections through Deliver.
+		c.Handoff = &handoff.Router{}
+		c.HandoffKey = make([]byte, 32)
+		if _, err := rand.Read(c.HandoffKey); err != nil {
+			return nil, err
+		}
+	}
+	if c.DeltaRegistry != "" && c.DeltaKeys.Signer == nil {
+		c.DeltaKeys = deltaKeys
+	}
 	return host.New(c)
 }
 
 var (
 	zygoteBin string
 	cgRoot    = os.Getenv("FIBERD_CGROUP_ROOT")
+	// hiddenDir holds a secret the agent can read and no fiber may.
+	hiddenDir string
+	// deltaKeys are the keys every test home signs, trusts and seals
+	// deltas with, as a deployment's homes share them.
+	deltaKeys artifact.Keys
 )
+
+// zygoteBuildFlags mirrors ZYGOTE_CFLAGS and ZYGOTE_LDFLAGS in the
+// Makefile, so the tests run the zygote hardened as it ships. On arm64
+// that includes -mbranch-protection=none, because a restored process
+// keeps stale pointer-authentication keys. goarch is runtime.GOARCH.
+func zygoteBuildFlags(goarch string) []string {
+	flags := []string{"-D_FORTIFY_SOURCE=3", "-O2", "-fstack-protector-strong", "-fstack-clash-protection", "-fPIE",
+		"-Wformat=2", "-Werror=format-security"}
+	if goarch == "arm64" {
+		flags = append(flags, "-mbranch-protection=none")
+	}
+	return append(flags, "-pie", "-Wl,-z,relro,-z,now")
+}
+
+// TestZygoteBuildFlags pins the arm64 flag that keeps pointer
+// authentication out of the zygote the tests build. Without it a restored
+// fiber traps on a FEAT_FPAC CPU, and some toolchains default to
+// -mbranch-protection=standard.
+func TestZygoteBuildFlags(t *testing.T) {
+	cases := []struct {
+		name   string
+		goarch string
+		want   bool
+	}{
+		{name: "arm64 disables branch protection", goarch: "arm64", want: true},
+		{name: "amd64 has no such flag", goarch: "amd64", want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := slices.Contains(zygoteBuildFlags(tc.goarch), "-mbranch-protection=none")
+			if got != tc.want {
+				t.Fatalf("zygoteBuildFlags(%q) has -mbranch-protection=none: %v, want %v", tc.goarch, got, tc.want)
+			}
+		})
+	}
+}
 
 func TestMain(m *testing.M) {
 	if cgRoot == "" {
@@ -54,12 +127,34 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 	zygoteBin = filepath.Join(dir, "refzygote")
-	build := exec.Command("gcc", "-O2", "-pthread", "-o", zygoteBin, "../../hack/zygote/refzygote.c", "../../hack/zygote/libfiberzygote.c")
+	args := append(zygoteBuildFlags(runtime.GOARCH),
+		"-pthread", "-DFZ_TLS", "-o", zygoteBin, "../../zygote/refzygote.c", "../../zygote/libfiberzygote.c", "-lssl", "-lcrypto")
+	build := exec.Command("gcc", args...)
 	build.Stderr = os.Stderr
 	if err := build.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "skipping proc tests: cannot build refzygote: %v\n", err)
 		os.Exit(0)
 	}
+	hiddenDir = filepath.Join(dir, "hidden")
+	if err := os.MkdirAll(hiddenDir, 0o700); err != nil {
+		panic(err)
+	}
+	if err := os.WriteFile(filepath.Join(hiddenDir, "secret"), []byte("agent only\n"), 0o600); err != nil {
+		panic(err)
+	}
+	k, err := grant.GenerateKey(jose.EdDSA)
+	if err != nil {
+		panic(err)
+	}
+	sk, err := artifact.GenerateSealKey()
+	if err != nil {
+		panic(err)
+	}
+	seal, err := artifact.SealKeyFromJWK(sk)
+	if err != nil {
+		panic(err)
+	}
+	deltaKeys = artifact.Keys{Signer: k, Seal: seal}
 	code := m.Run()
 	_ = os.RemoveAll(dir)
 	os.Exit(code)
@@ -67,10 +162,25 @@ func TestMain(m *testing.M) {
 
 func newRuntime(t *testing.T) core.Runtime {
 	t.Helper()
+	return newRuntimeWith(t, nil)
+}
+
+// newRuntimeWith is newRuntime over the given backend (nil for the
+// default fork backend).
+func newRuntimeWith(t *testing.T, be backend.Backend) core.Runtime {
+	t.Helper()
+	return newRuntimeFrom(t, be, zygoteBin+" --heap-mb 32")
+}
+
+// newRuntimeFrom is newRuntimeWith over the given template command line
+// (an argv, so a wrapper may be prefixed to the zygote).
+func newRuntimeFrom(t *testing.T, be backend.Backend, template string) core.Runtime {
+	t.Helper()
 	run := filepath.Join("/tmp", "fz-"+fmt.Sprint(os.Getpid()))
 	rt, err := newHost(host.Config{
-		Templates:  map[string]string{"default": zygoteBin + " --heap-mb 32"},
-		CgroupRoot: filepath.Join(cgRoot, "t"+fmt.Sprint(time.Now().UnixNano()%1_000_000)),
+		Backend:    be,
+		Templates:  map[string]string{"default": template},
+		CgroupRoot: filepath.Join(cgRoot, fmt.Sprintf("t%d-%d", os.Getpid(), time.Now().UnixNano()%1_000_000)),
 		RunDir:     run,
 	})
 	if err != nil {
@@ -80,9 +190,46 @@ func newRuntime(t *testing.T) core.Runtime {
 		if c, ok := rt.(interface{ Close() }); ok {
 			c.Close()
 		}
+		if t.Failed() {
+			logs, _ := filepath.Glob(filepath.Join(run, "*", "zygote.log"))
+			for _, l := range logs {
+				if b, err := os.ReadFile(l); err == nil {
+					t.Logf("%s:\n%s", l, b)
+				}
+			}
+		}
 		_ = os.RemoveAll(run)
 	})
 	return rt
+}
+
+// peerPID is the host pid of the process serving a unix endpoint, from
+// the connection's peer credentials.
+func peerPID(t *testing.T, endpoint string) int {
+	t.Helper()
+	dctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	c, err := fiberendpoint.Dial(dctx, endpoint)
+	if err != nil {
+		t.Fatalf("dial %s: %v", endpoint, err)
+	}
+	defer func() { _ = c.Close() }()
+	uc, ok := c.(*net.UnixConn)
+	if !ok {
+		t.Fatalf("%s is not a unix socket", endpoint)
+	}
+	raw, err := uc.SyscallConn()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cred *syscall.Ucred
+	var credErr error
+	if err := raw.Control(func(fd uintptr) {
+		cred, credErr = syscall.GetsockoptUcred(int(fd), syscall.SOL_SOCKET, syscall.SO_PEERCRED)
+	}); err != nil || credErr != nil {
+		t.Fatalf("peer credentials of %s: %v %v", endpoint, err, credErr)
+	}
+	return int(cred.Pid)
 }
 
 // talk sends one line to a fiber's endpoint and returns the reply.
@@ -94,6 +241,61 @@ func talk(t *testing.T, endpoint, line string) string {
 	if err != nil {
 		t.Fatalf("dial %s: %v", endpoint, err)
 	}
+	return talkOver(t, c, line)
+}
+
+// handOff connects to a handoff fiber the way the agent does. One end of
+// a fresh socket pair is passed to the fiber, and the other is returned
+// as the caller's TLS client, presenting cert.
+func handOff(t *testing.T, rt core.Runtime, fiberID string, cert tls.Certificate) net.Conn {
+	t.Helper()
+	key, pin, ok := rt.(core.HandoffRouter).HandoffRoute(fiberID)
+	if !ok || pin == "" {
+		t.Fatalf("no handoff route for %s", fiberID)
+	}
+	fds, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_STREAM|syscall.SOCK_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	theirs := os.NewFile(uintptr(fds[1]), "handed")
+	defer func() { _ = theirs.Close() }()
+	if err := rt.(interface {
+		Deliver(string, *os.File) error
+	}).Deliver(fiberID, theirs); err != nil {
+		_ = syscall.Close(fds[0])
+		t.Fatalf("deliver to %s: %v", fiberID, err)
+	}
+	ours := os.NewFile(uintptr(fds[0]), "ours")
+	defer func() { _ = ours.Close() }()
+	c, err := net.FileConn(ours)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tls.Client(c, handoff.ClientConfig(key, pin, cert))
+}
+
+// callerCert is a self-signed client certificate and its x5t#S256.
+func callerCert(t *testing.T) (tls.Certificate, string) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{SerialNumber: big.NewInt(1), NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour)}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key, Leaf: leaf}, tlsconf.Thumbprint(leaf)
+}
+
+// talkOver sends one line on c, returns the reply and closes c.
+func talkOver(t *testing.T, c net.Conn, line string) string {
+	t.Helper()
 	defer func() { _ = c.Close() }()
 	_ = c.SetDeadline(time.Now().Add(5 * time.Second))
 	if _, err := fmt.Fprintln(c, line); err != nil {
@@ -178,12 +380,71 @@ func TestCloneServeStatsRelease(t *testing.T) {
 }
 
 func TestParkResumeKeepsState(t *testing.T) {
-	rt := newRuntime(t)
-	if rt.Tier() < core.TierCheckpoint {
-		t.Skip("criu not usable here; runtime offers", rt.Tier())
+	caller, callerX5t := callerCert(t)
+	stranger, _ := callerCert(t)
+	cases := []struct {
+		name string
+		mode core.EndpointMode
+		// callerX5t binds the grant to the caller's certificate.
+		callerX5t string
+		// say sends one line to the fiber and returns the reply.
+		say func(t *testing.T, rt core.Runtime, h core.FiberHandle, line string) string
+		// refused, when set, is a connection the fiber must turn away.
+		refused func(t *testing.T, rt core.Runtime, h core.FiberHandle)
+		// fenceFile is where the resumed fiber's new fence is published.
+		fenceFile func(h core.FiberHandle) string
+	}{
+		{
+			name: "direct",
+			mode: core.EndpointDirect,
+			say: func(t *testing.T, _ core.Runtime, h core.FiberHandle, line string) string {
+				return talk(t, h.Endpoint, line)
+			},
+			fenceFile: func(h core.FiberHandle) string { return fiberendpoint.UnixPath(h.Endpoint) + ".fence" },
+		},
+		{
+			// The fiber never listens and terminates TLS itself. Its
+			// channel to the host is external to the checkpoint and
+			// replaced on resume.
+			name:      "handoff",
+			mode:      core.EndpointHandoff,
+			callerX5t: callerX5t,
+			say: func(t *testing.T, rt core.Runtime, h core.FiberHandle, line string) string {
+				return talkOver(t, handOff(t, rt, h.ID, caller), line)
+			},
+			refused: func(t *testing.T, rt core.Runtime, h core.FiberHandle) {
+				c := handOff(t, rt, h.ID, stranger)
+				defer func() { _ = c.Close() }()
+				_ = c.SetDeadline(time.Now().Add(5 * time.Second))
+				if _, err := fmt.Fprintln(c, "get"); err == nil {
+					if reply, err := bufio.NewReader(c).ReadString('\n'); err == nil {
+						t.Fatalf("a stranger's certificate was served: %q", reply)
+					}
+				}
+			},
+			fenceFile: func(core.FiberHandle) string {
+				return filepath.Join("/tmp", "fz-"+fmt.Sprint(os.Getpid()), "g5", "1-2.fence")
+			},
+		},
 	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rt := newRuntime(t)
+			if rt.Tier() < core.TierCheckpoint {
+				t.Skip("criu not usable here; runtime offers", rt.Tier())
+			}
+			var refused func(core.FiberHandle)
+			if tc.refused != nil {
+				refused = func(h core.FiberHandle) { tc.refused(t, rt, h) }
+			}
+			parkResumeKeepsState(t, rt, tc.mode, tc.callerX5t, func(h core.FiberHandle, line string) string { return tc.say(t, rt, h, line) }, refused, tc.fenceFile)
+		})
+	}
+}
+
+func parkResumeKeepsState(t *testing.T, rt core.Runtime, mode core.EndpointMode, callerX5t string, say func(core.FiberHandle, string) string, refused func(core.FiberHandle), fenceFile func(core.FiberHandle) string) {
 	ctx := context.Background()
-	g := core.Grant{UID: "g5", TemplateDigest: "sha256:ref", WBudgetBytes: 64 << 20}
+	g := core.Grant{UID: "g5", TemplateDigest: "sha256:ref", WBudgetBytes: 64 << 20, CallerThumbprint: callerX5t, Policy: core.Policy{EndpointMode: mode}}
 	if err := rt.PrepareTemplate(ctx, g); err != nil {
 		t.Fatal(err)
 	}
@@ -192,8 +453,11 @@ func TestParkResumeKeepsState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	talk(t, h1.Endpoint, "incr")
-	if got := talk(t, h1.Endpoint, "incr"); got != "2" {
+	say(h1, "incr")
+	if refused != nil {
+		refused(h1)
+	}
+	if got := say(h1, "incr"); got != "2" {
 		t.Fatalf("incr = %q", got)
 	}
 
@@ -229,13 +493,13 @@ func TestParkResumeKeepsState(t *testing.T) {
 	if h2.ID != "g5/1/2" || h2.Endpoint != h1.Endpoint {
 		t.Fatalf("resumed handle = %+v (first %+v)", h2, h1)
 	}
-	if got := talk(t, h2.Endpoint, "get"); got != "2" {
+	if got := say(h2, "get"); got != "2" {
 		t.Fatalf("counter after resume = %q, want 2 (state must survive park/resume)", got)
 	}
-	if got := talk(t, h2.Endpoint, "incr"); got != "3" {
+	if got := say(h2, "incr"); got != "3" {
 		t.Fatalf("incr after resume = %q", got)
 	}
-	pub, _ := os.ReadFile(fiberendpoint.UnixPath(h2.Endpoint) + ".fence")
+	pub, _ := os.ReadFile(fenceFile(h2))
 	if strings.TrimSpace(string(pub)) != "g5/1/2" {
 		t.Fatalf("published fence = %q", pub)
 	}
@@ -253,7 +517,7 @@ func TestParkResumeKeepsState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second resume: %v", err)
 	}
-	if got := talk(t, h3.Endpoint, "get"); got != "3" {
+	if got := say(h3, "get"); got != "3" {
 		t.Fatalf("counter after second resume = %q, want 3", got)
 	}
 	if err := rt.Release(ctx, h3.ID, true); err != nil {
@@ -321,9 +585,67 @@ func TestParkIsWSizedDelta(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := talk(t, h.Endpoint, "pid"); got != "1" {
-		t.Fatalf("fiber pid = %s, want 1 (own pid namespace)", got)
+	// Born or resumed, a fiber is the init of its own pid namespace,
+	// without capabilities it could use or regain, and blind to what the
+	// agent hides in its mount namespace.
+	secret := filepath.Join(hiddenDir, "secret")
+	if b, err := os.ReadFile(secret); err != nil || len(b) == 0 {
+		t.Fatalf("the agent cannot read its own secret: %v", err)
 	}
+	confined := []struct{ cmd, want string }{
+		{cmd: "pid", want: "1"},
+		{cmd: "status CapEff", want: "0000000000000000"},
+		{cmd: "status CapBnd", want: "0000000000000000"},
+		{cmd: "status NoNewPrivs", want: "1"},
+		{cmd: "read " + secret, want: "-"},
+	}
+	probe := func(when, endpoint string) {
+		t.Helper()
+		for _, p := range confined {
+			if got := talk(t, endpoint, p.cmd); got != p.want {
+				t.Fatalf("%s: %s = %q, want %q", when, p.cmd, got, p.want)
+			}
+		}
+	}
+	probe("born", h.Endpoint)
+
+	// Neither sibling sees the other's processes, and each has a mount
+	// namespace of its own, apart from the agent's.
+	sib, err := rt.Clone(ctx, core.CloneSpec{Grant: g, Fence: core.Fence{GrantUID: "g9", Epoch: 1, Seq: 3}, Deadline: 2 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, sibPID := peerPID(t, h.Endpoint), peerPID(t, sib.Endpoint)
+	apart := []struct{ endpoint, cmd string }{
+		{endpoint: h.Endpoint, cmd: fmt.Sprintf("read /proc/%d/status", sibPID)},
+		{endpoint: sib.Endpoint, cmd: fmt.Sprintf("read /proc/%d/status", pid)},
+		{endpoint: h.Endpoint, cmd: "read /proc/2/status"},
+	}
+	for _, a := range apart {
+		if got := talk(t, a.endpoint, a.cmd); got != "-" {
+			t.Fatalf("sibling visible: %s = %q, want -", a.cmd, got)
+		}
+	}
+	ns := map[string]bool{}
+	for _, p := range []string{"self", fmt.Sprint(pid), fmt.Sprint(sibPID)} {
+		link, err := os.Readlink("/proc/" + p + "/ns/mnt")
+		if err != nil || ns[link] {
+			t.Fatalf("mount namespace of %s = %q (%v), want one of its own", p, link, err)
+		}
+		ns[link] = true
+	}
+	// Siblings draw their own randomness. Each fiber's generator is
+	// reseeded at birth, so the first values differ instead of repeating
+	// what the zygote's seed would give.
+	for _, cmd := range []string{"random"} {
+		if a, b := talk(t, h.Endpoint, cmd), talk(t, sib.Endpoint, cmd); a == b {
+			t.Fatalf("siblings' first %s = %q and %q, want different values", cmd, a, b)
+		}
+	}
+	if err := rt.Release(ctx, sib.ID, true); err != nil {
+		t.Fatal(err)
+	}
+
 	const dirty = 8 << 20
 	talk(t, h.Endpoint, fmt.Sprintf("dirty %d", dirty))
 	talk(t, h.Endpoint, "incr")
@@ -361,9 +683,87 @@ func TestParkIsWSizedDelta(t *testing.T) {
 	if got := talk(t, h2.Endpoint, "get"); got != "1" {
 		t.Fatalf("counter after resume = %q, want 1", got)
 	}
-	if got := talk(t, h2.Endpoint, "pid"); got != "1" {
-		t.Fatalf("resumed fiber pid = %s, want 1", got)
+	probe("resumed", h2.Endpoint)
+	_ = rt.Release(ctx, h2.ID, true)
+}
+
+// TestFiberCannotWriteHostControls pins that a fiber cannot write host
+// sysctls such as core_pattern, a path to host root, or any grant's cgroup
+// limits. A fiber is euid 0, and sysctl and kernfs let euid 0 write on the
+// owner bit alone, so only its read-only mounts stand in the way. Each
+// control must answer EROFS at birth and after a park and resume, because
+// CRIU rebuilds the mount namespace.
+func TestFiberCannotWriteHostControls(t *testing.T) {
+	rt := newRuntime(t)
+	ctx := context.Background()
+	g := core.Grant{UID: "gro", TemplateDigest: "sha256:ref", WBudgetBytes: 64 << 20}
+	if err := rt.PrepareTemplate(ctx, g); err != nil {
+		t.Fatal(err)
 	}
+	h, err := rt.Clone(ctx, core.CloneSpec{Grant: g, Fence: core.Fence{GrantUID: "gro", Epoch: 1, Seq: 1}, Deadline: 2 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// ownCgroup is the cgroup of the fiber serving endpoint. Neither the
+	// fiber nor this test has a cgroup namespace, so both see the same
+	// path. Each incarnation has a cgroup of its own.
+	ownCgroup := func(endpoint string) string {
+		b, err := os.ReadFile(fmt.Sprintf("/proc/%d/cgroup", peerPID(t, endpoint)))
+		if err != nil {
+			return ""
+		}
+		for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+			if rest, ok := strings.CutPrefix(line, "0::"); ok {
+				return filepath.Join("/sys/fs/cgroup", rest)
+			}
+		}
+		return ""
+	}
+	cases := []struct {
+		name, path string
+		own        bool // path is relative to the fiber's own cgroup
+	}{
+		{name: "core_pattern", path: "/proc/sys/kernel/core_pattern"},
+		{name: "modprobe", path: "/proc/sys/kernel/modprobe"},
+		{name: "cgroup root procs", path: "/sys/fs/cgroup/cgroup.procs"},
+		{name: "own memory.max", path: "memory.max", own: true},
+	}
+	probe := func(when, endpoint string) {
+		own := ownCgroup(endpoint)
+		for _, tc := range cases {
+			t.Run(when+"/"+tc.name, func(t *testing.T) {
+				path := tc.path
+				if tc.own {
+					if own == "" {
+						t.Skip("the fiber's cgroup is not visible from here")
+					}
+					path = filepath.Join(own, tc.path)
+				}
+				if _, err := os.Stat(path); err != nil {
+					t.Skipf("%s: %v", path, err)
+				}
+				if got := talk(t, endpoint, "wopen "+path); got != "EROFS" {
+					t.Errorf("open %s for writing = %q, want EROFS", path, got)
+				}
+			})
+		}
+	}
+	probe("born", h.Endpoint)
+	if rt.Tier() < core.TierCheckpoint {
+		_ = rt.Release(ctx, h.ID, true)
+		return
+	}
+	// A sync park ends the born incarnation. The resumed one gets its
+	// mount namespace from CRIU and must be as closed.
+	ref, err := rt.Park(ctx, h.ID, true)
+	if err != nil {
+		t.Fatalf("park: %v", err)
+	}
+	h2, err := rt.Clone(ctx, core.CloneSpec{Grant: g, Source: core.SourceDelta, Ref: ref, Fence: core.Fence{GrantUID: "gro", Epoch: 1, Seq: 2}, Deadline: 5 * time.Second})
+	if err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	probe("resumed", h2.Endpoint)
 	_ = rt.Release(ctx, h2.ID, true)
 }
 
@@ -476,12 +876,13 @@ func TestSessionMovesThroughRegistry(t *testing.T) {
 	// One grant per home (its own uid and audience), the same template:
 	// that template is the domain the session moves within.
 	grantFor := func(home string) core.Grant {
-		return core.Grant{UID: "mob-" + home, Audience: home, TemplateDigest: digest, FiberMax: 4, WBudgetBytes: 32 << 20, LeaseExpiry: time.Now().Add(time.Hour)}
+		return core.Grant{UID: "mob-" + home, Audience: home, TemplateDigest: digest, FiberMax: 4, WBudgetBytes: 32 << 20, LeaseExpiry: time.Now().Add(time.Hour),
+			Policy: core.Policy{Isolation: core.Trusted}}
 	}
-	mk := func(home string) (*core.Agent, core.Runtime) {
+	mk := func(home string, keys artifact.Keys) (*core.Agent, core.Runtime) {
 		rt, err := newHost(host.Config{
 			Registry: reg + "/zygotes/ref", RegistryPlainHTTP: true, TemplateCache: t.TempDir(),
-			DeltaRegistry: reg + "/deltas", HomeID: home,
+			DeltaRegistry: reg + "/deltas", DeltaKeys: keys, HomeID: home,
 			CgroupRoot: filepath.Join(cgRoot, home+fmt.Sprint(time.Now().UnixNano()%1_000_000)),
 			RunDir:     filepath.Join("/tmp", "fz-"+home), DeltaDir: t.TempDir(),
 		})
@@ -494,12 +895,12 @@ func TestSessionMovesThroughRegistry(t *testing.T) {
 			}
 		})
 		a := &core.Agent{NodeID: home, Ledger: core.NewLedger(1), Budget: core.NewBudget(1000, 1<<20),
-			Runtime: rt, Audit: core.NopAuditor{}, Verify: tokenVerifier{"g": grantFor(home)},
+			Runtime: rt, Verify: tokenVerifier{"g": grantFor(home)},
 			Health: core.NewSourceHealth(time.Minute, time.Now())}
 		return a, rt
 	}
-	a, _ := mk("home-a")
-	b, _ := mk("home-b")
+	a, _ := mk("home-a", deltaKeys)
+	b, _ := mk("home-b", deltaKeys)
 	if b.Runtime.Tier() < core.TierCheckpoint {
 		t.Skip("criu not usable here")
 	}
@@ -519,6 +920,22 @@ func TestSessionMovesThroughRegistry(t *testing.T) {
 	}
 	if _, found, err := artifact.Resolve(ctx, domainRepo+":"+sessionTag("S"), true); err != nil || !found {
 		t.Fatalf("delta not published at %s: found=%v err=%v", domainRepo, found, err)
+	}
+
+	// A home with a key of its own does not trust A's. It finds S, will
+	// not take it, and names no home from the unverified manifest.
+	own, err := grant.GenerateKey(jose.EdDSA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	x, _ := mk("home-x", artifact.Keys{Signer: own, Seal: deltaKeys.Seal})
+	_, code, err = x.Clone(ctx, req)
+	var untrusted *core.RemoteMiss
+	if code != core.DeferredFallback || !errors.Is(err, artifact.ErrUntrusted) || !errors.As(err, &untrusted) || untrusted.PreferredHome != "" {
+		t.Fatalf("untrusting home clone = %d %v, want DeferredFallback ErrUntrusted with no preferred home", code, err)
+	}
+	if _, found, err := artifact.Resolve(ctx, domainRepo+":"+sessionTag("S"), true); err != nil || !found {
+		t.Fatalf("refused session must stay published: found=%v err=%v", found, err)
 	}
 
 	t0 := time.Now()
@@ -668,9 +1085,10 @@ func TestMobilityParityGate(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { rt.(interface{ Close() }).Close() })
-		g := core.Grant{UID: "par-" + home, Audience: home, TemplateDigest: digest, FiberMax: 4, WBudgetBytes: 32 << 20, LeaseExpiry: time.Now().Add(time.Hour)}
+		g := core.Grant{UID: "par-" + home, Audience: home, TemplateDigest: digest, FiberMax: 4, WBudgetBytes: 32 << 20, LeaseExpiry: time.Now().Add(time.Hour),
+			Policy: core.Policy{Isolation: core.Trusted}}
 		return &core.Agent{NodeID: home, Ledger: core.NewLedger(1), Budget: core.NewBudget(1000, 1<<20),
-			Runtime: rt, Audit: core.NopAuditor{}, Verify: tokenVerifier{"g": g},
+			Runtime: rt, Verify: tokenVerifier{"g": g},
 			Health: core.NewSourceHealth(time.Minute, time.Now())}
 	}
 	// home-a believes it runs another kernel (and does not care that its
@@ -814,7 +1232,9 @@ func TestCeilingAndPressureSource(t *testing.T) {
 	t.Logf("grant PSI some avg10 = %.2f%%", psi)
 	// The block ceiling landed on the grant cgroup: memory.high is at
 	// least fibers.max * w_budget.
-	matches, _ := filepath.Glob(filepath.Join(cgRoot, "t*", "g4", "memory.high"))
+	// Only this process's runtimes count, because earlier runs may have
+	// left theirs.
+	matches, _ := filepath.Glob(filepath.Join(cgRoot, fmt.Sprintf("t%d-*", os.Getpid()), "g4", "memory.high"))
 	if len(matches) != 1 {
 		t.Fatalf("grant cgroup memory.high not found: %v", matches)
 	}
@@ -872,5 +1292,151 @@ func TestDeadlineIsEnforced(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 	if list, _ := rt.List(ctx); len(list) != 0 {
 		t.Fatalf("late fiber left running: %+v", list)
+	}
+}
+
+// TestResumedDeltaRetiredAndDiscarded follows one named session on one
+// home with a delta registry through park, resume, park, resume and a
+// discarding release. The resume withdraws the copy the park published,
+// so nothing can claim or fall back to that older state. The delta it
+// came from stays on disk until the next park supersedes it or the
+// release discards it. After the release a Clone creates fresh. The
+// steps run in order against one agent.
+func TestResumedDeltaRetiredAndDiscarded(t *testing.T) {
+	ctx := context.Background()
+	out := filepath.Join(t.TempDir(), "art")
+	digest, err := artifact.Build(ctx, artifact.BuildOptions{Zygote: zygoteBin, Args: []string{"--heap-mb", "16"}, Out: out})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(registry.New())
+	defer srv.Close()
+	reg := strings.TrimPrefix(srv.URL, "http://")
+	if _, err := artifact.Push(ctx, out, reg+"/zygotes/ref:v1", true); err != nil {
+		t.Fatal(err)
+	}
+	g := core.Grant{UID: "ret-a", Audience: "home-a", TemplateDigest: digest, FiberMax: 4, WBudgetBytes: 32 << 20,
+		LeaseExpiry: time.Now().Add(time.Hour), Policy: core.Policy{Isolation: core.Trusted}}
+	rt, err := newHost(host.Config{
+		Registry: reg + "/zygotes/ref", RegistryPlainHTTP: true, TemplateCache: t.TempDir(),
+		DeltaRegistry: reg + "/deltas", DeltaKeys: deltaKeys, HomeID: "home-a",
+		CgroupRoot: filepath.Join(cgRoot, "ret"+fmt.Sprint(time.Now().UnixNano()%1_000_000)),
+		RunDir:     filepath.Join("/tmp", "fz-ret-a"), DeltaDir: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if c, ok := rt.(interface{ Close() }); ok {
+			c.Close()
+		}
+	})
+	if rt.Tier() < core.TierCheckpoint {
+		t.Skip("criu not usable here")
+	}
+	a := &core.Agent{NodeID: "home-a", Ledger: core.NewLedger(1), Budget: core.NewBudget(1000, 1<<20),
+		Runtime: rt, Verify: tokenVerifier{"g": g}, Health: core.NewSourceHealth(time.Minute, time.Now())}
+	req := core.CloneRequest{GrantJWT: []byte("g"), Session: "S", Deadline: 5 * time.Second}
+	tag := reg + "/deltas/" + strings.TrimPrefix(digest, "sha256:")[:40] + "-" + shortHash(digest) + ":" + sessionTag("S")
+	published := func(t *testing.T) bool {
+		t.Helper()
+		_, found, err := artifact.Resolve(ctx, tag, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return found
+	}
+	onDisk := func(ref string) bool {
+		_, err := os.Stat(filepath.Join(ref, "manifest.json"))
+		return err == nil
+	}
+	parkedRef := func(t *testing.T) string {
+		t.Helper()
+		st, ref, ok := a.Ledger.SessionState(g.UID, "S")
+		if !ok || st != core.StateParked || ref == "" {
+			t.Fatalf("S = %v %q %v, want parked with a delta", st, ref, ok)
+		}
+		return ref
+	}
+	clone := func(t *testing.T, want core.Action) core.CloneResponse {
+		t.Helper()
+		r, code, err := a.Clone(ctx, req)
+		if err != nil || code != core.OK || r.Kind != want {
+			t.Fatalf("clone: %v %d %v, want %v", err, code, r.Kind, want)
+		}
+		return r
+	}
+	var fiber, ref1, ref2 string
+	steps := []struct {
+		name string
+		run  func(t *testing.T)
+	}{
+		{"create and count to 3", func(t *testing.T) {
+			r := clone(t, core.ActCreate)
+			fiber = r.FiberID
+			for i := 0; i < 3; i++ {
+				talk(t, r.Endpoint, "incr")
+			}
+		}},
+		{"park publishes the delta", func(t *testing.T) {
+			if _, code, err := a.Park(ctx, fiber, true); err != nil || code != core.OK {
+				t.Fatalf("park: %v %d", err, code)
+			}
+			ref1 = parkedRef(t)
+			if !onDisk(ref1) || !published(t) {
+				t.Fatalf("after park: delta on disk %v, published %v", onDisk(ref1), published(t))
+			}
+		}},
+		{"resume keeps the state, withdraws the published copy and keeps the delta on disk", func(t *testing.T) {
+			r := clone(t, core.ActResume)
+			fiber = r.FiberID
+			if got := talk(t, r.Endpoint, "get"); got != "3" {
+				t.Fatalf("counter after resume = %q, want 3", got)
+			}
+			if published(t) {
+				t.Fatal("the published copy survived the local resume")
+			}
+			if !onDisk(ref1) {
+				t.Fatal("the delta the fiber came from must stay until the next park or a discard")
+			}
+		}},
+		{"the next park supersedes that delta", func(t *testing.T) {
+			if _, code, err := a.Park(ctx, fiber, false); err != nil || code != core.OK {
+				t.Fatalf("second park: %v %d", err, code)
+			}
+			ref2 = parkedRef(t)
+			if ref2 == ref1 || !onDisk(ref2) || !published(t) {
+				t.Fatalf("after the second park: ref %s (first %s), on disk %v, published %v", ref2, ref1, onDisk(ref2), published(t))
+			}
+			if onDisk(ref1) {
+				t.Fatalf("the superseded delta %s is still on disk", ref1)
+			}
+		}},
+		{"resume again, then release with discard", func(t *testing.T) {
+			r := clone(t, core.ActResume)
+			if got := talk(t, r.Endpoint, "incr"); got != "4" {
+				t.Fatalf("incr after the second resume = %q, want 4", got)
+			}
+			if code, err := a.Release(ctx, r.FiberID, true); err != nil || code != core.OK {
+				t.Fatalf("release: %v %d", err, code)
+			}
+			if onDisk(ref2) || published(t) {
+				t.Fatalf("after the discarding release: delta on disk %v, published %v", onDisk(ref2), published(t))
+			}
+		}},
+		{"a clone after the release creates fresh", func(t *testing.T) {
+			r := clone(t, core.ActCreate)
+			if got := talk(t, r.Endpoint, "get"); got != "0" {
+				t.Fatalf("counter of the fresh session = %q, want 0", got)
+			}
+			if code, err := a.Release(ctx, r.FiberID, true); err != nil || code != core.OK {
+				t.Fatalf("release: %v %d", err, code)
+			}
+		}},
+	}
+	for _, st := range steps {
+		if !t.Run(st.name, st.run) {
+			return // later steps build on this one
+		}
 	}
 }

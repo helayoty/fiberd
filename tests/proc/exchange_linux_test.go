@@ -53,6 +53,7 @@ func httpAgent(t *testing.T, home, registry string) (*core.Agent, host.Config, c
 		DeltaDir:      t.TempDir(),
 		TemplateCache: t.TempDir(),
 		DeltaRegistry: registry,
+		DeltaKeys:     deltaKeys,
 		HomeID:        home,
 	}
 	rt, err := newHost(cfg)
@@ -65,9 +66,10 @@ func httpAgent(t *testing.T, home, registry string) (*core.Agent, host.Config, c
 		}
 		_ = os.RemoveAll(cfg.RunDir)
 	})
-	g := core.Grant{UID: "x-" + home, Audience: home, TemplateDigest: "sha256:ref", FiberMax: 4, WBudgetBytes: 32 << 20, LeaseExpiry: time.Now().Add(time.Hour)}
+	g := core.Grant{UID: "x-" + home, Audience: home, TemplateDigest: "sha256:ref", FiberMax: 4, WBudgetBytes: 32 << 20, LeaseExpiry: time.Now().Add(time.Hour),
+		Policy: core.Policy{Isolation: core.Trusted}}
 	a := &core.Agent{NodeID: home, Ledger: core.NewLedger(1), Budget: core.NewBudget(1000, 1<<20),
-		Runtime: rt, Audit: core.NopAuditor{}, Verify: tokenVerifier{"g": g},
+		Runtime: rt, Verify: tokenVerifier{"g": g},
 		Health: core.NewSourceHealth(time.Minute, time.Now())}
 	return a, cfg, g
 }

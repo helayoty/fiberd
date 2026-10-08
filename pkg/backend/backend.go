@@ -6,15 +6,16 @@
 // runtime (pkg/runtime/host) owns all of that and calls the backend only
 // for the mechanism.
 //
-// Backends today: proc (a fork zygote checkpointed with CRIU). Planned on
-// the same interface: runc (the zygote in an OCI bundle), gvisor (runsc
-// checkpoint/restore per fiber), hyperlight (micro-VM snapshots through a
-// helper process speaking the zygote line protocol).
+// The backends are proc (a fork zygote checkpointed with CRIU), runc (the
+// zygote in an OCI container), gvisor (runsc checkpoint and restore per
+// fiber) and hyperlight (micro-VM snapshots through a helper process that
+// speaks the zygote line protocol).
 package backend
 
 import (
 	"context"
 	"errors"
+	"os"
 	"time"
 
 	"github.com/helayoty/fiberd/pkg/artifact"
@@ -31,6 +32,12 @@ type Template struct {
 	Argv      []string
 	Dir       string // artifact directory; empty for a bare command
 	ImagesDir string // checkpoint of the warm template, when the artifact has one
+	// ZygoteSHA256 is the hash the host verified the executable at
+	// Argv[0] to have. A backend that runs the template somewhere other
+	// than the host (gvisor binds a copy into the sandbox) checks what it
+	// runs against it, so nothing between the host's check and the run
+	// can swap the file.
+	ZygoteSHA256 string
 }
 
 // WarmSpec asks for one warm instance of a template for a grant.
@@ -52,6 +59,9 @@ type WarmSpec struct {
 	// starting one there and reading the cgroup; the host removes it
 	// afterwards. -1 when the host offers none.
 	ProbeCgroupFD int
+	// Hide lists absolute directories a fiber must not see. A backend
+	// that gives fibers a mount namespace of their own covers them there.
+	Hide []string
 }
 
 // Warm is a warm template instance.
@@ -83,6 +93,11 @@ type FiberSpec struct {
 	// so its checkpoint restores anywhere. Backends that always isolate
 	// ignore it.
 	OwnPIDNS bool
+	// Handoff, when set, is the fiber's end of a SOCK_SEQPACKET pair the
+	// host passes connections over. The fiber serves those instead of
+	// Endpoint. Only a Handoffer is given one. The backend does not keep
+	// it, and the caller closes it after Clone.
+	Handoff *os.File
 }
 
 // Fiber is a running fiber.
@@ -111,13 +126,25 @@ type ResumeSpec struct {
 	WarmID string
 	// WorkDir is the grant's run directory (WarmSpec.WorkDir).
 	WorkDir string
+	// Handoff replaces the handoff channel of a checkpoint taken from a
+	// handoff fiber (FiberSpec.Handoff). It is nil for any other checkpoint.
+	Handoff *os.File
 }
 
 // EndpointSchemer is implemented by backends that can serve fibers on
 // more than unix sockets under the run directory. A backend without it
-// speaks "unix" only, and the host refuses a policy it cannot honour.
+// speaks "unix" only. Under a tcp endpoint policy the host tells a "tcp"
+// backend the address to bind, and relays a port of its own to the unix
+// socket of any other.
 type EndpointSchemer interface {
 	EndpointSchemes() []string
+}
+
+// Handoffer is implemented by backends whose fibers can serve
+// connections the host passes them (FiberSpec.Handoff), across park and
+// resume. The host refuses a handoff grant on any other backend.
+type Handoffer interface {
+	Handoff() bool
 }
 
 // Exit reports the end of a fiber (FiberID set) or of a warm instance
@@ -147,9 +174,45 @@ type Backend interface {
 	Kill(fiberID string) error
 	// Exits delivers every fiber and warm-instance end, including those
 	// the host asked for through Park or Kill: the host is what knows
-	// whether an end was a death, and it cleans up on this signal.
+	// whether an end was a death, and it cleans up on this signal. An
+	// Unwarm may or may not be followed by the instance's Exit, so a host
+	// that unwarms treats that Exit as cleanup it has already done.
 	Exits() <-chan Exit
 	Close()
+}
+
+// Isolator is implemented by backends whose fibers run behind a kernel
+// of their own (gVisor's Sentry, a Hyperlight micro-VM) rather than on
+// the host kernel under the agent's uid. Only these serve untrusted
+// grants. A backend that does not implement it does not isolate.
+type Isolator interface {
+	IsolatesTenants() bool
+}
+
+// ChannelMaker is implemented by backends whose fibers live in a network
+// namespace of their own. criu finds only the sockets of the namespaces
+// it dumps, so a pair the host made in its own namespace cannot be
+// checkpointed with the fiber. The host asks such a backend for every
+// pair it shares with a fiber. Other backends share the host's namespace,
+// and plain socketpair(2) does.
+type ChannelMaker interface {
+	// Socketpair makes a close-on-exec AF_UNIX pair of the given type
+	// (SOCK_SEQPACKET for a handoff channel) for a fiber of the warm
+	// instance.
+	Socketpair(warmID string, typ int) ([2]int, error)
+}
+
+// IDMapper is implemented by backends whose warm instance and fibers run
+// in a user namespace of the grant's own, mapped to a range of host ids
+// with the grant's root at its start. The host hands that uid the one
+// thing the instance must write on its own, the cgroup.procs of the
+// grant's cgroup and of each fiber leaf, so clone3 into a leaf works.
+// Every limit stays the host's.
+type IDMapper interface {
+	// MappedRoot is the host uid the grant's root maps to. It fails when
+	// the grant cannot have its range on this home because another
+	// admitted grant holds it.
+	MappedRoot(grantUID string) (uint32, error)
 }
 
 // Platformer is implemented by backends whose checkpoints depend on
@@ -158,6 +221,14 @@ type Backend interface {
 // depends on the runsc release, not on the host kernel).
 type Platformer interface {
 	Platform() artifact.Platform
+}
+
+// Prober is implemented by backends that can say why they offer no
+// tier. The host refuses to open over such a backend and names this
+// reason in its error.
+type Prober interface {
+	// ProbeErr is why the backend offers no tier, nil when it offers one.
+	ProbeErr() error
 }
 
 // DeadlineAdvisor is implemented by backends whose fork or restore is

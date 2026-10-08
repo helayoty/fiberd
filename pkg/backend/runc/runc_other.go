@@ -13,17 +13,19 @@ import (
 
 // Options configure the runc backend.
 type Options struct {
-	Runc     string
-	Rootfs   string
-	StateDir string
-	CRIU     string
+	Runc       string
+	Rootfs     string
+	StateDir   string
+	CRIU       string
+	Pool       IDPool
+	SubIDFiles []string
 }
 
 type unsupported struct{}
 
 // New returns a backend whose every operation fails with
 // backend.ErrUnsupported.
-func New(Options) backend.Backend { return unsupported{} }
+func New(Options) (backend.Backend, error) { return unsupported{}, nil }
 
 func (unsupported) Name() string    { return "runc" }
 func (unsupported) Tier() core.Tier { return core.TierUnspecified }

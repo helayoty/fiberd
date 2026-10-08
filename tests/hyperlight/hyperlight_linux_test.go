@@ -67,7 +67,7 @@ func newRuntime(t *testing.T) core.Runtime {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { rt.(interface{ Close() }).Close() })
+	t.Cleanup(rt.Close)
 	return rt
 }
 

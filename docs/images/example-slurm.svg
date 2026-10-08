@@ -1,44 +1,87 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="720" viewBox="0 0 1200 720" role="img" aria-labelledby="slurm-title slurm-desc">
-  <title id="slurm-title">Slurm example with a fiberd capacity home inside one allocation</title>
-  <desc id="slurm-desc">A grant issuer signs capacity for a Slurm node. sbatch requests resources and Slurm creates a job-step cgroup. Inside the allocation, fiberd-job starts fiberd-slurm, stages the grant, and watches job state. The agent warms one template and creates fibers within the allocation. Callers use Clone and connect to the returned node address and fiber port.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="1030" viewBox="0 0 1440 1030" role="img" aria-labelledby="example-slurm-title example-slurm-desc">
+  <title id="example-slurm-title">One Slurm allocation contains many local fiber activations</title>
+  <desc id="example-slurm-desc">A resource-containment view with an allocation phase above a repeated local-serving phase. A submitter sends one sbatch job, with CPU and memory requirements and an issuer-signed CapacityGrant, to Slurm. Slurm starts the job within its job-step cgroup. The job script starts or restarts fiberd-slurm inside that same allocation; it is shown as a launch instruction, not a second runtime service. fiberd verifies the node-audience grant, warms a template, and controls fiber lifecycles beneath the allocation's aggregate CPU and memory ceiling. A caller repeatedly uses Clone, then the returned nodeIP:fiberPort endpoint, without submitting a new Slurm job per fiber. Job scope loss bumps the epoch; the script forwards termination to the agent. This is a reference integration, not a production control plane.</desc>
   <style>
-    :root{--bg:#f7f9fc;--panel:#fff;--ink:#172033;--muted:#5d6b7d;--line:#b8c4d4;--blue:#3165b5;--blue-bg:#eaf1ff;--teal:#13776f;--teal-bg:#e8f7f4;--violet:#704aa1;--violet-bg:#f2edfa;--amber:#a76500;--amber-bg:#fff3d6;--green:#287a4d;--green-bg:#e8f6ed}
-    @media(prefers-color-scheme:dark){:root{--bg:#0d1117;--panel:#161b22;--ink:#e6edf3;--muted:#a3adba;--line:#3d4652;--blue:#79a7ff;--blue-bg:#17243d;--teal:#53c7b8;--teal-bg:#102923;--violet:#c09cff;--violet-bg:#251b35;--amber:#f0b44d;--amber-bg:#30240f;--green:#63cf8e;--green-bg:#142b1e}}
-    text{font-family:ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;fill:var(--ink)}.bg{fill:var(--bg)}.panel{fill:var(--panel);stroke:var(--line);stroke-width:1.5}.bluebox{fill:var(--blue-bg);stroke:var(--blue);stroke-width:1.5}.allocation{fill:var(--teal-bg);stroke:var(--teal);stroke-width:2}.violetbox{fill:var(--violet-bg);stroke:var(--violet);stroke-width:1.5}.amberbox{fill:var(--amber-bg);stroke:var(--amber);stroke-width:1.5}.greenbox{fill:var(--green-bg);stroke:var(--green);stroke-width:1.5}.title{font-size:27px;font-weight:750}.subtitle{font-size:14px;fill:var(--muted)}.h{font-size:16px;font-weight:700}.b{font-size:13px}.s{font-size:11px;fill:var(--muted)}.cap{font-size:12px;font-weight:700;letter-spacing:.5px}.blue{fill:var(--blue)}.teal{fill:var(--teal)}.violet{fill:var(--violet)}.amber{fill:var(--amber)}.green{fill:var(--green)}.arrow{fill:none;stroke:var(--muted);stroke-width:2}.direct{fill:none;stroke:var(--green);stroke-width:2.5}.dash{stroke-dasharray:7 5}
+    :root{--bg:#f7f9fc;--panel:#fff;--ink:#172033;--muted:#5d6b7d;--border:#b8c4d4;--blue:#3165b5;--blue-bg:#eaf1ff;--teal:#13776f;--teal-bg:#e8f7f4;--violet:#704aa1;--violet-bg:#f2edfa;--amber:#a76500;--amber-bg:#fff3d6;--green:#287a4d;--green-bg:#e8f6ed}
+    @media(prefers-color-scheme:dark){:root{--bg:#0d1117;--panel:#161b22;--ink:#e6edf3;--muted:#a3adba;--border:#3d4652;--blue:#79a7ff;--blue-bg:#17243d;--teal:#53c7b8;--teal-bg:#102923;--violet:#c09cff;--violet-bg:#251b35;--amber:#f0b44d;--amber-bg:#30240f;--green:#63cf8e;--green-bg:#142b1e}}
+    text{font-family:ui-sans-serif,-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;fill:var(--ink)}.bg{fill:var(--bg)}.title{font-size:30px;font-weight:700}.heading{font-size:22px;font-weight:700}.label{font-size:20px;font-weight:600}.secondary{font-size:17px}.muted{fill:var(--muted)}.blue{fill:var(--blue)}.teal{fill:var(--teal)}.violet{fill:var(--violet)}.amber{fill:var(--amber)}.center{text-anchor:middle}
+    .scope{fill:none;stroke:var(--teal);stroke-width:1.5}.service{fill:var(--panel);stroke:var(--blue);stroke-width:2}.agent{stroke:var(--teal)}.actor{fill:var(--panel);stroke:var(--blue);stroke-width:2}.document{fill:var(--blue-bg);stroke:var(--blue);stroke-width:1.5}.template{fill:var(--amber-bg);stroke:var(--amber);stroke-width:1.5}.fiber{fill:var(--violet-bg);stroke:var(--violet);stroke-width:2}.divider{fill:none;stroke:var(--border);stroke-width:1.5}.flow{fill:none;stroke-width:2;stroke-linejoin:round;stroke-linecap:round}.placement{stroke:var(--blue)}.local{stroke:var(--teal)}.activation{stroke:var(--violet)}.base{stroke:var(--amber)}.return{stroke-dasharray:7 6}
+    text.amber{fill:#9e5e00}@media(prefers-color-scheme:dark){text.amber{fill:var(--amber)}}
   </style>
-  <defs><marker id="slurm-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M1 1l8 4-8 4z" fill="#7b8794"/></marker><marker id="slurm-green-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M1 1l8 4-8 4z" fill="#287a4d"/></marker></defs>
-  <rect class="bg" width="1200" height="720"/>
-  <text class="title" x="42" y="48">Slurm example: the allocation is the capacity home</text>
-  <text class="subtitle" x="42" y="74">Slurm allocates CPU, memory, node, and devices; fiberd activates fibers only inside that allocation.</text>
-  <text class="cap" x="42" y="112">BEFORE THE JOB SERVES</text>
-  <rect class="violetbox" x="42" y="132" width="250" height="106" rx="15"/>
-  <text class="h violet" x="167" y="164" text-anchor="middle">1 · Grant issuer</text><text class="b" x="167" y="194" text-anchor="middle">node audience + bounded capacity</text><text class="s" x="167" y="218" text-anchor="middle">signs JWT · publishes JWKS</text>
-  <rect class="bluebox" x="392" y="132" width="250" height="106" rx="15"/>
-  <text class="h blue" x="517" y="164" text-anchor="middle">2 · sbatch</text><text class="b" x="517" y="194" text-anchor="middle">requests CPU · memory · GRES</text><text class="s" x="517" y="218" text-anchor="middle">stages JWT · starts fiberd-job</text>
-  <rect class="allocation" x="742" y="132" width="250" height="106" rx="15"/>
-  <text class="h teal" x="867" y="164" text-anchor="middle">3 · Slurm scheduler</text><text class="b" x="867" y="194" text-anchor="middle">places job on one node</text><text class="s" x="867" y="218" text-anchor="middle">creates job-step cgroup</text>
-  <path class="arrow" d="M292 185h100M642 185h100" marker-end="url(#slurm-arrow)"/>
+  <defs>
+    <marker id="example-slurm-blue-arrow" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="12" markerHeight="12" markerUnits="userSpaceOnUse" orient="auto"><path d="M1 1 11 6 1 11Z" fill="var(--blue)"/></marker>
+    <marker id="example-slurm-teal-arrow" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="12" markerHeight="12" markerUnits="userSpaceOnUse" orient="auto"><path d="M1 1 11 6 1 11Z" fill="var(--teal)"/></marker>
+    <marker id="example-slurm-violet-arrow" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="12" markerHeight="12" markerUnits="userSpaceOnUse" orient="auto"><path d="M1 1 11 6 1 11Z" fill="var(--violet)"/></marker>
+    <marker id="example-slurm-amber-arrow" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="12" markerHeight="12" markerUnits="userSpaceOnUse" orient="auto"><path d="M1 1 11 6 1 11Z" fill="var(--amber)"/></marker>
+  </defs>
+  <rect class="bg" width="1440" height="1030"/>
+  <text class="title" x="48" y="66">One allocation. Many local fiber activations.</text>
+  <text class="secondary muted" x="48" y="100">Slurm places the capacity; fiberd uses it without a new sbatch for each Clone.</text>
+  <path class="divider" d="M48 130H1392"/>
 
-  <rect class="allocation" x="232" y="292" width="926" height="356" rx="23"/>
-  <text class="h teal" x="262" y="327">SLURM ALLOCATION + JOB-STEP CGROUP</text>
-  <text class="s" x="1128" y="327" text-anchor="end">requested CPU and memory remain the aggregate ceiling</text>
-  <rect class="panel" x="262" y="376" width="168" height="106" rx="15"/>
-  <text class="h" x="346" y="408" text-anchor="middle">Router / client</text><text class="b" x="346" y="438" text-anchor="middle">1 · Clone</text><text class="s" x="346" y="463" text-anchor="middle">published agent address</text>
-  <rect class="bluebox" x="500" y="358" width="220" height="145" rx="16"/>
-  <text class="h blue" x="610" y="390" text-anchor="middle">4 · fiberd-slurm</text><text class="b" x="610" y="419" text-anchor="middle">verify grant for node</text><text class="b" x="610" y="443" text-anchor="middle">own cgroup subtree</text><text class="s" x="610" y="471" text-anchor="middle">enforce capacity + lifecycle</text>
-  <rect class="panel" x="778" y="358" width="160" height="92" rx="15"/>
-  <text class="h" x="858" y="390" text-anchor="middle">fiberd-job.sh</text><text class="s" x="858" y="419" text-anchor="middle">start / restart agent</text><text class="s" x="858" y="439" text-anchor="middle">scope loss on job end</text>
-  <rect class="amberbox" x="778" y="482" width="160" height="88" rx="15"/>
-  <text class="h amber" x="858" y="514" text-anchor="middle">Warm template</text><text class="s" x="858" y="541" text-anchor="middle">inside allocation</text>
-  <rect class="greenbox" x="992" y="412" width="136" height="134" rx="15"/>
-  <text class="h green" x="1060" y="445" text-anchor="middle">Fibers</text><text class="b" x="1060" y="476" text-anchor="middle">nodeIP:port</text><text class="s" x="1060" y="503" text-anchor="middle">process leaves</text><text class="s" x="1060" y="522" text-anchor="middle">up to max</text>
-  <path class="arrow" d="M938 404h54M720 430h58M858 450v32M938 526h54" marker-end="url(#slurm-arrow)"/>
-  <path class="arrow" d="M867 238v54" marker-end="url(#slurm-arrow)"/>
-  <text class="s" x="882" y="270">allocation</text>
-  <path class="arrow" d="M430 420h70" marker-end="url(#slurm-arrow)"/>
-  <path class="arrow dash" d="M500 470h-42v38H346v-26" marker-end="url(#slurm-arrow)"/>
-  <text class="s" x="428" y="524" text-anchor="middle">endpoint + fence</text>
-  <path class="direct" d="M346 482v100h714v-36" marker-end="url(#slurm-green-arrow)"/>
-  <text class="b green" x="690" y="606" text-anchor="middle">2 · connect directly to nodeIP:fiberPort</text>
-  <text class="s" x="695" y="632" text-anchor="middle">Optional fabric devices are attached before the template warms; this example does not imply production GPU support.</text>
+  <text class="heading blue" x="48" y="180">Allocate · once</text>
+  <circle class="actor" cx="144" cy="239" r="16"/>
+  <path class="actor" d="M112 292V280C112 253 176 253 176 280V292"/>
+  <text class="label center" x="144" y="328">Submitter</text>
+  <path class="flow placement" d="M208 263H690" marker-end="url(#example-slurm-blue-arrow)"/>
+  <text class="label blue" x="260" y="242">sbatch · CPU + memory + grant</text>
+  <text class="secondary muted" x="260" y="296">fiberd-job.sh is the submitted script</text>
+  <rect class="service" x="690" y="212" width="330" height="114" rx="4"/>
+  <text class="heading blue" x="718" y="256">Slurm</text>
+  <text class="secondary" x="718" y="290">Schedule job on a node</text>
+  <path class="flow placement" d="M1020 269H1304V398" marker-end="url(#example-slurm-blue-arrow)"/>
+  <text class="secondary blue" x="1072" y="248">start job</text>
+
+  <path class="document" d="M48 382H352L380 410V501H48Z"/>
+  <path class="flow placement" d="M352 382V410H380"/>
+  <text class="label blue" x="72" y="426">Signed CapacityGrant</text>
+  <text class="secondary" x="72" y="460">Issuer authorizes fiber capacity</text>
+  <text class="secondary muted" x="48" y="532">Carried by the job; not issued by Slurm</text>
+
+  <rect class="scope" x="462" y="398" width="930" height="520" rx="16"/>
+  <text class="heading teal" x="492" y="439">Allocation / job-step cgroup</text>
+  <text class="secondary muted" x="492" y="470">Aggregate CPU + memory ceiling · swap closed</text>
+  <text class="secondary" x="492" y="516">fiberd-job.sh starts / restarts the agent here; forwards SIGTERM at job end</text>
+  <path class="divider" d="M492 536H1362"/>
+
+  <rect class="service agent" x="500" y="574" width="322" height="276" rx="4"/>
+  <text class="heading teal" x="526" y="614">fiberd-slurm</text>
+  <text class="secondary" x="526" y="649">Verify node-audience grant</text>
+  <text class="secondary" x="526" y="681">Watch allocation scope</text>
+  <path class="divider" d="M526 702H796"/>
+  <text class="label" x="526" y="739">Local lifecycle</text>
+  <text class="secondary" x="526" y="773">Clone · Park · Release</text>
+  <text class="secondary muted" x="526" y="814">No scheduler call per fiber</text>
+  <path class="flow placement" d="M380 447H414V625H500" marker-end="url(#example-slurm-blue-arrow)"/>
+
+  <rect class="template" x="1038" y="574" width="316" height="90" rx="3"/>
+  <rect class="template" x="1030" y="582" width="316" height="90" rx="3"/>
+  <rect class="template" x="1022" y="590" width="316" height="90" rx="3"/>
+  <text class="label amber" x="1046" y="627">Warm template</text>
+  <text class="secondary" x="1046" y="657">shared by local fibers</text>
+  <path class="flow local" d="M822 634H1022" marker-end="url(#example-slurm-teal-arrow)"/>
+  <text class="secondary teal center" x="922" y="615">prepare once</text>
+  <circle class="fiber" cx="1140" cy="804" r="57"/>
+  <circle class="fiber" cx="1290" cy="804" r="57"/>
+  <text class="label violet center" x="1140" y="811">Fiber A</text>
+  <text class="label violet center" x="1290" y="811">Fiber B</text>
+  <path class="flow base" d="M1215 680V719H1140V747" marker-end="url(#example-slurm-amber-arrow)"/>
+  <path class="flow base" d="M1215 719H1290V747" marker-end="url(#example-slurm-amber-arrow)"/>
+  <circle cx="1215" cy="719" r="3" fill="var(--amber)"/>
+  <text class="secondary amber" x="890" y="707">CREATE reuses base</text>
+  <path class="flow activation" d="M822 794H1083" marker-end="url(#example-slurm-violet-arrow)"/>
+  <text class="secondary violet center" x="952" y="777">select / activate</text>
+
+  <text class="heading teal" x="48" y="620">Activate · repeat</text>
+  <circle class="actor" cx="144" cy="677" r="16"/>
+  <path class="actor" d="M112 730V718C112 691 176 691 176 718V730"/>
+  <text class="label center" x="144" y="768">Caller</text>
+  <path class="flow local" d="M208 711H500" marker-end="url(#example-slurm-teal-arrow)"/>
+  <text class="secondary teal" x="268" y="691">1 · Clone</text>
+  <path class="flow local return" d="M500 754H220" marker-end="url(#example-slurm-teal-arrow)"/>
+  <text class="secondary teal" x="260" y="785">endpoint + fence</text>
+  <path class="flow local" d="M144 795V893H1140V861" marker-end="url(#example-slurm-teal-arrow)"/>
+  <text class="secondary teal" x="510" y="877">2 · Direct workload → nodeIP:fiberPort</text>
+  <text class="secondary" x="48" y="959">Scope loss invalidates the epoch; the allocation remains the outer resource boundary, not a service hop.</text>
+  <text class="secondary muted" x="48" y="996">Reference integration · protect bearer grants and the control transport before production use.</text>
 </svg>

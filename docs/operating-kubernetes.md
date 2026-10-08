@@ -1,168 +1,88 @@
 # Operating fiberd on Kubernetes
 
-The repository includes a reference Kubernetes integration under
-`examples/kubernetes`. It demonstrates the home interface and passes the
-project's conformance and pressure tests. It is not a general-purpose
-production operator. This page covers the CRD, controller, readiness,
-configuration, and operational workflow. The [runtime model](runtime-model.md)
-defines the platform-neutral relationship between a grant, home, warm
-template, and fibers. Review [Production readiness](production-readiness.md)
-before adapting the example for a real cluster.
+This page is the operator's how-to for the Kubernetes example in `examples/kubernetes`, for anyone running a [grant](glossary.md#grant) Pod on a cluster. Read the [quickstart](quickstart.md) first. How the controller, the grant Pod and the [home](glossary.md#home) work inside, and their known gaps, is in [design/kubernetes.md](design/kubernetes.md). The example demonstrates the [home seam](design/home.md) and passes the [conformance suite](glossary.md#conformance-suite). It is not a production-grade Kubernetes controller.
 
 ## Components
 
-The reference integration has two control-plane components.
+A `CapacityGrant` custom resource describes signed [fiber](glossary.md#fiber) capacity and the Pod that holds it. The `grant-issuer` Deployment runs `grant-controller`, which is the [issuer](glossary.md#issuer) here and takes the place of the standalone `grant-issuer` command. Each grant Pod runs `fiberd-k8s` as PID 1 of its only container, and no Pod is created per fiber.
 
-- The `CapacityGrant` CRD describes signed fiber capacity and the Pod that
-  will hold it.
-- The `grant-controller` polls and reconciles those resources, signs grants,
-  creates grant Pods and Secrets, renews leases, and mirrors placement and
-  readiness into resource status.
+## Image
 
-Each grant Pod runs `fiberd-k8s` as PID 1 of its only container. The
-Kubernetes home around that agent provides:
+The released `fiberd` image does not contain `fiberd-k8s`. Build the example image, which holds `fiberd-k8s`, `grant-controller`, the reference [zygote](glossary.md#zygote), [CRIU](glossary.md#criu), `runsc` and a gVisor rootfs, and point `spec.pod.image` at it.
 
-- a projected Secret containing the signed grant
-- the Pod's delegated cgroup subtree
-- the selected Pod IP for TCP endpoints
-- a readiness gate named `fiberd.io/zygote-ready`
-- Kubernetes scope facts for audit and revocation
-- optional ResourceClaims and device paths
+```bash
+docker build -t registry.example/fiberd-k8s:dev -f docker/kubernetes/Dockerfile .
+```
 
-The controller is a Deployment. The grant Pods are not a DaemonSet, and one
-Pod is not created per fiber.
+## Install
 
-## From CapacityGrant to ready home
+The manifests in `examples/kubernetes/kind/manifests` install the namespaces, the `CapacityGrant` custom resource definition, the controller's Deployment and the grant Pods' role-based access control (RBAC). Set the controller's image in `20-issuer.yaml` to the image built above, then apply them.
 
-![One CapacityGrant produces one grant Pod containing the agent, one warm template, and locally created fibers. Adding capacity means creating another CapacityGrant and grant Pod.](./images/kubernetes-runtime-model.svg)
+```bash
+kubectl apply -f examples/kubernetes/kind/manifests/{00-namespaces,10-crd,20-issuer,30-grant-rbac}.yaml
+```
 
-The reference lifecycle proceeds in this order.
+## From CapacityGrant to a ready home
+
+![The grant-issuer Deployment runs grant-controller, which reconciles CapacityGrant resources and creates grant Pods and their projected JWT Secrets. Each grant Pod's one container holds fiberd-k8s, its warm template and local fibers. Kubernetes schedules grant Pods, and Clone does not schedule Pods.](./images/kubernetes-runtime-model.svg)
 
 1. A platform component creates a `CapacityGrant`.
-2. The controller creates `<name>-grant`, which is the grant Pod.
-3. The controller signs a grant whose UID is the resource UID and whose
-   audience is the grant Pod name.
-4. The signed JWT is stored in an owned Secret and projected into the Pod.
-5. `fiberd-k8s` verifies and admits the grant, prepares the selected backend,
-   and warms the template.
-6. The agent sets the `fiberd.io/zygote-ready` gate to `True`.
-7. The controller copies placement, readiness, grant expiry, and the agent
-   endpoint into `CapacityGrant.status`.
+2. The controller creates the Pod `<name>-grant` and signs a grant whose UID is the resource UID and whose audience is the Pod name.
+3. The token lands in an owned Secret, projected into the Pod. The volume is optional, so the Pod can start before the Secret exists.
+4. `fiberd-k8s` admits the grant, warms the [template](glossary.md#template) and sets the readiness gate `fiberd.io/zygote-ready`.
+5. The controller copies placement, readiness, lease expiry and the [agent](glossary.md#agent) endpoint into `status`.
 
-The grant Secret volume is optional so the Pod can start before the controller
-has created or renewed the Secret. The home polls the projected directory and
-admits the grant when the JWT appears.
-
-The default grant lease is ten minutes. The controller renews the JWT after
-more than half of the lease has elapsed and writes the renewed token to the
-same Secret.
+To scale out, create another `CapacityGrant`. The controller never decides to add one, and [Clone](glossary.md#clone) never schedules a Pod.
 
 ## Readiness and status
 
-Pod creation and scheduling do not mean the home can serve fibers.
+| Field | Meaning |
+| --- | --- |
+| `status.placed` | The scheduler assigned the Pod to a node |
+| `status.ready` | Mirrors only the `fiberd.io/zygote-ready` gate, not the Pod's `Ready` condition |
+| `status.endpoint` | The agent's control endpoint, from the Pod's primary `podIP` |
+| `status.expiresAt` | The lease expiry of the current signed grant |
+| `status.message` | The latest reconciliation error |
 
-- `status.placed` becomes true after the scheduler assigns the Pod to a node.
-- `status.ready` currently mirrors only the custom
-  `fiberd.io/zygote-ready` condition. The controller does not inspect the
-  ordinary Pod `Ready` condition.
-- `status.endpoint` is the agent's control endpoint. A successful `Clone`
-  returns a separate data endpoint for the selected fiber.
-- `status.expiresAt` shows the current signed grant's lease expiry.
-- `status.message` carries the latest controller reconciliation error.
+- Route on both `status.ready` and the Pod's own `Ready` condition. The Pod has a TCP readiness probe on the agent's port, so Kubernetes marks it Ready only when the probe and the gate both pass.
+- The Pod's liveness probe runs `fiberd-k8s -healthz` in the agent container. It asks the admin socket's `/healthz` and exits non-zero on anything but 200. `/healthz` answers 503 once the [audit](design/audit.md#health) spool is poisoned, and the kubelet restarts the agent within about 30 seconds. A startup probe gives the agent 2 minutes to come up first.
+- A [consumer](glossary.md#consumer) sends the grant's JWT with every `Clone`. It reads the JWT from the grant Secret `<name>-grant`, key `grant.jwt`.
+- The controller renews that Secret in place, so read the JWT again after each renewal.
+- A successful `Clone` returns a separate endpoint for the fiber ([networking.md](networking.md)).
 
-Do not route from `CapacityGrant.status.ready` alone. A production controller
-must also require ordinary Pod readiness, or change the status contract to
-combine both conditions. A workload may still become unavailable later if the
-warm template exits, the Pod restarts, the grant expires, or the home loses
-its scope.
+## Persistence
 
-The Pod also has a TCP readiness probe on the agent's port. Kubernetes marks
-the Pod Ready only when that probe and the custom gate both pass.
-The reference controller does not mirror that combined Pod condition into
-`CapacityGrant.status.ready`.
-
-The current controller writes `status.endpoint` from the Pod's primary
-`status.podIP`. It does not inspect secondary addresses. On a dual-stack Pod,
-verify the endpoint before relying on status for an `inet6` deployment.
-
-## Persistence and fence continuity
-
-The reference controller mounts `/var/lib/fiberd` from `emptyDir`. That path
-contains the epoch, ledger snapshot, audit spool, and local checkpoint state.
-A container restart in the same Pod can retain the volume, but Pod replacement,
-rescheduling, and node loss do not.
-
-When the epoch file is lost, a replacement can start again at epoch 1. Reusing
-the same grant UID can then reproduce an earlier fence sequence. The reference
-example therefore does not provide global stale-fence safety across Pod
-replacement.
-
-A production integration needs storage and identity semantics whose lifetime
-matches the logical home, such as a deliberate PVC or host-local identity plus
-external fencing. If persisted epoch state is unavailable, start with a new
-home audience and grant UID rather than reusing the old fence namespace.
+The grant Pod keeps its state, the [epoch](glossary.md#epoch) included, in `/var/lib/fiberd` on an `emptyDir` ([why that matters](design/kubernetes.md#security-notes-and-known-gaps)). Give that path a lifetime that matches the home's identity, its audience and grant UID, or start a replacement Pod with a new audience and grant UID.
 
 ## CapacityGrant fields
 
-### Grant policy
+| Field | Meaning |
+| --- | --- |
+| `spec.template` | The template digest. `spec.pod.args` must make it resolvable with `-template` |
+| `spec.fibers.max` | Live fibers at once. Set a positive value, since zero means unlimited |
+| `spec.fibers.warm` | Signed, but no home acts on it, so leave it 0 ([grant fields](protocol.md#grant-fields)) |
+| `spec.wBudget` | The [W](glossary.md#w-working-set) ceiling per fiber. Set it, since zero means unlimited |
+| `spec.minTier` | The lowest [tier](glossary.md#tier) the grant accepts. Defaults to `FIBER_BASIC` |
+| `spec.isolation` | `UNTRUSTED` (default) is served only by gVisor or Hyperlight. `TRUSTED` by any runtime. The controller refuses `UNTRUSTED` on proc or runc, the default runtime included, and creates nothing |
+| `spec.lease` | The signed lifetime, renewed at half-life. Defaults to `10m` |
+| `spec.durability` | `best-effort` or `sync` audit records. Sync records are fsynced to the Pod's local spool and nothing ships them |
+| `spec.sessionClass` | The grant's [session class](glossary.md#session-class), signed into its policy |
+| `spec.deviceBudget` | The [device budget](glossary.md#device-budget), when the template is an [engine](glossary.md#engine) |
+| `spec.pod.image` | An image containing `fiberd-k8s` |
+| `spec.pod.runtime` | The agent's [runtime](glossary.md#runtime), which is one backend, `proc` (default), `runc`, `gvisor` or `hyperlight`. `gvisor` needs `-gvisor-rootfs <dir>` in `spec.pod.args`, and the example image ships one at `/usr/share/fiberd/gvisor-rootfs` |
+| `spec.pod.args` | Appended agent flags, such as `-template` and `-parity` |
+| `spec.pod.resources` | The container's requests and limits. The limits are the ceiling on everything in the Pod ([resources.md](resources.md)) |
+| `spec.pod.serviceAccountName` | Defaults to `fiberd-grant` |
+| `spec.pod.endpointFamily` | `inet4` (default) or `inet6`. Fibers of every runtime are reached over the Pod IP ([networking.md](networking.md)) |
+| `spec.pod.nodeSelector`, `spec.pod.nodeName` | Placement |
+| `spec.pod.resourceClaims`, `spec.pod.devices` | The grant's [fabric channel](glossary.md#fabric-channel). The claim belongs to the Pod, not to a fiber |
+| `spec.pod.privileged` | When unset, a proc Pod runs unprivileged with only the capabilities proc needs, and a Pod for any other runtime runs privileged ([the grant Pod](design/kubernetes.md)) |
+| `spec.pod.labels`, `spec.pod.annotations` | Added to the Pod |
+| `spec.pod.unsafeAdmin` | Test-only controls, which need an image built with the test hooks ([agent.md](design/agent.md)). Keep it false |
 
-- `spec.template` is the template digest presented to fiberd. The Pod image or
-  additional agent arguments must make that digest resolvable.
-- `spec.fibers.max` is the maximum number of live fibers. Set a positive value
-  because zero means unlimited in the core.
-- `spec.fibers.warm` is accepted and signed but unused by the current runtime.
-  See the canonical [grant fields](protocol.md#grant-fields).
-- `spec.wBudget` is the private working-set ceiling per fiber. Set it
-  explicitly because zero means unlimited.
-- `spec.minTier` is the minimum runtime capability. The home rejects a grant
-  when the selected backend cannot meet it. It defaults to `FIBER_BASIC`.
-- `spec.lease` controls the signed grant lifetime. It defaults to `10m`.
-- `spec.durability` selects best-effort or synchronous audit semantics. The
-  reference agent has no remote shipper, so synchronous records are fsynced to
-  the Pod's local spool.
-- `spec.sessionClass` is carried into the signed policy.
-- `spec.deviceBudget` sets the per-fiber device-state budget when the template
-  exposes a reporting engine. The current host checks nonzero capacity but
-  does not enforce the requested device class.
+A changed `spec.pod` never reaches a running Pod, so recreate the `CapacityGrant` for a Pod-level change. Renewals reuse the resource UID as the grant UID, so change only the lease in place and create a new resource for anything else ([why](design/core.md#security-notes-and-known-gaps)).
 
-### Grant Pod
-
-- `spec.pod.image` is the image used for the agent container.
-- `spec.pod.runtime` selects `proc`, `runc`, `gvisor`, or `hyperlight`. It
-  defaults to `proc`.
-- `spec.pod.args` appends fiberd flags. Use it to map template digests, select
-  parity policy, or tune pressure settings.
-- `spec.pod.resources` becomes the agent container's requests and limits.
-- `spec.pod.serviceAccountName` selects the Pod ServiceAccount. It defaults to
-  `fiberd-grant`.
-- `spec.pod.endpointFamily` selects `inet4` or `inet6`. It defaults to
-  `inet4`.
-- `spec.pod.nodeSelector` and `spec.pod.nodeName` constrain placement.
-- `spec.pod.resourceClaims` and `spec.pod.devices` describe the grant's device
-  fabric.
-- `spec.pod.privileged` defaults to true because the proc and checkpoint paths
-  need cgroup and CRIU privileges.
-- `spec.pod.labels` and `spec.pod.annotations` are added to the grant Pod.
-- `spec.pod.unsafeAdmin` enables test-only controls and should remain false in
-  normal deployments.
-
-The current controller creates a missing Pod but does not update or recreate
-an existing Pod when `spec.pod` changes. Recreate the `CapacityGrant` when a
-Pod-level field must change. A future production operator would need an
-explicit rollout policy instead.
-
-Grant-policy fields also require care. Renewals reuse the resource UID as the
-grant UID, while the core does not enforce immutable fields for that UID.
-Changing the template, capacity, W budget, tier, device, issuer, audience, or
-policy in place can update ledger authority without rewarming the template or
-rebuilding its resource boundary. Treat those fields as immutable, drain the
-old home, and create a new `CapacityGrant`. Lease renewal is safe only when the
-rest of the signed grant is unchanged.
-
-## Example CapacityGrant
-
-The following example is illustrative. Replace the image, digest, command,
-and resource values with measurements from the workload.
+## Example
 
 ```yaml
 apiVersion: fiberd.io/v1alpha1
@@ -176,171 +96,29 @@ spec:
     max: 10
   wBudget: 64Mi
   minTier: FIBER_CHECKPOINT
+  isolation: TRUSTED   # proc shares the node's kernel
   lease: 10m
   durability: best-effort
   pod:
-    image: registry.example/fiberd-web:1.0.0
+    image: registry.example/fiberd-k8s:dev
     runtime: proc
-    serviceAccountName: fiberd-grant
     endpointFamily: inet4
     args:
       - -template
       - sha256:0123456789abcdef=/app/web-zygote
     resources:
-      requests:
-        cpu: "2"
-        memory: 1Gi
-      limits:
-        cpu: "4"
-        memory: 1536Mi
+      requests: { cpu: "2", memory: 1Gi }
+      limits: { cpu: "4", memory: 1536Mi }
 ```
 
-This resource creates one Pod named `web-grant`. It does not create ten Pods
-or ten containers. The agent can create up to ten live fibers from the one
-warm template inside the Pod.
+This creates one Pod, `web-grant`, whose agent can run up to ten fibers from one [warm](glossary.md#warm) template. `/app/web-zygote` stands for your template, built as [zygote/README.md](../zygote/README.md) shows and added to the image. Replace the image, digest and resource values with measurements from the workload.
 
-## Resource configuration
+## Security checklist
 
-`spec.pod.resources` sets the aggregate Kubernetes scheduling request and Pod
-ceiling. `fibers.max` and `wBudget` apply inside that boundary and do not divide
-its CPU or memory into equal shares. The values in the example are
-illustrative. Use the measurement and sizing process in the
-[resource model](resources.md) before choosing production limits.
-
-Kubernetes uses the requests to place the grant Pod. The kubelet applies the
-container limits to the cgroup that becomes the capacity home. The agent, warm
-template, backend helpers, and every fiber consume resources inside that
-aggregate boundary.
-
-The Pod resources and signed grant answer different questions:
-
-- Pod resources tell Kubernetes what to schedule and enforce in aggregate.
-- `fibers.max` limits concurrent live fibers inside the Pod.
-- `wBudget` limits the private working set of each fiber.
-
-The CRD permits zero for both grant limits, while the protocol interprets zero
-as unlimited at those layers. Set explicit positive values unless the parent
-cgroup, ports, PIDs, and pressure handling are intentionally the only bounds.
-
-## Networking
-
-The agent has a control endpoint, while Clone returns the selected fiber's
-data endpoint. The kind NodePort exists only for host-side acceptance and is
-not created for each grant or fiber.
-
-The Kubernetes home examines `status.podIPs` and selects an address matching
-`spec.pod.endpointFamily`. The default is `inet4`. The home waits up to 90
-seconds for the kubelet to publish a matching address. The controller differs
-from the home here: it writes `CapacityGrant.status.endpoint` from the primary
-`status.podIP` only.
-
-TCP-capable fibers share the selected Pod IP and use distinct ports from the
-configured fiber range. Kubernetes networking applies at the grant-Pod
-boundary:
-
-- A NetworkPolicy selects the grant Pod, not an individual fiber.
-- fiberd does not create a Service, EndpointSlice, or NetworkPolicy per fiber.
-- A router must reach the Pod IP and the configured fiber port range.
-- Routing to a specific fiber requires the endpoint returned by `Clone`.
-
-The [networking model](networking.md) defines endpoint families, port
-allocation, and the direct data path.
-
-## ServiceAccount, scope, and identity
-
-The Kubernetes home uses the grant Pod's ServiceAccount to read scope facts
-and publish readiness. Give it only the required permissions, especially when
-using proc because mount-visible credentials can be available to fibers.
-
-The home records available values for:
-
-- namespace
-- Pod name and Pod UID
-- ServiceAccount name
-- node name
-- ServiceAccount token issuer
-- bound ResourceClaims
-
-Deleting the Pod or namespace, deleting a bound ResourceClaim, or changing
-the ServiceAccount token issuer causes scope loss. The agent advances its
-epoch and releases running fibers, which invalidates their old fences.
-
-The shown RBAC does not fully implement the Namespace part of that contract.
-The home reads the cluster-scoped Namespace resource, but the example grants
-that verb through a namespaced RoleBinding, which cannot authorize
-cluster-scoped resources. Namespace lookup failures are logged, so the shown
-manifests do not reliably detect Namespace termination. A production
-integration must grant narrowly scoped cluster-level read access or use
-another authoritative scope-loss signal.
-
-The proc backend shares the home's mount namespace. A proc fiber can therefore
-open a mounted ServiceAccount token when filesystem permissions allow it.
-runc, gVisor, and Hyperlight do not automatically receive the grant Pod's
-ServiceAccount mount. These fibers still do not receive distinct workload
-identities. Grant authority, fences, scope claims, and backend-specific
-credential exposure are defined in [Identity](identity.md).
-
-## Scaling out
-
-The reference controller reconciles grants but does not decide when to add
-them. Kubernetes scale-out follows this sequence:
-
-1. An external platform component creates another `CapacityGrant`.
-2. The controller creates another grant Pod and signed grant.
-3. Kubernetes schedules the Pod.
-4. fiberd warms its template and publishes readiness.
-5. The platform adds the new control endpoint to Clone routing.
-
-The controller does not implement an autoscaler. Grant Pods are not a
-DaemonSet, and the scheduler may place zero, one, or several on a node under
-ordinary Pod constraints. The
-[runtime model](runtime-model.md#scaling-within-and-beyond-a-home) describes
-the general distinction between local activation and adding a home.
-
-Deleting a `CapacityGrant` allows Kubernetes garbage collection to remove its
-owned Pod and Secret. The reference controller has no finalizer or graceful
-scale-in workflow, so an external platform should drain work before deletion.
-
-## Placement and devices
-
-Use normal Kubernetes scheduling controls for the grant Pod.
-
-- Resource requests participate in scheduling.
-- `nodeSelector` and `nodeName` constrain placement.
-- ResourceClaims describe Pod-level DRA allocation.
-- `devices` tells the warm engine which device paths or identifiers the claim
-  exposed.
-
-The device claim belongs to the grant Pod. fiberd can enforce a logical
-per-fiber `deviceBudget`, but it does not create a Kubernetes ResourceClaim per
-fiber.
-
-## Security boundary
-
-The reference Pod defaults to privileged. This is appropriate for the
-integration test because proc, cgroup delegation, and CRIU need host-facing
-capabilities. It is not a minimal production security profile.
-
-Before adapting the example:
-
-- review whether the selected backend needs privileged mode
-- reduce ServiceAccount permissions to the required namespace and resources
-- apply Pod-level network policy
-- put the plaintext fiberd control endpoint behind authenticated TLS or mTLS
-  and authorize Clone, Park, Release, and Watch
-- treat signed grant JWTs as bearer credentials and keep them out of broadly
-  readable metadata and logs
-- protect the issuer signing-key Secret
-- expose JWKS and discovery through trusted transport
-- disable `unsafeAdmin`
-- place untrusted workloads behind a sandbox boundary rather than proc
-
-The reference issuer serves discovery and JWKS over HTTP inside the example
-cluster. A production issuer should use the platform's authenticated and
-encrypted service path.
-
-For the concrete example files, see
-[`examples/kubernetes`](../examples/kubernetes/README.md). For what runs inside
-the Pod, see the [runtime model](runtime-model.md). For the complete hardening
-checklist and current blockers, see
-[Production readiness](production-readiness.md).
+- The example controller builds every grant Pod with `-insecure-plaintext`. A production controller passes `-tls-cert`, `-tls-key` and `-client-ca` instead, so every call carries a caller identity and grants are bound to it ([security.md](security.md#control-plane)).
+- Treat the grant JWT in the Secret as a bearer token until mTLS binds it. Keep it out of logs and annotations.
+- Serve discovery and the key set over an authenticated path. The example issuer serves plain HTTP inside the cluster.
+- Give the Pod's ServiceAccount only what the ClusterRole and RoleBinding in `30-grant-rbac.yaml` grant, and bind it per tenant namespace.
+- Apply a NetworkPolicy to the grant Pod. It selects the Pod, not a fiber.
+- Review whether the chosen runtime needs a privileged Pod, and protect the issuer's signing-key Secret.
+- Put untrusted workloads on gVisor or Hyperlight, never on proc or runc.

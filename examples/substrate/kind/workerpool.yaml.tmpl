@@ -1,9 +1,10 @@
 # A Substrate WorkerPool whose workers are fiberd homes: the only change
-# from the counter demo's pool is the image. The class stays `gvisor`
-# because Substrate's controller and API know only that class and
-# `microvm` (the enum is hard-coded); atelet fetches the gVisor assets
-# the class implies and hands them to the herder, which does not use
-# them. ${SUBSTRATE_VERSION} is the node label the install stamped.
+# from the counter demo's pool is the image. The class is `gvisor` and
+# the workers run it: every actor is a fiber in its own runsc sandbox,
+# restored from the template's sandbox image, with the worker's own runsc
+# and rootfs. The capabilities Substrate grants the class are the ones
+# this worker needs. ${SUBSTRATE_VERSION} is the node label the install
+# stamped.
 apiVersion: v1
 kind: Namespace
 metadata:

@@ -43,7 +43,8 @@ type FibersClient interface {
 	// Clone resolves a session to attach, resume or create. Every miss
 	// carries a Miss detail: ResourceExhausted for SHED, Unavailable for
 	// DEFERRED_FALLBACK. FailedPrecondition when min_tier exceeds the
-	// home's tier or a parked session needs a tier the home lacks.
+	// home's tier, a parked session needs a tier the home lacks, or an
+	// untrusted grant reaches a home that does not isolate tenants.
 	Clone(ctx context.Context, in *CloneRequest, opts ...grpc.CallOption) (*CloneResponse, error)
 	Park(ctx context.Context, in *ParkRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	Release(ctx context.Context, in *ReleaseRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
@@ -114,7 +115,8 @@ type FibersServer interface {
 	// Clone resolves a session to attach, resume or create. Every miss
 	// carries a Miss detail: ResourceExhausted for SHED, Unavailable for
 	// DEFERRED_FALLBACK. FailedPrecondition when min_tier exceeds the
-	// home's tier or a parked session needs a tier the home lacks.
+	// home's tier, a parked session needs a tier the home lacks, or an
+	// untrusted grant reaches a home that does not isolate tenants.
 	Clone(context.Context, *CloneRequest) (*CloneResponse, error)
 	Park(context.Context, *ParkRequest) (*emptypb.Empty, error)
 	Release(context.Context, *ReleaseRequest) (*emptypb.Empty, error)

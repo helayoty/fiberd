@@ -13,13 +13,9 @@ import (
 
 // Options configure the gVisor backend.
 type Options struct {
-	Runsc         string
-	Rootfs        string
-	StateDir      string
-	Platform      string
-	OverheadBytes uint64
-	NoDirectIO    bool
-	Debug         bool
+	Runsc    string
+	Rootfs   string
+	StateDir string
 }
 
 type unsupported struct{}

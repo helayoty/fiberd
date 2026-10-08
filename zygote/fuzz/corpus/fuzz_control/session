@@ -1,0 +1,6 @@
+HIDE /var/lib/fiberd
+DROP /restore
+RUNDIR /run/fiberd /run/fiberd/grant
+PREPARE mntns
+CLONE grant/1/1 /run/fiberd/grant/ep.sock 500 7b22726561647925f64656c61795f6d73223a20307d pidns,mntns,nocaps,handoff
+EVICT grant/1/1

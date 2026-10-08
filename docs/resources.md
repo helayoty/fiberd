@@ -1,218 +1,32 @@
-# Resource model
+# Resources
 
-fiberd creates fibers inside capacity that has already been admitted. It does
-not create CPU or memory beyond the capacity home that holds the grant. The
-home forms the outer resource boundary around the agent, warm template,
-backend helpers, and every fiber.
+This page says what bounds a [fiber](glossary.md#fiber)'s CPU and memory and how to size a [home](glossary.md#home). It is for operators. Read [architecture.md](architecture.md) first. The [cgroup](glossary.md#cgroup) formulas, hierarchy and out-of-memory (OOM) handling are in [design/resources.md](design/resources.md), and the pressure ladder in [design/core.md](design/core.md).
 
-![A capacity home provides one aggregate CPU and memory boundary. fiberd adds a grant cgroup and one leaf per fiber, while unchanged template pages remain shared on copy-on-write backends](./images/resource-hierarchy.svg)
+![Inherited resource limits with two alternative backend layouts: proc and runc use process leaves under the grant cgroup, sharing unchanged template pages while consuming unequal private W. Hyperlight sandboxes share a grant helper process and report W through the helper rather than per-fiber process cgroups. W budgets are ceilings, not reservations.](./images/resource-hierarchy.svg)
 
-## The capacity home is the outer resource boundary
+## The home is the outer bound
 
-On the Linux host runtime, fiberd operates beneath a capacity-home cgroup and
-delegates a subtree for each grant. Moving the agent and fibers into child
-cgroups does not bypass the limits inherited from the home. The agent, warm
-template, backend helpers, and all running fibers consume the same aggregate
-capacity.
+The environment that owns the home puts the [agent](glossary.md#agent) in a cgroup with limits, such as a Pod's container limits or a Slurm step. fiberd carves its own cgroups beneath it, so every limit it sets is bounded by the home's. The agent, the [warm](glossary.md#warm) [template](glossary.md#template), [backend](glossary.md#backend) helpers and every fiber share that one allocation.
 
-This produces two levels of policy.
+## CPU is shared
 
-- The capacity home controls the total resources available to fiberd.
-- The signed grant controls how fiberd may use those resources.
+fiberd sets no per-fiber CPU limit. Fibers, the template and the agent compete for the home's CPU, so a four-CPU home does not give four CPUs to each fiber. Choose `fibers.max` so the fibers that are runnable at once fit the home's CPU.
 
-If the home limit is lower than a limit fiberd sets inside its subtree, the
-home limit wins because every child remains subject to its ancestors.
+## Memory is shared pages plus W
 
-The environment that owns the home supplies this outer boundary. The
-[Kubernetes guide](operating-kubernetes.md#resource-configuration) explains
-how a grant Pod's container cgroup provides it in the reference integration.
+On proc and runc, a fiber pays only for its [W](glossary.md#w-working-set). The [grant](glossary.md#grant)'s W [budget](glossary.md#budget) caps each fiber's leaf, so a fiber that runs away ends alone. Sandbox backends add a fixed footprint per fiber. The budget is a ceiling, not a reservation. Eight fibers with a 64 MiB budget do not reserve 512 MiB, but the home must be able to hold them if they all reach it.
 
-## CPU is shared across the capacity home
+On proc and runc the grant's cgroup starts to throttle at `1.25 × (fibers.max × W budget + the template's footprint)` ([design/resources.md](design/resources.md) has the sandbox variant), and the [pressure ladder](design/core.md) acts on memory pressure before that hard stop. A [Clone](glossary.md#clone) refused for pressure is [shed](glossary.md#shed-and-deferred), never sent to another home.
 
-The home's CPU controls apply to the aggregate workload. fiberd does not
-currently configure a per-fiber `cpu.max`, CPU request, CPU weight, or
-exclusive CPU set.
+## What controls the fiber count
 
-As a result, running fibers, the warm template, and the agent compete within
-the home's CPU allocation. A four-CPU home does not give four CPUs to every
-fiber, and it does not divide those CPUs equally. The host enforces the
-aggregate limit while runnable processes compete for time.
+`fibers.max` counts live fibers, so [parked](glossary.md#park) [sessions](glossary.md#session) hold no slot. Set it and the W budget, since zero means unlimited ([grant fields](protocol.md#grant-fields)).
 
-Size the home's CPU capacity from expected concurrency and workload cost.
-Choose `fibers.max` so the number of simultaneously runnable fibers does not
-create unacceptable contention for that shared CPU pool.
+## Sizing a home
 
-## Memory is shared pages plus private working sets
+1. Measure the warm template's resident footprint.
+2. Measure a fiber's W after representative requests, and set `wBudget` above it.
+3. Choose `fibers.max` from the concurrency the home should serve and the CPU it has.
+4. Give the home the template, `fibers.max` working sets, backend and agent overhead, and headroom. Provision for every fiber at its budget if that must never shed, and for less if the pressure ladder may park and shed under contention.
 
-The memory used by a fiber has more than one part.
-
-- The **warm-template footprint** is the initialized code and data held by the
-  zygote or warm snapshot.
-- The **working set W** is the memory a fiber dirties or otherwise owns after
-  creation.
-- Some backends add a **fixed sandbox footprint** for a sentry, helper, or
-  micro-VM.
-
-On the proc and runc backends, fibers initially map the zygote's pages through
-copy-on-write. Unchanged pages remain shared and are not copied for every
-fiber. A page becomes private only when a fiber writes to it.
-
-This means home memory is not split into equal shares. The signed grant gives
-each fiber its own `w_budget_bytes` allowance, but that allowance is a ceiling,
-not a reservation. One fiber may use very little while another approaches the
-full budget. They still share the same capacity-home and grant-level
-boundaries.
-
-For example, eight fibers with a 64 MiB W budget do not immediately consume or
-reserve 512 MiB. Their actual charge depends on the pages they dirty. However,
-the operator must provision the home for the possibility that many fibers
-approach their budgets at the same time.
-
-## The cgroup hierarchy
-
-The Linux host runtime creates the following hierarchy beneath the home.
-
-```text
-capacity home cgroup            aggregate CPU and memory limits
-├── agent/                      fiberd process
-└── fiberd/
-    └── <grant UID>/            grant memory.high and memory.max
-        ├── zygote/             warm-template footprint
-        ├── f-<epoch>-<seq>/    one running fiber
-        ├── f-<epoch>-<seq>/    another running fiber
-        └── ...
-```
-
-For the default ceiling calculation, fiberd first computes a per-fiber leaf
-allowance `L`. On proc and runc, `L` is the grant's W budget. Backends with a
-fixed sandbox footprint use a larger leaf allowance so the sandbox itself does
-not consume the workload's W budget.
-
-The default grant limits are based on these values.
-
-```text
-block = warm-template footprint + fibers.max × L
-memory.high = block + 25%
-memory.max = memory.high + L
-```
-
-`memory.high` causes reclaim and stalls, which appear as memory pressure. The
-pressure controller reacts before the hard limit where possible.
-`memory.max` remains the grant's final cgroup stop. The `-grant-ceiling` flag
-can replace the default `memory.high` calculation for a deployment.
-
-The home's own `memory.max` still surrounds this hierarchy and may be lower
-than the grant limit.
-
-## What happens when a fiber exceeds its budget
-
-Every running fiber has its own cgroup leaf.
-
-On proc and runc, fiberd sets the leaf's `memory.max` to the W budget and sets
-`memory.oom.group=1`. It also disables swap for the leaf. If the fiber crosses
-the limit, the kernel kills the processes in that leaf as one unit.
-
-Backends with a fixed footprint need more room in the leaf for the sandbox.
-fiberd gives those leaves a larger gross `memory.max`, samples the workload's W
-counter, and kills the fiber when W exceeds the signed budget. Sampling occurs
-every 25 milliseconds in the current implementation.
-
-Both paths produce the same protocol-visible result.
-
-- the exit is classified and audited as `oom`.
-- only that fiber is removed.
-- its endpoint and runtime state are cleaned up.
-- its live slot returns to the grant.
-
-A fiber can also run out of memory while it is being created. The runtime
-registers the child before waiting for backend readiness so it can observe a
-racing exit and return the reserved slot instead of leaking capacity.
-
-The per-fiber limit reduces the blast radius, but it cannot guarantee that the
-home never reaches its parent limit. A sudden aggregate spike can still
-trigger parent enforcement before the pressure controller reclaims enough
-memory.
-
-## Pressure handling at grant level
-
-fiberd reads memory PSI from the grant cgroup. PSI measures the share of time
-tasks are stalled by memory pressure rather than only counting allocated
-bytes. The current default watermarks are 10 percent for shedding and 25
-percent for reclaim.
-
-The controller applies the following order.
-
-1. **Shed** new creates and resumes while allowing an existing session to
-   attach.
-2. **Reclaim** the running fiber with the largest W. A named session is parked
-   when possible, while an anonymous fiber is released.
-3. **Yield** the grant after pressure remains above the park watermark for
-   three checks and no fiber remains to reclaim.
-
-Device occupancy can feed the same ladder when the backend reports it. The
-higher of memory pressure and device pressure drives the response.
-
-Runtime cleanup is currently best effort during pressure-driven Yield. A
-failed release can be logged while ledger ownership is removed, so operators
-must monitor for orphaned backend work. See
-[Production readiness](production-readiness.md#cleanup-and-state-lifecycle).
-
-![The higher of memory PSI and reported device occupancy drives one ladder. fiberd sheds new creates and resumes, then reclaims the largest-W fiber by parking a named session or releasing an anonymous one. After three persistent checks with no victim, it yields the grant.](images/pressure-ladder.svg)
-
-## What controls fiber count
-
-The protocol calls the count fields `FiberLimits`.
-
-- `fibers.max` limits the number of live fibers in a grant. Parked sessions do
-  not occupy a live slot.
-- `fibers.warm` is signed with the grant but is not consumed by the current
-  runtime. It does not create a warm fiber pool. The
-  [protocol reference](protocol.md#grant-fields) defines this wire field.
-
-The ledger enforces `fibers.max` before calling the backend. A positive value
-is a hard live-count limit. The protocol defines zero as unlimited at this
-layer. Operators should therefore set an explicit positive maximum unless
-they intentionally want resource pressure, ports, PIDs, and the parent cgroup
-to become the only bounds.
-
-The protocol also defines a zero `wBudget` as unlimited. Operators should set
-an explicit working-set budget when they need per-fiber memory isolation and
-bounded checkpoint mobility.
-
-## Sizing a capacity home
-
-Size a home from measured workload behavior rather than dividing its memory
-limit by a desired instance count.
-
-1. Measure the initialized template's resident footprint.
-2. Measure the fiber working set after representative requests.
-3. Set `wBudget` above the working set the platform intends to support.
-4. Choose `fibers.max` from expected concurrency, shared CPU capacity, memory
-   demand, and acceptable overcommit.
-5. Give the home enough memory for the template, expected simultaneous working
-   sets, backend overhead, agent overhead, and operational headroom.
-6. Give the home enough CPU for the aggregate throughput the grant should
-   provide.
-
-If every fiber must be able to reach its W budget simultaneously, provision
-for that worst case. If the platform deliberately overcommits, configure
-enough operational headroom and expect the pressure ladder to shed and reclaim
-under contention.
-
-`device_budget` is separate from CPU and host memory. It limits each fiber's
-logical share of grant-wide device state, such as KV cache, when the template
-provides a compatible engine.
-
-## Environment mapping
-
-The environment that owns a home supplies its aggregate resource boundary.
-The signed grant then controls how fiberd may use capacity inside that
-boundary. See [Kubernetes operations](operating-kubernetes.md#resource-configuration)
-for the mapping from Pod requests and limits to a Kubernetes capacity home.
-
-For how these limits travel in the signed artifact, see the
-[grant protocol](protocol.md). For the instance and backend boundaries, see
-the [runtime model](runtime-model.md). For endpoint boundaries, see
-[networking](networking.md). For grant and workload identity, see
-[identity](identity.md). For operational safeguards and known limitations, see
-[Production readiness](production-readiness.md).
+A grant's [device budget](glossary.md#device-budget) is separate from CPU and memory, and applies only when its template is an [engine](glossary.md#engine). The device seam is in [design/runtime-host.md](design/runtime-host.md).

@@ -75,7 +75,6 @@ type Activator struct {
 	cfg    Config
 	client *consumer.Client
 	revs   map[string]*revision
-	mu     sync.Mutex
 }
 
 func New(client *consumer.Client, cfg Config) (*Activator, error) {
@@ -96,6 +95,12 @@ func New(client *consumer.Client, cfg Config) (*Activator, error) {
 		if r.Mode == "" {
 			r.Mode = "line"
 		}
+		if r.Mode != "line" && r.Mode != "http" {
+			return nil, fmt.Errorf("activator: revision %s: mode %q is not line or http", r.Name, r.Mode)
+		}
+		if _, dup := a.revs[r.Name]; dup {
+			return nil, fmt.Errorf("activator: revision %q twice", r.Name)
+		}
 		rv := &revision{Revision: r}
 		for i := 0; i < r.Concurrency; i++ {
 			rv.slots = append(rv.slots, &slot{session: fmt.Sprintf("%s-%d", r.Name, i)})
@@ -114,7 +119,9 @@ func (a *Activator) Run(ctx context.Context) {
 		<-ctx.Done()
 		return
 	}
-	t := time.NewTicker(a.cfg.Idle / 4)
+	// The tick is at least a millisecond. A shorter one gains nothing, and
+	// an idle under 4ns would make a zero tick, which panics.
+	t := time.NewTicker(max(a.cfg.Idle/4, time.Millisecond))
 	defer t.Stop()
 	for {
 		select {
@@ -178,25 +185,27 @@ func (a *Activator) route(r *http.Request) (*revision, string) {
 // pick chooses the slot for a request: the least busy slot that already
 // serves a fiber, unless every serving slot is busy and an empty one is
 // free, in which case the empty one (a second fiber is cloned only when
-// the first cannot take the request).
+// the first cannot take the request). Each slot's state is read only under
+// its own lock. No lock spans the revisions, so a slot held through a slow
+// Clone or Park delays only the requests that wait on it.
 func (a *Activator) pick(rv *revision) *slot {
-	a.mu.Lock()
-	defer a.mu.Unlock()
 	var serving, empty *slot
+	busy := 0 // serving's inUse when it was read
 	for _, s := range rv.slots {
 		s.mu.Lock()
+		has, n := s.fiber != nil, s.inUse
+		s.mu.Unlock()
 		switch {
-		case s.fiber != nil && (serving == nil || s.inUse < serving.inUse):
-			serving = s
-		case s.fiber == nil && empty == nil:
+		case has && (serving == nil || n < busy):
+			serving, busy = s, n
+		case !has && empty == nil:
 			empty = s
 		}
-		s.mu.Unlock()
 	}
 	switch {
 	case serving == nil:
 		return empty
-	case serving.inUse > 0 && empty != nil:
+	case busy > 0 && empty != nil:
 		return empty
 	default:
 		return serving
@@ -326,6 +335,12 @@ func (a *Activator) proxyLine(w http.ResponseWriter, r *http.Request, f consumer
 // endpoint.
 func (a *Activator) proxyHTTP(w http.ResponseWriter, r *http.Request, f consumer.Fiber, path string) bool {
 	gone := false
+	// Each request gets its own transport, so it must not keep the
+	// connection. An idle one would hold a socket and two goroutines for good.
+	tr := &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) { return a.cfg.Dial(ctx, f.Endpoint) },
+	}
+	defer tr.CloseIdleConnections()
 	rp := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.Out.URL.Scheme = "http"
@@ -336,9 +351,7 @@ func (a *Activator) proxyHTTP(w http.ResponseWriter, r *http.Request, f consumer
 			}
 			pr.Out.Host = r.Host
 		},
-		Transport: &http.Transport{
-			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) { return a.cfg.Dial(ctx, f.Endpoint) },
-		},
+		Transport: tr,
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
 			gone = true
 			http.Error(w, "fiber: "+err.Error(), http.StatusBadGateway)

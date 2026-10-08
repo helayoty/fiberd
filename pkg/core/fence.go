@@ -113,9 +113,5 @@ func (s *EpochStore) read() (uint64, error) {
 }
 
 func (s *EpochStore) write(v uint64) error {
-	tmp := s.path + ".tmp"
-	if err := os.WriteFile(tmp, []byte(strconv.FormatUint(v, 10)), 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, s.path)
+	return writeFileAtomic(s.path, []byte(strconv.FormatUint(v, 10)), 0o600)
 }

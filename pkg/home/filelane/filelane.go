@@ -59,7 +59,7 @@ func scan(ctx context.Context, dir string, seen map[string]fileState, ch chan<- 
 	names := make([]string, 0, len(entries))
 	for _, e := range entries {
 		// A projected volume lists its files as symlinks into ..data; a
-		// plain directory as files. Both stat through.
+		// plain directory as files. Both stat through to a regular file.
 		if filepath.Ext(e.Name()) == ".jwt" {
 			names = append(names, e.Name())
 		}
@@ -68,8 +68,8 @@ func scan(ctx context.Context, dir string, seen map[string]fileState, ch chan<- 
 	for _, name := range names {
 		path := filepath.Join(dir, name)
 		info, err := os.Stat(path)
-		if err != nil || info.IsDir() {
-			continue
+		if err != nil || !info.Mode().IsRegular() {
+			continue // reading a FIFO or a device could block the lane
 		}
 		present[name] = true
 		if st, ok := seen[name]; ok && st.mod.Equal(info.ModTime()) && st.size == info.Size() {

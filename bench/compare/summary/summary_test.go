@@ -1,0 +1,158 @@
+package summary
+
+import (
+	"bytes"
+	"strings"
+	"testing"
+
+	"github.com/helayoty/fiberd/bench/compare"
+)
+
+func act(run, burst int, ms float64, err string) compare.Record {
+	return compare.Record{Kind: "activation", System: "s", Class: "c", Run: run, Cold: run == 0, Burst: burst, TFirstByteMs: ms, Error: err, PollMs: 1}
+}
+
+func TestTable(t *testing.T) {
+	cases := []struct {
+		name     string
+		recs     []compare.Record
+		wantRows int
+		wantP50  float64
+		wantP99  float64
+		wantErr  int
+		wantSamp int
+		wantRuns int
+		wantSide func(t *testing.T, s Side)
+	}{
+		{
+			name: "cold run discarded, medians over runs of each run's quantile",
+			recs: []compare.Record{
+				act(0, 1, 900, ""),                                      // cold, ignored
+				act(1, 1, 10, ""), act(1, 1, 20, ""), act(1, 1, 30, ""), // p50 20, p99 30
+				act(2, 1, 100, ""), act(2, 1, 200, ""), act(2, 1, 300, ""), // p50 200, p99 300
+				act(3, 1, 1, ""), act(3, 1, 2, ""), act(3, 1, 3, ""), // p50 2, p99 3
+			},
+			wantRows: 1, wantP50: 20, wantP99: 30, wantSamp: 9, wantRuns: 3,
+		},
+		{
+			name:     "errors counted apart, cold errors included",
+			recs:     []compare.Record{act(0, 1, 0, "boom"), act(1, 1, 5, ""), act(1, 1, 0, "boom")},
+			wantRows: 1, wantP50: 5, wantP99: 5, wantErr: 2, wantSamp: 1, wantRuns: 1,
+		},
+		{
+			name:     "a burst that only failed still has a row",
+			recs:     []compare.Record{act(1, 10, 0, "boom"), act(2, 10, 0, "boom")},
+			wantRows: 1, wantErr: 2,
+		},
+		{
+			name: "side information",
+			recs: []compare.Record{
+				{Kind: "setup", System: "s", Class: "c", SetupMs: 1500},
+				{Kind: "run", System: "s", Class: "c", Run: 0, Cold: true, LoadBefore: "9 9 9", LoadAfter: "8 8 8", Deltas: map[string]float64{"w": 99}},
+				{Kind: "run", System: "s", Class: "c", Run: 1, LoadBefore: "2 2 2", LoadAfter: "3 3 3", Deltas: map[string]float64{"w": 4}},
+				{Kind: "run", System: "s", Class: "c", Run: 2, LoadAfter: "4 4 4", Deltas: map[string]float64{"w": 6}},
+				{Kind: "resume", System: "s", Class: "c", Run: 1, TFirstByteMs: 12},
+				{Kind: "resume", System: "s", Class: "c", Run: 2, TFirstByteMs: 14},
+				{Kind: "density", System: "s", Class: "c", Run: 1, N: 4, Bytes: 4 << 20, Standing: 8 << 20},
+				act(1, 1, 1, ""),
+			},
+			wantRows: 1, wantP50: 1, wantP99: 1, wantSamp: 1, wantRuns: 1,
+			wantSide: func(t *testing.T, s Side) {
+				if s.SetupMs != 1500 || s.LoadFirst != "9 9 9" || s.LoadLast != "4 4 4" {
+					t.Errorf("setup/load %+v", s)
+				}
+				if s.Deltas["w"] != 5 {
+					t.Errorf("delta median %v, want 5 (cold run excluded)", s.Deltas["w"])
+				}
+				if s.ResumeMs != 13 {
+					t.Errorf("resume %v, want 13", s.ResumeMs)
+				}
+				if s.DensityN != 4 || s.Marginal != 1<<20 || s.Amortized != 3<<20 {
+					t.Errorf("density %+v", s)
+				}
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rows, sides := Table(tc.recs)
+			if len(rows) != tc.wantRows {
+				t.Fatalf("rows %d, want %d: %+v", len(rows), tc.wantRows, rows)
+			}
+			r := rows[0]
+			if r.P50 != tc.wantP50 || r.P99 != tc.wantP99 || r.Errors != tc.wantErr || r.Samples != tc.wantSamp || r.Runs != tc.wantRuns {
+				t.Errorf("row %+v", r)
+			}
+			if tc.wantSide != nil {
+				if len(sides) != 1 {
+					t.Fatalf("sides %+v", sides)
+				}
+				tc.wantSide(t, sides[0])
+			}
+			var out bytes.Buffer
+			Print(&out, rows, sides)
+			if !strings.Contains(out.String(), "p50 ms") {
+				t.Error("Print wrote no header")
+			}
+		})
+	}
+}
+
+func TestQuantileMedian(t *testing.T) {
+	cases := []struct {
+		name   string
+		xs     []float64
+		q      float64
+		wantQ  float64
+		wantMd float64
+	}{
+		{name: "empty", wantQ: 0, wantMd: 0},
+		{name: "one", xs: []float64{7}, q: 0.99, wantQ: 7, wantMd: 7},
+		{name: "odd count p50 is the middle", xs: []float64{3, 1, 2}, q: 0.5, wantQ: 2, wantMd: 2},
+		{name: "even count median averages", xs: []float64{4, 1, 3, 2}, q: 0.5, wantQ: 2, wantMd: 2.5},
+		{name: "p99 of 100 is the 99th", xs: seq(100), q: 0.99, wantQ: 99, wantMd: 50.5},
+		{name: "p99 of 10 is the last", xs: seq(10), q: 0.99, wantQ: 10, wantMd: 5.5},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := Quantile(tc.xs, tc.q); got != tc.wantQ {
+				t.Errorf("quantile %v, want %v", got, tc.wantQ)
+			}
+			if got := Median(tc.xs); got != tc.wantMd {
+				t.Errorf("median %v, want %v", got, tc.wantMd)
+			}
+		})
+	}
+}
+
+func seq(n int) []float64 {
+	xs := make([]float64, n)
+	for i := range xs {
+		xs[i] = float64(i + 1)
+	}
+	return xs
+}
+
+func TestRead(t *testing.T) {
+	cases := []struct {
+		name    string
+		in      string
+		want    int
+		wantErr bool
+	}{
+		{name: "lines and blanks", in: "{\"kind\":\"setup\"}\n\n{\"kind\":\"run\"}\n", want: 2},
+		{name: "truncated line is an error", in: "{\"kind\":\"setup\"}\n{\"kind\":", wantErr: true},
+		{name: "empty", in: "", want: 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			recs, err := Read(strings.NewReader(tc.in))
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err %v, want error %v", err, tc.wantErr)
+			}
+			if len(recs) != tc.want {
+				t.Errorf("records %d, want %d", len(recs), tc.want)
+			}
+		})
+	}
+}

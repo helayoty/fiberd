@@ -95,16 +95,51 @@ func (d Dir) SetCeiling(high, max uint64) error {
 	return nil
 }
 
-// MemoryHigh reads the throttle ceiling; 0 when "max".
-func (d Dir) MemoryHigh() (uint64, error) {
-	s, err := d.read("memory.high")
+// SetMemoryMin protects b bytes of the group from reclaim. The kernel
+// caps it at the parent's effective memory.min, so a protection only
+// holds when every ancestor up to the delegation root carries one too.
+func (d Dir) SetMemoryMin(b uint64) error {
+	if err := d.write("memory.min", strconv.FormatUint(b, 10)); err != nil {
+		return fmt.Errorf("cgroup: memory.min on %s: %w", d.Path, err)
+	}
+	return nil
+}
+
+// SetPidsMax caps the tasks in the group and its descendants. 0 leaves
+// it unlimited. A group whose parent offers no pids controller (a Slurm
+// step) has no pids.max and is left alone.
+func (d Dir) SetPidsMax(n uint64) error {
+	if n == 0 {
+		return nil
+	}
+	if _, err := os.Stat(d.file("pids.max")); errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err := d.write("pids.max", strconv.FormatUint(n, 10)); err != nil {
+		return fmt.Errorf("cgroup: pids.max on %s: %w", d.Path, err)
+	}
+	return nil
+}
+
+// PidsMaxHits counts forks refused because this group was at pids.max
+// (pids.events max). It is 0 without a pids controller.
+func (d Dir) PidsMaxHits() (uint64, error) {
+	f, err := os.Open(d.file("pids.events"))
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	}
 	if err != nil {
 		return 0, err
 	}
-	if s == "max" {
-		return 0, nil
+	defer func() { _ = f.Close() }()
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		fields := strings.Fields(sc.Text())
+		if len(fields) == 2 && fields[0] == "max" {
+			return strconv.ParseUint(fields[1], 10, 64)
+		}
 	}
-	return strconv.ParseUint(s, 10, 64)
+	return 0, sc.Err()
 }
 
 // Open returns a directory descriptor suitable for clone3's cgroup field.

@@ -51,13 +51,19 @@ const (
 // parity fields gate cross-host resume: a delta over these pages only
 // restores where the kernel and libc match.
 type Config struct {
-	Args         []string  `json:"args"`
-	Arch         string    `json:"arch"`
-	Kernel       string    `json:"kernel"`
-	Libc         string    `json:"libc"`
-	ZygoteSHA256 string    `json:"zygote_sha256"`
-	HasImages    bool      `json:"has_images"`
-	BuiltAt      time.Time `json:"built_at"`
+	Args         []string `json:"args"`
+	Arch         string   `json:"arch"`
+	Kernel       string   `json:"kernel"`
+	Libc         string   `json:"libc"`
+	ZygoteSHA256 string   `json:"zygote_sha256"`
+	// Linking is LinkStatic or LinkDynamic (linking.go). A home whose
+	// backend runs the template inside a root filesystem of its own
+	// refuses a dynamic one, since it cannot tell whether that
+	// filesystem holds the libc. Empty in a config written before the
+	// fact was recorded, which counts as dynamic.
+	Linking   string    `json:"linking,omitempty"`
+	HasImages bool      `json:"has_images"`
+	BuiltAt   time.Time `json:"built_at"`
 	// Digest is the manifest digest. It is never stored in config.json
 	// (it is a layer); Pull fills it from the transfer, and ReadDigest
 	// reads the DIGEST side file Pack and Pull write.
@@ -264,6 +270,66 @@ func Pull(ctx context.Context, ref, dst string, plainHTTP bool) (Config, error) 
 	return cfg, nil
 }
 
+// Reverify re-checks a template cache entry a previous Pull left. The
+// directory must still pack to digest and its zygote still hash to its
+// config. It then replaces images/ with a fresh unpack of the verified
+// images.tar. Without this, anything that can write the cache could change
+// what every later warm runs.
+func Reverify(ctx context.Context, dir, digest string) (Config, error) {
+	dir, err := filepath.Abs(dir)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg, err := ReadConfig(dir)
+	if err != nil {
+		return Config{}, err
+	}
+	fs, err := file.New(dir)
+	if err != nil {
+		return Config{}, err
+	}
+	desc, err := pack(ctx, fs, dir, cfg)
+	_ = fs.Close()
+	if err != nil {
+		return Config{}, err
+	}
+	if got := desc.Digest.String(); got != digest {
+		return Config{}, fmt.Errorf("artifact: cached %s packs to %s", digest, got)
+	}
+	sum, err := fileSHA256(ZygotePath(dir))
+	if err != nil {
+		return Config{}, err
+	}
+	if sum != cfg.ZygoteSHA256 {
+		return Config{}, fmt.Errorf("artifact: cached zygote sha256 %s does not match config %s", sum, cfg.ZygoteSHA256)
+	}
+	if err := os.Chmod(ZygotePath(dir), 0o755); err != nil {
+		return Config{}, err
+	}
+	if cfg.HasImages {
+		// Unpack beside, then swap. A parent already mapped from the old
+		// files keeps them until it is closed.
+		fresh := ImagesDir(dir) + ".verified"
+		_ = os.RemoveAll(fresh)
+		if err := untar(filepath.Join(dir, fileImages), fresh); err != nil {
+			_ = os.RemoveAll(fresh)
+			return Config{}, err
+		}
+		old := ImagesDir(dir) + ".old"
+		_ = os.RemoveAll(old)
+		if err := os.Rename(ImagesDir(dir), old); err != nil && !errors.Is(err, os.ErrNotExist) {
+			_ = os.RemoveAll(fresh)
+			return Config{}, err
+		}
+		if err := os.Rename(fresh, ImagesDir(dir)); err != nil {
+			return Config{}, err
+		}
+		_ = os.RemoveAll(old)
+	}
+	cfg.Digest = digest
+	return cfg, nil
+}
+
 func repository(ref string, plainHTTP bool) (*remote.Repository, string, error) {
 	name, target := ref, ""
 	if i := strings.Index(ref, "@"); i >= 0 {
@@ -315,7 +381,9 @@ func tarDir(src, dst string) error {
 		return err
 	}
 	for _, e := range entries {
-		if e.IsDir() {
+		// Regular files only, as untar unpacks. A symlink would fail the
+		// copy and a FIFO would block it.
+		if !e.Type().IsRegular() {
 			continue
 		}
 		info, err := e.Info()

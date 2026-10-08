@@ -1,98 +1,30 @@
-# fiberd under Agent Substrate: a sandbox class whose actors are fibers
+# fiberd under Agent Substrate
 
-This directory is an example of a **consumer** of fiberd's protocol, not
-part of fiberd. It is its own Go module and builds against the checkout
-it sits in. It plugs fiberd into [Agent Substrate](https://github.com/agent-substrate/substrate)
-as a worker image, so Substrate's control plane creates, suspends and
-resumes actors that are fibers.
+This example is a worker image for [Agent Substrate](https://github.com/agent-substrate/substrate) whose actors are [fibers](../../docs/glossary.md#fiber), each one a gVisor sandbox. Substrate's control plane creates, suspends and resumes them, unchanged. It is for anyone who wants Substrate actors that are fibers. It is a consumer of fiberd's protocol, in its own Go module, and is not imported by fiberd.
 
-![Substrate routes through mTLS ingress to a worker herder backed by fiberd, while actor state is parked, exported, imported, and resumed between workers that share the admitted template contract.](../../docs/images/example-substrate.svg)
+![Atelet lifecycle control is separate from router workload traffic. Suspend exports parked state as files for Substrate to transport; the destination imports a publication into its local registry, then Clone claims it and resumes the actor.](../../docs/images/example-substrate.svg)
 
-## Why fibers fit
+## What it proves
 
-Substrate starts, suspends, restores, and terminates actors. The example maps
-those operations to Clone, Park with delta export, delta import followed by
-Clone, and Release. The worker keeps one admitted template warm, so actor
-state can be separated from reusable parent state.
+Substrate installs into a cluster of its own, made with kind (Kubernetes in Docker, which runs a test cluster on one machine). It has a pool of two fiberd workers declared as its `gvisor` class, which is what they run. An actor driven through Substrate's router shows four things.
 
-The lifecycle and resource behavior are documented in
-[Runtime model](../../docs/runtime-model.md) and
-[Resources](../../docs/resources.md). Backend comparisons and the
-Substrate-shaped worker measurement are centralized in
-[Benchmarks](../../docs/benchmarks.md#run-a-backend-lifecycle-comparison) and
-[Run E](../../docs/benchmarks.md#run-e-substrate-shaped-worker-lifecycle).
+- The first request resumes a new actor from the [template](../../docs/glossary.md#template)'s golden snapshot, which Substrate took of the template's first actor, onto a free worker.
+- Three POST requests raise the actor's counter to 3.
+- `kubectl ate suspend` [parks](../../docs/glossary.md#park) the actor, a checkpoint of its whole sandbox, and exports it.
+- The next request resumes it on whichever worker is free, with the count intact.
 
-## How it fits
+This example runs the [agent](../../docs/glossary.md#agent) with `-insecure-plaintext`, on the worker's loopback.
 
-Substrate gives everything outside the worker Pod: the control plane,
-scheduling, request parking, the router, snapshot upload and download,
-Pod certificates. What it asks of a sandbox class is the worker image,
-and that image must bring three things; their `ateom-gvisor` and
-`ateom-microvm` bring the same three.
+## Run it
 
-| Substrate asks the worker image for | this example's answer |
-|---|---|
-| a gRPC server on the shared socket speaking `Ateom` (run, checkpoint, restore, terminate, stats), driven by atelet | `herder/`: RunWorkload is `Clone(actor uid)` (a fresh session), CheckpointWorkload is `Park(sync)` then `host.ExportDelta` (the session leaves as files atelet ships), RestoreWorkload is `host.ImportDelta` then `Clone(uid)` (kind RESUME), TerminateWorkload is `Release(discard)`, the stats calls read `Watch`; misses map to the codes their router parks on |
-| the worker side of the router's tunnel: mTLS on :443, the actor named by the `ate-target-actor` header | `ingress/`: verifies the router's SPIFFE identity, proxies to the fiber's endpoint; 421 with `X-Ate-Assignment-Stale` when the actor is not here, as their `atunnel` does |
-| the sandbox runtime | fiberd's agent, embedded (`pkg/agent`), with `home/`: the worker's own issuer minting one grant per ActorTemplate sized by the actor's memory limit, liveness from atelet's socket, readiness once the template is warm |
-
-The `Ateom` service is copied from Substrate's `internal/proto`
-(Apache-2.0, unchanged but for the Go package) and generated with buf;
-the wire contract is the package name, the service and the field
-numbers, so an unmodified atelet drives this herder.
-
-Two facts about Substrate shape the first phase. Its sandbox class list
-(`gvisor`, `microvm`) is hard-coded in the CRD, the API and the
-controller, so a fiberd pool declares `sandboxClass: gvisor` and only
-the image differs; atelet fetches gVisor assets the herder never uses.
-And its Worker record holds one actor at a time, so this herder runs one
-actor per worker; the gain is in the start, the delta and the resume.
-Many actors per worker is the second phase, which needs a class
-registry (a TODO in their controller) and a worker capacity above one,
-proposed upstream first, as their integration policy asks.
-
-The workload in this phase is fiberd's reference zygote in HTTP mode
-(`refzygote --http`), named by the image's `ATEOM_FIBERD_TEMPLATE`
-(`"<atespace>/<name>=<command>"` per ActorTemplate, or `default`). The
-ActorTemplate's container image is pulled and prepared by atelet but not
-run: a Substrate image is not a zygote. Its readiness probe and memory
-limit are honoured.
-
-## Running it
-
-Unit tests need nothing; the whole-worker test needs the dev container:
+Run it from the repository root. It needs Docker, kubectl, Go and jq, and takes about ten minutes the first time.
 
 ```bash
-cd examples/substrate && go test ./...
-make linux-test                      # includes herder's TestActorLifecycleAcrossWorkers
+make example-substrate
 ```
 
-The end-to-end run installs Substrate itself into a kind cluster of its
-own (their scripts, at the pinned commit), builds the worker image from
-fiberd's dev image, applies a WorkerPool of two fiberd workers and an
-ActorTemplate, then drives an actor through Substrate's router:
+The latest result is in [benchmarks](../../docs/benchmarks.md).
 
-```bash
-make example-substrate               # docker, kubectl, go, jq; ten minutes the first time
-```
+## Design
 
-It prints each request's latency: the first request resumes the actor
-from the template's golden snapshot onto a free worker, three POSTs
-count to three, `kubectl ate suspend` checkpoints it (a park, an export,
-the upload), and the next request resumes it on whichever worker is free
-with the count intact. `examples/substrate/kind/run.sh down` deletes
-the cluster.
-
-## What this is not
-
-It is not a fork of Substrate and changes nothing in it. The point is
-the shape: a worker image that answers Substrate's contract with
-fiberd's four verbs, so a Substrate cluster gets clone-not-boot, W-sized
-suspends, and resumable state without a change to its control plane. A
-Substrate that registered sandbox classes and let a worker hold more
-than one actor would get the density column too.
-
-The example inherits fiberd's current control-plane, cleanup, persistence, and
-mobility-claim limitations. Review
-[Production readiness](../../docs/production-readiness.md) before treating the
-mapping as a deployment design.
+How Substrate's calls, the sandboxes, the ingress and the shared delta keys work is in [the Substrate design](../../docs/design/substrate.md).

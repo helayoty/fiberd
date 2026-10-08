@@ -1,4 +1,4 @@
-//! The reference workload (hack/zygote/refzygote.c) as a Hyperlight guest.
+//! The reference workload (zygote/refzygote.c) as a Hyperlight guest.
 //!
 //! The helper (hack/hyperlight/helper) calls `Init` once in the warm
 //! sandbox and snapshots it; every fiber is a sandbox restored from that

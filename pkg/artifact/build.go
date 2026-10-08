@@ -49,7 +49,7 @@ func Build(ctx context.Context, o BuildOptions) (string, error) {
 	}
 	arch, kernel, libc := HostInfo()
 	cfg := Config{Args: o.Args, Arch: arch, Kernel: kernel, Libc: libc, ZygoteSHA256: sum,
-		BuiltAt: time.Now().UTC().Truncate(time.Second)}
+		Linking: Linking(ZygotePath(o.Out)), BuiltAt: time.Now().UTC().Truncate(time.Second)}
 
 	if !o.SkipImages {
 		if err := checkpointZygote(ctx, o, filepath.Join(o.Out, dirImages)); err != nil {

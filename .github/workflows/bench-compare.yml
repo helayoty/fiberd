@@ -1,0 +1,138 @@
+# The activation comparison (bench/compare, docs/design/compare.md),
+# on demand only. Every selected group runs in ONE job on ONE runner,
+# because numbers compare only within one run on one host. GitHub's
+# ubuntu-24.04 runners are x86_64 and expose /dev/kvm, so the microvm
+# group (Firecracker, fiberd Hyperlight) has a real host here. Shared
+# runners are noisy, so the runner's facts and load are recorded first
+# and sit in every record.
+name: bench-compare
+
+on:
+  workflow_dispatch:
+    inputs:
+      groups:
+        description: "Which isolation classes to run"
+        type: choice
+        options: [all, shared-kernel, sandboxed, microvm]
+        default: all
+      runs:
+        description: "Timed runs after the discarded cold run"
+        type: string
+        default: "3"
+      bursts:
+        description: "Concurrent activations per run, comma separated"
+        type: string
+        default: "1,10,50"
+      runner:
+        description: "Runner label (a larger runner can be picked later)"
+        type: string
+        default: ubuntu-24.04
+
+permissions:
+  contents: read
+
+# Two manual runs must not overlap on the same group.
+concurrency:
+  group: bench-compare
+  cancel-in-progress: false
+
+jobs:
+  bench:
+    name: compare (${{ inputs.groups }}) on ${{ inputs.runner }}
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 240
+    env:
+      COMPARE_GROUPS: ${{ inputs.groups }}
+      COMPARE_RUNS: ${{ inputs.runs }}
+      COMPARE_BURSTS: ${{ inputs.bursts }}
+      COMPARE_FC_KERNEL: ${{ github.workspace }}/bin/fc/vmlinux
+      FC_VERSION: v1.17.0
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: |
+            go.sum
+            hack/tools/go.sum
+            examples/kubernetes/go.sum
+            bench/compare/go.sum
+      # The Rust toolchain and cargo registry for the Hyperlight helper
+      # live in the dev container's named volumes, as in ci.yml.
+      - name: runner facts (shared runners are noisy, so they go on the record)
+        run: |
+          {
+            echo "## Runner"
+            echo '```'
+            echo "cores: $(nproc)"
+            grep -m1 "model name" /proc/cpuinfo
+            free -h | head -2
+            echo "kernel: $(uname -r)"
+            echo "load: $(cut -d' ' -f1-3 /proc/loadavg)"
+            ls -l /dev/kvm 2>/dev/null || echo "kvm: absent"
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: enable KVM for this runner
+        if: inputs.groups == 'all' || inputs.groups == 'microvm'
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+      - uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa # v1.15.1
+        if: inputs.groups != 'microvm'
+        with:
+          version: v0.29.0
+          install_only: true
+      # Firecracker and a guest kernel, the steps of
+      # bench/compare/run/kvm-host.sh that apply to a runner.
+      - name: install Firecracker and a guest kernel
+        if: inputs.groups == 'all' || inputs.groups == 'microvm'
+        run: |
+          set -euo pipefail
+          sudo apt-get update -q && sudo apt-get install -y -q e2fsprogs iptables bc file
+          arch=$(uname -m); mkdir -p bin/fc && cd bin/fc
+          curl -fsSLo fc.tgz "https://github.com/firecracker-microvm/firecracker/releases/download/$FC_VERSION/firecracker-$FC_VERSION-$arch.tgz"
+          curl -fsSLo fc.tgz.sha256 "https://github.com/firecracker-microvm/firecracker/releases/download/$FC_VERSION/firecracker-$FC_VERSION-$arch.tgz.sha256.txt"
+          sha256sum -c fc.tgz.sha256 --ignore-missing
+          tar xzf fc.tgz && sudo install -m 0755 "release-$FC_VERSION-$arch/firecracker-$FC_VERSION-$arch" /usr/local/bin/firecracker
+          firecracker --version
+          curl -fsSLo vmlinux "https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.12/$arch/vmlinux-6.1.102"
+      - name: build the Hyperlight helper
+        if: inputs.groups == 'all' || inputs.groups == 'microvm'
+        run: make hyperlight-helper
+      - name: unit tests of the harness
+        run: cd bench/compare && go test -race -count=1 ./...
+      - name: run the comparison
+        run: make compare-phase4
+      - name: median table
+        if: always()
+        run: |
+          {
+            echo "## Results (medians of ${COMPARE_RUNS} runs, cold run discarded)"
+            cd bench/compare && go run ./cmd/summarize -markdown ../../bin/compare-state/phase*/*.jsonl
+          } >> "$GITHUB_STEP_SUMMARY" || echo "no results to summarize" >> "$GITHUB_STEP_SUMMARY"
+      - name: make the state readable for the upload (Firecracker ran as root)
+        if: always()
+        run: sudo chmod -R a+rX bin/compare-state 2>/dev/null || true
+      - name: keep the raw records and the summary
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: compare-${{ inputs.groups }}-${{ github.run_id }}
+          path: |
+            bin/compare-state/**/*.jsonl
+            bin/compare-state/**/summary.txt
+            bin/compare-state/host.txt
+          if-no-files-found: warn
+      - name: cluster state on failure
+        if: failure()
+        run: |
+          kubectl --context kind-compare get pods -A -o wide || true
+          kubectl --context kind-compare -n compare get cg -o yaml || true
+          kubectl --context kind-compare -n compare logs compare-proc-grant --tail=100 || true
+          kubectl --context kind-compare -n compare logs compare-gvisor-grant --tail=100 || true
+          sudo tail -n 50 bin/compare-state/phase4/fc-work/*.log 2>/dev/null || true
+      - name: delete the compare cluster
+        if: always()
+        run: make compare-down || true

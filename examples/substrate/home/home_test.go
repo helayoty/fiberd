@@ -32,65 +32,121 @@ func newHome(t *testing.T, cfg Config) (*Home, string) {
 	return h, srv.URL
 }
 
+// TestGrantsAreMintedPerTemplateAndVerifiable checks that a template's
+// first run mints a grant sized by the actor's memory limit and announces
+// it on the lane. The same template again gets the same grant, another
+// template gets another, and every token verifies against the home's keys.
 func TestGrantsAreMintedPerTemplateAndVerifiable(t *testing.T) {
 	ctx := context.Background()
-	h, issuer := newHome(t, Config{})
-	tmpl := herder.Template{Atespace: "team-a", Name: "counter"}
-
-	tok, g, err := h.Grant(ctx, tmpl, 128<<20)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if g.UID != GrantUID(tmpl) || g.TemplateDigest != "team-a/counter" || g.WBudgetBytes != 128<<20 || g.Audience != "worker-1" || g.MinTier != core.TierCheckpoint {
-		t.Fatalf("grant %+v", g)
-	}
-	// The agent's verifier accepts it against the home's own key set.
+	h, issuer := newHome(t, Config{Isolation: core.Trusted})
 	v := &grant.Verifier{Cache: &grant.Cache{IssuerURL: issuer}, Audience: "worker-1", MaxStale: time.Hour}
-	got, err := v.Verify(ctx, []byte(tok))
-	if err != nil {
-		t.Fatalf("verify: %v", err)
-	}
-	if got.UID != g.UID || got.TemplateDigest != g.TemplateDigest || got.WBudgetBytes != g.WBudgetBytes {
-		t.Fatalf("verified %+v, minted %+v", got, g)
-	}
-	// Same template again: the same grant, not a second one; another
-	// template: another grant with the default budget.
-	tok2, g2, _ := h.Grant(ctx, tmpl, 0)
-	if tok2 != tok || g2.UID != g.UID {
-		t.Fatal("a template must map to one grant")
-	}
-	_, g3, _ := h.Grant(ctx, herder.Template{Atespace: "team-a", Name: "other"}, 0)
-	if g3.UID == g.UID || g3.WBudgetBytes != 64<<20 {
-		t.Fatalf("second template's grant %+v", g3)
-	}
-
-	// Both were announced on the lane, in order.
 	lane, _ := h.Grants(ctx)
-	for i, want := range []string{tok, "?"} {
-		select {
-		case ev := <-lane:
-			if ev.Kind != fhome.GrantAdded || (want != "?" && string(ev.Token) != want) {
-				t.Fatalf("lane event %d: %+v", i, ev.Kind)
+	minted := map[string]core.Grant{} // by digest
+	tokens := map[string]string{}     // by digest
+	cases := []struct {
+		name   string
+		tmpl   herder.Template
+		memory uint64
+		digest string
+		budget uint64
+		reused bool // the template's earlier grant and token, nothing new on the lane
+	}{
+		{name: "a template's first run mints a grant sized by its memory limit",
+			tmpl: herder.Template{Atespace: "team-a", Name: "counter"}, memory: 128 << 20, digest: "team-a/counter", budget: 128 << 20},
+		{name: "the same template again is the same grant, not a second one",
+			tmpl: herder.Template{Atespace: "team-a", Name: "counter"}, digest: "team-a/counter", budget: 128 << 20, reused: true},
+		{name: "another template mints another grant with the default budget",
+			tmpl: herder.Template{Atespace: "team-a", Name: "other"}, digest: "team-a/other", budget: 64 << 20},
+	}
+	for _, tc := range cases {
+		if !t.Run(tc.name, func(t *testing.T) {
+			tok, g, err := h.Grant(ctx, tc.tmpl, tc.memory)
+			if err != nil {
+				t.Fatal(err)
 			}
-		case <-time.After(time.Second):
-			t.Fatalf("lane event %d missing", i)
+			if g.UID != GrantUID(tc.tmpl) || g.TemplateDigest != tc.digest || g.WBudgetBytes != tc.budget || g.Audience != "worker-1" || g.MinTier != core.TierCheckpoint || g.Policy.Isolation != core.Trusted {
+				t.Fatalf("grant %+v", g)
+			}
+			// The agent's verifier accepts it against the home's own key set.
+			got, err := v.Verify(ctx, []byte(tok))
+			if err != nil {
+				t.Fatalf("verify: %v", err)
+			}
+			if got.UID != g.UID || got.TemplateDigest != g.TemplateDigest || got.WBudgetBytes != g.WBudgetBytes {
+				t.Fatalf("verified %+v, minted %+v", got, g)
+			}
+			if tc.reused {
+				if prev := minted[tc.digest]; tok != tokens[tc.digest] || g.UID != prev.UID {
+					t.Fatal("a template must map to one grant")
+				}
+				select {
+				case ev := <-lane:
+					t.Fatalf("a reused grant announced again: %+v", ev.Kind)
+				default:
+				}
+				return
+			}
+			for d, prev := range minted {
+				if g.UID == prev.UID {
+					t.Fatalf("grant %s reuses the uid of template %s", g.UID, d)
+				}
+			}
+			minted[tc.digest], tokens[tc.digest] = g, tok
+			// Announced on the lane, in order.
+			select {
+			case ev := <-lane:
+				if ev.Kind != fhome.GrantAdded || string(ev.Token) != tok {
+					t.Fatalf("lane event: %+v", ev.Kind)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("lane event missing")
+			}
+		}) {
+			t.FailNow()
 		}
-	}
-
-	// Ready only once every minted template is warm.
-	if h.Ready() {
-		t.Fatal("ready before any template warmed")
-	}
-	_ = h.PublishReady(ctx, g.UID, true)
-	if h.Ready() {
-		t.Fatal("ready with one of two templates warm")
-	}
-	_ = h.PublishReady(ctx, g3.UID, true)
-	if !h.Ready() {
-		t.Fatal("not ready with every template warm")
 	}
 }
 
+// TestReadyOnceEveryMintedTemplateIsWarm checks that the home is ready only
+// once every minted template is warm. With nothing minted yet it is ready,
+// because the worker can take work.
+func TestReadyOnceEveryMintedTemplateIsWarm(t *testing.T) {
+	ctx := context.Background()
+	h, _ := newHome(t, Config{})
+	cases := []struct {
+		name string
+		mint string // template minted at this step
+		warm string // template published warm at this step
+		want bool
+	}{
+		{name: "nothing minted yet: ready", want: true},
+		{name: "a template minted, not warm: not ready", mint: "counter"},
+		{name: "two templates minted, neither warm: not ready", mint: "other"},
+		{name: "one of two templates warm: not ready", warm: "counter"},
+		{name: "every template warm: ready", warm: "other", want: true},
+	}
+	for _, tc := range cases {
+		if !t.Run(tc.name, func(t *testing.T) {
+			if tc.mint != "" {
+				if _, _, err := h.Grant(ctx, herder.Template{Atespace: "team-a", Name: tc.mint}, 0); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.warm != "" {
+				_ = h.PublishReady(ctx, GrantUID(herder.Template{Atespace: "team-a", Name: tc.warm}), true)
+			}
+			if got := h.Ready(); got != tc.want {
+				t.Fatalf("Ready = %v, want %v", got, tc.want)
+			}
+		}) {
+			t.FailNow()
+		}
+	}
+}
+
+// TestLivenessFollowsTheProbe checks that liveness follows the probe within
+// StaleTTL, and that the admin override on the lane wins over the probe.
+// Steps run in order on one home and one clock.
 func TestLivenessFollowsTheProbe(t *testing.T) {
 	now := time.Now()
 	clock := func() time.Time { return now }
@@ -102,39 +158,57 @@ func TestLivenessFollowsTheProbe(t *testing.T) {
 		return errors.New("no socket")
 	}})
 	ctx := context.Background()
-	if !h.Health().Healthy(now) {
-		t.Fatal("fresh home must be healthy")
+	cases := []struct {
+		name    string
+		lane    string // the admin override, "up" or "down", set before the probe
+		probe   bool
+		down    bool // the probe fails
+		advance time.Duration
+		healthy bool
+	}{
+		{name: "a fresh home is healthy", healthy: true},
+		{name: "probed 9s ago with a 10s TTL: healthy", probe: true, advance: 9 * time.Second, healthy: true},
+		{name: "11s of failed probes: unhealthy", probe: true, down: true, advance: 2 * time.Second},
+		{name: "the supervisor is back: healthy", probe: true, healthy: true},
+		{name: "lane forced down stays down though the probe answers", lane: "down", probe: true},
+		{name: "lane forced up", lane: "up", healthy: true},
 	}
-	h.probe(ctx)
-	now = now.Add(9 * time.Second)
-	if !h.Health().Healthy(now) {
-		t.Fatal("probed 9s ago with a 10s TTL: healthy")
-	}
-	alive = false
-	h.probe(ctx)
-	now = now.Add(2 * time.Second)
-	if h.Health().Healthy(now) {
-		t.Fatal("11s of failed probes: unhealthy")
-	}
-	alive = true
-	h.probe(ctx)
-	if !h.Health().Healthy(now) {
-		t.Fatal("the supervisor is back: healthy")
-	}
-	// The admin override wins over the probe.
-	h.SetLane(false)
-	h.probe(ctx)
-	if h.Health().Healthy(now) {
-		t.Fatal("lane forced down must stay down")
-	}
-	h.SetLane(true)
-	if !h.Health().Healthy(now) {
-		t.Fatal("lane forced up")
+	for _, tc := range cases {
+		if !t.Run(tc.name, func(t *testing.T) {
+			alive = !tc.down
+			if tc.lane != "" {
+				h.SetLane(tc.lane == "up")
+			}
+			if tc.probe {
+				h.probe(ctx)
+			}
+			now = now.Add(tc.advance)
+			if got := h.Health().Healthy(now); got != tc.healthy {
+				t.Fatalf("Healthy = %v, want %v", got, tc.healthy)
+			}
+		}) {
+			t.FailNow()
+		}
 	}
 }
 
-func TestNeedsAudienceAndIssuer(t *testing.T) {
-	if _, err := New(Config{CgroupRoot: t.TempDir()}); err == nil {
-		t.Fatal("want an error")
+func TestNewNeedsAudienceAndIssuer(t *testing.T) {
+	cases := []struct {
+		name    string
+		cfg     Config
+		wantErr bool
+	}{
+		{name: "neither audience nor issuer", wantErr: true},
+		{name: "audience without an issuer", cfg: Config{Audience: "worker-1"}, wantErr: true},
+		{name: "issuer without an audience", cfg: Config{IssuerURL: "http://127.0.0.1:1"}, wantErr: true},
+		{name: "both given", cfg: Config{Audience: "worker-1", IssuerURL: "http://127.0.0.1:1"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.cfg.CgroupRoot = t.TempDir()
+			if _, err := New(tc.cfg); (err != nil) != tc.wantErr {
+				t.Fatalf("New err = %v, want error %v", err, tc.wantErr)
+			}
+		})
 	}
 }

@@ -1,0 +1,73 @@
+# The client's place in the compare cluster: a namespace for the Pods and
+# claims under test, a service account allowed to make them and to read
+# the control-plane counters, and the client Pod itself, pinned to the
+# node so Pod IPs are reachable (they are not routable from the Mac).
+# The client mounts the node's cgroup tree for density, the containerd
+# socket for the cold Pod case, and the audit log for the event count.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: compare
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: compare-client
+  namespace: compare
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: compare-client
+rules:
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, create, delete]
+  - apiGroups: [extensions.agents.x-k8s.io]
+    resources: [sandboxtemplates, sandboxwarmpools, sandboxclaims]
+    verbs: [get, list, create, patch, delete]
+  - apiGroups: [agents.x-k8s.io]
+    resources: [sandboxes]
+    verbs: [get, list, patch]
+  - nonResourceURLs: [/metrics]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: compare-client
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: compare-client
+subjects:
+  - kind: ServiceAccount
+    name: compare-client
+    namespace: compare
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: compare-client
+  namespace: compare
+spec:
+  serviceAccountName: compare-client
+  nodeName: compare-control-plane
+  restartPolicy: Never
+  containers:
+    - name: client
+      image: compare-client:local
+      imagePullPolicy: Never
+      command: [sleep, infinity]
+      securityContext:
+        privileged: true   # the node's cgroup tree and containerd socket
+      volumeMounts:
+        - { name: cgroup, mountPath: /host/sys/fs/cgroup, readOnly: true }
+        - { name: containerd, mountPath: /run/containerd/containerd.sock }
+        - { name: audit, mountPath: /host/audit, readOnly: true }
+        - { name: out, mountPath: /out }
+  volumes:
+    - { name: cgroup, hostPath: { path: /sys/fs/cgroup, type: Directory } }
+    - { name: containerd, hostPath: { path: /run/containerd/containerd.sock, type: Socket } }
+    - { name: audit, hostPath: { path: /var/log/kube-audit, type: Directory } }
+    - { name: out, emptyDir: {} }

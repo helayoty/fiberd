@@ -13,7 +13,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 	"syscall"
 )
 
@@ -391,6 +390,7 @@ func MergeDelta(dir string, parent *Parent) error {
 	if parent.sha != info.ParentSHA256 {
 		return fmt.Errorf("%w: delta parent %s, offered %s", ErrParentMismatch, short(info.ParentSHA256), short(parent.sha))
 	}
+	page := make([]byte, PageSize)
 	for _, name := range info.Files {
 		pm, err := ReadPagemap(filepath.Join(dir, name))
 		if err != nil {
@@ -418,8 +418,15 @@ func MergeDelta(dir string, parent *Parent) error {
 			e := &pm.Entries[i]
 			switch {
 			case e.Flags&PEPresent != 0:
-				if _, err := io.CopyN(wr, rd, int64(uint64(e.NrPages)*PageSize)); err != nil {
-					return fail(fmt.Errorf("criu: delta pages file %s shorter than its pagemap: %w", pm.PagesFile(), err))
+				// Page by page, so a short read (a truncated delta) and a
+				// failed write (a full disk) are told apart.
+				for j := uint64(0); j < uint64(e.NrPages); j++ {
+					if _, err := io.ReadFull(rd, page); err != nil {
+						return fail(fmt.Errorf("criu: delta pages file %s shorter than its pagemap: %w", pm.PagesFile(), err))
+					}
+					if _, err := wr.Write(page); err != nil {
+						return fail(err)
+					}
 				}
 			case e.Flags&PEParent != 0:
 				for j := uint64(0); j < uint64(e.NrPages); j++ {
@@ -456,36 +463,4 @@ func short(s string) string {
 		return s[:12]
 	}
 	return s
-}
-
-// CopyDir copies a flat image directory (used to keep a parent pristine).
-func CopyDir(src, dst string) error {
-	if err := os.MkdirAll(dst, 0o755); err != nil {
-		return err
-	}
-	entries, err := os.ReadDir(src)
-	if err != nil {
-		return err
-	}
-	for _, e := range entries {
-		if e.IsDir() || strings.HasSuffix(e.Name(), ".log") {
-			continue
-		}
-		in, err := os.Open(filepath.Join(src, e.Name()))
-		if err != nil {
-			return err
-		}
-		out, err := os.OpenFile(filepath.Join(dst, e.Name()), os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
-		if err != nil {
-			_ = in.Close()
-			return err
-		}
-		_, err = io.Copy(out, in)
-		_ = in.Close()
-		_ = out.Close()
-		if err != nil {
-			return err
-		}
-	}
-	return nil
 }
