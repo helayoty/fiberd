@@ -35,11 +35,31 @@ func newFake(t *testing.T, k knobs) (*Backend, string) {
 	// New looked for the rootfs before it existed. Set the tier a real
 	// opening would find.
 	b.tier = core.TierSnapshot
-	t.Cleanup(func() {
-		b.Close()
-		endAllSandboxes(t, cfg)
-	})
+	t.Cleanup(func() { endFake(t, b, cfg) })
 	return b, cfg
+}
+
+// endFake is the fixture's teardown. Close kills every sandbox, the fakes
+// are ended whatever the knobs say, and then the backend's reapers are
+// waited for. A reaper runs `runsc delete` once `runsc wait` returns,
+// which is after Close has returned, and every fake runsc appends to
+// <cfg>/calls.log. The test's directories go right after this (TempDir's
+// RemoveAll is the oldest cleanup, so it runs last), and a delete landing
+// in between leaves the configuration directory "not empty".
+func endFake(t *testing.T, b *Backend, cfg string) {
+	t.Helper()
+	b.Close()
+	endAllSandboxes(t, cfg)
+	done := make(chan struct{})
+	go func() {
+		b.reapers.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Error("a reaper is still running after Close")
+	}
 }
 
 // waitFor polls cond until it holds or the deadline passes.
@@ -1175,6 +1195,49 @@ func TestClose(t *testing.T) {
 			}
 			for _, cid := range cids {
 				waitFor(t, cid+" to be gone", func() bool { return !sandboxAlive(cfg, cid) })
+			}
+		})
+	}
+}
+
+// TestEndFake checks that the fixture's teardown outlasts the backend's
+// reapers. Each sandbox's late `runsc delete` has been recorded when
+// endFake returns, and nothing invokes runsc after it, so the test's
+// directories can go. An Unwarm'd template reports no Exit, so draining
+// Exits would not do. The reaper count is the signal.
+func TestEndFake(t *testing.T) {
+	cases := []struct {
+		name  string
+		start func(t *testing.T, b *Backend, workDir string) []string // the cids it leaves to the teardown
+	}{
+		{name: "template and fiber", start: func(t *testing.T, b *Backend, workDir string) []string {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if _, err := b.Clone(ctx, "g", backend.FiberSpec{Fence: "g/1-1", Endpoint: filepath.Join(workDir, "ep.sock"), CgroupFD: -1, Deadline: 2 * time.Second}); err != nil {
+				t.Fatalf("Clone: %v", err)
+			}
+			return []string{warmCID(t, b, "g"), boxCID(t, b, "g/1-1")}
+		}},
+		{name: "unwarmed template", start: func(t *testing.T, b *Backend, _ string) []string {
+			cid := warmCID(t, b, "g")
+			b.Unwarm("g")
+			return []string{cid}
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b, cfg, _, workDir := warmed(t, knobs{})
+			cids := tc.start(t, b, workDir)
+			endFake(t, b, cfg)
+			calls := runscCalls(t, cfg)
+			for _, cid := range cids {
+				if findCall(calls, "delete -force "+cid) == "" {
+					t.Fatalf("the reaper of %s had not deleted it when the teardown returned", cid)
+				}
+			}
+			time.Sleep(200 * time.Millisecond)
+			if n := len(runscCalls(t, cfg)) - len(calls); n != 0 {
+				t.Fatalf("%d runsc calls after the teardown", n)
 			}
 		})
 	}

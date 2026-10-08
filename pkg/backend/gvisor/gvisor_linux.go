@@ -95,6 +95,13 @@ type Backend struct {
 	boxes map[string]*box  // fiber id
 	gen   uint64           // incarnations started, the suffix of every cid
 	exits chan backend.Exit
+	// reapers counts the waitWarm and waitBox goroutines still running.
+	// Each outlives the sandbox it watches: it deletes the container's
+	// runsc state after `runsc wait` returns, which is after Close has
+	// killed the sandbox and returned. Close does not wait for them (the
+	// Exit each reports is the host's cleanup signal), so whoever takes
+	// the state directory away waits here.
+	reapers sync.WaitGroup
 }
 
 type warm struct {
@@ -486,6 +493,7 @@ func (b *Backend) Warm(ctx context.Context, sp backend.WarmSpec) (backend.Warm, 
 	b.mu.Lock()
 	b.warms[w.id] = w
 	b.mu.Unlock()
+	b.reapers.Add(1)
 	go b.waitWarm(w)
 	return backend.Warm{ID: w.id, PID: b.pidOf(ctx, w.cid), Bytes: bytes, TotalBytes: total}, nil
 }
@@ -585,6 +593,7 @@ func cgroupCurrent(fd int) uint64 {
 }
 
 func (b *Backend) waitWarm(w *warm) {
+	defer b.reapers.Done()
 	_, _ = b.runsc(context.Background(), -1, "wait", w.cid)
 	_, _ = b.runsc(context.Background(), -1, "delete", "-force", w.cid)
 	b.mu.Lock()
@@ -645,6 +654,7 @@ func (b *Backend) start(ctx context.Context, images, workDir, template string, a
 	b.mu.Lock()
 	b.boxes[x.id] = x
 	b.mu.Unlock()
+	b.reapers.Add(1)
 	go b.waitBox(x)
 	if err := waitEndpoint(ctx, endpoint, x.done); err != nil {
 		_, _ = b.runsc(context.Background(), -1, "kill", x.cid, "KILL")
@@ -654,6 +664,7 @@ func (b *Backend) start(ctx context.Context, images, workDir, template string, a
 }
 
 func (b *Backend) waitBox(x *box) {
+	defer b.reapers.Done()
 	out, _ := b.runsc(context.Background(), -1, "wait", x.cid)
 	_, _ = b.runsc(context.Background(), -1, "delete", "-force", x.cid)
 	_ = os.RemoveAll(x.bundle)
