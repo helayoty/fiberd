@@ -91,6 +91,7 @@ nodes:
               pathType: DirectoryOrCreate
         scheduler:
           extraArgs:
+            bind-address: "0.0.0.0"
             authorization-always-allow-paths: /healthz,/readyz,/livez,/metrics
 EOF
   kind get clusters 2>/dev/null | grep -qx "$CLUSTER" || kind create cluster --name "$CLUSTER" --config "$STATE/kind.yaml" --wait 120s
