@@ -143,13 +143,25 @@ jobs:
             bin/compare-state/**/summary.txt
             bin/compare-state/host.txt
           if-no-files-found: warn
+      # Every Pod of the compare namespace, not a fixed list, so a home
+      # that never became ready (a grant Pod of any runtime, the client)
+      # shows its log and its events too.
       - name: cluster state on failure
         if: failure()
         run: |
-          kubectl --context kind-compare get pods -A -o wide || true
-          kubectl --context kind-compare -n compare get cg -o yaml || true
-          kubectl --context kind-compare -n compare logs compare-proc-grant --tail=100 || true
-          kubectl --context kind-compare -n compare logs compare-gvisor-grant --tail=100 || true
+          kc="kubectl --context kind-compare"
+          $kc get pods -A -o wide || true
+          $kc -n compare get cg -o yaml || true
+          $kc -n compare get events --sort-by=.lastTimestamp || true
+          for pod in $($kc -n compare get pods -o name 2>/dev/null); do
+            echo "::group::$pod describe"
+            $kc -n compare describe "$pod" || true
+            echo "::endgroup::"
+            echo "::group::$pod logs"
+            $kc -n compare logs "$pod" --all-containers --tail=200 || true
+            $kc -n compare logs "$pod" --all-containers --previous --tail=100 2>/dev/null || true
+            echo "::endgroup::"
+          done
           sudo tail -n 50 bin/compare-state/phase4/fc-work/*.log 2>/dev/null || true
       - name: delete the compare cluster
         if: always()
