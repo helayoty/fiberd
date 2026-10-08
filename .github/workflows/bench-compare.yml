@@ -47,6 +47,9 @@ jobs:
       COMPARE_BURSTS: ${{ inputs.bursts }}
       COMPARE_FC_KERNEL: ${{ github.workspace }}/bin/fc/vmlinux
       FC_VERSION: v1.17.0
+      # From the release's .sha256.txt files, pinned so a changed tarball fails.
+      FC_SHA256_X86_64: 06094a1108ae9e82aa4c23a775aa92758f53f1175d422270d9d6162cb9ade558
+      FC_SHA256_AARCH64: e351ebe4f7a16b5873bbd51005d2e6767103cff4d5ebc829df2d3f95a93e2256
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -92,9 +95,13 @@ jobs:
           set -euo pipefail
           sudo apt-get update -q && sudo apt-get install -y -q e2fsprogs iptables bc file
           arch=$(uname -m); mkdir -p bin/fc && cd bin/fc
+          case "$arch" in
+            x86_64) sum=$FC_SHA256_X86_64 ;;
+            aarch64) sum=$FC_SHA256_AARCH64 ;;
+            *) echo "no pinned Firecracker for $arch" >&2; exit 1 ;;
+          esac
           curl -fsSLo fc.tgz "https://github.com/firecracker-microvm/firecracker/releases/download/$FC_VERSION/firecracker-$FC_VERSION-$arch.tgz"
-          curl -fsSLo fc.tgz.sha256 "https://github.com/firecracker-microvm/firecracker/releases/download/$FC_VERSION/firecracker-$FC_VERSION-$arch.tgz.sha256.txt"
-          sha256sum -c fc.tgz.sha256 --ignore-missing
+          echo "$sum  fc.tgz" | sha256sum -c -
           tar xzf fc.tgz && sudo install -m 0755 "release-$FC_VERSION-$arch/firecracker-$FC_VERSION-$arch" /usr/local/bin/firecracker
           firecracker --version
           curl -fsSLo vmlinux "https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.12/$arch/vmlinux-6.1.102"
