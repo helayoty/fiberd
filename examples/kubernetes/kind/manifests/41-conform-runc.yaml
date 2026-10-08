@@ -1,0 +1,30 @@
+# A second home beside the conformance grant, on the runc runtime: the
+# zygote is an OCI container's init, from the static refzygote in the
+# gVisor rootfs the image ships. Nothing runs against it. It only has to
+# become Ready, which proves the image holds runc and that a runc home
+# warms a template inside a grant Pod (its user namespace, its template
+# bind, its /sys and cgroup setup). The compare bench's runc home sat
+# unready in CI because the image had no runc and nothing in kind had
+# ever asked a runc Pod to warm.
+apiVersion: fiberd.io/v1alpha1
+kind: CapacityGrant
+metadata:
+  name: conform-runc
+  namespace: tenant-a
+spec:
+  template: sha256:conform
+  fibers: { max: 4, warm: 1 }
+  wBudget: 32Mi
+  minTier: FIBER_CHECKPOINT
+  isolation: TRUSTED
+  lease: 10m
+  pod:
+    image: fiberd:kind
+    runtime: runc
+    args:
+      - -runc-rootfs
+      - /usr/share/fiberd/gvisor-rootfs
+      - -template
+      - default=/bin/refzygote --heap-mb 16
+    resources:
+      limits: { memory: 512Mi }

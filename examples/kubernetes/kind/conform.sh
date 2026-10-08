@@ -70,16 +70,24 @@ deploy() {
   "${KC[@]}" wait --for=condition=Established crd/capacitygrants.fiberd.io --timeout=60s
   "${KC[@]}" apply -f "$KIND_DIR/manifests/20-issuer.yaml" -f "$KIND_DIR/manifests/30-grant-rbac.yaml"
   "${KC[@]}" -n fiberd-system rollout status deploy/grant-issuer --timeout=120s
-  "${KC[@]}" apply -f "$KIND_DIR/manifests/40-conform.yaml"
+  "${KC[@]}" apply -f "$KIND_DIR/manifests/40-conform.yaml" -f "$KIND_DIR/manifests/41-conform-runc.yaml"
   # The controller creates the Pod and mints the grant; the agent admits
-  # it, warms the template and sets the gate: the Pod becomes Ready.
+  # it, warms the template and sets the gate: the Pod becomes Ready. The
+  # runc home (41-conform-runc.yaml) only has to get that far.
   wait_for 60 "grant pod created" "${KC[@]}" -n "$NS" get pod "$POD"
+  wait_for 60 "runc grant pod created" "${KC[@]}" -n "$NS" get pod conform-runc-grant
   "${KC[@]}" -n "$NS" wait --for=condition=Ready "pod/$POD" --timeout=180s
-  wait_for 30 "status.ready on the CapacityGrant" cg_ready
+  if ! "${KC[@]}" -n "$NS" wait --for=condition=Ready pod/conform-runc-grant --timeout=180s; then
+    "${KC[@]}" -n "$NS" describe pod conform-runc-grant || true
+    "${KC[@]}" -n "$NS" logs conform-runc-grant --tail=100 || true
+    exit 1
+  fi
+  wait_for 30 "status.ready on the CapacityGrant" cg_ready conform
+  wait_for 30 "status.ready on the runc CapacityGrant" cg_ready conform-runc
   "${KC[@]}" -n "$NS" get cg
 }
 
-cg_ready() { [ "$("${KC[@]}" -n "$NS" get cg conform -o jsonpath='{.status.ready}')" = true ]; }
+cg_ready() { [ "$("${KC[@]}" -n "$NS" get cg "$1" -o jsonpath='{.status.ready}')" = true ]; }
 
 restart_count() { "${KC[@]}" -n "$NS" get pod "$POD" -o jsonpath='{.status.containerStatuses[0].restartCount}'; }
 

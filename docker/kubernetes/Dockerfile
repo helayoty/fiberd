@@ -82,17 +82,20 @@ FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595
 # The release workflow adds version, revision, created and title labels.
 # These static ones cover local builds.
 LABEL org.opencontainers.image.source="https://github.com/helayoty/fiberd" \
-      org.opencontainers.image.description="fiberd for Kubernetes: the grant Pod agent (fiberd-k8s), the issuer controller (grant-controller), the reference zygote, criu, and the conformance and storm binaries" \
+      org.opencontainers.image.description="fiberd for Kubernetes: the grant Pod agent (fiberd-k8s), the issuer controller (grant-controller), the reference zygote, criu, runc, runsc, and the conformance and storm binaries" \
       org.opencontainers.image.licenses="Apache-2.0"
 ARG DEBIAN_FRONTEND=noninteractive
 # Runtime packages only. The libraries serve criu and the zygote's TLS.
-# curl and procps serve the conformance hooks that run in the Pod through
-# kubectl exec (examples/kubernetes/kind/conform.sh). The grant Pod's probes
-# do not need them, since they run `fiberd-k8s -healthz`.
+# runc serves the runc runtime (a grant Pod with runtime: runc runs each
+# zygote as an OCI container's init), from Debian's package as the dev
+# image has it. curl and procps serve the conformance hooks that run in
+# the Pod through kubectl exec (examples/kubernetes/kind/conform.sh). The
+# grant Pod's probes do not need them, since they run `fiberd-k8s -healthz`.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       libbsd0 libmd0 libnet1 libnl-3-200 libprotobuf-c1 libuuid1 libssl3 \
-      curl ca-certificates procps \
-    && rm -rf /var/lib/apt/lists/*
+      runc curl ca-certificates procps \
+    && rm -rf /var/lib/apt/lists/* \
+    && runc --version
 COPY --from=build --chmod=0755 /usr/local/sbin/criu /usr/local/sbin/criu
 COPY --from=build --chmod=0755 /usr/local/bin/runsc /usr/local/bin/runsc
 COPY --from=build --chmod=0755 /out/storm /out/fibctl /out/sessioncheck /out/grant-conform /out/refzygote /out/fiberd-k8s /out/grant-controller /usr/local/bin/

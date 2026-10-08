@@ -270,7 +270,7 @@ static int gvisor_main(void) {
 int main(int argc, char **argv) {
     int plain = 0, port = 8080;
     size_t heap_mb = 32;
-    const char *up = NULL;
+    const char *up = NULL, *logpath = NULL;
     for (int i = 1; i < argc; i++) if (strcmp(argv[i], "--gvisor") == 0) gvisor_mode = 1;
     for (int i = 1; i < argc; i++) if (strcmp(argv[i], "--plain") == 0) plain = 1;
     if (!plain && !gvisor_mode) fz_init(argc, argv); /* the zygote contract: first thing in main */
@@ -279,8 +279,20 @@ int main(int argc, char **argv) {
         else if (strcmp(argv[i], "--port") == 0 && i + 1 < argc) port = atoi(argv[++i]);
         else if (strcmp(argv[i], "--ifup") == 0 && i + 1 < argc) up = argv[++i];
         else if (strcmp(argv[i], "--framing") == 0 && i + 1 < argc) line_framing = strcmp(argv[++i], "line") == 0;
+        else if (strcmp(argv[i], "--log") == 0 && i + 1 < argc) logpath = argv[++i];
         else if (strcmp(argv[i], "--plain") == 0 || strcmp(argv[i], "--gvisor") == 0) {}
-        else { fprintf(stderr, "usage: %s [--heap-mb N] [--framing http|line] [--plain [--port N] [--ifup IF=IP/PREFIX]] [--gvisor]\n", argv[0]); return 2; }
+        else { fprintf(stderr, "usage: %s [--heap-mb N] [--framing http|line] [--log PATH] [--plain [--port N] [--ifup IF=IP/PREFIX]] [--gvisor]\n", argv[0]); return 2; }
+    }
+    if (logpath) {
+        /* The runc launcher's contract, as refzygote keeps it: a zygote
+         * that is a container's init reopens its stdio from inside, since
+         * descriptors opened outside its mount namespace are ones criu
+         * cannot map when it checkpoints the zygote's pages. */
+        int lf = open(logpath, O_WRONLY | O_CREAT | O_APPEND, 0644);
+        int nf = open("/dev/null", O_RDONLY);
+        if (lf < 0 || nf < 0) { perror("counter: --log"); return 2; }
+        dup2(nf, 0); dup2(lf, 1); dup2(lf, 2);
+        close(lf); close(nf);
     }
     if (up && ifup(up) < 0) { perror("counter: ifup"); return 3; }
     heavy_init(heap_mb);
