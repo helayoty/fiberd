@@ -1,0 +1,4 @@
+HIDE /var/lib/fiberd
+PREPARE mntns
+HIDE /etc/keys
+CLONE grant/1/1 /run/fiberd/grant/ep.sock 500 - pidns,mntns

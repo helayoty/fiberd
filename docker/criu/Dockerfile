@@ -4,8 +4,8 @@
 #
 # This is a workbench, not a runtime image. It runs --privileged with a
 # private cgroup namespace so the agent can carve a delegated cgroup subtree
-# and CRIU can dump and restore process trees. It stays root on purpose for
-# the same reason.
+# and CRIU can dump and restore process trees. It stays root for the same
+# reason.
 #
 # The base is Debian 12 (bookworm) because its arm64 userland is built
 # without pointer authentication (PAC). Trixie turns PAC on for arm64. A
@@ -27,8 +27,9 @@ LABEL org.opencontainers.image.source="https://github.com/helayoty/fiberd" \
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 ARG DEBIAN_FRONTEND=noninteractive
+# libclang-rt-14-dev holds libFuzzer's runtime for `make fuzz`.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      gcc make pkg-config patch libssl-dev clang lld \
+      gcc make pkg-config patch libssl-dev clang lld libclang-rt-14-dev \
       runc \
       curl ca-certificates jq procps iproute2 strace \
       libprotobuf-c-dev protobuf-c-compiler libprotobuf-dev python3-protobuf \
@@ -94,14 +95,12 @@ RUN rustup toolchain install 1.94.0 --profile minimal --component rust-src
 
 # OpenSSL for the rootfs zygote (hack/gvisor/rootfs.sh), built without
 # pointer authentication. Debian's libcrypto signs the link register in
-# its arm64 assembly (78 paciasp/autiasp in a static refzygote), and a
-# fiber checkpointed inside one of those routines traps on restore on a
-# FEAT_FPAC CPU. The 3.0 line hard-codes those instructions in its
-# perlasm (`.inst 0xd503233f`), so no compiler flag removes them, and on
-# aarch64 the C implementations are built instead (no-asm) with the flag
-# keeping the compiler's own output clean. Static libraries and headers
-# only, no shared objects, engines or tests. The tarball is pinned by
-# sha256.
+# its arm64 assembly, and a fiber checkpointed inside one of those
+# routines traps on restore on a FEAT_FPAC CPU. The 3.0 line hard-codes
+# those instructions in its perlasm (`.inst 0xd503233f`), so no compiler
+# flag removes them. On aarch64 the C implementations are built instead
+# (no-asm), with the flag keeping the compiler's own output clean. Static
+# libraries and headers only. The tarball is pinned by sha256.
 ARG OPENSSL_VERSION=3.0.18
 ARG OPENSSL_SHA256=d80c34f5cf902dccf1f1b5df5ebb86d0392e37049e5d73df1b3abae72e4ffe8b
 RUN set -eu; cd /tmp; \

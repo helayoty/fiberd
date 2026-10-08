@@ -1,0 +1,2 @@
+CLONE grant/1/1 /run/fiberd/grant/1/ep.sock 500 7b7d pidns,mntns,nocaps,handoff
+READY
