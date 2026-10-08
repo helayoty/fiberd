@@ -1491,10 +1491,12 @@ func TestCIDReuse(t *testing.T) {
 					t.Fatalf("the late reaper removed the successor's bundle: %v", err)
 				}
 			}
-			// The first's own directory went with it.
-			if _, err := os.Stat(filepath.Join(b.opt.StateDir, "templates", first)); err == nil {
-				t.Fatalf("the reaper left the template directory of %s", first)
-			}
+			// The first's own directory goes with it. The reaper removes it
+			// after the delete returns, so wait for that.
+			waitFor(t, "the reaper to remove the template directory of "+first, func() bool {
+				_, err := os.Stat(filepath.Join(b.opt.StateDir, "templates", first))
+				return os.IsNotExist(err)
+			})
 			if second == first {
 				t.Fatalf("the successor reuses cid %s", first)
 			}
