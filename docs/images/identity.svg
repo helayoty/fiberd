@@ -1,59 +1,77 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="760" viewBox="0 0 1200 760" role="img" aria-labelledby="identity-title identity-desc">
-  <title id="identity-title">Identity, fences, scope, and credentials in fiberd</title>
-  <desc id="identity-desc">An issuer signs a CapacityGrant that a caller presents with Clone. fiberd verifies the grant, resolves a session, and returns an endpoint and incarnation fence. Audit records include fence and home scope. Restart or scope loss advances the epoch and invalidates prior fences. A fence is not a secret and fiberd does not mint a per-fiber certificate or JWT.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="1072" viewBox="0 0 1440 1072" role="img" aria-labelledby="identity-title identity-desc">
+  <title id="identity-title">Authority is not incarnation identity</title>
+  <desc id="identity-desc">An identity relationship map, not a sequence of interchangeable components. An issuer signs a CapacityGrant JWT, which the caller carries with Clone to its named home. The grant is capacity authority; it may be bearer authority or explicitly bound to a client certificate. The home outline marks the audience and verification boundary, not a universal workload sandbox. fiberd verifies the signed grant and manages a running fiber. The fiber is identified by fence data: grant UID, agent epoch, and sequence. CREATE and RESUME mint a new fence; ATTACH preserves the existing one. The fence is neither signed authentication nor a secret. Home scope facts accompany events and fences in audit records rather than authorizing the workload. Restart or scope loss advances the epoch, making prior fences stale; old-running-fiber cleanup is best effort. A separate configured-credentials document has a dashed access relationship to the fiber: credentials are usable only if exposed by the backend and configuration. fiberd does not mint a generic per-fiber workload credential. Configured HANDOFF instead supplies a grant TLS identity and binds access to the caller certificate; it does not turn a fence into a credential. Durable epoch storage is required for continuity across home replacement.</desc>
   <style>
-    :root{--bg:#f7f9fc;--panel:#fff;--ink:#172033;--muted:#5d6b7d;--line:#b8c4d4;--blue:#3165b5;--blue-bg:#eaf1ff;--teal:#13776f;--teal-bg:#e8f7f4;--violet:#704aa1;--violet-bg:#f2edfa;--amber:#a76500;--amber-bg:#fff3d6;--red:#b33b32;--red-bg:#fff0ef}
-    @media(prefers-color-scheme:dark){:root{--bg:#0d1117;--panel:#161b22;--ink:#e6edf3;--muted:#a3adba;--line:#3d4652;--blue:#79a7ff;--blue-bg:#17243d;--teal:#53c7b8;--teal-bg:#102923;--violet:#c09cff;--violet-bg:#251b35;--amber:#f0b44d;--amber-bg:#30240f;--red:#ff8178;--red-bg:#321817}}
-    text{font-family:ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;fill:var(--ink)}.bg{fill:var(--bg)}.panel{fill:var(--panel);stroke:var(--line);stroke-width:1.5}.bluebox{fill:var(--blue-bg);stroke:var(--blue);stroke-width:1.5}.tealbox{fill:var(--teal-bg);stroke:var(--teal);stroke-width:1.5}.violetbox{fill:var(--violet-bg);stroke:var(--violet);stroke-width:1.5}.amberbox{fill:var(--amber-bg);stroke:var(--amber);stroke-width:1.5}.redbox{fill:var(--red-bg);stroke:var(--red);stroke-width:1.5}.title{font-size:27px;font-weight:750}.subtitle{font-size:14px;fill:var(--muted)}.h{font-size:16px;font-weight:700}.b{font-size:13px}.s{font-size:11px;fill:var(--muted)}.cap{font-size:12px;font-weight:700;letter-spacing:.5px}.blue{fill:var(--blue)}.teal{fill:var(--teal)}.violet{fill:var(--violet)}.amber{fill:var(--amber)}.red{fill:var(--red)}.arrow{fill:none;stroke:var(--muted);stroke-width:2}.dash{stroke-dasharray:7 5}
+    :root{--bg:#f7f9fc;--panel:#fff;--ink:#172033;--muted:#5d6b7d;--border:#b8c4d4;--blue:#3165b5;--blue-bg:#eaf1ff;--teal:#13776f;--teal-bg:#e8f7f4;--violet:#704aa1;--violet-bg:#f2edfa;--amber:#a76500;--amber-bg:#fff3d6;--red:#b33b32;--red-bg:#fff0ef;--green:#287a4d;--green-bg:#e8f6ed}
+    @media(prefers-color-scheme:dark){:root{--bg:#0d1117;--panel:#161b22;--ink:#e6edf3;--muted:#a3adba;--border:#3d4652;--blue:#79a7ff;--blue-bg:#17243d;--teal:#53c7b8;--teal-bg:#102923;--violet:#c09cff;--violet-bg:#251b35;--amber:#f0b44d;--amber-bg:#30240f;--red:#ff8178;--red-bg:#321817;--green:#63cf8e;--green-bg:#142b1e}}
+    text{font-family:ui-sans-serif,-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;fill:var(--ink)}
+    .bg{fill:var(--bg)}.boundary{fill:none;stroke:var(--teal);stroke-width:1.5;stroke-dasharray:9 6}.service{fill:var(--panel);stroke:var(--teal);stroke-width:2}.actor{fill:var(--panel);stroke:var(--blue);stroke-width:2}.document{stroke-width:1.5}.grant{fill:var(--blue-bg);stroke:var(--blue)}.data{fill:var(--violet-bg);stroke:var(--violet)}.credentials{fill:var(--amber-bg);stroke:var(--amber)}.fiber{fill:var(--violet-bg);stroke:var(--violet);stroke-width:2}
+    .title{font-size:30px;font-weight:700}.heading{font-size:22px;font-weight:700}.label{font-size:20px;font-weight:600}.body{font-size:17px}.muted{fill:var(--muted)}.blue{fill:var(--blue)}.teal{fill:var(--teal)}.violet{fill:var(--violet)}.amber{fill:var(--amber)}.red{fill:var(--red)}.center{text-anchor:middle}.divider{stroke:var(--border);stroke-width:1.5}.relation{fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}.authority{stroke:var(--blue)}.management{stroke:var(--teal)}.identifies{stroke:var(--violet);stroke-dasharray:6 5}.access{stroke:var(--amber);stroke-dasharray:7 6}
+    text.amber{fill:#9e5e00}@media(prefers-color-scheme:dark){text.amber{fill:var(--amber)}}
   </style>
-  <defs><marker id="identity-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M1 1l8 4-8 4z" fill="#7b8794"/></marker></defs>
-  <rect class="bg" width="1200" height="760"/>
-  <text class="title" x="42" y="48">Authority, incarnation, route, and workload identity are distinct</text>
-  <text class="subtitle" x="42" y="74">Grant JWT authorizes capacity · fence identifies one incarnation · endpoint is the route · scope anchors audit and revocation.</text>
+  <defs>
+    <marker id="identity-blue-arrow" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="12" markerHeight="12" markerUnits="userSpaceOnUse" orient="auto"><path d="M1 1 11 6 1 11Z" fill="var(--blue)"/></marker>
+    <marker id="identity-teal-arrow" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="12" markerHeight="12" markerUnits="userSpaceOnUse" orient="auto"><path d="M1 1 11 6 1 11Z" fill="var(--teal)"/></marker>
+    <marker id="identity-amber-arrow" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="12" markerHeight="12" markerUnits="userSpaceOnUse" orient="auto"><path d="M1 1 11 6 1 11Z" fill="var(--amber)"/></marker>
+  </defs>
+  <rect class="bg" width="1440" height="1072"/>
+  <text class="title" x="48" y="66">Authority is not incarnation identity</text>
+  <text class="body muted" x="48" y="100">A grant authorizes capacity. A fence names an incarnation. Workload credentials remain separate.</text>
+  <path class="divider" d="M48 130H1392"/>
 
-  <rect class="panel" x="42" y="104" width="1116" height="214" rx="20"/>
-  <text class="cap blue" x="68" y="137">CLONE PATH</text>
-  <rect class="bluebox" x="68" y="164" width="150" height="92" rx="14"/>
-  <text class="h blue" x="143" y="195" text-anchor="middle">Issuer</text><text class="b" x="143" y="225" text-anchor="middle">signing key</text>
-  <rect class="bluebox" x="258" y="164" width="170" height="92" rx="14"/>
-  <text class="h blue" x="343" y="195" text-anchor="middle">CapacityGrant JWT</text><text class="s" x="343" y="225" text-anchor="middle">capacity authority</text>
-  <rect class="violetbox" x="468" y="164" width="160" height="92" rx="14"/>
-  <text class="h violet" x="548" y="195" text-anchor="middle">Caller</text><text class="b" x="548" y="225" text-anchor="middle">Clone + session</text>
-  <rect class="tealbox" x="668" y="154" width="182" height="112" rx="14"/>
-  <text class="h teal" x="759" y="185" text-anchor="middle">fiberd</text><text class="b" x="759" y="214" text-anchor="middle">verify + resolve</text><text class="s" x="759" y="239" text-anchor="middle">ledger serialization</text>
-  <rect class="violetbox" x="890" y="154" width="220" height="112" rx="14"/>
-  <text class="h violet" x="1000" y="184" text-anchor="middle">Fiber incarnation</text><text class="b" x="1000" y="212" text-anchor="middle">fence: grant / epoch / seq</text><text class="s" x="1000" y="238" text-anchor="middle">endpoint returned with fence</text>
-  <path class="arrow" d="M218 210h40M428 210h40M628 210h40M850 210h40" marker-end="url(#identity-arrow)"/>
-  <text class="s" x="238" y="198" text-anchor="middle">signs</text><text class="s" x="448" y="198" text-anchor="middle">carries</text><text class="s" x="648" y="198" text-anchor="middle">sends</text>
-  <path class="arrow dash" d="M1000 266v28H548v-38" marker-end="url(#identity-arrow)"/>
-  <text class="s" x="774" y="290" text-anchor="middle">Clone response: kind + endpoint + fence</text>
+  <text class="heading blue" x="48" y="202">Capacity authority</text>
+  <circle class="actor" cx="112" cy="273" r="16"/>
+  <path class="actor" d="M80 326V314C80 287 144 287 144 314V326"/>
+  <text class="label blue center" x="112" y="364">Issuer</text>
+  <path class="document grant" d="M258 248H540L568 276V412H258Z"/>
+  <path class="relation authority" d="M540 248V276H568"/>
+  <text class="heading blue" x="282" y="295">CapacityGrant</text>
+  <text class="body" x="282" y="330">Signed JWT</text>
+  <text class="body" x="282" y="363">Bearer or client-bound</text>
+  <text class="body muted" x="258" y="453">Carried by the caller with Clone</text>
+  <path class="relation authority" d="M152 326H258" marker-end="url(#identity-blue-arrow)"/>
+  <text class="body blue center" x="205" y="305">signs</text>
 
-  <rect class="panel" x="42" y="348" width="704" height="350" rx="20"/>
-  <text class="cap teal" x="68" y="381">AUDIT + REVOCATION</text>
-  <rect class="tealbox" x="68" y="411" width="200" height="88" rx="14"/>
-  <text class="h teal" x="168" y="440" text-anchor="middle">Home scope</text><text class="s" x="168" y="466" text-anchor="middle">issuer + resource claim</text><text class="s" x="168" y="485" text-anchor="middle">environment-specific facts</text>
-  <rect class="violetbox" x="308" y="411" width="154" height="88" rx="14"/>
-  <text class="h violet" x="385" y="440" text-anchor="middle">Fence</text><text class="s" x="385" y="466" text-anchor="middle">event incarnation</text>
-  <rect class="tealbox" x="502" y="411" width="216" height="88" rx="14"/>
-  <text class="h teal" x="610" y="440" text-anchor="middle">Audit record</text><text class="s" x="610" y="466" text-anchor="middle">event + scope + fence</text><text class="s" x="610" y="485" text-anchor="middle">durability follows policy</text>
-  <path class="arrow" d="M268 455h40M462 455h40" marker-end="url(#identity-arrow)"/>
-  <rect class="redbox" x="68" y="553" width="144" height="72" rx="14"/><text class="h red" x="140" y="582" text-anchor="middle">Restart or</text><text class="b" x="140" y="605" text-anchor="middle">scope loss</text>
-  <rect class="redbox" x="260" y="553" width="130" height="72" rx="14"/><text class="h red" x="325" y="583" text-anchor="middle">Epoch++</text><text class="s" x="325" y="606" text-anchor="middle">persisted</text>
-  <rect class="redbox" x="438" y="553" width="130" height="72" rx="14"/><text class="h red" x="503" y="582" text-anchor="middle">Old fences</text><text class="s" x="503" y="606" text-anchor="middle">invalid</text>
-  <rect class="redbox" x="616" y="553" width="102" height="72" rx="14"/><text class="h red" x="667" y="582" text-anchor="middle">Running</text><text class="s" x="667" y="606" text-anchor="middle">released</text>
-  <path class="arrow" d="M212 589h48M390 589h48M568 589h48" marker-end="url(#identity-arrow)"/>
-  <text class="s" x="68" y="666">Running fibers are not recovered after agent restart; eligible parked named sessions may remain resumable.</text>
+  <rect class="boundary" x="636" y="178" width="756" height="558" rx="16"/>
+  <text class="heading teal" x="664" y="218">Named home</text>
+  <text class="body muted" x="854" y="218">Audience + local verification boundary</text>
+  <rect class="service" x="672" y="258" width="292" height="166" rx="4"/>
+  <text class="heading teal" x="696" y="299">fiberd agent</text>
+  <text class="body" x="696" y="335">Verifies capacity authority</text>
+  <text class="body" x="696" y="374">Signature · issuer · audience</text>
+  <path class="relation authority" d="M568 330H672" marker-end="url(#identity-blue-arrow)"/>
+  <text class="body blue center" x="620" y="307">Clone</text>
 
-  <rect class="panel" x="778" y="348" width="380" height="350" rx="20"/>
-  <text class="cap amber" x="804" y="381">WHAT A FIBER RECEIVES</text>
-  <rect class="violetbox" x="804" y="411" width="328" height="86" rx="14"/>
-  <text class="h violet" x="968" y="441" text-anchor="middle">Incarnation context</text>
-  <text class="b" x="968" y="468" text-anchor="middle">endpoint + fence + optional payload</text>
-  <rect class="redbox" x="804" y="527" width="328" height="64" rx="14"/>
-  <text class="h red" x="968" y="554" text-anchor="middle">No per-fiber credential is minted</text>
-  <text class="s" x="968" y="576" text-anchor="middle">the fence is not a secret</text>
-  <rect class="amberbox" x="804" y="617" width="152" height="58" rx="13"/>
-  <text class="b amber" x="880" y="642" text-anchor="middle">Process backend</text><text class="s" x="880" y="661" text-anchor="middle">home mounts may show</text>
-  <rect class="amberbox" x="980" y="617" width="152" height="58" rx="13"/>
-  <text class="b amber" x="1056" y="642" text-anchor="middle">Sandbox backend</text><text class="s" x="1056" y="661" text-anchor="middle">separate filesystem view</text>
+  <circle class="fiber" cx="1240" cy="348" r="86"/>
+  <text class="heading violet center" x="1240" y="341">Running fiber</text>
+  <text class="body center" x="1240" y="376">one incarnation</text>
+  <path class="relation management" d="M964 348H1154" marker-end="url(#identity-teal-arrow)"/>
+  <text class="body teal center" x="1059" y="324">manages</text>
+
+  <text class="label teal" x="672" y="488">Home scope</text>
+  <text class="body" x="672" y="521">Audit facts, not authorization</text>
+  <text class="body muted" x="672" y="559">Logged with event + fence</text>
+
+  <path class="document data" d="M1024 512H1322L1350 540V666H1024Z"/>
+  <path class="relation identifies" d="M1322 512V540H1350"/>
+  <text class="heading violet" x="1048" y="554">Fence data</text>
+  <text class="body" x="1048" y="592">grant UID / epoch / sequence</text>
+  <text class="body red" x="1048" y="633">Not a credential or secret</text>
+  <path class="relation identifies" d="M1240 434V512"/>
+  <text class="body violet" x="1050" y="484">identified by</text>
+  <text class="body" x="672" y="611">ATTACH keeps the fence.</text>
+  <text class="body" x="672" y="642">CREATE / RESUME mint a new one.</text>
+  <text class="body red" x="664" y="708">Restart / scope loss advances the epoch; prior fences become stale.</text>
+
+  <path class="divider" d="M48 784H1392"/>
+  <text class="heading amber" x="48" y="827">Workload credentials</text>
+  <path class="document credentials" d="M48 852H356L384 880V1010H48Z"/>
+  <path class="relation access" d="M356 852V880H384"/>
+  <text class="label amber" x="72" y="901">Configured credentials</text>
+  <text class="body" x="72" y="937">Mounts / workload TLS</text>
+  <text class="body" x="72" y="974">Not a generic per-fiber identity</text>
+  <path class="relation access" d="M384 932H1416V348H1326" marker-end="url(#identity-amber-arrow)"/>
+  <text class="body amber" x="452" y="911">Usable only if exposed by the backend + configuration</text>
+  <text class="body" x="452" y="978">Configured HANDOFF: grant TLS identity + bound caller.</text>
+  <text class="body muted" x="452" y="1012">Neither grant JWT nor fence becomes a per-fiber credential.</text>
 </svg>

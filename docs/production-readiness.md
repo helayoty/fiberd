@@ -14,13 +14,13 @@ examples.
 | Area | Current behavior | Production requirement |
 | --- | --- | --- |
 | Control API | The reference gRPC server, JSON gateway, and client use plaintext transport. Only Clone verifies a grant; Park, Release, and Watch have no caller identity. | Put every control operation behind authenticated TLS or mTLS and explicit authorization. Restrict network reachability. |
-| Grant removal | Removing a file from the grant lane forgets the grant but does not reliably terminate existing work or prevent the same unexpired bearer token from self-admitting again. | Persist revocation, reject replay, terminate or drain work deterministically, and publish the state change. |
+| Grant removal | Removing a grant from the lane releases its running fibers and denies its UID on that home until its tokens expire. Release is best effort, and the denial covers only the home that removed it. | Retry or quarantine failed releases, remove the grant on every home, and set `-max-lease` so the denial covers every token. |
 | Cleanup failure | Yield and epoch-change cleanup can log a runtime Release failure and still remove ledger ownership. | Retry or quarantine failed cleanup and keep capacity unavailable until termination is confirmed. |
 | Epoch persistence | Fence safety depends on a monotonically persistent epoch. The Kubernetes example stores state on `emptyDir`. | Persist the epoch for the lifetime of the logical home and use a new home identity when that state is lost. |
 | Parked-state deletion | Release addresses running fiber IDs. There is no public operation that deletes an already parked session delta, and anonymous Park has no resumable name. | Add explicit parked-session deletion and deterministic checkpoint, port, and disk garbage collection. |
 | Mobility claims | The reference registry claim performs pull, owner comparison, and delete as separate operations. | Use an atomic claim, lease, or compare-and-swap before enabling cross-home resume. |
 | Grant refresh | Redelivery of a grant UID can replace ledger fields while the old template remains warm. | Enforce immutable authority fields per UID and define exactly which lease fields may be renewed. |
-| Audit result | State changes precede audit append. A synchronous append failure can return `Internal` after completion; best-effort failure can return success without a record. | Define idempotent recovery, monitor spool failures, and operate bounded durable storage and a remote shipper where required. |
+| Audit result | State changes precede audit append. A synchronous append failure can return `Internal` after completion; best-effort failure can return success without a record, though the next record written is a `gap` naming it. After one failed `fsync` the spool refuses every synchronous record until the agent restarts. | Define idempotent recovery, monitor spool failures, restart the agent after an `fsync` failure, and operate bounded durable storage. Copy the spool off the host where required. |
 | Watch set | Watch has no batch boundary or deletion tombstone. | Add authoritative snapshot framing and removal events, or reconcile through another inventory source. |
 | Device class | The host currently validates nonzero device capacity but not the requested class. | Enforce class compatibility before admitting device-backed grants. |
 
@@ -49,7 +49,7 @@ advertises:
 
 - epoch state, so replacement processes cannot reuse old fences
 - ledger snapshots for admitted grants and parked-session metadata
-- audit spool data until it has been shipped and acknowledged
+- audit spool data until it has been copied off the host, where that is required
 - parent checkpoints and session deltas needed for resume
 
 The storage lifetime must match the logical home identity. If the epoch is
@@ -76,11 +76,12 @@ budget, tier, policy, and device fields immutable. Renew only the lease for an
 otherwise identical grant. Drain the old grant and issue a new UID when its
 workload or authority changes.
 
-Do not use file removal as a hard revocation signal in the current
-implementation. Keep leases short, stop routing new Clone calls, drain known
-work, confirm runtime termination, and rotate the bearer token. A hardened
-implementation must persist a revocation tombstone so the same token cannot
-self-admit again.
+Removing a grant from a home's lane releases its running fibers and persists
+a deny-list entry, so the same token can't self-admit there again (see
+[Security](security.md#grants)). Release is still best effort: a release
+that fails is logged, and the work can outlive the ledger entry. Set
+`-max-lease`, so that denials cover every token that may exist. Remove the
+grant on every home that holds it, and confirm runtime termination.
 
 ## Cleanup and state lifecycle
 
@@ -113,8 +114,9 @@ operator.
 - The controller creates a missing Pod but has no rollout policy for changing
   an existing Pod.
 - The controller has no finalizer or graceful scale-in workflow.
-- The Pod is privileged by default and the issuer serves HTTP inside the
-  example cluster.
+- A proc grant's Pod holds `SYS_ADMIN` and shares the host's user namespace,
+  other runtimes' Pods are privileged by default, and the issuer serves HTTP
+  inside the example cluster.
 - Epoch, snapshot, audit, and checkpoint state use `emptyDir`.
 
 A production operator must correct those behaviors, minimize privileges,
@@ -147,8 +149,8 @@ Before production use, require evidence for all of these:
 4. Failed backend cleanup is retried and does not free capacity early.
 5. Parked-state retention and deletion keep disk and ports bounded.
 6. Mobility uses atomic claims and a compatible endpoint topology.
-7. Audit disk-full, shipper outage, and synchronous failure behavior are
-   observable and recoverable.
+7. Audit disk-full and synchronous failure behavior are observable and
+   recoverable.
 8. Readiness, scope loss, drain, rollout, and deletion are tested against the
    real platform rather than only administrative hooks.
 9. Resource, endpoint, backend, and security conformance are run for the exact

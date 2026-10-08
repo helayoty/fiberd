@@ -1,46 +1,72 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="760" viewBox="0 0 1200 760" role="img" aria-labelledby="runtime-lifecycle-title runtime-lifecycle-desc">
-  <title id="runtime-lifecycle-title">fiberd runtime lifecycle across process and sandbox backends</title>
-  <desc id="runtime-lifecycle-desc">After a grant is admitted, fiberd warms one template. Create reserves a slot and establishes a new endpoint and fence for an incarnation. Observe tracks state, working set, exits, and grant lease. Park checkpoints an eligible named session and frees its running slot. Resume restores state as a new incarnation with a new fence and endpoint. Release destroys running state and may discard retained checkpoint data. Proc and runc use process and CRIU mechanisms; gVisor and Hyperlight use sandbox snapshots.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="988" viewBox="0 0 1440 988" role="img" aria-labelledby="runtime-lifecycle-title runtime-lifecycle-desc">
+  <title id="runtime-lifecycle-title">Running incarnations change; named sessions can survive</title>
+  <desc id="runtime-lifecycle-desc">State transitions for one local session, with successful operations on the arrows. Absent or removed means no retained session record; Clone resolves to CREATE when no resumable state is found locally or through configured registry lookup. CREATE reuses the separate warm template, reserves a live slot, and mints a new fence and endpoint. Running named sessions ATTACH to themselves, preserving fence and endpoint. Successful Park on a checkpoint-capable backend ends the running incarnation and retains the name and delta without a live slot. Clone of parked state resolves to RESUME, restores that state, reserves a slot, and mints a new fence. Release, exit, or revocation removes running state and forgets its name; no direct public Release transition exists from parked state. Anonymous Clone always creates; an anonymous Park has no name by which to resume its delta. Restart advances the durable epoch and does not recover running fibers. It rewarms valid grants and can recover compatible parked state when its metadata and delta survive. Revocation and orphan cleanup are best effort. A remotely claimed or exported delta can cease to be owned locally; mobility and garbage collection are not expanded here.</desc>
   <style>
-    :root{--bg:#f7f9fc;--panel:#fff;--ink:#172033;--muted:#5d6b7d;--line:#b8c4d4;--blue:#3165b5;--blue-bg:#eaf1ff;--teal:#13776f;--teal-bg:#e8f7f4;--violet:#704aa1;--violet-bg:#f2edfa;--amber:#a76500;--amber-bg:#fff3d6;--red:#b33b32;--red-bg:#fff0ef;--green:#287a4d;--green-bg:#e8f6ed}
-    @media(prefers-color-scheme:dark){:root{--bg:#0d1117;--panel:#161b22;--ink:#e6edf3;--muted:#a3adba;--line:#3d4652;--blue:#79a7ff;--blue-bg:#17243d;--teal:#53c7b8;--teal-bg:#102923;--violet:#c09cff;--violet-bg:#251b35;--amber:#f0b44d;--amber-bg:#30240f;--red:#ff8178;--red-bg:#321817;--green:#63cf8e;--green-bg:#142b1e}}
-    text{font-family:ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;fill:var(--ink)}.bg{fill:var(--bg)}.panel{fill:var(--panel);stroke:var(--line);stroke-width:1.5}.bluebox{fill:var(--blue-bg);stroke:var(--blue);stroke-width:1.5}.tealbox{fill:var(--teal-bg);stroke:var(--teal);stroke-width:1.5}.violetbox{fill:var(--violet-bg);stroke:var(--violet);stroke-width:1.5}.amberbox{fill:var(--amber-bg);stroke:var(--amber);stroke-width:1.5}.redbox{fill:var(--red-bg);stroke:var(--red);stroke-width:1.5}.greenbox{fill:var(--green-bg);stroke:var(--green);stroke-width:1.5}.title{font-size:27px;font-weight:750}.subtitle{font-size:14px;fill:var(--muted)}.h{font-size:16px;font-weight:700}.b{font-size:13px}.s{font-size:11px;fill:var(--muted)}.cap{font-size:12px;font-weight:700;letter-spacing:.5px}.blue{fill:var(--blue)}.teal{fill:var(--teal)}.violet{fill:var(--violet)}.amber{fill:var(--amber)}.red{fill:var(--red)}.green{fill:var(--green)}.arrow{fill:none;stroke:var(--muted);stroke-width:2}.loop{fill:none;stroke:var(--violet);stroke-width:2;stroke-dasharray:7 5}
+    :root{--bg:#f7f9fc;--panel:#fff;--ink:#172033;--muted:#5d6b7d;--border:#b8c4d4;--blue:#3165b5;--blue-bg:#eaf1ff;--teal:#13776f;--teal-bg:#e8f7f4;--violet:#704aa1;--violet-bg:#f2edfa;--amber:#a76500;--amber-bg:#fff3d6;--red:#b33b32;--red-bg:#fff0ef;--green:#287a4d;--green-bg:#e8f6ed}
+    @media(prefers-color-scheme:dark){:root{--bg:#0d1117;--panel:#161b22;--ink:#e6edf3;--muted:#a3adba;--border:#3d4652;--blue:#79a7ff;--blue-bg:#17243d;--teal:#53c7b8;--teal-bg:#102923;--violet:#c09cff;--violet-bg:#251b35;--amber:#f0b44d;--amber-bg:#30240f;--red:#ff8178;--red-bg:#321817;--green:#63cf8e;--green-bg:#142b1e}}
+    text{font-family:ui-sans-serif,-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;fill:var(--ink)}
+    .bg{fill:var(--bg)}.title{font-size:30px;font-weight:700}.heading{font-size:22px;font-weight:700}.label{font-size:20px;font-weight:600}.body{font-size:17px}.muted{fill:var(--muted)}.teal{fill:var(--teal)}.violet{fill:var(--violet)}.amber{fill:var(--amber)}.red{fill:var(--red)}.center{text-anchor:middle}
+    .template{fill:var(--amber-bg);stroke:var(--amber);stroke-width:1.5}.state{stroke-width:2}.absent{fill:var(--panel);stroke:var(--border)}.running{fill:var(--violet-bg);stroke:var(--violet)}.parked{fill:var(--amber-bg);stroke:var(--amber)}.divider{stroke:var(--border);stroke-width:1.5}.transition{fill:none;stroke-width:2;stroke-linejoin:round;stroke-linecap:round}.create{stroke:var(--violet)}.attach{stroke:var(--teal)}.park{stroke:var(--amber)}.remove{stroke:var(--red)}
+    text.amber{fill:#9e5e00}@media(prefers-color-scheme:dark){text.amber{fill:var(--amber)}}
   </style>
-  <defs><marker id="runtime-lifecycle-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M1 1l8 4-8 4z" fill="#7b8794"/></marker><marker id="runtime-lifecycle-violet-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M1 1l8 4-8 4z" fill="#704aa1"/></marker></defs>
-  <rect class="bg" width="1200" height="760"/>
-  <text class="title" x="42" y="48">Runtime lifecycle: one template, many incarnations</text>
-  <text class="subtitle" x="42" y="74">The state machine is stable across backends; the process or sandbox mechanism underneath each transition differs.</text>
-  <rect class="amberbox" x="42" y="144" width="196" height="126" rx="17"/>
-  <text class="h amber" x="140" y="178" text-anchor="middle">WARM</text><text class="b" x="140" y="208" text-anchor="middle">prepare one template</text><text class="s" x="140" y="235" text-anchor="middle">grant becomes ready</text><text class="s" x="140" y="254" text-anchor="middle">idempotent per grant</text>
-  <rect class="violetbox" x="282" y="144" width="196" height="126" rx="17"/>
-  <text class="h violet" x="380" y="178" text-anchor="middle">CREATE</text><text class="b" x="380" y="208" text-anchor="middle">reserve slot · fork / restore</text><text class="s" x="380" y="235" text-anchor="middle">new endpoint + fence</text><text class="s" x="380" y="254" text-anchor="middle">incarnation begins</text>
-  <rect class="tealbox" x="522" y="144" width="196" height="126" rx="17"/>
-  <text class="h teal" x="620" y="178" text-anchor="middle">OBSERVE</text><text class="b" x="620" y="208" text-anchor="middle">W · exits · endpoint</text><text class="s" x="620" y="235" text-anchor="middle">grant lease + pressure</text><text class="s" x="620" y="254" text-anchor="middle">running session ledger</text>
-  <polygon points="812,143 908,207 812,271 716,207" fill="var(--blue-bg)" stroke="var(--blue)" stroke-width="1.5"/>
-  <text class="h blue" x="812" y="203" text-anchor="middle">Park or</text><text class="b" x="812" y="227" text-anchor="middle">release?</text>
-  <rect class="amberbox" x="958" y="116" width="200" height="126" rx="17"/>
-  <text class="h amber" x="1058" y="150" text-anchor="middle">PARK</text><text class="b" x="1058" y="180" text-anchor="middle">checkpoint named state</text><text class="s" x="1058" y="207" text-anchor="middle">running slot freed</text><text class="s" x="1058" y="226" text-anchor="middle">tier must support it</text>
-  <rect class="redbox" x="958" y="296" width="200" height="126" rx="17"/>
-  <text class="h red" x="1058" y="330" text-anchor="middle">RELEASE</text><text class="b" x="1058" y="360" text-anchor="middle">end running state</text><text class="s" x="1058" y="387" text-anchor="middle">free slot + session name</text><text class="s" x="1058" y="406" text-anchor="middle">discard can remove delta</text>
-  <rect class="violetbox" x="718" y="324" width="190" height="98" rx="16"/>
-  <text class="h violet" x="813" y="357" text-anchor="middle">RESUME</text><text class="b" x="813" y="386" text-anchor="middle">restore parked state</text><text class="s" x="813" y="408" text-anchor="middle">new endpoint + new fence</text>
-  <path class="arrow" d="M238 207h44M478 207h44M718 207h-2M908 181h50M908 233h24v126h26" marker-end="url(#runtime-lifecycle-arrow)"/>
-  <path class="arrow" d="M1058 242v42H813v40" marker-end="url(#runtime-lifecycle-arrow)"/>
-  <path class="loop" d="M718 373H620V270" marker-end="url(#runtime-lifecycle-violet-arrow)"/>
-  <text class="s" x="668" y="361" text-anchor="middle">new incarnation</text>
+  <defs>
+    <marker id="runtime-lifecycle-violet-arrow" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="12" markerHeight="12" markerUnits="userSpaceOnUse" orient="auto"><path d="M1 1 11 6 1 11Z" fill="var(--violet)"/></marker>
+    <marker id="runtime-lifecycle-teal-arrow" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="12" markerHeight="12" markerUnits="userSpaceOnUse" orient="auto"><path d="M1 1 11 6 1 11Z" fill="var(--teal)"/></marker>
+    <marker id="runtime-lifecycle-amber-arrow" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="12" markerHeight="12" markerUnits="userSpaceOnUse" orient="auto"><path d="M1 1 11 6 1 11Z" fill="var(--amber)"/></marker>
+    <marker id="runtime-lifecycle-red-arrow" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="12" markerHeight="12" markerUnits="userSpaceOnUse" orient="auto"><path d="M1 1 11 6 1 11Z" fill="var(--red)"/></marker>
+  </defs>
+  <rect class="bg" width="1440" height="988"/>
+  <text class="title" x="48" y="66">Running incarnations change; named sessions can survive</text>
+  <text class="body muted" x="48" y="100">States are nodes. Successful operations are transitions — not a fixed sequence.</text>
+  <path class="divider" d="M48 130H1392"/>
 
-  <rect class="panel" x="42" y="492" width="534" height="192" rx="20"/>
-  <text class="cap violet" x="68" y="527">PROCESS BACKENDS · proc / runc</text>
-  <rect class="violetbox" x="68" y="552" width="220" height="96" rx="15"/>
-  <text class="h violet" x="178" y="583" text-anchor="middle">Create</text><text class="b" x="178" y="611" text-anchor="middle">copy-on-write child</text><text class="s" x="178" y="634" text-anchor="middle">fiber cgroup leaf</text>
-  <rect class="amberbox" x="328" y="552" width="220" height="96" rx="15"/>
-  <text class="h amber" x="438" y="583" text-anchor="middle">Park / Resume</text><text class="b" x="438" y="611" text-anchor="middle">CRIU delta when available</text><text class="s" x="438" y="634" text-anchor="middle">runc keeps OCI container context</text>
-  <rect class="panel" x="624" y="492" width="534" height="192" rx="20"/>
-  <text class="cap blue" x="650" y="527">SANDBOX BACKENDS · gVisor / Hyperlight</text>
-  <rect class="bluebox" x="650" y="552" width="220" height="96" rx="15"/>
-  <text class="h blue" x="760" y="583" text-anchor="middle">Create</text><text class="b" x="760" y="611" text-anchor="middle">restore warm image</text><text class="s" x="760" y="634" text-anchor="middle">separate sandbox per fiber</text>
-  <rect class="amberbox" x="910" y="552" width="220" height="96" rx="15"/>
-  <text class="h amber" x="1020" y="583" text-anchor="middle">Park / Resume</text><text class="b" x="1020" y="611" text-anchor="middle">sandbox snapshot</text><text class="s" x="1020" y="634" text-anchor="middle">Hyperlight uses grant helper</text>
-  <rect class="greenbox" x="42" y="708" width="1116" height="34" rx="13"/>
-  <text class="b green" x="600" y="731" text-anchor="middle">Every successful CREATE or RESUME establishes a distinct incarnation; ATTACH reuses the running incarnation’s endpoint and fence.</text>
+  <rect class="template" x="80" y="188" width="308" height="116" rx="3"/>
+  <rect class="template" x="72" y="196" width="308" height="116" rx="3"/>
+  <rect class="template" x="64" y="204" width="308" height="116" rx="3"/>
+  <text class="heading amber" x="88" y="246">Warm template</text>
+  <text class="body" x="88" y="279">Reusable resource for CREATE</text>
+  <text class="body muted" x="64" y="352">Not a session state; not consumed.</text>
+
+  <text class="label" x="1068" y="245">Named sessions</text>
+  <text class="body muted" x="1068" y="279">Keep their name across Park.</text>
+  <text class="body muted" x="1068" y="310">Resume needs checkpoint support.</text>
+
+  <rect class="state absent" x="48" y="458" width="320" height="166" rx="42"/>
+  <text class="heading center" x="208" y="506">Absent / removed</text>
+  <text class="body center" x="208" y="545">No retained session record</text>
+  <text class="body center" x="208" y="578">No live slot</text>
+  <rect class="state running" x="552" y="458" width="336" height="166" rx="42"/>
+  <text class="heading violet center" x="720" y="506">Running</text>
+  <text class="body center" x="720" y="545">Endpoint + current fence</text>
+  <text class="body center" x="720" y="578">One live slot</text>
+  <rect class="state parked" x="1072" y="458" width="320" height="166" rx="42"/>
+  <text class="heading amber center" x="1232" y="506">Parked</text>
+  <text class="body center" x="1232" y="545">Name + retained delta</text>
+  <text class="body center" x="1232" y="578">No live slot</text>
+
+  <path class="transition create" d="M368 541H552" marker-end="url(#runtime-lifecycle-violet-arrow)"/>
+  <text class="body violet center" x="460" y="509">Clone → CREATE</text>
+  <text class="body center" x="460" y="573">New fence</text>
+
+  <path class="transition attach" d="M612 458V334H828V458" marker-end="url(#runtime-lifecycle-teal-arrow)"/>
+  <text class="body teal center" x="720" y="376">Clone → ATTACH</text>
+  <text class="body center" x="720" y="407">Same fence + endpoint</text>
+
+  <path class="transition park" d="M888 500H1072" marker-end="url(#runtime-lifecycle-amber-arrow)"/>
+  <text class="label amber center" x="980" y="470">Park</text>
+  <text class="body center" x="980" y="527">Checkpoint state</text>
+  <path class="transition create" d="M1072 582H888" marker-end="url(#runtime-lifecycle-violet-arrow)"/>
+  <text class="body violet center" x="980" y="620">Clone → RESUME</text>
+  <text class="body center" x="980" y="651">New fence</text>
+
+  <path class="transition remove" d="M720 624V778H208V624" marker-end="url(#runtime-lifecycle-red-arrow)"/>
+  <text class="label red center" x="464" y="717">Release / exit / revocation</text>
+  <text class="body center" x="464" y="750">Free the slot; forget the name</text>
+  <text class="body muted" x="1072" y="726">Public Release cannot address</text>
+  <text class="body muted" x="1072" y="757">an already parked session.</text>
+
+  <path class="divider" d="M48 830H1392"/>
+  <text class="body" x="48" y="871">Anonymous Clone always creates; anonymous Park has no resumable session name.</text>
+  <text class="body" x="48" y="909">Restart advances the epoch: running fibers are not recovered; surviving compatible parked state may resume.</text>
+  <text class="body muted" x="48" y="947">Valid grants rewarm after restart. Revocation and orphan cleanup are best effort.</text>
 </svg>

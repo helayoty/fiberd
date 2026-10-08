@@ -37,7 +37,7 @@ not expire through these checks; production issuers should always set both.
 
 ### Grant fields
 
-- `grant_uid` is the stable identifier used by the ledger, fences, and status stream.
+- `grant_uid` is the stable identifier used by the ledger, fences, and status stream. It must be a DNS-1123 label, which means lowercase letters, digits and `-`, at most 63 characters, starting and ending with a letter or digit. A grant with any other UID is refused as unauthenticated, because the UID becomes a cgroup and run-directory name on the home.
 - `issuer` identifies the authority that signed the grant.
 - `audience` names the home allowed to exercise the grant.
 - `template_digest` fixes the pre-admitted OCI template or artifact.
@@ -49,6 +49,13 @@ not expire through these checks; production issuers should always set both.
 - `policy.durability` selects best-effort or synchronous audit handling.
 - `policy.session_class` and `policy.audit_class` are carried as policy labels.
 - `policy.psi_some_avg10_shed` and `policy.psi_some_avg10_park` override pressure watermarks when non-zero.
+- `policy.isolation` is `UNTRUSTED` or `TRUSTED`; unset means `UNTRUSTED`. An untrusted grant is admitted only by a home whose runtime isolates tenants from the host kernel (`gvisor`, `hyperlight`); any other home refuses it with `FailedPrecondition`.
+- `policy.endpoint_mode` is `DIRECT` or `HANDOFF`, and unset means `DIRECT`.
+  A `DIRECT` fiber listens on its own endpoint. A `HANDOFF` fiber is reached
+  over TLS through the home's handoff listener.
+  A `HANDOFF` grant must be bound to a caller certificate. An unbound one is
+  refused with `Unauthenticated`. A home that does not hand off connections
+  refuses the grant with `FailedPrecondition` at admission, like a tier gap.
 - `device_budget.bytes` and `device_budget.class` describe the per-fiber
   device-state slice and requested device class. The current host enforces
   available bytes but does not compare the requested class with the engine.
@@ -76,6 +83,9 @@ The response contains:
 - `endpoint`, which callers dial as returned.
 - `fence`, which identifies the grant, agent epoch, and sequence.
 - `kind`, which is `CREATE`, `ATTACH`, or `RESUME`.
+- `routing_key` and `server_key_sha256`, set only for a `HANDOFF` fiber. The
+  routing key names the fiber to the home's handoff listener. The key hash
+  is what the caller pins the fiber's TLS key to.
 
 The action depends on the session:
 
@@ -86,7 +96,9 @@ The action depends on the session:
 
 ATTACH returns the same fiber ID, endpoint, and fence. CREATE and RESUME mint a new fence.
 
-![Clone verifies the grant, applies local refusal checks, then attaches a running session, resumes a parked session, or creates a new fiber. A capacity miss is deferred when the grant lane is healthy and shed when it is unhealthy.](images/clone-resolution.svg)
+The diagram follows action selection and successful completion; [Outcomes](#outcomes) defines refusals and failure caveats.
+
+![After grant verification, admission, rate budget, and named lookup, Clone selects ATTACH for running state, RESUME for parked state, or CREATE for an unknown name or anonymous request. ATTACH audits and returns the same endpoint and fence without new runtime work. RESUME and CREATE need a slot and no shedding, then runtime work, audit, and commit before returning an endpoint with a new fence. Rejection or unavailable new work refuses the request.](images/clone-resolution.svg)
 
 ### Park
 
@@ -160,6 +172,16 @@ tcp://[fd00::7]:30012
 The supported forms are `unix://` with an absolute path and `tcp://` with a host and port. The configured home and backend determine which form can be issued. IPv4 and IPv6 use the same `tcp://` scheme, and IPv6 literals are bracketed.
 
 The endpoint is a transport address, not a separate identity. Address allocation, shared Pod or node addresses, ports, and network policy are covered in [Networking](networking.md).
+
+### Handoff endpoints
+
+For a `HANDOFF` fiber, `endpoint` is the home's handoff listener, the same `tcp://` address for every such fiber. The caller dials it with TLS 1.3 and does three things.
+
+- It sends `<routing_key>.fiberd` as the TLS server name.
+- It presents the certificate the grant is bound to.
+- It accepts the server only if the base64url SHA-256 of its public key (SubjectPublicKeyInfo) equals `server_key_sha256`.
+
+The home closes the connection without a reply if the server name is unknown, the fiber has ended, or no ClientHello arrives within 1 second. The fiber refuses any client certificate other than the grant's. In Go, `consumer.Fiber.DialHandoff` does all of this. A resumed session keeps its server key, on this home and on any home that shares the handoff key, but it gets a new routing key. Use the one from the latest Clone.
 
 ## Outcomes
 

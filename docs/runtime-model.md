@@ -5,7 +5,7 @@ plane issues a `CapacityGrant` to a home. The home runs a fiberd agent, and the
 agent verifies the grant and prepares one warm template. Callers then create
 fibers from that capacity without another placement call.
 
-![A grant warms one template, creates an incarnation with an endpoint and fence, observes it, and either parks and resumes named state or releases it. Process and sandbox backends implement those stages with different isolation mechanisms.](./images/runtime-lifecycle.svg)
+![Session state transitions: CREATE enters Running, ATTACH stays Running with the same fence, Park retains named state without a live slot, and RESUME returns to Running with a new fence. Release, exit, or revocation removes running state. The warm template is a reusable resource, not a session state.](./images/runtime-lifecycle.svg)
 
 These terms describe different parts of the model:
 
@@ -26,7 +26,7 @@ mechanism used to create or restore it.
 | Backend | What one fiber is | Creation and endpoints | Park and resume |
 | --- | --- | --- | --- |
 | `proc` | A child process in its own cgroup leaf | Copy-on-write fork; unix or TCP | CRIU delta when CRIU is available |
-| `runc` | A child process inside the warm OCI container | Copy-on-write fork; unix or TCP | CRIU delta when CRIU is available |
+| `runc` | A child process inside the warm OCI container | Copy-on-write fork; unix only | CRIU delta when CRIU is available |
 | gVisor | A separate `runsc` sandbox | Restore from an image; unix only, with networking disabled | Sandbox snapshot |
 | Hyperlight | A micro-VM sandbox inside one grant helper process | Restore from a snapshot; unix only | Helper snapshot |
 | `stub` | An in-memory protocol record | Synthetic test endpoint | In-memory park for tests |

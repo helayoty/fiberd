@@ -4,7 +4,7 @@ Build fiberd, run an agent on this machine, and exercise the four protocol
 operations. This page covers the runnable path. The conceptual guides explain
 the results, while each environment and consumer has its own example README.
 
-![The quickstart builds the binaries, starts an issuer and fiberd, exercises create, attach, park, and resume, then restarts the agent to demonstrate epoch invalidation.](./images/quickstart-flow.svg)
+![A numbered experiment separates operations, observed results, and session state: prepare the demo; Clone S to CREATE; repeat to ATTACH the same fence; Park the fiber; Clone S to RESUME with a new fence; restart with the same state directory and observe an old fiber ID return NotFound.](./images/quickstart-flow.svg)
 
 ## Build
 
@@ -22,8 +22,8 @@ The in-memory runtime runs anywhere. The agent speaks gRPC on `-listen` and, wit
 export FIBERD_STATE=$(mktemp -d)       # reused across restarts below
 bin/grant-issuer keygen -alg EdDSA -out $FIBERD_STATE/issuer.json
 bin/grant-issuer serve -key $FIBERD_STATE/issuer.json -addr 127.0.0.1:8686 &
-bin/fiberd -node-id node-a -verifier jwks -issuer http://127.0.0.1:8686 \
-  -http :8485 -admin-unsafe -stale-ttl 5s &
+bin/fiberd -state $FIBERD_STATE -node-id node-a -verifier jwks -issuer http://127.0.0.1:8686 \
+  -insecure-plaintext -http :8485 -stale-ttl 5s &
 until curl -sf localhost:8485/healthz >/dev/null; do sleep 0.2; done
 
 # a grant for this node: 2 fibers, 1 MiB working set each, a 10 minute lease
@@ -39,21 +39,22 @@ clone "{\"grantJwt\":$J,\"session\":\"S\"}"    # RESUME, fence seq 2
 clone "{\"grantJwt\":$J,\"image\":\"evil\"}"   # 400: admission completeness
 clone "{\"grantJwt\":$J}"                       # anonymous CREATE; the grant is now full (2/2)
 clone "{\"grantJwt\":$J}"                       # 503 DEFERRED_FALLBACK: full, issuer reachable
-curl -s --unix-socket $FIBERD_STATE/admin.sock -X POST http://x/lane -d '{"healthy":false}'
+kill %1; sleep 6                                # stop the issuer; the lane goes stale after -stale-ttl
 clone "{\"grantJwt\":$J}"                       # 429 SHED + Retry-After: issuer unreachable
 curl -s localhost:8485/v1/status                # running, parked, w_used_bytes, latest fence
-cat $FIBERD_STATE/audit.jsonl                   # one record per transition
+cat $FIBERD_STATE/private/audit.jsonl                   # one record per transition
+bin/audit-verify -spool $FIBERD_STATE/private/audit.jsonl -trust $FIBERD_STATE/private/audit-key.json
 
-kill %2; bin/fiberd -node-id node-a -verifier jwks -issuer http://127.0.0.1:8686 -http :8485 &
+bin/grant-issuer serve -key $FIBERD_STATE/issuer.json -addr 127.0.0.1:8686 &
+kill %2; bin/fiberd -state $FIBERD_STATE -node-id node-a -verifier jwks -issuer http://127.0.0.1:8686 -insecure-plaintext -http :8485 &
 until curl -sf localhost:8485/healthz >/dev/null; do sleep 0.2; done
 curl -s localhost:8485/healthz                  # epoch 1 -> 2: every prior fence is invalid
 curl -s -X POST localhost:8485/v1/park -d '{"fiberId":"g1/1/1"}'   # 404
 ```
 
-`-grants-dir` pre-admits `*.jwt` files dropped there. Removing a file invokes
-the current experimental revoke path, but it is not a production revocation
-mechanism: it does not reliably terminate existing work or prevent an
-unexpired token from being admitted again through Clone. See
+`-grants-dir` pre-admits `*.jwt` files dropped there. Removing a file revokes
+the grant on this home: its running fibers are released, and its token is
+refused until it expires (`$FIBERD_STATE/private/revoked.json`). See
 [Production readiness](production-readiness.md#grant-lifecycle-and-revocation).
 `-verifier insecure-json` takes unsigned protobuf-JSON grants, for development
 only. `grpcurl -plaintext -proto api/grant/v1/grant.proto localhost:8484

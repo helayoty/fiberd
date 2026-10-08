@@ -1,56 +1,78 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="760" viewBox="0 0 1200 760" role="img" aria-labelledby="architecture-components-title architecture-components-desc">
-  <title id="architecture-components-title">fiberd implementation component boundaries</title>
-  <desc id="architecture-components-desc">cmd/fiberd starts pkg/agent, which composes network servers, core policy, home, verifier, runtime, audit, and artifact seams. pkg/rpc calls pkg/core. The host runtime implements the core runtime interface and calls the selected backend. Artifact and several backend capability interfaces are optional. pkg/sys supplies Linux cgroup and CRIU mechanisms without entering the invariant core.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="840" viewBox="0 0 1440 840" role="img" aria-labelledby="architecture-components-title architecture-components-desc">
+  <title id="architecture-components-title">One invariant core, replaceable collaborators</title>
+  <desc id="architecture-components-desc">Selected structural relationships, not an execution sequence. Primary labels use repository package names or the concrete core.Spool type; subtitles describe roles. pkg/rpc calls core.Agent. pkg/home delivers grants and supplies health, scope, and fabric callbacks. pkg/core uses pkg/grant through core.Verifier and core.Spool through core.Auditor. The circular core.Runtime port selects pkg/runtime/host or pkg/runtime/stub. The host-only outline groups pkg/runtime/host with its pkg/backend and pkg/artifact dependencies. pkg/runtime/stub has neither dependency. pkg/agent.Run assembles these collaborators.</desc>
   <style>
-    :root{--bg:#f7f9fc;--panel:#fff;--ink:#172033;--muted:#5d6b7d;--line:#b8c4d4;--blue:#3165b5;--blue-bg:#eaf1ff;--teal:#13776f;--teal-bg:#e8f7f4;--violet:#704aa1;--violet-bg:#f2edfa;--amber:#a76500;--amber-bg:#fff3d6;--green:#287a4d;--green-bg:#e8f6ed}
-    @media(prefers-color-scheme:dark){:root{--bg:#0d1117;--panel:#161b22;--ink:#e6edf3;--muted:#a3adba;--line:#3d4652;--blue:#79a7ff;--blue-bg:#17243d;--teal:#53c7b8;--teal-bg:#102923;--violet:#c09cff;--violet-bg:#251b35;--amber:#f0b44d;--amber-bg:#30240f;--green:#63cf8e;--green-bg:#142b1e}}
-    text{font-family:ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;fill:var(--ink)}.bg{fill:var(--bg)}.panel{fill:var(--panel);stroke:var(--line);stroke-width:1.5}.bluebox{fill:var(--blue-bg);stroke:var(--blue);stroke-width:1.5}.tealbox{fill:var(--teal-bg);stroke:var(--teal);stroke-width:1.5}.violetbox{fill:var(--violet-bg);stroke:var(--violet);stroke-width:1.5}.amberbox{fill:var(--amber-bg);stroke:var(--amber);stroke-width:1.5}.greenbox{fill:var(--green-bg);stroke:var(--green);stroke-width:1.5}.title{font-size:27px;font-weight:750}.subtitle{font-size:14px;fill:var(--muted)}.h{font-size:16px;font-weight:700}.b{font-size:13px}.s{font-size:11px;fill:var(--muted)}.cap{font-size:12px;font-weight:700;letter-spacing:.5px}.blue{fill:var(--blue)}.teal{fill:var(--teal)}.violet{fill:var(--violet)}.amber{fill:var(--amber)}.green{fill:var(--green)}.arrow{fill:none;stroke:var(--muted);stroke-width:2}.inject{fill:none;stroke:var(--violet);stroke-width:2;stroke-dasharray:7 5}
+    :root{--bg:#f7f9fc;--panel:#fff;--ink:#172033;--muted:#5d6b7d;--border:#b8c4d4;--blue:#3165b5;--blue-bg:#eaf1ff;--teal:#13776f;--teal-bg:#e8f7f4;--violet:#704aa1;--violet-bg:#f2edfa;--amber:#a76500;--amber-bg:#fff3d6;--green:#287a4d;--green-bg:#e8f6ed}
+    @media(prefers-color-scheme:dark){:root{--bg:#0d1117;--panel:#161b22;--ink:#e6edf3;--muted:#a3adba;--border:#3d4652;--blue:#79a7ff;--blue-bg:#17243d;--teal:#53c7b8;--teal-bg:#102923;--violet:#c09cff;--violet-bg:#251b35;--amber:#f0b44d;--amber-bg:#30240f;--green:#63cf8e;--green-bg:#142b1e}}
+    text{font-family:ui-sans-serif,-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;fill:var(--ink)}
+    .bg{fill:var(--bg)}.title{font-size:30px;font-weight:700}.heading{font-size:22px;font-weight:700}.focal{font-size:28px;font-weight:700}.body{font-size:18px}.muted{fill:var(--muted)}.center{text-anchor:middle}.blue{fill:var(--blue)}.teal{fill:var(--teal)}.violet{fill:var(--violet)}.green{fill:var(--green)}
+    .scope{fill:none;stroke:var(--border);stroke-width:1.5}.component{fill:var(--panel);stroke-width:2}.api{stroke:var(--blue)}.home{stroke:var(--violet)}.policy{fill:var(--teal-bg);stroke:var(--teal)}.plugin{stroke:var(--violet)}.host{stroke:var(--green)}.detail{stroke:var(--border);stroke-width:1.5}.stub{stroke:var(--border);stroke-width:1.5}.port{fill:var(--bg);stroke:var(--green);stroke-width:2}
+    .divider{fill:none;stroke:var(--border);stroke-width:1.5}.flow{fill:none;stroke:var(--ink);stroke-width:2;stroke-linecap:round;stroke-linejoin:round}.binding{fill:none;stroke:var(--green);stroke-width:2;stroke-dasharray:7 6;stroke-linejoin:round}
   </style>
-  <defs><marker id="architecture-components-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M1 1l8 4-8 4z" fill="#7b8794"/></marker><marker id="architecture-components-violet-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M1 1l8 4-8 4z" fill="#704aa1"/></marker></defs>
-  <rect class="bg" width="1200" height="760"/>
-  <text class="title" x="42" y="48">Implementation composition: invariant core, injected environment</text>
-  <text class="subtitle" x="42" y="74">Arrows show dependency or calls-toward direction. Dashed seams are injected; optional capabilities are explicitly marked.</text>
-  <rect class="bluebox" x="42" y="122" width="214" height="90" rx="15"/>
-  <text class="h blue" x="149" y="155" text-anchor="middle">cmd/fiberd</text><text class="b" x="149" y="184" text-anchor="middle">parse config · start agent</text>
-  <rect class="violetbox" x="330" y="108" width="246" height="118" rx="17"/>
-  <text class="h violet" x="453" y="141" text-anchor="middle">pkg/agent</text><text class="b" x="453" y="170" text-anchor="middle">composition root</text><text class="s" x="453" y="194" text-anchor="middle">wires servers, state, loops, seams</text><text class="s" x="453" y="212" text-anchor="middle">selected by configuration</text>
-  <path class="arrow" d="M256 167h74" marker-end="url(#architecture-components-arrow)"/>
+  <defs>
+    <marker id="architecture-components-arrow" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="12" markerHeight="12" markerUnits="userSpaceOnUse" orient="auto"><path d="M1 1 11 6 1 11Z" fill="var(--ink)"/></marker>
+  </defs>
+  <rect class="bg" width="1440" height="840"/>
+  <text class="title" x="48" y="66">One invariant core, replaceable collaborators</text>
+  <text class="body muted" x="48" y="100">Code architecture · packages, types, and interfaces — not deployment units.</text>
+  <path class="divider" d="M48 130H1392"/>
 
-  <rect class="panel" x="42" y="284" width="534" height="214" rx="20"/>
-  <text class="cap" x="68" y="318">PUBLIC ADAPTERS + INVARIANT POLICY</text>
-  <rect class="bluebox" x="68" y="350" width="190" height="108" rx="15"/>
-  <text class="h blue" x="163" y="382" text-anchor="middle">pkg/rpc</text><text class="b" x="163" y="411" text-anchor="middle">gRPC + JSON gateway</text><text class="s" x="163" y="437" text-anchor="middle">status / error mapping</text>
-  <rect class="tealbox" x="342" y="340" width="206" height="128" rx="16"/>
-  <text class="h teal" x="445" y="372" text-anchor="middle">pkg/core</text><text class="b" x="445" y="401" text-anchor="middle">admission · ledger · fences</text><text class="b" x="445" y="425" text-anchor="middle">budgets · pressure · snapshots</text><text class="s" x="445" y="450" text-anchor="middle">depends on interfaces, not platforms</text>
-  <path class="arrow" d="M258 404h84" marker-end="url(#architecture-components-arrow)"/>
-  <text class="s" x="300" y="393" text-anchor="middle">calls</text>
-  <path class="arrow" d="M453 226v58" marker-end="url(#architecture-components-arrow)"/>
+  <rect class="component api" x="48" y="248" width="300" height="110" rx="4"/>
+  <text class="heading blue" x="72" y="290">pkg/rpc</text>
+  <text class="body muted" x="72" y="324">gRPC · JSON gateway</text>
+  <path class="flow" d="M348 303H434V407H512" marker-end="url(#architecture-components-arrow)"/>
+  <text class="body" x="360" y="287">requests</text>
 
-  <rect class="panel" x="620" y="108" width="538" height="390" rx="20"/>
-  <text class="cap violet" x="648" y="142">INJECTED SEAMS</text>
-  <rect class="violetbox" x="648" y="170" width="210" height="86" rx="14"/>
-  <text class="h violet" x="753" y="201" text-anchor="middle">pkg/home</text><text class="s" x="753" y="228" text-anchor="middle">grants · health · scope · fabric*</text>
-  <rect class="violetbox" x="920" y="170" width="210" height="86" rx="14"/>
-  <text class="h violet" x="1025" y="201" text-anchor="middle">pkg/grant verifier</text><text class="s" x="1025" y="228" text-anchor="middle">JWT / JWKS → core.Grant</text>
-  <rect class="violetbox" x="648" y="286" width="210" height="86" rx="14"/>
-  <text class="h violet" x="753" y="317" text-anchor="middle">core.Auditor</text><text class="s" x="753" y="344" text-anchor="middle">local spool + durability policy</text>
-  <rect class="amberbox" x="920" y="286" width="210" height="86" rx="14"/>
-  <text class="h amber" x="1025" y="317" text-anchor="middle">pkg/artifact*</text><text class="s" x="1025" y="344" text-anchor="middle">templates · deltas · parity · registry</text>
-  <rect class="greenbox" x="648" y="402" width="482" height="70" rx="15"/>
-  <text class="h green" x="889" y="431" text-anchor="middle">core.Runtime implementation</text><text class="b" x="889" y="456" text-anchor="middle">stub or pkg/runtime/host</text>
-  <path class="inject" d="M576 167h72M576 184h344M576 404h72M576 438h72" marker-end="url(#architecture-components-violet-arrow)"/>
-  <text class="s" x="889" y="489" text-anchor="middle">* optional: fabric, registry exchange, and backend capability interfaces are not universally present</text>
+  <rect class="component home" x="48" y="524" width="300" height="120" rx="4"/>
+  <text class="heading violet" x="72" y="566">pkg/home</text>
+  <text class="body muted" x="72" y="600">Grants · health · scope</text>
+  <path class="flow" d="M348 552H412V480H512" marker-end="url(#architecture-components-arrow)"/>
+  <text class="body" x="354" y="536">grants</text>
+  <path class="flow" d="M512 520H466V616H348" marker-end="url(#architecture-components-arrow)"/>
+  <text class="body" x="354" y="644">callbacks</text>
 
-  <rect class="panel" x="42" y="548" width="1116" height="160" rx="20"/>
-  <text class="cap" x="68" y="582">HOST EXECUTION PATH</text>
-  <rect class="greenbox" x="68" y="610" width="240" height="70" rx="14"/>
-  <text class="h green" x="188" y="638" text-anchor="middle">pkg/runtime/host</text><text class="s" x="188" y="662" text-anchor="middle">grants · endpoints · W · deltas</text>
-  <rect class="amberbox" x="388" y="610" width="394" height="70" rx="14"/>
-  <text class="h amber" x="585" y="638" text-anchor="middle">pkg/backend</text><text class="s" x="585" y="662" text-anchor="middle">proc · runc · gVisor · Hyperlight</text>
-  <rect class="bluebox" x="862" y="610" width="268" height="70" rx="14"/>
-  <text class="h blue" x="996" y="638" text-anchor="middle">pkg/sys · Linux mechanisms</text><text class="s" x="996" y="662" text-anchor="middle">cgroup v2 · CRIU</text>
-  <path class="arrow" d="M308 645h80M782 645h80" marker-end="url(#architecture-components-arrow)"/>
-  <text class="s" x="348" y="634" text-anchor="middle">calls</text><text class="s" x="822" y="634" text-anchor="middle">uses where needed</text>
-  <path class="inject" d="M889 472v76H188v62" marker-end="url(#architecture-components-violet-arrow)"/>
-  <text class="s" x="600" y="740" text-anchor="middle">The selected backend may implement additional optional interfaces; the core consumes only capabilities it discovers.</text>
+  <rect class="component policy" x="512" y="356" width="300" height="192" rx="8"/>
+  <text class="focal teal center" x="662" y="433">pkg/core</text>
+  <text class="body center" x="662" y="471">Admission · sessions · fences</text>
+
+  <rect class="component plugin" x="512" y="176" width="340" height="102" rx="4"/>
+  <text class="heading violet" x="536" y="215">pkg/grant</text>
+  <text class="body muted" x="536" y="249">Signed-grant verification</text>
+  <path class="flow" d="M682 356V278" marker-end="url(#architecture-components-arrow)"/>
+  <text class="body violet" x="702" y="322">core.Verifier</text>
+
+  <rect class="component plugin" x="512" y="672" width="340" height="102" rx="4"/>
+  <text class="heading violet" x="536" y="711">core.Spool</text>
+  <text class="body muted" x="536" y="745">Audit log · pkg/core</text>
+  <path class="flow" d="M682 548V672" marker-end="url(#architecture-components-arrow)"/>
+  <text class="body violet" x="702" y="616">core.Auditor</text>
+
+  <path class="flow" d="M812 445H868" marker-end="url(#architecture-components-arrow)"/>
+  <circle class="port" cx="878" cy="445" r="10"/>
+  <text class="body green center" x="882" y="390">core.Runtime</text>
+  <text class="body muted center" x="882" y="417">select one</text>
+  <path class="binding" d="M888 445H964V270H1016"/>
+  <path class="binding" d="M964 445V700H1056"/>
+  <circle cx="964" cy="445" r="3" fill="var(--green)"/>
+
+  <rect class="scope" x="992" y="170" width="400" height="386" rx="16"/>
+  <rect class="component host" x="1016" y="214" width="352" height="112" rx="4"/>
+  <text class="heading green" x="1040" y="257">pkg/runtime/host</text>
+  <text class="body muted" x="1040" y="291">Host execution</text>
+  <path class="flow" d="M1192 326V374H1100V422" marker-end="url(#architecture-components-arrow)"/>
+  <path class="flow" d="M1192 374H1284V422" marker-end="url(#architecture-components-arrow)"/>
+  <circle cx="1192" cy="374" r="3" fill="var(--ink)"/>
+  <rect class="component detail" x="1016" y="422" width="168" height="94" rx="4"/>
+  <text class="heading" x="1032" y="459">pkg/backend</text>
+  <text class="body muted" x="1032" y="489">Mechanism</text>
+  <rect class="component detail" x="1200" y="422" width="168" height="94" rx="4"/>
+  <text class="heading" x="1216" y="459">pkg/artifact</text>
+  <text class="body muted" x="1216" y="489">State storage</text>
+
+  <rect class="component stub" x="1056" y="650" width="312" height="100" rx="4"/>
+  <text class="heading" x="1080" y="689">pkg/runtime/stub</text>
+  <text class="body muted" x="1080" y="722">In-memory simulation</text>
+  <text class="body muted" x="1056" y="780">Dashed: alternative implementation</text>
+
+  <text class="body muted" x="48" y="818">Selected relationships · pkg/agent.Run assembles the reference agent.</text>
 </svg>

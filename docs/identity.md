@@ -5,7 +5,7 @@ workload credentials. These layers are connected, but they are not
 interchangeable. In particular, an endpoint or fence is not a cryptographic
 identity.
 
-![A signed grant flows through Clone to a verified home, one fence, and one running fiber, while the fence and home scope feed audit records and scope loss invalidates old fences](./images/identity.svg)
+![Identity relationships, not a sequence: a signed grant authorizes capacity at its named home; fence data identifies a running incarnation but is not a credential. Home scope provides audit facts. Workload credential access depends on backend configuration; configured HANDOFF uses a separate grant TLS identity and bound caller.](./images/identity.svg)
 
 ## The grant authenticates delegated capacity
 

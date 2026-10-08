@@ -1,42 +1,84 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="720" viewBox="0 0 1200 720" role="img" aria-labelledby="example-k8s-title example-k8s-desc">
-  <title id="example-k8s-title">Kubernetes example from CapacityGrant to serving fibers</title>
-  <desc id="example-k8s-desc">The reference grant controller reconciles a CapacityGrant into a signed grant Secret and one grant Pod. The projected JWT reaches fiberd-k8s, which verifies and admits the grant, warms a template, and publishes readiness. A router calls Clone and then connects to the returned Pod IP and fiber port. The Pod boundary contains the agent, template, helpers, and fibers.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="1090" viewBox="0 0 1440 1090" role="img" aria-labelledby="example-kubernetes-title example-kubernetes-desc">
+  <title id="example-kubernetes-title">The controller sets up a grant Pod; requests use its local capacity</title>
+  <desc id="example-kubernetes-desc">A setup-versus-serving view. The CapacityGrant custom resource is desired-state data, the grant-controller is a service, and the grant Pod is a resource boundary rather than a processing stage. Reconciliation ensures one Pod per grant and an owned Secret carrying a signed JWT addressed to that Pod, renewed at half-life. The Secret projects grant.jwt into fiberd-k8s. The agent verifies and admits the token, prepares its warm template, then publishes the zygote-ready custom gate. A separate local request path calls Clone, receives endpoint and fence, and connects directly to the selected fiber on PodIP:fiberPort. Agent, template and fibers share the Pod's aggregate cgroup ceiling. The reference controller's status.ready mirrors only the custom gate, not complete Pod readiness.</desc>
   <style>
-    :root{--bg:#f7f9fc;--panel:#fff;--ink:#172033;--muted:#5d6b7d;--line:#b8c4d4;--blue:#3165b5;--blue-bg:#eaf1ff;--teal:#13776f;--teal-bg:#e8f7f4;--violet:#704aa1;--violet-bg:#f2edfa;--amber:#a76500;--amber-bg:#fff3d6;--green:#287a4d;--green-bg:#e8f6ed}
-    @media(prefers-color-scheme:dark){:root{--bg:#0d1117;--panel:#161b22;--ink:#e6edf3;--muted:#a3adba;--line:#3d4652;--blue:#79a7ff;--blue-bg:#17243d;--teal:#53c7b8;--teal-bg:#102923;--violet:#c09cff;--violet-bg:#251b35;--amber:#f0b44d;--amber-bg:#30240f;--green:#63cf8e;--green-bg:#142b1e}}
-    text{font-family:ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;fill:var(--ink)}.bg{fill:var(--bg)}.panel{fill:var(--panel);stroke:var(--line);stroke-width:1.5}.bluebox{fill:var(--blue-bg);stroke:var(--blue);stroke-width:1.5}.pod{fill:var(--teal-bg);stroke:var(--teal);stroke-width:2}.tealbox{fill:var(--teal-bg);stroke:var(--teal);stroke-width:1.5}.violetbox{fill:var(--violet-bg);stroke:var(--violet);stroke-width:1.5}.amberbox{fill:var(--amber-bg);stroke:var(--amber);stroke-width:1.5}.greenbox{fill:var(--green-bg);stroke:var(--green);stroke-width:1.5}.title{font-size:27px;font-weight:750}.subtitle{font-size:14px;fill:var(--muted)}.h{font-size:16px;font-weight:700}.b{font-size:13px}.s{font-size:11px;fill:var(--muted)}.cap{font-size:12px;font-weight:700;letter-spacing:.5px}.blue{fill:var(--blue)}.teal{fill:var(--teal)}.violet{fill:var(--violet)}.amber{fill:var(--amber)}.green{fill:var(--green)}.arrow{fill:none;stroke:var(--muted);stroke-width:2}.direct{fill:none;stroke:var(--green);stroke-width:2.5}.dash{stroke-dasharray:7 5}
+    :root{--bg:#f7f9fc;--panel:#fff;--ink:#172033;--muted:#5d6b7d;--border:#b8c4d4;--blue:#3165b5;--blue-bg:#eaf1ff;--teal:#13776f;--teal-bg:#e8f7f4;--violet:#704aa1;--violet-bg:#f2edfa;--amber:#a76500;--amber-bg:#fff3d6;--green:#287a4d;--green-bg:#e8f6ed}
+    @media(prefers-color-scheme:dark){:root{--bg:#0d1117;--panel:#161b22;--ink:#e6edf3;--muted:#a3adba;--border:#3d4652;--blue:#79a7ff;--blue-bg:#17243d;--teal:#53c7b8;--teal-bg:#102923;--violet:#c09cff;--violet-bg:#251b35;--amber:#f0b44d;--amber-bg:#30240f;--green:#63cf8e;--green-bg:#142b1e}}
+    text{font-family:ui-sans-serif,-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;fill:var(--ink)}.bg{fill:var(--bg)}.title{font-size:30px;font-weight:700}.heading{font-size:22px;font-weight:700}.label{font-size:20px;font-weight:600}.secondary{font-size:17px}.muted{fill:var(--muted)}.blue{fill:var(--blue)}.teal{fill:var(--teal)}.violet{fill:var(--violet)}.amber{fill:var(--amber)}.center{text-anchor:middle}
+    .scope{fill:none;stroke:var(--teal);stroke-width:1.5}.service{fill:var(--panel);stroke:var(--blue);stroke-width:2}.agent{stroke:var(--teal)}.document{fill:var(--blue-bg);stroke:var(--blue);stroke-width:1.5}.template{fill:var(--amber-bg);stroke:var(--amber);stroke-width:1.5}.fiber{fill:var(--violet-bg);stroke:var(--violet);stroke-width:2}.actor{fill:var(--panel);stroke:var(--teal);stroke-width:2}.divider{fill:none;stroke:var(--border);stroke-width:1.5}.flow{fill:none;stroke-width:2;stroke-linejoin:round;stroke-linecap:round}.setup{stroke:var(--blue)}.local{stroke:var(--teal)}.activation{stroke:var(--violet)}.base{stroke:var(--amber)}.return{stroke-dasharray:7 6}
+    text.amber{fill:#9e5e00}@media(prefers-color-scheme:dark){text.amber{fill:var(--amber)}}
   </style>
-  <defs><marker id="example-k8s-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M1 1l8 4-8 4z" fill="#7b8794"/></marker><marker id="example-k8s-green-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M1 1l8 4-8 4z" fill="#287a4d"/></marker></defs>
-  <rect class="bg" width="1200" height="720"/>
-  <text class="title" x="42" y="48">Kubernetes example: a grant Pod becomes ready capacity</text>
-  <text class="subtitle" x="42" y="74">This is the repository’s reference integration, not a claim that core fiberd depends on Kubernetes.</text>
-  <text class="cap" x="42" y="112">CONTROL PLANE</text>
-  <rect class="bluebox" x="42" y="132" width="250" height="106" rx="15"/>
-  <text class="h blue" x="167" y="164" text-anchor="middle">1 · CapacityGrant</text><text class="b" x="167" y="194" text-anchor="middle">template · max · W · Pod resources</text><text class="s" x="167" y="218" text-anchor="middle">status updated asynchronously</text>
-  <rect class="violetbox" x="392" y="132" width="250" height="106" rx="15"/>
-  <text class="h violet" x="517" y="164" text-anchor="middle">2 · grant-controller</text><text class="b" x="517" y="194" text-anchor="middle">creates Pod + owned Secret</text><text class="s" x="517" y="218" text-anchor="middle">mints / renews audience-bound JWT</text>
-  <rect class="tealbox" x="742" y="132" width="250" height="106" rx="15"/>
-  <text class="h teal" x="867" y="164" text-anchor="middle">3 · Signed grant Secret</text><text class="b" x="867" y="194" text-anchor="middle">grant.jwt projected into Pod</text><text class="s" x="867" y="218" text-anchor="middle">file lane notices updates</text>
-  <path class="arrow" d="M292 185h100M642 185h100" marker-end="url(#example-k8s-arrow)"/>
-  <rect class="pod" x="232" y="292" width="926" height="356" rx="23"/>
-  <text class="h teal" x="262" y="327">GRANT POD</text><text class="s" x="1128" y="327" text-anchor="end">Pod cgroup + network boundary</text>
-  <rect class="panel" x="262" y="376" width="168" height="102" rx="15"/>
-  <text class="h" x="346" y="408" text-anchor="middle">Router</text><text class="b" x="346" y="437" text-anchor="middle">1 · Clone</text><text class="s" x="346" y="461" text-anchor="middle">outside or beside Pod</text>
-  <rect class="bluebox" x="500" y="358" width="234" height="140" rx="16"/>
-  <text class="h blue" x="617" y="390" text-anchor="middle">4 · fiberd-k8s</text><text class="b" x="617" y="419" text-anchor="middle">verify + admit JWT</text><text class="b" x="617" y="443" text-anchor="middle">ledger + backend + Clone</text><text class="s" x="617" y="471" text-anchor="middle">readiness after template warm</text>
-  <rect class="amberbox" x="794" y="358" width="190" height="92" rx="16"/>
-  <text class="h amber" x="889" y="390" text-anchor="middle">5 · Warm template</text><text class="b" x="889" y="419" text-anchor="middle">prepared once</text><text class="s" x="889" y="439" text-anchor="middle">for this grant</text>
-  <rect class="greenbox" x="1018" y="358" width="110" height="140" rx="15"/>
-  <text class="h green" x="1073" y="391" text-anchor="middle">Fibers</text><text class="b" x="1073" y="423" text-anchor="middle">:30001</text><text class="b" x="1073" y="447" text-anchor="middle">:30002</text><text class="s" x="1073" y="475" text-anchor="middle">up to max</text>
-  <path class="arrow" d="M430 427h70M734 404h60M984 404h34" marker-end="url(#example-k8s-arrow)"/>
-  <path class="arrow dash" d="M500 470h-42v40H346v-32" marker-end="url(#example-k8s-arrow)"/>
-  <text class="s" x="430" y="527" text-anchor="middle">endpoint + fence</text>
-  <path class="direct" d="M346 478v91h727v-71" marker-end="url(#example-k8s-green-arrow)"/>
-  <text class="b green" x="704" y="559" text-anchor="middle">2 · connect directly to returned PodIP:port</text>
-  <rect class="greenbox" x="500" y="536" width="234" height="53" rx="14"/>
-  <text class="b green" x="617" y="559" text-anchor="middle">readiness gate = True</text><text class="s" x="617" y="579" text-anchor="middle">only after warm succeeds</text>
-  <path class="arrow" d="M867 238v54" marker-end="url(#example-k8s-arrow)"/>
-  <text class="s" x="884" y="270">volume projection</text>
-  <rect class="bluebox" x="262" y="608" width="866" height="24" rx="12"/>
-  <text class="s" x="695" y="625" text-anchor="middle">Agent, warm template, backend helpers, and fibers all consume the Pod’s aggregate resources.</text>
+  <defs>
+    <marker id="example-kubernetes-blue-arrow" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="12" markerHeight="12" markerUnits="userSpaceOnUse" orient="auto"><path d="M1 1 11 6 1 11Z" fill="var(--blue)"/></marker>
+    <marker id="example-kubernetes-teal-arrow" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="12" markerHeight="12" markerUnits="userSpaceOnUse" orient="auto"><path d="M1 1 11 6 1 11Z" fill="var(--teal)"/></marker>
+    <marker id="example-kubernetes-violet-arrow" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="12" markerHeight="12" markerUnits="userSpaceOnUse" orient="auto"><path d="M1 1 11 6 1 11Z" fill="var(--violet)"/></marker>
+    <marker id="example-kubernetes-amber-arrow" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="12" markerHeight="12" markerUnits="userSpaceOnUse" orient="auto"><path d="M1 1 11 6 1 11Z" fill="var(--amber)"/></marker>
+  </defs>
+  <rect class="bg" width="1440" height="1090"/>
+  <text class="title" x="48" y="66">Reconcile capacity once. Serve fibers inside the Pod.</text>
+  <text class="secondary muted" x="48" y="100">Desired state and tokens are data; the controller is a service; the Pod is the resource boundary.</text>
+  <path class="divider" d="M48 130H1392"/>
+  <text class="heading blue" x="48" y="179">Controller setup</text>
+
+  <path class="document" d="M48 212H360L388 240V340H48Z"/>
+  <path class="flow setup" d="M360 212V240H388"/>
+  <text class="label blue" x="72" y="254">CapacityGrant resource</text>
+  <text class="secondary" x="72" y="286">template · fiber budget</text>
+  <text class="secondary" x="72" y="315">Pod resources + placement</text>
+  <rect class="service" x="560" y="212" width="360" height="116" rx="4"/>
+  <text class="label blue" x="584" y="252">grant-controller</text>
+  <text class="secondary" x="584" y="287">Reconcile desired state</text>
+  <path class="flow setup" d="M388 278H560" marker-end="url(#example-kubernetes-blue-arrow)"/>
+  <text class="secondary blue center" x="474" y="260">observe</text>
+
+  <rect class="scope" x="488" y="382" width="904" height="622" rx="16"/>
+  <text class="heading teal" x="520" y="421">One grant · one Pod</text>
+  <text class="secondary muted" x="520" y="453">Aggregate cgroup ceiling: agent + template + fibers</text>
+  <path class="flow setup" d="M690 328V382" marker-end="url(#example-kubernetes-blue-arrow)"/>
+  <text class="secondary blue" x="716" y="363">ensure Pod</text>
+
+  <path class="document" d="M1032 212H1332L1360 240V340H1032Z"/>
+  <path class="flow setup" d="M1332 212V240H1360"/>
+  <text class="label blue" x="1054" y="254">Owned grant Secret</text>
+  <text class="secondary" x="1054" y="286">JWT audience = this Pod</text>
+  <text class="secondary" x="1054" y="315">renewed at half-life</text>
+  <path class="flow setup" d="M920 278H1032" marker-end="url(#example-kubernetes-blue-arrow)"/>
+  <text class="secondary blue center" x="976" y="260">mint</text>
+
+  <rect class="service agent" x="560" y="620" width="330" height="310" rx="4"/>
+  <text class="heading teal" x="584" y="660">fiberd-k8s · PID 1</text>
+  <text class="secondary" x="584" y="691">Verify + admit grant</text>
+  <text class="secondary" x="584" y="791">Resolve sessions locally</text>
+  <path class="divider" d="M584 824H866"/>
+  <text class="secondary" x="584" y="858">After warm succeeds:</text>
+  <text class="secondary teal" x="584" y="890">zygote-ready = True</text>
+  <path class="flow setup" d="M1196 340V535H720V620" marker-end="url(#example-kubernetes-blue-arrow)"/>
+  <text class="secondary blue" x="775" y="517">project grant.jwt</text>
+
+  <rect class="template" x="1056" y="636" width="304" height="104" rx="3"/>
+  <rect class="template" x="1048" y="644" width="304" height="104" rx="3"/>
+  <rect class="template" x="1040" y="652" width="304" height="104" rx="3"/>
+  <text class="label amber" x="1064" y="695">Warm template</text>
+  <text class="secondary" x="1064" y="726">shared base</text>
+  <path class="flow local" d="M890 706H1040" marker-end="url(#example-kubernetes-teal-arrow)"/>
+  <text class="secondary teal center" x="965" y="688">prepare</text>
+  <circle class="fiber" cx="1196" cy="883" r="68"/>
+  <text class="label violet center" x="1196" y="880">Fiber</text>
+  <text class="secondary center" x="1196" y="910">live endpoint</text>
+  <path class="flow base" d="M1196 756V815" marker-end="url(#example-kubernetes-amber-arrow)"/>
+  <text class="secondary amber" x="1220" y="792">CREATE base</text>
+  <path class="flow activation" d="M890 883H1128" marker-end="url(#example-kubernetes-violet-arrow)"/>
+  <text class="secondary violet center" x="1008" y="863">select / activate</text>
+
+  <text class="heading teal" x="48" y="619">Local serving</text>
+  <circle class="actor" cx="160" cy="673" r="16"/>
+  <path class="actor" d="M128 727V715C128 688 192 688 192 715V727"/>
+  <text class="label center" x="160" y="769">Router / client</text>
+  <path class="flow local" d="M220 719H560" marker-end="url(#example-kubernetes-teal-arrow)"/>
+  <text class="secondary teal" x="276" y="700">1 · Clone(grant, session)</text>
+  <path class="flow local return" d="M560 758H244" marker-end="url(#example-kubernetes-teal-arrow)"/>
+  <text class="secondary teal" x="292" y="793">endpoint + fence</text>
+  <path class="flow local" d="M160 795V978H1196V951" marker-end="url(#example-kubernetes-teal-arrow)"/>
+  <text class="secondary teal" x="520" y="960">2 · Direct data → PodIP:fiberPort</text>
+  <text class="secondary muted" x="48" y="1048">Reference only · status.ready mirrors the custom gate, not full Pod readiness · emptyDir state · production gaps in the README.</text>
 </svg>

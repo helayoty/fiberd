@@ -34,7 +34,7 @@ Pod is not created per fiber.
 
 ## From CapacityGrant to ready home
 
-![One CapacityGrant produces one grant Pod containing the agent, one warm template, and locally created fibers. Adding capacity means creating another CapacityGrant and grant Pod.](./images/kubernetes-runtime-model.svg)
+![Deployment topology: the grant-controller Deployment reconciles CapacityGrant resources and creates grant Pods and projected JWT Secrets. Each grant Pod's sole container holds fiberd-k8s, its warm template, and local fibers. Scale-out adds another grant and Pod; Clone does not schedule Pods. The custom zygote-ready status is not full Pod readiness.](./images/kubernetes-runtime-model.svg)
 
 The reference lifecycle proceeds in this order.
 
@@ -117,9 +117,10 @@ home audience and grant UID rather than reusing the old fence namespace.
 - `spec.minTier` is the minimum runtime capability. The home rejects a grant
   when the selected backend cannot meet it. It defaults to `FIBER_BASIC`.
 - `spec.lease` controls the signed grant lifetime. It defaults to `10m`.
-- `spec.durability` selects best-effort or synchronous audit semantics. The
-  reference agent has no remote shipper, so synchronous records are fsynced to
-  the Pod's local spool.
+- `spec.durability` selects best-effort or synchronous audit semantics.
+  Synchronous records are fsynced to the Pod's local spool. Nothing ships
+  them elsewhere. After one failed `fsync` the Pod refuses synchronous
+  records until it restarts.
 - `spec.sessionClass` is carried into the signed policy.
 - `spec.deviceBudget` sets the per-fiber device-state budget when the template
   exposes a reporting engine. The current host checks nonzero capacity but
@@ -140,11 +141,16 @@ home audience and grant UID rather than reusing the old fence namespace.
 - `spec.pod.nodeSelector` and `spec.pod.nodeName` constrain placement.
 - `spec.pod.resourceClaims` and `spec.pod.devices` describe the grant's device
   fabric.
-- `spec.pod.privileged` defaults to true because the proc and checkpoint paths
-  need cgroup and CRIU privileges.
+- `spec.pod.privileged` makes the agent container privileged. Unset, a proc
+  grant's container drops every capability, adds back `SYS_ADMIN`,
+  `SYS_PTRACE`, `SYS_RESOURCE`, `SYS_TIME`, `SYS_CHROOT`, `NET_ADMIN` and
+  `SETPCAP`, and runs without a
+  seccomp profile, which CRIU needs to dump. Other runtimes run privileged
+  unless it is false.
 - `spec.pod.labels` and `spec.pod.annotations` are added to the grant Pod.
 - `spec.pod.unsafeAdmin` enables test-only controls and should remain false in
-  normal deployments.
+  normal deployments. It needs an image whose agent is built with
+  `-tags fiberd_testhooks`.
 
 The current controller creates a missing Pod but does not update or recreate
 an existing Pod when `spec.pod` changes. Recreate the `CapacityGrant` when a
@@ -176,6 +182,7 @@ spec:
     max: 10
   wBudget: 64Mi
   minTier: FIBER_CHECKPOINT
+  isolation: TRUSTED # proc shares the node's kernel; UNTRUSTED needs gvisor or hyperlight
   lease: 10m
   durability: best-effort
   pod:
@@ -273,8 +280,10 @@ manifests do not reliably detect Namespace termination. A production
 integration must grant narrowly scoped cluster-level read access or use
 another authoritative scope-loss signal.
 
-The proc backend shares the home's mount namespace. A proc fiber can therefore
-open a mounted ServiceAccount token when filesystem permissions allow it.
+A proc fiber gets its own mount namespace, in which the Pod's ServiceAccount
+token directory and the agent's grants and delta directories are covered by
+empty tmpfs mounts. Creating that namespace needs `CAP_SYS_ADMIN`. A
+confinement failure refuses the clone.
 runc, gVisor, and Hyperlight do not automatically receive the grant Pod's
 ServiceAccount mount. These fibers still do not receive distinct workload
 identities. Grant authority, fences, scope claims, and backend-specific
@@ -317,9 +326,12 @@ fiber.
 
 ## Security boundary
 
-The reference Pod defaults to privileged. This is appropriate for the
-integration test because proc, cgroup delegation, and CRIU need host-facing
-capabilities. It is not a minimal production security profile.
+A proc grant's Pod runs without `privileged`, with only the five
+capabilities the proc runtime needs (see
+[Security](security.md#agent-privileges)). `SYS_ADMIN` is still broad, the
+Pod has no seccomp profile, and it shares the host's user namespace. Pods for the
+other runtimes default to privileged. This is not a minimal production
+security profile.
 
 Before adapting the example:
 

@@ -2,9 +2,11 @@
 
 This page describes how the current fiberd implementation is assembled. It focuses on package boundaries, state transitions, persistence, and runtime extension points. For the operator-facing model, start with [Runtime model](runtime-model.md), [Resources and limits](resources.md), [Networking](networking.md), and [Identity](identity.md). For exact request and response behavior, see the [Protocol reference](protocol.md).
 
-![A home runs one fiberd agent. The control plane sends signed grants and receives aggregate status, while callers send Clone and receive an endpoint and fence. Each admitted grant contains one warm template and its fibers.](images/containment.svg)
+![Containment view: one home contains one fiberd agent and separate sibling grant scopes. Each grant owns its warm template and fiber set; nesting shows resource ownership, not a request sequence or a universal security boundary.](images/containment.svg)
 
-![The reference binary composes RPC, core scheduling, verification, home, runtime, audit, and artifact seams, while the host runtime delegates Linux execution to a selected backend and system mechanisms.](images/architecture-components.svg)
+The component map uses repository package names and the concrete `core.Spool` type as its primary labels. Short subtitles describe their roles; labeled interfaces show how the implementations connect to `pkg/core`.
+
+![pkg/rpc and pkg/home reach pkg/core, which uses home callbacks, pkg/grant through core.Verifier, core.Spool through core.Auditor, and a selected core.Runtime implementation. pkg/runtime/host depends on pkg/backend and pkg/artifact; pkg/runtime/stub is an independent alternative. Arrows show relationships, not execution order.](images/architecture-components.svg)
 
 ## Component boundaries
 
@@ -21,7 +23,7 @@ fiberd keeps scheduling policy in a small core and injects the environment-speci
 - `pkg/artifact` manages templates, checkpoints, deltas, registry exchange, and platform-parity metadata.
 - `pkg/sys` contains Linux integrations such as cgroups and CRIU.
 
-The core does not import Kubernetes APIs, container runtimes, or a particular control plane. Those concerns enter through the home, verifier, runtime, and artifact interfaces.
+The core does not import Kubernetes APIs, container runtimes, or a particular control plane. It consumes home-provided callbacks and the verifier, audit, and runtime interfaces; artifact handling belongs to the host runtime.
 
 ## Startup and reconciliation
 
@@ -116,6 +118,8 @@ The artifact layer separates a reusable parent checkpoint from session-specific 
 - the delta carries the parked session's mutable state.
 - platform facts prevent restore on an incompatible host.
 - ownership metadata identifies the home that published the delta.
+- every delta and parent is signed, and a home takes only what a key it trusts signed.
+- every delta is encrypted for its session domain and session before it leaves the home, and expires 24 hours after the park.
 - optional parity data can protect registry chunks.
 
 Mobility is conditional. If no delta finder is configured, the session stays
@@ -138,7 +142,7 @@ can reuse an earlier fence after a replacement starts again at epoch 1.
 
 The runtime reports asynchronous exits such as normal exit, signal, or OOM. The agent removes the fiber from the ledger, frees its slot, forgets any running named session, and records the exit. An exit that arrives before Clone commits is held briefly and settled after the commit so the slot is not leaked.
 
-The lease reaper periodically yields expired grants. Yielding revokes the grant, releases its running fibers, and retains parked deltas. A later delivery can admit the grant again.
+The lease reaper periodically yields expired grants. Yielding revokes the grant, releases its running fibers, and retains parked deltas. A later delivery can admit the grant again. A grant the home removes from its lane is also yielded, and its UID is denied until its tokens expire or the lane delivers it again.
 
 Release during Yield or scope loss is currently best effort. If a runtime
 release fails, the agent logs the error and can still remove ledger ownership,
@@ -161,8 +165,13 @@ selection, and operator-visible behavior.
 Every state-changing operation attempts to append an audit record with the
 fence and, when available, session, fiber, scope, and fabric details. The
 spool abstraction supports best-effort and synchronous durability modes.
+Records are hash-chained, and failed writes and torn lines leave `gap`
+records. Signed `checkpoint` records follow at intervals and at shutdown
+(see [Security](security.md#audit)).
 
-The reference agent opens the spool without a remote shipper. In that configuration, records are persisted locally and synchronous durability can only wait for local `fsync`. A deployment that promises remote durability must inject and operate a remote shipper.
+The spool is local only. Synchronous durability waits for a local `fsync`. A deployment that needs the records off the host must copy the spool there itself.
+
+A failed `fsync` is sticky. The spool then refuses every synchronous record until the agent restarts, because the kernel drops the pages a failed `fsync` could not write and a later `fsync` does not retry them. Best-effort records are still written.
 
 Runtime and ledger state change before the audit append. A synchronous append
 failure can therefore return `Internal` after the operation already completed;

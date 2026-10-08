@@ -1,42 +1,93 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="760" viewBox="0 0 1200 760" role="img" aria-labelledby="kata-title kata-desc">
-  <title id="kata-title">Kata-shaped containerd shim mapping a Pod container to a fiber</title>
-  <desc id="kata-desc">A Pod selects the fiberd runtime handler and carries grant, home, session, and stop policy. Kubelet calls containerd, which invokes the runtime-v2 fiberd shim. The shim records the sandbox and maps application Create to Clone, Kill to Park or Release, and the returned endpoint and fence to its container record. A parked named session resumes for a later Pod. This consumer mapping does not make a fiber an OCI container.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="812" viewBox="0 0 1440 812" role="img" aria-labelledby="example-kata-title example-kata-desc">
+  <title id="example-kata-title">Replace the Pod. Resume its session at home.</title>
+  <desc id="example-kata-desc">A containerd integration and three-step continuity sequence. Kubernetes application Pods are caller identities on the left. One node-side containerd-shim-fiberd-v1 bridge translates containerd task calls into the fiberd protocol; it is outside both application Pods and the separate fiberd home. RPC arrows terminate on activation bars along the fiberd service lifeline, not on the fiber or checkpoint. Short internal arrows connect each operation to its resulting state. Step 1: application Pod 1 Create sends Clone and creates fiber A at the home. Step 2: stopping Pod 1 with on-stop park retains checkpoint data there. Step 3: replacement Pod 2 Create names the same grant, home and kata-demo session; Clone resumes the data as fiber B with a new fence. Vertical home arrows show state over time, not movement between Pods. Release is the alternative stop policy and does not preserve this continuity. The shim is a protocol consumer, not a Kata VM or OCI runtime; successful resume requires a checkpoint-capable home.</desc>
   <style>
-    :root{--bg:#f7f9fc;--panel:#fff;--ink:#172033;--muted:#5d6b7d;--line:#b8c4d4;--blue:#3165b5;--blue-bg:#eaf1ff;--teal:#13776f;--teal-bg:#e8f7f4;--violet:#704aa1;--violet-bg:#f2edfa;--amber:#a76500;--amber-bg:#fff3d6;--red:#b33b32;--red-bg:#fff0ef;--green:#287a4d;--green-bg:#e8f6ed}
-    @media(prefers-color-scheme:dark){:root{--bg:#0d1117;--panel:#161b22;--ink:#e6edf3;--muted:#a3adba;--line:#3d4652;--blue:#79a7ff;--blue-bg:#17243d;--teal:#53c7b8;--teal-bg:#102923;--violet:#c09cff;--violet-bg:#251b35;--amber:#f0b44d;--amber-bg:#30240f;--red:#ff8178;--red-bg:#321817;--green:#63cf8e;--green-bg:#142b1e}}
-    text{font-family:ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;fill:var(--ink)}.bg{fill:var(--bg)}.panel{fill:var(--panel);stroke:var(--line);stroke-width:1.5}.home{fill:var(--teal-bg);stroke:var(--teal);stroke-width:2}.bluebox{fill:var(--blue-bg);stroke:var(--blue);stroke-width:1.5}.violetbox{fill:var(--violet-bg);stroke:var(--violet);stroke-width:1.5}.amberbox{fill:var(--amber-bg);stroke:var(--amber);stroke-width:1.5}.redbox{fill:var(--red-bg);stroke:var(--red);stroke-width:1.5}.greenbox{fill:var(--green-bg);stroke:var(--green);stroke-width:1.5}.title{font-size:27px;font-weight:750}.subtitle{font-size:14px;fill:var(--muted)}.h{font-size:16px;font-weight:700}.b{font-size:13px}.s{font-size:11px;fill:var(--muted)}.cap{font-size:12px;font-weight:700;letter-spacing:.5px}.blue{fill:var(--blue)}.teal{fill:var(--teal)}.violet{fill:var(--violet)}.amber{fill:var(--amber)}.red{fill:var(--red)}.green{fill:var(--green)}.arrow{fill:none;stroke:var(--muted);stroke-width:2}.dash{stroke-dasharray:7 5}
+    :root{--bg:#f7f9fc;--panel:#fff;--ink:#172033;--muted:#5d6b7d;--border:#b8c4d4;--blue:#3165b5;--blue-bg:#eaf1ff;--teal:#13776f;--teal-bg:#e8f7f4;--violet:#704aa1;--violet-bg:#f2edfa;--amber:#a76500;--amber-bg:#fff3d6;--green:#287a4d;--green-bg:#e8f6ed}
+    @media(prefers-color-scheme:dark){:root{--bg:#0d1117;--panel:#161b22;--ink:#e6edf3;--muted:#a3adba;--border:#3d4652;--blue:#79a7ff;--blue-bg:#17243d;--teal:#53c7b8;--teal-bg:#102923;--violet:#c09cff;--violet-bg:#251b35;--amber:#f0b44d;--amber-bg:#30240f;--green:#63cf8e;--green-bg:#142b1e}}
+    text{font-family:ui-sans-serif,-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;fill:var(--ink)}
+    .bg{fill:var(--bg)}.title{font-size:30px;font-weight:700}.label{font-size:22px;font-weight:600}.body{font-size:18px}.center{text-anchor:middle}.muted{fill:var(--muted)}.blue{fill:var(--blue)}.teal{fill:var(--teal)}.violet{fill:var(--violet)}.amber{fill:var(--amber)}
+    .boundary{fill:none;stroke:var(--border);stroke-width:1.5}.scope{fill:none;stroke:var(--teal);stroke-width:1.5}.pod{stroke:var(--blue);stroke-dasharray:8 6}.service{fill:var(--panel);stroke:var(--teal);stroke-width:2}.caller-service{stroke:var(--blue)}.fiber{fill:var(--violet-bg);stroke:var(--violet);stroke-width:2}.document{fill:var(--amber-bg);stroke:var(--amber);stroke-width:1.5}
+    .flow{fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}.control{stroke:var(--blue)}.activate{stroke:var(--violet)}.park{stroke:var(--amber)}.lifeline{fill:none;stroke:var(--border);stroke-width:1.5;stroke-dasharray:5 6}.junction{fill:var(--blue)}.number{font-size:18px;font-weight:700;text-anchor:middle}.number-circle{fill:var(--blue-bg);stroke:var(--blue)}
+    text.amber{fill:#9e5e00}@media(prefers-color-scheme:dark){text.amber{fill:var(--amber)}}
   </style>
-  <defs><marker id="kata-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M1 1l8 4-8 4z" fill="#7b8794"/></marker></defs>
-  <rect class="bg" width="1200" height="760"/>
-  <text class="title" x="42" y="48">Kata-shaped example: container lifecycle outside, fiber lifecycle inside</text>
-  <text class="subtitle" x="42" y="74">The shim translates containerd operations. It does not turn a fiber into an OCI container.</text>
-  <text class="cap" x="42" y="112">KUBERNETES NODE</text>
-  <rect class="panel" x="42" y="132" width="282" height="134" rx="16"/>
-  <text class="h" x="66" y="165">1 · Pod specification</text><text class="b" x="66" y="195">runtimeClassName: fiberd</text><text class="b" x="66" y="219">grant + home + named session</text><text class="b" x="66" y="243">on-stop: park or release</text>
-  <rect class="bluebox" x="420" y="132" width="282" height="134" rx="16"/>
-  <text class="h blue" x="444" y="165">2 · kubelet → containerd</text><text class="b" x="444" y="195">select runtime handler</text><text class="b" x="444" y="219">pass fiberd annotations</text><text class="b" x="444" y="243">Create · Start · Kill · Delete</text>
-  <rect class="violetbox" x="798" y="132" width="360" height="134" rx="16"/>
-  <text class="h violet" x="822" y="165">3 · containerd-shim-fiberd-v1</text><text class="b" x="822" y="195">sandbox Create: record only</text><text class="b" x="822" y="219">app Create: Clone(session)</text><text class="b" x="822" y="243">Kill: Park or Release by policy</text>
-  <path class="arrow" d="M324 199h96M702 199h96" marker-end="url(#kata-arrow)"/>
-  <text class="s" x="372" y="188" text-anchor="middle">Pod admitted</text><text class="s" x="750" y="188" text-anchor="middle">runtime-v2 API</text>
-  <rect class="home" x="244" y="314" width="914" height="250" rx="22"/>
-  <text class="h teal" x="272" y="349">FIBERD HOME IN THE GRANT POD</text>
-  <text class="s" x="1130" y="349" text-anchor="end">reached by gRPC in this example</text>
-  <rect class="bluebox" x="284" y="393" width="250" height="120" rx="16"/>
-  <text class="h blue" x="409" y="425" text-anchor="middle">Agent + ledger</text><text class="b" x="409" y="455" text-anchor="middle">resolve session</text><text class="b" x="409" y="479" text-anchor="middle">return kind + endpoint + fence</text><text class="s" x="409" y="500" text-anchor="middle">owns Park and Release</text>
-  <rect class="amberbox" x="634" y="403" width="190" height="96" rx="16"/>
-  <text class="h amber" x="729" y="435" text-anchor="middle">Warm template</text><text class="b" x="729" y="465" text-anchor="middle">already initialized</text><text class="s" x="729" y="486" text-anchor="middle">for the grant</text>
-  <rect class="greenbox" x="924" y="393" width="190" height="120" rx="16"/>
-  <text class="h green" x="1019" y="425" text-anchor="middle">Fiber</text><text class="b" x="1019" y="455" text-anchor="middle">named session</text><text class="b" x="1019" y="479" text-anchor="middle">endpoint + fence</text><text class="s" x="1019" y="500" text-anchor="middle">state retained only by Park</text>
-  <path class="arrow" d="M534 453h100M824 453h100" marker-end="url(#kata-arrow)"/>
-  <path class="arrow" d="M978 266v30H409v97" marker-end="url(#kata-arrow)"/><text class="s" x="694" y="289" text-anchor="middle">Clone · Park · Release</text>
-  <path class="arrow dash" d="M409 393v-66h569v-61" marker-end="url(#kata-arrow)"/><text class="s" x="694" y="323" text-anchor="middle">shim container record: kind + endpoint + fence</text>
-  <text class="cap" x="42" y="610">TWO-POD ACCEPTANCE FLOW</text>
-  <rect class="bluebox" x="42" y="634" width="190" height="78" rx="14"/><text class="h blue" x="137" y="665" text-anchor="middle">Pod 1 · Create</text><text class="b" x="137" y="692" text-anchor="middle">CREATE session</text>
-  <rect class="amberbox" x="272" y="634" width="190" height="78" rx="14"/><text class="h amber" x="367" y="665" text-anchor="middle">Delete Pod 1</text><text class="b" x="367" y="692" text-anchor="middle">Park state</text>
-  <rect class="greenbox" x="502" y="634" width="190" height="78" rx="14"/><text class="h green" x="597" y="665" text-anchor="middle">Pod 2 · Create</text><text class="b" x="597" y="692" text-anchor="middle">RESUME session</text>
-  <rect class="violetbox" x="732" y="634" width="190" height="78" rx="14"/><text class="h violet" x="827" y="665" text-anchor="middle">State continues</text><text class="b" x="827" y="692" text-anchor="middle">new fence</text>
-  <rect class="redbox" x="962" y="634" width="196" height="78" rx="14"/><text class="h red" x="1060" y="665" text-anchor="middle">Delete Pod 2</text><text class="b" x="1060" y="692" text-anchor="middle">Release + discard</text>
-  <path class="arrow" d="M232 673h40M462 673h40M692 673h40M922 673h40" marker-end="url(#kata-arrow)"/>
-  <text class="s" x="600" y="744" text-anchor="middle">A parked session resumes only when its runtime satisfies the checkpoint tier; it never silently becomes fresh state.</text>
+  <defs>
+    <marker id="example-kata-blue-arrow" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="12" markerHeight="12" markerUnits="userSpaceOnUse" orient="auto"><path d="M1 1 11 6 1 11Z" fill="var(--blue)"/></marker>
+    <marker id="example-kata-violet-arrow" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="12" markerHeight="12" markerUnits="userSpaceOnUse" orient="auto"><path d="M1 1 11 6 1 11Z" fill="var(--violet)"/></marker>
+    <marker id="example-kata-amber-arrow" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="12" markerHeight="12" markerUnits="userSpaceOnUse" orient="auto"><path d="M1 1 11 6 1 11Z" fill="var(--amber)"/></marker>
+  </defs>
+  <rect class="bg" width="1440" height="812"/>
+  <text class="title" x="48" y="66">Replace the Pod. Resume its session at home.</text>
+  <text class="body muted" x="48" y="104">Protocol consumer, not a Kata VM or OCI runtime.</text>
+
+  <rect class="boundary" x="48" y="156" width="390" height="612" rx="12"/>
+  <text class="label blue" x="72" y="194">Kubernetes caller</text>
+  <rect class="service caller-service" x="84" y="216" width="318" height="96" rx="4"/>
+  <text class="label blue center" x="243" y="252">containerd</text>
+  <text class="body center" x="243" y="284">RuntimeClass: fiberd</text>
+  <path class="lifeline" d="M390 312V736"/>
+
+  <rect class="service" x="522" y="216" width="388" height="96" rx="4"/>
+  <text class="label teal center" x="716" y="246">containerd-shim-fiberd-v1</text>
+  <text class="body center" x="716" y="271">Task API → fiberd protocol</text>
+  <text class="body muted center" x="716" y="299">on-stop: Park / Release</text>
+  <path class="lifeline" d="M716 312V736"/>
+
+  <rect class="scope" x="1018" y="156" width="374" height="612" rx="12"/>
+  <text class="label teal" x="1042" y="185">Same HOME</text>
+  <text class="body" x="1042" y="209">Session: kata-demo</text>
+  <rect class="service" x="1050" y="224" width="310" height="88" rx="4"/>
+  <text class="label teal center" x="1205" y="252">fiberd</text>
+  <text class="body center" x="1205" y="284">checkpoint-capable</text>
+  <path class="lifeline" d="M1082 312V736"/>
+  <text class="body teal center" x="1082" y="339">RPC</text>
+  <rect class="service" x="1072" y="384" width="20" height="38" rx="2"/>
+  <rect class="service" x="1072" y="500" width="20" height="38" rx="2"/>
+  <rect class="service" x="1072" y="658" width="20" height="38" rx="2"/>
+
+  <rect class="boundary pod" x="78" y="334" width="286" height="222" rx="8"/>
+  <text class="label blue" x="102" y="368">Application Pod 1</text>
+  <text class="body muted" x="102" y="532">on-stop: park</text>
+  <rect class="boundary pod" x="78" y="614" width="286" height="122" rx="8"/>
+  <text class="label blue" x="102" y="648">Application Pod 2</text>
+  <text class="body muted" x="102" y="710">Replacement</text>
+
+  <circle class="fiber" cx="1210" cy="402" r="62"/>
+  <text class="label violet center" x="1210" y="397">Fiber A</text>
+  <text class="body center" x="1210" y="426">fence A</text>
+  <path class="document" d="M1114 486H1282L1306 510V564H1114Z"/>
+  <path class="flow park" d="M1282 486V510H1306"/>
+  <text class="label amber center" x="1210" y="518">Parked state</text>
+  <text class="body center" x="1210" y="546">session retained</text>
+  <circle class="fiber" cx="1210" cy="676" r="62"/>
+  <text class="label violet center" x="1210" y="671">Fiber B</text>
+  <text class="body center" x="1210" y="700">new fence</text>
+  <path class="flow park" d="M1210 464V486" marker-end="url(#example-kata-amber-arrow)"/>
+  <path class="flow activate" d="M1210 564V614" marker-end="url(#example-kata-violet-arrow)"/>
+
+  <path class="flow control" d="M364 402H706" marker-end="url(#example-kata-blue-arrow)"/>
+  <circle class="junction" cx="390" cy="402" r="4"/>
+  <circle class="number-circle" cx="468" cy="370" r="13"/>
+  <text class="number blue" x="468" y="376">1</text>
+  <text class="label blue" x="494" y="377">Create</text>
+  <path class="flow activate" d="M726 402H1072" marker-end="url(#example-kata-violet-arrow)"/>
+  <path class="flow activate" d="M1092 402H1148" marker-end="url(#example-kata-violet-arrow)"/>
+  <text class="label violet center" x="887" y="377">Clone → CREATE</text>
+
+  <path class="flow control" d="M364 518H706" marker-end="url(#example-kata-blue-arrow)"/>
+  <circle class="junction" cx="390" cy="518" r="4"/>
+  <circle class="number-circle" cx="468" cy="486" r="13"/>
+  <text class="number blue" x="468" y="492">2</text>
+  <text class="label blue" x="494" y="493">Stop</text>
+  <path class="flow park" d="M726 518H1072" marker-end="url(#example-kata-amber-arrow)"/>
+  <path class="flow park" d="M1092 518H1114" marker-end="url(#example-kata-amber-arrow)"/>
+  <text class="label amber center" x="887" y="493">Park</text>
+
+  <path class="flow control" d="M364 676H706" marker-end="url(#example-kata-blue-arrow)"/>
+  <circle class="junction" cx="390" cy="676" r="4"/>
+  <circle class="number-circle" cx="468" cy="644" r="13"/>
+  <text class="number blue" x="468" y="650">3</text>
+  <text class="label blue" x="494" y="651">Create</text>
+  <path class="flow activate" d="M726 676H1072" marker-end="url(#example-kata-violet-arrow)"/>
+  <path class="flow activate" d="M1092 676H1148" marker-end="url(#example-kata-violet-arrow)"/>
+  <text class="label violet center" x="887" y="651">Clone → RESUME</text>
 </svg>

@@ -1,44 +1,73 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="760" viewBox="0 0 1200 760" role="img" aria-labelledby="knative-title knative-desc">
-  <title id="knative-title">Knative-shaped activator driving a fiber lifecycle</title>
-  <desc id="knative-desc">An HTTP caller reaches fiberd-activator, which maps a revision to a named session and calls Clone. A Hyperlight-backed fiberd home resolves CREATE, ATTACH, or RESUME and returns an endpoint and fence. The activator forwards traffic directly to the fiber, parks it after an idle interval, and handles DEFERRED_FALLBACK or SHED according to the protocol.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="1090" viewBox="0 0 1440 1090" role="img" aria-labelledby="example-knative-title example-knative-desc">
+  <title id="example-knative-title">The activator bridges HTTP requests and an idle fiber session</title>
+  <desc id="example-knative-desc">A time-ordered sequence for one revision session, with separate caller, activator, fiberd agent, and guest lifelines. The activator holds the grant. On the first request it calls Clone and receives CREATE with an endpoint and fence, then forwards workload data directly to the guest. A request while that fiber is cached is reported as ATTACH locally, with no Clone RPC. After idle time the activator calls Park with sync false and clears its cached fiber on success. The next request calls Clone on the same session and receives RESUME, retaining guest state. Blue messages are lifecycle control; teal messages are workload traffic. This standalone demo maps SHED to HTTP 503 with Retry-After and DEFERRED_FALLBACK to HTTP 503 with a preferred-home header when supplied, not the canonical gateway's SHED mapping of 429.</desc>
   <style>
-    :root{--bg:#f7f9fc;--panel:#fff;--ink:#172033;--muted:#5d6b7d;--line:#b8c4d4;--blue:#3165b5;--blue-bg:#eaf1ff;--teal:#13776f;--teal-bg:#e8f7f4;--violet:#704aa1;--violet-bg:#f2edfa;--amber:#a76500;--amber-bg:#fff3d6;--red:#b33b32;--red-bg:#fff0ef;--green:#287a4d;--green-bg:#e8f6ed}
-    @media(prefers-color-scheme:dark){:root{--bg:#0d1117;--panel:#161b22;--ink:#e6edf3;--muted:#a3adba;--line:#3d4652;--blue:#79a7ff;--blue-bg:#17243d;--teal:#53c7b8;--teal-bg:#102923;--violet:#c09cff;--violet-bg:#251b35;--amber:#f0b44d;--amber-bg:#30240f;--red:#ff8178;--red-bg:#321817;--green:#63cf8e;--green-bg:#142b1e}}
-    text{font-family:ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;fill:var(--ink)}.bg{fill:var(--bg)}.panel{fill:var(--panel);stroke:var(--line);stroke-width:1.5}.home{fill:var(--teal-bg);stroke:var(--teal);stroke-width:2}.bluebox{fill:var(--blue-bg);stroke:var(--blue);stroke-width:1.5}.violetbox{fill:var(--violet-bg);stroke:var(--violet);stroke-width:1.5}.amberbox{fill:var(--amber-bg);stroke:var(--amber);stroke-width:1.5}.redbox{fill:var(--red-bg);stroke:var(--red);stroke-width:1.5}.greenbox{fill:var(--green-bg);stroke:var(--green);stroke-width:1.5}.title{font-size:27px;font-weight:750}.subtitle{font-size:14px;fill:var(--muted)}.h{font-size:16px;font-weight:700}.b{font-size:13px}.s{font-size:11px;fill:var(--muted)}.cap{font-size:12px;font-weight:700;letter-spacing:.5px}.blue{fill:var(--blue)}.teal{fill:var(--teal)}.violet{fill:var(--violet)}.amber{fill:var(--amber)}.red{fill:var(--red)}.green{fill:var(--green)}.arrow{fill:none;stroke:var(--muted);stroke-width:2}.direct{fill:none;stroke:var(--green);stroke-width:2.5}.dash{stroke-dasharray:7 5}
+    :root{--bg:#f7f9fc;--panel:#fff;--ink:#172033;--muted:#5d6b7d;--border:#b8c4d4;--blue:#3165b5;--blue-bg:#eaf1ff;--teal:#13776f;--teal-bg:#e8f7f4;--violet:#704aa1;--violet-bg:#f2edfa;--amber:#a76500;--amber-bg:#fff3d6;--red:#b33b32;--red-bg:#fff0ef;--green:#287a4d;--green-bg:#e8f6ed}
+    @media(prefers-color-scheme:dark){:root{--bg:#0d1117;--panel:#161b22;--ink:#e6edf3;--muted:#a3adba;--border:#3d4652;--blue:#79a7ff;--blue-bg:#17243d;--teal:#53c7b8;--teal-bg:#102923;--violet:#c09cff;--violet-bg:#251b35;--amber:#f0b44d;--amber-bg:#30240f;--red:#ff8178;--red-bg:#321817;--green:#63cf8e;--green-bg:#142b1e}}
+    text{font-family:ui-sans-serif,-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;fill:var(--ink)}.bg{fill:var(--bg)}.title{font-size:30px;font-weight:700}.heading{font-size:22px;font-weight:700}.label{font-size:20px;font-weight:600}.secondary{font-size:17px}.muted{fill:var(--muted)}.blue{fill:var(--blue)}.teal{fill:var(--teal)}.violet{fill:var(--violet)}.amber{fill:var(--amber)}.red{fill:var(--red)}.center{text-anchor:middle}
+    .service{fill:var(--panel);stroke:var(--blue);stroke-width:2}.actor{fill:var(--panel);stroke:var(--teal);stroke-width:2}.fiber{fill:var(--violet-bg);stroke:var(--violet);stroke-width:2}.divider{fill:none;stroke:var(--border);stroke-width:1.5}.lifeline{stroke:var(--border);stroke-width:1.5;stroke-dasharray:5 6}.flow{fill:none;stroke-width:2;stroke-linecap:round}.control{stroke:var(--blue)}.data{stroke:var(--teal)}.return{stroke-dasharray:7 6}.note{fill:var(--amber-bg)}.failure{fill:var(--red-bg)}
+    text.amber{fill:#9e5e00}@media(prefers-color-scheme:dark){text.amber{fill:var(--amber)}}
   </style>
-  <defs><marker id="knative-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M1 1l8 4-8 4z" fill="#7b8794"/></marker><marker id="knative-green-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M1 1l8 4-8 4z" fill="#287a4d"/></marker></defs>
-  <rect class="bg" width="1200" height="760"/>
-  <text class="title" x="42" y="48">Knative-shaped example: requests drive the fiber lifecycle</text>
-  <text class="subtitle" x="42" y="74">The activator owns request routing and idleness; fiberd owns admitted capacity, session resolution, and state.</text>
-  <rect class="panel" x="42" y="132" width="206" height="112" rx="16"/>
-  <text class="h" x="145" y="165" text-anchor="middle">1 · HTTP caller</text><text class="b" x="145" y="196" text-anchor="middle">POST /hello</text><text class="s" x="145" y="221" text-anchor="middle">request / response</text>
-  <rect class="violetbox" x="320" y="112" width="286" height="152" rx="17"/>
-  <text class="h violet" x="463" y="145" text-anchor="middle">2 · fiberd-activator</text><text class="b" x="463" y="176" text-anchor="middle">holds revision grant</text><text class="b" x="463" y="200" text-anchor="middle">maps hello → session hello-0</text><text class="b" x="463" y="224" text-anchor="middle">tracks endpoint + idle timer</text><text class="s" x="463" y="247" text-anchor="middle">consumer integration</text>
-  <path class="arrow" d="M248 176h72" marker-end="url(#knative-arrow)"/><path class="arrow dash" d="M320 224h-72" marker-end="url(#knative-arrow)"/>
-  <rect class="home" x="680" y="102" width="478" height="424" rx="22"/>
-  <text class="h teal" x="708" y="137">FIBERD HOME · HYPERLIGHT BACKEND</text>
-  <rect class="bluebox" x="714" y="174" width="410" height="98" rx="16"/>
-  <text class="h blue" x="919" y="206" text-anchor="middle">3 · Agent + session ledger</text><text class="b" x="919" y="235" text-anchor="middle">CREATE · ATTACH · RESUME</text><text class="s" x="919" y="258" text-anchor="middle">returns endpoint + fence on success</text>
-  <rect class="amberbox" x="714" y="315" width="174" height="114" rx="16"/>
-  <text class="h amber" x="801" y="347" text-anchor="middle">Warm guest</text><text class="b" x="801" y="376" text-anchor="middle">snapshot held by</text><text class="b" x="801" y="398" text-anchor="middle">grant helper</text><text class="s" x="801" y="418" text-anchor="middle">prepared once</text>
-  <rect class="greenbox" x="936" y="315" width="188" height="114" rx="16"/>
-  <text class="h green" x="1030" y="347" text-anchor="middle">Guest fiber</text><text class="b" x="1030" y="376" text-anchor="middle">hello-0 endpoint</text><text class="b" x="1030" y="398" text-anchor="middle">counter state</text><text class="s" x="1030" y="418" text-anchor="middle">serves while running</text>
-  <path class="arrow" d="M888 372h48" marker-end="url(#knative-arrow)"/>
-  <path class="arrow" d="M606 166h108" marker-end="url(#knative-arrow)"/><text class="s" x="660" y="155" text-anchor="middle">Clone(hello-0)</text>
-  <path class="arrow dash" d="M714 244H606" marker-end="url(#knative-arrow)"/><text class="s" x="660" y="261" text-anchor="middle">kind + endpoint</text>
-  <path class="direct" d="M606 264v214h424v-49" marker-end="url(#knative-green-arrow)"/><text class="b green" x="816" y="470" text-anchor="middle">forward to fiber endpoint; relay response</text>
-  <rect class="amberbox" x="714" y="457" width="410" height="43" rx="14"/><text class="b amber" x="919" y="484" text-anchor="middle">idle timer: Park · next request: Resume retained state</text>
+  <defs>
+    <marker id="example-knative-blue-arrow" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="12" markerHeight="12" markerUnits="userSpaceOnUse" orient="auto"><path d="M1 1 11 6 1 11Z" fill="var(--blue)"/></marker>
+    <marker id="example-knative-teal-arrow" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="12" markerHeight="12" markerUnits="userSpaceOnUse" orient="auto"><path d="M1 1 11 6 1 11Z" fill="var(--teal)"/></marker>
+  </defs>
+  <rect class="bg" width="1440" height="1090"/>
+  <text class="title" x="48" y="66">Who wakes a fiber when an HTTP request arrives?</text>
+  <text class="secondary muted" x="48" y="100">The activator holds the grant and the endpoint cache. Blue = lifecycle RPC; teal = workload data.</text>
+  <path class="divider" d="M48 130H1392"/>
 
-  <rect class="redbox" x="320" y="318" width="286" height="154" rx="17"/>
-  <text class="h red" x="344" y="350">When Clone cannot serve here</text>
-  <text class="b" x="344" y="382">DEFERRED_FALLBACK</text><text class="s" x="344" y="404">ordinary provisioning path or preferred home</text>
-  <text class="b" x="344" y="434">SHED + Retry-After</text><text class="s" x="344" y="456">wait, then retry this home</text>
-  <text class="cap" x="42" y="580">ONE NAMED REVISION SESSION OVER TIME</text>
-  <rect class="panel" x="42" y="604" width="190" height="92" rx="15"/><text class="h" x="137" y="635" text-anchor="middle">No running fiber</text><text class="s" x="137" y="664" text-anchor="middle">first request</text><text class="s" x="137" y="682" text-anchor="middle">Clone(hello-0)</text>
-  <rect class="greenbox" x="272" y="604" width="190" height="92" rx="15"/><text class="h green" x="367" y="635" text-anchor="middle">CREATE</text><text class="b" x="367" y="664" text-anchor="middle">new guest starts</text>
-  <rect class="bluebox" x="502" y="604" width="190" height="92" rx="15"/><text class="h blue" x="597" y="635" text-anchor="middle">ATTACH</text><text class="b" x="597" y="664" text-anchor="middle">reuse incarnation</text>
-  <rect class="amberbox" x="732" y="604" width="190" height="92" rx="15"/><text class="h amber" x="827" y="635" text-anchor="middle">PARKED</text><text class="b" x="827" y="664" text-anchor="middle">idle state retained</text>
-  <rect class="violetbox" x="962" y="604" width="196" height="92" rx="15"/><text class="h violet" x="1060" y="635" text-anchor="middle">RESUME</text><text class="b" x="1060" y="664" text-anchor="middle">new incarnation</text>
-  <path class="arrow" d="M232 650h40M462 650h40M692 650h40M922 650h40" marker-end="url(#knative-arrow)"/>
-  <text class="s" x="600" y="738" text-anchor="middle">While active, later requests resolve ATTACH; after Park, the next valid Clone resolves RESUME.</text>
+  <circle class="actor" cx="156" cy="177" r="14"/>
+  <path class="actor" d="M130 217V205C130 183 182 183 182 205V217"/>
+  <text class="label center" x="156" y="246">HTTP caller</text>
+  <rect class="service" x="334" y="165" width="300" height="84" rx="4"/>
+  <text class="label blue center" x="484" y="199">fiberd-activator</text>
+  <text class="secondary center" x="484" y="229">revision → session hello-0</text>
+  <rect class="service" x="704" y="165" width="280" height="84" rx="4"/>
+  <text class="label blue center" x="844" y="199">fiberd agent</text>
+  <text class="secondary center" x="844" y="229">Hyperlight home</text>
+  <circle class="fiber" cx="1264" cy="196" r="39"/>
+  <text class="label violet center" x="1264" y="265">Guest fiber</text>
+
+  <path class="lifeline" d="M156 270V940M484 249V940M844 249V940M1264 278V940"/>
+  <text class="secondary muted" x="48" y="290">First request</text>
+  <path class="flow data" d="M156 326H484" marker-end="url(#example-knative-teal-arrow)"/>
+  <text class="secondary teal" x="188" y="311">1 · HTTP request</text>
+  <path class="flow control" d="M484 365H844" marker-end="url(#example-knative-blue-arrow)"/>
+  <text class="secondary blue" x="520" y="349">2 · Clone(grant, session)</text>
+  <path class="flow control return" d="M844 407H484" marker-end="url(#example-knative-blue-arrow)"/>
+  <text class="secondary blue" x="520" y="391">3 · CREATE · endpoint + fence</text>
+  <path class="flow data" d="M484 449H1264" marker-end="url(#example-knative-teal-arrow)"/>
+  <text class="secondary teal" x="913" y="433">4 · Forward request</text>
+
+  <path class="divider" d="M48 477H1392"/>
+  <text class="secondary muted" x="48" y="506">While live</text>
+  <path class="flow data" d="M156 541H484" marker-end="url(#example-knative-teal-arrow)"/>
+  <text class="secondary teal" x="188" y="525">5 · Another request</text>
+  <path class="flow data" d="M484 587H1264" marker-end="url(#example-knative-teal-arrow)"/>
+  <text class="secondary teal" x="913" y="571">6 · Reuse cached endpoint</text>
+  <text class="secondary amber" x="530" y="567">Cached reuse ≠ Clone RPC</text>
+
+  <path class="divider" d="M48 619H1392"/>
+  <text class="secondary muted" x="48" y="650">Idle timeout</text>
+  <path class="flow control" d="M484 685H844" marker-end="url(#example-knative-blue-arrow)"/>
+  <text class="secondary blue" x="520" y="667">7 · Park(fiber, sync=false)</text>
+  <text class="secondary muted" x="912" y="670">Guest stops; state retained</text>
+  <text class="secondary muted" x="520" y="717">Clear cached fiber on success</text>
+
+  <path class="divider" d="M48 743H1392"/>
+  <text class="secondary muted" x="48" y="775">After idle</text>
+  <path class="flow data" d="M156 809H484" marker-end="url(#example-knative-teal-arrow)"/>
+  <text class="secondary teal" x="188" y="793">8 · Next HTTP request</text>
+  <path class="flow control" d="M484 849H844" marker-end="url(#example-knative-blue-arrow)"/>
+  <text class="secondary blue" x="520" y="833">9 · Clone(same session)</text>
+  <path class="flow control return" d="M844 892H484" marker-end="url(#example-knative-blue-arrow)"/>
+  <text class="secondary blue" x="520" y="876">10 · RESUME · new fence</text>
+  <path class="flow data" d="M484 935H1264" marker-end="url(#example-knative-teal-arrow)"/>
+  <text class="secondary teal" x="913" y="919">11 · Forward; counter continues</text>
+
+  <rect class="boundary failure" x="48" y="968" width="1344" height="62" rx="5"/>
+  <text class="secondary red" x="72" y="993">No capacity in this demo: SHED → 503 + Retry-After</text>
+  <text class="secondary red" x="72" y="1017">DEFERRED_FALLBACK → 503 + X-Fiberd-Preferred-Home, when supplied</text>
+  <text class="secondary muted" x="48" y="1063">Standalone consumer, not a Knative install · busy slots may add fibers up to concurrency · HTTP replies omitted for clarity.</text>
 </svg>

@@ -1,59 +1,57 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="680" viewBox="0 0 1200 680" role="img" aria-labelledby="containment-title containment-desc">
-  <title id="containment-title">Containment boundaries around a fiberd fiber</title>
-  <desc id="containment-desc">A control plane sends signed grants and receives aggregate status. A caller sends Clone and receives an endpoint and fence. A home contains one fiberd agent. Each admitted grant has its own resource and policy boundary, one warm template, and multiple fiber incarnations.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="824" viewBox="0 0 1440 824" role="img" aria-labelledby="containment-title containment-desc">
+  <title id="containment-title">One home, one agent, separate grant scopes</title>
+  <desc id="containment-desc">A containment view, not a request sequence. One home contains a single fiberd agent and two illustrated sibling grant scopes. Each admitted grant owns one warm template and its own fiber set; the agent is outside both grants and manages both. Grant A illustrates two running fibers; grant B illustrates one. These are example instance counts, not reservations. The home supplies aggregate capacity, and grants carry their own lease and policy. Nesting shows resource ownership, not a claim that every grant or fiber has its own container or security boundary: workload isolation is backend-specific.</desc>
   <style>
-    :root{--bg:#f7f9fc;--panel:#fff;--ink:#172033;--muted:#5d6b7d;--line:#b8c4d4;--blue:#3165b5;--blue-bg:#eaf1ff;--teal:#13776f;--teal-bg:#e8f7f4;--violet:#704aa1;--violet-bg:#f2edfa;--amber:#a76500;--amber-bg:#fff3d6}
-    @media(prefers-color-scheme:dark){:root{--bg:#0d1117;--panel:#161b22;--ink:#e6edf3;--muted:#a3adba;--line:#3d4652;--blue:#79a7ff;--blue-bg:#17243d;--teal:#53c7b8;--teal-bg:#102923;--violet:#c09cff;--violet-bg:#251b35;--amber:#f0b44d;--amber-bg:#30240f}}
-    text{font-family:ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;fill:var(--ink)}.bg{fill:var(--bg)}.panel{fill:var(--panel);stroke:var(--line);stroke-width:1.5}.home{fill:var(--blue-bg);stroke:var(--blue);stroke-width:2}.grant{fill:var(--teal-bg);stroke:var(--teal);stroke-width:2}.warm{fill:var(--amber-bg);stroke:var(--amber);stroke-width:1.5}.fiber{fill:var(--violet-bg);stroke:var(--violet);stroke-width:1.5}.title{font-size:27px;font-weight:750}.subtitle{font-size:14px;fill:var(--muted)}.h{font-size:16px;font-weight:700}.b{font-size:13px}.s{font-size:11px;fill:var(--muted)}.cap{font-size:12px;font-weight:700;letter-spacing:.6px}.blue{fill:var(--blue)}.teal{fill:var(--teal)}.violet{fill:var(--violet)}.amber{fill:var(--amber)}.arrow{fill:none;stroke:var(--muted);stroke-width:2}.dash{stroke-dasharray:7 5}
+    :root{--bg:#f7f9fc;--panel:#fff;--ink:#172033;--muted:#5d6b7d;--border:#b8c4d4;--blue:#3165b5;--blue-bg:#eaf1ff;--teal:#13776f;--teal-bg:#e8f7f4;--violet:#704aa1;--violet-bg:#f2edfa;--amber:#a76500;--amber-bg:#fff3d6;--green:#287a4d;--green-bg:#e8f6ed}
+    @media(prefers-color-scheme:dark){:root{--bg:#0d1117;--panel:#161b22;--ink:#e6edf3;--muted:#a3adba;--border:#3d4652;--blue:#79a7ff;--blue-bg:#17243d;--teal:#53c7b8;--teal-bg:#102923;--violet:#c09cff;--violet-bg:#251b35;--amber:#f0b44d;--amber-bg:#30240f;--green:#63cf8e;--green-bg:#142b1e}}
+    text{font-family:ui-sans-serif,-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;fill:var(--ink)}
+    .bg{fill:var(--bg)}.scope{fill:none;stroke-width:1.5}.home{stroke:var(--blue)}.grant{stroke:var(--teal);stroke-dasharray:9 6}.service{fill:var(--panel);stroke:var(--teal);stroke-width:2}.template{fill:var(--amber-bg);stroke:var(--amber);stroke-width:1.5}.fiber{fill:var(--violet-bg);stroke:var(--violet);stroke-width:2}.divider{stroke:var(--border);stroke-width:1.5}
+    .title{font-size:30px;font-weight:700}.heading{font-size:22px;font-weight:700}.label{font-size:20px;font-weight:600}.body{font-size:17px}.muted{fill:var(--muted)}.blue{fill:var(--blue)}.teal{fill:var(--teal)}.amber{fill:var(--amber)}.violet{fill:var(--violet)}.center{text-anchor:middle}
+    text.amber{fill:#9e5e00}@media(prefers-color-scheme:dark){text.amber{fill:var(--amber)}}
   </style>
-  <defs><marker id="containment-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M1 1l8 4-8 4z" fill="#7b8794"/></marker></defs>
-  <rect class="bg" width="1200" height="680"/>
-  <text class="title" x="42" y="48">Containment is layered, not per-fiber placement</text>
-  <text class="subtitle" x="42" y="74">The home supplies the outer environment; each grant bounds policy and capacity; the backend defines each fiber’s mechanism.</text>
+  <rect class="bg" width="1440" height="824"/>
+  <text class="title" x="48" y="66">One home, one agent, separate grant scopes</text>
+  <text class="body muted" x="48" y="100">What lives inside what? Each grant owns a template and its fiber set — not another agent.</text>
+  <path class="divider" d="M48 130H1392"/>
 
-  <rect class="panel" x="42" y="150" width="210" height="120" rx="16"/>
-  <text class="h blue" x="147" y="182" text-anchor="middle">Control plane</text>
-  <text class="b" x="147" y="215" text-anchor="middle">signed grants →</text>
-  <text class="b" x="147" y="242" text-anchor="middle">← aggregate status</text>
-  <rect class="panel" x="42" y="376" width="210" height="120" rx="16"/>
-  <text class="h violet" x="147" y="408" text-anchor="middle">Caller or router</text>
-  <text class="b" x="147" y="441" text-anchor="middle">Clone →</text>
-  <text class="b" x="147" y="468" text-anchor="middle">← endpoint + fence</text>
+  <rect class="scope home" x="48" y="164" width="1344" height="588" rx="18"/>
+  <text class="heading blue" x="80" y="205">Home</text>
+  <text class="body muted" x="174" y="205">Aggregate capacity · environment scope</text>
 
-  <rect class="home" x="310" y="108" width="848" height="492" rx="24"/>
-  <text class="h blue" x="340" y="143">HOME</text>
-  <text class="s" x="402" y="143">standalone host, grant Pod, or Slurm allocation</text>
-  <rect class="panel" x="342" y="224" width="206" height="166" rx="16"/>
-  <text class="h teal" x="445" y="257" text-anchor="middle">fiberd agent</text>
-  <text class="b" x="445" y="291" text-anchor="middle">ledger + budgets</text>
-  <text class="b" x="445" y="315" text-anchor="middle">fences + pressure</text>
-  <text class="s" x="445" y="350" text-anchor="middle">one agent per home</text>
+  <rect class="service" x="80" y="260" width="264" height="152" rx="4"/>
+  <text class="heading teal" x="108" y="302">fiberd agent</text>
+  <text class="body" x="108" y="341">Manages both grants</text>
+  <text class="body" x="108" y="374">Ledger · fences · budgets</text>
+  <text class="body muted" x="80" y="474">Grants are siblings.</text>
+  <text class="body muted" x="80" y="505">Their templates and fibers</text>
+  <text class="body muted" x="80" y="536">belong to separate scopes.</text>
 
-  <rect class="grant" x="596" y="166" width="528" height="374" rx="20"/>
-  <text class="cap teal" x="624" y="200">ONE ADMITTED GRANT</text>
-  <text class="s" x="813" y="200">resources, lease, admitted template, policy</text>
-  <rect class="warm" x="628" y="232" width="464" height="79" rx="15"/>
-  <text class="h amber" x="860" y="262" text-anchor="middle">Warm template</text>
-  <text class="b" x="860" y="288" text-anchor="middle">one initialized fork or restore source for this grant</text>
-  <path class="arrow" d="M860 311v42M860 353H706v29M860 353v29M860 353h154v29" marker-end="url(#containment-arrow)"/>
-  <rect class="fiber" x="628" y="384" width="156" height="93" rx="14"/>
-  <text class="h violet" x="706" y="414" text-anchor="middle">Fiber A</text>
-  <text class="b" x="706" y="440" text-anchor="middle">incarnation</text>
-  <text class="s" x="706" y="461" text-anchor="middle">endpoint + fence</text>
-  <rect class="fiber" x="782" y="384" width="156" height="93" rx="14"/>
-  <text class="h violet" x="860" y="414" text-anchor="middle">Fiber B</text>
-  <text class="b" x="860" y="440" text-anchor="middle">incarnation</text>
-  <text class="s" x="860" y="461" text-anchor="middle">endpoint + fence</text>
-  <rect class="fiber" x="936" y="384" width="156" height="93" rx="14" stroke-dasharray="7 5"/>
-  <text class="h violet" x="1014" y="420" text-anchor="middle">+ N</text>
-  <text class="b" x="1014" y="447" text-anchor="middle">up to fibers.max</text>
+  <rect class="scope grant" x="386" y="252" width="470" height="468" rx="12"/>
+  <text class="heading teal" x="414" y="291">Grant A</text>
+  <text class="body muted" x="414" y="320">Own lease · workload · limits</text>
+  <rect class="template" x="430" y="350" width="390" height="110" rx="3"/>
+  <rect class="template" x="422" y="358" width="390" height="110" rx="3"/>
+  <rect class="template" x="414" y="366" width="390" height="110" rx="3"/>
+  <text class="heading amber" x="440" y="409">Warm template A</text>
+  <text class="body" x="440" y="443">One reusable source for this grant</text>
+  <circle class="fiber" cx="516" cy="608" r="72"/>
+  <text class="label violet center" x="516" y="606">Fiber A1</text>
+  <text class="body center" x="516" y="636">live instance</text>
+  <circle class="fiber" cx="724" cy="608" r="72"/>
+  <text class="label violet center" x="724" y="606">Fiber A2</text>
+  <text class="body center" x="724" y="636">live instance</text>
 
-  <path class="arrow" d="M252 207h90v66" marker-end="url(#containment-arrow)"/>
-  <path class="arrow dash" d="M342 324h-58v116h-32" marker-end="url(#containment-arrow)"/>
-  <path class="arrow" d="M548 307h48" marker-end="url(#containment-arrow)"/>
-  <text class="s" x="572" y="296" text-anchor="middle">manages</text>
-  <rect class="panel" x="342" y="492" width="206" height="69" rx="14"/>
-  <text class="b" x="445" y="519" text-anchor="middle">another grant repeats</text>
-  <text class="s" x="445" y="541" text-anchor="middle">template + bounded fiber set</text>
-  <text class="subtitle" x="600" y="644" text-anchor="middle">Individual fibers are not control-plane placement objects; they stay within the admitted grant and the backend’s actual isolation model.</text>
+  <rect class="scope grant" x="890" y="252" width="470" height="468" rx="12"/>
+  <text class="heading teal" x="918" y="291">Grant B</text>
+  <text class="body muted" x="918" y="320">Own lease · workload · limits</text>
+  <rect class="template" x="934" y="350" width="390" height="110" rx="3"/>
+  <rect class="template" x="926" y="358" width="390" height="110" rx="3"/>
+  <rect class="template" x="918" y="366" width="390" height="110" rx="3"/>
+  <text class="heading amber" x="944" y="409">Warm template B</text>
+  <text class="body" x="944" y="443">One reusable source for this grant</text>
+  <circle class="fiber" cx="1124" cy="608" r="72"/>
+  <text class="label violet center" x="1124" y="606">Fiber B1</text>
+  <text class="body center" x="1124" y="636">live instance</text>
+
+  <text class="body muted" x="48" y="793">Nesting shows resource ownership. Workload isolation depends on the selected backend.</text>
 </svg>

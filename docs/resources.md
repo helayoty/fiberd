@@ -5,7 +5,7 @@ not create CPU or memory beyond the capacity home that holds the grant. The
 home forms the outer resource boundary around the agent, warm template,
 backend helpers, and every fiber.
 
-![A capacity home provides one aggregate CPU and memory boundary. fiberd adds a grant cgroup and one leaf per fiber, while unchanged template pages remain shared on copy-on-write backends](./images/resource-hierarchy.svg)
+![Inherited resource limits with two alternative backend layouts: proc and runc use process leaves under the grant cgroup, sharing unchanged template pages while consuming unequal private W. Hyperlight sandboxes share a grant helper process and report W through the helper rather than per-fiber process cgroups. W budgets are ceilings, not reservations.](./images/resource-hierarchy.svg)
 
 ## The capacity home is the outer resource boundary
 
@@ -157,7 +157,9 @@ failed release can be logged while ledger ownership is removed, so operators
 must monitor for orphaned backend work. See
 [Production readiness](production-readiness.md#cleanup-and-state-lifecycle).
 
-![The higher of memory PSI and reported device occupancy drives one ladder. fiberd sheds new creates and resumes, then reclaims the largest-W fiber by parking a named session or releasing an anonymous one. After three persistent checks with no victim, it yields the grant.](images/pressure-ladder.svg)
+The diagram follows each pressure evaluation rather than an inevitable escalation. Successful reclaim resets the three-check counter; failed reclaim attempts also advance it, just like a check with no victim. A failed or unavailable Park falls back to Release.
+
+![The maximum available PSI or device-occupancy reading selects a branch: below 10 percent, clear shedding; at 10 to below 25, shed new work; at 25 or above, also select the largest-W running fiber. Try Park for named state, otherwise Release. Three consecutive high-pressure evaluations without successful reclaim yield the grant. These are overridable defaults; ATTACH is pressure-exempt.](images/pressure-ladder.svg)
 
 ## What controls fiber count
 

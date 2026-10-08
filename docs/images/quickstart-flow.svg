@@ -1,45 +1,84 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="720" viewBox="0 0 1200 720" role="img" aria-labelledby="quickstart-flow-title quickstart-flow-desc">
-  <title id="quickstart-flow-title">fiberd quickstart flow from build through restart</title>
-  <desc id="quickstart-flow-desc">The quickstart builds fiberd, grant-issuer, and zygotectl; creates an issuer key and serves JWKS; starts fiberd with the matching audience and verifier; mints a bounded grant; exercises CREATE, ATTACH, PARK, and RESUME for a named session; then restarts the agent to advance the epoch and invalidate prior fences. Platform-specific commands are intentionally omitted.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="1070" viewBox="0 0 1440 1070" role="img" aria-labelledby="quickstart-flow-title quickstart-flow-desc">
+  <title id="quickstart-flow-title">Demonstrate create, attach, park, resume, and epoch invalidation</title>
+  <desc id="quickstart-flow-desc">A numbered experiment, not a component diagram. Prepare the local in-memory demo using the commands below the image: build, serve issuer keys, start fiberd, and mint a grant. Clone session S to CREATE fence g1/1/1. Clone S again to ATTACH the same endpoint and fence. Park the returned fiber ID to free a running slot and retain named state. Clone S to RESUME with a new sequence, g1/1/2. Restart fiberd with the same FIBERD_STATE directory: epoch advances from 1 to 2 and Park with an old fiber ID returns 404. Operation text is shorthand for the executable commands in the guide; running and parked shapes show observed session state. The portable runtime simulates fibers rather than starting Linux workloads.</desc>
   <style>
-    :root{--bg:#f7f9fc;--panel:#fff;--ink:#172033;--muted:#5d6b7d;--line:#b8c4d4;--blue:#3165b5;--blue-bg:#eaf1ff;--teal:#13776f;--teal-bg:#e8f7f4;--violet:#704aa1;--violet-bg:#f2edfa;--amber:#a76500;--amber-bg:#fff3d6;--red:#b33b32;--red-bg:#fff0ef;--green:#287a4d;--green-bg:#e8f6ed}
-    @media(prefers-color-scheme:dark){:root{--bg:#0d1117;--panel:#161b22;--ink:#e6edf3;--muted:#a3adba;--line:#3d4652;--blue:#79a7ff;--blue-bg:#17243d;--teal:#53c7b8;--teal-bg:#102923;--violet:#c09cff;--violet-bg:#251b35;--amber:#f0b44d;--amber-bg:#30240f;--red:#ff8178;--red-bg:#321817;--green:#63cf8e;--green-bg:#142b1e}}
-    text{font-family:ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;fill:var(--ink)}.bg{fill:var(--bg)}.panel{fill:var(--panel);stroke:var(--line);stroke-width:1.5}.bluebox{fill:var(--blue-bg);stroke:var(--blue);stroke-width:1.5}.tealbox{fill:var(--teal-bg);stroke:var(--teal);stroke-width:1.5}.violetbox{fill:var(--violet-bg);stroke:var(--violet);stroke-width:1.5}.amberbox{fill:var(--amber-bg);stroke:var(--amber);stroke-width:1.5}.redbox{fill:var(--red-bg);stroke:var(--red);stroke-width:1.5}.greenbox{fill:var(--green-bg);stroke:var(--green);stroke-width:1.5}.title{font-size:27px;font-weight:750}.subtitle{font-size:14px;fill:var(--muted)}.h{font-size:16px;font-weight:700}.b{font-size:13px}.s{font-size:11px;fill:var(--muted)}.step{font-size:12px;font-weight:800}.blue{fill:var(--blue)}.teal{fill:var(--teal)}.violet{fill:var(--violet)}.amber{fill:var(--amber)}.red{fill:var(--red)}.green{fill:var(--green)}.arrow{fill:none;stroke:var(--muted);stroke-width:2}
+    :root{--bg:#f7f9fc;--panel:#fff;--ink:#172033;--muted:#5d6b7d;--border:#b8c4d4;--blue:#3165b5;--blue-bg:#eaf1ff;--teal:#13776f;--teal-bg:#e8f7f4;--violet:#704aa1;--violet-bg:#f2edfa;--amber:#a76500;--amber-bg:#fff3d6;--green:#287a4d;--green-bg:#e8f6ed;--red:#b33b32;--red-bg:#fff0ef}
+    @media(prefers-color-scheme:dark){:root{--bg:#0d1117;--panel:#161b22;--ink:#e6edf3;--muted:#a3adba;--border:#3d4652;--blue:#79a7ff;--blue-bg:#17243d;--teal:#53c7b8;--teal-bg:#102923;--violet:#c09cff;--violet-bg:#251b35;--amber:#f0b44d;--amber-bg:#30240f;--green:#63cf8e;--green-bg:#142b1e;--red:#ff8178;--red-bg:#321817}}
+    text{font-family:ui-sans-serif,-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;fill:var(--ink)}
+    .bg{fill:var(--bg)}.title{font-size:30px;font-weight:700}.heading{font-size:22px;font-weight:700}.label{font-size:20px;font-weight:600}.secondary{font-size:17px}.muted{fill:var(--muted)}.center{text-anchor:middle}.blue{fill:var(--blue)}.teal{fill:var(--teal)}.violet{fill:var(--violet)}.amber{fill:var(--amber)}.green{fill:var(--green)}.red{fill:var(--red)}
+    .command{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:20px}.divider{stroke:var(--border);stroke-width:1.5}.state{fill:var(--green-bg);stroke:var(--green);stroke-width:1.5}.template{fill:var(--amber-bg);stroke:var(--amber);stroke-width:1.5}.number-bg{fill:var(--blue-bg);stroke:var(--blue);stroke-width:1.5}.number{font-size:17px;font-weight:700;text-anchor:middle;fill:var(--blue)}.flow{fill:none;stroke:var(--blue);stroke-width:2}
+    text.amber{fill:#9e5e00}@media(prefers-color-scheme:dark){text.amber{fill:var(--amber)}}
   </style>
-  <defs><marker id="quickstart-flow-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M1 1l8 4-8 4z" fill="#7b8794"/></marker></defs>
-  <rect class="bg" width="1200" height="720"/>
-  <text class="title" x="42" y="48">Quickstart: build, trust, activate, restart</text>
-  <text class="subtitle" x="42" y="74">The durable ideas are shown here; exact shell syntax, ports, and paths remain in the runnable quickstart.</text>
-  <rect class="bluebox" x="42" y="124" width="236" height="126" rx="17"/>
-  <circle cx="72" cy="154" r="16" fill="var(--blue)"/><text class="step" x="72" y="158" text-anchor="middle" fill="#fff">1</text>
-  <text class="h blue" x="102" y="159">Build binaries</text><text class="b" x="66" y="193">fiberd</text><text class="b" x="66" y="216">grant-issuer · zygotectl</text><text class="s" x="66" y="237">use pinned project toolchain</text>
-  <rect class="violetbox" x="334" y="124" width="236" height="126" rx="17"/>
-  <circle cx="364" cy="154" r="16" fill="var(--violet)"/><text class="step" x="364" y="158" text-anchor="middle" fill="#fff">2</text>
-  <text class="h violet" x="394" y="159">Create trust root</text><text class="b" x="358" y="193">generate issuer key</text><text class="b" x="358" y="216">serve discovery + JWKS</text><text class="s" x="358" y="237">keep key material local</text>
-  <rect class="tealbox" x="626" y="124" width="236" height="126" rx="17"/>
-  <circle cx="656" cy="154" r="16" fill="var(--teal)"/><text class="step" x="656" y="158" text-anchor="middle" fill="#fff">3</text>
-  <text class="h teal" x="686" y="159">Start fiberd</text><text class="b" x="650" y="193">node audience + verifier</text><text class="b" x="650" y="216">state + RPC endpoints</text><text class="s" x="650" y="237">wait for health</text>
-  <rect class="amberbox" x="918" y="124" width="240" height="126" rx="17"/>
-  <circle cx="948" cy="154" r="16" fill="var(--amber)"/><text class="step" x="948" y="158" text-anchor="middle" fill="#fff">4</text>
-  <text class="h amber" x="978" y="159">Mint bounded grant</text><text class="b" x="942" y="193">matching audience</text><text class="b" x="942" y="216">template · max · W · lease</text><text class="s" x="942" y="237">carry JWT with Clone</text>
-  <path class="arrow" d="M278 187h56M570 187h56M862 187h56" marker-end="url(#quickstart-flow-arrow)"/>
+  <defs><marker id="quickstart-flow-blue-arrow" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="12" markerHeight="12" markerUnits="userSpaceOnUse" orient="auto"><path d="M1 1 11 6 1 11Z" fill="var(--blue)"/></marker></defs>
+  <rect class="bg" width="1440" height="1070"/>
+  <text class="title" x="48" y="66">Create, attach, park, resume—then restart</text>
+  <text class="secondary muted" x="48" y="100">One named session · portable in-memory demo · operation shorthand for the commands below.</text>
+  <path class="divider" d="M48 130H1392"/>
 
-  <rect class="panel" x="42" y="318" width="1116" height="220" rx="20"/>
-  <text class="step" x="68" y="352">5 · EXERCISE ONE NAMED SESSION</text>
-  <rect class="greenbox" x="68" y="382" width="198" height="104" rx="15"/>
-  <text class="h green" x="167" y="414" text-anchor="middle">CREATE</text><text class="b" x="167" y="443" text-anchor="middle">first Clone(session)</text><text class="s" x="167" y="467" text-anchor="middle">new endpoint + fence</text>
-  <rect class="bluebox" x="348" y="382" width="198" height="104" rx="15"/>
-  <text class="h blue" x="447" y="414" text-anchor="middle">ATTACH</text><text class="b" x="447" y="443" text-anchor="middle">same session while running</text><text class="s" x="447" y="467" text-anchor="middle">same endpoint + fence</text>
-  <rect class="amberbox" x="628" y="382" width="198" height="104" rx="15"/>
-  <text class="h amber" x="727" y="414" text-anchor="middle">PARK</text><text class="b" x="727" y="443" text-anchor="middle">checkpoint named state</text><text class="s" x="727" y="467" text-anchor="middle">requires checkpoint tier</text>
-  <rect class="violetbox" x="908" y="382" width="224" height="104" rx="15"/>
-  <text class="h violet" x="1020" y="414" text-anchor="middle">RESUME</text><text class="b" x="1020" y="443" text-anchor="middle">Clone same parked session</text><text class="s" x="1020" y="467" text-anchor="middle">new endpoint + new fence</text>
-  <path class="arrow" d="M266 434h82M546 434h82M826 434h82" marker-end="url(#quickstart-flow-arrow)"/>
-  <text class="s" x="600" y="516" text-anchor="middle">Inspect status and audit records between transitions; capacity misses demonstrate DEFERRED_FALLBACK or SHED.</text>
+  <circle class="number-bg" cx="72" cy="188" r="16"/>
+  <text class="number" x="72" y="194">1</text>
+  <text class="heading blue" x="118" y="195">Prepare the demo</text>
+  <text class="label" x="118" y="233">make build → issuer keygen + serve → start fiberd → mint grant</text>
+  <text class="secondary muted" x="118" y="266">Wait for /healthz · keep FIBERD_STATE · grant g1: max 2, W 1 MiB, lease 10m</text>
+  <path class="divider" d="M48 298H1392"/>
+  <text class="secondary muted" x="118" y="332">RUN OPERATION</text>
+  <text class="secondary muted" x="648" y="332">OBSERVE RESULT</text>
+  <text class="secondary muted center" x="1228" y="332">SESSION S</text>
 
-  <rect class="redbox" x="42" y="592" width="1116" height="84" rx="17"/>
-  <circle cx="72" cy="622" r="16" fill="var(--red)"/><text class="step" x="72" y="626" text-anchor="middle" fill="#fff">6</text>
-  <text class="h red" x="102" y="627">Restart agent → persisted epoch advances</text>
-  <text class="b" x="102" y="655">All prior fences become invalid. Running fibers are not recovered; compatible parked named sessions may remain resumable.</text>
-  <text class="s" x="600" y="708" text-anchor="middle">Use the stub runtime for the portable protocol path; real proc, runc, gVisor, and Hyperlight mechanisms require their documented Linux prerequisites.</text>
+  <circle class="number-bg" cx="72" cy="391" r="16"/>
+  <text class="number" x="72" y="397">2</text>
+  <text class="command" x="118" y="398">Clone("S")</text>
+  <text class="secondary muted" x="118" y="432">Name not yet known</text>
+  <path class="flow" d="M492 398H606" marker-end="url(#quickstart-flow-blue-arrow)"/>
+  <text class="heading green" x="648" y="398">CREATE · g1/1/1</text>
+  <text class="secondary" x="648" y="432">New endpoint and fence</text>
+  <ellipse class="state" cx="1228" cy="409" rx="116" ry="38"/>
+  <text class="label green center" x="1228" y="416">Running</text>
+  <path class="divider" d="M118 470H1392"/>
+
+  <circle class="number-bg" cx="72" cy="515" r="16"/>
+  <text class="number" x="72" y="521">3</text>
+  <text class="command" x="118" y="522">Clone("S")</text>
+  <text class="secondary muted" x="118" y="556">Repeat the same request</text>
+  <path class="flow" d="M492 522H606" marker-end="url(#quickstart-flow-blue-arrow)"/>
+  <text class="heading blue" x="648" y="522">ATTACH · g1/1/1</text>
+  <text class="secondary" x="648" y="556">Same endpoint and fence</text>
+  <ellipse class="state" cx="1228" cy="533" rx="116" ry="38"/>
+  <text class="label green center" x="1228" y="540">Still running</text>
+  <path class="divider" d="M118 594H1392"/>
+
+  <circle class="number-bg" cx="72" cy="639" r="16"/>
+  <text class="number" x="72" y="645">4</text>
+  <text class="command" x="118" y="646">Park("g1/1/1")</text>
+  <text class="secondary muted" x="118" y="680">Use the returned fiber ID</text>
+  <path class="flow" d="M492 646H606" marker-end="url(#quickstart-flow-blue-arrow)"/>
+  <text class="heading amber" x="648" y="646">Success · slot freed</text>
+  <text class="secondary" x="648" y="680">Named state retained</text>
+  <rect class="template" x="1124" y="615" width="224" height="66" rx="3"/>
+  <rect class="template" x="1116" y="623" width="224" height="66" rx="3"/>
+  <text class="label amber center" x="1228" y="663">Parked</text>
+  <path class="divider" d="M118 718H1392"/>
+
+  <circle class="number-bg" cx="72" cy="763" r="16"/>
+  <text class="number" x="72" y="769">5</text>
+  <text class="command" x="118" y="770">Clone("S")</text>
+  <text class="secondary muted" x="118" y="804">Request the parked name</text>
+  <path class="flow" d="M492 770H606" marker-end="url(#quickstart-flow-blue-arrow)"/>
+  <text class="heading violet" x="648" y="770">RESUME · g1/1/2</text>
+  <text class="secondary" x="648" y="804">Same endpoint; new fence</text>
+  <ellipse class="state" cx="1228" cy="781" rx="116" ry="38"/>
+  <text class="label green center" x="1228" y="788">Running again</text>
+  <path class="divider" d="M48 852H1392"/>
+
+  <circle class="number-bg" cx="72" cy="901" r="16"/>
+  <text class="number" x="72" y="907">6</text>
+  <text class="heading blue" x="118" y="908">Restart fiberd</text>
+  <text class="secondary" x="118" y="942">Reuse the same FIBERD_STATE</text>
+  <path class="flow" d="M492 908H606" marker-end="url(#quickstart-flow-blue-arrow)"/>
+  <text class="heading red" x="648" y="908">Epoch 1 → 2</text>
+  <text class="secondary" x="648" y="942">Prior fences invalid</text>
+  <text class="label red" x="1072" y="908">Park(old ID) → 404</text>
+  <text class="secondary muted" x="1072" y="942">NotFound, not RESUME</text>
+  <text class="secondary muted" x="48" y="1012">Inspect status and audit along the way. Admission and capacity-failure probes are in the runnable script.</text>
+  <text class="secondary muted" x="48" y="1042">Development-only transport and runtime; real workload backends need the documented Linux prerequisites.</text>
 </svg>

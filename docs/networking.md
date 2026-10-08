@@ -4,7 +4,7 @@ fiberd gives every running fiber an endpoint. The surrounding home and
 selected backend determine which endpoint families are available, what the
 fiber can reach, and where callers can connect.
 
-![A router calls Clone on the agent, receives the selected home address and one fiber port, and then connects directly to that fiber. Other fibers share the home address and use different ports.](./images/networking.svg)
+![In DIRECT TCP mode, the caller exchanges Clone and its result with the agent's control endpoint, then sends workload traffic directly to the selected fiber, bypassing the agent. Fibers share the home address but have distinct ports. HANDOFF uses a different shared-listener path, with TLS terminated by the fiber.](./images/networking.svg)
 
 ## Clone returns the data-plane route
 
@@ -44,8 +44,11 @@ plan to keep ports bounded.
 
 Backend support is not uniform.
 
-- **proc** and **runc** support Unix and TCP endpoints. Their TCP fibers use
-  the home's network namespace.
+- **proc** supports Unix and TCP endpoints. Its TCP fibers use the home's
+  network namespace.
+- **runc** supports Unix endpoints only. Its fibers run in a network
+  namespace with the loopback alone and reach neither the network nor the
+  home's loopback.
 - **gVisor** currently supports Unix endpoints only and runs with networking
   disabled in the reference backend.
 - **Hyperlight** currently supports Unix endpoints only.
@@ -90,19 +93,58 @@ fiberd does not create any of the following for an individual fiber:
 
 The endpoint is a route to the fiber, not proof of the fiber's identity. The
 workload protocol must provide authentication and encryption when callers
-require them.
+require them, or the grant can use handoff, below.
+
+## Handoff endpoints
+
+A grant with `policy.endpoint_mode: HANDOFF` puts its fibers behind one TLS
+listener on the home instead of a port each. Callers reach every such fiber
+on the same address, and the TLS server name picks the fiber.
+
+```text
+tcp://10.244.0.8:8443  SNI k3x...q7.fiberd  fiber A
+tcp://10.244.0.8:8443  SNI p9m...a2.fiberd  fiber B
+```
+
+The agent reads only the TLS ClientHello, then passes the connection to the
+fiber, which terminates TLS itself. The agent never sees the traffic.
+
+- The fiber accepts only the client certificate the grant is bound to, so
+  a handoff grant must be minted with `-bind-cert`.
+- The caller pins the fiber's TLS key with `server_key_sha256` from the
+  Clone response, so a connection can't reach another fiber unnoticed.
+- No fiber holds a port, and the home has one port to expose and police.
+
+Turning it on:
+
+- `-handoff-listen <addr>` opens the listener, for example `:8443`. Without
+  it, the home refuses handoff grants with `FailedPrecondition`.
+- `-handoff-advertise <host:port>` is the address callers are given. By
+  default it is the listen address, with `-endpoint-host` in place of a
+  wildcard host, or `127.0.0.1` with a warning when neither is set.
+- `-handoff-key <file>` is the 32-byte key each grant's TLS key is derived
+  from, a symmetric JWK as `grant-issuer keygen -alg A256GCM` writes it.
+  Without it, the home generates `<state>/private/handoff-key.json`. Homes that
+  move sessions between them share one, so a resumed session keeps the key
+  its caller pinned.
+- `grant-issuer mint -endpoint-mode HANDOFF` mints a handoff grant.
+
+Only the `proc` and `runc` backends support handoff. The template must
+serve TLS on the connections it is passed. The reference template does so
+when it is built with `make zygote`. A build without TLS refuses to start
+handoff fibers rather than serve them in plaintext.
 
 ## Secure the control path separately
 
-The reference gRPC listener, JSON gateway, and consumer client use plaintext
-transport. Clone carries a replayable grant JWT, while Park, Release, and Watch
-do not carry caller credentials. Do not expose the control endpoint on an
-untrusted network. Put it behind authenticated TLS or mTLS, authorize each
-operation, restrict source networks, and protect the JSON gateway with the
-same policy.
+The gRPC API and the JSON gateway require TLS 1.3 with a client certificate,
+and every call, including `Park`, `Release`, and `Watch`, acts as the
+certificate's subject. Plaintext is available only for development (see
+[Security](security.md#control-plane)).
 
-The data endpoint is separate and still needs workload-level authentication
-and encryption when its network is not fully trusted.
+The data endpoint is separate. For a `DIRECT` fiber, fiberd does not
+authenticate or encrypt it, so it needs workload-level authentication and
+encryption when its network is not fully trusted. A `HANDOFF` fiber gets
+both from its TLS connection, as described above.
 
 ## Mobility requires compatible endpoint topology
 
