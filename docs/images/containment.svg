@@ -1,6 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="824" viewBox="0 0 1440 824" role="img" aria-labelledby="containment-title containment-desc">
-  <title id="containment-title">One home, one agent, separate grant scopes</title>
-  <desc id="containment-desc">A containment view, not a request sequence. One home contains a single fiberd agent and two illustrated sibling grant scopes. Each admitted grant owns one warm template and its own fiber set; the agent is outside both grants and manages both. Grant A illustrates two running fibers; grant B illustrates one. These are example instance counts, not reservations. The home supplies aggregate capacity, and grants carry their own lease and policy. Nesting shows resource ownership, not a claim that every grant or fiber has its own container or security boundary: workload isolation is backend-specific.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="792" viewBox="0 0 1440 792" role="img" aria-labelledby="containment-title containment-desc">
+  <title id="containment-title">One home, one agent, separate grants</title>
+  <desc id="containment-desc">A containment view, not a request sequence. One home contains a single fiberd agent and two sibling grants. Each admitted grant owns one warm template and its own set of fibers. The agent sits outside both grants and manages both. Grant A illustrates two running fibers; grant B illustrates one. These are example instance counts, not reservations. The home supplies aggregate capacity, and grants carry their own lease and policy. Nesting shows resource ownership, not a container or security boundary per grant or fiber.</desc>
   <style>
     :root{--bg:#f7f9fc;--panel:#fff;--ink:#172033;--muted:#5d6b7d;--border:#b8c4d4;--blue:#3165b5;--blue-bg:#eaf1ff;--teal:#13776f;--teal-bg:#e8f7f4;--violet:#704aa1;--violet-bg:#f2edfa;--amber:#a76500;--amber-bg:#fff3d6;--green:#287a4d;--green-bg:#e8f6ed}
     @media(prefers-color-scheme:dark){:root{--bg:#0d1117;--panel:#161b22;--ink:#e6edf3;--muted:#a3adba;--border:#3d4652;--blue:#79a7ff;--blue-bg:#17243d;--teal:#53c7b8;--teal-bg:#102923;--violet:#c09cff;--violet-bg:#251b35;--amber:#f0b44d;--amber-bg:#30240f;--green:#63cf8e;--green-bg:#142b1e}}
@@ -9,22 +9,19 @@
     .title{font-size:30px;font-weight:700}.heading{font-size:22px;font-weight:700}.label{font-size:20px;font-weight:600}.body{font-size:17px}.muted{fill:var(--muted)}.blue{fill:var(--blue)}.teal{fill:var(--teal)}.amber{fill:var(--amber)}.violet{fill:var(--violet)}.center{text-anchor:middle}
     text.amber{fill:#9e5e00}@media(prefers-color-scheme:dark){text.amber{fill:var(--amber)}}
   </style>
-  <rect class="bg" width="1440" height="824"/>
-  <text class="title" x="48" y="66">One home, one agent, separate grant scopes</text>
+  <rect class="bg" width="1440" height="792"/>
+  <text class="title" x="48" y="66">One home, one agent, separate grants</text>
   <text class="body muted" x="48" y="100">What lives inside what? Each grant owns a template and its fiber set — not another agent.</text>
   <path class="divider" d="M48 130H1392"/>
 
   <rect class="scope home" x="48" y="164" width="1344" height="588" rx="18"/>
   <text class="heading blue" x="80" y="205">Home</text>
-  <text class="body muted" x="174" y="205">Aggregate capacity · environment scope</text>
+  <text class="body muted" x="174" y="205">Aggregate capacity</text>
 
   <rect class="service" x="80" y="260" width="264" height="152" rx="4"/>
   <text class="heading teal" x="108" y="302">fiberd agent</text>
   <text class="body" x="108" y="341">Manages both grants</text>
   <text class="body" x="108" y="374">Ledger · fences · budgets</text>
-  <text class="body muted" x="80" y="474">Grants are siblings.</text>
-  <text class="body muted" x="80" y="505">Their templates and fibers</text>
-  <text class="body muted" x="80" y="536">belong to separate scopes.</text>
 
   <rect class="scope grant" x="386" y="252" width="470" height="468" rx="12"/>
   <text class="heading teal" x="414" y="291">Grant A</text>
@@ -52,6 +49,4 @@
   <circle class="fiber" cx="1124" cy="608" r="72"/>
   <text class="label violet center" x="1124" y="606">Fiber B1</text>
   <text class="body center" x="1124" y="636">live instance</text>
-
-  <text class="body muted" x="48" y="793">Nesting shows resource ownership. Workload isolation depends on the selected backend.</text>
 </svg>

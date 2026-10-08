@@ -1,6 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="890" viewBox="0 0 1440 890" role="img" aria-labelledby="clone-resolution-title clone-resolution-desc">
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="880" viewBox="0 0 1440 880" role="img" aria-labelledby="clone-resolution-title clone-resolution-desc">
   <title id="clone-resolution-title">What does Clone do with this session?</title>
-  <desc id="clone-resolution-desc">Preflight verifies and admits the grant, takes a rate token, locates named state, and checks ledger eligibility. A running named session selects ATTACH: audit and return the same endpoint and fence, bypassing the new-work gate and runtime creation. Parked state selects RESUME, never CREATE as a substitute for missing checkpoint support. An unknown name or anonymous request selects CREATE. Both new-work actions require a live slot and no shedding before the runtime forks or restores, then audit precedes commit and the endpoint is returned with a new fence. Preflight rejection or unavailable new work leads to refusal. Later runtime, audit, and commit failures can also refuse; exact outcomes and rollback caveats belong to the protocol reference, not this action-selection diagram.</desc>
+  <desc id="clone-resolution-desc">Preflight verifies and admits the grant, checks the thrash budget, locates named state, and checks ledger eligibility. A running named session selects ATTACH: audit and return the same endpoint and fence, bypassing the new-work gate and runtime creation. Parked state selects RESUME, never CREATE as a substitute for missing checkpoint support. An unknown name or anonymous request selects CREATE. Both new-work actions require a live slot and no shedding before the runtime forks or restores, then audit precedes commit and the endpoint is returned with a new fence. Preflight rejection or unavailable new work leads to refusal. Later runtime, audit, and commit failures can also refuse.</desc>
   <style>
     :root{--bg:#f7f9fc;--panel:#fff;--ink:#172033;--muted:#5d6b7d;--border:#b8c4d4;--blue:#3165b5;--blue-bg:#eaf1ff;--teal:#13776f;--teal-bg:#e8f7f4;--violet:#704aa1;--violet-bg:#f2edfa;--amber:#a76500;--amber-bg:#fff3d6;--green:#287a4d;--green-bg:#e8f6ed;--red:#b33b32;--red-bg:#fff0ef}
     @media(prefers-color-scheme:dark){:root{--bg:#0d1117;--panel:#161b22;--ink:#e6edf3;--muted:#a3adba;--border:#3d4652;--blue:#79a7ff;--blue-bg:#17243d;--teal:#53c7b8;--teal-bg:#102923;--violet:#c09cff;--violet-bg:#251b35;--amber:#f0b44d;--amber-bg:#30240f;--green:#63cf8e;--green-bg:#142b1e;--red:#ff8178;--red-bg:#321817}}
@@ -16,7 +16,7 @@
     <marker id="clone-resolution-green-arrow" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="12" markerHeight="12" markerUnits="userSpaceOnUse" orient="auto"><path d="M1 1 11 6 1 11Z" fill="var(--green)"/></marker>
     <marker id="clone-resolution-red-arrow" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="12" markerHeight="12" markerUnits="userSpaceOnUse" orient="auto"><path d="M1 1 11 6 1 11Z" fill="var(--red)"/></marker>
   </defs>
-  <rect class="bg" width="1440" height="890"/>
+  <rect class="bg" width="1440" height="880"/>
   <text class="title" x="48" y="66">What does Clone do with this session?</text>
   <text class="body muted" x="48" y="100">Session resolution, not the full error reference.</text>
   <path class="divider" d="M48 130H1392"/>
@@ -24,7 +24,7 @@
   <rect class="operation" x="48" y="170" width="360" height="132" rx="4"/>
   <text class="heading teal" x="72" y="210">Preflight</text>
   <text class="body" x="72" y="245">Verified + admitted grant</text>
-  <text class="body" x="72" y="276">Rate budget · named lookup</text>
+  <text class="body" x="72" y="276">Thrash budget · named lookup</text>
   <path class="flow normal" d="M408 236H472" marker-end="url(#clone-resolution-teal-arrow)"/>
   <path class="decision" d="M658 162L844 236L658 310L472 236Z"/>
   <text class="heading teal center" x="658" y="244">Session?</text>
@@ -75,6 +75,4 @@
   <rect class="result" x="1088" y="744" width="304" height="96" rx="32"/>
   <text class="heading green center" x="1240" y="783">Endpoint +</text>
   <text class="heading green center" x="1240" y="814">new fence</text>
-
-  <text class="body muted" x="48" y="876">Any step can refuse; exact outcomes and rollback behavior are defined in the protocol.</text>
 </svg>

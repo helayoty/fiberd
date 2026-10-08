@@ -1,78 +1,127 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="840" viewBox="0 0 1440 840" role="img" aria-labelledby="architecture-components-title architecture-components-desc">
-  <title id="architecture-components-title">One invariant core, replaceable collaborators</title>
-  <desc id="architecture-components-desc">Selected structural relationships, not an execution sequence. Primary labels use repository package names or the concrete core.Spool type; subtitles describe roles. pkg/rpc calls core.Agent. pkg/home delivers grants and supplies health, scope, and fabric callbacks. pkg/core uses pkg/grant through core.Verifier and core.Spool through core.Auditor. The circular core.Runtime port selects pkg/runtime/host or pkg/runtime/stub. The host-only outline groups pkg/runtime/host with its pkg/backend and pkg/artifact dependencies. pkg/runtime/stub has neither dependency. pkg/agent.Run assembles these collaborators.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="914" viewBox="0 0 1440 914" role="img" aria-labelledby="architecture-components-title architecture-components-desc">
+  <title id="architecture-components-title">Which components make up one fiberd agent?</title>
+  <desc id="architecture-components-desc">The components of one fiberd agent, grouped in three bordered lanes, with the path of one Clone numbered in blue. Above the agent sit two callers. The issuer signs grants, and the grant verifier reads its published signing keys. The consumer is any caller of the agent. The control lane holds the grant verifier, the control API, the home and the handoff router. The record lane holds admission and pressure, the ledger and the audit spool. The execution lane holds artifact and mobility, the runtime host and the backends. Below the agent sit the registry, the zygote and the fibers. The Clone path runs as follows. 1, the consumer calls the control API over gRPC or JSON with mutual TLS. 2, the control API has the grant verifier check the grant. 3, the control API calls the ledger. 4, the ledger calls the runtime host. 5, the runtime host calls a backend. 6, a fiber starts. On proc and runc the backend drives the zygote, the warm template's own process, which forks the fiber. On gVisor and Hyperlight the backend restores the fiber instead. Other calls are drawn in grey. The home delivers grants, health and scope to the ledger. The ledger consults admission and pressure, which can ask the ledger to reclaim fibers. The ledger records every change in the audit spool. The runtime host calls artifact and mobility, which pulls from and publishes to the untrusted registry. Separately, the consumer opens a TLS connection to the handoff router, which passes it to its fiber without decrypting it.</desc>
   <style>
     :root{--bg:#f7f9fc;--panel:#fff;--ink:#172033;--muted:#5d6b7d;--border:#b8c4d4;--blue:#3165b5;--blue-bg:#eaf1ff;--teal:#13776f;--teal-bg:#e8f7f4;--violet:#704aa1;--violet-bg:#f2edfa;--amber:#a76500;--amber-bg:#fff3d6;--green:#287a4d;--green-bg:#e8f6ed}
     @media(prefers-color-scheme:dark){:root{--bg:#0d1117;--panel:#161b22;--ink:#e6edf3;--muted:#a3adba;--border:#3d4652;--blue:#79a7ff;--blue-bg:#17243d;--teal:#53c7b8;--teal-bg:#102923;--violet:#c09cff;--violet-bg:#251b35;--amber:#f0b44d;--amber-bg:#30240f;--green:#63cf8e;--green-bg:#142b1e}}
     text{font-family:ui-sans-serif,-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;fill:var(--ink)}
-    .bg{fill:var(--bg)}.title{font-size:30px;font-weight:700}.heading{font-size:22px;font-weight:700}.focal{font-size:28px;font-weight:700}.body{font-size:18px}.muted{fill:var(--muted)}.center{text-anchor:middle}.blue{fill:var(--blue)}.teal{fill:var(--teal)}.violet{fill:var(--violet)}.green{fill:var(--green)}
-    .scope{fill:none;stroke:var(--border);stroke-width:1.5}.component{fill:var(--panel);stroke-width:2}.api{stroke:var(--blue)}.home{stroke:var(--violet)}.policy{fill:var(--teal-bg);stroke:var(--teal)}.plugin{stroke:var(--violet)}.host{stroke:var(--green)}.detail{stroke:var(--border);stroke-width:1.5}.stub{stroke:var(--border);stroke-width:1.5}.port{fill:var(--bg);stroke:var(--green);stroke-width:2}
-    .divider{fill:none;stroke:var(--border);stroke-width:1.5}.flow{fill:none;stroke:var(--ink);stroke-width:2;stroke-linecap:round;stroke-linejoin:round}.binding{fill:none;stroke:var(--green);stroke-width:2;stroke-dasharray:7 6;stroke-linejoin:round}
+    .bg{fill:var(--bg)}.title{font-size:30px;font-weight:700}.heading{font-size:22px;font-weight:700}.name{font-size:20px;font-weight:700}.label{font-size:20px;font-weight:600}.lane{font-size:17px;font-weight:700}.secondary{font-size:17px}.muted{fill:var(--muted)}.center{text-anchor:middle}.end{text-anchor:end}.blue{fill:var(--blue)}.teal{fill:var(--teal)}.violet{fill:var(--violet)}.amber{fill:var(--amber)}.green{fill:var(--green)}
+    .divider{fill:none;stroke:var(--border);stroke-width:1.5}.scope{fill:none;stroke:var(--border);stroke-width:1.5}.outside{fill:var(--panel);stroke:var(--muted);stroke-width:1.5}
+    .band{stroke-width:1.5;fill-opacity:.5;stroke-opacity:.55}.band-control{fill:var(--blue-bg);stroke:var(--blue)}.band-record{fill:var(--teal-bg);stroke:var(--teal)}.band-exec{fill:var(--green-bg);stroke:var(--green)}
+    .box{fill:var(--panel);stroke-width:2}.control{stroke:var(--blue)}.record{stroke:var(--teal)}.exec{stroke:var(--green)}.ledger{fill:var(--teal-bg);stroke:var(--teal);stroke-width:2}.template{fill:var(--amber-bg);stroke:var(--amber);stroke-width:1.5}.fiber{fill:var(--violet-bg);stroke:var(--violet);stroke-width:2}
+    .flow{fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}.clone{stroke:var(--blue)}.call{stroke:var(--muted);stroke-width:1.5}.traffic{stroke:var(--violet);stroke-dasharray:7 6}
+    .number{font-size:17px;font-weight:700;text-anchor:middle}.blue-number{fill:var(--blue-bg);stroke:var(--blue);stroke-width:1.5}
+    text.amber{fill:#9e5e00}@media(prefers-color-scheme:dark){text.amber{fill:var(--amber)}}
   </style>
   <defs>
-    <marker id="architecture-components-arrow" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="12" markerHeight="12" markerUnits="userSpaceOnUse" orient="auto"><path d="M1 1 11 6 1 11Z" fill="var(--ink)"/></marker>
+    <marker id="architecture-components-blue-arrow" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="12" markerHeight="12" markerUnits="userSpaceOnUse" orient="auto"><path d="M1 1 11 6 1 11Z" fill="var(--blue)"/></marker>
+    <marker id="architecture-components-muted-arrow" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="11" markerHeight="11" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path d="M1 1 11 6 1 11Z" fill="var(--muted)"/></marker>
+    <marker id="architecture-components-violet-arrow" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="12" markerHeight="12" markerUnits="userSpaceOnUse" orient="auto"><path d="M1 1 11 6 1 11Z" fill="var(--violet)"/></marker>
   </defs>
-  <rect class="bg" width="1440" height="840"/>
-  <text class="title" x="48" y="66">One invariant core, replaceable collaborators</text>
-  <text class="body muted" x="48" y="100">Code architecture · packages, types, and interfaces — not deployment units.</text>
+  <rect class="bg" width="1440" height="914"/>
+  <text class="title" x="48" y="66">Which components make up one fiberd agent?</text>
+  <text class="secondary muted" x="48" y="100">Blue numbers follow one Clone from the consumer to a new fiber.</text>
   <path class="divider" d="M48 130H1392"/>
 
-  <rect class="component api" x="48" y="248" width="300" height="110" rx="4"/>
-  <text class="heading blue" x="72" y="290">pkg/rpc</text>
-  <text class="body muted" x="72" y="324">gRPC · JSON gateway</text>
-  <path class="flow" d="M348 303H434V407H512" marker-end="url(#architecture-components-arrow)"/>
-  <text class="body" x="360" y="287">requests</text>
+  <rect class="outside" x="184" y="156" width="256" height="84" rx="4"/>
+  <text class="name center" x="312" y="190">Issuer</text>
+  <text class="secondary center muted" x="312" y="218">Signs grants</text>
+  <rect class="outside" x="512" y="156" width="856" height="84" rx="4"/>
+  <text class="name center" x="948" y="190">Consumer</text>
+  <text class="secondary center muted" x="948" y="218">Any caller of the agent</text>
 
-  <rect class="component home" x="48" y="524" width="300" height="120" rx="4"/>
-  <text class="heading violet" x="72" y="566">pkg/home</text>
-  <text class="body muted" x="72" y="600">Grants · health · scope</text>
-  <path class="flow" d="M348 552H412V480H512" marker-end="url(#architecture-components-arrow)"/>
-  <text class="body" x="354" y="536">grants</text>
-  <path class="flow" d="M512 520H466V616H348" marker-end="url(#architecture-components-arrow)"/>
-  <text class="body" x="354" y="644">callbacks</text>
+  <rect class="scope" x="48" y="280" width="1344" height="458" rx="18"/>
+  <text class="label" x="72" y="309">fiberd agent</text>
+  <rect class="band band-control" x="60" y="322" width="1320" height="108" rx="12"/>
+  <rect class="band band-record" x="60" y="470" width="1320" height="108" rx="12"/>
+  <rect class="band band-exec" x="60" y="618" width="1320" height="108" rx="12"/>
+  <text class="lane blue" x="80" y="382">Control</text>
+  <text class="lane teal" x="80" y="530">Record</text>
+  <text class="lane green" x="80" y="678">Execution</text>
 
-  <rect class="component policy" x="512" y="356" width="300" height="192" rx="8"/>
-  <text class="focal teal center" x="662" y="433">pkg/core</text>
-  <text class="body center" x="662" y="471">Admission · sessions · fences</text>
+  <path class="flow call" d="M312 240V334" marker-end="url(#architecture-components-muted-arrow)"/>
+  <text class="secondary muted" x="326" y="270">signing keys</text>
+  <path class="flow call" d="M968 418V450H704V482" marker-end="url(#architecture-components-muted-arrow)"/>
+  <path class="flow call" d="M512 510H440" marker-end="url(#architecture-components-muted-arrow)"/>
+  <path class="flow call" d="M440 546H512" marker-end="url(#architecture-components-muted-arrow)"/>
+  <text class="secondary muted center" x="476" y="568">reclaim</text>
+  <path class="flow call" d="M768 524H840" marker-end="url(#architecture-components-muted-arrow)"/>
+  <path class="flow call" d="M512 672H440" marker-end="url(#architecture-components-muted-arrow)"/>
+  <path class="flow call" d="M312 714V782" marker-start="url(#architecture-components-muted-arrow)" marker-end="url(#architecture-components-muted-arrow)"/>
+  <text class="secondary muted" x="326" y="764">pull · publish</text>
 
-  <rect class="component plugin" x="512" y="176" width="340" height="102" rx="4"/>
-  <text class="heading violet" x="536" y="215">pkg/grant</text>
-  <text class="body muted" x="536" y="249">Signed-grant verification</text>
-  <path class="flow" d="M682 356V278" marker-end="url(#architecture-components-arrow)"/>
-  <text class="body violet" x="702" y="322">core.Verifier</text>
+  <path class="flow traffic" d="M1256 240V334" marker-end="url(#architecture-components-violet-arrow)"/>
+  <text class="secondary violet end" x="1242" y="270">TLS connection</text>
+  <path class="flow traffic" d="M1256 418V782" marker-end="url(#architecture-components-violet-arrow)"/>
+  <text class="secondary violet end" x="1242" y="530">never decrypted</text>
 
-  <rect class="component plugin" x="512" y="672" width="340" height="102" rx="4"/>
-  <text class="heading violet" x="536" y="711">core.Spool</text>
-  <text class="body muted" x="536" y="745">Audit log · pkg/core</text>
-  <path class="flow" d="M682 548V672" marker-end="url(#architecture-components-arrow)"/>
-  <text class="body violet" x="702" y="616">core.Auditor</text>
+  <rect class="box control" x="200" y="334" width="224" height="84" rx="4"/>
+  <text class="name blue center" x="312" y="383">Grant verifier</text>
+  <rect class="box control" x="528" y="334" width="224" height="84" rx="4"/>
+  <text class="name blue center" x="640" y="368">Control API</text>
+  <text class="secondary center" x="640" y="396">gRPC · JSON · mTLS</text>
+  <rect class="box control" x="856" y="334" width="224" height="84" rx="4"/>
+  <text class="name blue center" x="968" y="368">Home</text>
+  <text class="secondary center" x="968" y="396">Grants · health · scope</text>
+  <rect class="box control" x="1144" y="334" width="224" height="84" rx="4"/>
+  <text class="name blue center" x="1256" y="368">Handoff router</text>
+  <text class="secondary center" x="1256" y="396">One shared address</text>
 
-  <path class="flow" d="M812 445H868" marker-end="url(#architecture-components-arrow)"/>
-  <circle class="port" cx="878" cy="445" r="10"/>
-  <text class="body green center" x="882" y="390">core.Runtime</text>
-  <text class="body muted center" x="882" y="417">select one</text>
-  <path class="binding" d="M888 445H964V270H1016"/>
-  <path class="binding" d="M964 445V700H1056"/>
-  <circle cx="964" cy="445" r="3" fill="var(--green)"/>
+  <rect class="box record" x="184" y="482" width="256" height="84" rx="4"/>
+  <text class="name teal center" x="312" y="531">Admission and pressure</text>
+  <rect class="ledger" x="512" y="482" width="256" height="84" rx="4"/>
+  <text class="name teal center" x="640" y="516">Ledger</text>
+  <text class="secondary center" x="640" y="544">Grants · sessions · fences</text>
+  <rect class="box record" x="840" y="482" width="256" height="84" rx="4"/>
+  <text class="name teal center" x="968" y="516">Audit spool</text>
+  <text class="secondary center" x="968" y="544">Signed, hash-chained</text>
 
-  <rect class="scope" x="992" y="170" width="400" height="386" rx="16"/>
-  <rect class="component host" x="1016" y="214" width="352" height="112" rx="4"/>
-  <text class="heading green" x="1040" y="257">pkg/runtime/host</text>
-  <text class="body muted" x="1040" y="291">Host execution</text>
-  <path class="flow" d="M1192 326V374H1100V422" marker-end="url(#architecture-components-arrow)"/>
-  <path class="flow" d="M1192 374H1284V422" marker-end="url(#architecture-components-arrow)"/>
-  <circle cx="1192" cy="374" r="3" fill="var(--ink)"/>
-  <rect class="component detail" x="1016" y="422" width="168" height="94" rx="4"/>
-  <text class="heading" x="1032" y="459">pkg/backend</text>
-  <text class="body muted" x="1032" y="489">Mechanism</text>
-  <rect class="component detail" x="1200" y="422" width="168" height="94" rx="4"/>
-  <text class="heading" x="1216" y="459">pkg/artifact</text>
-  <text class="body muted" x="1216" y="489">State storage</text>
+  <rect class="box exec" x="184" y="630" width="256" height="84" rx="4"/>
+  <text class="name green center" x="312" y="664">Artifact and mobility</text>
+  <text class="secondary center" x="312" y="692">Templates · parked state</text>
+  <rect class="box exec" x="512" y="630" width="256" height="84" rx="4"/>
+  <text class="name green center" x="640" y="664">Runtime host</text>
+  <text class="secondary center" x="640" y="692">Cgroup, endpoint, file view</text>
+  <rect class="box exec" x="840" y="630" width="256" height="84" rx="4"/>
+  <text class="name green center" x="968" y="679">Backends</text>
 
-  <rect class="component stub" x="1056" y="650" width="312" height="100" rx="4"/>
-  <text class="heading" x="1080" y="689">pkg/runtime/stub</text>
-  <text class="body muted" x="1080" y="722">In-memory simulation</text>
-  <text class="body muted" x="1056" y="780">Dashed: alternative implementation</text>
+  <path class="outside" d="M184 794V860A128 12 0 0 0 440 860V794"/>
+  <ellipse class="outside" cx="312" cy="794" rx="128" ry="12"/>
+  <text class="name center" x="312" y="833">Registry</text>
+  <text class="secondary center muted" x="312" y="857">OCI · untrusted</text>
+  <rect class="template" x="868" y="782" width="200" height="84" rx="4"/>
+  <text class="name amber center" x="968" y="816">Zygote</text>
+  <text class="secondary center" x="968" y="844">Warm template</text>
+  <rect class="fiber" x="1160" y="798" width="224" height="84" rx="12"/>
+  <rect class="fiber" x="1152" y="790" width="224" height="84" rx="12"/>
+  <rect class="fiber" x="1144" y="782" width="224" height="84" rx="12"/>
+  <text class="name violet center" x="1256" y="831">Fibers</text>
 
-  <text class="body muted" x="48" y="818">Selected relationships · pkg/agent.Run assembles the reference agent.</text>
+  <path class="flow clone" d="M640 240V334" marker-end="url(#architecture-components-blue-arrow)"/>
+  <circle class="blue-number" cx="616" cy="262" r="13"/>
+  <text class="number blue" x="616" y="268">1</text>
+  <text class="label blue" x="656" y="268">Clone</text>
+  <path class="flow clone" d="M528 376H424" marker-end="url(#architecture-components-blue-arrow)"/>
+  <circle class="blue-number" cx="476" cy="352" r="13"/>
+  <text class="number blue" x="476" y="358">2</text>
+  <path class="flow clone" d="M640 418V482" marker-end="url(#architecture-components-blue-arrow)"/>
+  <circle class="blue-number" cx="616" cy="450" r="13"/>
+  <text class="number blue" x="616" y="456">3</text>
+  <path class="flow clone" d="M640 566V630" marker-end="url(#architecture-components-blue-arrow)"/>
+  <circle class="blue-number" cx="616" cy="598" r="13"/>
+  <text class="number blue" x="616" y="604">4</text>
+  <path class="flow clone" d="M768 672H840" marker-end="url(#architecture-components-blue-arrow)"/>
+  <circle class="blue-number" cx="804" cy="648" r="13"/>
+  <text class="number blue" x="804" y="654">5</text>
+  <path class="flow clone" d="M968 714V782" marker-end="url(#architecture-components-blue-arrow)"/>
+  <text class="secondary blue end" x="954" y="764">proc · runc</text>
+  <path class="flow clone" d="M1068 824H1144" marker-end="url(#architecture-components-blue-arrow)"/>
+  <circle class="blue-number" cx="1106" cy="800" r="13"/>
+  <text class="number blue" x="1106" y="806">6</text>
+  <text class="secondary blue center" x="1106" y="850">fork</text>
+  <path class="flow clone" d="M1096 672H1180V782" marker-end="url(#architecture-components-blue-arrow)"/>
+  <circle class="blue-number" cx="1138" cy="648" r="13"/>
+  <text class="number blue" x="1138" y="654">6</text>
+  <text class="secondary blue center" x="1138" y="696">restore</text>
+  <text class="secondary blue end" x="1166" y="764">gVisor · Hyperlight</text>
 </svg>

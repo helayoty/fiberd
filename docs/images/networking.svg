@@ -1,70 +1,98 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="890" viewBox="0 0 1440 890" role="img" aria-labelledby="networking-title networking-desc">
-  <title id="networking-title">Control asks the agent; workload traffic goes to the fiber</title>
-  <desc id="networking-desc">In this DIRECT TCP example, the caller sends Clone to the agent's control endpoint and receives tcp://10.244.0.8:30001 plus a fence. It then connects to fiber A, without sending workload traffic through the agent. Fiber B shares the home address but has another port. The home outline is a network scope, not a service. Proc and runc support direct TCP and Unix; gVisor and Hyperlight support Unix only. HANDOFF is a different path: a shared home listener reads the TLS ClientHello and passes the connection to the selected fiber, which terminates TLS. Handoff requires proc or runc, a bound client certificate, routing-key SNI, and a pinned fiber key.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="1030" viewBox="0 0 1440 1030" role="img" aria-labelledby="networking-title networking-desc">
+  <title id="networking-title">Control asks the agent, and every fiber gets a TCP port</title>
+  <desc id="networking-desc">In this DIRECT TCP example, the caller sends Clone to the agent's control endpoint on port 8484 and gets back tcp://10.244.0.8 with a port, plus a fence. It then connects to that port. Fiber A is a proc fiber that binds port 30001 itself, so its traffic bypasses the agent. Fiber B runs on gVisor, runc or Hyperlight and serves a unix socket. The agent's relay listens on port 30002 and copies bytes to that socket without reading them, so TLS stays end to end. Both fibers share the home address and differ only by port. HANDOFF is a different path for proc and runc only. One shared TLS listener on the agent hands each connection to its fiber, and the fiber terminates TLS.</desc>
   <style>
     :root{--bg:#f7f9fc;--panel:#fff;--ink:#172033;--muted:#5d6b7d;--border:#b8c4d4;--blue:#3165b5;--blue-bg:#eaf1ff;--teal:#13776f;--teal-bg:#e8f7f4;--violet:#704aa1;--violet-bg:#f2edfa;--amber:#a76500;--amber-bg:#fff3d6;--green:#287a4d;--green-bg:#e8f6ed}
-    @media(prefers-color-scheme:dark){:root{--bg:#0d1117;--panel:#161b22;--ink:#e6edf3;--muted:#a3adba;--border:#3d4652;--blue:#79a7ff;--blue-bg:#17243d;--teal:#53c7b8;--teal-bg:#102923;--violet:#c09cff;--violet-bg:#251b35;--amber:#f0b44d;--amber-bg:#30240f;--green:#63cf8e;--green-bg:#142b1e}}
     text{font-family:ui-sans-serif,-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;fill:var(--ink)}
     .bg{fill:var(--bg)}.title{font-size:30px;font-weight:700}.heading{font-size:22px;font-weight:700}.label{font-size:20px;font-weight:600}.secondary{font-size:17px}.muted{fill:var(--muted)}.center{text-anchor:middle}.blue{fill:var(--blue)}.teal{fill:var(--teal)}.violet{fill:var(--violet)}.amber{fill:var(--amber)}
-    .scope{fill:none;stroke:var(--teal);stroke-width:1.5}.service{fill:var(--panel);stroke:var(--teal);stroke-width:2}.fiber{fill:var(--violet-bg);stroke:var(--violet);stroke-width:2}.actor{fill:var(--panel);stroke:var(--blue);stroke-width:2}.port{fill:var(--bg);stroke:var(--teal);stroke-width:2}
-    .divider{fill:none;stroke:var(--border);stroke-width:1.5}.flow{fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}.control{stroke:var(--blue)}.response{stroke-dasharray:7 6}.data{stroke:var(--violet);stroke-width:3}.number{font-size:17px;font-weight:700;text-anchor:middle}.blue-number{fill:var(--blue-bg);stroke:var(--blue)}.violet-number{fill:var(--violet-bg);stroke:var(--violet)}
-    text.amber{fill:#9e5e00}@media(prefers-color-scheme:dark){text.amber{fill:var(--amber)}}
+    .scope{fill:none;stroke:var(--teal);stroke-width:1.5}.service{fill:var(--panel);stroke:var(--teal);stroke-width:2}.part{fill:var(--bg);stroke:var(--teal);stroke-width:1.5}.fiber{fill:var(--violet-bg);stroke:var(--violet);stroke-width:2}.actor{fill:var(--panel);stroke:var(--blue);stroke-width:2}.port{fill:var(--bg);stroke:var(--teal);stroke-width:2}
+    .sandbox{fill:none;stroke:var(--violet);stroke-width:1.5;stroke-dasharray:6 5}.socket{fill:var(--panel);stroke:var(--violet);stroke-width:1.5}
+    .lane{fill:none;stroke:var(--amber);stroke-width:1.5}.step{fill:var(--panel);stroke:var(--amber);stroke-width:1.5}
+    .divider{fill:none;stroke:var(--border);stroke-width:1.5}.flow{fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}.control{stroke:var(--blue)}.response{stroke-dasharray:7 6}.data{stroke:var(--violet);stroke-width:3}.handoff{stroke:var(--amber)}.number{font-size:17px;font-weight:700;text-anchor:middle}.blue-number{fill:var(--blue-bg);stroke:var(--blue)}.violet-number{fill:var(--violet-bg);stroke:var(--violet)}
+    text.amber{fill:#9e5e00}
   </style>
   <defs>
     <marker id="networking-blue-arrow" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="12" markerHeight="12" markerUnits="userSpaceOnUse" orient="auto"><path d="M1 1 11 6 1 11Z" fill="var(--blue)"/></marker>
     <marker id="networking-violet-arrow" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="12" markerHeight="12" markerUnits="userSpaceOnUse" orient="auto"><path d="M1 1 11 6 1 11Z" fill="var(--violet)"/></marker>
+    <marker id="networking-amber-arrow" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="12" markerHeight="12" markerUnits="userSpaceOnUse" orient="auto"><path d="M1 1 11 6 1 11Z" fill="var(--amber)"/></marker>
   </defs>
-  <rect class="bg" width="1440" height="890"/>
-  <text class="title" x="48" y="66">Control asks the agent. Traffic goes to the fiber.</text>
-  <text class="secondary muted" x="48" y="100">DIRECT TCP example · one home address does not mean one connection.</text>
+  <rect class="bg" width="1440" height="1030"/>
+  <text class="title" x="48" y="66">Control asks the agent. Every fiber gets a TCP port.</text>
+  <text class="secondary muted" x="48" y="100">DIRECT TCP example · one home address, one port per fiber</text>
   <path class="divider" d="M48 130H1392"/>
 
-  <rect class="scope" x="684" y="174" width="708" height="492" rx="16"/>
-  <text class="heading teal" x="712" y="213">Home · 10.244.0.8</text>
-  <text class="secondary muted" x="712" y="244">Shared address · separate control and workload ports</text>
+  <!-- Home -->
+  <rect class="scope" x="560" y="170" width="832" height="640" rx="16"/>
+  <text class="heading teal" x="588" y="209">Home · 10.244.0.8</text>
+  <text class="secondary muted" x="588" y="240">Shared address · a port per fiber</text>
 
-  <circle class="actor" cx="166" cy="304" r="19"/>
-  <path class="actor" d="M130 365V353C130 324 202 324 202 353V365"/>
-  <text class="heading center" x="166" y="452">Caller / router</text>
-  <text class="secondary center muted" x="166" y="481">Keeps returned route</text>
+  <!-- Caller -->
+  <circle class="actor" cx="166" cy="330" r="19"/>
+  <path class="actor" d="M130 391V379C130 350 202 350 202 379V391"/>
+  <text class="heading center" x="166" y="446">Caller / router</text>
+  <text class="secondary center muted" x="166" y="475">Keeps returned route</text>
 
-  <rect class="service" x="720" y="282" width="294" height="132" rx="4"/>
-  <text class="heading teal" x="744" y="320">fiberd agent</text>
-  <text class="secondary" x="744" y="353">Control endpoint · :8484</text>
-  <text class="secondary muted" x="744" y="383">Clone · Park · Release</text>
-  <circle class="port" cx="720" cy="328" r="6"/>
-  <circle class="port" cx="720" cy="394" r="6"/>
+  <!-- Agent -->
+  <rect class="service" x="596" y="270" width="340" height="350" rx="6"/>
+  <text class="heading teal" x="620" y="304">fiberd agent</text>
+  <rect class="part" x="620" y="322" width="292" height="124" rx="4"/>
+  <text class="label" x="644" y="372">Control endpoint · :8484</text>
+  <text class="secondary muted" x="644" y="404">Clone · Park · Release</text>
+  <rect class="part" x="620" y="500" width="292" height="96" rx="4"/>
+  <text class="label" x="644" y="537">Relay · :30002</text>
+  <text class="secondary muted" x="644" y="569">Copies bytes, never reads them</text>
 
-  <path class="flow control" d="M230 328H714" marker-end="url(#networking-blue-arrow)"/>
-  <circle class="blue-number" cx="276" cy="294" r="13"/>
-  <text class="number blue" x="276" y="300">1</text>
-  <text class="label blue" x="302" y="301">Clone + grant + session</text>
-  <path class="flow control response" d="M714 394H246" marker-end="url(#networking-blue-arrow)"/>
-  <circle class="blue-number" cx="276" cy="359" r="13"/>
-  <text class="number blue" x="276" y="365">2</text>
-  <text class="secondary blue" x="302" y="366">tcp://10.244.0.8:30001 + fence</text>
+  <!-- Control flow -->
+  <path class="flow control" d="M230 356H614" marker-end="url(#networking-blue-arrow)"/>
+  <circle class="port" cx="620" cy="356" r="6"/>
+  <circle class="blue-number" cx="276" cy="322" r="13"/>
+  <text class="number blue" x="276" y="328">1</text>
+  <text class="label blue" x="302" y="329">Clone + grant + session</text>
+  <path class="flow control response" d="M614 422H246" marker-end="url(#networking-blue-arrow)"/>
+  <circle class="port" cx="620" cy="422" r="6"/>
+  <circle class="blue-number" cx="276" cy="389" r="13"/>
+  <text class="number blue" x="276" y="395">2</text>
+  <text class="secondary blue" x="302" y="396">tcp://10.244.0.8:port + fence</text>
 
-  <circle class="fiber" cx="1228" cy="337" r="61"/>
-  <text class="label center violet" x="1228" y="337">Fiber B</text>
-  <text class="secondary center" x="1228" y="365">:30002</text>
-  <text class="secondary center muted" x="1228" y="425">Another workload</text>
+  <!-- Workload traffic -->
+  <path class="flow data" d="M166 500V730H1194" marker-end="url(#networking-violet-arrow)"/>
+  <path class="flow data" d="M166 548H614" marker-end="url(#networking-violet-arrow)"/>
+  <circle class="port" cx="620" cy="548" r="6"/>
+  <text class="secondary violet" x="196" y="535">Fiber B · through the relay</text>
+  <circle class="violet-number" cx="210" cy="628" r="13"/>
+  <text class="number violet" x="210" y="634">3</text>
+  <text class="heading violet" x="236" y="636">Connect to the port</text>
+  <text class="secondary muted" x="236" y="664">Workload traffic</text>
+  <text class="secondary violet" x="196" y="717">Fiber A · agent bypassed</text>
 
-  <circle class="fiber" cx="1228" cy="552" r="79"/>
-  <text class="heading center violet" x="1228" y="546">Fiber A</text>
-  <text class="secondary center" x="1228" y="577">:30001</text>
-  <path class="flow data" d="M166 499V552H1149" marker-end="url(#networking-violet-arrow)"/>
-  <circle class="violet-number" cx="360" cy="490" r="13"/>
-  <text class="number violet" x="360" y="496">3</text>
-  <text class="heading violet" x="388" y="497">Connect to returned fiber</text>
-  <text class="secondary violet" x="388" y="527">Workload traffic · agent bypassed</text>
-  <text class="secondary muted" x="712" y="629">No per-fiber IP or discovery record</text>
+  <!-- Relayed fiber -->
+  <path class="flow data" d="M918 548H965" marker-end="url(#networking-violet-arrow)"/>
+  <circle class="port" cx="912" cy="548" r="6"/>
+  <rect class="socket" x="966" y="528" width="124" height="40" rx="20"/>
+  <text class="secondary center violet" x="1028" y="554">unix socket</text>
+  <path class="flow data" d="M1090 548H1194" marker-end="url(#networking-violet-arrow)"/>
+  <rect class="sandbox" x="1132" y="446" width="236" height="172" rx="10"/>
+  <text class="secondary center violet" x="1250" y="476">gVisor / runc / Hyperlight</text>
+  <circle class="fiber" cx="1250" cy="548" r="56"/>
+  <text class="label center violet" x="1250" y="555">Fiber B</text>
 
-  <path class="divider" d="M48 714H1392"/>
-  <text class="heading violet" x="48" y="755">DIRECT endpoint support</text>
-  <text class="secondary" x="48" y="789">proc / runc: TCP or Unix · gVisor / Hyperlight: Unix</text>
-  <text class="secondary" x="48" y="818">Unix needs an accessible path; a route is not authentication.</text>
-  <text class="heading amber" x="760" y="755">HANDOFF is a different path · proc / runc</text>
-  <text class="secondary" x="760" y="789">Shared TLS listener → selected fiber terminates TLS</text>
-  <text class="secondary" x="760" y="818">Routing-key SNI · bound client certificate · pinned fiber key</text>
-  <text class="secondary muted" x="48" y="865">Park / Resume retain the endpoint; cross-home resume needs a target that can bind and route it.</text>
+  <!-- Direct fiber -->
+  <text class="secondary violet" x="620" y="717">proc fiber · binds its own port</text>
+  <circle class="fiber" cx="1250" cy="730" r="56"/>
+  <text class="label center violet" x="1250" y="724">Fiber A</text>
+  <text class="secondary center" x="1250" y="752">:30001</text>
+
+  <!-- Handoff -->
+  <rect class="lane" x="48" y="850" width="1344" height="150" rx="16"/>
+  <text class="heading amber" x="76" y="889">HANDOFF is a different path · proc / runc</text>
+  <rect class="step" x="76" y="917" width="200" height="56" rx="4"/>
+  <text class="label center" x="176" y="952">Caller</text>
+  <path class="flow handoff" d="M276 945H514" marker-end="url(#networking-amber-arrow)"/>
+  <text class="secondary center amber" x="396" y="933">TLS</text>
+  <rect class="step" x="520" y="917" width="340" height="56" rx="4"/>
+  <text class="label center" x="690" y="952">Agent · shared TLS listener</text>
+  <path class="flow handoff" d="M860 945H1098" marker-end="url(#networking-amber-arrow)"/>
+  <text class="secondary center amber" x="980" y="933">hands over the connection</text>
+  <rect class="step" x="1104" y="917" width="260" height="56" rx="4"/>
+  <text class="label center" x="1234" y="952">Fiber terminates TLS</text>
 </svg>

@@ -1,126 +1,69 @@
 # fiberd
 
-**A capability-grant protocol for fast, local instance activation.**
+![The control plane issues a signed capacity grant once. The home verifies it, warms one template and creates fibers locally. It returns endpoints to callers and reports aggregate status.](./docs/images/fiberd-hero.svg)
 
-fiberd lets a control plane allocate and charge a block of capacity once, then lets the receiving
-environment create instances from that block without another control-plane call. These instances
-are called **fibers**.
+Platforms often need many instances of the same workload, started on demand. The workload may be a container, an agent or a plain process. Each new instance usually boots, loads its code and fills its own memory, and often waits on a control plane first, even though it is a copy of one that already runs. fiberd creates those instances from one warm copy, fast and densely, inside whatever already places the workload, such as Kubernetes or Slurm. It is a reference implementation, not yet production-ready, and [production-readiness.md](docs/production-readiness.md) lists what is missing.
 
-The cold path handles placement, admission, quota, and billing, while the warm path creates, attaches,
-parks, and releases individual fibers. Capacity already admitted to a healthy home can remain usable
-during a control-plane outage until its lease expires or its home scope is lost.
+## What fiberd does
 
-![The control plane issues and charges a signed capacity grant once. The home verifies it, warms one template, creates fibers locally, returns endpoints to callers, and reports aggregate status.](./docs/images/fiberd-hero.svg)
+- A [template](docs/glossary.md#template) starts once and stays [warm](docs/glossary.md#warm).
+- Each [fiber](docs/glossary.md#fiber) is a cheap fork or snapshot restore of that template, so it starts in milliseconds.
+- An [issuer](docs/glossary.md#issuer) grants a block of capacity once, as a signed [grant](docs/glossary.md#grant).
+- The [home](docs/glossary.md#home) checks the grant locally and mints fibers from it without calling back.
 
-## Why fiberd?
+## Why fiberd
 
-Serverless and agent platforms need instances that are:
+fiberd works with the scheduler, not instead of it. Fast starts from a warm copy are not new either. Android's zygote forks warm processes, and Firecracker and Lambda SnapStart restore snapshots. fiberd's part is making that safe to run at scale.
 
-* **fast** enough to create on the request path.
-* **dense** enough to run in large numbers.
-* **accountable** to a tenant and a hard capacity ceiling.
+- **Placement once, instances locally.** The scheduler places a signed block of capacity once. The home creates instances inside it with no API write or scheduler call per instance, so the scheduler sees one placement instead of one object per instance.
+- **Every instance stays checkable.** Each fiber's [fence](docs/glossary.md#fence) ties it to its grant and to the agent's [epoch](docs/glossary.md#epoch), so revocation and restarts reach every fiber. Each operation lands in a hash-chained audit log with signed checkpoints. A caller that misses gets a typed answer that says whether to back off or fall back.
+- **One contract, any scheduler, any isolation.** The same grant works on Kubernetes, Slurm or a bare host, and over plain processes, runc, gVisor or Hyperlight.
+- **Sessions move.** A parked session can resume on another home, verified and sealed to its tenant.
 
-fiberd combines block-level capacity delegation with warm-template cloning. The control plane 
-delegates capacity to a home, much like assigning an IP prefix to a router. The home keeps the 
-workload template initialized and creates fibers through the backend's clone or restore 
-mechanism. The protocol adds the controls needed to use this model across execution environments:
+The fastest path, proc and runc, shares the host kernel, so it suits trusted code. Untrusted code runs on gVisor or Hyperlight, where a fiber is a snapshot restore.
 
-1. **Signed capacity grants** carry authorization with the work and are verified offline.
-2. **Explicit miss semantics** distinguish local backpressure (`SHED`) from capacity that may
-    be provisioned elsewhere (`DEFERRED_FALLBACK`).
-3. **Working-set accounting** uses the memory a fiber dirties (`W`) to bound private memory and 
-checkpoint mobility.
+## The four verbs
 
-## How it works
+- **[Clone](docs/glossary.md#clone)** returns a fiber for a grant, anonymous or by [session](docs/glossary.md#session) name.
+- **[Park](docs/glossary.md#park)** saves a session and frees its fiber's memory.
+- **[Release](docs/glossary.md#release)** ends a fiber.
+- **[Watch](docs/glossary.md#watch)** streams a summary of each grant.
 
-The control plane issues a signed `CapacityGrant`. It identifies the admitted template and 
-defines the capacity limit, working-set budget, runtime tier, policy, and expiry. The 
-receiving **home** verifies the grant, warms the template, and runs one fiberd agent. 
-A home can be a standalone host, a Kubernetes grant Pod, or a Slurm allocation.
+[protocol.md](docs/protocol.md) is the wire contract for all four.
 
-Callers use four operations:
+## Reading path
 
-```
-Clone(grant, deadline)              -> anonymous fiber          (fungible worker)
-Clone(grant, deadline, session: S)  -> attach | resume | create (idempotent: "my worker")
-Park(fiberID, sync)                 -> checkpoint delta, keep name
-Release(fiberID)                    -> destroy state, free name
-```
+Read in this order, and look up any term in the [glossary](docs/glossary.md).
 
-`Clone` returns the endpoint and fence for the selected fiber. The fence identifies that 
-incarnation, while the grant lease limits how long the home holds the capacity. The control 
-plane receives aggregate grant status rather than a record for every fiber.
+1. [Quickstart](docs/quickstart.md) to see it run.
+2. [Architecture](docs/architecture.md) for how it is designed.
+3. [Security](docs/security.md) for the trust boundaries.
+4. The operator guides, which are [Operating on Kubernetes](docs/operating-kubernetes.md), [Networking](docs/networking.md), [Resources](docs/resources.md) and [Production readiness](docs/production-readiness.md).
+5. The [design docs](docs/design/README.md) for each module in depth.
+6. The [examples](#examples) for fiberd in real environments.
+7. [Protocol](docs/protocol.md) for the wire contract, and [Benchmarks](docs/benchmarks.md) for measured results.
 
-## Quick start
-
-Go 1.26 or newer is required.
+## Start
 
 ```bash
 make build
-make test
-make conform-stub
+make conform-stub   # the conformance suite on the in-memory runtime, on any OS
+make conform-proc   # the same on real fibers, in the Linux dev container (hack/dev)
 ```
 
-`make conform-stub` runs the executable protocol contract against the in-memory runtime and
-works on macOS and Linux. To exercise real forks, cgroup v2, and CRIU inside the Linux
-development container:
-
-```bash
-make conform-proc
-```
-
-See the [quickstart](docs/quickstart.md) for a signed-grant walkthrough, JSON and gRPC examples,
-and all available backend targets.
-
-## Backends and homes
-
-The core is independent of both the sandbox mechanism and the environment
-that owns the grant.
-
-| Type | Implementations |
-| --- | --- |
-| **Backend** | `proc` (fork + CRIU), `runc`, gVisor, Hyperlight |
-| **Built-in home** | standalone with an optional file-backed grant lane |
-| **Environment examples** | Kubernetes, Slurm |
-| **Consumer examples** | Knative activator, Kata-shaped containerd shim, Agent Substrate herder |
-
-Each backend and integration target advertises its capabilities and uses the
-same conformance contract. Linux is required for real fibers. The stub runtime
-supports development and protocol tests on macOS.
+The [quickstart](docs/quickstart.md) walks through each call. To write your own template, read [zygote/README.md](zygote/README.md) and [the zygote design](docs/design/zygote.md).
 
 ## Examples
 
-- [Kubernetes](examples/kubernetes/README.md): a `CapacityGrant` CRD,
-  issuer controller, and grant Pod with fiberd as PID 1.
-- [Slurm](examples/slurm/README.md): fiberd inside an allocation, bounded by
-  the allocation's cgroup and CPUs.
-- [Knative](examples/knative/README.md): scale-from-zero through a fiberd
-  activator over Hyperlight.
-- [Kata-shaped shim](examples/kata/README.md): a containerd runtime-v2 shim
-  whose containers are fibers.
-- [Agent Substrate](examples/substrate/README.md): actors created, suspended,
-  and resumed as fibers.
-
-## Documentation
-
-- **Run it:** [Quickstart](docs/quickstart.md)
-- **Understand what runs:** [Runtime model](docs/runtime-model.md)
-- **Plan CPU and memory:** [Resource model](docs/resources.md)
-- **Plan connectivity:** [Networking](docs/networking.md)
-- **Understand trust boundaries:** [Identity](docs/identity.md)
-- **Operate on Kubernetes:** [Kubernetes operations](docs/operating-kubernetes.md)
-- **Understand the design:** [Architecture](docs/architecture.md)
-- **Implement the wire contract:** [Protocol](docs/protocol.md)
-- **Evaluate deployment risk:** [Production readiness](docs/production-readiness.md)
-- **Review measured results and methodology:** [Benchmarks](docs/benchmarks.md)
+- [Kubernetes](examples/kubernetes/README.md) is a controller that turns each `CapacityGrant` custom resource into a signed grant and one Pod running the agent.
+- [Slurm](examples/slurm/README.md) runs the [agent](docs/glossary.md#agent) inside a job allocation.
+- [Knative](examples/knative/README.md) is an activator, the component that holds requests while a service scales from zero, here with fibers in Hyperlight micro-VMs.
+- [Kata-shaped shim](examples/kata/README.md) is a containerd shim, the plug-in that starts a Pod's containers. It has the shape of the Kata Containers shim without using Kata, and its containers are fibers.
+- [Agent Substrate](examples/substrate/README.md) is a worker for a platform that starts, suspends and resumes actors in worker Pods. Its actors are fibers.
 
 ## Contributing
 
-- Run `make test` and `make lint`.
-- Run `make proto` after changing `api/**/*.proto`.
-- Backend changes must pass the corresponding `conform-*` target.
-- New homes and integrations should keep `pkg/core` unchanged and pass the
-  conformance suite.
+CI runs the unit tests on linux/amd64 and macOS as a non-root user, so privileged tests skip there. The Linux suites run as root in a container. Run `make test` and `make lint` before sending a change.
 
 ## License
 

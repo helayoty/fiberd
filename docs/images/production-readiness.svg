@@ -1,0 +1,76 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="540" viewBox="0 0 1440 540" role="img" aria-labelledby="production-readiness-title production-readiness-desc">
+  <title id="production-readiness-title">From reference implementation to production</title>
+  <desc id="production-readiness-desc">A left-to-right path from fiberd today, a reference implementation, to production. It passes through four groups of acceptance gates. Transport and grants needs TLS everywhere, grant changes limited to the lease, and a lane directory only the control plane can write. State needs a durable epoch, a failed release retried or its capacity held, bounded parked state, and consumers that reconcile through an inventory other than Watch. Mobility, audit and devices needs an atomic registry claim, an audit spool that is monitored and copied off the host, and device grants matched to the engine's class. Every deployment also tests the grant lifecycle and platform events on the real platform, and passes conformance on the exact production backend. Production is reached only when every gate has passed with recorded evidence.</desc>
+  <style>
+    :root{--bg:#f7f9fc;--panel:#fff;--ink:#172033;--muted:#5d6b7d;--border:#b8c4d4;--blue:#3165b5;--blue-bg:#eaf1ff;--teal:#13776f;--teal-bg:#e8f7f4;--violet:#704aa1;--violet-bg:#f2edfa;--amber:#a76500;--amber-bg:#fff3d6;--green:#287a4d;--green-bg:#e8f6ed}
+    @media(prefers-color-scheme:dark){:root{--bg:#0d1117;--panel:#161b22;--ink:#e6edf3;--muted:#a3adba;--border:#3d4652;--blue:#79a7ff;--blue-bg:#17243d;--teal:#53c7b8;--teal-bg:#102923;--violet:#c09cff;--violet-bg:#251b35;--amber:#f0b44d;--amber-bg:#30240f;--green:#63cf8e;--green-bg:#142b1e}}
+    text{font-family:ui-sans-serif,-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;fill:var(--ink)}
+    .bg{fill:var(--bg)}.title{font-size:30px;font-weight:700}.name{font-size:20px;font-weight:700}.lane{font-size:17px;font-weight:700}.secondary{font-size:17px}.muted{fill:var(--muted)}.center{text-anchor:middle}.blue{fill:var(--blue)}.teal{fill:var(--teal)}.amber{fill:var(--amber)}.green{fill:var(--green)}
+    .divider{fill:none;stroke:var(--border);stroke-width:1.5}.outside{fill:var(--panel);stroke:var(--muted);stroke-width:1.5}.goal{fill:var(--green-bg);stroke:var(--green);stroke-width:2}
+    .band{stroke-width:1.5;fill-opacity:.5;stroke-opacity:.55}.band-blue{fill:var(--blue-bg);stroke:var(--blue)}.band-teal{fill:var(--teal-bg);stroke:var(--teal)}.band-amber{fill:var(--amber-bg);stroke:var(--amber)}.band-every{fill:var(--panel);stroke:var(--muted)}
+    .chip{fill:var(--panel);stroke-width:1.5}.chip-blue{stroke:var(--blue)}.chip-teal{stroke:var(--teal)}.chip-amber{stroke:var(--amber)}.chip-every{stroke:var(--muted)}
+    .flow{fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}.path{stroke:var(--green)}
+    text.amber{fill:#9e5e00}@media(prefers-color-scheme:dark){text.amber{fill:var(--amber)}}
+  </style>
+  <defs>
+    <marker id="production-readiness-arrow" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="12" markerHeight="12" markerUnits="userSpaceOnUse" orient="auto"><path d="M1 1 11 6 1 11Z" fill="var(--green)"/></marker>
+  </defs>
+  <rect class="bg" width="1440" height="540"/>
+  <text class="title" x="48" y="66">From reference implementation to production</text>
+  <text class="secondary muted" x="48" y="100">A deployment counts as production only when it passes every gate with recorded evidence.</text>
+  <path class="divider" d="M48 130H1392"/>
+
+  <rect class="outside" x="48" y="271" width="132" height="128" rx="4"/>
+  <text class="name center" x="114" y="323">fiberd</text>
+  <text class="secondary center muted" x="114" y="351">reference</text>
+  <text class="secondary center muted" x="114" y="375">implementation</text>
+
+  <rect class="band band-blue" x="210" y="170" width="232" height="330" rx="12"/>
+  <text class="lane blue" x="226" y="204">Transport and grants</text>
+  <rect class="chip chip-blue" x="222" y="228" width="208" height="52" rx="4"/>
+  <text class="secondary center" x="326" y="260">TLS everywhere</text>
+  <rect class="chip chip-blue" x="222" y="294" width="208" height="52" rx="4"/>
+  <text class="secondary center" x="326" y="326">Only leases change</text>
+  <rect class="chip chip-blue" x="222" y="360" width="208" height="52" rx="4"/>
+  <text class="secondary center" x="326" y="392">Locked lane directory</text>
+
+  <rect class="band band-teal" x="472" y="170" width="232" height="330" rx="12"/>
+  <text class="lane teal" x="488" y="204">State</text>
+  <rect class="chip chip-teal" x="484" y="228" width="208" height="52" rx="4"/>
+  <text class="secondary center" x="588" y="260">Durable epoch</text>
+  <rect class="chip chip-teal" x="484" y="294" width="208" height="52" rx="4"/>
+  <text class="secondary center" x="588" y="326">Release retried or held</text>
+  <rect class="chip chip-teal" x="484" y="360" width="208" height="52" rx="4"/>
+  <text class="secondary center" x="588" y="392">Bounded parked state</text>
+  <rect class="chip chip-teal" x="484" y="426" width="208" height="52" rx="4"/>
+  <text class="secondary center" x="588" y="458">Reconcile beyond Watch</text>
+
+  <rect class="band band-amber" x="734" y="170" width="232" height="330" rx="12"/>
+  <text class="lane amber" x="750" y="204">Mobility, audit, devices</text>
+  <rect class="chip chip-amber" x="746" y="228" width="208" height="52" rx="4"/>
+  <text class="secondary center" x="850" y="260">Atomic claim</text>
+  <rect class="chip chip-amber" x="746" y="294" width="208" height="52" rx="4"/>
+  <text class="secondary center" x="850" y="326">Audit off host, monitored</text>
+  <rect class="chip chip-amber" x="746" y="360" width="208" height="52" rx="4"/>
+  <text class="secondary center" x="850" y="392">Device class matched</text>
+
+  <rect class="band band-every" x="996" y="170" width="232" height="330" rx="12"/>
+  <text class="lane" x="1012" y="204">Every deployment</text>
+  <rect class="chip chip-every" x="1008" y="228" width="208" height="52" rx="4"/>
+  <text class="secondary center" x="1112" y="260">Grant lifecycle tested</text>
+  <rect class="chip chip-every" x="1008" y="294" width="208" height="52" rx="4"/>
+  <text class="secondary center" x="1112" y="326">Platform events tested</text>
+  <rect class="chip chip-every" x="1008" y="360" width="208" height="52" rx="4"/>
+  <text class="secondary center" x="1112" y="392">Conformance passes</text>
+
+  <path class="flow path" d="M180 335H210" marker-end="url(#production-readiness-arrow)"/>
+  <path class="flow path" d="M442 335H472" marker-end="url(#production-readiness-arrow)"/>
+  <path class="flow path" d="M704 335H734" marker-end="url(#production-readiness-arrow)"/>
+  <path class="flow path" d="M966 335H996" marker-end="url(#production-readiness-arrow)"/>
+  <path class="flow path" d="M1228 335H1258" marker-end="url(#production-readiness-arrow)"/>
+
+  <rect class="goal" x="1258" y="271" width="132" height="128" rx="4"/>
+  <text class="name green center" x="1324" y="323">Production</text>
+  <text class="secondary center" x="1324" y="351">every gate</text>
+  <text class="secondary center" x="1324" y="375">passed</text>
+</svg>

@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="1004" viewBox="0 0 1440 1004" role="img" aria-labelledby="fiberd-hero-title fiberd-hero-desc">
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="953" viewBox="0 0 1440 953" role="img" aria-labelledby="fiberd-hero-title fiberd-hero-desc">
   <title id="fiberd-hero-title">Place capacity once. Activate fibers locally.</title>
   <desc id="fiberd-hero-desc">A two-phase behavior overview, not a module inventory. Capacity admission: 1, the external control plane supplies a signed CapacityGrant, an authorization document, to one fiberd agent; 2, the agent prepares the grant's shared warm template. Local requests: 3, a caller sends Clone with the grant and optional session to that same agent. CREATE reuses the template; CREATE or RESUME activates a fiber, while ATTACH reuses the existing live fiber. 4, the agent returns the selected fiber's endpoint and fence; 5, in direct endpoint mode, the caller connects to that fiber without routing workload traffic through the agent. The home and one illustrated admitted grant are resource scopes, not services; the agent can manage multiple grants. Aggregate status returns asynchronously to the control plane. Local operation requires a valid lease and home scope, current verifier state, and a healthy runtime and template.</desc>
   <style>
@@ -17,7 +17,7 @@
     <marker id="fiberd-hero-violet-arrow" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="12" markerHeight="12" markerUnits="userSpaceOnUse" orient="auto"><path d="M1 1 11 6 1 11Z" fill="var(--violet)"/></marker>
     <marker id="fiberd-hero-amber-arrow" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="12" markerHeight="12" markerUnits="userSpaceOnUse" orient="auto"><path d="M1 1 11 6 1 11Z" fill="var(--amber)"/></marker>
   </defs>
-  <rect class="bg" width="1440" height="1004"/>
+  <rect class="bg" width="1440" height="953"/>
   <text class="title" x="48" y="66">Place capacity once. Activate fibers locally.</text>
   <text class="secondary muted" x="48" y="100">Admit bounded capacity; reuse its warm template without another placement call.</text>
   <path class="divider" d="M48 130H1392"/>
@@ -101,5 +101,4 @@
   <text class="label violet" x="500" y="899">Connect directly</text>
   <text class="secondary muted" x="701" y="899">direct endpoint mode</text>
 
-  <text class="secondary muted" x="48" y="975">Local path requires valid lease + home scope, current verifier state, and healthy runtime/template.</text>
 </svg>

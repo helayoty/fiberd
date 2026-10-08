@@ -1,102 +1,108 @@
 # Quickstart
 
-Build fiberd, run an agent on this machine, and exercise the four protocol
-operations. This page covers the runnable path. The conceptual guides explain
-the results, while each environment and consumer has its own example README.
+This page builds fiberd and runs the four protocol calls on this machine, then dials a real [fiber](glossary.md#fiber) on Linux. It is for anyone trying fiberd for the first time. Read the [README](../README.md) first, and [architecture.md](architecture.md) after this to understand what you saw.
 
-![A numbered experiment separates operations, observed results, and session state: prepare the demo; Clone S to CREATE; repeat to ATTACH the same fence; Park the fiber; Clone S to RESUME with a new fence; restart with the same state directory and observe an old fiber ID return NotFound.](./images/quickstart-flow.svg)
+![The quickstart in four rows. Set up builds fiberd, starts the issuer and an agent on the in-memory runtime, and mints a grant. Session S is created, attached, parked and resumed as g1/1/2. The guide then probes refusals, stops the agent to verify its signed audit, restarts at epoch 2, and Park of g1/1/2 returns 404. On Linux, a real agent counts to 2, parks, resumes, and counts 3 with its state kept.](./images/quickstart-flow.svg)
 
 ## Build
 
-Go 1.26 or newer. The build tools are pinned in `hack/tools/go.mod` and run through `go tool`; nothing else needs installing.
+You need Go 1.26 or newer and curl. The Linux steps below also need Docker.
 
 ```bash
-make build      # bin/fiberd, bin/grant-issuer, bin/zygotectl
+make build
 ```
 
 ## Run the protocol on this machine
 
-The in-memory runtime runs anywhere. The agent speaks gRPC on `-listen` and, with `-http`, a JSON gateway of the same service. Grants are signed JWTs from `grant-issuer`, verified offline against the issuer's published keys.
+The [agent](glossary.md#agent) speaks gRPC and, with `-http`, a JSON gateway of the same service. Without a `-runtime` flag it uses the `stub` [runtime](glossary.md#runtime), which runs no code, so it works on any OS. [Grants](glossary.md#grant) are signed tokens from `grant-issuer`, verified offline against the [issuer](glossary.md#issuer)'s published keys. `-insecure-plaintext` skips mutual TLS, for development only.
+
+A grant is `UNTRUSTED` unless its issuer says otherwise, and the stub runtime counts as isolating tenants because it runs no tenant code, so it admits this grant.
 
 ```bash
-export FIBERD_STATE=$(mktemp -d)       # reused across restarts below
-bin/grant-issuer keygen -alg EdDSA -out $FIBERD_STATE/issuer.json
-bin/grant-issuer serve -key $FIBERD_STATE/issuer.json -addr 127.0.0.1:8686 &
-bin/fiberd -state $FIBERD_STATE -node-id node-a -verifier jwks -issuer http://127.0.0.1:8686 \
+export STATE=$(mktemp -d)              # reused across the restart below
+bin/grant-issuer keygen -alg EdDSA -out $STATE/issuer.json
+bin/grant-issuer serve -key $STATE/issuer.json -addr 127.0.0.1:8686 &
+bin/fiberd -state $STATE -node-id node-a -verifier jwks -issuer http://127.0.0.1:8686 \
   -insecure-plaintext -http :8485 -stale-ttl 5s &
 until curl -sf localhost:8485/healthz >/dev/null; do sleep 0.2; done
 
-# a grant for this node: 2 fibers, 1 MiB working set each, a 10 minute lease
-T=$(bin/grant-issuer mint -key $FIBERD_STATE/issuer.json -issuer http://127.0.0.1:8686 \
+# a grant for this node (-aud must equal the agent's -node-id),
+# 2 fibers of 1 MiB working set each, a 10 minute lease
+T=$(bin/grant-issuer mint -key $STATE/issuer.json -issuer http://127.0.0.1:8686 \
      -aud node-a -uid g1 -max 2 -w-budget 1Mi -min-tier FIBER_WARM -ttl 10m)
-J=$(python3 -c "import json,sys;print(json.dumps(sys.argv[1]))" "$T")
 clone() { curl -s -w ' [http %{http_code}]\n' -X POST localhost:8485/v1/clone -d "$1"; }
 
-clone "{\"grantJwt\":$J,\"session\":\"S\"}"    # CREATE, fence g1/1/1
-clone "{\"grantJwt\":$J,\"session\":\"S\"}"    # ATTACH, same endpoint and fence
+clone "{\"grantJwt\":\"$T\",\"session\":\"S\"}"   # CREATE, fiberId g1/1/1
+clone "{\"grantJwt\":\"$T\",\"session\":\"S\"}"   # ATTACH, the same fiberId, endpoint and fence
 curl -s -X POST localhost:8485/v1/park -d '{"fiberId":"g1/1/1"}'
-clone "{\"grantJwt\":$J,\"session\":\"S\"}"    # RESUME, fence seq 2
-clone "{\"grantJwt\":$J,\"image\":\"evil\"}"   # 400: admission completeness
-clone "{\"grantJwt\":$J}"                       # anonymous CREATE; the grant is now full (2/2)
-clone "{\"grantJwt\":$J}"                       # 503 DEFERRED_FALLBACK: full, issuer reachable
-kill %1; sleep 6                                # stop the issuer; the lane goes stale after -stale-ttl
-clone "{\"grantJwt\":$J}"                       # 429 SHED + Retry-After: issuer unreachable
-curl -s localhost:8485/v1/status                # running, parked, w_used_bytes, latest fence
-cat $FIBERD_STATE/private/audit.jsonl                   # one record per transition
-bin/audit-verify -spool $FIBERD_STATE/private/audit.jsonl -trust $FIBERD_STATE/private/audit-key.json
+clone "{\"grantJwt\":\"$T\",\"session\":\"S\"}"   # RESUME, a new fiberId g1/1/2
+clone "{\"grantJwt\":\"$T\",\"image\":\"evil\"}"  # 400, an unknown field is refused
+clone "{\"grantJwt\":\"$T\"}"                      # anonymous CREATE g1/1/3, the grant is full (2/2)
+clone "{\"grantJwt\":\"$T\"}"                      # 503 DEFERRED_FALLBACK, full while the issuer is reachable
+kill %1; sleep 6                                   # stop the issuer, the lane goes stale after -stale-ttl
+clone "{\"grantJwt\":\"$T\"}"                      # 429 SHED with Retry-After, issuer unreachable
+curl -s localhost:8485/v1/status                   # running fibers and the latest fence
 
-bin/grant-issuer serve -key $FIBERD_STATE/issuer.json -addr 127.0.0.1:8686 &
-kill %2; bin/fiberd -state $FIBERD_STATE -node-id node-a -verifier jwks -issuer http://127.0.0.1:8686 -insecure-plaintext -http :8485 &
+kill %2; wait %2                                   # stop the agent, which signs its audit spool
+bin/audit-verify -spool $STATE/private/audit.jsonl -trust $STATE/private/audit-key.json
+
+bin/grant-issuer serve -key $STATE/issuer.json -addr 127.0.0.1:8686 &
+bin/fiberd -state $STATE -node-id node-a -verifier jwks -issuer http://127.0.0.1:8686 \
+  -insecure-plaintext -http :8485 &
 until curl -sf localhost:8485/healthz >/dev/null; do sleep 0.2; done
-curl -s localhost:8485/healthz                  # epoch 1 -> 2: every prior fence is invalid
-curl -s -X POST localhost:8485/v1/park -d '{"fiberId":"g1/1/1"}'   # 404
+curl -s localhost:8485/healthz                     # epoch 2, every fence of epoch 1 is invalid
+curl -s -X POST localhost:8485/v1/park -d '{"fiberId":"g1/1/2"}'   # 404, the restart ended g1/1/2
 ```
 
-`-grants-dir` pre-admits `*.jwt` files dropped there. Removing a file revokes
-the grant on this home: its running fibers are released, and its token is
-refused until it expires (`$FIBERD_STATE/private/revoked.json`). See
-[Production readiness](production-readiness.md#grant-lifecycle-and-revocation).
-`-verifier insecure-json` takes unsigned protobuf-JSON grants, for development
-only. `grpcurl -plaintext -proto api/grant/v1/grant.proto localhost:8484
-fiberd.grant.v1.Fibers/Clone` reaches the gRPC service directly.
+- The fiber ID is the [fence](glossary.md#fence), so each command uses the ID the call before it returned.
+- When the issuer stops answering, the home's [lane](glossary.md#lane) goes stale and misses turn from deferred to [shed](glossary.md#shed-and-deferred).
+- `audit-verify` checks the agent's local, signed record of every state change ([audit.md](design/audit.md)). The agent signs it when it stops, so the check runs after the stop.
 
-## Real fibers
+[protocol.md](protocol.md) explains each reply. `-grants-dir` pre-admits `*.jwt` files dropped there, and removing one revokes the grant on this [home](glossary.md#home) ([home.md](design/home.md)).
 
-The fork zygote, cgroups, CRIU and the sandbox backends need a Linux kernel. On a Mac the dev container in `hack/dev` is that kernel: privileged, cgroup v2, criu built from source (see the Dockerfile for why bookworm and which criu). Every Linux target below runs inside it.
+## Dial a real fiber
+
+The fork [zygote](glossary.md#zygote), [cgroups](glossary.md#cgroup), [CRIU](glossary.md#criu) and the sandbox [backends](glossary.md#backend) need a Linux kernel. On a Mac, `hack/dev/run.sh bash` opens a shell in the Linux dev container, with this repository at `/src`. Run these steps there, since the container has every tool they use, `jq` included. They start the agent with `-runtime proc`, the proc backend, and refzygote, the reference template, serving HTTP.
 
 ```bash
-make linux-check      # cgroup v2, PSI, criu, gcc
-make linux-test       # unit and integration tests
-make conform-proc     # the conformance suite against the fork zygote
+make build zygote
+bin/grant-issuer keygen -alg EdDSA -out /tmp/issuer.json
+bin/grant-issuer serve -key /tmp/issuer.json -addr 127.0.0.1:8686 &
+bin/fiberd -state /tmp/fiberd -node-id node-a -verifier jwks -issuer http://127.0.0.1:8686 \
+  -insecure-plaintext -http :8485 -runtime proc -template "default=$PWD/bin/refzygote --http" &
+until curl -sf localhost:8485/healthz >/dev/null; do sleep 0.2; done
+T=$(bin/grant-issuer mint -key /tmp/issuer.json -issuer http://127.0.0.1:8686 -aud node-a -uid g1 -isolation TRUSTED)
+EP=$(curl -s -X POST localhost:8485/v1/clone -d "{\"grantJwt\":\"$T\",\"session\":\"S\"}" | jq -r .endpoint)
+curl -s --unix-socket ${EP#unix://} -X POST http://fiber/incr           # 1, the fiber's own counter
+curl -s --unix-socket ${EP#unix://} -X POST http://fiber/incr           # 2
+curl -s -X POST localhost:8485/v1/park -d '{"fiberId":"g1/1/1"}'
+curl -s -X POST localhost:8485/v1/clone -d "{\"grantJwt\":\"$T\",\"session\":\"S\"}"   # RESUME, g1/1/2
+curl -s --unix-socket ${EP#unix://} -X POST http://fiber/incr           # 3, the state survived the park
 ```
 
-| Backend | Conformance target | Additional requirement |
-| --- | --- | --- |
-| proc | `make conform-proc` | cgroup v2 and CRIU |
-| runc | `make conform-runc` | runc, CRIU, and a root filesystem |
-| gVisor | `make conform-gvisor` | runsc and a root filesystem |
-| Hyperlight | `make conform-hyperlight-fake` or `make conform-hyperlight` | the real-helper target requires KVM |
+The grant is `TRUSTED` because proc fibers share the host kernel, and a home refuses an `UNTRUSTED` grant on proc ([security.md](security.md#admission-and-isolation)). The resumed fiber listens on its parked socket again, so the last `curl` reuses `$EP` from the first Clone.
 
-See the [runtime model](runtime-model.md) for backend behavior and tiers.
-`fiberd -h` lists every configuration flag.
+## Write your own template
+
+A template is your program linked with libfiberzygote. [zygote/README.md](../zygote/README.md) builds one, and [design/zygote.md](design/zygote.md) is the contract it must keep. Point `-template` at it instead of refzygote.
 
 ## Conformance
 
-`grant-conform` (built from `tests/conform`) is the executable contract: cases C1 to C10, driven through the public gRPC surface plus hooks a target supplies as commands (restart it, flip the grant lane, look up an audit record, end the engine, lose the scope). The outcomes are defined in [protocol.md](protocol.md). Cases without their hook are skipped and say so.
+The [conformance suite](glossary.md#conformance-suite) checks these.
+
+- Idempotent [clones](glossary.md#clone).
+- Monotonic [fences](glossary.md#fence).
+- The [epoch](glossary.md#epoch) bump on restart.
+- Revocation by [lease](glossary.md#lease).
+- Admission completeness.
+- The [W](glossary.md#w-working-set) [budget](glossary.md#budget).
+- The [tier](glossary.md#tier) floor.
+- The [device budget](glossary.md#device-budget).
+- The loss of the [warm](glossary.md#warm) template.
+- [Scope](glossary.md#scope) loss.
 
 ```bash
-make conform-stub      # the in-memory runtime, unsigned grants
-make conform-signed    # the same with a live issuer and real JWTs
-bin/grant-conform -target host:port -node-id <audience> -mint jwt -issuer-key key.json -issuer <url> \
-  [-restart-cmd ...] [-cp-health-cmd ...] [-audit-file ...] [-engine-kill-cmd ...] [-scope-cmd ...]
+make conform-proc
 ```
 
-## Next
-
-Continue with an environment or consumer example:
-
-- [Kubernetes](../examples/kubernetes/README.md)
-- [Slurm](../examples/slurm/README.md)
-- [Knative](../examples/knative/README.md)
-- [Kata-shaped containerd shim](../examples/kata/README.md)
-- [Agent Substrate](../examples/substrate/README.md)
+That runs it against the fork zygote with real cgroups, in the dev container. `make conform-stub` runs it against the in-memory runtime on any OS. `make conform-runc`, `make conform-gvisor` and `make conform-hyperlight-fake` cover the other backends ([backends.md](design/backends.md)), and each example README names the target for its platform.
