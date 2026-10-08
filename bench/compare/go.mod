@@ -11,6 +11,7 @@ toolchain go1.26.7
 require (
 	github.com/helayoty/fiberd v0.0.0
 	github.com/helayoty/fiberd/examples/kubernetes v0.0.0
+	go.uber.org/goleak v1.3.0
 	google.golang.org/grpc v1.83.2
 	google.golang.org/protobuf v1.36.12
 )

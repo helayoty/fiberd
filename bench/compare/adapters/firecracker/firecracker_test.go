@@ -5,8 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -17,20 +17,15 @@ import (
 	"testing"
 	"time"
 
+	"go.uber.org/goleak"
+
 	"github.com/helayoty/fiberd/bench/compare"
 )
 
-// TestMain doubles as the UFFD handler the adapter execs in the uffd
-// case: it listens on the socket it is given and waits to be killed.
+// TestMain fails the package when a test leaves a goroutine behind,
+// such as a handler's waiter outliving Release.
 func TestMain(m *testing.M) {
-	if sock := os.Getenv("COMPARE_FC_FAKE_UFFD"); sock != "" {
-		if _, err := net.Listen("unix", os.Args[1]); err != nil {
-			fmt.Fprintln(os.Stderr, "fake uffd handler:", err)
-			os.Exit(2)
-		}
-		select {}
-	}
-	os.Exit(m.Run())
+	goleak.VerifyTestMain(m)
 }
 
 // call is one API request the fake Firecracker saw.
@@ -41,22 +36,31 @@ type call struct {
 
 // fakeLauncher serves the Firecracker API on the socket, records every
 // call, writes snapshot files on /snapshot/create and points Addr at a
-// loopback counter.
+// loopback counter. It answers 500 on refuse. Its handler listens on
+// the UFFD socket, or by handlerMode refuses to start or exits before
+// listening.
 type fakeLauncher struct {
-	t     *testing.T
-	mu    sync.Mutex
-	calls []call
-	addr  string
+	mu          sync.Mutex
+	calls       []call
+	addr        string
+	refuse      string
+	handlerMode string
 }
+
+const (
+	vmRSS      = 3 << 20
+	handlerRSS = 1 << 20
+)
 
 type fakeVM struct {
 	srv  *http.Server
 	addr string
 }
 
-func (v *fakeVM) Addr() string { return v.addr }
-func (v *fakeVM) Pid() int     { return os.Getpid() }
-func (v *fakeVM) Kill() error  { return v.srv.Close() }
+func (v *fakeVM) Addr() string        { return v.addr }
+func (v *fakeVM) Pid() int            { return os.Getpid() }
+func (v *fakeVM) RSS() (int64, error) { return vmRSS, nil }
+func (v *fakeVM) Kill() error         { return v.srv.Close() }
 
 func (l *fakeLauncher) Start(_ context.Context, _ int, sock string) (VM, error) {
 	ln, err := net.Listen("unix", sock)
@@ -75,11 +79,52 @@ func (l *fakeLauncher) Start(_ context.Context, _ int, sock string) (VM, error) 
 				_ = os.WriteFile(body[k].(string), []byte("x"), 0o644)
 			}
 		}
+		if r.URL.Path == l.refuse {
+			http.Error(w, "fault", http.StatusInternalServerError)
+			return
+		}
 		w.WriteHeader(http.StatusNoContent)
 	})}
 	go func() { _ = srv.Serve(ln) }()
 	return &fakeVM{srv: srv, addr: l.addr}, nil
 }
+
+type fakeHandler struct {
+	ln     net.Listener
+	once   sync.Once
+	exited chan error
+}
+
+func (l *fakeLauncher) Handler(_ context.Context, sock, _ string) (Handler, error) {
+	h := &fakeHandler{exited: make(chan error, 1)}
+	switch l.handlerMode {
+	case "refuse":
+		return nil, errors.New("no such file or directory")
+	case "exit":
+		h.end(errors.New("exit status 2: no memory file"))
+		return h, nil
+	}
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		return nil, err
+	}
+	h.ln = ln
+	return h, nil
+}
+
+func (h *fakeHandler) end(err error) {
+	h.once.Do(func() {
+		if h.ln != nil {
+			_ = h.ln.Close()
+		}
+		h.exited <- err
+	})
+}
+
+func (h *fakeHandler) Pid() int            { return 2 }
+func (h *fakeHandler) RSS() (int64, error) { return handlerRSS, nil }
+func (h *fakeHandler) Kill() error         { h.end(errors.New("signal: killed")); return nil }
+func (h *fakeHandler) Wait() error         { return <-h.exited }
 
 func (l *fakeLauncher) paths() []string {
 	l.mu.Lock()
@@ -124,10 +169,12 @@ func counter(t *testing.T) (ip string, port int) {
 	return "127.0.0.1", ln.Addr().(*net.TCPAddr).Port
 }
 
+// newAdapter wires an Adapter to a fake launcher. Whatever a test
+// leaves running is released at cleanup.
 func newAdapter(t *testing.T, uffd bool, slots int) (*Adapter, *fakeLauncher) {
 	t.Helper()
 	ip, port := counter(t)
-	l := &fakeLauncher{t: t, addr: ip}
+	l := &fakeLauncher{addr: ip}
 	// Socket paths must stay short, so the work dir is under /tmp.
 	work, err := os.MkdirTemp("/tmp", "fc-")
 	if err != nil {
@@ -137,13 +184,17 @@ func newAdapter(t *testing.T, uffd bool, slots int) (*Adapter, *fakeLauncher) {
 	o := Options{Kernel: "vmlinux", Rootfs: "rootfs.ext4", SnapshotDir: filepath.Join(work, "snap"), WorkDir: work,
 		Port: port, MaxSlots: slots, Poll: time.Millisecond, Launch: l}
 	if uffd {
-		o.UFFDHandler = os.Args[0]
-		t.Setenv("COMPARE_FC_FAKE_UFFD", "1")
+		o.UFFDHandler = "handler"
 	}
 	a, err := New(o)
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		for id := range a.vms {
+			_ = a.Release(context.Background(), compare.Handle{ID: id})
+		}
+	})
 	return a, l
 }
 
@@ -152,17 +203,15 @@ func TestSetupAndActivate(t *testing.T) {
 		name        string
 		uffd        bool
 		wantBackend string
+		wantRSS     int64
 	}{
-		{name: "file backend", wantBackend: "File"},
-		{name: "uffd variant", uffd: true, wantBackend: "Uffd"},
+		{name: "file backend", wantBackend: "File", wantRSS: vmRSS},
+		{name: "uffd variant", uffd: true, wantBackend: "Uffd", wantRSS: vmRSS + handlerRSS},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			a, l := newAdapter(t, tc.uffd, 4)
-			// The uffd case execs this test binary as the handler. On a
-			// loaded macOS host that exec was seen to take over 10 s, so
-			// the bound is generous. A pass takes well under a second.
-			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 			if err := a.Setup(ctx); err != nil {
 				t.Fatal(err)
@@ -198,12 +247,8 @@ func TestSetupAndActivate(t *testing.T) {
 			if fb.IsZero() || h.Meta["slot"] != "0" {
 				t.Errorf("handle %+v", h)
 			}
-			// Density reads /proc, so it is checked on Linux only.
-			if runtime.GOOS == "linux" {
-				n, err := a.Density(ctx, []compare.Handle{h})
-				if err != nil || n <= 0 {
-					t.Errorf("density %d, %v", n, err)
-				}
+			if n, err := a.Density(ctx, []compare.Handle{h}); err != nil || n != tc.wantRSS {
+				t.Errorf("density %d, %v, want %d", n, err, tc.wantRSS)
 			}
 			nh, err := a.Resume(ctx, h)
 			if err != nil {
@@ -217,6 +262,61 @@ func TestSetupAndActivate(t *testing.T) {
 			}
 			if len(a.slots) != 0 || len(a.vms) != 0 {
 				t.Errorf("release left slots %v vms %v", a.slots, a.vms)
+			}
+		})
+	}
+}
+
+func TestNew(t *testing.T) {
+	cases := []struct {
+		name    string
+		o       Options
+		wantErr bool
+	}{
+		{name: "a missing kernel is refused", o: Options{Rootfs: "r", SnapshotDir: "s", WorkDir: "w"}, wantErr: true},
+		{name: "defaults fill the rest", o: Options{Kernel: "k", Rootfs: "r", SnapshotDir: "s", WorkDir: "w"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a, err := New(tc.o)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("New = %v", err)
+			}
+			if tc.wantErr {
+				return
+			}
+			if _, ok := a.launch.(*execLauncher); !ok || a.o.Port != 8080 || a.o.MaxSlots != 256 || !strings.Contains(a.o.BootArgs, "--port 8080 --ifup eth0=172.16.0.2/30") {
+				t.Errorf("defaults %+v, launcher %T", a.o, a.launch)
+			}
+		})
+	}
+}
+
+func TestActivateRefusals(t *testing.T) {
+	cases := []struct {
+		name        string
+		handlerMode string
+		refuse      string
+		want        string
+	}{
+		{name: "a handler that cannot start", handlerMode: "refuse", want: "uffd handler: no such file"},
+		{name: "a handler that exits before listening", handlerMode: "exit", want: "exited before listening: exit status 2: no memory file"},
+		{name: "a refused snapshot load", refuse: "/snapshot/load", want: "PUT /snapshot/load: 500 Internal Server Error: fault"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a, l := newAdapter(t, true, 2)
+			l.handlerMode, l.refuse = tc.handlerMode, tc.refuse
+			ctx := context.Background()
+			if err := a.Setup(ctx); err != nil {
+				t.Fatal(err)
+			}
+			_, err := a.Activate(ctx, "a")
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Activate = %v, want an error with %q", err, tc.want)
+			}
+			if len(a.slots) != 0 || len(a.vms) != 0 {
+				t.Errorf("refusal left slots %v vms %v", a.slots, a.vms)
 			}
 		})
 	}
@@ -274,6 +374,28 @@ func TestLoadParamsAndNamespace(t *testing.T) {
 			}
 			if Namespace(tc.slot) != "fc-"+string(rune('0'+tc.slot)) {
 				t.Errorf("namespace %s", Namespace(tc.slot))
+			}
+		})
+	}
+}
+
+func TestRSS(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("rss reads /proc")
+	}
+	cases := []struct {
+		name    string
+		pid     int
+		wantErr bool
+	}{
+		{name: "the test process", pid: os.Getpid()},
+		{name: "no such process", pid: math.MaxInt32, wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			n, err := rss(tc.pid)
+			if (err != nil) != tc.wantErr || (!tc.wantErr && n <= 0) {
+				t.Fatalf("rss = %d, %v", n, err)
 			}
 		})
 	}

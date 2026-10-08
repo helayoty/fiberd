@@ -58,22 +58,40 @@ type Options struct {
 	// MaxSlots caps concurrent instances, one namespace each.
 	MaxSlots int
 	Poll     time.Duration
-	// Launch overrides how a Firecracker process is started, for tests.
+	// Launch overrides how the processes are started, for tests.
 	Launch Launcher
 }
 
-// VM is one running Firecracker process.
-type VM interface {
-	// Addr is the address the host dials to reach the guest's port.
-	Addr() string
+// Process is a started process. Pid and RSS feed Density.
+type Process interface {
 	Pid() int
+	// RSS is the resident set, in bytes.
+	RSS() (int64, error)
 	Kill() error
 }
 
-// Launcher starts a Firecracker process in a slot's network namespace,
-// serving its API on sock, and returns once the socket answers.
+// VM is one running Firecracker process. Kill waits for it to end.
+type VM interface {
+	Process
+	// Addr is the address the host dials to reach the guest's port.
+	Addr() string
+}
+
+// Handler is a running UFFD page-fault handler. Kill does not wait,
+// Wait returns its exit once.
+type Handler interface {
+	Process
+	Wait() error
+}
+
+// Launcher starts a slot's processes.
 type Launcher interface {
+	// Start runs Firecracker in the slot's network namespace, serving
+	// its API on sock, and returns once the socket answers.
 	Start(ctx context.Context, slot int, sock string) (VM, error)
+	// Handler runs the page-fault handler serving mem on sock and
+	// returns at once. The caller waits for the socket.
+	Handler(ctx context.Context, sock, mem string) (Handler, error)
 }
 
 // Adapter implements compare.Adapter.
@@ -89,8 +107,8 @@ type Adapter struct {
 type instance struct {
 	slot    int
 	vm      VM
-	handler *exec.Cmd
-	exited  chan error // closed by the handler's waiter, holding its exit
+	handler Handler
+	exited  chan error // holds the handler's exit, sent by its waiter
 }
 
 // New checks the options.
@@ -123,7 +141,7 @@ func New(o Options) (*Adapter, error) {
 	}
 	a := &Adapter{o: o, launch: o.Launch, slots: map[int]bool{}, vms: map[string]*instance{}}
 	if a.launch == nil {
-		a.launch = &execLauncher{o: o}
+		a.launch = Exec(o)
 	}
 	return a, nil
 }
@@ -281,18 +299,17 @@ func (a *Adapter) restore(ctx context.Context, id string, slot int, dir string) 
 	if a.o.UFFDHandler != "" {
 		uffd = filepath.Join(a.o.WorkDir, fmt.Sprintf("uffd-%d.sock", slot))
 		_ = os.Remove(uffd)
-		inst.handler = exec.CommandContext(ctx, a.o.UFFDHandler, uffd, a.mem(dir))
-		var stderr bytes.Buffer
-		inst.handler.Stderr = &stderr
-		if err := inst.handler.Start(); err != nil {
+		h, err := a.launch.Handler(ctx, uffd, a.mem(dir))
+		if err != nil {
 			_ = vm.Kill()
 			return compare.Handle{}, fmt.Errorf("uffd handler: %w", err)
 		}
+		inst.handler = h
 		inst.exited = make(chan error, 1)
-		go func() { inst.exited <- inst.handler.Wait() }()
+		go func() { inst.exited <- h.Wait() }()
 		if err := waitSocket(ctx, uffd, inst.exited); err != nil {
 			inst.kill()
-			return compare.Handle{}, fmt.Errorf("uffd handler: %w %s", err, strings.TrimSpace(stderr.String()))
+			return compare.Handle{}, fmt.Errorf("uffd handler: %w", err)
 		}
 	}
 	if err := dialAPI(sock).do(ctx, http.MethodPut, "/snapshot/load", a.LoadParams(dir, uffd)); err != nil {
@@ -308,8 +325,8 @@ func (a *Adapter) restore(ctx context.Context, id string, slot int, dir string) 
 
 func (i *instance) kill() {
 	_ = i.vm.Kill()
-	if i.handler != nil && i.handler.Process != nil {
-		_ = i.handler.Process.Kill()
+	if i.handler != nil {
+		_ = i.handler.Kill()
 		<-i.exited
 	}
 }
@@ -377,12 +394,12 @@ func (a *Adapter) Density(_ context.Context, hs []compare.Handle) (int64, error)
 		if inst == nil {
 			continue
 		}
-		pids := []int{inst.vm.Pid()}
-		if inst.handler != nil && inst.handler.Process != nil {
-			pids = append(pids, inst.handler.Process.Pid)
+		procs := []Process{inst.vm}
+		if inst.handler != nil {
+			procs = append(procs, inst.handler)
 		}
-		for _, pid := range pids {
-			n, err := RSS(pid)
+		for _, p := range procs {
+			n, err := p.RSS()
 			if err != nil {
 				return 0, err
 			}
@@ -392,8 +409,8 @@ func (a *Adapter) Density(_ context.Context, hs []compare.Handle) (int64, error)
 	return total, nil
 }
 
-// RSS reads VmRSS of a process, in bytes.
-func RSS(pid int) (int64, error) {
+// rss reads VmRSS of a process, in bytes.
+func rss(pid int) (int64, error) {
 	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid))
 	if err != nil {
 		return 0, err
@@ -432,7 +449,10 @@ func waitSocket(ctx context.Context, path string, exited chan error) error {
 	}
 }
 
-// execLauncher runs netns.sh and Firecracker.
+// Exec is the Launcher New uses when Options.Launch is nil. It runs
+// netns.sh, Firecracker and the UFFD handler as processes.
+func Exec(o Options) Launcher { return &execLauncher{o: o} }
+
 type execLauncher struct{ o Options }
 
 type process struct {
@@ -441,13 +461,43 @@ type process struct {
 	down func()
 }
 
-func (p *process) Addr() string { return p.addr }
-func (p *process) Pid() int     { return p.cmd.Process.Pid }
+func (p *process) Addr() string        { return p.addr }
+func (p *process) Pid() int            { return p.cmd.Process.Pid }
+func (p *process) RSS() (int64, error) { return rss(p.Pid()) }
 func (p *process) Kill() error {
 	err := p.cmd.Process.Kill()
 	_ = p.cmd.Wait()
 	p.down()
 	return err
+}
+
+type handlerProcess struct {
+	cmd    *exec.Cmd
+	stderr bytes.Buffer
+}
+
+func (h *handlerProcess) Pid() int            { return h.cmd.Process.Pid }
+func (h *handlerProcess) RSS() (int64, error) { return rss(h.Pid()) }
+func (h *handlerProcess) Kill() error         { return h.cmd.Process.Kill() }
+
+// Wait returns the exit with what the handler wrote to stderr.
+func (h *handlerProcess) Wait() error {
+	err := h.cmd.Wait()
+	if s := strings.TrimSpace(h.stderr.String()); err != nil && s != "" {
+		return fmt.Errorf("%w: %s", err, s)
+	}
+	return err
+}
+
+// Handler runs the handler binary with the socket and the memory file
+// as its arguments.
+func (l *execLauncher) Handler(ctx context.Context, sock, mem string) (Handler, error) {
+	h := &handlerProcess{cmd: exec.CommandContext(ctx, l.o.UFFDHandler, sock, mem)}
+	h.cmd.Stderr = &h.stderr
+	if err := h.cmd.Start(); err != nil {
+		return nil, err
+	}
+	return h, nil
 }
 
 // Start brings the slot's namespace up (netns.sh prints the address the
