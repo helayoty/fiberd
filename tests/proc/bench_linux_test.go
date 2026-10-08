@@ -15,12 +15,12 @@ import (
 	"github.com/helayoty/fiberd/pkg/sys/cgroup"
 )
 
-// TestStormNumbers reproduces zygote_bench.c's shapes through the real
+// TestStormNumbers measures fork and copy-on-write through the real
 // runtime path (agent-side Clone -> control socket -> clone3 -> scrub ->
 // endpoint bound -> ready): a 50-way concurrent storm, and sustained
 // throughput at W = 1 MiB and W = 4 MiB. It prints numbers rather than
-// asserting them; run with -v under make linux-test. Set FIBERD_BENCH=1
-// to enable (it takes a few seconds).
+// asserting them. FIBERD_BENCH=1 enables it, and make bench runs it with
+// -v (it takes a few seconds).
 func TestStormNumbers(t *testing.T) {
 	if os.Getenv("FIBERD_BENCH") == "" {
 		t.Skip("set FIBERD_BENCH=1 to run the storm measurement")
@@ -63,8 +63,8 @@ func TestStormNumbers(t *testing.T) {
 	report(t, "single clone, fork-to-ready (n=10)", single)
 
 	// 2. 50-way storm: all clones issued at once, each dirtying 4 MiB at
-	// birth like the C bench's children. Memory: what the grant cgroup
-	// charges for zygote + 50 fibers (exact, unlike PSS).
+	// birth. Memory is what the grant cgroup charges for the zygote and 50
+	// fibers (exact, unlike PSS).
 	const n = 50
 	var mu sync.Mutex
 	var lat []time.Duration
@@ -104,7 +104,7 @@ func TestStormNumbers(t *testing.T) {
 	releaseAll(hs)
 
 	// 3. Throughput vs W: sustained clone+release cycles with 8 in flight,
-	// each fiber dirtying W at birth; the C bench's f(W) claim.
+	// each fiber dirtying W at birth.
 	for _, w := range []uint64{1 << 20, 4 << 20} {
 		const cycles = 120
 		const inflight = 8

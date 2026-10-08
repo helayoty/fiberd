@@ -56,8 +56,12 @@ func TestMain(m *testing.M) {
 func newRuntime(t *testing.T) core.Runtime {
 	t.Helper()
 	name := fmt.Sprintf("rc%d", time.Now().UnixNano()%1_000_000)
+	be, err := runcbackend.New(runcbackend.Options{Rootfs: rootfs, StateDir: filepath.Join(work, name)})
+	if err != nil {
+		t.Fatal(err)
+	}
 	rt, err := host.New(host.Config{
-		Backend:    runcbackend.New(runcbackend.Options{Rootfs: rootfs, StateDir: filepath.Join(work, name)}),
+		Backend:    be,
 		Templates:  map[string]string{"default": "/bin/refzygote --heap-mb 32"},
 		CgroupRoot: filepath.Join(cgRoot, name),
 		RunDir:     filepath.Join("/tmp", "fz-"+name),
@@ -66,7 +70,7 @@ func newRuntime(t *testing.T) core.Runtime {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { rt.(interface{ Close() }).Close() })
+	t.Cleanup(rt.Close)
 	if rt.Tier() < core.TierCheckpoint {
 		t.Skip("criu not usable here")
 	}

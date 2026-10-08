@@ -1,0 +1,153 @@
+//go:build linux
+
+package proctest
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/helayoty/fiberd/pkg/backend"
+	procbackend "github.com/helayoty/fiberd/pkg/backend/proc"
+)
+
+// warmDirect opens the fork backend on its own, without the host
+// runtime, and warms one zygote for a grant whose run directory is dir
+// and that hides the given paths. Fibers are forked into the test's own
+// cgroup (no leaf), which is what these tests need: they are about the
+// zygote's answers, not accounting. Their endpoints go under dir: a
+// fiber sees nothing else of dir's parent (see TestFiberSeesOnlyItsRunDir).
+func warmDirect(t *testing.T, dir string, hide []string) (*procbackend.Backend, backend.Warm) {
+	t.Helper()
+	be := procbackend.NewBackend(procbackend.Options{})
+	t.Cleanup(be.Close)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	w, err := be.Warm(ctx, backend.WarmSpec{
+		GrantUID:      "gd",
+		Template:      backend.Template{Argv: []string{zygoteBin, "--heap-mb", "16"}},
+		CgroupFD:      -1,
+		ProbeCgroupFD: -1,
+		WorkDir:       dir,
+		Hide:          hide,
+	})
+	if err != nil {
+		t.Fatalf("warm: %v", err)
+	}
+	return be, w
+}
+
+// cloneDirect forks one fiber of w serving a unix socket under dir, the
+// run directory w was warmed with.
+func cloneDirect(t *testing.T, be *procbackend.Backend, w backend.Warm, dir, fence, payload string) (backend.Fiber, error) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return be.Clone(ctx, w.ID, backend.FiberSpec{
+		Fence:    fence,
+		Endpoint: filepath.Join(dir, strings.ReplaceAll(fence, "/", "-")+".sock"),
+		CgroupFD: -1,
+		Deadline: 2 * time.Second,
+		OwnPIDNS: true,
+		Payload:  []byte(payload),
+	})
+}
+
+// TestHideFailureRefusesClone: a fiber that cannot have every HIDE path
+// covered does not run. A path that cannot be covered (a regular file: a
+// tmpfs cannot be mounted over it) ends the child with EX_MNT_HIDE. More
+// paths than the zygote holds get the HIDE line refused, and from then
+// on every clone of the grant is refused. With every path coverable the
+// fiber runs, the secret covered and its capabilities gone.
+func TestHideFailureRefusesClone(t *testing.T) {
+	cases := []struct {
+		name string
+		// hide makes the grant's HIDE paths under dir. secret is a file
+		// the fiber must not read when it runs.
+		hide func(t *testing.T, dir string) (hide []string, secret string)
+		// wantErr names what the clone error must say; nil for success.
+		wantErr []string
+	}{
+		{
+			name: "an uncoverable path refuses the clone",
+			hide: func(t *testing.T, dir string) ([]string, string) {
+				file := filepath.Join(dir, "a-file")
+				if err := os.WriteFile(file, []byte("visible\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				secretDir, secret := secretUnder(t, dir)
+				return []string{file, secretDir}, secret
+			},
+			wantErr: []string{"died before ready", "exit:113"}, // EX_MNT_HIDE
+		},
+		{
+			name: "a refused HIDE line refuses every clone",
+			hide: func(t *testing.T, dir string) ([]string, string) {
+				// The zygote holds 16 paths. The secret is the 17th, whose
+				// HIDE line it refuses.
+				var hide []string
+				for i := 0; i < 16; i++ {
+					d := filepath.Join(dir, fmt.Sprintf("extra-%d", i))
+					if err := os.Mkdir(d, 0o700); err != nil {
+						t.Fatal(err)
+					}
+					hide = append(hide, d)
+				}
+				secretDir, secret := secretUnder(t, dir)
+				return append(hide, secretDir), secret
+			},
+			wantErr: []string{"refused", "HIDE: too many paths"},
+		},
+		{
+			name: "every path covered, the fiber runs",
+			hide: func(t *testing.T, dir string) ([]string, string) {
+				secretDir, secret := secretUnder(t, dir)
+				return []string{secretDir}, secret
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			hide, secret := tc.hide(t, dir)
+			be, w := warmDirect(t, dir, hide)
+			_, err := cloneDirect(t, be, w, dir, "gd/1-1", "")
+			if tc.wantErr != nil {
+				for _, want := range tc.wantErr {
+					if err == nil || !strings.Contains(err.Error(), want) {
+						t.Fatalf("clone = %v, want it refused with an error mentioning %q", err, want)
+					}
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("clone: %v", err)
+			}
+			ep := filepath.Join(dir, "gd-1-1.sock")
+			if got := talk(t, ep, "read "+secret); got != "-" {
+				t.Fatalf("read of the secret = %q, want - (covered)", got)
+			}
+			if got := talk(t, ep, "status CapEff"); got != "0000000000000000" {
+				t.Fatalf("CapEff = %q, want none", got)
+			}
+		})
+	}
+}
+
+// secretUnder makes dir/secrets/key, a secret no fiber may read.
+func secretUnder(t *testing.T, dir string) (secretDir, secret string) {
+	t.Helper()
+	secretDir = filepath.Join(dir, "secrets")
+	if err := os.Mkdir(secretDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	secret = filepath.Join(secretDir, "key")
+	if err := os.WriteFile(secret, []byte("agent only\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return secretDir, secret
+}

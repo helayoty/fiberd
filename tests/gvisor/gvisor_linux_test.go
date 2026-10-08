@@ -59,20 +59,8 @@ func newRuntime(t *testing.T) core.Runtime {
 	t.Helper()
 	name = fmt.Sprintf("gv%d", time.Now().UnixNano()%1_000_000)
 	state := filepath.Join(work, name)
-	t.Cleanup(func() {
-		if !t.Failed() {
-			return
-		}
-		// The workloads' stderr, for a post-mortem.
-		outs, _ := filepath.Glob(filepath.Join(state, "runsc-*.out"))
-		for _, o := range outs {
-			if data, err := os.ReadFile(o); err == nil && len(data) > 0 {
-				t.Logf("%s:\n%s", filepath.Base(o), data)
-			}
-		}
-	})
 	rt, err := host.New(host.Config{
-		Backend:    gvisorbackend.New(gvisorbackend.Options{Rootfs: rootfs, StateDir: state, Debug: true}),
+		Backend:    gvisorbackend.New(gvisorbackend.Options{Rootfs: rootfs, StateDir: state}),
 		Templates:  map[string]string{"default": "/bin/refzygote --heap-mb 64 --gvisor"},
 		CgroupRoot: filepath.Join(cgRoot, name),
 		RunDir:     filepath.Join("/tmp", "fz-"+name),
@@ -81,7 +69,7 @@ func newRuntime(t *testing.T) core.Runtime {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { rt.(interface{ Close() }).Close() })
+	t.Cleanup(rt.Close)
 	if rt.Tier() < core.TierSnapshot {
 		t.Skip("gvisor backend not usable here")
 	}
