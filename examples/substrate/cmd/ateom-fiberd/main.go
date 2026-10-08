@@ -155,6 +155,12 @@ func run(podUID, listen, credBundle, trustBundle, clientID, readyAddr string, pa
 	c.DeltaKey, c.DeltaSealKey = deltaKey, sealKey
 	c.DeltaTrust = os.Getenv("ATEOM_FIBERD_DELTA_TRUST")
 	c.Finish()
+	// The readiness check reads its own copy, since the agent's goroutine
+	// writes c. Its state dir is absolute, as the agent makes c's.
+	if abs, err := filepath.Abs(c.StateDir); err == nil {
+		c.StateDir = abs
+	}
+	health := c
 	// Load the keys before the agent starts, so a bad key stops the worker
 	// before it serves anything.
 	deltaKeys, err := c.LoadDeltaKeys()
@@ -214,11 +220,22 @@ func run(podUID, listen, credBundle, trustBundle, clientID, readyAddr string, pa
 	}
 	gs := grpc.NewServer()
 	ateompb.RegisterAteomServer(gs, svc)
+	// The worker ends when its agent exits, or when it refuses atelet's
+	// certificate. It would otherwise serve atelet with no agent behind it,
+	// or never be offered an actor.
+	fail := make(chan error, 2)
+	go func() {
+		err := <-agentErr
+		if err == nil {
+			err = errors.New("exited")
+		}
+		fail <- fmt.Errorf("agent: %w", err)
+	}()
 	// Reported once atelet's calls can reach the herder: an actor may be
 	// placed here as soon as atelet accepts it.
 	go func() {
 		if err := report.Run(ctx); err != nil && ctx.Err() == nil {
-			log.Printf("capacity: %v", err)
+			fail <- err
 		}
 	}()
 	go func() {
@@ -229,7 +246,7 @@ func run(podUID, listen, credBundle, trustBundle, clientID, readyAddr string, pa
 
 	// Readiness for the kubelet: the agent up and every minted template warm.
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /readyz", readyz(h.Ready, c.Healthz))
+	mux.HandleFunc("GET /readyz", readyz(h.Ready, health.Healthz))
 	go func() {
 		srv := &http.Server{Addr: readyAddr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 		go func() { <-ctx.Done(); _ = srv.Close() }()
@@ -239,10 +256,30 @@ func run(podUID, listen, credBundle, trustBundle, clientID, readyAddr string, pa
 	}()
 
 	log.Printf("ateom-fiberd: pod %s serving atelet at %s, ingress on %s, agent at %s, templates %v", podUID, sock, listen, agentAddr, templates)
-	err = gs.Serve(ul)
+	err = serve(ctx, gs, ul, fail)
 	_ = os.Remove(sock)
+	return err
+}
+
+// serve serves atelet on l until ctx ends, which is no error, or until
+// the worker fails, which stops gs and is serve's error.
+func serve(ctx context.Context, gs *grpc.Server, l net.Listener, fail <-chan error) error {
+	failed := make(chan error, 1)
+	go func() {
+		select {
+		case err := <-fail:
+			failed <- err
+			gs.Stop()
+		case <-ctx.Done():
+		}
+	}()
+	err := gs.Serve(l)
 	if ctx.Err() != nil {
 		return nil
+	}
+	select {
+	case err = <-failed:
+	default:
 	}
 	return err
 }

@@ -186,6 +186,16 @@ func TestReconcileLifecycle(t *testing.T) {
 				t.Fatalf("renewed too early: %s", st.ExpiresAt)
 			}
 		}},
+		{"a transient API error lands in the message and leaves placement and readiness as they were", func(t *testing.T) {
+			srv.Fail("GET", secretPath, 500, 1)
+			if err := c.Reconcile(ctx); err != nil {
+				t.Fatal(err)
+			}
+			st := status(t, srv)
+			if !st.Placed || st.Node != "kind-worker" || !st.Ready || st.Endpoint != "10.244.0.9:8484" || !strings.Contains(st.Message, "get secret: kube: 500") {
+				t.Fatalf("status after a transient error = %+v", st)
+			}
+		}},
 		{"past half-life the grant is renewed in the same Secret: same uid, later expiry", func(t *testing.T) {
 			now = now.Add(5 * time.Minute)
 			mark = len(srv.Calls())
@@ -223,6 +233,34 @@ func TestReconcileLifecycle(t *testing.T) {
 			st := status(t, srv)
 			if st.Placed || st.Ready || st.Node != "" || st.Endpoint != "" || st.GrantUID != "cg-uid-1" {
 				t.Fatalf("status after the Pod was replaced = %+v", st)
+			}
+		}},
+		// An evicted Pod, or one on a lost node, is Failed for good.
+		{"a Failed Pod is deleted, and the next pass creates a fresh one", func(t *testing.T) {
+			srv.Update(podPath, func(pod map[string]any) {
+				pod["spec"].(map[string]any)["nodeName"] = "kind-worker"
+				pod["status"] = map[string]any{"phase": "Failed", "podIP": "10.244.0.9", "conditions": []any{
+					map[string]any{"type": controller.ReadyCondition, "status": "True"}}}
+			})
+			mark = len(srv.Calls())
+			if err := c.Reconcile(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if got := verbs(srv.Calls()[mark:]); len(got) < 3 || got[2] != "DELETE "+podPath {
+				t.Fatalf("calls = %v, want the Failed Pod deleted", got)
+			}
+			if srv.Get(podPath) != nil {
+				t.Fatal("the Failed Pod was kept")
+			}
+			if st := status(t, srv); st.Placed || st.Ready || st.Node != "" || st.Endpoint != "" || st.Message != "" {
+				t.Fatalf("status with the Failed Pod deleted = %+v", st)
+			}
+			if err := c.Reconcile(ctx); err != nil {
+				t.Fatal(err)
+			}
+			pod := srv.Get(podPath)
+			if st, _ := pod["status"].(map[string]any); pod == nil || st["phase"] != nil {
+				t.Fatalf("pod after the next pass = %v, want a fresh one", pod)
 			}
 		}},
 		// Deletion is the garbage collector's job. The fake API server does it here.
@@ -473,6 +511,12 @@ func TestReconcileAPIFailures(t *testing.T) {
 		{name: "a Pod another writer created first is no failure",
 			prep:       func(srv *kubetest.Server, _ *controller.Controller) { srv.Fail("POST", podsPath, 409, 1) },
 			wantSecret: true},
+		{name: "deleting a Failed Pod failing is reported",
+			prep: func(srv *kubetest.Server, _ *controller.Controller) {
+				srv.Put(podPath, map[string]any{"metadata": map[string]any{"name": "conform-grant"}, "status": map[string]any{"phase": "Failed"}})
+				srv.Fail("DELETE", podPath, 500, 1)
+			},
+			message: "delete failed pod: kube: 500"},
 		{name: "reading the Secret failing is reported",
 			prep:    func(srv *kubetest.Server, _ *controller.Controller) { srv.Fail("GET", secretPath, 500, 1) },
 			message: "get secret: kube: 500"},

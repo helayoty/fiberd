@@ -248,6 +248,52 @@ func TestWaitTCP(t *testing.T) {
 	}
 }
 
+// TestServe checks that a worker serving atelet stops, with the error, when
+// it fails, as when its agent exits or it refuses atelet's certificate. A
+// worker that kept serving would hold actors with no agent behind them, or
+// sit unready forever. Its context ending is a clean stop.
+func TestServe(t *testing.T) {
+	errAgent := errors.New("agent: exited")
+	errRefused := errors.New("capacity: the peer is not " + capacity.AteletID)
+	cases := []struct {
+		name string
+		fail error // what the worker fails with, or nil for its context ending
+	}{
+		{name: "the agent exits", fail: errAgent},
+		{name: "atelet's certificate is refused", fail: errRefused},
+		{name: "the context ends"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			l, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			gs := grpc.NewServer()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			fail := make(chan error, 1)
+			done := make(chan error, 1)
+			go func() { done <- serve(ctx, gs, l, fail) }()
+			if tc.fail != nil {
+				fail <- tc.fail
+			} else {
+				cancel()
+				gs.GracefulStop() // as run does when ctx ends
+			}
+			select {
+			case err := <-done:
+				if !errors.Is(err, tc.fail) {
+					t.Fatalf("serve = %v, want %v", err, tc.fail)
+				}
+			case <-time.After(10 * time.Second):
+				gs.Stop()
+				t.Fatal("the worker kept serving atelet")
+			}
+		})
+	}
+}
+
 // freePort is a loopback address nothing listens on, for the servers run
 // starts on fixed addresses.
 func freePort(t *testing.T) string {

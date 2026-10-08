@@ -79,9 +79,11 @@ type fib struct {
 // the demand alone is not enough. The ladder is often still parking then,
 // since a checkpoint of a fiber throttled under memory.high takes a while
 // on a loaded host, and the rounds keep sampling, without dirtying more,
-// until the park shows or the deadline ends them.
-func roundsOver(allDone bool, running uint32, parked bool) bool {
-	return running == 0 || allDone && parked
+// until the park shows or the deadline ends them. A running count of 0
+// means every fiber gone only once a status has arrived (seen). Before
+// that it is 0 with every fiber alive.
+func roundsOver(allDone bool, running uint32, seen, parked bool) bool {
+	return seen && running == 0 || allDone && parked
 }
 
 func run(o opts) int {
@@ -211,7 +213,7 @@ func run(o opts) int {
 			maxCurrent = cur
 		}
 		psi, _ := grantCG.PSI()
-		running, parked, _ := status()
+		running, parked, seen := status()
 		var demand uint64
 		for _, f := range fs {
 			demand += f.dirtied
@@ -222,7 +224,7 @@ func run(o opts) int {
 			firstPark = time.Now()
 			firstParkPSI = psi.SomeAvg10
 		}
-		if roundsOver(allDone, running, !firstPark.IsZero()) {
+		if roundsOver(allDone, running, seen, !firstPark.IsZero()) {
 			break
 		}
 		time.Sleep(o.round)

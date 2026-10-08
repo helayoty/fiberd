@@ -12,7 +12,9 @@
 //	              atelet ──▶ the control plane's Worker record
 //
 // The report retries until atelet accepts it, because the Worker record
-// may not exist yet when the worker first comes up.
+// may not exist yet when the worker first comes up. A peer whose
+// certificate this worker refuses ends the report with that error, since
+// a retry would meet the same certificate.
 package capacity
 
 import (
@@ -29,6 +31,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"google.golang.org/grpc"
@@ -105,6 +108,8 @@ type Config struct {
 type Reporter struct {
 	cfg   Config
 	creds credentials.TransportCredentials
+	// refused is why this worker refused atelet's certificate, if it did.
+	refused atomic.Pointer[error]
 }
 
 // New checks the TLS material, so a worker with a broken bundle stops
@@ -124,6 +129,16 @@ func New(cfg Config) (*Reporter, error) {
 	if err != nil {
 		return nil, err
 	}
+	// gRPC reports a failed handshake only as Unavailable, so the refusal
+	// is kept here for Run.
+	verify := tc.VerifyConnection
+	tc.VerifyConnection = func(cs tls.ConnectionState) error {
+		err := verify(cs)
+		if err != nil {
+			r.refused.Store(&err)
+		}
+		return err
+	}
 	r.creds = credentials.NewTLS(tc)
 	return r, nil
 }
@@ -131,7 +146,8 @@ func New(cfg Config) (*Reporter, error) {
 const maxBackoff = 30 * time.Second
 
 // Run reports the capacity, retrying with a doubling wait until atelet
-// accepts it or ctx ends.
+// accepts it or ctx ends. It returns at once when this worker refuses the
+// peer's certificate (chain, SPIFFE id or node).
 func (r *Reporter) Run(ctx context.Context) error {
 	req := &ateletpb.SetWorkerCapacityRequest{Capacity: Read(r.cfg.Dir)}
 	for wait := r.cfg.Backoff; ; wait = min(2*wait, maxBackoff) {
@@ -142,6 +158,9 @@ func (r *Reporter) Run(ctx context.Context) error {
 		}
 		if ctx.Err() != nil {
 			return ctx.Err()
+		}
+		if p := r.refused.Load(); p != nil {
+			return *p
 		}
 		log.Printf("capacity: report to atelet at %s: %v (retrying in %s)", r.cfg.Socket, err, wait)
 		select {

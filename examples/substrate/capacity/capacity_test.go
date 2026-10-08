@@ -247,12 +247,7 @@ func TestReport(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			// A refused handshake is retried until the context ends.
-			timeout := 5 * time.Second
-			if tc.err != "" {
-				timeout = 200 * time.Millisecond
-			}
-			ctx, cancel := context.WithTimeout(context.Background(), timeout)
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			err = r.Run(ctx)
 			calls, got := a.result()
@@ -262,25 +257,13 @@ func TestReport(t *testing.T) {
 				}
 				return
 			}
-			if err == nil || got != nil {
-				t.Fatalf("Run = %v, atelet got %v, want a refused handshake", err, got)
-			}
-			// The handshake error is logged per attempt, then Run ends with ctx.
-			if _, herr := handshake(cfg); herr == nil || !strings.Contains(herr.Error(), tc.err) {
-				t.Fatalf("handshake = %v, want an error with %q", herr, tc.err)
+			// A refused certificate ends Run with why, without a retry
+			// that would meet the same certificate.
+			if err == nil || !strings.Contains(err.Error(), tc.err) || ctx.Err() != nil || got != nil {
+				t.Fatalf("Run = %v (ctx %v), atelet got %v, want an error with %q at once", err, ctx.Err(), got, tc.err)
 			}
 		})
 	}
-}
-
-// handshake makes one report and returns its error, so a test sees why
-// atelet was refused.
-func handshake(cfg capacity.Config) (*ateletpb.SetWorkerCapacityResponse, error) {
-	r, err := capacity.New(cfg)
-	if err != nil {
-		return nil, err
-	}
-	return r.Once(context.Background())
 }
 
 // TestNew checks the TLS material a worker refuses to start with.

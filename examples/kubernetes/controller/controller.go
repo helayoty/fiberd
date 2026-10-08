@@ -127,7 +127,9 @@ func (c *Controller) Reconcile(ctx context.Context) error {
 		}
 		if err := c.reconcileOne(ctx, cg); err != nil {
 			log.Printf("controller: %s/%s: %v", cg.Metadata.Namespace, cg.Metadata.Name, err)
-			_ = c.patchStatus(ctx, cg, Status{GrantUID: cg.Metadata.UID, PodName: PodName(cg), Message: err.Error()})
+			// Only the message and the names: a transient error says
+			// nothing about the Pod, so placed and ready stay as they were.
+			_ = c.patchStatus(ctx, cg, map[string]any{"grantUID": cg.Metadata.UID, "podName": PodName(cg), "message": err.Error()})
 		}
 	}
 	return nil
@@ -156,6 +158,14 @@ func (c *Controller) reconcileOne(ctx context.Context, cg *CapacityGrant) error 
 	// 1. The Pod.
 	var p Pod
 	switch err := c.Client.Get(ctx, c.podPath(cg), &p); {
+	case err == nil && p.Status.Phase == "Failed":
+		// A Failed Pod (evicted, or its node lost) never runs again. It is
+		// deleted, and the next pass creates a fresh one.
+		if err := c.Client.Delete(ctx, c.podPath(cg)); err != nil && !kube.IsNotFound(err) {
+			return fmt.Errorf("delete failed pod: %w", err)
+		}
+		log.Printf("controller: deleted failed grant pod %s/%s", cg.Metadata.Namespace, PodName(cg))
+		p = Pod{}
 	case err == nil:
 	case kube.IsNotFound(err):
 		want := BuildPod(cg, c.Issuer.URL, lease)
