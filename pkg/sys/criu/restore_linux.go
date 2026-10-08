@@ -15,16 +15,14 @@ import (
 	"time"
 )
 
-// Restore starts `criu restore` for the images in dir, inside the cgroup
-// whose directory descriptor is cgroupFD (so the restored tree lands in
-// that leaf), and returns once the tree is running or ctx ends.
-func (o Options) Restore(ctx context.Context, dir string, cgroupFD int) (*Restored, error) {
-	return o.RestoreWith(ctx, dir, cgroupFD, nil)
-}
-
-// RestoreWith is Restore with extra criu arguments (external mounts, a
-// new root filesystem for trees dumped inside a container).
-func (o Options) RestoreWith(ctx context.Context, dir string, cgroupFD int, extra []string) (*Restored, error) {
+// RestoreWith starts `criu restore` for the images in dir, inside the
+// cgroup whose directory descriptor is cgroupFD (so the restored tree
+// lands in that leaf), and returns once the tree is running or ctx ends.
+// extra holds more criu arguments (external mounts, a new root filesystem
+// for trees dumped inside a container). files[i] becomes criu's
+// descriptor 3+i, which an "--inherit-fd fd[3+i]:<key>" in extra hands to
+// the restored tree.
+func (o Options) RestoreWith(ctx context.Context, dir string, cgroupFD int, extra []string, files []*os.File) (*Restored, error) {
 	pidfile := filepath.Join(dir, "restore.pid")
 	_ = os.Remove(pidfile)
 	args := []string{"restore", "--no-default-config",
@@ -33,6 +31,7 @@ func (o Options) RestoreWith(ctx context.Context, dir string, cgroupFD int, extr
 		"-v2", "--log-file", "restore.log"}
 	args = append(args, extra...)
 	cmd := exec.Command(o.bin(), args...)
+	cmd.ExtraFiles = files
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if cgroupFD >= 0 {
 		cmd.SysProcAttr.UseCgroupFD = true

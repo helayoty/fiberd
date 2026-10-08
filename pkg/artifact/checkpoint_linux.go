@@ -74,6 +74,7 @@ func checkpointZygote(ctx context.Context, o BuildOptions, imagesDir string) err
 			return fmt.Errorf("artifact: zygote did not become ready: %w", err)
 		}
 	case err := <-waited:
+		waited <- err // the deferred cleanup waits on it too
 		return fmt.Errorf("artifact: zygote exited before READY: %w", err)
 	case <-time.After(o.ReadyTimeout):
 		return errors.New("artifact: zygote did not become ready in time")

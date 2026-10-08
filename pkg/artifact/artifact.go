@@ -264,6 +264,66 @@ func Pull(ctx context.Context, ref, dst string, plainHTTP bool) (Config, error) 
 	return cfg, nil
 }
 
+// Reverify re-checks a template cache entry a previous Pull left. The
+// directory must still pack to digest and its zygote still hash to its
+// config. It then replaces images/ with a fresh unpack of the verified
+// images.tar. Without this, anything that can write the cache could change
+// what every later warm runs.
+func Reverify(ctx context.Context, dir, digest string) (Config, error) {
+	dir, err := filepath.Abs(dir)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg, err := ReadConfig(dir)
+	if err != nil {
+		return Config{}, err
+	}
+	fs, err := file.New(dir)
+	if err != nil {
+		return Config{}, err
+	}
+	desc, err := pack(ctx, fs, dir, cfg)
+	_ = fs.Close()
+	if err != nil {
+		return Config{}, err
+	}
+	if got := desc.Digest.String(); got != digest {
+		return Config{}, fmt.Errorf("artifact: cached %s packs to %s", digest, got)
+	}
+	sum, err := fileSHA256(ZygotePath(dir))
+	if err != nil {
+		return Config{}, err
+	}
+	if sum != cfg.ZygoteSHA256 {
+		return Config{}, fmt.Errorf("artifact: cached zygote sha256 %s does not match config %s", sum, cfg.ZygoteSHA256)
+	}
+	if err := os.Chmod(ZygotePath(dir), 0o755); err != nil {
+		return Config{}, err
+	}
+	if cfg.HasImages {
+		// Unpack beside, then swap. A parent already mapped from the old
+		// files keeps them until it is closed.
+		fresh := ImagesDir(dir) + ".verified"
+		_ = os.RemoveAll(fresh)
+		if err := untar(filepath.Join(dir, fileImages), fresh); err != nil {
+			_ = os.RemoveAll(fresh)
+			return Config{}, err
+		}
+		old := ImagesDir(dir) + ".old"
+		_ = os.RemoveAll(old)
+		if err := os.Rename(ImagesDir(dir), old); err != nil && !errors.Is(err, os.ErrNotExist) {
+			_ = os.RemoveAll(fresh)
+			return Config{}, err
+		}
+		if err := os.Rename(fresh, ImagesDir(dir)); err != nil {
+			return Config{}, err
+		}
+		_ = os.RemoveAll(old)
+	}
+	cfg.Digest = digest
+	return cfg, nil
+}
+
 func repository(ref string, plainHTTP bool) (*remote.Repository, string, error) {
 	name, target := ref, ""
 	if i := strings.Index(ref, "@"); i >= 0 {
@@ -315,7 +375,9 @@ func tarDir(src, dst string) error {
 		return err
 	}
 	for _, e := range entries {
-		if e.IsDir() {
+		// Regular files only, as untar unpacks: a symlink would fail the
+		// copy and a FIFO would block it.
+		if !e.Type().IsRegular() {
 			continue
 		}
 		info, err := e.Info()

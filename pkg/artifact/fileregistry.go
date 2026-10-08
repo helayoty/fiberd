@@ -8,8 +8,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
+
+	"github.com/go-jose/go-jose/v4"
 )
 
 // A file registry: the directory-artifact operations (PushDir, Resolve,
@@ -97,31 +98,22 @@ func resolveTarget(repoDir, target string) (string, bool, error) {
 	return d, true, nil
 }
 
-func filePushDir(dir, ref, artifactType string, annotations map[string]string) (string, error) {
+func filePushDir(dir, ref, artifactType string, annotations map[string]string, signer *jose.JSONWebKey) (string, error) {
 	repoDir, tag, err := fileRef(ref)
 	if err != nil {
 		return "", err
 	}
-	entries, err := os.ReadDir(dir)
+	files, err := dirFiles(dir)
 	if err != nil {
 		return "", err
 	}
-	m := storedManifest{ArtifactType: artifactType, Annotations: annotations}
-	for _, e := range entries {
-		if !e.Type().IsRegular() || strings.HasSuffix(e.Name(), ".log") || strings.HasSuffix(e.Name(), ".tmp") {
-			continue
-		}
-		sum, err := fileSHA256(filepath.Join(dir, e.Name()))
-		if err != nil {
-			return "", err
-		}
-		info, err := e.Info()
-		if err != nil {
-			return "", err
-		}
-		m.Files = append(m.Files, fileEntry{Name: e.Name(), SHA256: sum, Size: info.Size()})
+	if annotations, err = signed(signer, artifactType, annotations, files); err != nil {
+		return "", err
 	}
-	sort.Slice(m.Files, func(i, j int) bool { return m.Files[i].Name < m.Files[j].Name })
+	m := storedManifest{ArtifactType: artifactType, Annotations: annotations}
+	for _, f := range files {
+		m.Files = append(m.Files, fileEntry{Name: f.Name, SHA256: strings.TrimPrefix(f.Digest, "sha256:"), Size: f.Size})
+	}
 	mb, err := json.Marshal(m)
 	if err != nil {
 		return "", err
@@ -184,14 +176,27 @@ func fileResolve(ref string) (Located, bool, error) {
 	if err != nil {
 		return Located{}, false, err
 	}
-	return Located{Digest: digest, ArtifactType: m.ArtifactType, Annotations: m.Annotations}, true, nil
+	return Located{Digest: digest, ArtifactType: m.ArtifactType, Annotations: m.Annotations, Files: m.files()}, true, nil
 }
 
+func (m storedManifest) files() []File {
+	files := make([]File, 0, len(m.Files))
+	for _, f := range m.Files {
+		files = append(files, File{Name: f.Name, Digest: "sha256:" + f.SHA256, Size: f.Size})
+	}
+	return files
+}
+
+// readFileManifest reads the manifest stored under digest and checks it
+// hashes to it, as a registry's content addressing would.
 func readFileManifest(repoDir, digest string) (storedManifest, error) {
 	var m storedManifest
 	b, err := os.ReadFile(filepath.Join(blobDir(repoDir, digest), "manifest.json"))
 	if err != nil {
 		return m, err
+	}
+	if sum := sha256.Sum256(b); "sha256:"+hex.EncodeToString(sum[:]) != digest {
+		return m, fmt.Errorf("artifact: manifest under %s does not hash to it", digest)
 	}
 	return m, json.Unmarshal(b, &m)
 }
@@ -216,8 +221,13 @@ func filePullDir(ref, dst string) (string, error) {
 		return "", err
 	}
 	for _, f := range m.Files {
-		if err := copyFile(filepath.Join(blobDir(repoDir, digest), "files", f.Name), filepath.Join(dst, f.Name), 0o644); err != nil {
+		out := filepath.Join(dst, filepath.Base(f.Name))
+		if err := copyFile(filepath.Join(blobDir(repoDir, digest), "files", f.Name), out, 0o644); err != nil {
 			return "", fmt.Errorf("artifact: pull %s: %w", ref, err)
+		}
+		if sum, err := fileSHA256(out); err != nil || sum != f.SHA256 {
+			_ = os.Remove(out)
+			return "", fmt.Errorf("artifact: pull %s: %s does not match its manifest digest", ref, f.Name)
 		}
 	}
 	return digest, nil
