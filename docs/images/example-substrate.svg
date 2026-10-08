@@ -1,6 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="1100" viewBox="0 0 1440 1100" role="img" aria-labelledby="example-substrate-title example-substrate-desc">
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="995" viewBox="0 0 1440 995" role="img" aria-labelledby="example-substrate-title example-substrate-desc">
   <title id="example-substrate-title">Substrate owns placement and transport; fiberd owns actor lifecycles</title>
-  <desc id="example-substrate-desc">Two separate views distinguish responsibilities from movement of state. Above, atelet sends Ateom lifecycle calls over a shared local Unix socket to a worker's herder with embedded fiberd. Independently, atenet-router sends workload traffic through mTLS ingress to the actor's local fiber. Below, a suspend and restore transfers data between workers. Worker A disables routing, parks synchronously and publishes the session; ExportDelta writes portable archives and metadata and deletes the source session's registry tag. Substrate and atelet transport those files. Worker B's ImportDelta verifies the signature, expiry and destination grant's session domain, opens the sealed state, then re-seals and publishes it for the destination session. Clone finds and claims that imported publication and resumes the actor under a new fence. Import is not itself a running actor, and the file transfer is not a direct registry claim between workers. This demo uses worker-local file registries, accepts full process-memory snapshot scope, and runs one actor per worker. Compatible templates and trusted signing and sealing keys are required; registry claims are not a consensus handoff.</desc>
+  <desc id="example-substrate-desc">Two separate views distinguish responsibilities from movement of state. Above, atelet sends Ateom lifecycle calls over a shared local Unix socket to a worker's herder with embedded fiberd. Independently, atenet-router sends workload traffic over mTLS to the worker ingress, which ends mTLS and proxies plain HTTP to the actor's local fiber. Below, a suspend and restore transfers data between workers. Worker A disables routing, parks synchronously and publishes the session; Export writes portable archives and metadata and deletes the source session's registry tag. Substrate and atelet transport those files. Worker B's import verifies the signature, expiry and destination grant's session domain, opens the sealed state, then re-seals and publishes it for the destination session. Clone finds and claims that imported publication and resumes the actor under a new fence. Each worker runs one actor at a time.</desc>
   <style>
     :root{--bg:#f7f9fc;--panel:#fff;--ink:#172033;--muted:#5d6b7d;--border:#b8c4d4;--blue:#3165b5;--blue-bg:#eaf1ff;--teal:#13776f;--teal-bg:#e8f7f4;--violet:#704aa1;--violet-bg:#f2edfa;--amber:#a76500;--amber-bg:#fff3d6;--green:#287a4d;--green-bg:#e8f6ed}
     @media(prefers-color-scheme:dark){:root{--bg:#0d1117;--panel:#161b22;--ink:#e6edf3;--muted:#a3adba;--border:#3d4652;--blue:#79a7ff;--blue-bg:#17243d;--teal:#53c7b8;--teal-bg:#102923;--violet:#c09cff;--violet-bg:#251b35;--amber:#f0b44d;--amber-bg:#30240f;--green:#63cf8e;--green-bg:#142b1e}}
@@ -14,14 +14,14 @@
     <marker id="example-substrate-amber-arrow" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="12" markerHeight="12" markerUnits="userSpaceOnUse" orient="auto"><path d="M1 1 11 6 1 11Z" fill="var(--amber)"/></marker>
     <marker id="example-substrate-violet-arrow" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="12" markerHeight="12" markerUnits="userSpaceOnUse" orient="auto"><path d="M1 1 11 6 1 11Z" fill="var(--violet)"/></marker>
   </defs>
-  <rect class="bg" width="1440" height="1100"/>
+  <rect class="bg" width="1440" height="995"/>
   <text class="title" x="48" y="66">Substrate moves actors; fiberd restores their state.</text>
   <text class="secondary muted" x="48" y="100">Placement and request routing stay in Substrate. Local lifecycle and snapshot mechanics stay in the worker.</text>
   <path class="divider" d="M48 130H1392"/>
 
   <text class="heading blue" x="48" y="181">Control is not workload traffic</text>
   <rect class="scope" x="872" y="166" width="520" height="322" rx="14"/>
-  <text class="label teal" x="900" y="200">Worker · one actor in this phase</text>
+  <text class="label teal" x="900" y="200">Worker · one actor at a time</text>
   <rect class="service" x="48" y="211" width="310" height="99" rx="4"/>
   <text class="label blue" x="72" y="249">atelet</text>
   <text class="secondary" x="72" y="282">Substrate lifecycle driver</text>
@@ -36,12 +36,13 @@
   <text class="secondary" x="72" y="436">Route assigned actor</text>
   <rect class="service router" x="904" y="374" width="236" height="83" rx="4"/>
   <text class="label teal" x="926" y="410">Worker ingress</text>
-  <text class="secondary" x="926" y="439">mTLS → local proxy</text>
+  <text class="secondary" x="926" y="439">Ends mTLS · proxies</text>
   <circle class="fiber" cx="1290" cy="416" r="44"/>
   <text class="label violet center" x="1290" y="422">Fiber</text>
   <path class="flow data" d="M358 416H904" marker-end="url(#example-substrate-teal-arrow)"/>
-  <text class="secondary teal" x="454" y="397">mTLS workload tunnel</text>
+  <text class="secondary teal" x="454" y="397">mTLS workload traffic</text>
   <path class="flow data" d="M1140 416H1246" marker-end="url(#example-substrate-teal-arrow)"/>
+  <text class="secondary teal center" x="1191" y="402">HTTP</text>
   <path class="flow activation" d="M1290 313V372" marker-end="url(#example-substrate-violet-arrow)"/>
   <text class="secondary violet" x="978" y="346">Clone · Park · Release</text>
 
@@ -51,7 +52,7 @@
   <text class="heading teal" x="80" y="628">Worker A · suspend</text>
   <text class="label blue" x="80" y="682">1 · Park(sync)</text>
   <text class="secondary" x="80" y="713">Disable routing; publish session</text>
-  <text class="label blue" x="80" y="778">2 · ExportDelta</text>
+  <text class="label blue" x="80" y="778">2 · Export</text>
   <text class="secondary" x="80" y="809">Write files; retire source registry tag</text>
   <path class="divider" d="M80 851H426"/>
   <text class="secondary muted" x="80" y="889">Source is no longer serving</text>
@@ -66,20 +67,14 @@
   <text class="secondary center" x="720" y="672">upload + download</text>
   <path class="flow transfer" d="M458 789H566" marker-end="url(#example-substrate-amber-arrow)"/>
   <path class="flow transfer" d="M874 789H934V682H982" marker-end="url(#example-substrate-amber-arrow)"/>
-  <text class="secondary muted center" x="720" y="899">Data artifact, not a service</text>
 
   <rect class="scope" x="982" y="590" width="410" height="365" rx="14"/>
   <text class="heading teal" x="1014" y="628">Worker B · restore</text>
-  <text class="label blue" x="1014" y="682">4 · ImportDelta</text>
+  <text class="label blue" x="1014" y="682">4 · Import</text>
   <text class="secondary" x="1014" y="713">Verify + open; re-seal and publish</text>
   <text class="label violet" x="1014" y="778">5 · Clone → RESUME</text>
   <text class="secondary" x="1014" y="809">Find + claim imported session</text>
   <path class="divider" d="M1014 851H1360"/>
   <text class="secondary" x="1014" y="889">State continues under a new fence</text>
   <text class="secondary muted" x="1014" y="920">Route to destination endpoint</text>
-
-  <rect class="boundary note" x="48" y="981" width="1344" height="57" rx="4"/>
-  <text class="secondary blue" x="72" y="1005">Import is not activation: it publishes into the destination's local file registry; the following Clone claims and resumes.</text>
-  <text class="secondary blue" x="72" y="1028">Trust is checked against the destination grant's session domain, not the unsigned export metadata's domain.</text>
-  <text class="secondary muted" x="48" y="1072">Demo: full process-memory scope · compatible template + trusted signing / sealing keys · registry claims are not a consensus handoff.</text>
 </svg>
