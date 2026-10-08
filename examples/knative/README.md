@@ -4,7 +4,7 @@ This directory is an example of a **consumer** of fiberd's protocol, not
 part of fiberd. It is its own Go module and builds against the checkout
 it sits in. Nothing under it is imported by fiberd.
 
-![The activator holds a revision grant, calls Clone, forwards the request to the returned fiber endpoint, parks the session when idle, and resumes it on the next request.](../../docs/images/example-knative.svg)
+![Request and idle sequence: the activator calls Clone for CREATE or RESUME, forwards workload data to the guest, reuses a cached endpoint as local ATTACH without a Clone RPC, and parks the session after idle time.](../../docs/images/example-knative.svg)
 
 The CREATE, ATTACH, RESUME, SHED, and DEFERRED_FALLBACK semantics are defined
 in the [protocol reference](../../docs/protocol.md). This page covers only how
@@ -55,8 +55,7 @@ its parked state.
 
 The consumer side of the protocol itself is fiberd's `pkg/consumer`: a
 client for Clone, Park, Release and Watch whose errors are typed
-(`*Shed`, `*Deferred`, `*TierGap`) so a consumer branches on them, plus
-`CloneRetry`, which waits out SHED by `retry_after`.
+(`*Shed`, `*Deferred`, `*TierGap`) so a consumer branches on them.
 
 ## Running it
 

@@ -341,6 +341,11 @@ func (s *Service) Kill(ctx context.Context, r *taskAPI.KillRequest) (*emptypb.Em
 	if err != nil {
 		return nil, err
 	}
+	if r.ExecID != "" {
+		// The shim makes no execs. Stopping the container here would
+		// park or release the Pod's fiber.
+		return nil, errgrpc.ToGRPC(errdefs.ErrNotImplemented)
+	}
 	status := uint32(0)
 	if r.Signal == uint32(syscall.SIGKILL) {
 		status = 137
@@ -354,10 +359,13 @@ func (s *Service) Wait(ctx context.Context, r *taskAPI.WaitRequest) (*taskAPI.Wa
 	if err != nil {
 		return nil, err
 	}
+	if r.ExecID != "" {
+		return nil, errgrpc.ToGRPC(errdefs.ErrNotImplemented)
+	}
 	select {
 	case <-c.exited:
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		return nil, errgrpc.ToGRPC(ctx.Err())
 	}
 	return &taskAPI.WaitResponse{ExitStatus: c.exitStatus, ExitedAt: timestamppb.New(c.exitedAt)}, nil
 }
@@ -383,6 +391,9 @@ func (s *Service) State(_ context.Context, r *taskAPI.StateRequest) (*taskAPI.St
 	c, err := s.get(r.ID)
 	if err != nil {
 		return nil, err
+	}
+	if r.ExecID != "" {
+		return nil, errgrpc.ToGRPC(errdefs.ErrNotImplemented)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()

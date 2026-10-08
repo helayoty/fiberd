@@ -4,7 +4,12 @@ This directory is an example of a **consumer** of fiberd's protocol, not
 part of fiberd. It is its own Go module (containerd's dependency tree
 stays here) and builds against the checkout it sits in.
 
-![A Pod using the fiberd RuntimeClass reaches the shim through containerd. The shim maps container Create and Kill to Clone, Park, and Release, and a later Pod on the same session resumes the parked fiber.](../../docs/images/example-kata.svg)
+![One node-side shim bridges containerd to a separate fiberd home. Pod 1 Create clones a fiber; stopping with Park retains session data at the home; replacement Pod 2 Create resumes that session with a new fence. Fibers and parked data stay outside the application Pods.](../../docs/images/example-kata.svg)
+
+The shim runs beside containerd on the node, not in an application or grant
+Pod. The two application Pods name the same grant, home and session;
+successful Park leaves state at that home for replacement Create to resume
+with a new fence. This continuity requires a checkpoint-capable backend.
 
 The fiber lifecycle and request semantics are defined in
 [Runtime model](../../docs/runtime-model.md) and

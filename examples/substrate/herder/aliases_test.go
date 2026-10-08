@@ -22,3 +22,13 @@ const (
 	scopeDataOnGolden = ateompb.SnapshotScope_SNAPSHOT_SCOPE_DATA_ON_GOLDEN
 	noWorkload        = ateompb.NoSampleReason_NO_SAMPLE_REASON_NO_WORKLOAD
 )
+
+type (
+	ateompbNoSampleReason = ateompb.NoSampleReason
+	ateompbStatsSample    = ateompb.WorkloadStatsSample
+)
+
+const (
+	notMeasurableYet = ateompb.NoSampleReason_NO_SAMPLE_REASON_NOT_MEASURABLE_YET
+	sourceCgroup     = ateompb.StatsSource_STATS_SOURCE_CGROUP
+)

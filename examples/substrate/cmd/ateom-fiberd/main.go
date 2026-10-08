@@ -47,29 +47,47 @@ func env(name, def string) string {
 }
 
 func main() {
-	// Substrate's worker container arguments (cmd/atecontroller); the
-	// egress and CONNECT listeners are accepted and not served: fibers
-	// use the Pod's network directly and have one port.
-	podUID := flag.String("pod-uid", env("POD_UID", ""), "the worker Pod's uid (Substrate keys the herder by it)")
-	listen := flag.String("atunnel-listen-address", ":443", "ingress: where atenet-router connects (mTLS)")
-	_ = flag.String("atunnel-connect-listen-address", ":8443", "accepted, not served (CONNECT tunnels)")
-	credBundle := flag.String("atunnel-credential-bundle", "", "PEM with this Pod's key and certificate (projected by Substrate)")
-	trustBundle := flag.String("atunnel-trust-bundle", "", "PEM with the CAs the router's certificate chains to")
-	_ = flag.String("atunnel-egress-listen-address", "", "accepted, not served (egress gateway)")
-	_ = flag.String("atunnel-egress-trust-bundle", "", "accepted, unused")
-	clientID := flag.String("atunnel-client-identity", ingress.DefaultAllowedClientID, "the SPIFFE id the router presents")
-	readyAddr := flag.String("readiness-listen-address", "0.0.0.0:8080", "the kubelet's /readyz")
-	basePath := flag.String("base-path", herder.DefaultBase, "the hostPath shared with atelet")
-	_ = flag.String("otlp-relay-socket", "", "accepted, unused")
-	_ = flag.String("log-level", "", "accepted, unused")
-	_ = flag.Bool("version", false, "accepted")
-	flag.Parse()
-	if *podUID == "" {
-		log.Fatal("ateom-fiberd: -pod-uid (or POD_UID) is required")
+	o, err := parseArgs(flag.CommandLine, os.Args[1:])
+	if err != nil {
+		log.Fatal(err)
 	}
-	if err := run(*podUID, *listen, *credBundle, *trustBundle, *clientID, *readyAddr, herder.Paths{Base: *basePath}); err != nil {
+	if err := run(o.podUID, o.listen, o.credBundle, o.trustBundle, o.clientID, o.readyAddr, o.paths); err != nil {
 		log.Fatalf("ateom-fiberd: %v", err)
 	}
+}
+
+// options are the worker container's arguments that run uses.
+type options struct {
+	podUID, listen, credBundle, trustBundle, clientID, readyAddr string
+	paths                                                        herder.Paths
+}
+
+// parseArgs reads Substrate's worker container arguments
+// (cmd/atecontroller) from args into fs. The egress and CONNECT listeners
+// are accepted and not served: fibers use the Pod's network directly and
+// have one port.
+func parseArgs(fs *flag.FlagSet, args []string) (options, error) {
+	podUID := fs.String("pod-uid", env("POD_UID", ""), "the worker Pod's uid (Substrate keys the herder by it)")
+	listen := fs.String("atunnel-listen-address", ":443", "ingress: where atenet-router connects (mTLS)")
+	_ = fs.String("atunnel-connect-listen-address", ":8443", "accepted, not served (CONNECT tunnels)")
+	credBundle := fs.String("atunnel-credential-bundle", "", "PEM with this Pod's key and certificate (projected by Substrate)")
+	trustBundle := fs.String("atunnel-trust-bundle", "", "PEM with the CAs the router's certificate chains to")
+	_ = fs.String("atunnel-egress-listen-address", "", "accepted, not served (egress gateway)")
+	_ = fs.String("atunnel-egress-trust-bundle", "", "accepted, unused")
+	clientID := fs.String("atunnel-client-identity", ingress.DefaultAllowedClientID, "the SPIFFE id the router presents")
+	readyAddr := fs.String("readiness-listen-address", "0.0.0.0:8080", "the kubelet's /readyz")
+	basePath := fs.String("base-path", herder.DefaultBase, "the hostPath shared with atelet")
+	_ = fs.String("otlp-relay-socket", "", "accepted, unused")
+	_ = fs.String("log-level", "", "accepted, unused")
+	_ = fs.Bool("version", false, "accepted")
+	if err := fs.Parse(args); err != nil {
+		return options{}, err
+	}
+	if *podUID == "" {
+		return options{}, errors.New("ateom-fiberd: -pod-uid (or POD_UID) is required")
+	}
+	return options{podUID: *podUID, listen: *listen, credBundle: *credBundle, trustBundle: *trustBundle,
+		clientID: *clientID, readyAddr: *readyAddr, paths: herder.Paths{Base: *basePath}}, nil
 }
 
 func run(podUID, listen, credBundle, trustBundle, clientID, readyAddr string, paths herder.Paths) error {
@@ -96,10 +114,14 @@ func run(podUID, listen, credBundle, trustBundle, clientID, readyAddr string, pa
 		return err
 	}
 	issuerURL := "http://" + il.Addr().String()
+	iso, err := core.ParseIsolation(env("ATEOM_FIBERD_ISOLATION", "UNTRUSTED"))
+	if err != nil {
+		return fmt.Errorf("ATEOM_FIBERD_ISOLATION: %w", err)
+	}
 	h, err := subhome.New(subhome.Config{
 		Audience: podUID, IssuerURL: issuerURL, ProbeSocket: paths.SupportSocket(),
-		CgroupRoot: os.Getenv("ATEOM_FIBERD_CGROUP_ROOT"),
-		Scope:      []core.ScopeClaim{{Name: "worker_pod_uid", Value: podUID}, {Name: "node", Value: os.Getenv("NODE_NAME")}},
+		CgroupRoot: os.Getenv("ATEOM_FIBERD_CGROUP_ROOT"), Isolation: iso,
+		Scope: []core.ScopeClaim{{Name: "worker_pod_uid", Value: podUID}, {Name: "node", Value: os.Getenv("NODE_NAME")}},
 	})
 	if err != nil {
 		return err
@@ -117,16 +139,25 @@ func run(podUID, listen, credBundle, trustBundle, clientID, readyAddr string, pa
 	c.Bind(flag.NewFlagSet("fiberd", flag.ContinueOnError))
 	c.Listen, c.NodeID, c.StateDir = agentAddr, podUID, stateDir
 	c.Verifier, c.Issuer = "jwks", issuerURL
+	c.InsecurePlaintext = true
 	c.RuntimeName = env("ATEOM_FIBERD_RUNTIME", "proc")
 	c.CRIUBin = env("ATEOM_FIBERD_CRIU", c.CRIUBin)
 	c.Templates = templates
 	c.RunDir = env("ATEOM_FIBERD_RUN_DIR", "/run/fiberd")
 	c.DeltaRegistry = registry
-	c.AdminPath = filepath.Join(stateDir, "admin.sock")
+	c.DeltaKey, c.DeltaTrust = os.Getenv("ATEOM_FIBERD_DELTA_KEY"), os.Getenv("ATEOM_FIBERD_DELTA_TRUST")
+	c.DeltaSealKey = os.Getenv("ATEOM_FIBERD_DELTA_SEAL_KEY")
 	c.Finish()
+	// Load the keys before the agent starts, or it would race this to
+	// generate them. Snapshots restore on other workers only when they
+	// share the keys.
+	deltaKeys, err := c.LoadDeltaKeys()
+	if err != nil {
+		return err
+	}
 	agentErr := make(chan error, 1)
 	go func() {
-		agentErr <- agent.Run(&c, func(*agent.Config, core.Verifier, *grant.Cache) (fhome.Home, error) { return h, nil })
+		agentErr <- agent.Run(&c, func(*agent.Config, *grant.Cache) (fhome.Home, error) { return h, nil })
 	}()
 	if err := waitTCP(ctx, agentAddr, 60*time.Second, agentErr); err != nil {
 		return fmt.Errorf("agent did not come up: %w", err)
@@ -155,7 +186,7 @@ func run(podUID, listen, credBundle, trustBundle, clientID, readyAddr string, pa
 	// The herder atelet drives.
 	svc := herder.New(herder.Config{
 		Client: client, Grants: h, Router: ing, Paths: paths,
-		Host: host.Config{DeltaRegistry: registry, HomeID: podUID},
+		Host: host.Config{DeltaRegistry: registry, DeltaKeys: deltaKeys, HomeID: podUID},
 	})
 	go svc.Run(ctx)
 	if err := os.MkdirAll(paths.AteomDir(podUID), 0o700); err != nil {

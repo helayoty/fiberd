@@ -14,6 +14,7 @@ spec:
   fibers: { max: 8, warm: 1 }
   wBudget: 64Mi
   minTier: FIBER_CHECKPOINT
+  isolation: TRUSTED
   lease: 10m
   pod:
     image: fiberd:kind

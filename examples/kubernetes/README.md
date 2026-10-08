@@ -5,7 +5,7 @@ not part of fiberd. It is its own Go module, and it builds against the
 checkout it sits in (`replace github.com/helayoty/fiberd => ../..`).
 Nothing under it is imported by fiberd.
 
-![The controller reconciles one CapacityGrant into a signed grant and one grant Pod. fiberd-k8s admits the grant, warms one template, publishes readiness, and returns fiber endpoints on the Pod IP.](../../docs/images/example-kubernetes.svg)
+![Controller setup is separate from local serving: a CapacityGrant resource produces one Pod and an owned grant Secret; projection and warm-up precede the custom readiness gate, while repeated Clone and direct fiber traffic stay off the controller path.](../../docs/images/example-kubernetes.svg)
 
 ## Canonical model
 
@@ -31,7 +31,7 @@ readiness, fence-persistence, and scope-loss limits are documented in
 | `kube/` | The slice of the Kubernetes API this needs, as plain HTTPS requests with the projected token. No client-go: the agent stays a small static binary. `kube/kubetest` is an in-memory API server for the tests. |
 | `controller/`, `cmd/grant-controller` | fiberd's reference issuer as a controller: the key in a Secret, discovery and JWKS on a Service, and every `CapacityGrant` resource (`kind/manifests/10-crd.yaml`) reconciled into one grant Pod running `fiberd-k8s` and one signed grant addressed to it, projected through a Secret and renewed at half-life. The resource's status mirrors placement, the gate and the endpoint. |
 | `cmd/fiberd-k8s` | The agent binary for grant Pods. |
-| `kind/` | The acceptance: an image with both binaries, the reference zygote and criu; a one-node kind cluster; manifests for the controller, its RBAC, the grant Pods' service account and two `CapacityGrant`s; and `conform.sh`, which waits for the grant Pod's readiness gate, runs fiberd's conformance suite (C1 to C10) from the host against the Pod, and runs the overcommit storm inside a second Pod under a 384 MiB limit. |
+| `kind/` | The acceptance: the image from `../../docker/kubernetes/Dockerfile`; a one-node kind cluster; manifests for the controller, its RBAC, the grant Pods' service account and two `CapacityGrant`s; and `conform.sh`, which waits for the grant Pod's readiness gate, runs fiberd's conformance suite (C1 to C10) from the host against the Pod, and runs the overcommit storm inside a second Pod under a 384 MiB limit. |
 
 ## Running it
 

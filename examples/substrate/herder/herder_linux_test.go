@@ -13,11 +13,15 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/go-jose/go-jose/v4"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 
 	"github.com/helayoty/fiberd/pkg/artifact"
@@ -41,6 +45,24 @@ import (
 // fake atelet directories under a temp root. Needs the dev container
 // (a writable cgroup root, gcc, criu); skipped elsewhere.
 
+// workerKeys are the delta keys every worker shares. A pool's workers must
+// share them so a snapshot taken on one restores on another.
+var workerKeys = sync.OnceValue(func() artifact.Keys {
+	k, err := grant.GenerateKey(jose.EdDSA)
+	if err != nil {
+		panic(err)
+	}
+	sk, err := artifact.GenerateSealKey()
+	if err != nil {
+		panic(err)
+	}
+	seal, err := artifact.SealKeyFromJWK(sk)
+	if err != nil {
+		panic(err)
+	}
+	return artifact.Keys{Signer: k, Seal: seal}
+})
+
 func zygote(t *testing.T) (bin, cgRoot string) {
 	t.Helper()
 	cgRoot = os.Getenv("FIBERD_CGROUP_ROOT")
@@ -53,7 +75,7 @@ func zygote(t *testing.T) (bin, cgRoot string) {
 		_ = f.Close()
 	}
 	bin = filepath.Join(t.TempDir(), "refzygote")
-	build := exec.Command("gcc", "-O2", "-pthread", "-o", bin, "../../../hack/zygote/refzygote.c", "../../../hack/zygote/libfiberzygote.c")
+	build := exec.Command("gcc", "-O2", "-pthread", "-o", bin, "../../../zygote/refzygote.c", "../../../zygote/libfiberzygote.c")
 	build.Stderr = os.Stderr
 	if err := build.Run(); err != nil {
 		t.Skipf("cannot build refzygote: %v", err)
@@ -77,7 +99,8 @@ func newWorker(t *testing.T, name, bin, cgRoot, base string) *worker {
 	// The home: its own issuer on a loopback server.
 	isrv := httptest.NewServer(nil)
 	t.Cleanup(isrv.Close)
-	h, err := subhome.New(subhome.Config{Audience: name, IssuerURL: isrv.URL, CgroupRoot: filepath.Join(cgRoot, name+fmt.Sprint(time.Now().UnixNano()%1_000_000))})
+	h, err := subhome.New(subhome.Config{Audience: name, IssuerURL: isrv.URL, CgroupRoot: filepath.Join(cgRoot, name+fmt.Sprint(time.Now().UnixNano()%1_000_000)),
+		Isolation: core.Trusted})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,6 +115,7 @@ func newWorker(t *testing.T, name, bin, cgRoot, base string) *worker {
 		DeltaDir:      t.TempDir(),
 		TemplateCache: t.TempDir(),
 		DeltaRegistry: artifact.FileScheme + filepath.Join(t.TempDir(), "registry"),
+		DeltaKeys:     workerKeys(),
 		HomeID:        name,
 	}
 	rt, err := host.New(hc)
@@ -99,9 +123,7 @@ func newWorker(t *testing.T, name, bin, cgRoot, base string) *worker {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		if c, ok := rt.(interface{ Close() }); ok {
-			c.Close()
-		}
+		rt.Close()
 		_ = os.RemoveAll(hc.RunDir)
 	})
 	if rt.Tier() < core.TierCheckpoint {
@@ -109,8 +131,7 @@ func newWorker(t *testing.T, name, bin, cgRoot, base string) *worker {
 	}
 	ag := &core.Agent{
 		NodeID: name, Ledger: core.NewLedger(1), Budget: core.NewBudget(1000, 1<<20),
-		Runtime: rt, Audit: core.NopAuditor{},
-		Verify: &grant.Verifier{Cache: &grant.Cache{IssuerURL: isrv.URL}, Audience: name, MaxStale: time.Hour},
+		Runtime: rt, Verify: &grant.Verifier{Cache: &grant.Cache{IssuerURL: isrv.URL}, Audience: name, MaxStale: time.Hour},
 		Health: h.Health(), StatusInterval: 20 * time.Millisecond,
 	}
 	go ag.Run(ctx)
@@ -136,7 +157,7 @@ func newWorker(t *testing.T, name, bin, cgRoot, base string) *worker {
 
 	paths := herder.Paths{Base: base}
 	svc := herder.New(herder.Config{Client: client, Grants: h, Router: ing, Paths: paths,
-		Host: host.Config{DeltaRegistry: hc.DeltaRegistry, HomeID: name}})
+		Host: host.Config{DeltaRegistry: hc.DeltaRegistry, DeltaKeys: hc.DeltaKeys, HomeID: name}})
 	go svc.Run(ctx)
 	return &worker{svc: svc, home: h, ingress: isrv2, paths: paths}
 }
@@ -189,6 +210,12 @@ func ship(t *testing.T, from herder.Paths, fromUID string, files []string, to he
 	return total
 }
 
+// snapshot is a checkpoint's files on the worker that wrote them.
+type snapshot struct {
+	on    *worker
+	files []string
+}
+
 func TestActorLifecycleAcrossWorkers(t *testing.T) {
 	bin, cgRoot := zygote(t)
 	ctx := context.Background()
@@ -217,7 +244,7 @@ func TestActorLifecycleAcrossWorkers(t *testing.T) {
 	if _, err := a.svc.RunWorkload(ctx, run2); err == nil {
 		t.Fatal("a second actor on a busy worker must be refused")
 	}
-	// Checkpoint the golden state.
+	// Checkpoint the golden state, which the actors below start from.
 	t0 = time.Now()
 	resp, err := a.svc.CheckpointWorkload(ctx, ckpt)
 	if err != nil {
@@ -230,67 +257,88 @@ func TestActorLifecycleAcrossWorkers(t *testing.T) {
 	if _, _, _, ok := a.svc.Active(); ok {
 		t.Fatal("worker A still busy after checkpoint")
 	}
+	snapshots := map[string]snapshot{"golden": {on: a, files: resp.GetSnapshotFiles()}} // by actor uid
 
-	// Actor x1 on worker B is restored from the golden snapshot (atelet
-	// downloaded it into x1's restore-state): a new session from the
-	// template's state. Then it counts to three and is checkpointed.
-	_, ckptX, restoreX, _ := actorReq("x1")
-	shipped := ship(t, a.paths, "golden", resp.GetSnapshotFiles(), b.paths, "x1")
-	t.Logf("shipped %d bytes", shipped)
-	t0 = time.Now()
-	if _, err := b.svc.RestoreWorkload(ctx, restoreX); err != nil {
-		t.Fatalf("restore x1 on B: %v", err)
+	// Each step is atelet moving an actor. It downloads a snapshot into the
+	// actor's restore-state, restores the actor on a worker and drives its
+	// count through the ingress. Then it removes the actor by checkpoint,
+	// whose snapshot a later step uses, or by terminate. Either way the
+	// ingress forgets the actor and the worker is free. Steps run in order.
+	cases := []struct {
+		name       string
+		from       string // the snapshot's actor uid
+		to         *worker
+		uid        string
+		incr       int    // POST /incr after the restore
+		count      string // GET /count after that
+		checkpoint bool
+		readyz     string // a readyz path the actor never answers 200 on: the restore fails
+	}{
+		{name: "x1 restores on B from the golden snapshot, a new session from the template's state, and counts to three",
+			from: "golden", to: b, uid: "x1", incr: 3, count: "3", checkpoint: true},
+		{name: "x1 resumes on A from its own snapshot with its count",
+			from: "x1", to: a, uid: "x1", count: "3"},
+		{name: "y1 from the same golden snapshot starts at zero: golden state is shared, actor state is not",
+			from: "golden", to: b, uid: "y1", count: "0"},
+		{name: "z1 restored but never ready is let go: the restore is unavailable and the worker stays free",
+			from: "golden", to: a, uid: "z1", readyz: "/missing"},
 	}
-	t.Logf("RestoreWorkload from golden (import, claim, resume, readyz): %s", time.Since(t0).Round(time.Millisecond))
-	for i := 0; i < 3; i++ {
-		if st, _ := b.through(t, "POST", "ate-demo/counter-x1", "/incr"); st != 200 {
-			t.Fatalf("incr %d: %d", i, st)
+	for _, tc := range cases {
+		if !t.Run(tc.name, func(t *testing.T) {
+			_, ckpt, restore, term := actorReq(tc.uid)
+			actor := "ate-demo/counter-" + tc.uid
+			snap := snapshots[tc.from]
+			t.Logf("shipped %d bytes", ship(t, snap.on.paths, tc.from, snap.files, tc.to.paths, tc.uid))
+			t0 := time.Now()
+			if tc.readyz != "" {
+				restore.Spec = &ateompb.WorkloadSpec{Containers: []*ateompb.Container{{Name: "counter",
+					Readyz: &ateompb.Readyz{HttpGet: &ateompb.HTTPGetAction{Path: tc.readyz}, TimeoutSeconds: 1}}}}
+				if _, err := tc.to.svc.RestoreWorkload(ctx, restore); status.Code(err) != codes.Unavailable {
+					t.Fatalf("restore %s with readyz %s = %v, want Unavailable", tc.uid, tc.readyz, err)
+				}
+				if st, _ := tc.to.through(t, "GET", actor, "/count"); st != http.StatusMisdirectedRequest {
+					t.Fatalf("an actor that never turned ready must be misdirected, got %d", st)
+				}
+				if _, _, _, ok := tc.to.svc.Active(); ok {
+					t.Fatal("worker busy with an actor that never turned ready")
+				}
+				return
+			}
+			if _, err := tc.to.svc.RestoreWorkload(ctx, restore); err != nil {
+				t.Fatalf("restore %s: %v", tc.uid, err)
+			}
+			t.Logf("RestoreWorkload (import, claim, resume, readyz): %s", time.Since(t0).Round(time.Millisecond))
+			for i := 0; i < tc.incr; i++ {
+				if st, _ := tc.to.through(t, "POST", actor, "/incr"); st != 200 {
+					t.Fatalf("incr %d: %d", i, st)
+				}
+			}
+			if st, body := tc.to.through(t, "GET", actor, "/count"); st != 200 || body != tc.count {
+				t.Fatalf("%s count = %d %q, want %s", tc.uid, st, body, tc.count)
+			}
+			if _, err := tc.to.svc.GetWorkloadStats(ctx, &ateompb.GetWorkloadStatsRequest{ActorUid: tc.uid}); err != nil {
+				time.Sleep(100 * time.Millisecond)
+				if _, err := tc.to.svc.GetWorkloadStats(ctx, &ateompb.GetWorkloadStatsRequest{ActorUid: tc.uid}); err != nil {
+					t.Fatalf("stats: %v", err)
+				}
+			}
+			if tc.checkpoint {
+				resp, err := tc.to.svc.CheckpointWorkload(ctx, ckpt)
+				if err != nil {
+					t.Fatalf("checkpoint %s: %v", tc.uid, err)
+				}
+				snapshots[tc.uid] = snapshot{on: tc.to, files: resp.GetSnapshotFiles()}
+			} else if _, err := tc.to.svc.TerminateWorkload(ctx, term); err != nil {
+				t.Fatalf("terminate %s: %v", tc.uid, err)
+			}
+			if st, _ := tc.to.through(t, "GET", actor, "/count"); st != http.StatusMisdirectedRequest {
+				t.Fatalf("an actor taken off must be misdirected, got %d", st)
+			}
+			if _, _, _, ok := tc.to.svc.Active(); ok {
+				t.Fatal("worker still busy after the actor left")
+			}
+		}) {
+			t.FailNow()
 		}
-	}
-	if st, body := b.through(t, "GET", "ate-demo/counter-x1", "/count"); st != 200 || body != "3" {
-		t.Fatalf("x1 count = %d %q, want 3", st, body)
-	}
-	if _, err := b.svc.GetWorkloadStats(ctx, &ateompb.GetWorkloadStatsRequest{ActorUid: "x1"}); err != nil {
-		time.Sleep(100 * time.Millisecond)
-		if _, err := b.svc.GetWorkloadStats(ctx, &ateompb.GetWorkloadStatsRequest{ActorUid: "x1"}); err != nil {
-			t.Fatalf("stats: %v", err)
-		}
-	}
-	respX, err := b.svc.CheckpointWorkload(ctx, ckptX)
-	if err != nil {
-		t.Fatalf("checkpoint x1: %v", err)
-	}
-
-	// x1 resumes on A (its snapshot travelled back) with the count.
-	shipped = ship(t, b.paths, "x1", respX.GetSnapshotFiles(), a.paths, "x1")
-	t.Logf("shipped %d bytes", shipped)
-	t0 = time.Now()
-	if _, err := a.svc.RestoreWorkload(ctx, restoreX); err != nil {
-		t.Fatalf("restore x1 on A: %v", err)
-	}
-	t.Logf("RestoreWorkload of a counted actor: %s", time.Since(t0).Round(time.Millisecond))
-	if st, body := a.through(t, "GET", "ate-demo/counter-x1", "/count"); st != 200 || body != "3" {
-		t.Fatalf("x1 count on A = %d %q, want 3", st, body)
-	}
-	_, _, _, termX := actorReq("x1")
-	if _, err := a.svc.TerminateWorkload(ctx, termX); err != nil {
-		t.Fatalf("terminate x1: %v", err)
-	}
-
-	// A second actor from the same golden snapshot starts at zero, not at
-	// three: golden state is shared, actor state is not.
-	_, _, restoreY, termY := actorReq("y1")
-	ship(t, a.paths, "golden", resp.GetSnapshotFiles(), b.paths, "y1")
-	if _, err := b.svc.RestoreWorkload(ctx, restoreY); err != nil {
-		t.Fatalf("restore y1 on B: %v", err)
-	}
-	if st, body := b.through(t, "GET", "ate-demo/counter-y1", "/count"); st != 200 || body != "0" {
-		t.Fatalf("y1 count = %d %q, want 0", st, body)
-	}
-	if _, err := b.svc.TerminateWorkload(ctx, termY); err != nil {
-		t.Fatal(err)
-	}
-	if _, _, _, ok := b.svc.Active(); ok {
-		t.Fatal("worker B still busy after terminate")
 	}
 }

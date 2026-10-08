@@ -5,7 +5,7 @@ fiberd. It is its own Go module and builds against the checkout it sits
 in (`replace github.com/helayoty/fiberd => ../..`). Nothing under it is
 imported by fiberd, and nothing in `pkg/core` changed for it.
 
-![A signed grant is submitted with sbatch. fiberd-slurm verifies it inside the allocation, watches job state, warms one template, and serves fibers on the node address.](../../docs/images/example-slurm.svg)
+![One sbatch creates a bounded Slurm allocation; the job script starts fiberd-slurm inside it, and repeated Clone calls activate fibers under the same resource ceiling without new scheduler submissions.](../../docs/images/example-slurm.svg)
 
 The generic execution, resource, endpoint, and trust models are documented in
 [Runtime model](../../docs/runtime-model.md),
@@ -46,9 +46,9 @@ or `<user>/` into the job's grants directory.
 
 ```bash
 tok=$(grant-issuer mint -key key.json -issuer http://issuer:8686 -aud "$(hostname -s)" \
-      -template sha256:app -max 4 -warm 1 -w-budget 32Mi -min-tier FIBER_CHECKPOINT -ttl 2h)
+      -template sha256:app -max 4 -warm 1 -w-budget 32Mi -min-tier FIBER_CHECKPOINT -isolation TRUSTED -ttl 2h)
 sbatch --ntasks=1 --cpus-per-task=4 --mem=1G --export=ALL,FIBERD_GRANT="$tok" fiberd-job.sh \
-    -verifier jwks -issuer http://issuer:8686 -runtime proc \
+    -verifier jwks -issuer http://issuer:8686 -insecure-plaintext -runtime proc \
     -template "default=/usr/local/bin/refzygote --heap-mb 32" -endpoint-family inet4
 ```
 
@@ -57,9 +57,10 @@ on a grant it cannot verify for its node.
 
 ## Slurm in Docker and the acceptance
 
-`docker/` builds a one-node cluster (Debian's `slurm-wlm`, munge,
+[`docker/slurm/Dockerfile`](../../docker/slurm/Dockerfile) builds a one-node cluster (Debian's `slurm-wlm`, munge,
 `cgroup/v2` with `task/cgroup`, criu, fiberd's binaries) that runs
-privileged with a private cgroup namespace. `conform.sh` (from the
+privileged with a private cgroup namespace. The configuration files and
+entrypoint remain in [`docker/`](docker/). `conform.sh` (from the
 repository root) brings it up, runs the issuer inside as the cluster's
 control plane, submits the agent as a job, runs fiberd's conformance suite
 C1 to C10 from the host against the published port with every hook through

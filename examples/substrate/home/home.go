@@ -47,10 +47,11 @@ type Config struct {
 	// empty means the Pod's own cgroup, delegated.
 	CgroupRoot string
 	// Grant sizing.
-	Lease         time.Duration // default 24h
-	FiberMax      int           // default 4
-	DefaultBudget uint64        // W budget when the actor names no memory limit (default 64 MiB)
-	MinTier       core.Tier     // default FIBER_CHECKPOINT
+	Lease         time.Duration  // default 24h
+	FiberMax      int            // default 4
+	DefaultBudget uint64         // W budget when the actor names no memory limit (default 64 MiB)
+	MinTier       core.Tier      // default FIBER_CHECKPOINT
+	Isolation     core.Isolation // default untrusted, which only gvisor or hyperlight serve
 	// Scope claims this home asserts (worker pod uid, node, ...).
 	Scope []core.ScopeClaim
 	Now   func() time.Time
@@ -160,6 +161,7 @@ func (h *Home) Grant(_ context.Context, tmpl herder.Template, memoryBytes uint64
 		UID: GrantUID(tmpl), Audience: h.cfg.Audience, TemplateDigest: tmpl.Digest(),
 		FiberMax: h.cfg.FiberMax, FiberWarm: 1, WBudgetBytes: budget, MinTier: h.cfg.MinTier,
 		LeaseExpiry: now.Add(h.cfg.Lease),
+		Policy:      core.Policy{Isolation: h.cfg.Isolation},
 	}
 	tok, err := h.issuer.Mint(g)
 	if err != nil {

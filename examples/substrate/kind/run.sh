@@ -83,7 +83,7 @@ system() {
 image() {
   log "the ateom-fiberd worker image"
   hack/dev/run.sh true # the builder stage is the dev image
-  docker build -t "$IMAGE" -f examples/substrate/kind/Dockerfile .
+  docker build -t "$IMAGE" -f docker/substrate/Dockerfile .
   docker push "$IMAGE"
 }
 

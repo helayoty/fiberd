@@ -12,7 +12,7 @@
 # is not drained for a "Kill task failed".
 #
 #   sbatch --ntasks=1 --mem=1G --export=ALL,FIBERD_GRANT=... fiberd-job.sh \
-#       -verifier jwks -issuer http://localhost:8686 -runtime proc \
+#       -verifier jwks -issuer http://localhost:8686 -insecure-plaintext -runtime proc \
 #       -template "default=/usr/local/bin/refzygote --heap-mb 32"
 set -u
 : "${SLURM_JOB_ID:?}"

@@ -13,7 +13,9 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -66,35 +68,60 @@ func (r *revisionFlags) Set(v string) error {
 }
 
 func main() {
-	var revs revisionFlags
-	home := flag.String("home", "127.0.0.1:8484", "the fiberd home's gRPC address")
-	listen := flag.String("listen", ":8080", "HTTP listen address")
-	idle := flag.Duration("idle", 30*time.Second, "park a revision's fiber after this long without requests (0 = never)")
-	deadline := flag.Duration("clone-deadline", 5*time.Second, "runtime budget per Clone")
-	flag.Var(&revs, "revision", "a revision: name=<jwt|@file>[,concurrency=N][,mode=line|http] (repeatable)")
-	flag.Parse()
-	if err := run(*home, *listen, *idle, *deadline, revs); err != nil {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	err := run(ctx, os.Args[1:], os.Stderr, nil)
+	stop()
+	var usage usageError
+	switch {
+	case errors.Is(err, flag.ErrHelp):
+	case errors.As(err, &usage):
+		os.Exit(2) // the flag package has printed the error and the usage
+	case err != nil:
 		log.Fatal(err)
 	}
 }
 
-func run(home, listen string, idle, deadline time.Duration, revs []activator.Revision) error {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	client, err := consumer.Dial(ctx, home)
+// usageError is a bad command line, already reported with the usage.
+type usageError struct{ error }
+
+func (e usageError) Unwrap() error { return e.error }
+
+// run parses args (usage and flag errors go to out), serves until ctx
+// ends, and returns nil once it has stopped cleanly. ready, when set, is
+// told the bound HTTP address before serving starts.
+func run(ctx context.Context, args []string, out io.Writer, ready func(net.Addr)) error {
+	fs := flag.NewFlagSet("fiberd-activator", flag.ContinueOnError)
+	fs.SetOutput(out)
+	var revs revisionFlags
+	home := fs.String("home", "127.0.0.1:8484", "the fiberd home's gRPC address")
+	listen := fs.String("listen", ":8080", "HTTP listen address")
+	idle := fs.Duration("idle", 30*time.Second, "park a revision's fiber after this long without requests (0 = never)")
+	deadline := fs.Duration("clone-deadline", 5*time.Second, "runtime budget per Clone")
+	fs.Var(&revs, "revision", "a revision: name=<jwt|@file>[,concurrency=N][,mode=line|http] (repeatable)")
+	if err := fs.Parse(args); err != nil {
+		return usageError{err}
+	}
+	client, err := consumer.Dial(ctx, *home)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = client.Close() }()
-	act, err := activator.New(client, activator.Config{Revisions: revs, Idle: idle, CloneDeadline: deadline})
+	act, err := activator.New(client, activator.Config{Revisions: revs, Idle: *idle, CloneDeadline: *deadline})
 	if err != nil {
 		return err
 	}
+	lis, err := net.Listen("tcp", *listen)
+	if err != nil {
+		return err
+	}
+	if ready != nil {
+		ready(lis.Addr())
+	}
 	go act.Run(ctx)
-	srv := &http.Server{Addr: listen, Handler: act, ReadHeaderTimeout: 5 * time.Second}
+	srv := &http.Server{Handler: act, ReadHeaderTimeout: 5 * time.Second}
 	go func() { <-ctx.Done(); _ = srv.Close() }()
-	log.Printf("fiberd-activator: %d revision(s) on %s, home %s, idle park after %s", len(revs), listen, home, idle)
-	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	log.Printf("fiberd-activator: %d revision(s) on %s, home %s, idle park after %s", len(revs), lis.Addr(), *home, *idle)
+	if err := srv.Serve(lis); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
 	return nil

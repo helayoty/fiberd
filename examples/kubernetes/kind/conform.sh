@@ -31,7 +31,7 @@ STATE=${CONFORM_STATE:-bin/conform-state-kind}
 KC=(kubectl --context "kind-$CLUSTER")
 
 kexec() { "${KC[@]}" -n "$NS" exec "$POD" -c agent -- "$@"; }
-admin() { kexec curl -sf --unix-socket /var/lib/fiberd/admin.sock "$@"; }
+admin() { kexec curl -sf --unix-socket /var/lib/fiberd/private/admin.sock "$@"; }
 
 wait_for() { # wait_for <seconds> <description> <cmd...>
   local n=$1 what=$2; shift 2
@@ -55,7 +55,8 @@ down() { kind delete cluster --name "$CLUSTER"; }
 
 image() {
   hack/dev/run.sh true # the builder stage is the dev image
-  docker build -t "$IMAGE" -f "$KIND_DIR/Dockerfile" .
+  docker build -t "$IMAGE" -f docker/kubernetes/Dockerfile \
+    --build-arg "DEV_IMAGE=${FIBERD_DEV_IMAGE:-fiberd-dev:local}" .
   kind load docker-image --name "$CLUSTER" "$IMAGE"
 }
 
@@ -101,7 +102,7 @@ lane() {
 audit() {
   local event=$1 fence=$2 uid epoch seq
   IFS=/ read -r uid epoch seq <<<"$fence"
-  kexec grep -q "\"event\":\"$event\".*\"fence\":{\"GrantUID\":\"$uid\",\"Epoch\":$epoch,\"Seq\":$seq}" /var/lib/fiberd/audit.jsonl
+  kexec grep -q "\"event\":\"$event\".*\"fence\":{\"GrantUID\":\"$uid\",\"Epoch\":$epoch,\"Seq\":$seq}" /var/lib/fiberd/private/audit.jsonl
 }
 
 # The fiberd subtree sits under the container's cgroup: the mount root in
@@ -120,7 +121,7 @@ conform() {
   rm -f bin/grant-conform
   go test -c -o bin/grant-conform ./tests/conform
   "${KC[@]}" -n fiberd-system get secret grant-issuer-key -o jsonpath='{.data.key\.json}' | base64 -d >"$STATE/issuer-key.json"
-  bin/grant-conform -test.v -target "$TARGET" -target-tier FIBER_CHECKPOINT -node-id "$POD" \
+  bin/grant-conform -test.v -target "$TARGET" -target-tier FIBER_CHECKPOINT -node-id "$POD" -isolation TRUSTED \
     -mint jwt -issuer-key "$STATE/issuer-key.json" -issuer "$ISSUER_URL" \
     -restart-cmd "$0 restart" -cp-health-cmd "$0 lane \$1" -audit-cmd "$0 audit \$1 \$2" \
     -engine-kill-cmd "$0 engine-kill \$1" -scope-cmd "$0 scope-lost" -case-timeout 60s
@@ -130,12 +131,12 @@ storm() {
   "${KC[@]}" apply -f "$KIND_DIR/manifests/50-storm.yaml"
   wait_for 60 "storm pod created" "${KC[@]}" -n "$NS" get pod storm-grant
   "${KC[@]}" -n "$NS" wait --for=condition=Ready pod/storm-grant --timeout=180s
-  "${KC[@]}" -n "$NS" cp "$STATE/issuer-key.json" storm-grant:/tmp/issuer-key.json -c agent
+  "${KC[@]}" -n "$NS" cp --no-preserve "$STATE/issuer-key.json" storm-grant:/tmp/issuer-key.json -c agent
   # The container's cgroup is the mount root in a private cgroup
   # namespace and the scope /proc/1/cgroup names in the host's (what a
   # privileged Pod gets); the OOM counter and the fiberd subtree are there.
   "${KC[@]}" -n "$NS" exec storm-grant -c agent -- sh -c "$own_cgroup"'
-    exec storm -target 127.0.0.1:8484 -node-id storm-grant -issuer-key /tmp/issuer-key.json -issuer "$0" \
+    exec storm -target 127.0.0.1:8484 -node-id storm-grant -issuer-key /tmp/issuer-key.json -issuer "$0" -isolation TRUSTED \
       -cgroup-root "$own/fiberd" -container-events "$own/memory.events" \
       -fibers 8 -ceiling 167772160 -overcommit 2 -step 2097152 -round 250ms' "$ISSUER_URL"
   echo "--- storm pod:"

@@ -5,6 +5,8 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/helayoty/fiberd/pkg/sys/caps"
+
 	"github.com/helayoty/fiberd/examples/kubernetes/kube"
 )
 
@@ -93,7 +95,18 @@ type ContainerPort struct {
 }
 
 type SecurityContext struct {
-	Privileged bool `json:"privileged"`
+	Privileged     bool            `json:"privileged"`
+	Capabilities   *Capabilities   `json:"capabilities,omitempty"`
+	SeccompProfile *SeccompProfile `json:"seccompProfile,omitempty"`
+}
+
+type Capabilities struct {
+	Add  []string `json:"add,omitempty"`
+	Drop []string `json:"drop,omitempty"`
+}
+
+type SeccompProfile struct {
+	Type string `json:"type"`
 }
 
 type VolumeMount struct {
@@ -128,6 +141,22 @@ func ownerOf(cg *CapacityGrant) []kube.OwnerReference {
 		Controller: true, BlockOwnerDeletion: true}}
 }
 
+// securityContext is the agent container's security context. It is
+// privileged when asked, and for runtimes whose needs are not measured.
+// Otherwise it adds only the proc runtime's capabilities and leaves seccomp
+// unconfined, because criu cannot dump from under a filter.
+func securityContext(runtime string, privileged *bool) *SecurityContext {
+	if privileged != nil && *privileged || privileged == nil && runtime != "proc" {
+		return &SecurityContext{Privileged: true}
+	}
+	add := make([]string, 0, len(caps.Proc))
+	for _, c := range caps.Proc {
+		add = append(add, caps.Names[c])
+	}
+	return &SecurityContext{Capabilities: &Capabilities{Add: add, Drop: []string{"ALL"}},
+		SeccompProfile: &SeccompProfile{Type: "Unconfined"}}
+}
+
 // BuildPod is the Pod spec for a CapacityGrant: fiberd-k8s as PID 1, the
 // projected grant volume, the readiness gate, the cgroup and criu
 // privileges, the block ceiling as the container's limits.
@@ -145,11 +174,14 @@ func BuildPod(cg *CapacityGrant, issuerURL string, lease time.Duration) *Pod {
 	if sa == "" {
 		sa = "fiberd-grant"
 	}
-	privileged := ps.Privileged == nil || *ps.Privileged
 	args := []string{
 		"-verifier", "jwks", "-issuer", issuerURL, "-jwks-max-stale", lease.String(),
+		"-insecure-plaintext",
 		"-listen", ":" + strconv.Itoa(agentPort),
 		"-runtime", runtime,
+		// The Pod's name, from FIBERD_NODE_ID below, which Kubernetes
+		// expands in args.
+		"-node-id", "$(FIBERD_NODE_ID)",
 		"-state", "/var/lib/fiberd", "-run-dir", "/run/fiberd",
 		"-grants-dir", GrantsMount,
 		"-endpoint-family", family,
@@ -161,10 +193,13 @@ func BuildPod(cg *CapacityGrant, issuerURL string, lease time.Duration) *Pod {
 		args = append(args, "-admin-unsafe")
 	}
 	args = append(args, ps.Args...)
-	labels := map[string]string{GrantLabel: cg.Metadata.Name}
+	// The grant label is set last: Services select a grant's Pod by it, so
+	// the spec's labels must not move it.
+	labels := map[string]string{}
 	for k, v := range ps.Labels {
 		labels[k] = v
 	}
+	labels[GrantLabel] = cg.Metadata.Name
 	probe := &Probe{PeriodSeconds: 2}
 	probe.TCPSocket.Port = agentPort
 	return &Pod{
@@ -193,7 +228,7 @@ func BuildPod(cg *CapacityGrant, issuerURL string, lease time.Duration) *Pod {
 				},
 				Ports:           []ContainerPort{{Name: "grpc", ContainerPort: agentPort}},
 				Resources:       ps.Resources,
-				SecurityContext: &SecurityContext{Privileged: privileged},
+				SecurityContext: securityContext(runtime, ps.Privileged),
 				VolumeMounts: []VolumeMount{
 					{Name: "grants", MountPath: GrantsMount, ReadOnly: true},
 					{Name: "state", MountPath: "/var/lib/fiberd"},

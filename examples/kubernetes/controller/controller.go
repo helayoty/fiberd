@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -222,12 +223,31 @@ func (c *Controller) reconcileOne(ctx context.Context, cg *CapacityGrant) error 
 	if st == cg.Status {
 		return nil
 	}
-	return c.patchStatus(ctx, cg, st)
+	return c.patchStatus(ctx, cg, wholeStatus(st))
 }
 
-func (c *Controller) patchStatus(ctx context.Context, cg *CapacityGrant, st Status) error {
+// patchStatus merges st into the resource's status.
+func (c *Controller) patchStatus(ctx context.Context, cg *CapacityGrant, st any) error {
 	path := "/apis/" + APIVersion + "/namespaces/" + cg.Metadata.Namespace + "/" + Resource + "/" + cg.Metadata.Name + "/status"
 	return c.Client.PatchMerge(ctx, path, map[string]any{"status": st})
+}
+
+// wholeStatus is st as a merge patch that replaces the whole status. A
+// merge patch keeps every field it leaves out, so each field st leaves
+// empty is sent as null. Otherwise an old error message, or the node and
+// endpoint of a Pod since replaced, would outlive what they described.
+func wholeStatus(st Status) map[string]any {
+	raw, _ := json.Marshal(st)
+	m := map[string]any{}
+	_ = json.Unmarshal(raw, &m)
+	t := reflect.TypeFor[Status]()
+	for i := range t.NumField() {
+		name, _, _ := strings.Cut(t.Field(i).Tag.Get("json"), ",")
+		if _, ok := m[name]; !ok {
+			m[name] = nil
+		}
+	}
+	return m
 }
 
 func leaseOf(cg *CapacityGrant) (time.Duration, error) {
@@ -254,6 +274,10 @@ func grantOf(cg *CapacityGrant, lease time.Duration, now time.Time) (core.Grant,
 			return core.Grant{}, fmt.Errorf("spec.minTier: %w", err)
 		}
 	}
+	iso, err := core.ParseIsolation(cg.Spec.Isolation)
+	if err != nil {
+		return core.Grant{}, fmt.Errorf("spec.isolation: %w", err)
+	}
 	var d core.Durability
 	switch strings.ToLower(cg.Spec.Durability) {
 	case "", "best-effort", "best_effort", "besteffort":
@@ -267,7 +291,7 @@ func grantOf(cg *CapacityGrant, lease time.Duration, now time.Time) (core.Grant,
 		UID: cg.Metadata.UID, Audience: PodName(cg), TemplateDigest: cg.Spec.Template,
 		FiberMax: cg.Spec.Fibers.Max, FiberWarm: cg.Spec.Fibers.Warm, WBudgetBytes: w, MinTier: tier,
 		LeaseExpiry: now.Add(lease).Truncate(time.Second),
-		Policy:      core.Policy{Durability: d, SessionClass: cg.Spec.SessionClass},
+		Policy:      core.Policy{Durability: d, SessionClass: cg.Spec.SessionClass, Isolation: iso},
 	}
 	if db := cg.Spec.DeviceBudget; db != nil {
 		b, err := ParseBytes(db.Bytes)

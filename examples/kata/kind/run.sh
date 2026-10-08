@@ -66,7 +66,7 @@ mint() {
     "${KC[@]}" -n fiberd-system get secret grant-issuer-key -o jsonpath='{.data.key\.json}' | base64 -d >"$STATE/issuer-key.json"
     go run ./cmd/grant-issuer mint -key "$STATE/issuer-key.json" -issuer http://grant-issuer.fiberd-system.svc:8080 \
       -aud "$HOME_POD" -uid kata-demo-grant -template sha256:conform -max 2 -warm 1 -w-budget 32Mi \
-      -min-tier FIBER_CHECKPOINT -ttl 2h >"$STATE/grant.jwt"
+      -min-tier FIBER_CHECKPOINT -isolation TRUSTED -ttl 2h >"$STATE/grant.jwt"
   fi
   cat "$STATE/grant.jwt"
 }
@@ -99,7 +99,7 @@ EOF
 }
 
 status() { # the home's ledger, through its admin socket
-  "${KC[@]}" -n "$NS" exec "$HOME_POD" -c agent -- sh -c 'grep -c "" /var/lib/fiberd/audit.jsonl >/dev/null; tail -3 /var/lib/fiberd/audit.jsonl | cut -c1-160'
+  "${KC[@]}" -n "$NS" exec "$HOME_POD" -c agent -- sh -c 'grep -c "" /var/lib/fiberd/private/audit.jsonl >/dev/null; tail -3 /var/lib/fiberd/private/audit.jsonl | cut -c1-160'
 }
 
 run() {
@@ -111,13 +111,13 @@ run() {
   pod kata-1 park | tee "$STATE/pod1.log"
   grep -q "fiber .* CREATE session=kata-demo" "$STATE/pod1.log" || { echo "FAIL: first Pod's container was not a fresh fiber"; exit 1; }
   "${KC[@]}" -n "$NS" delete pod kata-1 --wait=true >/dev/null
-  wait_for 30 "park recorded on the home" sh -c "${KC[*]} -n $NS exec $HOME_POD -c agent -- grep -q '\"event\":\"park\".*\"session\":\"kata-demo\"' /var/lib/fiberd/audit.jsonl"
+  wait_for 30 "park recorded on the home" sh -c "${KC[*]} -n $NS exec $HOME_POD -c agent -- grep -q '\"event\":\"park\".*\"session\":\"kata-demo\"' /var/lib/fiberd/private/audit.jsonl"
   echo "ok   deleted: the home parked session kata-demo"
   echo "--- the same session again: the container resumes where it was"
   pod kata-2 release | tee "$STATE/pod2.log"
   grep -q "fiber .* RESUME session=kata-demo" "$STATE/pod2.log" || { echo "FAIL: second Pod's container did not resume the parked session"; exit 1; }
   "${KC[@]}" -n "$NS" delete pod kata-2 --wait=true >/dev/null
-  wait_for 30 "release recorded on the home" sh -c "${KC[*]} -n $NS exec $HOME_POD -c agent -- grep -q '\"event\":\"release\".*kata-demo' /var/lib/fiberd/audit.jsonl"
+  wait_for 30 "release recorded on the home" sh -c "${KC[*]} -n $NS exec $HOME_POD -c agent -- grep -q '\"event\":\"release\".*kata-demo' /var/lib/fiberd/private/audit.jsonl"
   echo "ok   deleted: the home released session kata-demo"
   echo "PASS kata example: containers of a fiberd RuntimeClass Pod are fibers"
 }

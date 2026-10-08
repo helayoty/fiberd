@@ -61,6 +61,10 @@ spec:
                 minTier:
                   type: string
                   enum: [FIBER_BASIC, FIBER_WARM, FIBER_CHECKPOINT, FIBER_SNAPSHOT]
+                isolation:
+                  type: string
+                  enum: [UNTRUSTED, TRUSTED]
+                  description: UNTRUSTED (default) is served only by gvisor or hyperlight; TRUSTED by any runtime
                 lease:
                   type: string
                   description: validity of each minted grant, renewed at half-life (default 10m)

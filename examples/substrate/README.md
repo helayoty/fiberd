@@ -6,7 +6,7 @@ it sits in. It plugs fiberd into [Agent Substrate](https://github.com/agent-subs
 as a worker image, so Substrate's control plane creates, suspends and
 resumes actors that are fibers.
 
-![Substrate routes through mTLS ingress to a worker herder backed by fiberd, while actor state is parked, exported, imported, and resumed between workers that share the admitted template contract.](../../docs/images/example-substrate.svg)
+![Atelet lifecycle control is separate from router workload traffic. Suspend exports parked state as files for Substrate to transport; the destination imports a publication into its local registry, then Clone claims it and resumes the actor.](../../docs/images/example-substrate.svg)
 
 ## Why fibers fit
 
@@ -58,6 +58,16 @@ ActorTemplate's container image is pulled and prepared by atelet but not
 run: a Substrate image is not a zygote. Its readiness probe and memory
 limit are honoured.
 
+A snapshot restores only on a worker that trusts the key it was signed
+with: `ATEOM_FIBERD_DELTA_KEY` names the private key every worker signs
+with, and `ATEOM_FIBERD_DELTA_TRUST` a JWKS of further keys to accept.
+It also opens only on a worker that has the key it was sealed with:
+`ATEOM_FIBERD_DELTA_SEAL_KEY` names the symmetric key every worker
+encrypts snapshots with before they leave it. The kind image bakes in
+both keys, generated at build time, so all its workers share them. That
+is a demo shortcut, because anyone who can pull the image can sign and
+open snapshots. A real pool mounts the keys from a Secret.
+
 ## Running it
 
 Unit tests need nothing; the whole-worker test needs the dev container:
@@ -68,7 +78,8 @@ make linux-test                      # includes herder's TestActorLifecycleAcros
 ```
 
 The end-to-end run installs Substrate itself into a kind cluster of its
-own (their scripts, at the pinned commit), builds the worker image from
+own (their scripts, at the pinned commit), builds the worker image using
+[`docker/substrate/Dockerfile`](../../docker/substrate/Dockerfile) and
 fiberd's dev image, applies a WorkerPool of two fiberd workers and an
 ActorTemplate, then drives an actor through Substrate's router:
 

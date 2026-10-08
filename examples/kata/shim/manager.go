@@ -156,7 +156,11 @@ func RegisterPlugin() {
 			if !ok {
 				return nil, fmt.Errorf("publisher plugin: %w", errdefs.ErrInvalidArgument)
 			}
-			return NewService(ic.Context, pub, ss.(shutdown.Service)), nil
+			sd, ok := ss.(shutdown.Service)
+			if !ok {
+				return nil, fmt.Errorf("shutdown plugin: %w", errdefs.ErrInvalidArgument)
+			}
+			return NewService(ic.Context, pub, sd), nil
 		},
 	})
 }
