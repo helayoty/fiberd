@@ -3,153 +3,203 @@
 package gvisor
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
-	"os/exec"
-	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
-	"syscall"
+	"sync"
 	"testing"
 	"time"
+
+	"go.uber.org/goleak"
 )
 
-// The test binary doubles as a runsc and as the sandbox a runsc leaves
-// behind, so the backend's commands can be exercised without gVisor.
-// Options.Runsc is a one-line shell wrapper that execs the binary with
-// fakeRunscArg and the configuration directory.
-const (
-	fakeRunscArg   = "fake-runsc"
-	fakeSandboxArg = "fake-sandbox"
-	fakeVersion    = "release-20260817.0"
-	imageFile      = "checkpoint.img"
-)
-
-// knobs script the fake runsc. They are read from <cfg>/knobs on every
-// invocation.
-type knobs struct {
-	Fail        map[string]bool // commands that fail, out of run, restore, checkpoint, state, kill and wait
-	LongOutput  bool            // a failing command prints more than the error tail keeps
-	NoMarker    bool            // the template sandbox never drops its ready marker
-	NoServe     bool            // a fiber sandbox never serves its endpoint
-	IgnoreUSR1  bool            // a sandbox keeps its endpoint through a park request
-	SlowRestore time.Duration   // restore sleeps this long before starting the sandbox
-	SlowCheckpt time.Duration   // a checkpoint that ends the sandbox returns this long after it is gone
-	ExitStatus  int             // what `wait` reports
-	BadWaitJSON bool            // `wait` prints something that is not JSON
-	// GateDelete holds the first `delete` that runs after the knob is set
-	// until <cfg>/gate.open exists, and marks <cfg>/gate.passed once that
-	// delete has done its work. It places a reaper's late delete at will.
-	GateDelete bool
-}
-
-// gateFiles are what GateDelete uses. They are the claim the one gated
-// delete takes, the file the test creates to let it go, and its mark.
-const (
-	gateClaimed = "gate.claimed"
-	gateOpen    = "gate.open"
-	gatePassed  = "gate.passed"
-)
-
+// TestMain fails the package when a test leaves a goroutine behind, such
+// as a reaper outliving Close.
 func TestMain(m *testing.M) {
-	switch {
-	case len(os.Args) >= 3 && os.Args[1] == fakeRunscArg:
-		os.Exit(fakeRunsc(os.Args[2], os.Args[3:]))
-	case len(os.Args) >= 5 && os.Args[1] == fakeSandboxArg:
-		fakeSandbox(os.Args[2], os.Args[3], os.Args[4])
-		os.Exit(0)
-	}
-	os.Exit(m.Run())
+	goleak.VerifyTestMain(m)
 }
 
-// fakeRunscBin writes the wrapper and the knobs into a fresh
-// configuration directory and returns the wrapper's path and that
-// directory.
-func fakeRunscBin(t *testing.T, k knobs) (bin, cfg string) {
-	t.Helper()
-	cfg = t.TempDir()
-	setKnobs(t, cfg, k)
-	exe, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	bin = filepath.Join(cfg, "runsc")
-	// Under -race the test binary sleeps a second at exit (GORACE
-	// atexit_sleep_ms defaults to 1000), which every fake runsc command
-	// and every fake sandbox would pay. The backend's deadlines are sized
-	// for runsc, so the sleep is turned off for both.
-	script := fmt.Sprintf("#!/bin/sh\nexport GORACE=\"${GORACE:+$GORACE }atexit_sleep_ms=0\"\nexec %q %s %q \"$@\"\n", exe, fakeRunscArg, cfg)
-	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	return bin, cfg
+// fakeRunsc is runsc and its sandboxes inside the test process, wired
+// into a Backend through the run seam. A sandbox behaves as the reference
+// zygote does under --gvisor: a template drops the ready marker on /host,
+// a fiber serves its endpoint there and closes it on USR1.
+type fakeRunsc struct {
+	mu       sync.Mutex
+	knobs    knobs
+	recorded []fakeCall
+	boxes    map[string]*fakeSandbox // running, by cid
+	nextPID  int
+	gate     *deleteGate // the next delete is held here, when set
 }
 
-func setKnobs(t *testing.T, cfg string, k knobs) {
-	t.Helper()
-	b, err := json.Marshal(k)
-	if err != nil {
-		t.Fatal(err)
+const (
+	fakeVersion = "release-20260817.0"
+	imageFile   = "checkpoint.img"
+)
+
+// knobs script the fake runsc. They are read on every invocation, so a
+// test can change them between calls (setKnobs).
+type knobs struct {
+	Fail       map[string]bool // commands that fail, out of version, list, delete, run, restore, checkpoint, state, kill and wait
+	LongOutput bool            // a failing command prints more than the error tail keeps
+	NoMarker   bool            // the template sandbox never drops its ready marker
+	NoServe    bool            // a fiber sandbox never serves its endpoint
+	IgnoreUSR1 bool            // a sandbox keeps its endpoint through a park request
+	// SlowRestore is how long a restore takes before the sandbox is up.
+	// The context ending cuts it short, as it kills a real runsc.
+	SlowRestore time.Duration
+	// SlowCheckpt is how long a checkpoint that ends the sandbox takes
+	// after it is gone, as a real one's image flush and cleanup do.
+	SlowCheckpt time.Duration
+	ExitStatus  int  // what `wait` reports
+	BadWaitJSON bool // `wait` prints something that is not JSON
+}
+
+// fakeCall is one recorded invocation: the arguments after the binary
+// joined by spaces, and the cgroup it was started in.
+type fakeCall struct {
+	args     string
+	cgroupFD int
+}
+
+// fakeSandbox is one running sandbox.
+type fakeSandbox struct {
+	cid      string
+	pid      int
+	endpoint string // the host path it serves, "" for none
+	ln       net.Listener
+	done     chan struct{} // closed when the sandbox has ended
+}
+
+// deleteGate holds one `delete`: claimed closes when it is waiting, open
+// lets it go, passed closes once it is done.
+type deleteGate struct {
+	claimed chan struct{}
+	open    chan struct{}
+	passed  chan struct{}
+}
+
+func newFakeRunsc(k knobs) *fakeRunsc {
+	return &fakeRunsc{knobs: k, boxes: map[string]*fakeSandbox{}, nextPID: 40000}
+}
+
+func (f *fakeRunsc) setKnobs(k knobs) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.knobs = k
+}
+
+// holdNextDelete arms the gate for the next `delete` the fake runs.
+func (f *fakeRunsc) holdNextDelete() *deleteGate {
+	g := &deleteGate{claimed: make(chan struct{}), open: make(chan struct{}), passed: make(chan struct{})}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.gate = g
+	return g
+}
+
+// calls is every recorded invocation, arguments joined by spaces.
+func (f *fakeRunsc) calls() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]string, len(f.recorded))
+	for i, c := range f.recorded {
+		out[i] = c.args
 	}
-	if err := os.WriteFile(filepath.Join(cfg, "knobs"), b, 0o600); err != nil {
-		t.Fatal(err)
+	return out
+}
+
+// cgroupOf is the cgroup fd the first invocation containing every part
+// was started in, or -2 when there is none.
+func (f *fakeRunsc) cgroupOf(parts ...string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, c := range f.recorded {
+		if containsAll(c.args, parts) {
+			return c.cgroupFD
+		}
+	}
+	return -2
+}
+
+func containsAll(s string, parts []string) bool {
+	for _, p := range parts {
+		if !strings.Contains(s, p) {
+			return false
+		}
+	}
+	return true
+}
+
+// alive reports whether the sandbox for cid runs.
+func (f *fakeRunsc) alive(cid string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	_, ok := f.boxes[cid]
+	return ok
+}
+
+// pidOf is the running sandbox's pid, 0 when there is none.
+func (f *fakeRunsc) pidOf(cid string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if x := f.boxes[cid]; x != nil {
+		return x.pid
+	}
+	return 0
+}
+
+// endAll ends every sandbox still running, whatever the knobs said.
+func (f *fakeRunsc) endAll() {
+	f.mu.Lock()
+	cids := make([]string, 0, len(f.boxes))
+	for cid := range f.boxes {
+		cids = append(cids, cid)
+	}
+	f.mu.Unlock()
+	for _, cid := range cids {
+		f.endSandbox(cid)
 	}
 }
 
-// runscCalls is every recorded invocation, arguments joined by spaces.
-func runscCalls(t *testing.T, cfg string) []string {
-	t.Helper()
-	b, err := os.ReadFile(filepath.Join(cfg, "calls.log"))
-	if err != nil {
-		return nil
-	}
-	return strings.Split(strings.TrimSpace(string(b)), "\n")
-}
+// errExit is what a failed runsc process reports.
+var errExit = errors.New("exit status 1")
 
-// sandboxState is what the fake sandbox records about itself while it
-// runs, at <cfg>/state/<cid>.json. Its absence means the sandbox is gone.
-type sandboxState struct {
-	PID      int    `json:"pid"`
-	Endpoint string `json:"endpoint"`
-}
-
-func stateFile(cfg, cid string) string { return filepath.Join(cfg, "state", cid+".json") }
-
-func readState(cfg, cid string) (sandboxState, error) {
-	var st sandboxState
-	b, err := os.ReadFile(stateFile(cfg, cid))
-	if err != nil {
-		return st, err
-	}
-	return st, json.Unmarshal(b, &st)
-}
-
-// fakeRunsc is one runsc invocation. The global --flags come first.
-func fakeRunsc(cfg string, args []string) int {
-	logf, err := os.OpenFile(filepath.Join(cfg, "calls.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-	if err == nil {
-		_, _ = logf.WriteString(strings.Join(args, " ") + "\n")
-		_ = logf.Close()
-	}
-	var k knobs
-	if b, err := os.ReadFile(filepath.Join(cfg, "knobs")); err == nil {
-		_ = json.Unmarshal(b, &k)
+// run is one runsc invocation, the global --flags first in args.
+func (f *fakeRunsc) run(ctx context.Context, cgroupFD int, args []string, out io.Writer) error {
+	f.mu.Lock()
+	f.recorded = append(f.recorded, fakeCall{args: strings.Join(args, " "), cgroupFD: cgroupFD})
+	k := f.knobs
+	f.mu.Unlock()
+	fail := func(what string) error {
+		if k.LongOutput {
+			_, _ = io.WriteString(out, strings.Repeat("x", 600))
+		}
+		_, _ = fmt.Fprintf(out, "fake runsc: %s failed\n", what)
+		return errExit
 	}
 	for _, a := range args {
 		if a == "--version" {
-			fmt.Printf("runsc version %s\nspec: 1.1.0-rc.1\n", fakeVersion)
-			return 0
+			if k.Fail["version"] {
+				return fail("version")
+			}
+			_, _ = fmt.Fprintf(out, "runsc version %s\nspec: 1.1.0-rc.1\n", fakeVersion)
+			return nil
 		}
 	}
 	for len(args) > 0 && strings.HasPrefix(args[0], "--") {
 		args = args[1:]
 	}
 	if len(args) == 0 {
-		fmt.Println("no command")
-		return 1
+		_, _ = fmt.Fprintln(out, "no command")
+		return errExit
 	}
 	cmd, rest := args[0], args[1:]
 	flag := func(name string) string {
@@ -175,53 +225,54 @@ func fakeRunsc(cfg string, args []string) int {
 			cid = rest[len(rest)-2]
 		}
 	}
-	fail := func(what string) int {
-		if k.LongOutput {
-			fmt.Print(strings.Repeat("x", 600))
-		}
-		fmt.Printf("fake runsc: %s failed\n", what)
-		return 1
-	}
 	if k.Fail[cmd] {
 		return fail(cmd)
 	}
 	switch cmd {
 	case "list":
-		// With -quiet, one container id per line, from the state directory.
-		ents, _ := os.ReadDir(filepath.Join(cfg, "state"))
-		for _, e := range ents {
-			fmt.Println(strings.TrimSuffix(e.Name(), ".json"))
+		// With -quiet, one container id per line.
+		f.mu.Lock()
+		ids := make([]string, 0, len(f.boxes))
+		for id := range f.boxes {
+			ids = append(ids, id)
 		}
-		return 0
+		f.mu.Unlock()
+		sort.Strings(ids)
+		for _, id := range ids {
+			_, _ = fmt.Fprintln(out, id)
+		}
+		return nil
 	case "delete":
-		gated := false
-		if k.GateDelete {
-			if f, err := os.OpenFile(filepath.Join(cfg, gateClaimed), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644); err == nil {
-				_ = f.Close()
-				gated = true
-				for {
-					if _, err := os.Stat(filepath.Join(cfg, gateOpen)); err == nil {
-						break
-					}
-					time.Sleep(5 * time.Millisecond)
-				}
-			}
+		f.mu.Lock()
+		g := f.gate
+		f.gate = nil
+		f.mu.Unlock()
+		if g != nil {
+			close(g.claimed)
+			<-g.open
 		}
 		// -force on a running container ends it first.
-		code := endSandbox(cfg, cid)
-		if gated {
-			_ = os.WriteFile(filepath.Join(cfg, gatePassed), nil, 0o644)
+		f.endSandbox(cid)
+		if g != nil {
+			close(g.passed)
 		}
-		return code
+		return nil
 	case "run", "restore":
 		if cmd == "restore" {
 			if _, err := os.Stat(filepath.Join(flag("--image-path"), imageFile)); err != nil {
-				fmt.Printf("fake runsc: no image at %s\n", flag("--image-path"))
-				return 1
+				_, _ = fmt.Fprintf(out, "fake runsc: no image at %s\n", flag("--image-path"))
+				return errExit
 			}
-			time.Sleep(k.SlowRestore)
+			if k.SlowRestore > 0 {
+				select {
+				case <-time.After(k.SlowRestore):
+				case <-ctx.Done():
+					_, _ = fmt.Fprintln(out, "signal: killed")
+					return ctx.Err()
+				}
+			}
 		}
-		return startSandbox(cfg, cid, flag("--bundle"))
+		return f.startSandbox(cid, flag("--bundle"), k, out)
 	case "checkpoint":
 		img := flag("--image-path")
 		if err := os.MkdirAll(img, 0o755); err != nil {
@@ -230,125 +281,76 @@ func fakeRunsc(cfg string, args []string) int {
 		if err := os.WriteFile(filepath.Join(img, imageFile), []byte(cid), 0o644); err != nil {
 			return fail("write image")
 		}
-		if !has("--leave-running") {
-			code := endSandbox(cfg, cid)
-			time.Sleep(k.SlowCheckpt) // image flush and cleanup after the sandbox is gone
-			return code
+		if has("--leave-running") {
+			return nil
 		}
-		return 0
+		f.endSandbox(cid)
+		if k.SlowCheckpt > 0 {
+			select {
+			case <-time.After(k.SlowCheckpt):
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+		return nil
 	case "state":
-		st, err := readState(cfg, cid)
-		if err != nil {
-			fmt.Printf("fake runsc: container %q does not exist\n", cid)
-			return 1
+		pid := f.pidOf(cid)
+		if pid == 0 {
+			_, _ = fmt.Fprintf(out, "fake runsc: container %q does not exist\n", cid)
+			return errExit
 		}
-		fmt.Printf(`{"id": %q, "pid": %d, "status": "running"}`+"\n", cid, st.PID)
-		return 0
+		_, _ = fmt.Fprintf(out, `{"id": %q, "pid": %d, "status": "running"}`+"\n", cid, pid)
+		return nil
 	case "wait":
-		for {
-			if _, err := os.Stat(stateFile(cfg, cid)); err != nil {
-				break
+		f.mu.Lock()
+		x := f.boxes[cid]
+		f.mu.Unlock()
+		if x != nil {
+			select {
+			case <-x.done:
+			case <-ctx.Done():
+				return ctx.Err()
 			}
-			if os.Getppid() == 1 {
-				return 1 // the backend that asked is gone
-			}
-			time.Sleep(5 * time.Millisecond)
 		}
 		if k.BadWaitJSON {
-			fmt.Println("not json")
+			_, _ = fmt.Fprintln(out, "not json")
 		} else {
-			fmt.Printf(`{"id": %q, "exitStatus": %d}`+"\n", cid, k.ExitStatus)
+			_, _ = fmt.Fprintf(out, `{"id": %q, "exitStatus": %d}`+"\n", cid, k.ExitStatus)
 		}
-		return 0
+		return nil
 	case "kill":
-		st, err := readState(cfg, cid)
-		if err != nil {
-			fmt.Printf("fake runsc: container %q does not exist\n", cid)
-			return 1
+		f.mu.Lock()
+		x := f.boxes[cid]
+		f.mu.Unlock()
+		if x == nil {
+			_, _ = fmt.Fprintf(out, "fake runsc: container %q does not exist\n", cid)
+			return errExit
 		}
-		switch rest[len(rest)-1] {
-		case "USR1":
-			_ = syscall.Kill(st.PID, syscall.SIGUSR1)
-		default:
-			// The sandbox cleans up on SIGTERM, which stands in for
-			// the kill a real runsc would make it vanish with.
-			_ = syscall.Kill(st.PID, syscall.SIGTERM)
+		if rest[len(rest)-1] == "USR1" {
+			if !k.IgnoreUSR1 {
+				x.closeEndpoint()
+			}
+			return nil
 		}
-		return 0
+		f.endSandbox(cid)
+		return nil
 	}
-	fmt.Printf("fake runsc: unknown command %q\n", cmd)
-	return 1
+	_, _ = fmt.Fprintf(out, "fake runsc: unknown command %q\n", cmd)
+	return errExit
 }
 
-// startSandbox detaches a sandbox for the bundle and returns once it has
-// recorded itself, as `runsc run --detach` returns with the sandbox up.
-func startSandbox(cfg, cid, bundle string) int {
-	exe, err := os.Executable()
-	if err != nil {
-		return 1
-	}
-	if err := os.MkdirAll(filepath.Join(cfg, "state"), 0o755); err != nil {
-		return 1
-	}
-	_ = os.Remove(stateFile(cfg, cid))
-	sb := exec.Command(exe, fakeSandboxArg, cfg, cid, bundle)
-	sb.Stdout, sb.Stderr = os.Stdout, os.Stderr // the detached output file
-	sb.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	if err := sb.Start(); err != nil {
-		fmt.Printf("fake runsc: start sandbox: %v\n", err)
-		return 1
-	}
-	_ = sb.Process.Release()
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		if _, err := readState(cfg, cid); err == nil {
-			return 0
-		}
-		if time.Now().After(deadline) {
-			fmt.Println("fake runsc: sandbox did not come up")
-			return 1
-		}
-		time.Sleep(2 * time.Millisecond)
-	}
-}
-
-// endSandbox ends a sandbox and waits for it to be gone.
-func endSandbox(cfg, cid string) int {
-	st, err := readState(cfg, cid)
-	if err != nil {
-		return 0
-	}
-	_ = syscall.Kill(st.PID, syscall.SIGTERM)
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		if _, err := os.Stat(stateFile(cfg, cid)); err != nil {
-			return 0
-		}
-		if time.Now().After(deadline) {
-			fmt.Println("fake runsc: sandbox did not end")
-			return 1
-		}
-		time.Sleep(2 * time.Millisecond)
-	}
-}
-
-// fakeSandbox is the workload a sandbox runs, behaving as the reference
-// zygote does under --gvisor. A template (FIBERD_FENCE=none) drops the
-// ready marker on /host and waits. A fiber serves its endpoint on /host
-// and closes it on SIGUSR1. Both record themselves while they run and go
-// away on SIGTERM.
-func fakeSandbox(cfg, cid, bundle string) {
-	var k knobs
-	if b, err := os.ReadFile(filepath.Join(cfg, "knobs")); err == nil {
-		_ = json.Unmarshal(b, &k)
-	}
+// startSandbox brings up the sandbox for the bundle, as `runsc run
+// --detach` returns with the sandbox up.
+func (f *fakeRunsc) startSandbox(cid, bundle string, k knobs, out io.Writer) error {
 	data, err := os.ReadFile(filepath.Join(bundle, "config.json"))
 	if err != nil {
-		return
+		_, _ = fmt.Fprintf(out, "fake runsc: bundle: %v\n", err)
+		return errExit
 	}
 	var s spec
 	if err := json.Unmarshal(data, &s); err != nil {
-		return
+		_, _ = fmt.Fprintf(out, "fake runsc: bundle: %v\n", err)
+		return errExit
 	}
 	host := ""
 	for _, m := range s.Mounts {
@@ -362,18 +364,22 @@ func fakeSandbox(cfg, cid, bundle string) {
 			env[key] = val
 		}
 	}
-	st := sandboxState{PID: os.Getpid()}
-	var ln net.Listener
+	x := &fakeSandbox{cid: cid, done: make(chan struct{})}
 	if env["FIBERD_FENCE"] == "none" {
 		if !k.NoMarker {
-			_ = os.WriteFile(filepath.Join(host, readyMarker), nil, 0o644)
+			if err := os.WriteFile(filepath.Join(host, readyMarker), nil, 0o644); err != nil {
+				_, _ = fmt.Fprintf(out, "fake runsc: marker: %v\n", err)
+				return errExit
+			}
 		}
 	} else if ep := env["FIBERD_ENDPOINT"]; ep != "" && !k.NoServe {
-		st.Endpoint = filepath.Join(host, strings.TrimPrefix(ep, "/host/"))
-		ln, err = net.Listen("unix", st.Endpoint)
+		x.endpoint = filepath.Join(host, strings.TrimPrefix(ep, "/host/"))
+		ln, err := net.Listen("unix", x.endpoint)
 		if err != nil {
-			return
+			_, _ = fmt.Fprintf(out, "fake runsc: listen: %v\n", err)
+			return errExit
 		}
+		x.ln = ln
 		go func() {
 			for {
 				c, err := ln.Accept()
@@ -384,60 +390,41 @@ func fakeSandbox(cfg, cid, bundle string) {
 			}
 		}()
 	}
-	b, _ := json.Marshal(st)
-	if err := os.WriteFile(stateFile(cfg, cid), b, 0o644); err != nil {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if old := f.boxes[cid]; old != nil {
+		_, _ = fmt.Fprintf(out, "fake runsc: container %q exists\n", cid)
+		if x.ln != nil {
+			_ = x.ln.Close()
+		}
+		return errExit
+	}
+	f.nextPID++
+	x.pid = f.nextPID
+	f.boxes[cid] = x
+	return nil
+}
+
+// endSandbox ends the sandbox for cid, if it runs.
+func (f *fakeRunsc) endSandbox(cid string) {
+	f.mu.Lock()
+	x := f.boxes[cid]
+	delete(f.boxes, cid)
+	f.mu.Unlock()
+	if x == nil {
 		return
 	}
-	sigs := make(chan os.Signal, 2)
-	signal.Notify(sigs, syscall.SIGTERM, syscall.SIGUSR1)
-	for sig := range sigs {
-		switch sig {
-		case syscall.SIGUSR1:
-			if ln != nil && !k.IgnoreUSR1 {
-				_ = ln.Close()
-				_ = os.Remove(st.Endpoint)
-				ln = nil
-			}
-		default:
-			if ln != nil {
-				_ = ln.Close()
-			}
-			_ = os.Remove(stateFile(cfg, cid))
-			return
-		}
+	if x.ln != nil {
+		_ = x.ln.Close()
 	}
+	close(x.done)
 }
 
-// sandboxAlive reports whether the fake sandbox for cid still runs.
-func sandboxAlive(cfg, cid string) bool {
-	st, err := readState(cfg, cid)
-	if err != nil {
-		return false
-	}
-	return !errors.Is(syscall.Kill(st.PID, 0), syscall.ESRCH)
-}
-
-// endAllSandboxes ends every fake sandbox the configuration knows of, so
-// a test never leaves a process behind.
-func endAllSandboxes(t *testing.T, cfg string) {
-	t.Helper()
-	ents, _ := os.ReadDir(filepath.Join(cfg, "state"))
-	for _, e := range ents {
-		cid := strings.TrimSuffix(e.Name(), ".json")
-		if st, err := readState(cfg, cid); err == nil {
-			_ = syscall.Kill(st.PID, syscall.SIGTERM)
-		}
-	}
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		ents, _ := os.ReadDir(filepath.Join(cfg, "state"))
-		if len(ents) == 0 {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Errorf("%d fake sandboxes still recorded", len(ents))
-			return
-		}
-		time.Sleep(5 * time.Millisecond)
+// closeEndpoint is what the workload does on USR1: it stops serving and
+// removes its socket, so the host sees the endpoint gone.
+func (x *fakeSandbox) closeEndpoint() {
+	if x.ln != nil {
+		_ = x.ln.Close()
+		_ = os.Remove(x.endpoint)
 	}
 }

@@ -15,41 +15,47 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
+
+	"go.uber.org/goleak"
 
 	"github.com/helayoty/fiberd/pkg/backend"
 	"github.com/helayoty/fiberd/pkg/core"
 )
 
-// newFake opens a backend over the fake runsc with a rootfs directory of
-// its own. Everything it starts is ended when the test is.
-func newFake(t *testing.T, k knobs) (*Backend, string) {
+// newFake opens a backend over an in-process fake runsc. Everything it
+// starts is ended when the test is.
+func newFake(t *testing.T, k knobs) (*Backend, *fakeRunsc) {
 	t.Helper()
-	bin, cfg := fakeRunscBin(t, k)
-	b := New(Options{Runsc: bin, Rootfs: filepath.Join(t.TempDir(), "rootfs"), StateDir: filepath.Join(t.TempDir(), "state")}).(*Backend)
-	if err := os.Mkdir(b.opt.Rootfs, 0o755); err != nil {
+	f := newFakeRunsc(k)
+	rootfs := filepath.Join(t.TempDir(), "rootfs")
+	if err := os.Mkdir(rootfs, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	// New looked for the rootfs before it existed. Set the tier a real
-	// opening would find.
-	b.tier = core.TierSnapshot
-	t.Cleanup(func() { endFake(t, b, cfg) })
-	return b, cfg
+	b := newBackend(Options{Runsc: "runsc", Rootfs: rootfs, StateDir: filepath.Join(t.TempDir(), "state")}, f.run)
+	if b.Tier() != core.TierSnapshot {
+		t.Fatalf("Tier = %s (%v), want FIBER_SNAPSHOT over the fake", b.Tier(), b.ProbeErr())
+	}
+	t.Cleanup(func() { endFake(t, b, f) })
+	return b, f
 }
 
-// endFake is the fixture's teardown. Close kills every sandbox, the fakes
-// are ended whatever the knobs say, and then the backend's reapers are
-// waited for. A reaper runs `runsc delete` once `runsc wait` returns,
-// which is after Close has returned, and every fake runsc appends to
-// <cfg>/calls.log. The test's directories go right after this (TempDir's
-// RemoveAll is the oldest cleanup, so it runs last), and a delete landing
-// in between leaves the configuration directory "not empty".
-func endFake(t *testing.T, b *Backend, cfg string) {
+// endFake is the fixture's teardown: knobs reset (so a kill scripted to
+// fail cannot hold Close to its bound), Close, then whatever the fake
+// still runs is ended.
+func endFake(t *testing.T, b *Backend, f *fakeRunsc) {
 	t.Helper()
+	f.setKnobs(knobs{})
 	b.Close()
-	endAllSandboxes(t, cfg)
+	f.endAll()
+	if !reapersDone(b, time.Second) {
+		t.Error("a reaper is still running after Close")
+	}
+}
+
+// reapersDone reports whether every reaper has finished within the bound.
+func reapersDone(b *Backend, bound time.Duration) bool {
 	done := make(chan struct{})
 	go func() {
 		b.reapers.Wait()
@@ -57,12 +63,13 @@ func endFake(t *testing.T, b *Backend, cfg string) {
 	}()
 	select {
 	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Error("a reaper is still running after Close")
+		return true
+	case <-time.After(bound):
+		return false
 	}
 }
 
-// waitFor polls cond until it holds or the deadline passes.
+// waitFor polls cond until it holds or the bound passes.
 func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
@@ -70,7 +77,7 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 		if time.Now().After(deadline) {
 			t.Fatalf("timed out waiting for %s", what)
 		}
-		time.Sleep(5 * time.Millisecond)
+		time.Sleep(time.Millisecond)
 	}
 }
 
@@ -121,9 +128,9 @@ func lastField(call string) string {
 }
 
 // warmed is a backend with the template for grant g warm.
-func warmed(t *testing.T, k knobs) (*Backend, string, backend.Warm, string) {
+func warmed(t *testing.T, k knobs) (*Backend, *fakeRunsc, backend.Warm, string) {
 	t.Helper()
-	b, cfg := newFake(t, k)
+	b, f := newFake(t, k)
 	workDir := filepath.Join(t.TempDir(), "g")
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -131,20 +138,20 @@ func warmed(t *testing.T, k knobs) (*Backend, string, backend.Warm, string) {
 	if err != nil {
 		t.Fatalf("Warm: %v", err)
 	}
-	return b, cfg, w, workDir
+	return b, f, w, workDir
 }
 
 // cloned is warmed plus one fiber serving on <workDir>/ep.sock.
-func cloned(t *testing.T, k knobs) (*Backend, string, string, backend.Fiber) {
+func cloned(t *testing.T, k knobs) (*Backend, *fakeRunsc, string, backend.Fiber) {
 	t.Helper()
-	b, cfg, w, workDir := warmed(t, k)
+	b, f, w, workDir := warmed(t, k)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	f, err := b.Clone(ctx, w.ID, backend.FiberSpec{Fence: "g/1-1", Endpoint: filepath.Join(workDir, "ep.sock"), CgroupFD: -1, Deadline: 2 * time.Second})
+	fb, err := b.Clone(ctx, w.ID, backend.FiberSpec{Fence: "g/1-1", Endpoint: filepath.Join(workDir, "ep.sock"), CgroupFD: -1, Deadline: 2 * time.Second})
 	if err != nil {
 		t.Fatalf("Clone: %v", err)
 	}
-	return b, cfg, workDir, f
+	return b, f, workDir, fb
 }
 
 // dialable reports whether a unix socket accepts a connection.
@@ -160,13 +167,7 @@ func dialable(path string) bool {
 // findCall is the first recorded runsc invocation containing every part.
 func findCall(calls []string, parts ...string) string {
 	for _, c := range calls {
-		ok := true
-		for _, p := range parts {
-			if !strings.Contains(c, p) {
-				ok = false
-			}
-		}
-		if ok {
+		if containsAll(c, parts) {
 			return c
 		}
 	}
@@ -174,63 +175,72 @@ func findCall(calls []string, parts ...string) string {
 }
 
 // TestNew checks that the tier is FIBER_SNAPSHOT only with a runsc that
-// answers and a rootfs directory, the version is read from runsc, and the
-// defaults fill in. The facts the backend states about itself do not depend
-// on either.
+// answers and a rootfs directory, the version is read from runsc through
+// the seam, and the defaults fill in. The facts the backend states about
+// itself do not depend on either.
 func TestNew(t *testing.T) {
-	bin, _ := fakeRunscBin(t, knobs{})
-	rootfs := t.TempDir()
 	cases := []struct {
 		name        string
-		opt         func(t *testing.T) Options
+		knobs       knobs
+		opt         func(t *testing.T, rootfs string) Options
 		wantTier    core.Tier
 		wantVersion string
 		wantRunsc   string
 		wantState   string
 		wantWhy     string // in ProbeErr, "" for none
+		wantSweep   bool   // the root was listed for leftovers
 	}{
-		{name: "runsc and rootfs", opt: func(*testing.T) Options { return Options{Runsc: bin, Rootfs: rootfs, StateDir: "/s"} },
-			wantTier: core.TierSnapshot, wantVersion: fakeVersion, wantRunsc: bin, wantState: "/s"},
-		{name: "runsc missing", opt: func(t *testing.T) Options {
-			return Options{Runsc: filepath.Join(t.TempDir(), "none"), Rootfs: rootfs, StateDir: "/s"}
-		}, wantRunsc: "NONE", wantState: "/s", wantWhy: "unavailable"},
-		{name: "rootfs missing", opt: func(t *testing.T) Options {
-			return Options{Runsc: bin, Rootfs: filepath.Join(t.TempDir(), "none"), StateDir: "/s"}
-		}, wantVersion: fakeVersion, wantRunsc: bin, wantState: "/s", wantWhy: "rootfs unusable"},
-		{name: "rootfs is a file", opt: func(t *testing.T) Options {
+		{name: "runsc and rootfs", opt: func(_ *testing.T, rootfs string) Options {
+			return Options{Runsc: "/opt/runsc", Rootfs: rootfs, StateDir: "/s"}
+		},
+			wantTier: core.TierSnapshot, wantVersion: fakeVersion, wantRunsc: "/opt/runsc", wantState: "/s", wantSweep: true},
+		{name: "runsc missing", knobs: knobs{Fail: map[string]bool{"version": true}}, opt: func(_ *testing.T, rootfs string) Options {
+			return Options{Runsc: "/nowhere/runsc", Rootfs: rootfs, StateDir: "/s"}
+		}, wantRunsc: "/nowhere/runsc", wantState: "/s", wantWhy: "runsc /nowhere/runsc unavailable"},
+		{name: "rootfs missing", opt: func(t *testing.T, _ string) Options {
+			return Options{Runsc: "/opt/runsc", Rootfs: filepath.Join(t.TempDir(), "none"), StateDir: "/s"}
+		}, wantVersion: fakeVersion, wantRunsc: "/opt/runsc", wantState: "/s", wantWhy: "rootfs unusable", wantSweep: true},
+		{name: "rootfs is a file", opt: func(t *testing.T, _ string) Options {
 			f := filepath.Join(t.TempDir(), "file")
 			if err := os.WriteFile(f, nil, 0o600); err != nil {
 				t.Fatal(err)
 			}
-			return Options{Runsc: bin, Rootfs: f, StateDir: "/s"}
-		}, wantVersion: fakeVersion, wantRunsc: bin, wantState: "/s", wantWhy: "is not a directory"},
-		{name: "defaults", opt: func(t *testing.T) Options { return Options{Rootfs: filepath.Join(t.TempDir(), "none")} },
-			wantRunsc: "runsc", wantState: "/var/lib/fiberd/gvisor", wantVersion: "ANY", wantWhy: "ANY"},
+			return Options{Runsc: "/opt/runsc", Rootfs: f, StateDir: "/s"}
+		}, wantVersion: fakeVersion, wantRunsc: "/opt/runsc", wantState: "/s", wantWhy: "is not a directory", wantSweep: true},
+		{name: "defaults", opt: func(_ *testing.T, rootfs string) Options { return Options{Rootfs: rootfs} },
+			wantTier: core.TierSnapshot, wantRunsc: "runsc", wantState: "/var/lib/fiberd/gvisor", wantVersion: fakeVersion, wantSweep: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			opt := tc.opt(t)
-			b := New(opt).(*Backend)
+			f := newFakeRunsc(tc.knobs)
+			opt := tc.opt(t, t.TempDir())
+			b := newBackend(opt, f.run)
 			t.Cleanup(b.Close)
 			if b.Tier() != tc.wantTier {
 				t.Fatalf("Tier = %s, want %s", b.Tier(), tc.wantTier)
 			}
 			why := b.ProbeErr()
 			switch {
-			case tc.wantWhy == "ANY":
 			case tc.wantWhy == "" && why != nil:
 				t.Fatalf("ProbeErr = %v, want nil", why)
 			case tc.wantWhy != "" && (why == nil || !strings.Contains(why.Error(), tc.wantWhy)):
 				t.Fatalf("ProbeErr = %v, want one mentioning %q", why, tc.wantWhy)
 			}
-			if tc.wantVersion != "ANY" && b.version != tc.wantVersion {
+			if b.version != tc.wantVersion {
 				t.Fatalf("version = %q, want %q", b.version, tc.wantVersion)
 			}
-			if tc.wantRunsc != "NONE" && b.opt.Runsc != tc.wantRunsc {
+			if b.opt.Runsc != tc.wantRunsc {
 				t.Fatalf("Runsc = %q, want %q", b.opt.Runsc, tc.wantRunsc)
 			}
 			if b.opt.StateDir != tc.wantState {
 				t.Fatalf("StateDir = %q, want %q", b.opt.StateDir, tc.wantState)
+			}
+			calls := f.calls()
+			if findCall(calls, "--version") == "" {
+				t.Fatalf("no version probe among\n%s", strings.Join(calls, "\n"))
+			}
+			if (findCall(calls, "list -quiet") != "") != tc.wantSweep {
+				t.Fatalf("sweep %v, want %v among\n%s", !tc.wantSweep, tc.wantSweep, strings.Join(calls, "\n"))
 			}
 			p := b.Platform()
 			if p.Kernel != "gvisor-"+b.version || p.Libc != "rootfs-"+filepath.Base(opt.Rootfs) {
@@ -267,12 +277,12 @@ func TestRunsc(t *testing.T) {
 			wantText: "exit status 1: ..." + tail400(strings.Repeat("x", 600)+"fake runsc: state failed")},
 		{name: "detached output through a file", args: []string{"state", "--detach", "x"}, wantText: `container "x" does not exist`, wantOut: `container "x" does not exist`},
 		{name: "detached without a state directory", stateDir: "missing", args: []string{"state", "--detach", "x"}, wantErr: os.ErrNotExist},
-		{name: "deadline ends the command", knobs: knobs{SlowRestore: 3 * time.Second}, timeout: 500 * time.Millisecond,
+		{name: "deadline ends the command", knobs: knobs{SlowRestore: 3 * time.Second}, timeout: 100 * time.Millisecond,
 			args: []string{"restore", "--detach", "--image-path", "IMG", "--bundle", "B", "x"}, wantErr: context.DeadlineExceeded, wantText: "runsc restore"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			b, _ := newFake(t, tc.knobs)
+			b, f := newFake(t, tc.knobs)
 			if err := os.MkdirAll(b.opt.StateDir, 0o755); err != nil {
 				t.Fatal(err)
 			}
@@ -309,16 +319,14 @@ func TestRunsc(t *testing.T) {
 					t.Fatalf("output files left: %v", left)
 				}
 			}
-			if tc.args[0] != "--version" {
-				calls := runscCalls(t, filepath.Dir(b.opt.Runsc))
-				want := "--root=" + filepath.Join(b.opt.StateDir, "root") + " --platform=systrap --network=none --ignore-cgroups --host-uds=all --overlay2=none --app-huge-pages=false " + strings.Join(args, " ")
-				got := findCall(calls, want)
-				if tc.stateDir == "missing" {
-					want, got = "", findCall(calls, strings.Join(tc.args, " ")) // never ran
-				}
-				if got != want {
-					t.Fatalf("runsc was invoked as %q, want %q", got, want)
-				}
+			calls := f.calls()
+			want := strings.Join(append(b.globalArgs(), args...), " ")
+			got := findCall(calls, want)
+			if tc.stateDir == "missing" {
+				want, got = "", findCall(calls, strings.Join(tc.args, " ")) // never ran
+			}
+			if got != want {
+				t.Fatalf("runsc was invoked as %q, want %q", got, want)
 			}
 		})
 	}
@@ -596,14 +604,14 @@ func TestWarm(t *testing.T) {
 			}
 		}, wantText: "not a directory"},
 		{name: "run fails", argv: []string{"/bin/refzygote"}, tier: core.TierSnapshot, knobs: knobs{Fail: map[string]bool{"run": true}}, wantText: "runsc run: exit status 1: fake runsc: run failed"},
-		{name: "template never ready", argv: []string{"/bin/refzygote"}, tier: core.TierSnapshot, knobs: knobs{NoMarker: true}, timeout: time.Second,
+		{name: "template never ready", argv: []string{"/bin/refzygote"}, tier: core.TierSnapshot, knobs: knobs{NoMarker: true}, timeout: 300 * time.Millisecond,
 			started: true, wantErr: context.DeadlineExceeded, wantText: "template did not become ready"},
 		{name: "template checkpoint fails", argv: []string{"/bin/refzygote"}, tier: core.TierSnapshot, knobs: knobs{Fail: map[string]bool{"checkpoint": true}},
 			started: true, wantText: "template checkpoint: gvisor: runsc checkpoint"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			b, cfg := newFake(t, tc.knobs)
+			b, f := newFake(t, tc.knobs)
 			b.tier = tc.tier
 			workDir := filepath.Join(t.TempDir(), "g")
 			if tc.workDir != nil {
@@ -629,10 +637,10 @@ func TestWarm(t *testing.T) {
 				if n != 0 {
 					t.Fatalf("%d templates registered after a failed warm", n)
 				}
+				calls := f.calls()
 				if tc.started {
 					// Started, so it must have been ended by a delete after
 					// the run.
-					calls := runscCalls(t, cfg)
 					ran := false
 					for _, c := range calls {
 						if strings.Contains(c, "run --detach") {
@@ -645,25 +653,25 @@ func TestWarm(t *testing.T) {
 						t.Fatalf("the template was started and never deleted:\n%s", strings.Join(calls, "\n"))
 					}
 				}
-				started := lastField(findCall(runscCalls(t, cfg), "run --detach"))
-				waitFor(t, "the template sandbox to be gone", func() bool { return !sandboxAlive(cfg, started) })
+				if started := lastField(findCall(calls, "run --detach")); started != "" && f.alive(started) {
+					t.Fatalf("the template sandbox %s is still running after a failed warm", started)
+				}
 				return
 			}
 			if err != nil {
 				t.Fatalf("Warm: %v", err)
 			}
 			wc := warmCID(t, b, "g")
-			st, serr := readState(cfg, wc)
-			if serr != nil || w.ID != "g" || w.PID != st.PID || w.Bytes != 0 || w.TotalBytes != 0 {
-				t.Fatalf("Warm = %+v, want id g and the sandbox pid %d (%v)", w, st.PID, serr)
+			if pid := f.pidOf(wc); pid == 0 || w.ID != "g" || w.PID != pid || w.Bytes != 0 || w.TotalBytes != 0 {
+				t.Fatalf("Warm = %+v, want id g and the sandbox pid %d", w, pid)
 			}
 			tdir := filepath.Join(b.opt.StateDir, "templates", "g")
 			if _, err := os.Stat(filepath.Join(tdir, "images", imageFile)); err != nil {
 				t.Fatalf("template image not written: %v", err)
 			}
 			// The reaper's wait starts in the background.
-			waitFor(t, "the reaper's wait", func() bool { return findCall(runscCalls(t, cfg), "wait "+wc) != "" })
-			calls := runscCalls(t, cfg)
+			waitFor(t, "the reaper's wait", func() bool { return findCall(f.calls(), "wait "+wc) != "" })
+			calls := f.calls()
 			for _, want := range []string{
 				"run --detach --bundle " + filepath.Join(tdir, "bundle") + " " + wc,
 				"checkpoint --leave-running --image-path " + filepath.Join(tdir, "images") + " --direct " + wc,
@@ -679,17 +687,24 @@ func TestWarm(t *testing.T) {
 			}
 			b.Unwarm("nobody")
 			b.Unwarm(w.ID)
-			waitFor(t, "the template sandbox to be gone", func() bool { return !sandboxAlive(cfg, wc) })
+			if f.alive(wc) {
+				t.Fatal("the template sandbox survived Unwarm")
+			}
 			// The reaper cleans up after it and says nothing, since the
 			// instance is already unregistered. An end the host asked for
 			// through Unwarm is not news to it.
 			waitFor(t, "the reaper's delete", func() bool {
-				return len(runscCalls(t, cfg)) > 0 && strings.HasSuffix(runscCalls(t, cfg)[len(runscCalls(t, cfg))-1], "delete -force "+wc)
+				calls := f.calls()
+				return len(calls) > 0 && strings.HasSuffix(calls[len(calls)-1], "delete -force "+wc)
 			})
+			// Checked once the reaper is done, so no exit is still on its way.
+			if !reapersDone(b, 5*time.Second) {
+				t.Fatal("a reaper is still running")
+			}
 			select {
 			case e := <-b.Exits():
 				t.Fatalf("unexpected exit %+v after Unwarm", e)
-			case <-time.After(100 * time.Millisecond):
+			default:
 			}
 			b.mu.Lock()
 			n := len(b.warms)
@@ -703,61 +718,34 @@ func TestWarm(t *testing.T) {
 			if err != nil {
 				t.Fatalf("second Warm: %v", err)
 			}
-			if wc2 := warmCID(t, b, "g"); w2.PID == w.PID || wc2 == wc || !sandboxAlive(cfg, wc2) {
+			if wc2 := warmCID(t, b, "g"); w2.PID == w.PID || wc2 == wc || !f.alive(wc2) {
 				t.Fatalf("second Warm = %+v cid %s, want a new live sandbox with a cid other than %s", w2, wc2, wc)
 			}
 			select {
 			case e := <-b.Exits():
 				t.Fatalf("unexpected exit %+v", e)
-			case <-time.After(100 * time.Millisecond):
+			default:
 			}
 		})
 	}
 }
 
-// cgroupLeaf makes a cgroup under the delegated root and opens it, or
-// skips. The cleanup waits for the leaf to empty and removes it.
-func cgroupLeaf(t *testing.T) int {
-	t.Helper()
-	if os.Geteuid() != 0 {
-		t.Skip("needs root")
-	}
-	root := os.Getenv("FIBERD_CGROUP_ROOT")
-	if root == "" {
-		root = "/sys/fs/cgroup/fiberd"
-	}
-	if f, err := os.OpenFile(filepath.Join(root, "cgroup.subtree_control"), os.O_WRONLY, 0); err != nil {
-		t.Skipf("no delegated cgroup at %s", root)
-	} else {
-		_ = f.Close()
-	}
-	dir := filepath.Join(root, fmt.Sprintf("gvisor-unit-%d-%d", os.Getpid(), time.Now().UnixNano()))
-	if err := os.Mkdir(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	fd, err := syscall.Open(dir, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_CLOEXEC, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		_ = syscall.Close(fd)
-		waitFor(t, "the emptied leaf to be removable", func() bool { return os.Remove(dir) == nil })
-	})
-	return fd
-}
-
 // TestProbeFootprint checks that the template image is restored once into the
-// probe cgroup as a fiber would be, measured serving, and ended, leaving
-// nothing in the leaf or the run directory. A probe that cannot restore or
-// serve measures nothing.
+// probe cgroup as a fiber would be, measured serving from the leaf's
+// counters (a seeded directory here, a real leaf in tests/gvisor), and
+// ended, leaving nothing behind. A probe that cannot restore or serve
+// measures nothing.
 func TestProbeFootprint(t *testing.T) {
+	leaf := map[string]string{"memory.stat": "anon 4096\nshmem 8192\nfile 0\n", "memory.current": "12288\n"}
 	cases := []struct {
-		name     string
-		knobs    knobs
-		noCgroup bool
-		wantLog  string
+		name      string
+		knobs     knobs
+		noCgroup  bool
+		wantBytes uint64
+		wantTotal uint64
+		wantLog   string
 	}{
-		{name: "measured serving in the leaf"},
+		{name: "measured serving in the leaf", wantBytes: 8192, wantTotal: 12288},
 		{name: "no probe cgroup", noCgroup: true},
 		{name: "restore fails", knobs: knobs{Fail: map[string]bool{"restore": true}}, wantLog: "footprint probe: gvisor: runsc restore"},
 		{name: "never serves", knobs: knobs{NoServe: true}, wantLog: "footprint probe did not serve: context deadline exceeded"},
@@ -766,12 +754,12 @@ func TestProbeFootprint(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			fd := -1
 			if !tc.noCgroup {
-				fd = cgroupLeaf(t)
+				fd = cgroupFiles(t, leaf)
 			}
 			var logs bytes.Buffer
 			log.SetOutput(&logs)
 			t.Cleanup(func() { log.SetOutput(os.Stderr) })
-			b, cfg := newFake(t, tc.knobs)
+			b, f := newFake(t, tc.knobs)
 			workDir := filepath.Join(t.TempDir(), "g")
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
@@ -779,17 +767,13 @@ func TestProbeFootprint(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Warm: %v", err)
 			}
-			if tc.noCgroup || tc.wantLog != "" {
-				if w.Bytes != 0 || w.TotalBytes != 0 {
-					t.Fatalf("Warm measured %d/%d bytes, want nothing", w.Bytes, w.TotalBytes)
-				}
-			} else if w.TotalBytes == 0 || w.Bytes > w.TotalBytes {
-				t.Fatalf("Warm measured shmem %d of %d bytes, want a footprint", w.Bytes, w.TotalBytes)
+			if w.Bytes != tc.wantBytes || w.TotalBytes != tc.wantTotal {
+				t.Fatalf("Warm measured %d/%d bytes, want %d/%d", w.Bytes, w.TotalBytes, tc.wantBytes, tc.wantTotal)
 			}
 			if tc.wantLog != "" && !strings.Contains(logs.String(), tc.wantLog) {
 				t.Fatalf("log = %q, want %q", logs.String(), tc.wantLog)
 			}
-			calls := runscCalls(t, cfg)
+			calls := f.calls()
 			if tc.noCgroup {
 				if findCall(calls, "-probe") != "" {
 					t.Fatal("a probe ran without a probe cgroup")
@@ -798,15 +782,19 @@ func TestProbeFootprint(t *testing.T) {
 			}
 			tdir := filepath.Join(b.opt.StateDir, "templates", "g")
 			probe := warmCID(t, b, "g") + "-probe"
-			if findCall(calls, "restore --detach --image-path "+filepath.Join(tdir, "images")+" --bundle "+filepath.Join(tdir, "probe-bundle")+" --direct "+probe) == "" {
+			restore := "restore --detach --image-path " + filepath.Join(tdir, "images") + " --bundle " + filepath.Join(tdir, "probe-bundle") + " --direct " + probe
+			if findCall(calls, restore) == "" {
 				t.Fatalf("no probe restore among\n%s", strings.Join(calls, "\n"))
+			}
+			if got := f.cgroupOf(restore); got != fd {
+				t.Fatalf("the probe was restored in cgroup fd %d, want the probe cgroup %d", got, fd)
 			}
 			for _, want := range []string{"kill " + probe + " KILL", "wait " + probe, "delete -force " + probe} {
 				if findCall(calls, want) == "" {
 					t.Fatalf("no %q among\n%s", want, strings.Join(calls, "\n"))
 				}
 			}
-			if sandboxAlive(cfg, probe) {
+			if f.alive(probe) {
 				t.Fatal("the probe sandbox is still alive")
 			}
 			for _, left := range []string{filepath.Join(tdir, "probe-bundle"), filepath.Join(workDir, "probe.sock")} {
@@ -826,7 +814,7 @@ func TestProbeWithoutABundle(t *testing.T) {
 	}{{name: "template directory is a file"}}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			b, cfg := newFake(t, knobs{})
+			b, f := newFake(t, knobs{})
 			tdir := filepath.Join(t.TempDir(), "tdir")
 			if err := os.WriteFile(tdir, nil, 0o600); err != nil {
 				t.Fatal(err)
@@ -836,7 +824,7 @@ func TestProbeWithoutABundle(t *testing.T) {
 			if shmem != 0 || total != 0 {
 				t.Fatalf("probeFootprint = %d/%d, want nothing", shmem, total)
 			}
-			if c := findCall(runscCalls(t, cfg), "w-g-probe"); c != "" {
+			if c := findCall(f.calls(), "w-g-probe"); c != "" {
 				t.Fatalf("runsc ran for a probe without a bundle: %s", c)
 			}
 		})
@@ -859,18 +847,17 @@ func TestClone(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			b, cfg, w, workDir := warmed(t, tc.knobs)
+			b, f, w, workDir := warmed(t, tc.knobs)
 			ep := filepath.Join(workDir, "ep.sock")
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			f, err := b.Clone(ctx, w.ID, backend.FiberSpec{Fence: "g/1-1", Endpoint: ep, CgroupFD: -1, Deadline: 2 * time.Second, Payload: tc.payload})
+			fb, err := b.Clone(ctx, w.ID, backend.FiberSpec{Fence: "g/1-1", Endpoint: ep, CgroupFD: -1, Deadline: 2 * time.Second, Payload: tc.payload})
 			if err != nil {
 				t.Fatalf("Clone: %v", err)
 			}
 			fc := boxCID(t, b, "g/1-1")
-			st, serr := readState(cfg, fc)
-			if serr != nil || f.ID != "g/1-1" || f.PID != st.PID {
-				t.Fatalf("Clone = %+v, want g/1-1 with the sandbox pid %d (%v)", f, st.PID, serr)
+			if pid := f.pidOf(fc); pid == 0 || fb.ID != "g/1-1" || fb.PID != pid {
+				t.Fatalf("Clone = %+v, want g/1-1 with the sandbox pid %d", fb, pid)
 			}
 			if !dialable(ep) {
 				t.Fatalf("%s does not accept connections", ep)
@@ -889,7 +876,7 @@ func TestClone(t *testing.T) {
 				t.Fatalf("bundle payload: %s", cfgJSON)
 			}
 			tdir := filepath.Join(b.opt.StateDir, "templates", "g")
-			calls := runscCalls(t, cfg)
+			calls := f.calls()
 			if findCall(calls, "restore --detach --image-path "+filepath.Join(tdir, "images")+" --bundle "+bundle+" --direct "+fc) == "" {
 				t.Fatalf("no restore among\n%s", strings.Join(calls, "\n"))
 			}
@@ -933,14 +920,12 @@ func TestCloneRefusals(t *testing.T) {
 		{name: "endpoint outside the run directory", endpoint: "/elsewhere/ep.sock", wantText: "outside the grant's run directory"},
 		{name: "bundle cannot be written", endpoint: "ep.sock", bundles: true, wantText: "not a directory"},
 		{name: "restore fails", endpoint: "ep.sock", knobs: knobs{Fail: map[string]bool{"restore": true}}, wantText: "runsc restore: exit status 1: fake runsc: restore failed (no leaf)"},
-		// Deadlines here are wide enough that a loaded runner's fork and
-		// exec of the fake runsc do not fire them first.
-		{name: "never serves", endpoint: "ep.sock", knobs: knobs{NoServe: true}, deadline: time.Second, wantErr: context.DeadlineExceeded, wantText: "g/1-1 did not serve", wantKill: true},
-		{name: "restore misses the deadline", endpoint: "ep.sock", knobs: knobs{SlowRestore: 3 * time.Second}, deadline: 500 * time.Millisecond, wantErr: context.DeadlineExceeded, wantText: "runsc restore"},
+		{name: "never serves", endpoint: "ep.sock", knobs: knobs{NoServe: true}, deadline: 300 * time.Millisecond, wantErr: context.DeadlineExceeded, wantText: "g/1-1 did not serve", wantKill: true},
+		{name: "restore misses the deadline", endpoint: "ep.sock", knobs: knobs{SlowRestore: 3 * time.Second}, deadline: 100 * time.Millisecond, wantErr: context.DeadlineExceeded, wantText: "runsc restore"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			b, cfg, w, workDir := warmed(t, tc.knobs)
+			b, f, w, workDir := warmed(t, tc.knobs)
 			warmID := w.ID
 			if tc.warmID != "" {
 				warmID = tc.warmID
@@ -961,11 +946,15 @@ func TestCloneRefusals(t *testing.T) {
 				t.Fatalf("Clone = %v, want %q (errors.Is %v)", err, tc.wantText, tc.wantErr)
 			}
 			if tc.wantKill {
-				fc := boxCID(t, b, "g/1-1")
-				if findCall(runscCalls(t, cfg), "kill "+fc+" KILL") == "" {
+				// The reaper may have unregistered the box already, so
+				// its cid comes from the restore that started it.
+				fc := lastField(findCall(f.calls(), "restore --detach"))
+				if findCall(f.calls(), "kill "+fc+" KILL") == "" {
 					t.Fatal("a fiber that never served was not killed")
 				}
-				waitFor(t, "the sandbox to be gone", func() bool { return !sandboxAlive(cfg, fc) })
+				if f.alive(fc) {
+					t.Fatal("the sandbox of a fiber that never served is still running")
+				}
 			}
 		})
 	}
@@ -1044,19 +1033,17 @@ func TestParkAndResume(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			b, cfg, workDir, _ := cloned(t, tc.knobs)
+			b, f, workDir, _ := cloned(t, tc.knobs)
 			fc := boxCID(t, b, "g/1-1")
 			dir := filepath.Join(t.TempDir(), "park")
 			if err := b.Park(context.Background(), "g/1-1", backend.ParkSpec{Dir: dir}); err != nil {
 				t.Fatalf("Park: %v", err)
 			}
-			if _, err := os.Stat(b.bundleDir(fc)); err == nil {
-				waitFor(t, "the reaper to remove the bundle", func() bool {
-					_, err := os.Stat(b.bundleDir(fc))
-					return err != nil
-				})
-			}
-			calls := runscCalls(t, cfg)
+			waitFor(t, "the reaper to remove the bundle", func() bool {
+				_, err := os.Stat(b.bundleDir(fc))
+				return err != nil
+			})
+			calls := f.calls()
 			for _, want := range []string{"kill " + fc + " USR1", "checkpoint --image-path " + dir + " --direct " + fc} {
 				if findCall(calls, want) == "" {
 					t.Fatalf("no %q among\n%s", want, strings.Join(calls, "\n"))
@@ -1065,9 +1052,9 @@ func TestParkAndResume(t *testing.T) {
 			if c := findCall(calls, "checkpoint", "--direct "+fc); strings.Contains(c, "--leave-running") {
 				t.Fatalf("a park left the sandbox running: %s", c)
 			}
-			for _, f := range []string{imageFile, "config.json"} {
-				if _, err := os.Stat(filepath.Join(dir, f)); err != nil {
-					t.Fatalf("%s not in the park image: %v", f, err)
+			for _, name := range []string{imageFile, "config.json"} {
+				if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+					t.Fatalf("%s not in the park image: %v", name, err)
 				}
 			}
 			if e := waitExit(t, b); e != (backend.Exit{FiberID: "g/1-1", Status: "exit:0"}) {
@@ -1079,16 +1066,15 @@ func TestParkAndResume(t *testing.T) {
 			ep := filepath.Join(workDir, "ep2.sock")
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			f, err := b.Resume(ctx, backend.ResumeSpec{Dir: dir, Fence: "g/2-1", Endpoint: ep, CgroupFD: -1, Deadline: 2 * time.Second, WarmID: "g", WorkDir: workDir})
+			fb, err := b.Resume(ctx, backend.ResumeSpec{Dir: dir, Fence: "g/2-1", Endpoint: ep, CgroupFD: -1, Deadline: 2 * time.Second, WarmID: "g", WorkDir: workDir})
 			if err != nil {
 				t.Fatalf("Resume: %v", err)
 			}
 			fc2 := boxCID(t, b, "g/2-1")
-			st, serr := readState(cfg, fc2)
-			if serr != nil || f.ID != "g/2-1" || f.PID != st.PID || !dialable(ep) {
-				t.Fatalf("Resume = %+v (%v), want g/2-1 serving on %s", f, serr, ep)
+			if pid := f.pidOf(fc2); pid == 0 || fb.ID != "g/2-1" || fb.PID != pid || !dialable(ep) {
+				t.Fatalf("Resume = %+v (pid %d), want g/2-1 serving on %s", fb, pid, ep)
 			}
-			if findCall(runscCalls(t, cfg), "restore --detach --image-path "+dir+" --bundle "+b.bundleDir(fc2)+" --direct "+fc2) == "" {
+			if findCall(f.calls(), "restore --detach --image-path "+dir+" --bundle "+b.bundleDir(fc2)+" --direct "+fc2) == "" {
 				t.Fatal("the resume did not restore the park image")
 			}
 			cfgJSON, err := os.ReadFile(filepath.Join(b.bundleDir(fc2), "config.json"))
@@ -1121,15 +1107,14 @@ func TestParkRefusals(t *testing.T) {
 		{name: "unknown fiber", fiber: "nobody", wantText: `unknown fiber "nobody"`},
 		{name: "bundle gone", fiber: "g/1-1", noBundle: true, wantText: "config.json: no such file"},
 		{name: "workload cannot be signalled", fiber: "g/1-1", after: knobs{Fail: map[string]bool{"kill": true}}, wantText: "runsc kill"},
-		{name: "endpoint stays open", fiber: "g/1-1", before: knobs{IgnoreUSR1: true}, wantErr: context.DeadlineExceeded, wantText: "did not close its endpoint for the checkpoint"},
+		{name: "endpoint stays open", fiber: "g/1-1", before: knobs{IgnoreUSR1: true}, after: knobs{IgnoreUSR1: true}, wantErr: context.DeadlineExceeded, wantText: "did not close its endpoint for the checkpoint"},
 		{name: "checkpoint fails", fiber: "g/1-1", after: knobs{Fail: map[string]bool{"checkpoint": true}}, wantText: "runsc checkpoint"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			b, cfg, _, _ := cloned(t, tc.before)
+			b, f, _, _ := cloned(t, tc.before)
 			fc := boxCID(t, b, "g/1-1")
-			setKnobs(t, cfg, tc.after)
-			t.Cleanup(func() { setKnobs(t, cfg, knobs{}) })
+			f.setKnobs(tc.after)
 			if tc.noBundle {
 				if err := os.RemoveAll(b.bundleDir(fc)); err != nil {
 					t.Fatal(err)
@@ -1139,7 +1124,7 @@ func TestParkRefusals(t *testing.T) {
 			if err == nil || (tc.wantErr != nil && !errors.Is(err, tc.wantErr)) || !strings.Contains(err.Error(), tc.wantText) {
 				t.Fatalf("Park = %v, want %q (errors.Is %v)", err, tc.wantText, tc.wantErr)
 			}
-			if !sandboxAlive(cfg, fc) {
+			if !f.alive(fc) {
 				t.Fatal("a refused park ended the fiber")
 			}
 		})
@@ -1182,7 +1167,7 @@ func TestClose(t *testing.T) {
 	}{{name: "template and fiber"}}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			b, cfg, _, _ := cloned(t, knobs{})
+			b, f, _, _ := cloned(t, knobs{})
 			cids := []string{warmCID(t, b, "g"), boxCID(t, b, "g/1-1")}
 			b.Close()
 			got := map[backend.Exit]bool{}
@@ -1194,21 +1179,25 @@ func TestClose(t *testing.T) {
 				t.Fatalf("exits = %v, want %v", got, want)
 			}
 			for _, cid := range cids {
-				waitFor(t, cid+" to be gone", func() bool { return !sandboxAlive(cfg, cid) })
+				if f.alive(cid) {
+					t.Fatalf("%s is still running after Close", cid)
+				}
 			}
 		})
 	}
 }
 
-// TestEndFake checks that the fixture's teardown outlasts the backend's
-// reapers. Each sandbox's late `runsc delete` has been recorded when
-// endFake returns, and nothing invokes runsc after it, so the test's
-// directories can go. An Unwarm'd template reports no Exit, so draining
-// Exits would not do. The reaper count is the signal.
-func TestEndFake(t *testing.T) {
+// TestReapersFinishBeforeTeardown pins that Close returns only once its
+// reapers are done (the flake of 698b7c6, fixed in the backend). A
+// reaper's delete is held at the gate, Close must still be waiting then,
+// and once the gate opens it returns with every delete recorded and no
+// goroutine left. An Unwarm'd template reports no Exit, so the reaper
+// count is the signal.
+func TestReapersFinishBeforeTeardown(t *testing.T) {
 	cases := []struct {
 		name  string
-		start func(t *testing.T, b *Backend, workDir string) []string // the cids it leaves to the teardown
+		start func(t *testing.T, b *Backend, workDir string) []string // the cids it leaves to Close
+		held  func(t *testing.T, b *Backend)                          // ends the sandbox whose delete the gate holds, or nothing for Close to
 	}{
 		{name: "template and fiber", start: func(t *testing.T, b *Backend, workDir string) []string {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -1219,25 +1208,46 @@ func TestEndFake(t *testing.T) {
 			return []string{warmCID(t, b, "g"), boxCID(t, b, "g/1-1")}
 		}},
 		{name: "unwarmed template", start: func(t *testing.T, b *Backend, _ string) []string {
-			cid := warmCID(t, b, "g")
-			b.Unwarm("g")
-			return []string{cid}
-		}},
+			return []string{warmCID(t, b, "g")}
+		}, held: func(_ *testing.T, b *Backend) { b.Unwarm("g") }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			b, cfg, _, workDir := warmed(t, knobs{})
+			b, f, _, workDir := warmed(t, knobs{})
 			cids := tc.start(t, b, workDir)
-			endFake(t, b, cfg)
-			calls := runscCalls(t, cfg)
+			gate := f.holdNextDelete()
+			closed := make(chan struct{})
+			if tc.held != nil {
+				tc.held(t, b)
+			}
+			go func() {
+				b.Close()
+				close(closed)
+			}()
+			<-gate.claimed
+			select {
+			case <-closed:
+				t.Fatal("Close returned while a reaper's delete was still to run")
+			default:
+			}
+			close(gate.open)
+			select {
+			case <-closed:
+			case <-time.After(5 * time.Second):
+				t.Fatal("Close did not return once the reapers could finish")
+			}
+			calls := f.calls()
 			for _, cid := range cids {
 				if findCall(calls, "delete -force "+cid) == "" {
-					t.Fatalf("the reaper of %s had not deleted it when the teardown returned", cid)
+					t.Fatalf("the reaper of %s had not deleted it when Close returned", cid)
 				}
 			}
-			time.Sleep(200 * time.Millisecond)
-			if n := len(runscCalls(t, cfg)) - len(calls); n != 0 {
-				t.Fatalf("%d runsc calls after the teardown", n)
+			if !reapersDone(b, time.Second) {
+				t.Fatal("a reaper is still counted after Close")
+			}
+			goleak.VerifyNone(t)
+			if n := len(f.calls()) - len(calls); n != 0 {
+				t.Fatalf("%d runsc calls after Close", n)
 			}
 		})
 	}
@@ -1250,19 +1260,18 @@ func TestPidOf(t *testing.T) {
 		name  string
 		cid   string
 		knobs knobs
-		want  func(cfg, wc string) int
+		want  func(f *fakeRunsc, wc string) int
 	}{
-		{name: "running sandbox", cid: "WARM", want: func(cfg, wc string) int { st, _ := readState(cfg, wc); return st.PID }},
-		{name: "unknown sandbox", cid: "nobody", want: func(string, string) int { return 0 }},
-		{name: "state fails", cid: "WARM", knobs: knobs{Fail: map[string]bool{"state": true}}, want: func(string, string) int { return 0 }},
+		{name: "running sandbox", cid: "WARM", want: func(f *fakeRunsc, wc string) int { return f.pidOf(wc) }},
+		{name: "unknown sandbox", cid: "nobody", want: func(*fakeRunsc, string) int { return 0 }},
+		{name: "state fails", cid: "WARM", knobs: knobs{Fail: map[string]bool{"state": true}}, want: func(*fakeRunsc, string) int { return 0 }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			b, cfg, _, _ := warmed(t, knobs{})
+			b, f, _, _ := warmed(t, knobs{})
 			wc := warmCID(t, b, "g")
-			setKnobs(t, cfg, tc.knobs)
-			t.Cleanup(func() { setKnobs(t, cfg, knobs{}) })
-			want := tc.want(cfg, wc)
+			f.setKnobs(tc.knobs)
+			want := tc.want(f, wc)
 			if tc.name == "running sandbox" && want == 0 {
 				t.Fatal("the running sandbox recorded no pid")
 			}
@@ -1329,27 +1338,27 @@ func TestSweep(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			bin, cfg := fakeRunscBin(t, tc.knobs)
-			t.Cleanup(func() { endAllSandboxes(t, cfg) })
+			f := newFakeRunsc(tc.knobs)
+			t.Cleanup(f.endAll)
 			// A sandbox of a previous life, started outside any backend.
 			old := &Backend{opt: Options{Rootfs: "/rootfs"}}
 			bundle := filepath.Join(t.TempDir(), "bundle")
 			if err := old.writeBundle(bundle, []string{"/bin/refzygote"}, []string{"FIBERD_FENCE=none"}, t.TempDir(), "", ""); err != nil {
 				t.Fatal(err)
 			}
-			if code := startSandbox(cfg, "w-old-7", bundle); code != 0 || !sandboxAlive(cfg, "w-old-7") {
-				t.Fatalf("the leftover sandbox did not start (%d)", code)
+			var out bytes.Buffer
+			if err := f.startSandbox("w-old-7", bundle, knobs{}, &out); err != nil || !f.alive("w-old-7") {
+				t.Fatalf("the leftover sandbox did not start: %v %s", err, out.String())
 			}
-			b := New(Options{Runsc: bin, Rootfs: t.TempDir(), StateDir: filepath.Join(t.TempDir(), "state")}).(*Backend)
+			b := newBackend(Options{Runsc: "runsc", Rootfs: t.TempDir(), StateDir: filepath.Join(t.TempDir(), "state")}, f.run)
 			t.Cleanup(b.Close)
 			if tc.wantGone {
-				waitFor(t, "the leftover to be gone", func() bool { return !sandboxAlive(cfg, "w-old-7") })
-				if findCall(runscCalls(t, cfg), "delete -force w-old-7") == "" {
+				if f.alive("w-old-7") || findCall(f.calls(), "delete -force w-old-7") == "" {
 					t.Fatal("the leftover was not deleted through runsc")
 				}
 				return
 			}
-			if !sandboxAlive(cfg, "w-old-7") || findCall(runscCalls(t, cfg), "delete") != "" {
+			if !f.alive("w-old-7") || findCall(f.calls(), "delete") != "" {
 				t.Fatal("something was deleted without a listing")
 			}
 		})
@@ -1368,16 +1377,16 @@ func TestCIDReuse(t *testing.T) {
 		// starts its successor, returning the successor's cid and bundle
 		// ("" when there is none).
 		first func(t *testing.T, b *Backend, workDir string) string
-		again func(t *testing.T, b *Backend, cfg, workDir string) (string, string)
+		again func(t *testing.T, b *Backend, gate *deleteGate, workDir string) (string, string)
 		// settle ends the successor and waits for its reaper, so nothing
 		// still writes into the test's directories when they go.
-		settle func(t *testing.T, b *Backend, cfg, second string)
+		settle func(t *testing.T, b *Backend, f *fakeRunsc, second string)
 	}{
 		{name: "template warmed again after Unwarm",
 			first: func(t *testing.T, b *Backend, _ string) string { return warmCID(t, b, "g") },
-			again: func(t *testing.T, b *Backend, cfg, workDir string) (string, string) {
+			again: func(t *testing.T, b *Backend, gate *deleteGate, workDir string) (string, string) {
 				b.Unwarm("g")
-				waitFor(t, "the reaper's delete to be held", func() bool { _, err := os.Stat(filepath.Join(cfg, gateClaimed)); return err == nil })
+				<-gate.claimed
 				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 				defer cancel()
 				if _, err := b.Warm(ctx, backend.WarmSpec{GrantUID: "g", Template: backend.Template{Argv: []string{"/bin/refzygote", "--gvisor"}}, CgroupFD: -1, ProbeCgroupFD: -1, WorkDir: workDir}); err != nil {
@@ -1385,9 +1394,9 @@ func TestCIDReuse(t *testing.T) {
 				}
 				return warmCID(t, b, "g"), ""
 			},
-			settle: func(t *testing.T, b *Backend, cfg, second string) {
+			settle: func(t *testing.T, b *Backend, f *fakeRunsc, second string) {
 				b.Unwarm("g")
-				waitFor(t, "the successor's reaper", func() bool { return findCall(runscCalls(t, cfg), "delete -force "+second) != "" })
+				waitFor(t, "the successor's reaper", func() bool { return findCall(f.calls(), "delete -force "+second) != "" })
 			}},
 		{name: "fiber cloned again under its fence after Kill",
 			first: func(t *testing.T, b *Backend, workDir string) string {
@@ -1398,11 +1407,11 @@ func TestCIDReuse(t *testing.T) {
 				}
 				return boxCID(t, b, "g/1-1")
 			},
-			again: func(t *testing.T, b *Backend, cfg, workDir string) (string, string) {
+			again: func(t *testing.T, b *Backend, gate *deleteGate, workDir string) (string, string) {
 				if err := b.Kill("g/1-1"); err != nil {
 					t.Fatalf("Kill: %v", err)
 				}
-				waitFor(t, "the reaper's delete to be held", func() bool { _, err := os.Stat(filepath.Join(cfg, gateClaimed)); return err == nil })
+				<-gate.claimed
 				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 				defer cancel()
 				if _, err := b.Clone(ctx, "g", backend.FiberSpec{Fence: "g/1-1", Endpoint: filepath.Join(workDir, "ep.sock"), CgroupFD: -1, Deadline: 2 * time.Second}); err != nil {
@@ -1411,7 +1420,7 @@ func TestCIDReuse(t *testing.T) {
 				cid := boxCID(t, b, "g/1-1")
 				return cid, b.bundleDir(cid)
 			},
-			settle: func(t *testing.T, b *Backend, _, _ string) {
+			settle: func(t *testing.T, b *Backend, _ *fakeRunsc, _ string) {
 				if err := b.Kill("g/1-1"); err != nil {
 					t.Fatalf("Kill: %v", err)
 				}
@@ -1420,19 +1429,17 @@ func TestCIDReuse(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			b, cfg, _, workDir := warmed(t, knobs{})
+			b, f, _, workDir := warmed(t, knobs{})
 			first := tc.first(t, b, workDir)
-			setKnobs(t, cfg, knobs{GateDelete: true})
-			second, bundle := tc.again(t, b, cfg, workDir)
-			if !sandboxAlive(cfg, second) {
+			gate := f.holdNextDelete()
+			second, bundle := tc.again(t, b, gate, workDir)
+			if !f.alive(second) {
 				t.Fatalf("the successor %s is not running", second)
 			}
 			// The old reaper's delete lands here.
-			if err := os.WriteFile(filepath.Join(cfg, gateOpen), nil, 0o644); err != nil {
-				t.Fatal(err)
-			}
-			waitFor(t, "the held delete to run", func() bool { _, err := os.Stat(filepath.Join(cfg, gatePassed)); return err == nil })
-			if !sandboxAlive(cfg, second) {
+			close(gate.open)
+			<-gate.passed
+			if !f.alive(second) {
 				t.Fatalf("the late delete of %s ended its successor %s", first, second)
 			}
 			if bundle != "" {
@@ -1443,7 +1450,7 @@ func TestCIDReuse(t *testing.T) {
 			if second == first {
 				t.Fatalf("the successor reuses cid %s", first)
 			}
-			tc.settle(t, b, cfg, second)
+			tc.settle(t, b, f, second)
 		})
 	}
 }

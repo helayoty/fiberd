@@ -36,12 +36,14 @@
 package gvisor
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
@@ -67,7 +69,15 @@ const (
 	createDeadline = 500 * time.Millisecond
 	resumeDeadline = 2 * time.Second
 	readyMarker    = "warm.ready"
+	// closeWait bounds Close's wait for its reapers, hit only when runsc
+	// itself is wedged.
+	closeWait = 10 * time.Second
 )
+
+// runFunc runs one runsc process (args after the binary, the cgroup to
+// start in or -1, where its output goes). execRunsc is the real one, a
+// unit test's fake answers in-process.
+type runFunc func(ctx context.Context, cgroupFD int, args []string, out io.Writer) error
 
 // Options configure the gVisor backend.
 type Options struct {
@@ -90,17 +100,17 @@ type Backend struct {
 	tier    core.Tier
 	why     error // why tier is unspecified, nil when it is not
 
+	// run starts every runsc process. New sets it to execRunsc.
+	run runFunc
+
 	mu    sync.Mutex
 	warms map[string]*warm // warm id
 	boxes map[string]*box  // fiber id
 	gen   uint64           // incarnations started, the suffix of every cid
 	exits chan backend.Exit
-	// reapers counts the waitWarm and waitBox goroutines still running.
-	// Each outlives the sandbox it watches: it deletes the container's
-	// runsc state after `runsc wait` returns, which is after Close has
-	// killed the sandbox and returned. Close does not wait for them (the
-	// Exit each reports is the host's cleanup signal), so whoever takes
-	// the state directory away waits here.
+	// reapers counts the waitWarm and waitBox goroutines, each deleting
+	// its container's state after `runsc wait` returns. Close waits for
+	// them, so nothing of the backend runs once it returns.
 	reapers sync.WaitGroup
 }
 
@@ -127,20 +137,27 @@ type box struct {
 
 // New opens the backend. The tier is FIBER_SNAPSHOT when runsc answers
 // and the rootfs exists. Otherwise it offers none, and ProbeErr says why.
-func New(o Options) backend.Backend {
+func New(o Options) backend.Backend { return newBackend(o, nil) }
+
+// newBackend is New with the runsc adapter chosen: nil for the process
+// (execRunsc), or a unit test's in-process fake.
+func newBackend(o Options, run runFunc) *Backend {
 	if o.Runsc == "" {
 		o.Runsc = "runsc"
 	}
 	if o.StateDir == "" {
 		o.StateDir = "/var/lib/fiberd/gvisor"
 	}
-	b := &Backend{opt: o, warms: map[string]*warm{}, boxes: map[string]*box{}, exits: make(chan backend.Exit, 1024)}
-	out, err := exec.Command(o.Runsc, "--version").Output()
+	b := &Backend{opt: o, run: run, warms: map[string]*warm{}, boxes: map[string]*box{}, exits: make(chan backend.Exit, 1024)}
+	if b.run == nil {
+		b.run = b.execRunsc
+	}
+	out, err := b.runsc(context.Background(), -1, "--version")
 	if err != nil {
 		b.why = fmt.Errorf("runsc %s unavailable: %w", o.Runsc, err)
 		return b
 	}
-	b.version = strings.TrimSpace(strings.TrimPrefix(strings.SplitN(string(out), "\n", 2)[0], "runsc version "))
+	b.version = strings.TrimSpace(strings.TrimPrefix(strings.SplitN(out, "\n", 2)[0], "runsc version "))
 	b.sweep()
 	if st, err := os.Stat(o.Rootfs); err != nil {
 		b.why = fmt.Errorf("rootfs unusable: %w", err)
@@ -199,19 +216,13 @@ func (b *Backend) globalArgs() []string {
 		"--network=none", "--ignore-cgroups", "--host-uds=all", "--overlay2=none", "--app-huge-pages=false"}
 }
 
-// runsc runs one runsc command. cgroupFD >= 0 starts it (and so the
-// sandbox and gofer it leaves behind with --detach) inside that cgroup.
-// A detached command's output goes to a file, never a pipe: the sandbox
-// it leaves behind inherits the descriptors and a pipe would never close.
+// runsc runs one runsc command through b.run. cgroupFD >= 0 starts it
+// (and so the sandbox and gofer it leaves behind with --detach) inside
+// that cgroup. A detached command's output goes to a file, never a pipe:
+// the sandbox it leaves behind inherits the descriptors and a pipe would
+// never close.
 func (b *Backend) runsc(ctx context.Context, cgroupFD int, args ...string) (string, error) {
-	cmd := exec.CommandContext(ctx, b.opt.Runsc, append(b.globalArgs(), args...)...)
-	// A command that is not detached writes to a pipe. Should a process
-	// it leaves behind hold that pipe open, Run returns this long after
-	// the command itself has exited instead of waiting for the pipe.
-	cmd.WaitDelay = time.Second
-	if cgroupFD >= 0 {
-		cmd.SysProcAttr = &syscall.SysProcAttr{UseCgroupFD: true, CgroupFD: cgroupFD}
-	}
+	full := append(b.globalArgs(), args...)
 	detached := false
 	for _, a := range args {
 		if a == "--detach" {
@@ -232,11 +243,12 @@ func (b *Backend) runsc(ctx context.Context, cgroupFD int, args ...string) (stri
 			_ = f.Close()
 			_ = os.Remove(f.Name())
 		}()
-		cmd.Stdout, cmd.Stderr = f, f
-		err = cmd.Run()
+		err = b.run(ctx, cgroupFD, full, f)
 		out, _ = os.ReadFile(f.Name())
 	} else {
-		out, err = cmd.CombinedOutput()
+		var buf bytes.Buffer
+		err = b.run(ctx, cgroupFD, full, &buf)
+		out = buf.Bytes()
 	}
 	if err != nil {
 		if ctx.Err() != nil {
@@ -252,6 +264,21 @@ func (b *Backend) runsc(ctx context.Context, cgroupFD int, args ...string) (stri
 		return string(out), fmt.Errorf("gvisor: runsc %s: %w: %s", args[0], err, tail)
 	}
 	return string(out), nil
+}
+
+// execRunsc is run's default: the runsc process, with its stdout and
+// stderr on out. The context ending kills it.
+func (b *Backend) execRunsc(ctx context.Context, cgroupFD int, args []string, out io.Writer) error {
+	cmd := exec.CommandContext(ctx, b.opt.Runsc, args...)
+	// A command that is not detached writes to a pipe. Should a process
+	// it leaves behind hold that pipe open, Run returns this long after
+	// the command itself has exited instead of waiting for the pipe.
+	cmd.WaitDelay = time.Second
+	if cgroupFD >= 0 {
+		cmd.SysProcAttr = &syscall.SysProcAttr{UseCgroupFD: true, CgroupFD: cgroupFD}
+	}
+	cmd.Stdout, cmd.Stderr = out, out
+	return cmd.Run()
 }
 
 // spec is the OCI config.json a sandbox is created or restored with.
@@ -789,6 +816,8 @@ func (b *Backend) Kill(fiberID string) error {
 
 func (b *Backend) Exits() <-chan backend.Exit { return b.exits }
 
+// Close kills every sandbox and waits (bounded) for their reapers, so the
+// state directory can go once it returns.
 func (b *Backend) Close() {
 	b.mu.Lock()
 	var cids []string
@@ -801,6 +830,16 @@ func (b *Backend) Close() {
 	b.mu.Unlock()
 	for _, c := range cids {
 		_, _ = b.runsc(context.Background(), -1, "kill", c, "KILL")
+	}
+	done := make(chan struct{})
+	go func() {
+		b.reapers.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(closeWait):
+		log.Printf("gvisor: close: a reaper is still running after %s", closeWait)
 	}
 }
 

@@ -118,7 +118,7 @@ func TestStageTemplate(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			b, cfg := newFake(t, knobs{})
+			b, f := newFake(t, knobs{})
 			dir, sha := artifactDir(t, []byte("#!/bin/sh\nexec sleep 600\n"))
 			tpl := tc.template(t, dir, sha)
 			workDir := filepath.Join(t.TempDir(), "g")
@@ -130,7 +130,7 @@ func TestStageTemplate(t *testing.T) {
 				if err == nil || !strings.Contains(err.Error(), tc.wantText) {
 					t.Fatalf("Warm = %v, want %q", err, tc.wantText)
 				}
-				if findCall(runscCalls(t, cfg), "run") != "" {
+				if findCall(f.calls(), "run") != "" {
 					t.Fatal("a refused template started a sandbox")
 				}
 				if _, err := os.Stat(filepath.Join(tdir, "template", "zygote")); err == nil {
@@ -164,11 +164,11 @@ func TestStageTemplate(t *testing.T) {
 			if src := templateMountOf(t, filepath.Join(tdir, "bundle")); src != staged {
 				t.Fatalf("template bundle binds %q, want %q", src, staged)
 			}
-			f, err := b.Clone(ctx, w.ID, backend.FiberSpec{Fence: "g/1-1", Endpoint: filepath.Join(workDir, "ep.sock"), CgroupFD: -1, Deadline: 2 * time.Second})
+			fb, err := b.Clone(ctx, w.ID, backend.FiberSpec{Fence: "g/1-1", Endpoint: filepath.Join(workDir, "ep.sock"), CgroupFD: -1, Deadline: 2 * time.Second})
 			if err != nil {
 				t.Fatalf("Clone: %v", err)
 			}
-			if src := templateMountOf(t, b.bundleDir(boxCID(t, b, f.ID))); src != staged {
+			if src := templateMountOf(t, b.bundleDir(boxCID(t, b, fb.ID))); src != staged {
 				t.Fatalf("fiber bundle binds %q, want %q", src, staged)
 			}
 			// The cache is not what is bound: rewriting it after the warm

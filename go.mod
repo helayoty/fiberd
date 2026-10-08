@@ -10,6 +10,7 @@ require (
 	github.com/go-jose/go-jose/v4 v4.1.5
 	github.com/google/go-containerregistry v0.22.1
 	github.com/opencontainers/image-spec v1.1.1
+	go.uber.org/goleak v1.3.0
 	golang.org/x/sys v0.47.0
 	google.golang.org/grpc v1.83.2
 	google.golang.org/protobuf v1.36.12
