@@ -27,7 +27,14 @@ registry_up() {
   if [ "$(docker inspect -f '{{.State.Running}}' "$REG_NAME" 2>/dev/null)" != true ]; then
     docker run -d --restart=always -p "127.0.0.1:$REG_PORT:5000" --network bridge --name "$REG_NAME" registry:2 >/dev/null
   fi
-  docker network connect kind "$REG_NAME" 2>/dev/null || true
+}
+
+# registry_join puts the registry on the kind network, which exists only
+# once kind has made a cluster. On a fresh host that is after cluster_up.
+registry_join() {
+  if [ -z "$(docker inspect -f '{{with index .NetworkSettings.Networks "kind"}}x{{end}}' "$REG_NAME")" ]; then
+    docker network connect kind "$REG_NAME"
+  fi
 }
 
 cluster_up() {
@@ -134,7 +141,7 @@ registry_addr() {
 }
 
 case "${1:-}" in
-  up) registry_up; cluster_up; gvisor_up; echo "cluster kind-$CLUSTER up, registry localhost:$REG_PORT, audit $STATE/audit/audit.log" ;;
+  up) registry_up; cluster_up; registry_join; gvisor_up; echo "cluster kind-$CLUSTER up, registry localhost:$REG_PORT, audit $STATE/audit/audit.log" ;;
   registry-addr) registry_addr ;;
   down) kind delete cluster --name "$CLUSTER"; docker rm -f "$REG_NAME" >/dev/null 2>&1 || true ;;
   *) echo "usage: $0 up|registry-addr|down" >&2; exit 2 ;;
