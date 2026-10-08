@@ -95,6 +95,12 @@ nodes:
             authorization-always-allow-paths: /healthz,/readyz,/livez,/metrics
 EOF
   kind get clusters 2>/dev/null | grep -qx "$CLUSTER" || kind create cluster --name "$CLUSTER" --config "$STATE/kind.yaml" --wait 120s
+  # journald's per-service rate limit can drop the goroutine dump of a
+  # containerd crash under a burst, so the node keeps every line.
+  docker exec "$NODE" sh -c 'test -f /etc/systemd/journald.conf.d/compare.conf || {
+    mkdir -p /etc/systemd/journald.conf.d
+    printf "[Journal]\nRateLimitIntervalSec=0\nRateLimitBurst=0\n" > /etc/systemd/journald.conf.d/compare.conf
+    systemctl restart systemd-journald; }'
   # The registry, as kind's local-registry recipe wires it.
   docker exec "$NODE" sh -c "mkdir -p /etc/containerd/certs.d/localhost:$REG_PORT && printf '[host.\"http://$REG_NAME:5000\"]\n' > /etc/containerd/certs.d/localhost:$REG_PORT/hosts.toml"
   "${KC[@]}" apply -f - <<EOF
