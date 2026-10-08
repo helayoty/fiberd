@@ -90,6 +90,7 @@ type instance struct {
 	slot    int
 	vm      VM
 	handler *exec.Cmd
+	exited  chan error // closed by the handler's waiter, holding its exit
 }
 
 // New checks the options.
@@ -281,13 +282,17 @@ func (a *Adapter) restore(ctx context.Context, id string, slot int, dir string) 
 		uffd = filepath.Join(a.o.WorkDir, fmt.Sprintf("uffd-%d.sock", slot))
 		_ = os.Remove(uffd)
 		inst.handler = exec.CommandContext(ctx, a.o.UFFDHandler, uffd, a.mem(dir))
+		var stderr bytes.Buffer
+		inst.handler.Stderr = &stderr
 		if err := inst.handler.Start(); err != nil {
 			_ = vm.Kill()
 			return compare.Handle{}, fmt.Errorf("uffd handler: %w", err)
 		}
-		if err := waitSocket(ctx, uffd); err != nil {
+		inst.exited = make(chan error, 1)
+		go func() { inst.exited <- inst.handler.Wait() }()
+		if err := waitSocket(ctx, uffd, inst.exited); err != nil {
 			inst.kill()
-			return compare.Handle{}, fmt.Errorf("uffd handler: %w", err)
+			return compare.Handle{}, fmt.Errorf("uffd handler: %w %s", err, strings.TrimSpace(stderr.String()))
 		}
 	}
 	if err := dialAPI(sock).do(ctx, http.MethodPut, "/snapshot/load", a.LoadParams(dir, uffd)); err != nil {
@@ -305,7 +310,7 @@ func (i *instance) kill() {
 	_ = i.vm.Kill()
 	if i.handler != nil && i.handler.Process != nil {
 		_ = i.handler.Process.Kill()
-		_ = i.handler.Wait()
+		<-i.exited
 	}
 }
 
@@ -402,8 +407,10 @@ func RSS(pid int) (int64, error) {
 	return 0, fmt.Errorf("no VmRSS for pid %d", pid)
 }
 
-// waitSocket waits for a unix socket to accept.
-func waitSocket(ctx context.Context, path string) error {
+// waitSocket waits for a unix socket to accept. It stops early when
+// exited fires, so a process that dies before listening is reported
+// instead of waited on. A nil exited never fires.
+func waitSocket(ctx context.Context, path string, exited chan error) error {
 	for {
 		c, err := net.Dial("unix", path)
 		if err == nil {
@@ -413,6 +420,10 @@ func waitSocket(ctx context.Context, path string) error {
 		select {
 		case <-ctx.Done():
 			return fmt.Errorf("%s: %w", path, ctx.Err())
+		case err := <-exited:
+			// Put it back so kill does not block on an empty channel.
+			exited <- err
+			return fmt.Errorf("%s: the handler exited before listening: %v", path, err)
 		case <-time.After(2 * time.Millisecond):
 		}
 	}
@@ -455,7 +466,7 @@ func (l *execLauncher) Start(ctx context.Context, slot int, sock string) (VM, er
 		return nil, err
 	}
 	p := &process{cmd: cmd, addr: addr, down: down}
-	if err := waitSocket(ctx, sock); err != nil {
+	if err := waitSocket(ctx, sock, nil); err != nil {
 		_ = p.Kill()
 		return nil, err
 	}

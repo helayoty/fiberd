@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -23,6 +25,7 @@ import (
 func TestMain(m *testing.M) {
 	if sock := os.Getenv("COMPARE_FC_FAKE_UFFD"); sock != "" {
 		if _, err := net.Listen("unix", os.Args[1]); err != nil {
+			fmt.Fprintln(os.Stderr, "fake uffd handler:", err)
 			os.Exit(2)
 		}
 		select {}
@@ -271,6 +274,50 @@ func TestLoadParamsAndNamespace(t *testing.T) {
 			}
 			if Namespace(tc.slot) != "fc-"+string(rune('0'+tc.slot)) {
 				t.Errorf("namespace %s", Namespace(tc.slot))
+			}
+		})
+	}
+}
+
+func TestWaitSocket(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "fcw-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	live := filepath.Join(dir, "live.sock")
+	ln, err := net.Listen("unix", live)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	dead := make(chan error, 1)
+	dead <- errors.New("exit status 2")
+	cases := []struct {
+		name    string
+		path    string
+		exited  chan error
+		timeout time.Duration
+		want    string // empty means no error
+	}{
+		{name: "a listening socket answers", path: live, timeout: time.Second},
+		{name: "a handler that exits is reported at once", path: filepath.Join(dir, "none.sock"), exited: dead, timeout: time.Minute, want: "exited before listening"},
+		{name: "no socket and no exit waits for the deadline", path: filepath.Join(dir, "none.sock"), timeout: 50 * time.Millisecond, want: "deadline exceeded"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), tc.timeout)
+			defer cancel()
+			start := time.Now()
+			err := waitSocket(ctx, tc.path, tc.exited)
+			switch {
+			case tc.want == "" && err != nil:
+				t.Fatalf("waitSocket = %v, want nil", err)
+			case tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)):
+				t.Fatalf("waitSocket = %v, want an error with %q", err, tc.want)
+			}
+			if tc.exited != nil && time.Since(start) > 5*time.Second {
+				t.Fatalf("an exited handler took %v to report", time.Since(start))
 			}
 		})
 	}
