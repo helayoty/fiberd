@@ -75,18 +75,20 @@ func New(o Options) (*Adapter, error) {
 // Template is the SandboxTemplate the pool is made of. Its Pod is the
 // same counter Pod the plain comparator runs.
 func (a *Adapter) Template() map[string]any {
-	limits := map[string]any{}
+	limits, resources := map[string]any{}, map[string]any{}
 	if a.o.CPU != "" {
 		limits["cpu"] = a.o.CPU
+		resources["requests"] = map[string]any{"cpu": compare.CPURequest}
 	}
 	if a.o.Memory != "" {
 		limits["memory"] = a.o.Memory
 	}
+	resources["limits"] = limits
 	spec := map[string]any{
 		"containers": []any{map[string]any{
 			"name": "counter", "image": a.o.Image, "imagePullPolicy": "IfNotPresent",
 			"ports":     []any{map[string]any{"containerPort": a.o.Port}},
-			"resources": map[string]any{"limits": limits},
+			"resources": resources,
 		}},
 	}
 	if a.o.RuntimeClass != "" {

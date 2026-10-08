@@ -82,9 +82,15 @@ run_in_client() { # run_in_client <system> <class> <args...>
   local system=$1 class=$2; shift 2
   echo "== $system"
   wait_quiet_host
-  # shellcheck disable=SC2046  # the flag strings are lists
-  client_exec compare -adapter "${ADAPTER:?}" -system "$system" -class "$class" -runs "$RUNS" -bursts "$BURSTS" \
+  # shellcheck disable=SC2046,SC2016  # the flag strings are lists, $0 and $@ expand in the Pod
+  client_exec sh -c 'rm -f "/out/$0.rc"; compare "$@"; rc=$?; echo "$rc" >"/out/$0.rc"; exit "$rc"' "$system" \
+    -adapter "${ADAPTER:?}" -system "$system" -class "$class" -runs "$RUNS" -bursts "$BURSTS" \
     -out "/out/$system.jsonl" $(control_plane_flags) "$@"
+  # kubectl exec can exit 0 when its stream breaks, as on a containerd
+  # restart, while compare still runs. Only the exit file says it ended.
+  local rc
+  rc=$(client_exec cat "/out/$system.rc" 2>/dev/null) || rc=
+  [ "$rc" = 0 ] || { echo "$system: compare did not finish (exit ${rc:-unknown}), the exec stream broke" >&2; return 1; }
 }
 
 # collect copies the client's results into $STATE/<phase> and prints the

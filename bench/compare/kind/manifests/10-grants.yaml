@@ -33,6 +33,7 @@ spec:
       - -registry-plain-http
     resources:
       limits: { memory: 4Gi }
+      requests: { memory: 256Mi }
 ---
 apiVersion: fiberd.io/v1alpha1
 kind: CapacityGrant
@@ -59,6 +60,7 @@ spec:
       - -registry-plain-http
     resources:
       limits: { memory: 4Gi }
+      requests: { memory: 256Mi }
 ---
 apiVersion: fiberd.io/v1alpha1
 kind: CapacityGrant
@@ -87,3 +89,4 @@ spec:
       # A restored sandbox is about 90 MiB. The limit is the kubelet's
       # ceiling on the whole home, template and fibers.
       limits: { memory: 6Gi }
+      requests: { memory: 256Mi }

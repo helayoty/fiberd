@@ -90,7 +90,8 @@ type container struct {
 		ContainerPort int `json:"containerPort"`
 	} `json:"ports"`
 	Resources struct {
-		Limits map[string]string `json:"limits,omitempty"`
+		Limits   map[string]string `json:"limits,omitempty"`
+		Requests map[string]string `json:"requests,omitempty"`
 	} `json:"resources"`
 }
 
@@ -108,6 +109,7 @@ func (a *Adapter) Build(id string) *pod {
 	limits := map[string]string{}
 	if a.o.CPU != "" {
 		limits["cpu"] = a.o.CPU
+		c.Resources.Requests = map[string]string{"cpu": compare.CPURequest}
 	}
 	if a.o.Memory != "" {
 		limits["memory"] = a.o.Memory

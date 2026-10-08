@@ -18,6 +18,13 @@ import (
 // has no equivalent of, such as Resume on a plain Pod.
 var ErrUnsupported = errors.New("compare: unsupported by this system")
 
+// CPURequest is what a Pod or claim reserves on the node when it has a
+// CPU limit. The limit keeps every instance's share fair. Left to
+// default, the request equals the limit, and a burst of 50 at 250m asks
+// for 12.5 cores, so kubelet refuses most of it on a small node. A fiber
+// reserves nothing per instance either.
+const CPURequest = "10m"
+
 // Handle is one activated instance.
 type Handle struct {
 	// ID is what the system calls the instance (a Pod name, a fiber id,

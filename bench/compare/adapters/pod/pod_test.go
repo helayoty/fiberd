@@ -60,6 +60,9 @@ func TestBuild(t *testing.T) {
 				if c.Resources.Limits["cpu"] != "250m" || c.Resources.Limits["memory"] != "64Mi" {
 					t.Errorf("limits %v", c.Resources.Limits)
 				}
+				if len(c.Resources.Requests) != 1 || c.Resources.Requests["cpu"] != "10m" {
+					t.Errorf("requests %v, want only cpu 10m", c.Resources.Requests)
+				}
 				if p.Spec.RestartPolicy != "Never" {
 					t.Errorf("restart %q", p.Spec.RestartPolicy)
 				}
@@ -69,7 +72,7 @@ func TestBuild(t *testing.T) {
 				if p.Spec.RuntimeClassName != "gvisor" || p.Spec.Containers[0].ImagePullPolicy != "Always" {
 					t.Errorf("spec %+v", p.Spec)
 				}
-				if p.Spec.Containers[0].Resources.Limits != nil {
+				if r := p.Spec.Containers[0].Resources; r.Limits != nil || r.Requests != nil {
 					t.Error("no limits asked, none set")
 				}
 			}},

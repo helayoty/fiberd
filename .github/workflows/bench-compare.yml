@@ -165,10 +165,17 @@ jobs:
             # zygote log in the grant's run directory (pkg/backend/runc). Any
             # other Pod has neither, and the exec fails quietly.
             echo "::group::$pod runc and zygote logs"
+            # shellcheck disable=SC2016  # $f expands in the Pod
             $kc -n compare exec "$pod" -c agent -- sh -c \
               'for f in /var/lib/fiberd/runc/bundles/*.runc.log /run/fiberd/*/zygote.log; do [ -f "$f" ] || continue; echo "--- $f"; tail -c 4096 "$f"; done' 2>/dev/null || true
             echo "::endgroup::"
           done
+          # The node's own view: a containerd or kubelet crash, or an OOM kill.
+          echo "::group::node journal"
+          docker exec compare-control-plane journalctl -u containerd -u kubelet --since "-20min" --no-pager 2>/dev/null \
+            | grep -iE "panic|fatal|error|oom|killed|started|stopped" | tail -n 200 || true
+          sudo dmesg 2>/dev/null | grep -iE "oom|killed process" | tail -n 20 || true
+          echo "::endgroup::"
           sudo tail -n 50 bin/compare-state/phase4/fc-work/*.log 2>/dev/null || true
       - name: delete the compare cluster
         if: always()

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -54,6 +55,36 @@ func newAdapter(t *testing.T, srv *kubetest.Server, replicas int, rc string) *Ad
 		t.Fatal(err)
 	}
 	return a
+}
+
+func TestTemplateResources(t *testing.T) {
+	cases := []struct {
+		name         string
+		cpu, memory  string
+		wantLimits   map[string]any
+		wantRequests map[string]any
+	}{
+		{name: "a CPU limit reserves only the small request", cpu: "250m", memory: "64Mi",
+			wantLimits: map[string]any{"cpu": "250m", "memory": "64Mi"}, wantRequests: map[string]any{"cpu": "10m"}},
+		{name: "no CPU limit, no request", memory: "64Mi", wantLimits: map[string]any{"memory": "64Mi"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a, err := New(Options{Kube: &kube.Client{}, Namespace: "ns", Image: "img", CPU: tc.cpu, Memory: tc.memory})
+			if err != nil {
+				t.Fatal(err)
+			}
+			spec := a.Template()["spec"].(map[string]any)["podTemplate"].(map[string]any)["spec"].(map[string]any)
+			res := spec["containers"].([]any)[0].(map[string]any)["resources"].(map[string]any)
+			if got := res["limits"]; !reflect.DeepEqual(got, tc.wantLimits) {
+				t.Errorf("limits %v, want %v", got, tc.wantLimits)
+			}
+			got, _ := res["requests"].(map[string]any)
+			if tc.wantRequests == nil && got != nil || tc.wantRequests != nil && !reflect.DeepEqual(got, tc.wantRequests) {
+				t.Errorf("requests %v, want %v", got, tc.wantRequests)
+			}
+		})
+	}
 }
 
 func TestSetup(t *testing.T) {
