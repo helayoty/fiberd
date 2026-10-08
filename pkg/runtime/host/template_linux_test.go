@@ -21,17 +21,17 @@ import (
 	"github.com/helayoty/fiberd/pkg/core"
 )
 
-// TestResolveTemplateDigest: a registry template's digest names its
+// TestResolveTemplateDigest checks that a registry template's digest names its
 // directory in the template cache, so only "sha256:" and 64 lowercase hex
 // characters may reach the path. Anything else is refused before the
-// cache is touched. "sha256:.." once named the cache's parent, which a
-// failed pull then removed.
+// cache is touched. "sha256:.." would name the cache's parent, which a
+// failed pull removes.
 func TestResolveTemplateDigest(t *testing.T) {
 	hex64 := strings.Repeat("0123456789abcdef", 4)
 	cases := []struct {
 		name   string
 		digest string
-		// refused: the digest is rejected for its form, before any pull.
+		// refused means the digest is rejected for its form, before any pull.
 		refused bool
 	}{
 		{name: "valid", digest: "sha256:" + hex64},
@@ -52,7 +52,7 @@ func TestResolveTemplateDigest(t *testing.T) {
 			if err := os.WriteFile(sentinel, nil, 0o600); err != nil {
 				t.Fatal(err)
 			}
-			// Nothing listens on port 1: a pull fails at once.
+			// Nothing listens on port 1, so a pull fails at once.
 			r := &Runtime{cfg: Config{Registry: "127.0.0.1:1/tmpl", RegistryPlainHTTP: true, TemplateCache: cache}}
 			_, err := r.resolveTemplate(context.Background(), tc.digest)
 			if _, serr := os.Stat(sentinel); serr != nil {
@@ -68,9 +68,10 @@ func TestResolveTemplateDigest(t *testing.T) {
 	}
 }
 
-// TestParentHash: a parent checkpoint's hash comes from a pulled delta and
-// is joined into the parent store, so only 64 lowercase hex characters may
-// reach the path. Anything else is refused before the store is touched.
+// TestParentHash checks that a parent checkpoint's hash comes from a pulled
+// delta and is joined into the parent store, so only 64 lowercase hex
+// characters may reach the path. Anything else is refused before the store is
+// touched.
 func TestParentHash(t *testing.T) {
 	hex64 := strings.Repeat("0123456789abcdef", 4)
 	cases := []struct {
@@ -106,17 +107,18 @@ func TestParentHash(t *testing.T) {
 
 // templateArtifact writes a zygote artifact directory by hand (an
 // executable, its config, images when asked) and pushes it to reg,
-// returning its digest.
-func templateArtifact(t *testing.T, reg string, p artifact.Platform, images bool) string {
+// returning its digest. linking is what the config says about the
+// executable ("" for a config from before the fact was recorded).
+func templateArtifact(t *testing.T, reg string, p artifact.Platform, images bool, linking string) string {
 	t.Helper()
 	dir := t.TempDir()
-	zygote := []byte("#!/bin/sh\nexit 0\n")
+	zygote := []byte("#!/bin/sh\nexit 0\n" + linking)
 	sum := sha256.Sum256(zygote)
 	if err := os.WriteFile(artifact.ZygotePath(dir), zygote, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	cfg := map[string]any{"args": []string{"--heap", "8"}, "arch": p.Arch, "kernel": p.Kernel, "libc": p.Libc,
-		"zygote_sha256": hex.EncodeToString(sum[:]), "has_images": images, "built_at": "2026-10-01T00:00:00Z"}
+		"zygote_sha256": hex.EncodeToString(sum[:]), "has_images": images, "built_at": "2026-10-01T00:00:00Z", "linking": linking}
 	b, err := json.Marshal(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -132,27 +134,29 @@ func templateArtifact(t *testing.T, reg string, p artifact.Platform, images bool
 			t.Fatal(err)
 		}
 	}
-	digest, err := artifact.Push(context.Background(), dir, reg+"/tmpl/x:"+fmt.Sprintf("%v-%s", images, p.Kernel), true)
+	digest, err := artifact.Push(context.Background(), dir, reg+"/tmpl/x:"+fmt.Sprintf("%v-%s-%s", images, p.Kernel, linking), true)
 	if err != nil {
 		t.Fatalf("push: %v", err)
 	}
 	return digest
 }
 
-// TestResolveTemplateRegistry: a digest not in the Templates map is
-// pulled from the registry into the cache once, re-verified on every
-// later use, and gated on platform parity: the architecture always, the
-// kernel and libc only when the artifact carries images.
+// TestResolveTemplateRegistry checks that a digest not in the Templates
+// map is pulled from the registry into the cache once, re-verified on
+// every later use, and gated on platform parity. The architecture always
+// counts, and the kernel and libc only when the artifact carries images.
 func TestResolveTemplateRegistry(t *testing.T) {
 	ctx := context.Background()
 	srv := httptest.NewServer(registry.New())
 	defer srv.Close()
 	reg := strings.TrimPrefix(srv.URL, "http://")
 	host := artifact.Platform{Arch: "arm64", Kernel: "6.10.0-here", Libc: "glibc 2.40", Backend: "fake"}
-	bare := templateArtifact(t, reg, artifact.Platform{Arch: "arm64", Kernel: "5.4.0-elsewhere", Libc: "musl"}, false)
-	foreign := templateArtifact(t, reg, artifact.Platform{Arch: "amd64", Kernel: "6.10.0-here", Libc: "glibc 2.40"}, false)
-	imaged := templateArtifact(t, reg, host, true)
-	imagedElsewhere := templateArtifact(t, reg, artifact.Platform{Arch: "arm64", Kernel: "6.9.0-elsewhere", Libc: "glibc 2.40"}, true)
+	bare := templateArtifact(t, reg, artifact.Platform{Arch: "arm64", Kernel: "5.4.0-elsewhere", Libc: "musl"}, false, artifact.LinkDynamic)
+	static := templateArtifact(t, reg, artifact.Platform{Arch: "arm64", Kernel: "5.4.0-elsewhere", Libc: "musl"}, false, artifact.LinkStatic)
+	unknown := templateArtifact(t, reg, artifact.Platform{Arch: "arm64", Kernel: "5.4.0-elsewhere", Libc: "musl"}, false, "")
+	foreign := templateArtifact(t, reg, artifact.Platform{Arch: "amd64", Kernel: "6.10.0-here", Libc: "glibc 2.40"}, false, artifact.LinkDynamic)
+	imaged := templateArtifact(t, reg, host, true, artifact.LinkDynamic)
+	imagedElsewhere := templateArtifact(t, reg, artifact.Platform{Arch: "arm64", Kernel: "6.9.0-elsewhere", Libc: "glibc 2.40"}, true, artifact.LinkDynamic)
 	cache := t.TempDir()
 	r := &Runtime{cfg: Config{Registry: reg + "/tmpl/x", RegistryPlainHTTP: true, TemplateCache: cache, Templates: map[string]string{"sha256:local": "/zyg/local --x"}}, host: host}
 	cacheDir := func(digest string) string { return filepath.Join(cache, strings.TrimPrefix(digest, "sha256:")) }
@@ -174,6 +178,9 @@ func TestResolveTemplateRegistry(t *testing.T) {
 			dir := cacheDir(bare)
 			if strings.Join(tpl.Argv, " ") != artifact.ZygotePath(dir)+" --heap 8" || tpl.Digest != bare || tpl.Dir != dir || tpl.ImagesDir != "" {
 				t.Fatalf("template = %+v", tpl)
+			}
+			if sum, _ := artifact.ReadConfig(dir); tpl.ZygoteSHA256 != sum.ZygoteSHA256 || len(tpl.ZygoteSHA256) != 64 {
+				t.Fatalf("template hash = %q, want the verified executable's %q", tpl.ZygoteSHA256, sum.ZygoteSHA256)
 			}
 			if st, err := os.Stat(artifact.ZygotePath(dir)); err != nil || st.Mode().Perm() != 0o755 {
 				t.Fatalf("pulled zygote: %v %v", st, err)
@@ -222,6 +229,43 @@ func TestResolveTemplateRegistry(t *testing.T) {
 			relaxed.cfg.Parity = artifact.Parity{Kernel: artifact.ParityOff, Libc: artifact.ParityOff}
 			if _, err := relaxed.resolveTemplate(ctx, imagedElsewhere); err != nil {
 				t.Fatalf("resolveTemplate with parity off = %v", err)
+			}
+		}},
+		{"a backend with a root filesystem of its own takes only static bare templates", func(t *testing.T) {
+			// The sandbox loads the executable against its rootfs's
+			// libraries, which the home cannot inspect. Static needs
+			// none. Dynamic, or a config that does not say, is refused
+			// unless libc parity is off. Nothing changes for a backend
+			// that runs templates on the host.
+			sandboxed := &Runtime{cfg: r.cfg, host: artifact.Platform{Arch: "arm64", Kernel: "gvisor-20260817.0", Libc: "rootfs-rootfs", Backend: "gvisor"}, ownRootfs: true}
+			relaxed := &Runtime{cfg: sandboxed.cfg, host: sandboxed.host, ownRootfs: true}
+			relaxed.cfg.Parity = artifact.Parity{Libc: artifact.ParityOff}
+			cases := []struct {
+				name    string
+				rt      *Runtime
+				digest  string
+				refused bool
+			}{
+				{name: "static on a sandboxed backend", rt: sandboxed, digest: static},
+				{name: "dynamic on a sandboxed backend", rt: sandboxed, digest: bare, refused: true},
+				{name: "unknown linking on a sandboxed backend", rt: sandboxed, digest: unknown, refused: true},
+				{name: "dynamic with libc parity off", rt: relaxed, digest: bare},
+				{name: "dynamic on the host's own libc", rt: r, digest: bare},
+				{name: "unknown linking on the host's own libc", rt: r, digest: unknown},
+			}
+			for _, tc := range cases {
+				t.Run(tc.name, func(t *testing.T) {
+					_, err := tc.rt.resolveTemplate(ctx, tc.digest)
+					if tc.refused {
+						if !errors.Is(err, ErrParity) || !strings.Contains(err.Error(), "not a static executable") || !strings.Contains(err.Error(), "gvisor") || !strings.Contains(err.Error(), "-parity libc=off") {
+							t.Fatalf("resolveTemplate = %v, want ErrParity naming the linking, the backend and the way out", err)
+						}
+						return
+					}
+					if err != nil {
+						t.Fatalf("resolveTemplate = %v", err)
+					}
+				})
 			}
 		}},
 		{"a digest the registry lacks leaves no cache entry", func(t *testing.T) {

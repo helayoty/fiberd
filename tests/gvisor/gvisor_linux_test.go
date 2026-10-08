@@ -57,22 +57,33 @@ var name string // the current runtime's name: its cgroup and directories
 
 func newRuntime(t *testing.T) core.Runtime {
 	t.Helper()
+	return newRuntimeWith(t, "/bin/refzygote --heap-mb 64 --gvisor")
+}
+
+// newRuntimeWith is newRuntime with the given command as the template,
+// and mods applied to the configuration.
+func newRuntimeWith(t *testing.T, template string, mods ...func(*host.Config)) core.Runtime {
+	t.Helper()
 	name = fmt.Sprintf("gv%d", time.Now().UnixNano()%1_000_000)
 	state := filepath.Join(work, name)
-	rt, err := host.New(host.Config{
+	cfg := host.Config{
 		Backend:    gvisorbackend.New(gvisorbackend.Options{Rootfs: rootfs, StateDir: state}),
-		Templates:  map[string]string{"default": "/bin/refzygote --heap-mb 64 --gvisor"},
+		Templates:  map[string]string{"default": template},
 		CgroupRoot: filepath.Join(cgRoot, name),
 		RunDir:     filepath.Join("/tmp", "fz-"+name),
 		DeltaDir:   filepath.Join(work, name, "deltas"),
-	})
+	}
+	for _, mod := range mods {
+		mod(&cfg)
+	}
+	rt, err := host.New(cfg)
+	if errors.Is(err, host.ErrNoTier) {
+		t.Skipf("gvisor backend not usable here: %v", err)
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(rt.Close)
-	if rt.Tier() < core.TierSnapshot {
-		t.Skip("gvisor backend not usable here")
-	}
 	return rt
 }
 

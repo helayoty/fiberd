@@ -45,8 +45,9 @@ type Config struct {
 	RunDir string
 	// Endpoints is the address family fibers are served on: unix sockets
 	// under RunDir (the zero value), or tcp on one declared address with
-	// a port per fiber. The backend must list the family's scheme in
-	// EndpointSchemes; every backend speaks unix.
+	// a port per fiber. A backend that lists "tcp" in EndpointSchemes
+	// (proc) binds the port itself. Any other serves the unix socket and
+	// the agent relays the port to it (relay.go).
 	Endpoints endpoint.Policy
 	// DeltaDir holds parked images: <DeltaDir>/<grant>/<epoch>-<seq>/.
 	DeltaDir string
@@ -55,15 +56,15 @@ type Config struct {
 	// domain, one tag per session) and looked up by other homes. Uses
 	// RegistryPlainHTTP.
 	DeltaRegistry string
-	// DeltaKeys signs every delta and parent checkpoint this home pushes
-	// to DeltaRegistry, and decides which ones it will pull or import:
-	// only those a trusted key signed. Its Seal key encrypts every delta
-	// before it leaves the home; homes that move sessions between them
-	// share it. Signer and Seal are required with DeltaRegistry.
+	// DeltaKeys signs every delta and parent checkpoint this home pushes to
+	// DeltaRegistry. The home pulls or imports only those a trusted key
+	// signed. Its Seal key encrypts each delta before it leaves the home, so
+	// homes that move sessions between them share it. Signer and Seal are
+	// required with DeltaRegistry.
 	DeltaKeys artifact.Keys
-	// Handoff routes callers' connections to the fibers of grants whose
-	// endpoint mode is handoff; their handles name its address. Nil
-	// refuses such grants (ErrNoHandoff).
+	// Handoff routes callers' connections to the fibers of handoff-mode
+	// grants, whose handles name its address. Nil refuses such grants
+	// (ErrNoHandoff).
 	Handoff *handoff.Router
 	// HandoffKey derives each handoff grant's TLS identity. Homes that
 	// move sessions between them share it. Required, at least 32 bytes,
@@ -91,7 +92,7 @@ type Config struct {
 	// FiberHide lists directories fibers must not see, besides
 	// DefaultFiberHide, DeltaDir and PrivateDir, in backends that give a
 	// fiber a mount namespace of its own. A directory holding RunDir is
-	// never hidden: fiber endpoints live there.
+	// never hidden, because fiber endpoints live there.
 	FiberHide []string
 	// PrivateDir is the agent's private state (its keys, the ledger
 	// snapshot, the epoch, the audit spool). Fibers run as the agent's uid
@@ -172,8 +173,8 @@ func holds(dir, run string) bool {
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, "../")
 }
 
-// grantPids is the pids.max of a grant's cgroup; 0 = none, which is
-// what a grant without a fibers.max gets.
+// grantPids is the pids.max of a grant's cgroup. It is 0 (none) for a
+// grant without a fibers.max.
 func grantPids(g core.Grant) uint64 {
 	if g.FiberMax <= 0 {
 		return 0
@@ -199,6 +200,11 @@ func DefaultCeiling(g core.Grant, templateBytes uint64) uint64 {
 }
 
 var ErrUnsupported = errors.New("host: not supported on this platform")
+
+// ErrNoTier is New's refusal of a backend that offers no tier, because
+// its tools or files are missing. Confinement fails closed, so the agent
+// does not start over such a backend.
+var ErrNoTier = errors.New("offers no tier")
 
 // ParseTemplateFlag parses "digest=path [args]" for -template.
 func ParseTemplateFlag(m map[string]string, v string) error {

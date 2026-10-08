@@ -18,12 +18,12 @@ func TestConfigDerivations(t *testing.T) {
 		grantPids uint64
 		quota     uint64
 		// tmplBytes is the warm template's resident size the default
-		// ceiling adds to the block; ceiling is the result, 0 for none.
+		// ceiling adds to the block. ceiling is the result, 0 for none.
 		tmplBytes uint64
 		ceiling   uint64
 		hide      []string
 		skipped   []string
-		// wantErr is a fragment of fiberHide's error; "" for none.
+		// wantErr is a fragment of fiberHide's error, "" for none.
 		wantErr string
 	}{
 		{name: "defaults on a sized grant", grant: sized, grantPids: 5 * fiberPidsMax, quota: 4 * 4 * 32 << 20,
@@ -91,8 +91,8 @@ func TestConfigDerivations(t *testing.T) {
 	}
 }
 
-// TestTemplateFlag: -template entries are "digest=path [args]", and a
-// digest resolves to its own entry, else to "default", else to nothing.
+// TestTemplateFlag checks that -template entries are "digest=path [args]",
+// and a digest resolves to its own entry, else to "default", else to nothing.
 func TestTemplateFlag(t *testing.T) {
 	cases := []struct {
 		name string

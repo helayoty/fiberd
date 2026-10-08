@@ -83,10 +83,11 @@ func refzygote(t *testing.T) string {
 	return zygoteBin
 }
 
-// TestRunHostRuntime starts the agent on each sandbox backend of the host
+// TestRunHostRuntime starts the agent on the fork backends of the host
 // runtime. It carves its cgroup, makes its directories under -state, and
 // serves the handoff listener when asked, then stops cleanly. No fiber is
-// cloned: that is the backends' own tests' job.
+// cloned, since the backends' own tests do that. gVisor and Hyperlight
+// without their tools offer no tier, and TestRunRefuses has them.
 func TestRunHostRuntime(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -100,14 +101,8 @@ func TestRunHostRuntime(t *testing.T) {
 			return []string{"-runtime", "proc", "-template", "default=" + refzygote(t) + " --heap-mb 16", "-handoff-listen", "127.0.0.1:0",
 				"-grants-dir", dir, "-grant-ceiling", ceiling, "-endpoint-family", "inet4"}
 		}},
-		{name: "gvisor", args: func(dir string) []string {
-			return []string{"-runtime", "gvisor", "-template", "default=/bin/true", "-gvisor-rootfs", dir, "-runsc", "/nonexistent/runsc"}
-		}},
 		{name: "runc", args: func(dir string) []string {
 			return []string{"-runtime", "runc", "-template", "default=/bin/true", "-runc-rootfs", dir, "-runc", "/nonexistent/runc"}
-		}},
-		{name: "hyperlight", args: func(string) []string {
-			return []string{"-runtime", "hyperlight", "-template", "default=/g", "-hyperlight-helper", "/nonexistent/helper"}
 		}},
 	}
 	for _, tc := range cases {

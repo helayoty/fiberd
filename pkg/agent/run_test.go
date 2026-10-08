@@ -294,8 +294,8 @@ func hosted(host, advertised string) agent.HomeFactory {
 	}
 }
 
-// fixture is what a case's setup made: more flags, and what a caller
-// needs to reach the agent.
+// fixture is what a case's setup made, such as more flags and what a
+// caller needs to reach the agent.
 type fixture struct {
 	args   []string
 	state  string
@@ -329,9 +329,9 @@ func mint(t *testing.T, is *grant.Issuer, g core.Grant) string {
 }
 
 // TestRunServes starts the agent in-process the way cmd/fiberd does and
-// talks to it over its real listeners: gRPC, the JSON gateway and the
-// admin socket. Each case ends with a clean stop: Run returns nil, the
-// admin socket is gone and nothing Run started is left running.
+// talks to it over its real listeners, which are gRPC, the JSON gateway
+// and the admin socket. Each case ends with a clean stop. Run returns nil,
+// the admin socket is gone and nothing Run started is left running.
 func TestRunServes(t *testing.T) {
 	cases := []struct {
 		name string
@@ -522,7 +522,7 @@ func TestRunServes(t *testing.T) {
 	}
 }
 
-// TestRunStopsWhenAskedBeforeServing: a stop that lands while Run is
+// TestRunStopsWhenAskedBeforeServing checks that a stop that lands while Run is
 // still starting up is a clean stop, not a serve error.
 func TestRunStopsWhenAskedBeforeServing(t *testing.T) {
 	c := newConfig(t, stateDir(t))
@@ -556,7 +556,7 @@ func TestRunStopsWhenAskedBeforeServing(t *testing.T) {
 	noRunGoroutines(t)
 }
 
-// TestRunStopsOnSignal: Run, which has no context, stops cleanly on
+// TestRunStopsOnSignal checks that Run, which has no context, stops cleanly on
 // SIGINT or SIGTERM.
 func TestRunStopsOnSignal(t *testing.T) {
 	cases := []struct {
@@ -595,8 +595,8 @@ func TestRunStopsOnSignal(t *testing.T) {
 	}
 }
 
-// TestRunScopeLost: a home that loses its scope bumps the agent's epoch
-// through the callback Run hands it. A bump that cannot be persisted
+// TestRunScopeLost checks that a home that loses its scope bumps the agent's
+// epoch through the callback Run hands it. A bump that cannot be persisted
 // leaves the epoch where it was.
 func TestRunScopeLost(t *testing.T) {
 	cases := []struct {
@@ -639,8 +639,8 @@ func TestRunScopeLost(t *testing.T) {
 	}
 }
 
-// TestRunRefuses: every misconfiguration Run can see fails it with an
-// error naming the problem, and leaves nothing running behind.
+// TestRunRefuses checks that every misconfiguration Run can see fails it with
+// an error naming the problem, and leaves nothing running behind.
 func TestRunRefuses(t *testing.T) {
 	busy := func(t *testing.T) string {
 		l, err := net.Listen("tcp", "127.0.0.1:0")
@@ -711,6 +711,12 @@ func TestRunRefuses(t *testing.T) {
 			},
 			want: "runc runtime: ", wantLinux: "runc: state directory"},
 		{name: "gvisor without a rootfs", args: []string{"-runtime", "gvisor", "-template", "default=/z"}, want: "-runtime=gvisor needs -gvisor-rootfs"},
+		// Confinement fails closed: a backend whose tools are missing
+		// offers no tier, and the agent does not start over it.
+		{name: "gvisor whose runsc is missing", args: []string{"-runtime", "gvisor", "-template", "default=/z", "-gvisor-rootfs", "/r", "-runsc", missing},
+			want: "gvisor runtime: ", wantLinux: "gvisor runtime: host: backend gvisor offers no tier: runsc " + missing + " unavailable"},
+		{name: "hyperlight whose helper is missing", args: []string{"-runtime", "hyperlight", "-template", "default=/g", "-hyperlight-helper", missing},
+			want: "hyperlight runtime: ", wantLinux: "hyperlight runtime: host: backend hyperlight offers no tier: helper " + missing + " unusable"},
 		{name: "bad parity", args: append([]string{"-parity", "kernel=sometimes"}, proc...), want: "parity"},
 		{name: "unknown endpoint family", args: append([]string{"-endpoint-family", "pigeon"}, proc...), want: `endpoint family "pigeon"`},
 		{name: "endpoint host of the wrong family", args: append([]string{"-endpoint-family", "inet4", "-endpoint-host", "::1"}, proc...),

@@ -23,7 +23,7 @@ import (
 
 const mib = 1 << 20
 
-// handoffRouter is a router that listens nowhere: tests hand fibers
+// handoffRouter is a router that listens nowhere. Tests hand fibers
 // connections through Deliver.
 
 // needRoot skips a test that needs root. The launcher chowns into mapped
@@ -38,8 +38,16 @@ func handoffRouter() *handoff.Router { return &handoff.Router{Advertise: "tcp://
 
 var handoffKey = bytes.Repeat([]byte{9}, 32)
 
-// TestNewRefusals: New checks its configuration before touching the
-// cgroup tree or the file system.
+// proberBackend is a backend that says why it offers no tier.
+type proberBackend struct {
+	*fakeBackend
+	why error
+}
+
+func (b proberBackend) ProbeErr() error { return b.why }
+
+// TestNewRefusals checks that New refuses a bad configuration before
+// touching the cgroup tree or the file system.
 func TestNewRefusals(t *testing.T) {
 	cases := []struct {
 		name string
@@ -77,24 +85,18 @@ func TestNewRefusals(t *testing.T) {
 			c.DeltaRegistry = "registry.example/deltas"
 			return c
 		}, want: "DeltaKeys.Signer"},
-		{name: "tcp endpoints on a backend that serves unix only", cfg: func(t *testing.T) Config {
-			c := testConfig(t, newFakeBackend(core.TierWarm))
-			c.Endpoints = endpoint.Policy{Family: endpoint.Inet4, Host: "127.0.0.1"}
-			return c
-		}, want: "cannot serve tcp endpoints"},
-		{name: "tcp endpoints on a backend that lists another scheme", cfg: func(t *testing.T) Config {
-			c := testConfig(t, &struct {
-				*fakeBackend
-				schemesMixin
-			}{newFakeBackend(core.TierWarm), schemesMixin{[]string{"unix", "vsock"}}})
-			c.Endpoints = endpoint.Policy{Family: endpoint.Inet6, Host: "::1"}
-			return c
-		}, want: "cannot serve tcp endpoints"},
 		{name: "the run directory inside the delta directory", cfg: func(t *testing.T) Config {
 			c := testConfig(t, newFakeBackend(core.TierWarm))
 			c.RunDir = filepath.Join(c.DeltaDir, "run")
 			return c
 		}, want: "inside DeltaDir"},
+		{name: "a backend that offers no tier", cfg: func(t *testing.T) Config {
+			return Config{Backend: newFakeBackend(core.TierUnspecified), CgroupRoot: filepath.Join(t.TempDir(), "cg")}
+		}, want: "host: backend fake offers no tier"},
+		{name: "a backend that says why it offers no tier", cfg: func(t *testing.T) Config {
+			be := proberBackend{newFakeBackend(core.TierUnspecified), errors.New("runsc missing")}
+			return Config{Backend: be, CgroupRoot: filepath.Join(t.TempDir(), "cg")}
+		}, want: "host: backend fake offers no tier: runsc missing"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -106,13 +108,57 @@ func TestNewRefusals(t *testing.T) {
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("New = %v, want an error mentioning %q", err, tc.want)
 			}
+			if strings.Contains(tc.want, "offers no tier") && !errors.Is(err, ErrNoTier) {
+				t.Fatalf("New = %v, want ErrNoTier", err)
+			}
 		})
 	}
 }
 
-// TestNewPlatform: what the home believes about its host is detected,
-// then overridden by the backend's facts, then by the configuration; the
-// backend's name always. Paths are made absolute and created.
+// TestNewRelay checks which homes relay tcp endpoints: a tcp family over
+// a backend that does not bind tcp itself. A backend that does (proc) is
+// told the tcp address, and a unix home relays nothing.
+func TestNewRelay(t *testing.T) {
+	withSchemes := func(schemes ...string) backend.Backend {
+		return &struct {
+			*fakeBackend
+			schemesMixin
+		}{newFakeBackend(core.TierWarm), schemesMixin{schemes}}
+	}
+	cases := []struct {
+		name   string
+		be     backend.Backend
+		policy endpoint.Policy
+		relay  bool
+	}{
+		{name: "inet4 over a backend without an EndpointSchemer", be: newFakeBackend(core.TierWarm),
+			policy: endpoint.Policy{Family: endpoint.Inet4, Host: "127.0.0.1"}, relay: true},
+		{name: "inet6 over a backend that lists other schemes", be: withSchemes("unix", "vsock"),
+			policy: endpoint.Policy{Family: endpoint.Inet6, Host: "::1"}, relay: true},
+		{name: "inet4 over a backend that binds tcp itself", be: withSchemes("unix", "tcp"),
+			policy: endpoint.Policy{Family: endpoint.Inet4, Host: "127.0.0.1"}},
+		{name: "unix over a unix-only backend", be: newFakeBackend(core.TierWarm)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := testConfig(t, tc.be)
+			c.Endpoints = tc.policy
+			r, err := New(c)
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			defer r.Close()
+			if r.Relays() != tc.relay {
+				t.Fatalf("Relays = %v, want %v", r.Relays(), tc.relay)
+			}
+		})
+	}
+}
+
+// TestNewPlatform checks that what the home believes about its host is
+// detected, then overridden by the backend's facts, then by the
+// configuration. The backend's name always overrides. Paths are made
+// absolute and created.
 func TestNewPlatform(t *testing.T) {
 	detected := artifact.Host()
 	cases := []struct {
@@ -177,7 +223,7 @@ func TestNewPlatform(t *testing.T) {
 	}
 }
 
-// TestBackendFacts: what the runtime relays from its backend's optional
+// TestBackendFacts checks what the runtime relays from its backend's optional
 // interfaces, and the answer without them.
 func TestBackendFacts(t *testing.T) {
 	sb := newSandboxBackend(core.TierSnapshot)
@@ -231,7 +277,7 @@ func TestBackendFacts(t *testing.T) {
 	}
 }
 
-// TestPrepareTemplate: the grant's cgroups, the warm instance, the delta
+// TestPrepareTemplate checks the grant's cgroups, the warm instance, the delta
 // parent and the block ceiling.
 func TestPrepareTemplate(t *testing.T) {
 	sized := core.Grant{UID: "g1", TemplateDigest: "sha256:tmpl", FiberMax: 2, WBudgetBytes: 64 * mib}
@@ -479,8 +525,8 @@ func TestPrepareTemplate(t *testing.T) {
 // tcpPolicy serves fibers on 127.0.0.1 with two ports.
 var tcpPolicy = endpoint.Policy{Family: endpoint.Inet4, Host: "127.0.0.1", PortMin: 40000, PortMax: 40001}
 
-// TestClone: a fiber is born into a leaf of its own with the endpoint
-// the policy chooses, and every failure leaves nothing behind.
+// TestClone checks that a fiber is born into a leaf of its own with the
+// endpoint the policy chooses, and every failure leaves nothing behind.
 func TestClone(t *testing.T) {
 	g := core.Grant{UID: "g1", TemplateDigest: "sha256:tmpl", FiberMax: 4, WBudgetBytes: 64 * mib}
 	handoffG := g
@@ -764,7 +810,7 @@ func TestClone(t *testing.T) {
 	}
 }
 
-// TestFiberEnds: how a fiber's end is classified and cleaned up, whether
+// TestFiberEnds checks how a fiber's end is classified and cleaned up, whether
 // the host asked for it, the fiber died, or its template went.
 func TestFiberEnds(t *testing.T) {
 	g := core.Grant{UID: "g1", TemplateDigest: "sha256:tmpl", WBudgetBytes: 64 * mib}
@@ -797,7 +843,7 @@ func TestFiberEnds(t *testing.T) {
 		}},
 		{name: "killed by the kernel for exceeding its budget: reported as oom", run: func(t *testing.T, r *Runtime, be *fakeBackend, h core.FiberHandle) {
 			// A task of the test's own in the leaf allocates past the leaf's
-			// memory.max; the kernel's group OOM takes the leaf.
+			// memory.max, and the kernel's group OOM takes the leaf.
 			leaf := r.root.Child("g1").Child("f-1-1")
 			startInLeaf(t, leaf, "exec dd if=/dev/zero of=/dev/null bs=256M count=1")
 			waitFor(t, "the kernel to kill the leaf", func() bool { n, _ := leaf.OOMKills(); return n > 0 })
@@ -864,7 +910,7 @@ func TestFiberEnds(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			// The fake fiber has no task in its leaf; the orphan has one.
+			// The fake fiber has no task in its leaf, but the orphan has one.
 			list, err := r.List(context.Background())
 			if err != nil || len(list) != 1 || list[0].ID != orphan.String() {
 				t.Fatalf("List = %+v %v, want the orphan alone", list, err)
@@ -895,9 +941,9 @@ func TestFiberEnds(t *testing.T) {
 	}
 }
 
-// TestEnforceW: a backend that reports W or device use itself has its
-// fibers' budgets held by the host, which kills and reports an overrun
-// as the kernel would.
+// TestEnforceW checks that a backend that reports W or device use itself has
+// its fibers' budgets held by the host, which kills and reports an overrun as
+// the kernel would.
 func TestEnforceW(t *testing.T) {
 	g := core.Grant{UID: "g1", TemplateDigest: "sha256:tmpl", WBudgetBytes: 1000, DeviceBudget: core.DeviceBudget{Bytes: 50}}
 	fence := core.Fence{GrantUID: "g1", Epoch: 1, Seq: 1}
@@ -959,14 +1005,14 @@ func TestEnforceW(t *testing.T) {
 	}
 }
 
-// TestWBytes: where a fiber's working set is read from, by backend kind.
+// TestWBytes checks where a fiber's working set is read from, by backend kind.
 func TestWBytes(t *testing.T) {
 	cases := []struct {
 		name string
 		be   backend.Backend
 		// task puts a process of the test's own in the leaf.
 		task bool
-		// positive is whether W must be above zero; otherwise it must be 0.
+		// positive is whether W must be above zero. Otherwise it must be 0.
 		positive bool
 		wantErr  string
 	}{
@@ -1022,7 +1068,7 @@ func TestWBytes(t *testing.T) {
 	}
 }
 
-// TestPressure: PSI of the grant's cgroup, and an error for a grant with
+// TestPressure checks PSI of the grant's cgroup, and an error for a grant with
 // none.
 func TestPressure(t *testing.T) {
 	cases := []struct {
@@ -1050,7 +1096,7 @@ func TestPressure(t *testing.T) {
 	}
 }
 
-// TestListAndPrune: the leaves with live tasks under the root, known or
+// TestListAndPrune checks the leaves with live tasks under the root, known or
 // not, and the removal of grants no longer admitted.
 func TestListAndPrune(t *testing.T) {
 	cases := []struct {
@@ -1086,7 +1132,7 @@ func TestListAndPrune(t *testing.T) {
 			if err != nil || len(list) != 1 || list[0].ID != live.String() || list[0].Endpoint != tc.endpoint(r, live) {
 				t.Fatalf("List = %+v %v, want only %s", list, err, live)
 			}
-			// A grant with a cgroup nested two deep cannot be pruned: only
+			// A grant with a cgroup nested two deep cannot be pruned. Only
 			// leaves are removed, and a leaf with a child is not empty.
 			deep := r.root.Child("deep")
 			if err := deep.Ensure("memory"); err != nil {
@@ -1112,7 +1158,7 @@ func TestListAndPrune(t *testing.T) {
 	}
 }
 
-// TestParentStore: template checkpoints filed by hash, moved or linked,
+// TestParentStore checks template checkpoints filed by hash, moved or linked,
 // shared between warms and found again from disk.
 func TestParentStore(t *testing.T) {
 	hex64 := strings.Repeat("0123456789abcdef", 4)
@@ -1136,7 +1182,7 @@ func TestParentStore(t *testing.T) {
 			if p, ok := r.parents[sha]; !ok || p.SHA256() != sha {
 				t.Fatal("the parent is not loaded")
 			}
-			// The same pages again: the copy is dropped, the store kept.
+			// With the same pages again, the copy is dropped and the store kept.
 			again := filepath.Join(t.TempDir(), "again")
 			if err := writeParentDir(again, "a"); err != nil {
 				t.Fatal(err)
@@ -1284,8 +1330,8 @@ func TestParentStore(t *testing.T) {
 	}
 }
 
-// TestPidsPressure: a birth refused while the grant's cgroup hit pids.max
-// is the grant's own pressure.
+// TestPidsPressure checks that a birth refused while the grant's cgroup hit
+// pids.max is the grant's own pressure.
 func TestPidsPressure(t *testing.T) {
 	cause := errors.New("fork: resource temporarily unavailable")
 	cases := []struct {
@@ -1314,8 +1360,8 @@ func TestPidsPressure(t *testing.T) {
 	}
 }
 
-// TestDelegateProcs: only an id-mapping backend's grant gets cgroup.procs
-// chowned, and only when the mapper and the file allow.
+// TestDelegateProcs checks that only an id-mapping backend's grant gets
+// cgroup.procs chowned, and only when the mapper and the file allow.
 func TestDelegateProcs(t *testing.T) {
 	needRoot(t)
 	cases := []struct {
@@ -1368,8 +1414,8 @@ func TestDelegateProcs(t *testing.T) {
 	}
 }
 
-// TestPorts: the port range is handed out once per fiber, re-reserved for
-// a resume, and given back.
+// TestPorts checks that the port range is handed out once per fiber,
+// re-reserved for a resume, and given back.
 func TestPorts(t *testing.T) {
 	cases := []struct {
 		name string
@@ -1412,7 +1458,7 @@ func TestPorts(t *testing.T) {
 	}
 }
 
-// TestFileHelpers: the JSON, size and fsync helpers around delta
+// TestFileHelpers checks the JSON, size and fsync helpers around delta
 // directories.
 func TestFileHelpers(t *testing.T) {
 	cases := []struct {

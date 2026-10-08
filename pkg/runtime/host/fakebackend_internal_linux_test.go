@@ -3,12 +3,14 @@
 package host
 
 import (
+	"bufio"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -26,12 +28,10 @@ import (
 	"github.com/helayoty/fiberd/pkg/sys/cgroup"
 )
 
-// A fake backend.Backend. It forks nothing: it records every call the
+// A fake backend.Backend. It forks nothing. It records every call the
 // runtime makes, answers with what a test configured, and reports exits
-// when asked. The runtime's own logic (cgroups, endpoints, manifests,
-// budgets, the delta protocol) runs for real over it. Optional backend
-// interfaces are mixins a test composes in, so "the backend is not an
-// Overheader" and "it is one" are both reachable.
+// when asked, while the runtime's own logic runs for real over it.
+// Optional backend interfaces are mixins a test composes in.
 
 // fakeFiber is one fiber the fake backend was asked for.
 type fakeFiber struct {
@@ -44,6 +44,8 @@ type fakeFiber struct {
 	// handoff is the fiber's end of its handoff channel, kept open past
 	// Clone (the runtime closes its copy), or -1.
 	handoff int
+	// ln is the unix listener a serving fake fiber answers on (serve).
+	ln net.Listener
 }
 
 type fakeBackend struct {
@@ -65,7 +67,7 @@ type fakeBackend struct {
 	// Knobs a test sets before calling the runtime.
 	warmErr, cloneErr, parkErr, resumeErr error
 	warm                                  backend.Warm
-	// parkFiles is what Park writes into its directory; nil writes a
+	// parkFiles is what Park writes into its directory. Nil writes a
 	// page file and a dump log.
 	parkFiles map[string]string
 	// parkNoDir makes Park succeed without making its directory, as a
@@ -74,12 +76,16 @@ type fakeBackend struct {
 	// parkDangling makes Park leave a dangling symlink in its directory,
 	// which no fsync can open.
 	parkDangling bool
-	// noExit makes Kill and an async Park end nothing: no exit is ever
+	// noExit makes Kill and an async Park end nothing, so no exit is ever
 	// reported for the fiber.
 	noExit bool
 	// endpointFile makes Clone leave a file at the unix endpoint path, as
 	// the bound socket of a real fiber would.
 	endpointFile bool
+	// serve makes Clone and Resume listen on the fiber's unix endpoint
+	// and answer every line with "<fence>:<line>", as a fiber would. The
+	// listener ends with the fiber.
+	serve bool
 }
 
 func newFakeBackend(tier core.Tier) *fakeBackend {
@@ -142,10 +148,52 @@ func (b *fakeBackend) Clone(_ context.Context, warmID string, spec backend.Fiber
 			return backend.Fiber{}, err
 		}
 	}
+	ln, err := b.listen(spec.Fence, spec.Endpoint)
+	if err != nil {
+		return backend.Fiber{}, err
+	}
 	fd, identity := takeHandoff(spec.Handoff)
 	b.nextPID++
-	b.fibers[spec.Fence] = &fakeFiber{spec: spec, alive: true, identity: identity, handoff: fd}
+	b.fibers[spec.Fence] = &fakeFiber{spec: spec, alive: true, identity: identity, handoff: fd, ln: ln}
 	return backend.Fiber{ID: spec.Fence, PID: b.nextPID}, nil
+}
+
+// listen serves a fake fiber's unix endpoint when serve is set.
+func (b *fakeBackend) listen(fence, ep string) (net.Listener, error) {
+	if !b.serve || !filepath.IsAbs(ep) {
+		return nil, nil
+	}
+	ln, err := net.Listen("unix", ep)
+	if err != nil {
+		return nil, err
+	}
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer func() { _ = c.Close() }()
+				sc := bufio.NewScanner(c)
+				for sc.Scan() {
+					if _, err := fmt.Fprintf(c, "%s:%s\n", fence, sc.Text()); err != nil {
+						return
+					}
+				}
+			}()
+		}
+	}()
+	return ln, nil
+}
+
+// end marks a fiber dead and closes what it served on.
+func (f *fakeFiber) end() {
+	f.alive = false
+	if f.ln != nil {
+		_ = f.ln.Close()
+		f.ln = nil
+	}
 }
 
 func (b *fakeBackend) Park(_ context.Context, fiberID string, spec backend.ParkSpec) error {
@@ -182,7 +230,7 @@ func (b *fakeBackend) Park(_ context.Context, fiberID string, spec backend.ParkS
 		}
 	}
 	if !spec.Sync && !b.noExit {
-		f.alive = false
+		f.end()
 		b.exits <- backend.Exit{FiberID: fiberID, Status: "exit:0"}
 	}
 	return nil
@@ -194,10 +242,14 @@ func (b *fakeBackend) Resume(_ context.Context, spec backend.ResumeSpec) (backen
 	if b.resumeErr != nil {
 		return backend.Fiber{}, b.resumeErr
 	}
+	ln, err := b.listen(spec.Fence, spec.Endpoint)
+	if err != nil {
+		return backend.Fiber{}, err
+	}
 	fd, identity := takeHandoff(spec.Handoff)
 	rs := spec
 	b.nextPID++
-	b.fibers[spec.Fence] = &fakeFiber{resume: &rs, alive: true, identity: identity, handoff: fd}
+	b.fibers[spec.Fence] = &fakeFiber{resume: &rs, alive: true, identity: identity, handoff: fd, ln: ln}
 	return backend.Fiber{ID: spec.Fence, PID: b.nextPID}, nil
 }
 
@@ -209,7 +261,7 @@ func (b *fakeBackend) Kill(fiberID string) error {
 	if f == nil || !f.alive || b.noExit {
 		return nil
 	}
-	f.alive = false
+	f.end()
 	b.exits <- backend.Exit{FiberID: fiberID, Status: "signal:SIGKILL"}
 	return nil
 }
@@ -228,6 +280,7 @@ func (b *fakeBackend) Close() {
 			_ = syscall.Close(f.handoff)
 			f.handoff = -1
 		}
+		f.end()
 	}
 	close(b.exits)
 }
@@ -236,7 +289,7 @@ func (b *fakeBackend) Close() {
 func (b *fakeBackend) die(fiberID, status string) {
 	b.mu.Lock()
 	if f := b.fibers[fiberID]; f != nil {
-		f.alive = false
+		f.end()
 	}
 	b.mu.Unlock()
 	b.exits <- backend.Exit{FiberID: fiberID, Status: status}
@@ -289,7 +342,7 @@ func (b *fakeBackend) warmSpec(grantUID string) (backend.WarmSpec, bool) {
 	return s, ok
 }
 
-// Mixins: each adds one optional backend interface.
+// Each mixin adds one optional backend interface.
 
 type overheadMixin struct{}
 
@@ -428,7 +481,7 @@ type fakeDelta struct {
 type codecMixin struct {
 	cmu        sync.Mutex
 	loads      int
-	failLoadAt int // 1-based index of the LoadParent call that fails; 0 = never
+	failLoadAt int // 1-based index of the LoadParent call that fails (0 = never)
 	loadErr    error
 	computeErr error
 	mergeErr   error
@@ -525,7 +578,7 @@ func (c *codecMixin) loadedParents() []*fakeParent {
 
 type selfCheckpointMixin struct {
 	err   error
-	pages string // what the checkpoint's pages hold; "" = derived from the warm id
+	pages string // what the checkpoint's pages hold ("" = derived from the warm id)
 	calls atomic.Int32
 }
 
@@ -568,9 +621,9 @@ func newCodecBackend(tier core.Tier) *codecBackend {
 	return &codecBackend{newFakeBackend(tier), &codecMixin{}, &selfCheckpointMixin{}}
 }
 
-// sandboxBackend is a backend whose fibers are sandboxes: a fixed
-// footprint, W and devices reported by the backend itself, tenants
-// isolated, handoff and tcp endpoints.
+// sandboxBackend is a backend whose fibers are sandboxes. It has a fixed
+// footprint, reports W and devices itself, isolates tenants, and offers
+// handoff and tcp endpoints.
 type sandboxBackend struct {
 	*fakeBackend
 	overheadMixin
@@ -767,7 +820,7 @@ func readManifest(t *testing.T, dir string) manifest {
 	return m
 }
 
-// Interface checks: the compositions offer what the tests rely on.
+// The compositions offer the interfaces the tests rely on.
 var (
 	_ backend.Backend          = (*fakeBackend)(nil)
 	_ backend.DeltaCodec       = (*codecBackend)(nil)
