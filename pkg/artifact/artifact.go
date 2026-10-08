@@ -51,13 +51,19 @@ const (
 // parity fields gate cross-host resume: a delta over these pages only
 // restores where the kernel and libc match.
 type Config struct {
-	Args         []string  `json:"args"`
-	Arch         string    `json:"arch"`
-	Kernel       string    `json:"kernel"`
-	Libc         string    `json:"libc"`
-	ZygoteSHA256 string    `json:"zygote_sha256"`
-	HasImages    bool      `json:"has_images"`
-	BuiltAt      time.Time `json:"built_at"`
+	Args         []string `json:"args"`
+	Arch         string   `json:"arch"`
+	Kernel       string   `json:"kernel"`
+	Libc         string   `json:"libc"`
+	ZygoteSHA256 string   `json:"zygote_sha256"`
+	// Linking is LinkStatic or LinkDynamic (linking.go). A home whose
+	// backend runs the template inside a root filesystem of its own
+	// refuses a dynamic one, since it cannot tell whether that
+	// filesystem holds the libc. Empty in a config written before the
+	// fact was recorded, which counts as dynamic.
+	Linking   string    `json:"linking,omitempty"`
+	HasImages bool      `json:"has_images"`
+	BuiltAt   time.Time `json:"built_at"`
 	// Digest is the manifest digest. It is never stored in config.json
 	// (it is a layer); Pull fills it from the transfer, and ReadDigest
 	// reads the DIGEST side file Pack and Pull write.
@@ -375,7 +381,7 @@ func tarDir(src, dst string) error {
 		return err
 	}
 	for _, e := range entries {
-		// Regular files only, as untar unpacks: a symlink would fail the
+		// Regular files only, as untar unpacks. A symlink would fail the
 		// copy and a FIFO would block it.
 		if !e.Type().IsRegular() {
 			continue
