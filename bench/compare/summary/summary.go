@@ -66,11 +66,13 @@ type Side struct {
 	LoadFirst, LoadLast string
 	// Deltas are the control-plane counters per timed run, medianed.
 	Deltas map[string]float64
-	// ResumeMs is the median resume to first byte, 0 when unsupported.
+	// ResumeMs is the median resume to first byte over the timed runs,
+	// 0 when unsupported. The cold run is discarded, errors and all.
 	ResumeMs  float64
 	ResumeErr string
-	// Density, bytes per idle instance. Marginal is the instances' own
-	// charge over N, Amortized adds what the system keeps standing.
+	// Density, bytes per idle instance, medians over the timed runs.
+	// Marginal is the instances' own charge over N, Amortized adds what
+	// the system keeps standing.
 	DensityN   int
 	Marginal   int64
 	Amortized  int64
@@ -91,6 +93,7 @@ func Table(recs []compare.Record) ([]Row, []Side) {
 	poll := map[key]float64{}
 	sides := map[[2]string]*Side{}
 	resume := map[[2]string][]float64{}
+	density := map[[2]string]*[3][]float64{} // n, marginal, amortized per run
 	side := func(r compare.Record) *Side {
 		k := [2]string{r.System, r.Class}
 		if sides[k] == nil {
@@ -143,26 +146,35 @@ func Table(recs []compare.Record) ([]Row, []Side) {
 				deltas[sk][name] = append(deltas[sk][name], v)
 			}
 		case "resume":
+			if r.Cold {
+				continue
+			}
 			s := side(r)
 			if r.Error != "" {
 				s.ResumeErr = r.Error
 				continue
 			}
-			if !r.Cold {
-				resume[[2]string{r.System, r.Class}] = append(resume[[2]string{r.System, r.Class}], r.TFirstByteMs)
-			}
+			resume[[2]string{r.System, r.Class}] = append(resume[[2]string{r.System, r.Class}], r.TFirstByteMs)
 		case "density":
+			if r.Cold {
+				continue
+			}
 			s := side(r)
 			if r.Error != "" {
 				s.DensityErr = r.Error
 				continue
 			}
-			if r.Cold || r.N == 0 {
+			if r.N == 0 {
 				continue
 			}
-			s.DensityN = r.N
-			s.Marginal = r.Bytes / int64(r.N)
-			s.Amortized = (r.Bytes + r.Standing) / int64(r.N)
+			sk := [2]string{r.System, r.Class}
+			if density[sk] == nil {
+				density[sk] = &[3][]float64{}
+			}
+			d := density[sk]
+			d[0] = append(d[0], float64(r.N))
+			d[1] = append(d[1], float64(r.Bytes/int64(r.N)))
+			d[2] = append(d[2], float64((r.Bytes+r.Standing)/int64(r.N)))
 		}
 	}
 	var rows []Row
@@ -204,6 +216,9 @@ func Table(recs []compare.Record) ([]Row, []Side) {
 			s.Deltas[name] = Median(vs)
 		}
 		s.ResumeMs = Median(resume[sk])
+		if d := density[sk]; d != nil {
+			s.DensityN, s.Marginal, s.Amortized = int(Median(d[0])), int64(Median(d[1])), int64(Median(d[2]))
+		}
 		out = append(out, *s)
 	}
 	sort.Slice(out, func(i, j int) bool {

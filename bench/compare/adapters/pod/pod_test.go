@@ -99,7 +99,7 @@ func TestLifecycle(t *testing.T) {
 		wantErr string
 	}{
 		{name: "warm: create, ip, first byte, delete"},
-		{name: "cold: the image is removed before the create", cold: true},
+		{name: "cold: the image is removed by Prepare, not by the create", cold: true},
 		{name: "a failed Pod is an error, not a hang", phase: "Failed", wantErr: "is Failed"},
 	}
 	for _, tc := range cases {
@@ -118,6 +118,12 @@ func TestLifecycle(t *testing.T) {
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
+			if err := a.Prepare(ctx, "x"); err != nil {
+				t.Fatal(err)
+			}
+			if want := map[bool]int{true: 1}[tc.cold]; removed != want {
+				t.Errorf("image removed %d times by Prepare, want %d", removed, want)
+			}
 			h, err := a.Activate(ctx, "x")
 			if err != nil {
 				t.Fatal(err)
@@ -127,7 +133,7 @@ func TestLifecycle(t *testing.T) {
 				t.Fatal("pod not created")
 			}
 			if tc.cold && removed != 1 {
-				t.Errorf("image removed %d times, want 1", removed)
+				t.Errorf("image removed %d times after the create, want 1: Activate removed it inside the timed window", removed)
 			}
 			// The kubelet sets the IP a little later.
 			go func() {
@@ -168,8 +174,32 @@ func TestLifecycle(t *testing.T) {
 			if deletes != 1 {
 				t.Errorf("deletes %d, want 1", deletes)
 			}
+			if err := a.Park(ctx, h); !errors.Is(err, compare.ErrUnsupported) {
+				t.Errorf("park err %v, want ErrUnsupported", err)
+			}
 			if _, err := a.Resume(ctx, h); !errors.Is(err, compare.ErrUnsupported) {
 				t.Errorf("resume err %v, want ErrUnsupported", err)
+			}
+		})
+	}
+}
+
+func TestMissing(t *testing.T) {
+	cases := []struct {
+		name string
+		out  string
+		want bool
+	}{
+		{name: "crictl's missing image, what a burst's other removals see", out: "FATA[0000] no such image localhost:5002/counter:latest\n", want: true},
+		{name: "a missing crictl is an error, not a warm run", out: "sh: 1: crictl: not found\n"},
+		{name: "a missing crictl, bash's wording", out: "sh: crictl: command not found\n"},
+		{name: "a refused socket", out: "FATA[0000] connect: connection refused\n"},
+		{name: "nothing", out: ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := Missing(tc.out); got != tc.want {
+				t.Errorf("Missing(%q) = %v, want %v", tc.out, got, tc.want)
 			}
 		})
 	}

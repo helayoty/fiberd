@@ -174,6 +174,9 @@ func TestAdapter(t *testing.T) {
 			if fb.IsZero() || hd.Meta["attempts"] != "0" {
 				t.Errorf("first request should be the measurement: %+v %v", hd, fb)
 			}
+			if err := a.Park(ctx, hd); err != nil {
+				t.Fatal(err)
+			}
 			nh, err := a.Resume(ctx, hd)
 			if err != nil {
 				t.Fatal(err)

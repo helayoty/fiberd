@@ -72,6 +72,44 @@ func TestTable(t *testing.T) {
 				}
 			},
 		},
+		{
+			name: "hold lines are not latency samples",
+			recs: []compare.Record{
+				{Kind: "hold", System: "s", Class: "c", Run: 1, TFirstByteMs: 500},
+				act(1, 1, 1, ""),
+			},
+			wantRows: 1, wantP50: 1, wantP99: 1, wantSamp: 1, wantRuns: 1,
+		},
+		{
+			name: "the cold run's resume error is discarded with the cold run",
+			recs: []compare.Record{
+				{Kind: "resume", System: "s", Class: "c", Run: 0, Cold: true, Error: "resume: boom"},
+				{Kind: "resume", System: "s", Class: "c", Run: 1, TFirstByteMs: 12},
+				act(1, 1, 1, ""),
+			},
+			wantRows: 1, wantP50: 1, wantP99: 1, wantSamp: 1, wantRuns: 1,
+			wantSide: func(t *testing.T, s Side) {
+				if s.ResumeErr != "" || s.ResumeMs != 12 {
+					t.Errorf("resume %q %v, want no error and 12", s.ResumeErr, s.ResumeMs)
+				}
+			},
+		},
+		{
+			name: "density is the median over the timed runs, not the last run",
+			recs: []compare.Record{
+				{Kind: "density", System: "s", Class: "c", Run: 0, Cold: true, N: 4, Bytes: 400 << 20, Standing: 8 << 20},
+				{Kind: "density", System: "s", Class: "c", Run: 1, N: 4, Bytes: 4 << 20, Standing: 8 << 20},
+				{Kind: "density", System: "s", Class: "c", Run: 2, N: 4, Bytes: 8 << 20, Standing: 8 << 20},
+				{Kind: "density", System: "s", Class: "c", Run: 3, N: 4, Bytes: 40 << 20, Standing: 8 << 20},
+				act(1, 1, 1, ""),
+			},
+			wantRows: 1, wantP50: 1, wantP99: 1, wantSamp: 1, wantRuns: 1,
+			wantSide: func(t *testing.T, s Side) {
+				if s.DensityN != 4 || s.Marginal != 2<<20 || s.Amortized != 4<<20 {
+					t.Errorf("density n=%d marginal=%d amortized=%d, want 4, 2MiB, 4MiB", s.DensityN, s.Marginal, s.Amortized)
+				}
+			},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

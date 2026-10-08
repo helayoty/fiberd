@@ -227,6 +227,7 @@ func (a *Adapter) Setup(ctx context.Context) error {
 	}
 	defer a.free(slot)
 	sock := filepath.Join(a.o.WorkDir, "boot.sock")
+	_ = os.Remove(sock)
 	vm, err := a.launch.Start(ctx, slot, sock)
 	if err != nil {
 		return err
@@ -324,7 +325,9 @@ func (a *Adapter) restore(ctx context.Context, id string, slot int, dir string) 
 }
 
 func (i *instance) kill() {
-	_ = i.vm.Kill()
+	if i.vm != nil {
+		_ = i.vm.Kill()
+	}
 	if i.handler != nil {
 		_ = i.handler.Kill()
 		<-i.exited
@@ -356,27 +359,43 @@ func (a *Adapter) Release(_ context.Context, h compare.Handle) error {
 	return nil
 }
 
-// Resume pauses the guest, snapshots it into its own directory, ends the
-// process and restores that snapshot into a new one in the same slot.
-func (a *Adapter) Resume(ctx context.Context, h compare.Handle) (compare.Handle, error) {
+// Park pauses the guest, snapshots it into its own directory and ends
+// the process. The slot stays taken for the resume.
+func (a *Adapter) Park(ctx context.Context, h compare.Handle) error {
 	a.mu.Lock()
 	inst := a.vms[h.ID]
 	a.mu.Unlock()
-	if inst == nil {
-		return compare.Handle{}, fmt.Errorf("firecracker: unknown instance %s", h.ID)
+	if inst == nil || inst.vm == nil {
+		return fmt.Errorf("firecracker: no running instance %s", h.ID)
 	}
 	dir := filepath.Join(a.o.WorkDir, "park-"+h.ID)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return compare.Handle{}, err
+		return err
 	}
 	if err := a.snapshot(ctx, dialAPI(h.Meta["sock"]), dir); err != nil {
-		return compare.Handle{}, err
+		return err
 	}
-	a.mu.Lock()
-	delete(a.vms, h.ID)
-	a.mu.Unlock()
 	inst.kill()
-	nh, err := a.restore(ctx, h.ID, inst.slot, dir)
+	a.mu.Lock()
+	a.vms[h.ID] = &instance{slot: inst.slot}
+	a.mu.Unlock()
+	return nil
+}
+
+// Resume restores the parked snapshot into a new process in the same
+// slot.
+func (a *Adapter) Resume(ctx context.Context, h compare.Handle) (compare.Handle, error) {
+	a.mu.Lock()
+	inst := a.vms[h.ID]
+	parked := inst != nil && inst.vm == nil
+	if parked {
+		delete(a.vms, h.ID)
+	}
+	a.mu.Unlock()
+	if !parked {
+		return compare.Handle{}, fmt.Errorf("firecracker: instance %s is not parked", h.ID)
+	}
+	nh, err := a.restore(ctx, h.ID, inst.slot, filepath.Join(a.o.WorkDir, "park-"+h.ID))
 	if err != nil {
 		a.free(inst.slot)
 	}
@@ -426,7 +445,7 @@ func rss(pid int) (int64, error) {
 
 // waitSocket waits for a unix socket to accept. It stops early when
 // exited fires, so a process that dies before listening is reported
-// instead of waited on. A nil exited never fires.
+// instead of waited on.
 func waitSocket(ctx context.Context, path string, exited chan error) error {
 	for {
 		c, err := net.Dial("unix", path)
@@ -441,9 +460,9 @@ func waitSocket(ctx context.Context, path string, exited chan error) error {
 			// Put it back so kill does not block on an empty channel.
 			exited <- err
 			if err == nil {
-				return fmt.Errorf("%s: the handler exited before listening, with status 0", path)
+				return fmt.Errorf("%s: the process exited before listening, with status 0", path)
 			}
-			return fmt.Errorf("%s: the handler exited before listening: %w", path, err)
+			return fmt.Errorf("%s: the process exited before listening: %w", path, err)
 		case <-time.After(2 * time.Millisecond):
 		}
 	}
@@ -456,9 +475,11 @@ func Exec(o Options) Launcher { return &execLauncher{o: o} }
 type execLauncher struct{ o Options }
 
 type process struct {
-	cmd  *exec.Cmd
-	addr string
-	down func()
+	cmd    *exec.Cmd
+	addr   string
+	down   func()
+	log    *os.File
+	exited chan error // holds the exit, sent by its waiter
 }
 
 func (p *process) Addr() string        { return p.addr }
@@ -466,7 +487,8 @@ func (p *process) Pid() int            { return p.cmd.Process.Pid }
 func (p *process) RSS() (int64, error) { return rss(p.Pid()) }
 func (p *process) Kill() error {
 	err := p.cmd.Process.Kill()
-	_ = p.cmd.Wait()
+	<-p.exited
+	_ = p.log.Close()
 	p.down()
 	return err
 }
@@ -502,6 +524,8 @@ func (l *execLauncher) Handler(ctx context.Context, sock, mem string) (Handler, 
 
 // Start brings the slot's namespace up (netns.sh prints the address the
 // host dials), runs Firecracker inside it and waits for the API socket.
+// The guest console and Firecracker's own output go to the .log beside
+// the socket.
 func (l *execLauncher) Start(ctx context.Context, slot int, sock string) (VM, error) {
 	if l.o.Netns == "" {
 		return nil, errors.New("firecracker: need Netns (netns.sh)")
@@ -512,14 +536,21 @@ func (l *execLauncher) Start(ctx context.Context, slot int, sock string) (VM, er
 	}
 	addr := strings.TrimSpace(string(out))
 	down := func() { _ = exec.Command(l.o.Netns, "down", strconv.Itoa(slot)).Run() }
-	cmd := exec.Command("ip", "netns", "exec", Namespace(slot), l.o.Binary, "--api-sock", sock, "--id", fmt.Sprintf("slot%d", slot))
-	cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
-	if err := cmd.Start(); err != nil {
+	logf, err := os.Create(strings.TrimSuffix(sock, ".sock") + ".log")
+	if err != nil {
 		down()
 		return nil, err
 	}
-	p := &process{cmd: cmd, addr: addr, down: down}
-	if err := waitSocket(ctx, sock, nil); err != nil {
+	cmd := exec.Command("ip", "netns", "exec", Namespace(slot), l.o.Binary, "--api-sock", sock, "--id", fmt.Sprintf("slot%d", slot))
+	cmd.Stdout, cmd.Stderr = logf, logf
+	if err := cmd.Start(); err != nil {
+		_ = logf.Close()
+		down()
+		return nil, err
+	}
+	p := &process{cmd: cmd, addr: addr, down: down, log: logf, exited: make(chan error, 1)}
+	go func() { p.exited <- cmd.Wait() }()
+	if err := waitSocket(ctx, sock, p.exited); err != nil {
 		_ = p.Kill()
 		return nil, err
 	}

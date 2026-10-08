@@ -5,9 +5,14 @@ import (
 	"context"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/helayoty/fiberd/bench/compare"
 
 	"github.com/helayoty/fiberd/examples/kubernetes/kube"
 	"github.com/helayoty/fiberd/examples/kubernetes/kube/kubetest"
@@ -139,6 +144,9 @@ func TestClaim(t *testing.T) {
 					time.Sleep(20 * time.Millisecond)
 					srv.Update(sbPath, func(obj map[string]any) { obj["status"] = map[string]any{} })
 				}()
+				if err := a.Park(ctx, h); err != nil {
+					t.Fatal(err)
+				}
 				nh, err := a.Resume(ctx, h)
 				if err != nil {
 					t.Fatal(err)
@@ -164,6 +172,89 @@ func TestClaim(t *testing.T) {
 			}
 			if srv.Get(claimPath) != nil {
 				t.Error("claim not deleted")
+			}
+		})
+	}
+}
+
+// owned is a Sandbox's metadata with one controller owner.
+func owned(kind, name string) map[string]any {
+	return map[string]any{"metadata": map[string]any{"ownerReferences": []map[string]any{
+		{"apiVersion": "x/v1", "kind": kind, "name": name, "uid": "u-" + name, "controller": true}}}}
+}
+
+// seedSandboxes puts Sandboxes with their Pods and cgroups in place:
+// two the pool "counter" still owns, one a claim took, one of another
+// pool. Each Pod is charged its index in MiB.
+func seedSandboxes(t *testing.T, srv *kubetest.Server) string {
+	t.Helper()
+	root := t.TempDir()
+	for i, sb := range []struct{ name, ownerKind, owner string }{
+		{"counter-a", "SandboxWarmPool", "counter"}, {"counter-b", "SandboxWarmPool", "counter"},
+		{"counter-c", "SandboxClaim", "claim-x"}, {"other-a", "SandboxWarmPool", "other"},
+	} {
+		srv.Put(core+"ns/sandboxes/"+sb.name, owned(sb.ownerKind, sb.owner))
+		uid := "uid-" + sb.name
+		srv.Put("/api/v1/namespaces/ns/pods/"+sb.name, map[string]any{"metadata": map[string]any{"uid": uid}})
+		dir := filepath.Join(root, "kubepods", "pod"+uid)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "memory.current"), []byte(strconv.Itoa((i+1)<<20)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return root
+}
+
+func TestDensity(t *testing.T) {
+	cases := []struct {
+		name    string
+		handles []compare.Handle
+		want    int64
+	}{
+		{name: "standing is the pool's unclaimed sandboxes only", want: 1<<20 + 2<<20},
+		{name: "handles are charged their own sandboxes", handles: []compare.Handle{{ID: "claim-x", Meta: map[string]string{"sandbox": "counter-c"}}}, want: 3 << 20},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := kubetest.New()
+			defer srv.Close()
+			a := newAdapter(t, srv, 1, "")
+			a.o.CgroupRoot = seedSandboxes(t, srv)
+			got, err := a.Density(context.Background(), tc.handles)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want {
+				t.Errorf("density %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCleanup(t *testing.T) {
+	cases := []struct {
+		name     string
+		standing bool
+	}{
+		{name: "the pool and the template are deleted", standing: true},
+		{name: "nothing standing is not an error"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := kubetest.New()
+			defer srv.Close()
+			a := newAdapter(t, srv, 1, "")
+			if tc.standing {
+				srv.Put(tmplPath, a.Template())
+				srv.Put(poolPath, a.Pool())
+			}
+			if err := a.Cleanup(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if srv.Get(poolPath) != nil || srv.Get(tmplPath) != nil {
+				t.Error("the pool or the template survived Cleanup")
 			}
 		})
 	}

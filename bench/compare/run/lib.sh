@@ -56,7 +56,8 @@ template_digest() { # template_digest <http|line|gvisor>
   [ -f "$TEMPLATES_ENV" ] || { echo "no $TEMPLATES_ENV: run phase1.sh deploy first" >&2; exit 1; }
   # shellcheck disable=SC1090
   . "$TEMPLATES_ENV"
-  local var="DIGEST_${1^^}"
+  local var
+  var="DIGEST_$(echo "$1" | tr '[:lower:]' '[:upper:]')"
   [ -n "${!var:-}" ] || { echo "no $var in $TEMPLATES_ENV" >&2; exit 1; }
   echo "${!var}"
 }

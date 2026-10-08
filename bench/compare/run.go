@@ -15,9 +15,11 @@ import (
 )
 
 // Record is one JSON line. Activation lines carry Burst and the two
-// timings. Run lines (Kind "run") carry the host load and control-plane
-// deltas around one run. Setup lines (Kind "setup") carry the one-time
-// cost. Density and resume lines are the remaining kinds.
+// timings. Hold lines (Kind "hold") are the activations made to hold an
+// instance for resume or density, with the same fields, and are not
+// latency samples. Run lines (Kind "run") carry the host load and
+// control-plane deltas around one run. Setup lines (Kind "setup") carry
+// the one-time cost. Density and resume lines are the remaining kinds.
 type Record struct {
 	Kind   string `json:"kind"`
 	System string `json:"system"`
@@ -127,8 +129,20 @@ func (r *Runner) emit(rec Record) {
 // Run is setup, one cold run, then Runs timed runs. Every run does each
 // burst size once, releases everything between bursts, and keeps
 // nothing between runs. It returns the first error that stopped a run,
-// while per-activation errors go into the records.
-func (r *Runner) Run(ctx context.Context) error {
+// while per-activation errors go into the records. An adapter's Cleanup
+// runs last, whatever stopped the runs.
+func (r *Runner) Run(ctx context.Context) (err error) {
+	defer func() {
+		c, ok := r.Adapter.(Cleaner)
+		if !ok {
+			return
+		}
+		cctx, cancel := r.outlive(ctx)
+		defer cancel()
+		if cerr := c.Cleanup(cctx); cerr != nil && err == nil {
+			err = fmt.Errorf("cleanup: %w", cerr)
+		}
+	}()
 	runs, bursts := r.Runs, r.Bursts
 	if runs <= 0 {
 		runs = 3
@@ -163,6 +177,10 @@ func (r *Runner) Run(ctx context.Context) error {
 				return err
 			}
 		}
+		// A cancelled run stops here, after its instances are released.
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		rec.LoadAfter = r.load()
 		if r.ControlPlane != nil {
 			d, err := r.ControlPlane.Delta(ctx)
@@ -177,12 +195,27 @@ func (r *Runner) Run(ctx context.Context) error {
 	return nil
 }
 
-// one is a single activation to first byte. The handle comes back for
-// the release, nil when activation failed.
-func (r *Runner) one(ctx context.Context, run, burst int, id string) *Handle {
+// prepare runs the adapter's untimed pre-step, if it has one.
+func (r *Runner) prepare(ctx context.Context, id string) error {
+	if p, ok := r.Adapter.(Preparer); ok {
+		return p.Prepare(ctx, id)
+	}
+	return nil
+}
+
+// one is a single activation to first byte, recorded under kind. prep
+// is what the pre-step answered, which fails the activation before its
+// clock starts. The handle comes back for the release, nil when
+// activation failed.
+func (r *Runner) one(ctx context.Context, kind string, run, burst int, id string, prep error) *Handle {
 	ctx, cancel := context.WithTimeout(ctx, r.timeout())
 	defer cancel()
-	rec := Record{Kind: "activation", Run: run, Cold: run == 0, Burst: burst, ID: id, PollMs: ms(r.Poll)}
+	rec := Record{Kind: kind, Run: run, Cold: run == 0, Burst: burst, ID: id, PollMs: ms(r.Poll)}
+	if prep != nil {
+		rec.Error = "prepare: " + prep.Error()
+		r.emit(rec)
+		return nil
+	}
 	t0 := r.now()
 	rec.T0 = t0.Format(time.RFC3339Nano)
 	h, err := r.Adapter.Activate(ctx, id)
@@ -212,17 +245,35 @@ func (r *Runner) timeout() time.Duration {
 	return 2 * time.Minute
 }
 
+// outlive is a context for releasing and cleaning up, which must happen
+// when the run's context was cancelled.
+func (r *Runner) outlive(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), r.timeout())
+}
+
 // burst activates n instances at once, waits for all, then releases
-// them all. Nothing runs between bursts.
+// them all. Nothing runs between bursts. Every pre-step ends before the
+// first clock starts, so none runs inside another activation's window.
 func (r *Runner) burst(ctx context.Context, run, n int) error {
-	hs := make([]*Handle, n)
+	ids := make([]string, n)
+	prep := make([]error, n)
 	var wg sync.WaitGroup
+	for i := range n {
+		ids[i] = fmt.Sprintf("r%d-b%d-%d", run, n, i)
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			prep[i] = r.prepare(ctx, ids[i])
+		}(i)
+	}
+	wg.Wait()
+	hs := make([]*Handle, n)
 	start := r.now()
 	for i := range n {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			hs[i] = r.one(ctx, run, n, fmt.Sprintf("r%d-b%d-%d", run, n, i))
+			hs[i] = r.one(ctx, "activation", run, n, ids[i], prep[i])
 		}(i)
 	}
 	wg.Wait()
@@ -230,42 +281,53 @@ func (r *Runner) burst(ctx context.Context, run, n int) error {
 	return r.releaseAll(ctx, hs)
 }
 
+// releaseAll releases every live handle, with a context that outlives
+// a cancelled run so nothing is left behind.
 func (r *Runner) releaseAll(ctx context.Context, hs []*Handle) error {
 	var first error
 	for _, h := range hs {
 		if h == nil {
 			continue
 		}
-		if err := r.Adapter.Release(ctx, *h); err != nil && first == nil {
+		if err := r.release(ctx, *h); err != nil && first == nil {
 			first = fmt.Errorf("release %s: %w", h.ID, err)
 		}
 	}
 	return first
 }
 
-// resume activates one instance, parks and resumes it, and times the
-// resumed instance to its first byte.
+func (r *Runner) release(ctx context.Context, h Handle) error {
+	rctx, cancel := r.outlive(ctx)
+	defer cancel()
+	return r.Adapter.Release(rctx, h)
+}
+
+// resume activates one instance, parks it untimed, then times its
+// resume to first byte.
 func (r *Runner) resume(ctx context.Context, run int) error {
 	id := fmt.Sprintf("r%d-resume", run)
-	h := r.one(ctx, run, 1, id)
+	h := r.one(ctx, "hold", run, 0, id, r.prepare(ctx, id))
 	if h == nil {
 		return nil
 	}
 	rctx, cancel := context.WithTimeout(ctx, r.timeout())
 	defer cancel()
 	rec := Record{Kind: "resume", Run: run, Cold: run == 0, ID: id, PollMs: ms(r.Poll)}
+	if err := r.Adapter.Park(rctx, *h); err != nil {
+		rec.Error = "park: " + err.Error()
+		if errors.Is(err, ErrUnsupported) {
+			rec.Error = ErrUnsupported.Error()
+		}
+		r.emit(rec)
+		return r.release(ctx, *h)
+	}
 	t0 := r.now()
 	rec.T0 = t0.Format(time.RFC3339Nano)
 	nh, err := r.Adapter.Resume(rctx, *h)
-	switch {
-	case errors.Is(err, ErrUnsupported):
-		rec.Error = ErrUnsupported.Error()
-		r.emit(rec)
-		return r.Adapter.Release(ctx, *h)
-	case err != nil:
+	if err != nil {
 		rec.Error = "resume: " + err.Error()
 		r.emit(rec)
-		return r.Adapter.Release(ctx, *h)
+		return r.release(ctx, *h)
 	}
 	rec.TAddrMs = ms(r.now().Sub(t0))
 	nh, fb, err := r.Adapter.Ready(rctx, nh)
@@ -275,7 +337,7 @@ func (r *Runner) resume(ctx context.Context, run int) error {
 		rec.TFirstByteMs = ms(fb.Sub(t0))
 	}
 	r.emit(rec)
-	return r.Adapter.Release(ctx, nh)
+	return r.release(ctx, nh)
 }
 
 // density holds Density idle instances for Idle, then reads what they
@@ -287,7 +349,8 @@ func (r *Runner) density(ctx context.Context, run int) error {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			hs[i] = r.one(ctx, run, 0, fmt.Sprintf("r%d-d%d", run, i))
+			id := fmt.Sprintf("r%d-d%d", run, i)
+			hs[i] = r.one(ctx, "hold", run, 0, id, r.prepare(ctx, id))
 		}(i)
 	}
 	wg.Wait()

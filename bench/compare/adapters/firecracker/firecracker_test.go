@@ -250,6 +250,12 @@ func TestSetupAndActivate(t *testing.T) {
 			if n, err := a.Density(ctx, []compare.Handle{h}); err != nil || n != tc.wantRSS {
 				t.Errorf("density %d, %v, want %d", n, err, tc.wantRSS)
 			}
+			if err := a.Park(ctx, h); err != nil {
+				t.Fatal(err)
+			}
+			if len(a.slots) != 1 || a.vms["a"] == nil || a.vms["a"].vm != nil {
+				t.Errorf("park should keep the slot and no process: slots %v vms %v", a.slots, a.vms)
+			}
 			nh, err := a.Resume(ctx, h)
 			if err != nil {
 				t.Fatal(err)
@@ -440,6 +446,65 @@ func TestWaitSocket(t *testing.T) {
 			}
 			if tc.exited != nil && time.Since(start) > 5*time.Second {
 				t.Fatalf("an exited handler took %v to report", time.Since(start))
+			}
+		})
+	}
+}
+
+func TestParkedRelease(t *testing.T) {
+	cases := []struct {
+		name string
+		park bool
+	}{
+		{name: "a parked instance released frees its slot", park: true},
+		{name: "resume of an instance that is not parked is refused"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a, _ := newAdapter(t, false, 2)
+			ctx := context.Background()
+			if err := a.Setup(ctx); err != nil {
+				t.Fatal(err)
+			}
+			h, err := a.Activate(ctx, "a")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.park {
+				if err := a.Park(ctx, h); err != nil {
+					t.Fatal(err)
+				}
+			} else if _, err := a.Resume(ctx, h); err == nil || !strings.Contains(err.Error(), "not parked") {
+				t.Fatalf("Resume = %v, want a refusal", err)
+			}
+			if err := a.Release(ctx, h); err != nil {
+				t.Fatal(err)
+			}
+			if len(a.slots) != 0 || len(a.vms) != 0 {
+				t.Errorf("release left slots %v vms %v", a.slots, a.vms)
+			}
+		})
+	}
+}
+
+func TestStaleBootSocket(t *testing.T) {
+	cases := []struct {
+		name  string
+		stale bool
+	}{
+		{name: "a boot.sock left by a killed run is removed before the boot", stale: true},
+		{name: "a clean work dir"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a, _ := newAdapter(t, false, 1)
+			if tc.stale {
+				if err := os.WriteFile(filepath.Join(a.o.WorkDir, "boot.sock"), nil, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := a.Setup(context.Background()); err != nil {
+				t.Fatalf("Setup = %v", err)
 			}
 		})
 	}

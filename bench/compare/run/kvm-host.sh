@@ -18,13 +18,25 @@ sudo apt-get install -y -q docker.io curl git make gcc libssl-dev jq
 sudo usermod -aG docker "$USER"
 sudo apt-get install -y -q cpu-checker && sudo kvm-ok
 
-# kind, kubectl, Go
-KIND_VERSION=${KIND_VERSION:-v0.29.0}
-sudo curl -fsSLo /usr/local/bin/kind "https://kind.sigs.k8s.io/dl/$KIND_VERSION/kind-linux-amd64" && sudo chmod +x /usr/local/bin/kind
-KUBE_VERSION=$(curl -fsSL https://dl.k8s.io/release/stable.txt)
-sudo curl -fsSLo /usr/local/bin/kubectl "https://dl.k8s.io/release/$KUBE_VERSION/bin/linux/amd64/kubectl" && sudo chmod +x /usr/local/bin/kubectl
-GO_VERSION=${GO_VERSION:-1.26.7}
-curl -fsSLo /tmp/go.tgz "https://go.dev/dl/go$GO_VERSION.linux-amd64.tar.gz" && sudo rm -rf /usr/local/go && sudo tar -C /usr/local -xzf /tmp/go.tgz
+# kind, kubectl and Go, each pinned by version and sha256 (from
+# kind-linux-amd64.sha256sum, kubectl.sha256 and go.dev/dl), so a changed
+# download fails. kubectl matches the node image kind v0.29.0 defaults to.
+[ "$ARCH" = x86_64 ] || { echo "the tool pins below are x86_64 only" >&2; exit 1; }
+KIND_VERSION=v0.29.0
+KIND_SHA256=c72eda46430f065fb45c5f70e7c957cc9209402ef309294821978677c8fb3284
+KUBE_VERSION=v1.33.1
+KUBECTL_SHA256=5de4e9f2266738fd112b721265a0c1cd7f4e5208b670f811861f699474a100a3
+GO_VERSION=1.26.7
+GO_SHA256=ffb5f8de10c62550dfddab66b36b57030721e0a44a3218e9e1181d7b59f121ca
+curl -fsSLo /tmp/kind "https://kind.sigs.k8s.io/dl/$KIND_VERSION/kind-linux-amd64"
+echo "$KIND_SHA256  /tmp/kind" | sha256sum -c -
+sudo install -m 0755 /tmp/kind /usr/local/bin/kind
+curl -fsSLo /tmp/kubectl "https://dl.k8s.io/release/$KUBE_VERSION/bin/linux/amd64/kubectl"
+echo "$KUBECTL_SHA256  /tmp/kubectl" | sha256sum -c -
+sudo install -m 0755 /tmp/kubectl /usr/local/bin/kubectl
+curl -fsSLo /tmp/go.tgz "https://go.dev/dl/go$GO_VERSION.linux-amd64.tar.gz"
+echo "$GO_SHA256  /tmp/go.tgz" | sha256sum -c -
+sudo rm -rf /usr/local/go && sudo tar -C /usr/local -xzf /tmp/go.tgz
 export PATH=$PATH:/usr/local/go/bin
 
 # Firecracker, with the matching jailer, and a guest kernel from the CI artifacts

@@ -195,12 +195,14 @@ func (a *Adapter) Release(ctx context.Context, h compare.Handle) error {
 	return err
 }
 
-// Resume parks the fiber synchronously and clones its session again,
-// which the home serves as RESUME.
+// Park parks the fiber synchronously, keeping its session's state.
+func (a *Adapter) Park(ctx context.Context, h compare.Handle) error {
+	return a.client.Park(ctx, h.ID, true)
+}
+
+// Resume clones the parked fiber's session again, which the home serves
+// as RESUME.
 func (a *Adapter) Resume(ctx context.Context, h compare.Handle) (compare.Handle, error) {
-	if err := a.client.Park(ctx, h.ID, true); err != nil {
-		return compare.Handle{}, fmt.Errorf("park: %w", err)
-	}
 	f, err := a.client.Clone(ctx, a.token, h.Meta["session"], a.o.Deadline, nil)
 	if err != nil {
 		return compare.Handle{}, fmt.Errorf("clone after park: %w", err)

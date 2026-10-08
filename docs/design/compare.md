@@ -54,7 +54,7 @@ Pods, claims and Firecracker return an address before the instance listens, so t
 - Each run does bursts of 1, 10 and 50 and releases everything in between. Every number is the median of 3 timed runs after a discarded cold run.
 - Each run records the host load before and after. A phase refuses to start when the load exceeds the core count.
 
-Runs can also time [park](../glossary.md#park) and resume, and hold idle instances for 30 seconds to read their memory from cgroups or the Firecracker process.
+Runs can also [park](../glossary.md#park) an instance untimed and then time its resume to first byte, and hold idle instances for 30 seconds to read their memory from cgroups or the Firecracker process.
 
 **Phases.** Phase 0 records the host and its load. Phase 1 is the shared-kernel class on a kind cluster named `compare`, with control-plane deltas. Phase 2 is fiberd proc, runc and gVisor standalone in the dev container. Phase 3 is the sandboxed class on the same cluster. Phase 4 is everything again on one host with `/dev/kvm`, plus Firecracker and Hyperlight. Docker Desktop has no `/dev/kvm`, so the headline table comes from phase 4 alone.
 

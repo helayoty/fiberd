@@ -230,17 +230,14 @@ func (a *Adapter) Release(ctx context.Context, h compare.Handle) error {
 	return err
 }
 
-// Resume suspends the Sandbox, waits for its Pod to be gone, and sets
-// it Running again. The handle keeps the claim, with Addr cleared so
-// Ready reads the new Pod IP.
-func (a *Adapter) Resume(ctx context.Context, h compare.Handle) (compare.Handle, error) {
-	sb := h.Meta["sandbox"]
-	if sb == "" {
-		return compare.Handle{}, fmt.Errorf("agentsandbox: claim %s names no sandbox", h.ID)
+// Park suspends the Sandbox and waits for its Pod to be gone.
+func (a *Adapter) Park(ctx context.Context, h compare.Handle) error {
+	path, err := a.sandbox(h)
+	if err != nil {
+		return err
 	}
-	path := core + a.o.Namespace + "/sandboxes/" + sb
 	if err := a.mode(ctx, path, "Suspended"); err != nil {
-		return compare.Handle{}, err
+		return err
 	}
 	for {
 		var s struct {
@@ -249,22 +246,39 @@ func (a *Adapter) Resume(ctx context.Context, h compare.Handle) (compare.Handle,
 			} `json:"status"`
 		}
 		if err := a.o.Kube.Get(ctx, path, &s); err != nil {
-			return compare.Handle{}, err
+			return err
 		}
 		if len(s.Status.PodIPs) == 0 {
-			break
+			return nil
 		}
 		select {
 		case <-ctx.Done():
-			return compare.Handle{}, ctx.Err()
+			return ctx.Err()
 		case <-time.After(50 * time.Millisecond):
 		}
+	}
+}
+
+// Resume sets the suspended Sandbox Running again. The handle keeps the
+// claim, with Addr cleared so Ready reads the new Pod IP.
+func (a *Adapter) Resume(ctx context.Context, h compare.Handle) (compare.Handle, error) {
+	path, err := a.sandbox(h)
+	if err != nil {
+		return compare.Handle{}, err
 	}
 	if err := a.mode(ctx, path, "Running"); err != nil {
 		return compare.Handle{}, err
 	}
-	nh := compare.Handle{ID: h.ID, Meta: map[string]string{"sandbox": sb}}
-	return nh, nil
+	return compare.Handle{ID: h.ID, Meta: map[string]string{"sandbox": h.Meta["sandbox"]}}, nil
+}
+
+// sandbox is the path of the claim's Sandbox.
+func (a *Adapter) sandbox(h compare.Handle) (string, error) {
+	sb := h.Meta["sandbox"]
+	if sb == "" {
+		return "", fmt.Errorf("agentsandbox: claim %s names no sandbox", h.ID)
+	}
+	return core + a.o.Namespace + "/sandboxes/" + sb, nil
 }
 
 func (a *Adapter) mode(ctx context.Context, path, mode string) error {
@@ -279,16 +293,9 @@ func (a *Adapter) Density(ctx context.Context, hs []compare.Handle) (int64, erro
 	}
 	var names []string
 	if len(hs) == 0 {
-		var list struct {
-			Items []struct {
-				Metadata kube.ObjectMeta `json:"metadata"`
-			} `json:"items"`
-		}
-		if err := a.o.Kube.Get(ctx, core+a.o.Namespace+"/sandboxes", &list); err != nil {
+		var err error
+		if names, err = a.standing(ctx); err != nil {
 			return 0, err
-		}
-		for _, it := range list.Items {
-			names = append(names, it.Metadata.Name)
 		}
 	}
 	for _, h := range hs {
@@ -307,6 +314,43 @@ func (a *Adapter) Density(ctx context.Context, hs []compare.Handle) (int64, erro
 		dirs = append(dirs, d)
 	}
 	return compare.SumCgroups(dirs)
+}
+
+// standing names the pool's unclaimed Sandboxes. agent-sandbox makes
+// the pool the controller owner of each Sandbox it fills, and hands the
+// ownership to the claim that takes one, so the namespace's other
+// Sandboxes (claimed ones, other pools') carry another owner.
+func (a *Adapter) standing(ctx context.Context) ([]string, error) {
+	var list struct {
+		Items []struct {
+			Metadata kube.ObjectMeta `json:"metadata"`
+		} `json:"items"`
+	}
+	if err := a.o.Kube.Get(ctx, core+a.o.Namespace+"/sandboxes", &list); err != nil {
+		return nil, err
+	}
+	var names []string
+	for _, it := range list.Items {
+		for _, ref := range it.Metadata.OwnerReferences {
+			if ref.Kind == "SandboxWarmPool" && ref.Name == a.o.Name {
+				names = append(names, it.Metadata.Name)
+				break
+			}
+		}
+	}
+	return names, nil
+}
+
+// Cleanup deletes the pool and the template, so they stand for no other
+// system's runs. The pool's Sandboxes go with it.
+func (a *Adapter) Cleanup(ctx context.Context) error {
+	ns := a.o.Namespace
+	for _, p := range []string{ext + ns + "/sandboxwarmpools/" + a.o.Name, ext + ns + "/sandboxtemplates/" + a.o.Name} {
+		if err := a.o.Kube.Delete(ctx, p); err != nil && !kube.IsNotFound(err) {
+			return err
+		}
+	}
+	return nil
 }
 
 // podUID is the uid of a sandbox's Pod. agent-sandbox names the Pod

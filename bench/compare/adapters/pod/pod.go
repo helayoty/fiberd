@@ -33,9 +33,9 @@ type Options struct {
 	Port     int
 	// CPU and Memory are the container's limits, the fairness rule.
 	CPU, Memory string
-	// RemoveImage runs before every activation in the cold case. It is
-	// not timed. Typically `crictl rmi <image>` against the node's
-	// containerd socket.
+	// RemoveImage runs before every activation in the cold case, as the
+	// untimed Prepare step. Typically `crictl rmi <image>` against the
+	// node's containerd socket.
 	RemoveImage func(ctx context.Context) error
 	// CgroupRoot is where Pod cgroups are found for density, mounted
 	// from the node. Empty disables density.
@@ -141,13 +141,20 @@ func (a *Adapter) Setup(ctx context.Context) error {
 	return a.Release(ctx, h)
 }
 
+// Prepare drops the image from the node in the cold case, before the
+// runner starts the activation's clock.
+func (a *Adapter) Prepare(ctx context.Context, _ string) error {
+	if a.o.RemoveImage == nil {
+		return nil
+	}
+	if err := a.o.RemoveImage(ctx); err != nil {
+		return fmt.Errorf("remove image: %w", err)
+	}
+	return nil
+}
+
 // Activate creates the Pod. The handle is its name. Addr comes with Ready.
 func (a *Adapter) Activate(ctx context.Context, id string) (compare.Handle, error) {
-	if a.o.RemoveImage != nil {
-		if err := a.o.RemoveImage(ctx); err != nil {
-			return compare.Handle{}, fmt.Errorf("remove image: %w", err)
-		}
-	}
 	p := a.Build(id)
 	var created pod
 	if err := a.o.Kube.Create(ctx, "/api/v1/namespaces/"+a.o.Namespace+"/pods", p, &created); err != nil {
@@ -197,6 +204,9 @@ func (a *Adapter) Release(ctx context.Context, h compare.Handle) error {
 	return err
 }
 
+// Park has no Pod equivalent, nor has Resume.
+func (a *Adapter) Park(context.Context, compare.Handle) error { return compare.ErrUnsupported }
+
 // Resume has no Pod equivalent.
 func (a *Adapter) Resume(context.Context, compare.Handle) (compare.Handle, error) {
 	return compare.Handle{}, compare.ErrUnsupported
@@ -222,12 +232,22 @@ func (a *Adapter) Density(_ context.Context, hs []compare.Handle) (int64, error)
 }
 
 // Command is a RemoveImage that runs a shell command, for the cold case.
+// A burst runs it once per activation at the same time, so the image
+// being gone already is not an error.
 func Command(cmd string) func(ctx context.Context) error {
 	return func(ctx context.Context) error {
 		out, err := exec.CommandContext(ctx, "sh", "-c", cmd).CombinedOutput()
-		if err != nil && !strings.Contains(string(out), "not found") {
+		if err != nil && !Missing(string(out)) {
 			return fmt.Errorf("%s: %w: %s", cmd, err, strings.TrimSpace(string(out)))
 		}
 		return nil
 	}
+}
+
+// Missing reports whether a removal's output is crictl's "no such
+// image". Nothing looser, since a missing crictl ("command not found")
+// must fail the cold case rather than quietly run it warm. containerd
+// tolerates two removals racing by itself.
+func Missing(out string) bool {
+	return strings.Contains(strings.ToLower(out), "no such image")
 }
