@@ -55,7 +55,11 @@ type mobileRuntime struct {
 }
 
 func (m *mobileRuntime) key(g core.Grant, session string) string {
-	return g.SessionDomain() + "/" + session
+	domain, err := g.SessionDomain()
+	if err != nil {
+		panic(err) // the agent never asks the store for a grant without a domain
+	}
+	return domain + "/" + session
 }
 
 func (m *mobileRuntime) PublishDelta(_ context.Context, ref string, g core.Grant, session string) (string, error) {
@@ -180,8 +184,8 @@ func newMobileAgent(t *testing.T, home string, st *store, g core.Grant) (*core.A
 // the same parked state. A session parked on A is claimed and resumed by B,
 // after which A's stale copy must not resume. The steps run in order.
 func TestSessionMovesBetweenHomes(t *testing.T) {
-	ga := core.Grant{UID: "ga", Audience: "A", TemplateDigest: "sha256:t", FiberMax: 4, WBudgetBytes: 10 << 20}
-	gb := core.Grant{UID: "gb", Audience: "B", TemplateDigest: "sha256:t", FiberMax: 4, WBudgetBytes: 10 << 20}
+	ga := core.Grant{UID: "ga", Tenant: "acme", Audience: "A", TemplateDigest: "sha256:t", FiberMax: 4, WBudgetBytes: 10 << 20}
+	gb := core.Grant{UID: "gb", Tenant: "acme", Audience: "B", TemplateDigest: "sha256:t", FiberMax: 4, WBudgetBytes: 10 << 20}
 	st := &store{deltas: map[string]published{}}
 	a, ra := newMobileAgent(t, "A", st, ga)
 	b, rb := newMobileAgent(t, "B", st, gb)
@@ -200,13 +204,13 @@ func TestSessionMovesBetweenHomes(t *testing.T) {
 				t.Fatalf("A clone: %v %d %v", err, code, r1.Kind)
 			}
 		}},
-		{name: "A parks it and the park publishes under the template domain", step: func(t *testing.T) {
+		{name: "A parks it and the park publishes under the tenant and template domain", step: func(t *testing.T) {
 			ra.deltaW = 4 << 20
 			if _, code, err := a.Park(ctx, r1.FiberID, true); err != nil || code != core.OK {
 				t.Fatalf("A park: %v %d", err, code)
 			}
-			if !st.stored("sha256:t/S") {
-				t.Fatal("park did not publish the delta under the template domain")
+			if !st.stored("acme/sha256:t/S") {
+				t.Fatal("park did not publish the delta under the tenant and template domain")
 			}
 		}},
 		{name: "B, which never saw it, finds, claims and resumes it with its own grant", step: func(t *testing.T) {
@@ -217,7 +221,7 @@ func TestSessionMovesBetweenHomes(t *testing.T) {
 			if r2.Kind != core.ActResume || len(rb.claims) != 1 {
 				t.Fatalf("B clone kind = %v claims = %v, want RESUME after one claim", r2.Kind, rb.claims)
 			}
-			if st.stored("sha256:t/S") {
+			if st.stored("acme/sha256:t/S") {
 				t.Fatal("claim left the delta in the store")
 			}
 		}},
@@ -241,25 +245,31 @@ func TestSessionMovesBetweenHomes(t *testing.T) {
 }
 
 // TestSessionDomain checks that parked state is shared within a session
-// domain. That is the template digest, unless the policy names a session
-// class.
+// domain: the tenant, then the template digest, unless the policy names
+// a session class. A grant without a tenant has no domain.
 func TestSessionDomain(t *testing.T) {
 	cases := []struct {
 		name  string
 		grant core.Grant
 		want  string
+		err   error
 	}{
-		{name: "without a session class it is the template digest",
-			grant: core.Grant{UID: "ga", Audience: "A", TemplateDigest: "sha256:t"}, want: "sha256:t"},
-		{name: "another audience on the same template shares it",
-			grant: core.Grant{UID: "gb", Audience: "B", TemplateDigest: "sha256:t"}, want: "sha256:t"},
-		{name: "a session class defines its own domain",
-			grant: core.Grant{UID: "gc", Audience: "B", TemplateDigest: "sha256:t", Policy: core.Policy{SessionClass: "tenant-2"}}, want: "tenant-2"},
+		{name: "without a session class it is the tenant and the template digest",
+			grant: core.Grant{UID: "ga", Audience: "A", Tenant: "acme", TemplateDigest: "sha256:t"}, want: "acme/sha256:t"},
+		{name: "another audience of the tenant on the same template shares it",
+			grant: core.Grant{UID: "gb", Audience: "B", Tenant: "acme", TemplateDigest: "sha256:t"}, want: "acme/sha256:t"},
+		{name: "a session class defines its own domain within the tenant",
+			grant: core.Grant{UID: "gc", Audience: "B", Tenant: "acme", TemplateDigest: "sha256:t", Policy: core.Policy{SessionClass: "models"}}, want: "acme/models"},
+		{name: "another tenant on the same template and class is another domain",
+			grant: core.Grant{UID: "gd", Audience: "B", Tenant: "globex", TemplateDigest: "sha256:t", Policy: core.Policy{SessionClass: "models"}}, want: "globex/models"},
+		{name: "without a tenant there is no domain",
+			grant: core.Grant{UID: "ge", Audience: "A", TemplateDigest: "sha256:t", Policy: core.Policy{SessionClass: "models"}}, err: core.ErrNoTenant},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := tc.grant.SessionDomain(); got != tc.want {
-				t.Fatalf("SessionDomain = %q, want %q", got, tc.want)
+			got, err := tc.grant.SessionDomain()
+			if !errors.Is(err, tc.err) || got != tc.want {
+				t.Fatalf("SessionDomain = %q, %v, want %q, %v", got, err, tc.want, tc.err)
 			}
 		})
 	}
@@ -343,7 +353,7 @@ func TestParkedSessionPickup(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			g := core.Grant{UID: "g1", TemplateDigest: "sha256:t", FiberMax: 4, WBudgetBytes: tc.budget}
+			g := core.Grant{UID: "g1", Tenant: "acme", TemplateDigest: "sha256:t", FiberMax: 4, WBudgetBytes: tc.budget}
 			if tc.failAudit != "" {
 				g.Policy.Durability = core.Sync
 			}
@@ -419,7 +429,7 @@ func TestParkedSessionPickup(t *testing.T) {
 			if code == core.OK && r.Kind != tc.wantKind {
 				t.Fatalf("%s clone kind = %v, want %v", tc.from, r.Kind, tc.wantKind)
 			}
-			if ok := st.stored("sha256:t/S"); ok != tc.wantStored {
+			if ok := st.stored("acme/sha256:t/S"); ok != tc.wantStored {
 				t.Fatalf("S in the store = %v, want %v", ok, tc.wantStored)
 			}
 			if len(prt.claims) != tc.wantClaims {
@@ -453,7 +463,7 @@ func TestConcurrentClaims(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			g := core.Grant{UID: "g1", TemplateDigest: "sha256:t", FiberMax: 4, WBudgetBytes: 8 << 20}
+			g := core.Grant{UID: "g1", Tenant: "acme", TemplateDigest: "sha256:t", FiberMax: 4, WBudgetBytes: 8 << 20}
 			st := &store{deltas: map[string]published{}}
 			a, _ := newMobileAgent(t, "A", st, g)
 			b, rb := newMobileAgent(t, "B", st, g)
@@ -516,7 +526,7 @@ func TestConcurrentClaims(t *testing.T) {
 			if n := rb.nClaims(); n != 1 {
 				t.Fatalf("claims = %d, want 1", n)
 			}
-			if st.stored("sha256:t/S") {
+			if st.stored("acme/sha256:t/S") {
 				t.Fatal("claim left the delta in the store")
 			}
 			if s, _ := coretest.GrantStatus(b.Ledger, "g1"); s.Running != 1 || s.Parked != 0 {
@@ -560,7 +570,7 @@ func TestResumedDeltaLifecycle(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			g := core.Grant{UID: "g1", Audience: "A", TemplateDigest: "sha256:t", FiberMax: 4, WBudgetBytes: 8 << 20}
+			g := core.Grant{UID: "g1", Tenant: "acme", Audience: "A", TemplateDigest: "sha256:t", FiberMax: 4, WBudgetBytes: 8 << 20}
 			st := &store{deltas: map[string]published{}}
 			a, ra := newMobileAgent(t, "A", st, g)
 			ra.retireFails = tc.retireFails
@@ -574,7 +584,7 @@ func TestResumedDeltaLifecycle(t *testing.T) {
 				if _, code, err := a.Park(ctx, id, false); err != nil || code != core.OK {
 					t.Fatalf("park: %v %d", err, code)
 				}
-				if !st.stored("sha256:t/S") {
+				if !st.stored("acme/sha256:t/S") {
 					t.Fatal("park did not publish the delta")
 				}
 				r2, code, err := a.Clone(ctx, req)
@@ -582,7 +592,7 @@ func TestResumedDeltaLifecycle(t *testing.T) {
 					t.Fatalf("resume: %v %d %v", err, code, r2.Kind)
 				}
 				id = r2.FiberID
-				if got := st.stored("sha256:t/S"); got != tc.wantStoredAfterResume {
+				if got := st.stored("acme/sha256:t/S"); got != tc.wantStoredAfterResume {
 					t.Errorf("published copy after the local resume = %v, want %v", got, tc.wantStoredAfterResume)
 				}
 			}
@@ -602,7 +612,7 @@ func TestResumedDeltaLifecycle(t *testing.T) {
 			if len(ra.discarded) != tc.wantDiscarded || (tc.wantDiscarded == 1 && ra.discarded[0] != ref1) {
 				t.Errorf("discarded = %v, want %d of %s", ra.discarded, tc.wantDiscarded, ref1)
 			}
-			if got := st.stored("sha256:t/S"); got != tc.wantStored {
+			if got := st.stored("acme/sha256:t/S"); got != tc.wantStored {
 				t.Errorf("published copy at the end = %v, want %v", got, tc.wantStored)
 			}
 			r3, code, err := a.Clone(ctx, req)
@@ -669,7 +679,7 @@ func TestLostFiberDiscardsResumedDelta(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			g := core.Grant{UID: "g1", Audience: "A", TemplateDigest: "sha256:t", FiberMax: 4, WBudgetBytes: 8 << 20}
+			g := core.Grant{UID: "g1", Tenant: "acme", Audience: "A", TemplateDigest: "sha256:t", FiberMax: 4, WBudgetBytes: 8 << 20}
 			st := &store{deltas: map[string]published{}}
 			a, ra := newMobileAgent(t, "A", st, g)
 			req := core.CloneRequest{GrantJWT: []byte("g1"), Session: "S", Deadline: time.Second}
@@ -710,4 +720,183 @@ func (m *mobileRuntime) HasDeltaLike(ref string) bool {
 		}
 	}
 	return true
+}
+
+// TestMigrateOutDiscardsDelta checks what the publishing home does with
+// its parked copy once another home has claimed the session: the copy is
+// older state no one may resume, so it is dropped with the quota and the
+// port it held, and the session is created fresh here. A drop that fails
+// is logged and changes nothing else.
+func TestMigrateOutDiscardsDelta(t *testing.T) {
+	cases := []struct {
+		name       string
+		discardErr error
+	}{
+		{name: "the stale copy is dropped"},
+		{name: "a drop that fails still forgets the session", discardErr: errors.New("busy")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ga := core.Grant{UID: "ga", Tenant: "acme", Audience: "A", TemplateDigest: "sha256:t", FiberMax: 4, WBudgetBytes: 10 << 20}
+			gb := core.Grant{UID: "gb", Tenant: "acme", Audience: "B", TemplateDigest: "sha256:t", FiberMax: 4, WBudgetBytes: 10 << 20}
+			st := &store{deltas: map[string]published{}}
+			a, ra := newMobileAgent(t, "A", st, ga)
+			b, _ := newMobileAgent(t, "B", st, gb)
+			ra.discardErr = tc.discardErr
+			ctx := context.Background()
+			r1, code, err := a.Clone(ctx, core.CloneRequest{GrantJWT: []byte("ga"), Session: "S", Deadline: time.Second})
+			if err != nil || code != core.OK {
+				t.Fatalf("A clone: %v %d", err, code)
+			}
+			if _, code, err := a.Park(ctx, r1.FiberID, true); err != nil || code != core.OK {
+				t.Fatalf("A park: %v %d", err, code)
+			}
+			if r2, code, err := b.Clone(ctx, core.CloneRequest{GrantJWT: []byte("gb"), Session: "S", Deadline: time.Second}); err != nil || code != core.OK || r2.Kind != core.ActResume {
+				t.Fatalf("B clone: %v %d %v", err, code, r2.Kind)
+			}
+			ref := "delta-A-" + r1.FiberID
+			st.claimedRefs = append(st.claimedRefs, ref)
+			r3, code, err := a.Clone(ctx, core.CloneRequest{GrantJWT: []byte("ga"), Session: "S", Deadline: time.Second})
+			if err != nil || code != core.OK || r3.Kind != core.ActCreate {
+				t.Fatalf("A clone after the claim: %v %d %v, want a fresh create", err, code, r3.Kind)
+			}
+			if len(ra.discarded) != 1 || ra.discarded[0] != ref {
+				t.Fatalf("A dropped %v, want its stale copy %s", ra.discarded, ref)
+			}
+			if _, _, known := a.Ledger.SessionState("ga", "S"); known {
+				if st, _, _ := a.Ledger.SessionState("ga", "S"); st != core.StateRunning {
+					t.Fatalf("S on A is %v, want the fresh session running", st)
+				}
+			}
+		})
+	}
+}
+
+// TestTenantKeepsSessionsApart has tenant acme park session S on home A
+// and then has another grant clone S on home B. The session domain is the
+// tenant and then the template, so a grant of the same tenant resumes it
+// whatever its UID and audience, and a grant of another tenant on the
+// same template, class and name creates a fresh session and leaves
+// acme's in the store. Before the tenant, the domain was the template
+// alone, and B resumed A's session for anyone who guessed its name.
+func TestTenantKeepsSessionsApart(t *testing.T) {
+	cases := []struct {
+		name       string
+		claimant   core.Grant
+		wantKind   core.Action
+		wantStored bool // acme's S still in the store afterwards
+	}{
+		{name: "the same tenant resumes it through another grant on another home",
+			claimant:   core.Grant{UID: "gb", Tenant: "acme", Audience: "B", TemplateDigest: "sha256:t", FiberMax: 4, WBudgetBytes: 10 << 20},
+			wantKind:   core.ActResume,
+			wantStored: false},
+		{name: "another tenant on the same template creates fresh and finds nothing",
+			claimant:   core.Grant{UID: "gb", Tenant: "globex", Audience: "B", TemplateDigest: "sha256:t", FiberMax: 4, WBudgetBytes: 10 << 20},
+			wantKind:   core.ActCreate,
+			wantStored: true},
+		{name: "another tenant with the same session class creates fresh and finds nothing",
+			claimant: core.Grant{UID: "gb", Tenant: "globex", Audience: "B", TemplateDigest: "sha256:t", FiberMax: 4, WBudgetBytes: 10 << 20,
+				Policy: core.Policy{SessionClass: "models"}},
+			wantKind:   core.ActCreate,
+			wantStored: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			owner := core.Grant{UID: "ga", Tenant: "acme", Audience: "A", TemplateDigest: "sha256:t", FiberMax: 4, WBudgetBytes: 10 << 20,
+				Policy: tc.claimant.Policy}
+			st := &store{deltas: map[string]published{}}
+			a, _ := newMobileAgent(t, "A", st, owner)
+			b, rb := newMobileAgent(t, "B", st, tc.claimant)
+			r, code, err := a.Clone(ctx, core.CloneRequest{GrantJWT: []byte("ga"), Session: "S", Deadline: time.Second})
+			if err != nil || code != core.OK || r.Kind != core.ActCreate {
+				t.Fatalf("A clone: %v %d %v", err, code, r.Kind)
+			}
+			if _, code, err := a.Park(ctx, r.FiberID, true); err != nil || code != core.OK {
+				t.Fatalf("A park: %v %d", err, code)
+			}
+			ownerKey := "acme/sha256:t/S"
+			if owner.Policy.SessionClass != "" {
+				ownerKey = "acme/" + owner.Policy.SessionClass + "/S"
+			}
+			if !st.stored(ownerKey) {
+				t.Fatalf("A's park did not publish %s", ownerKey)
+			}
+			r2, code, err := b.Clone(ctx, core.CloneRequest{GrantJWT: []byte("gb"), Session: "S", Deadline: time.Second})
+			if err != nil || code != core.OK {
+				t.Fatalf("B clone: %v %d", err, code)
+			}
+			if r2.Kind != tc.wantKind {
+				t.Fatalf("B clone kind = %v, want %v", r2.Kind, tc.wantKind)
+			}
+			if got := st.stored(ownerKey); got != tc.wantStored {
+				t.Fatalf("acme's S in the store after B's clone = %v, want %v", got, tc.wantStored)
+			}
+			if wantClaims := map[bool]int{true: 1, false: 0}[tc.wantKind == core.ActResume]; rb.nClaims() != wantClaims {
+				t.Fatalf("B claimed %d sessions, want %d", rb.nClaims(), wantClaims)
+			}
+		})
+	}
+}
+
+// TestNamedSessionNeedsTenant checks that a grant without a tenant runs
+// anonymous fibers only. A named Clone under it is refused up front as
+// FailedPrecondition, and so is a named Park should the grant be
+// delivered again without its tenant. Anonymous fibers clone and park.
+func TestNamedSessionNeedsTenant(t *testing.T) {
+	with := core.Grant{UID: "g1", Tenant: "acme", Audience: "A", TemplateDigest: "sha256:t", FiberMax: 4}
+	without := core.Grant{UID: "g1", Audience: "A", TemplateDigest: "sha256:t", FiberMax: 4}
+	cases := []struct {
+		name      string
+		grant     core.Grant
+		session   string
+		redeliver *core.Grant // admitted again before the park
+		wantClone core.StatusCode
+		wantPark  core.StatusCode
+	}{
+		{name: "a named clone without a tenant is refused", grant: without, session: "S", wantClone: core.NeedsTier},
+		{name: "an anonymous clone and park without a tenant work", grant: without, wantClone: core.OK, wantPark: core.OK},
+		{name: "a named clone and park with a tenant work", grant: with, session: "S", wantClone: core.OK, wantPark: core.OK},
+		{name: "a named park is refused once the grant lost its tenant", grant: with, session: "S", redeliver: &without,
+			wantClone: core.OK, wantPark: core.NeedsTier},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			a, _ := newMobileAgent(t, "A", &store{deltas: map[string]published{}}, tc.grant)
+			r, code, err := a.Clone(ctx, core.CloneRequest{GrantJWT: []byte("g1"), Session: tc.session, Deadline: time.Second})
+			if code != tc.wantClone {
+				t.Fatalf("clone = %d %v, want %d", code, err, tc.wantClone)
+			}
+			if code != core.OK {
+				if !errors.Is(err, core.ErrNoTenant) {
+					t.Fatalf("clone err = %v, want ErrNoTenant", err)
+				}
+				if st, _ := coretest.GrantStatus(a.Ledger, "g1"); st.Running != 0 {
+					t.Fatalf("a refused clone left %d fibers running", st.Running)
+				}
+				return
+			}
+			if tc.redeliver != nil {
+				a.Ledger.AdmitGrant(*tc.redeliver)
+			}
+			_, code, err = a.Park(ctx, r.FiberID, true)
+			if code != tc.wantPark {
+				t.Fatalf("park = %d %v, want %d", code, err, tc.wantPark)
+			}
+			st, _ := coretest.GrantStatus(a.Ledger, "g1")
+			if code != core.OK {
+				if !errors.Is(err, core.ErrNoTenant) {
+					t.Fatalf("park err = %v, want ErrNoTenant", err)
+				}
+				if st.Running != 1 || st.Parked != 0 {
+					t.Fatalf("after a refused park: running %d parked %d, want the fiber still running", st.Running, st.Parked)
+				}
+				return
+			}
+			if st.Running != 0 {
+				t.Fatalf("after the park: running %d, want 0", st.Running)
+			}
+		})
+	}
 }

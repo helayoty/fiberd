@@ -40,7 +40,10 @@ type Options struct {
 	NodeID string
 	// TemplateDigest selects the home's -template mapping.
 	TemplateDigest string
-	Isolation      string
+	// Tenant is what the grant's named sessions are filed under. Default
+	// "compare".
+	Tenant    string
+	Isolation string
 	// WBudget and FiberMax are the grant's limits. WBudget is the
 	// per-instance memory limit of the fairness rule.
 	WBudget  uint64
@@ -109,8 +112,12 @@ func (a *Adapter) Grant() (core.Grant, error) {
 	if digest == "" {
 		digest = "sha256:compare"
 	}
+	tenant := a.o.Tenant
+	if tenant == "" {
+		tenant = "compare"
+	}
 	return core.Grant{
-		UID: a.uid, Audience: a.o.NodeID, TemplateDigest: digest,
+		UID: a.uid, Audience: a.o.NodeID, TemplateDigest: digest, Tenant: tenant,
 		FiberMax: a.o.FiberMax, WBudgetBytes: a.o.WBudget,
 		LeaseExpiry: time.Now().Add(time.Hour).Truncate(time.Second),
 		Policy:      core.Policy{Isolation: iso},

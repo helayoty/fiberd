@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1440" height="540" viewBox="0 0 1440 540" role="img" aria-labelledby="production-readiness-title production-readiness-desc">
   <title id="production-readiness-title">From reference implementation to production</title>
-  <desc id="production-readiness-desc">A left-to-right path from fiberd today, a reference implementation, to production. It passes through four groups of acceptance gates. Transport and grants needs TLS everywhere, grant changes limited to the lease, and a lane directory only the control plane can write. State needs a durable epoch, a failed release retried or its capacity held, bounded parked state, and consumers that reconcile through an inventory other than Watch. Mobility, audit and devices needs an atomic registry claim, an audit spool that is monitored and copied off the host, and device grants matched to the engine's class. Every deployment also tests the grant lifecycle and platform events on the real platform, and passes conformance on the exact production backend. Production is reached only when every gate has passed with recorded evidence.</desc>
+  <desc id="production-readiness-desc">A left-to-right path from fiberd today, a reference implementation, to production. It passes through four groups of acceptance gates. Transport and grants needs TLS everywhere, grant changes limited to the lease, and a lane directory only the control plane can write. State needs a durable epoch, a failed release retried or its capacity held, bounded parked state, and consumers that reconcile through an inventory other than Watch. Mobility, audit and devices needs a decision on whether a session may start fresh when the registry is unreachable, an audit spool that is monitored and copied off the host, and device grants matched to the engine's class. Every deployment also tests the grant lifecycle and platform events on the real platform, and passes conformance on the exact production backend. Production is reached only when every gate has passed with recorded evidence.</desc>
   <style>
     :root{--bg:#f7f9fc;--panel:#fff;--ink:#172033;--muted:#5d6b7d;--border:#b8c4d4;--blue:#3165b5;--blue-bg:#eaf1ff;--teal:#13776f;--teal-bg:#e8f7f4;--violet:#704aa1;--violet-bg:#f2edfa;--amber:#a76500;--amber-bg:#fff3d6;--green:#287a4d;--green-bg:#e8f6ed}
     @media(prefers-color-scheme:dark){:root{--bg:#0d1117;--panel:#161b22;--ink:#e6edf3;--muted:#a3adba;--border:#3d4652;--blue:#79a7ff;--blue-bg:#17243d;--teal:#53c7b8;--teal-bg:#102923;--violet:#c09cff;--violet-bg:#251b35;--amber:#f0b44d;--amber-bg:#30240f;--green:#63cf8e;--green-bg:#142b1e}}
@@ -48,7 +48,7 @@
   <rect class="band band-amber" x="734" y="170" width="232" height="330" rx="12"/>
   <text class="lane amber" x="750" y="204">Mobility, audit, devices</text>
   <rect class="chip chip-amber" x="746" y="228" width="208" height="52" rx="4"/>
-  <text class="secondary center" x="850" y="260">Atomic claim</text>
+  <text class="secondary center" x="850" y="260">Fresh-state fallback</text>
   <rect class="chip chip-amber" x="746" y="294" width="208" height="52" rx="4"/>
   <text class="secondary center" x="850" y="326">Audit off host, monitored</text>
   <rect class="chip chip-amber" x="746" y="360" width="208" height="52" rx="4"/>

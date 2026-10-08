@@ -365,6 +365,21 @@ func (l *Ledger) Fiber(fiberID string) (Fence, bool) {
 	return ref.fence, true
 }
 
+// FiberSession is the session name a running fiber carries, "" for an
+// anonymous or unknown fiber.
+func (l *Ledger) FiberSession(fiberID string) string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	ref, ok := l.fibers[fiberID]
+	if !ok || ref.sessionKey == "" {
+		return ""
+	}
+	if s, ok := l.sessions[ref.sessionKey]; ok {
+		return s.Name
+	}
+	return ""
+}
+
 // FibersOf lists the running fibers of one grant with their session name
 // and last sampled W, for the pressure ladder.
 func (l *Ledger) FibersOf(grantUID string) []FiberInfo {

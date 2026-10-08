@@ -44,7 +44,7 @@ func (r *auditLog) events(event string) []core.AuditRecord {
 // parked sessions resume under it, and grants stay admitted. The setup
 // runs one fiber and parks one session. The steps bump and then probe.
 func TestBumpEpochRevokesEveryFence(t *testing.T) {
-	g := core.Grant{UID: "g1", TemplateDigest: "sha256:t", FiberMax: 4, LeaseExpiry: time.Now().Add(time.Hour)}
+	g := core.Grant{UID: "g1", Tenant: "acme", TemplateDigest: "sha256:t", FiberMax: 4, LeaseExpiry: time.Now().Add(time.Hour)}
 	a := newAgent(t, "up", core.TierCheckpoint, g)
 	a.NodeID = ""
 	store, err := core.OpenEpochStore(t.TempDir())
@@ -133,7 +133,7 @@ func TestBumpEpochRevokesEveryFence(t *testing.T) {
 // runs before the template is warmed and its release with Revoke. The
 // steps run in order against one agent.
 func TestFabricProvisionedWithGrantAndReleasedWithIt(t *testing.T) {
-	g := core.Grant{UID: "g2", TemplateDigest: "sha256:t", FiberMax: 1}
+	g := core.Grant{UID: "g2", Tenant: "acme", TemplateDigest: "sha256:t", FiberMax: 1}
 	a := newAgent(t, "up", core.TierWarm, g)
 	a.NodeID = ""
 	var provisioned, released int
@@ -206,7 +206,7 @@ func TestBumpEpochOutcomes(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			g := core.Grant{UID: "g1", FiberMax: 4}
+			g := core.Grant{UID: "g1", Tenant: "acme", FiberMax: 4}
 			if tc.syncAudit {
 				g.Policy.Durability = core.Sync
 			}

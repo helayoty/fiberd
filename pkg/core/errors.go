@@ -47,6 +47,12 @@ var (
 	// Handoff checks the caller's certificate in the fiber, so it needs
 	// one.
 	ErrHandoffUnbound = errors.New("agent: handoff grant is not bound to a caller certificate")
+	// ErrNoTenant: a named session was cloned or parked under a grant
+	// without a tenant. A named session is filed under its tenant, so
+	// without one there is nothing to file it under or to look it up by.
+	// It is a FailedPrecondition, like a tier gap. Anonymous fibers are
+	// unaffected.
+	ErrNoTenant = errors.New("agent: named session needs a grant with a tenant")
 )
 
 // Audit errors.

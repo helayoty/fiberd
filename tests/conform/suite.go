@@ -137,6 +137,7 @@ func (c *client) grant(t *testing.T, prefix string, mut func(g *core.Grant)) (co
 		UID:            uid(prefix),
 		Audience:       c.d.NodeID,
 		TemplateDigest: c.d.Template,
+		Tenant:         "conform",
 		FiberMax:       2,
 		MinTier:        core.TierBasic,
 		LeaseExpiry:    time.Now().Add(10 * time.Minute),

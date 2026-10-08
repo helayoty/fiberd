@@ -65,7 +65,7 @@ An `UNTRUSTED` grant, the default, is admitted only on a backend that isolates t
 
 ## Fiber isolation
 
-- Every proc and runc fiber is born in its own cgroup leaf and pid namespace. A proc fiber also gets a private mount namespace with the agent's private paths covered and the run directory narrowed to its own grant's. Confinement fails closed ([zygote.md](design/zygote.md)).
+- Every proc and runc fiber is born in its own cgroup leaf and pid namespace. A proc fiber also gets a private mount namespace with the agent's private paths covered, the run directory narrowed to its own grant's, and `/sys` and the host controls under `/proc` read-only. Confinement fails closed ([zygote.md](design/zygote.md)).
 - proc fibers run as uid 0 with every capability dropped under `no_new_privs`.
 - runc fibers are an unprivileged host uid in a per-grant user namespace, whose ids come from a pool far above ordinary users', with a loopback-only network namespace and nested user namespaces denied ([user-namespaces.md](design/user-namespaces.md)).
 - A template must reseed its random generators in every new incarnation, at the fork, after a restore and when its fence changes ([zygote.md](design/zygote.md), [zygote/README.md](../zygote/README.md)).
@@ -76,7 +76,7 @@ With proc or runc, the agent re-executes at start with only the capabilities tha
 
 ## Templates and deltas
 
-A template is pulled by the digest the grant names and checked again on every [warm](glossary.md#warm). Every [delta](glossary.md#delta) a home publishes is signed with `-delta-key` and sealed with AES-256-GCM under a key derived for its [session class](glossary.md#session-class), and it expires 24 hours after the [park](glossary.md#park). A home takes only a delta signed by a key it trusts, for the session class and session it asked for. Import, which takes a session exported as files, needs the signed manifest of the checkpoint the delta builds on, and seals for the importing grant's session class, never the one the export names. [artifact.md](design/artifact.md) has the formats and the key derivation.
+A template is pulled by the digest the grant names and checked again on every [warm](glossary.md#warm). Every [delta](glossary.md#delta) a home publishes is signed with `-delta-key` and sealed with AES-256-GCM under a key derived for its session domain, the grant's [tenant](glossary.md#tenant) and [session class](glossary.md#session-class), and it expires 24 hours after the [park](glossary.md#park). A home takes only a delta signed by a key it trusts, for the domain and session it asked for. Import, which takes a session exported as files, needs the signed manifest of the checkpoint the delta builds on, and seals for the importing grant's domain, never the one the export names. [artifact.md](design/artifact.md) has the formats and the key derivation.
 
 ## Audit
 
@@ -87,9 +87,12 @@ Every state transition appends a hash-chained record to the agent's private spoo
 - proc and runc share the host kernel.
 - proc fibers are uid 0 behind confinement alone.
 - runc has no egress, and costs a rootfs copy per grant.
+- A runc fiber reads the agent's network devices under its read-only `/sys` ([user-namespaces.md](design/user-namespaces.md)).
 - `SYS_ADMIN` is broad.
 - Unmeasured runtimes keep every capability.
-- Every copy of a template carries its random state, and only the template can reseed it. A forked fiber learns it is new in `on_fiber`, a gVisor sandbox when its checkpoint read returns, and a resumed proc or runc fiber only by watching the fence file beside its unix endpoint, since CRIU keeps the pid. There is no uniform signal yet. A Hyperlight guest gets none (the reference guest owns no generator, so nothing there repeats today), and a template that does not watch the fence, or serves tcp or handoff connections where no fence file sits beside the socket, replays its parked sequence after a resume.
+- Every copy of a template carries its random state, and only the template can reseed it. A forked fiber learns it is new in `on_fiber`, a gVisor sandbox when its checkpoint read returns, and a resumed proc or runc fiber by watching its fence file, since CRIU keeps the pid. There is no uniform signal yet, a Hyperlight guest gets none, and a template that does not watch its fence file replays its parked sequence after a resume.
+- Fibers have no general system-call filter. runc fibers cannot create user namespaces, but proc fibers can, though the read-only `/sys` and `/proc` locks still hold inside them ([zygote.md](design/zygote.md)).
+- Template images are signed but not sealed, so whatever a template holds in memory when it is checkpointed leaves the home in the clear. Keep secrets out of templates ([artifact.md](design/artifact.md)).
 - Address-space layout randomisation (ASLR) is off for every [zygote](glossary.md#zygote) and its fibers, so the fibers of a template share one fixed memory layout on every home. A memory-corruption exploit inside a fiber is easier, because an address learned in one fiber holds in all of them.
 - Whoever can write the grant lane's directory can deny a grant UID on that home ([home.md](design/home.md)).
 - Running the agent itself inside a user namespace (a Pod with `hostUsers` set to false) is untested. runc's per-grant user namespace is a different thing and restores fine ([user-namespaces.md](design/user-namespaces.md)).

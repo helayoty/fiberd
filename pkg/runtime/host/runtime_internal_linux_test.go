@@ -6,9 +6,11 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -157,16 +159,24 @@ func TestNewRelay(t *testing.T) {
 
 // TestNewPlatform checks that what the home believes about its host is
 // detected, then overridden by the backend's facts, then by the
-// configuration. The backend's name always overrides. Paths are made
-// absolute and created.
+// configuration. The backend's name always overrides. A proc home
+// records its template cache path. Paths are made absolute and
+// created.
 func TestNewPlatform(t *testing.T) {
 	detected := artifact.Host()
+	named := func(name string) *fakeBackend {
+		b := newFakeBackend(core.TierWarm)
+		b.name = name
+		return b
+	}
 	cases := []struct {
 		name string
 		be   backend.Backend
 		mod  func(*Config)
 		want artifact.Platform
 		hide []string // besides the defaults, DeltaDir, PrivateDir, TemplateCache and the run dir rules
+		// templates means want.Templates is the home's template cache.
+		templates bool
 	}{
 		{name: "detected, named after the backend", be: newFakeBackend(core.TierWarm),
 			want: artifact.Platform{Arch: detected.Arch, Kernel: detected.Kernel, Libc: detected.Libc, Backend: "fake"}},
@@ -188,12 +198,21 @@ func TestNewPlatform(t *testing.T) {
 			},
 			want: artifact.Platform{Arch: detected.Arch, Kernel: detected.Kernel, Libc: detected.Libc, Backend: "fake"},
 			hide: []string{"/srv/secrets"}},
+		{name: "a proc home records its template cache path", be: named("proc"), templates: true,
+			want: artifact.Platform{Arch: detected.Arch, Kernel: detected.Kernel, Libc: detected.Libc, Backend: "proc"}},
+		{name: "a runc home does not, since it binds a copy of its own", be: named("runc"),
+			want: artifact.Platform{Arch: detected.Arch, Kernel: detected.Kernel, Libc: detected.Libc, Backend: "runc"}},
+		{name: "a gvisor home does not", be: named("gvisor"),
+			want: artifact.Platform{Arch: detected.Arch, Kernel: detected.Kernel, Libc: detected.Libc, Backend: "gvisor"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Chdir(t.TempDir())
 			cwd, _ := os.Getwd()
 			r := newTestRuntime(t, tc.be, tc.mod)
+			if tc.templates {
+				tc.want.Templates = r.cfg.TemplateCache
+			}
 			if r.host != tc.want {
 				t.Fatalf("host platform = %+v, want %+v", r.host, tc.want)
 			}
@@ -1213,6 +1232,57 @@ func TestParentStore(t *testing.T) {
 			loaded := cb.loadedParents()
 			if len(loaded) != 3 || loaded[2].closed.Load() != 1 || loaded[1].closed.Load() != 0 {
 				t.Fatalf("%d parents loaded; the duplicate must be closed and the kept one open", len(loaded))
+			}
+		}},
+		{name: "concurrent warms of one artifact all file its images, whichever links first", run: func(t *testing.T, _ *Runtime, _ *codecBackend) {
+			// Each round is a fresh store with warms linking at once. The
+			// link a warm loses to is the same content, so every warm
+			// ends with the parent loaded from the store.
+			images := filepath.Join(t.TempDir(), "images")
+			if err := writeParentDir(images, "g"); err != nil {
+				t.Fatal(err)
+			}
+			for round := 0; round < 200; round++ {
+				cb := newCodecBackend(core.TierCheckpoint)
+				r := &Runtime{cfg: Config{TemplateCache: t.TempDir()}, be: cb, parents: map[string]backend.Parent{}}
+				const warms = 8
+				start := make(chan struct{})
+				errs := make([]error, warms)
+				var wg sync.WaitGroup
+				for i := range warms {
+					wg.Add(1)
+					go func() {
+						defer wg.Done()
+						<-start
+						sha, err := r.registerParent(images, false)
+						if err == nil && sha != shaOf("g") {
+							err = fmt.Errorf("sha %s", sha)
+						}
+						errs[i] = err
+					}()
+				}
+				close(start)
+				wg.Wait()
+				for i, err := range errs {
+					if err != nil {
+						t.Fatalf("round %d: warm %d: registerParent: %v", round, i, err)
+					}
+				}
+				if target, err := os.Readlink(filepath.Join(r.parentsDir(), shaOf("g"))); err != nil || target != images {
+					t.Fatalf("round %d: store entry -> %s %v", round, target, err)
+				}
+				kept, open := r.parents[shaOf("g")], 0
+				for _, p := range cb.loadedParents() {
+					if p.closed.Load() == 0 {
+						open++
+						if p != kept {
+							t.Fatalf("round %d: a parent other than the kept one is open", round)
+						}
+					}
+				}
+				if kept == nil || open != 1 {
+					t.Fatalf("round %d: kept %v, %d open", round, kept, open)
+				}
 			}
 		}},
 		{name: "a checkpoint on another file system cannot be moved into the store", run: func(t *testing.T, r *Runtime, cb *codecBackend) {

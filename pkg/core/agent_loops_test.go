@@ -63,7 +63,7 @@ func TestRunLoop(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			start := time.Now()
-			g := core.Grant{UID: "g1", Audience: "node-a", FiberMax: 2, LeaseExpiry: start.Add(time.Hour)}
+			g := core.Grant{UID: "g1", Tenant: "acme", Audience: "node-a", FiberMax: 2, LeaseExpiry: start.Add(time.Hour)}
 			if tc.sync {
 				g.Policy.Durability = core.Sync
 			}

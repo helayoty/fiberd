@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/helayoty/fiberd/pkg/core"
+	fiberendpoint "github.com/helayoty/fiberd/pkg/endpoint"
 )
 
 // TestRandomPerIncarnation pins that every new incarnation of a fiber
@@ -18,8 +19,41 @@ import (
 // signal the template has to reseed before it serves.
 func TestRandomPerIncarnation(t *testing.T) {
 	ctx := context.Background()
+	// resumeTwice parks one fiber and resumes the delta twice, as a
+	// second home or a retry after a failed resume would. The first
+	// resume is released, not discarded, so the delta stays. Each
+	// incarnation answers random as its very first request, and names
+	// the fence it serves under.
+	resumeTwice := func(t *testing.T, rt core.Runtime, g core.Grant) (string, string) {
+		h, err := rt.Clone(ctx, core.CloneSpec{Grant: g, Fence: core.Fence{GrantUID: g.UID, Epoch: 1, Seq: 1}, Deadline: 2 * time.Second})
+		if err != nil {
+			t.Fatalf("clone: %v", err)
+		}
+		talk(t, h.Endpoint, "random") // the parked image holds a sequence in progress
+		ref, err := rt.Park(ctx, h.ID, true)
+		if err != nil {
+			t.Fatalf("park: %v", err)
+		}
+		var out []string
+		for seq := uint64(2); seq <= 3; seq++ {
+			h2, err := rt.Clone(ctx, core.CloneSpec{Grant: g, Source: core.SourceDelta, Ref: ref, Fence: core.Fence{GrantUID: g.UID, Epoch: 1, Seq: seq}, Deadline: 5 * time.Second})
+			if err != nil {
+				t.Fatalf("resume %d: %v", seq, err)
+			}
+			out = append(out, talk(t, h2.Endpoint, "random"))
+			if got := talk(t, h2.Endpoint, "fence"); got != h2.ID {
+				t.Fatalf("resume %d: fence = %q, want %q", seq, got, h2.ID)
+			}
+			if err := rt.Release(ctx, h2.ID, false); err != nil {
+				t.Fatalf("release %s: %v", h2.ID, err)
+			}
+		}
+		return out[0], out[1]
+	}
 	cases := []struct {
 		name string
+		// runtime opens the home; nil for the unix-endpoint default.
+		runtime func(t *testing.T) core.Runtime
 		// draw makes two incarnations of g and returns the first
 		// random() each one answers.
 		draw func(t *testing.T, rt core.Runtime, g core.Grant) (a, b string)
@@ -36,40 +70,18 @@ func TestRandomPerIncarnation(t *testing.T) {
 			}
 			return out[0], out[1]
 		}},
-		{name: "two resumes of one park", draw: func(t *testing.T, rt core.Runtime, g core.Grant) (string, string) {
-			h, err := rt.Clone(ctx, core.CloneSpec{Grant: g, Fence: core.Fence{GrantUID: g.UID, Epoch: 1, Seq: 1}, Deadline: 2 * time.Second})
-			if err != nil {
-				t.Fatalf("clone: %v", err)
-			}
-			talk(t, h.Endpoint, "random") // the parked image holds a sequence in progress
-			ref, err := rt.Park(ctx, h.ID, true)
-			if err != nil {
-				t.Fatalf("park: %v", err)
-			}
-			// The same delta twice, as a second home or a retry after a
-			// failed resume would. The first resume is released, not
-			// discarded, so the delta stays. Each incarnation answers
-			// random as its very first request.
-			var out []string
-			for seq := uint64(2); seq <= 3; seq++ {
-				h2, err := rt.Clone(ctx, core.CloneSpec{Grant: g, Source: core.SourceDelta, Ref: ref, Fence: core.Fence{GrantUID: g.UID, Epoch: 1, Seq: seq}, Deadline: 5 * time.Second})
-				if err != nil {
-					t.Fatalf("resume %d: %v", seq, err)
-				}
-				out = append(out, talk(t, h2.Endpoint, "random"))
-				if got := talk(t, h2.Endpoint, "fence"); got != h2.ID {
-					t.Fatalf("resume %d: fence = %q, want %q", seq, got, h2.ID)
-				}
-				if err := rt.Release(ctx, h2.ID, false); err != nil {
-					t.Fatalf("release %s: %v", h2.ID, err)
-				}
-			}
-			return out[0], out[1]
-		}},
+		{name: "two resumes of one park", draw: resumeTwice},
+		// A fiber that binds tcp itself has no socket to find its fence
+		// file beside. It reads the file named by its birth fence.
+		{name: "two resumes of one park on a tcp endpoint", draw: resumeTwice,
+			runtime: func(t *testing.T) core.Runtime { return tcpRuntime(t, fiberendpoint.Inet4, "127.0.0.1", 41010, 41013) }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			rt := newRuntime(t)
+			if tc.runtime != nil {
+				rt = tc.runtime(t)
+			}
 			if rt.Tier() < core.TierCheckpoint {
 				t.Skip("criu not usable here")
 			}

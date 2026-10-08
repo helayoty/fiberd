@@ -60,7 +60,7 @@ func TestCloneDefaultDeadlines(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			g := core.Grant{UID: "g1", Audience: "node-a", FiberMax: 2}
+			g := core.Grant{UID: "g1", Tenant: "acme", Audience: "node-a", FiberMax: 2}
 			a := newAgent(t, "up", core.TierCheckpoint, g)
 			var spec core.CloneSpec
 			dr := deadlineRuntime{fakeRuntime: fakeRuntime{tier: core.TierCheckpoint, exits: make(chan core.FiberExit, 8)}, spec: &spec}
@@ -143,7 +143,7 @@ func TestAdmitWaitsForInflight(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			g := core.Grant{UID: "g1", Audience: "node-a"}
+			g := core.Grant{UID: "g1", Tenant: "acme", Audience: "node-a"}
 			a := newAgent(t, "up", core.TierCheckpoint)
 			rt := prepRuntime{fakeRuntime: fakeRuntime{tier: core.TierCheckpoint}, started: make(chan struct{}, 2), proceed: make(chan struct{}), err: tc.firstErr}
 			a.Runtime = rt
@@ -258,7 +258,7 @@ func TestAdmitOutcomes(t *testing.T) {
 			if health == "" {
 				health = "up"
 			}
-			g := core.Grant{UID: "g1", Audience: "node-a", DeviceBudget: tc.device}
+			g := core.Grant{UID: "g1", Tenant: "acme", Audience: "node-a", DeviceBudget: tc.device}
 			a := newAgent(t, health, core.TierCheckpoint)
 			rt := &admitRuntime{fakeRuntime: fakeRuntime{tier: core.TierCheckpoint}, prepErr: tc.prepErr, offers: tc.offers}
 			if tc.plain {
@@ -325,7 +325,7 @@ func TestYield(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			g := core.Grant{UID: "g1", Audience: "node-a", FiberMax: 4}
+			g := core.Grant{UID: "g1", Tenant: "acme", Audience: "node-a", FiberMax: 4}
 			a := newAgent(t, "up", core.TierCheckpoint, g)
 			rt := &listingRuntime{fakeRuntime: fakeRuntime{tier: core.TierCheckpoint}, releaseErr: tc.releaseErr}
 			a.Runtime = rt
@@ -398,7 +398,7 @@ func TestRedeliver(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			g := core.Grant{UID: "g1", Audience: "node-a"}
+			g := core.Grant{UID: "g1", Tenant: "acme", Audience: "node-a"}
 			a := newAgent(t, "up", core.TierCheckpoint, g)
 			rec := &auditLog{}
 			a.Audit = rec

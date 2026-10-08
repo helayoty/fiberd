@@ -235,19 +235,42 @@ func filePullDir(ref, dst string) (string, error) {
 
 // fileDelete removes a tag, and the content it pointed at when no other
 // tag still does; a digest target removes the content and every tag on it.
-func fileDelete(ref string) error {
+// It reports whether this call took the target away: the tag file's
+// unlink, or the blob directory's rename, is the one step two deleters
+// race on, and the one that finds nothing lost.
+func fileDelete(ref string) (bool, error) {
 	repoDir, target, err := fileRef(ref)
 	if err != nil {
-		return err
+		return false, err
 	}
 	digest, found, err := resolveTarget(repoDir, target)
 	if err != nil || !found {
-		return err
+		return false, err
 	}
-	if !strings.HasPrefix(target, "sha256:") {
-		if err := os.Remove(tagFile(repoDir, target)); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return err
+	byDigest := strings.HasPrefix(target, "sha256:")
+	bd := blobDir(repoDir, digest)
+	if !byDigest {
+		if err := os.Remove(tagFile(repoDir, target)); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return false, nil // another deleter took it, and the content is theirs to drop
+			}
+			return false, err
 		}
+	} else {
+		// The content goes out of the way first, so the rename decides
+		// between two deleters of one digest.
+		tmp, err := os.MkdirTemp(filepath.Dir(bd), ".rm-")
+		if err != nil {
+			return false, err
+		}
+		_ = os.Remove(tmp) // a fresh name; os.Rename refuses an existing directory
+		if err := os.Rename(bd, tmp); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return false, nil
+			}
+			return false, err
+		}
+		bd = tmp
 	}
 	tags, _ := os.ReadDir(filepath.Join(repoDir, "tags"))
 	for _, t := range tags {
@@ -256,14 +279,14 @@ func fileDelete(ref string) error {
 			continue
 		}
 		if strings.TrimSpace(string(b)) == digest {
-			if strings.HasPrefix(target, "sha256:") {
+			if byDigest {
 				_ = os.Remove(tagFile(repoDir, t.Name()))
 			} else {
-				return nil // another tag keeps the content
+				return true, nil // another tag keeps the content
 			}
 		}
 	}
-	return os.RemoveAll(blobDir(repoDir, digest))
+	return true, os.RemoveAll(bd)
 }
 
 // TarDir writes every regular file directly under src into the tar

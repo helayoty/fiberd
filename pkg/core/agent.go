@@ -51,8 +51,9 @@ const (
 	Invalid
 	// Unauthenticated: the grant did not verify, or is not for this home.
 	Unauthenticated
-	// NeedsTier: the grant or session demands a tier this runtime lacks.
-	// Never satisfied by a lesser mechanism.
+	// NeedsTier: the grant or session demands a tier this runtime lacks,
+	// or the grant lacks what a named session needs (a tenant). Never
+	// satisfied by a lesser mechanism.
 	NeedsTier
 	// NotFound: no such fiber in this epoch.
 	NotFound
@@ -217,6 +218,13 @@ func (a *Agent) Clone(ctx context.Context, req CloneRequest) (CloneResponse, Sta
 		return CloneResponse{}, Unauthenticated, ErrUnboundGrant
 	case g.CallerThumbprint == "" && g.Policy.EndpointMode == EndpointHandoff:
 		return CloneResponse{}, Unauthenticated, ErrHandoffUnbound
+	}
+	// A named session is filed under the grant's tenant when it parks
+	// and looked up by it when it resumes. A grant without one cannot do
+	// either, so it runs anonymous fibers only. Refused up front, not at
+	// the park that would have failed.
+	if req.Session != "" && g.Tenant == "" {
+		return CloneResponse{}, NeedsTier, fmt.Errorf("%w: grant %s, session %q", ErrNoTenant, g.UID, req.Session)
 	}
 
 	// 2. Self-admission: a verified grant that names this home is admitted
@@ -405,10 +413,14 @@ func (a *Agent) locate(ctx context.Context, g Grant, session string) (StatusCode
 		if st != StateParked || finder.Owned(ctx, ref) {
 			return OK, nil
 		}
-		log.Printf("mobility: session %s/%s was claimed by another home; forgetting the local copy", g.UID, session)
+		// The copy here is older state no one may resume. It goes, with
+		// the delta quota and the port it held.
+		log.Printf("mobility: session %s/%s was claimed by another home; dropping the local copy", g.UID, session)
 		a.Ledger.ForgetSession(g.UID, session)
 		a.persist()
-		_ = a.audit(ctx, BestEffort, AuditRecord{Event: "migrate-out", Fence: Fence{GrantUID: g.UID, Epoch: a.Ledger.Epoch()}, Session: session})
+		fence := Fence{GrantUID: g.UID, Epoch: a.Ledger.Epoch()}
+		a.discardDelta(ctx, fence, session, ref)
+		_ = a.audit(ctx, BestEffort, AuditRecord{Event: "migrate-out", Fence: fence, Session: session})
 	}
 	rd, found, err := finder.FindDelta(ctx, g, session)
 	if err != nil {
@@ -685,7 +697,7 @@ func (a *Agent) BumpEpoch(ctx context.Context, reason string) (uint64, error) {
 // matching boot bias. A tier, device, isolation or handoff gap is
 // neither. It is FailedPrecondition.
 func (a *Agent) missCode(err error) StatusCode {
-	if errors.Is(err, ErrNeedsTier) || errors.Is(err, ErrNeedsDevice) || errors.Is(err, ErrNeedsIsolation) || errors.Is(err, ErrNeedsHandoff) {
+	if errors.Is(err, ErrNeedsTier) || errors.Is(err, ErrNeedsDevice) || errors.Is(err, ErrNeedsIsolation) || errors.Is(err, ErrNeedsHandoff) || errors.Is(err, ErrNoTenant) {
 		return NeedsTier
 	}
 	if a.Health != nil && !a.Health.Healthy(time.Now()) {
@@ -722,6 +734,14 @@ func (a *Agent) Park(ctx context.Context, fiberID string, sync bool) (string, St
 	fence, ok := a.Ledger.Fiber(fiberID)
 	if !ok {
 		return "", NotFound, ErrFiberUnknown
+	}
+	// Clone refuses a named session under a grant without a tenant, so
+	// this holds unless the grant was delivered again without one since.
+	// Nothing is parked, because a named delta is filed under the tenant.
+	if session := a.Ledger.FiberSession(fiberID); session != "" {
+		if g, known := a.Ledger.Grant(fence.GrantUID); known && g.Tenant == "" {
+			return "", NeedsTier, fmt.Errorf("%w: grant %s, session %q", ErrNoTenant, g.UID, session)
+		}
 	}
 	ref, perr := a.Runtime.Park(ctx, fiberID, sync)
 	if ref == "" {

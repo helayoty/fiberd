@@ -22,7 +22,7 @@ flowchart LR
     W[Watch has no tombstone] --> G12[gate 12]
   end
   subgraph M[Mobility, audit and devices]
-    C[non-atomic claim] --> G6[gate 6]
+    C[fresh-state fallback] --> G6[gate 6]
     A[local spool, fsync poison] --> G7[gate 7]
     DC[device class not checked] --> G13[gate 13]
   end
@@ -43,7 +43,7 @@ flowchart LR
 3. The [epoch](../glossary.md#epoch) survives a process restart and the intended home replacement, or the replacement starts under a new audience and grant UID.
 4. A failed runtime [release](../glossary.md#release) is retried or the capacity stays quarantined, checked by killing the [backend](../glossary.md#backend) under a release.
 5. [Parked](../glossary.md#park) [deltas](../glossary.md#delta) and ports stay bounded under the deployment's retention policy, and anonymous parks are not used.
-6. Cross-home resume runs only with a claim that cannot double-resume, and fresh-state fallback is acceptable or disabled.
+6. Where cross-home resume matters, a fresh session after an unreachable registry is acceptable or ruled out.
 7. A full disk and a failed fsync are visible in monitoring, and the spool is copied off the host where records matter.
 8. Readiness, [scope](../glossary.md#scope) loss, drain and deletion are tested against the real platform, not only through the test hooks ([agent.md](agent.md)).
 9. The conformance suite passes on the exact production backend and configuration, and the benchmarks are re-run there with the method in [benchmarks.md](../benchmarks.md).

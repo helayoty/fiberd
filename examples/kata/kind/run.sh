@@ -65,7 +65,7 @@ mint() {
   if [ ! -s "$STATE/grant.jwt" ]; then
     "${KC[@]}" -n fiberd-system get secret grant-issuer-key -o jsonpath='{.data.key\.json}' | base64 -d >"$STATE/issuer-key.json"
     go run ./cmd/grant-issuer mint -key "$STATE/issuer-key.json" -issuer http://grant-issuer.fiberd-system.svc:8080 \
-      -aud "$HOME_POD" -uid kata-demo-grant -template sha256:conform -max 2 -warm 1 -w-budget 32Mi \
+      -aud "$HOME_POD" -uid kata-demo-grant -tenant kata -template sha256:conform -max 2 -warm 1 -w-budget 32Mi \
       -min-tier FIBER_CHECKPOINT -isolation TRUSTED -ttl 2h >"$STATE/grant.jwt"
   fi
   cat "$STATE/grant.jwt"

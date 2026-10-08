@@ -120,16 +120,16 @@ func newAgent(t *testing.T, health string, tier core.Tier, grants ...core.Grant)
 // reservation, and an exit that beats the commit must not leak a slot.
 func TestCloneOutcomes(t *testing.T) {
 	past := time.Now().Add(-time.Minute)
-	g1 := core.Grant{UID: "g1", Audience: "node-a", FiberMax: 1}
+	g1 := core.Grant{UID: "g1", Tenant: "acme", Audience: "node-a", FiberMax: 1}
 	full := func(t *testing.T, a *core.Agent) { a.Ledger.AdmitGrant(g1); createFiber(t, a.Ledger, "g1", "", "f1") }
-	bound := core.Grant{UID: "gb", Audience: "node-a", CallerThumbprint: "router-x5t"}
-	trusted := core.Grant{UID: "gtr", Audience: "node-a", Policy: core.Policy{Isolation: core.Trusted}}
+	bound := core.Grant{UID: "gb", Tenant: "acme", Audience: "node-a", CallerThumbprint: "router-x5t"}
+	trusted := core.Grant{UID: "gtr", Tenant: "acme", Audience: "node-a", Policy: core.Policy{Isolation: core.Trusted}}
 	shared := func(t *testing.T, a *core.Agent) {
 		a.Runtime = fakeRuntime{tier: core.TierCheckpoint, exits: make(chan core.FiberExit, 8), shared: true}
 	}
-	handoff := core.Grant{UID: "gh", Audience: "node-a", CallerThumbprint: "router-x5t", Policy: core.Policy{EndpointMode: core.EndpointHandoff}}
-	unboundHandoff := core.Grant{UID: "gu", Audience: "node-a", Policy: core.Policy{EndpointMode: core.EndpointHandoff}}
-	syncG := core.Grant{UID: "gs", Audience: "node-a", Policy: core.Policy{Durability: core.Sync}}
+	handoff := core.Grant{UID: "gh", Tenant: "acme", Audience: "node-a", CallerThumbprint: "router-x5t", Policy: core.Policy{EndpointMode: core.EndpointHandoff}}
+	unboundHandoff := core.Grant{UID: "gu", Tenant: "acme", Audience: "node-a", Policy: core.Policy{EndpointMode: core.EndpointHandoff}}
+	syncG := core.Grant{UID: "gs", Tenant: "acme", Audience: "node-a", Policy: core.Policy{Durability: core.Sync}}
 	routes := func(t *testing.T, a *core.Agent) {
 		a.Runtime = fakeRuntime{tier: core.TierCheckpoint, exits: make(chan core.FiberExit, 8), routes: true}
 	}
@@ -181,17 +181,17 @@ func TestCloneOutcomes(t *testing.T) {
 			token: "gb", caller: "router-x5t", want: core.OK, running: 1},
 		{name: "token re-minted for another caller than the admitted grant is unauthenticated", health: "up", tier: core.TierCheckpoint, grants: []core.Grant{bound},
 			setup: func(t *testing.T, a *core.Agent) {
-				a.Ledger.AdmitGrant(core.Grant{UID: "gb", Audience: "node-a", CallerThumbprint: "old-x5t"})
+				a.Ledger.AdmitGrant(core.Grant{UID: "gb", Tenant: "acme", Audience: "node-a", CallerThumbprint: "old-x5t"})
 			},
 			token: "gb", caller: "router-x5t", want: core.Unauthenticated, wantErr: core.ErrCallerMismatch},
 		{name: "token that drops the admitted grant's caller binding is unauthenticated", health: "up", tier: core.TierCheckpoint, grants: []core.Grant{g1},
 			setup: func(t *testing.T, a *core.Agent) {
-				a.Ledger.AdmitGrant(core.Grant{UID: "g1", Audience: "node-a", CallerThumbprint: "router-x5t"})
+				a.Ledger.AdmitGrant(core.Grant{UID: "g1", Tenant: "acme", Audience: "node-a", CallerThumbprint: "router-x5t"})
 			},
 			token: "g1", caller: "router-x5t", want: core.Unauthenticated, wantErr: core.ErrCallerMismatch},
 		{name: "bad token is unauthenticated", health: "up", tier: core.TierCheckpoint, token: "nope", want: core.Unauthenticated},
 		{name: "wrong audience is unauthenticated", health: "up", tier: core.TierCheckpoint,
-			grants: []core.Grant{{UID: "gx", Audience: "node-b"}}, token: "gx", want: core.Unauthenticated, wantErr: core.ErrWrongAudience},
+			grants: []core.Grant{{UID: "gx", Tenant: "acme", Audience: "node-b"}}, token: "gx", want: core.Unauthenticated, wantErr: core.ErrWrongAudience},
 		{name: "first sight self-admits and creates", health: "down", tier: core.TierCheckpoint,
 			grants: []core.Grant{g1}, token: "g1", want: core.OK, running: 1},
 		{name: "full healthy is fallback", health: "up", tier: core.TierCheckpoint, grants: []core.Grant{g1},
@@ -201,17 +201,17 @@ func TestCloneOutcomes(t *testing.T) {
 		{name: "full nil health fails toward fallback", health: "nil", tier: core.TierCheckpoint, grants: []core.Grant{g1},
 			setup: full, token: "g1", want: core.DeferredFallback, wantErr: core.ErrGrantFull, running: 1},
 		{name: "expired healthy is fallback", health: "up", tier: core.TierCheckpoint,
-			grants: []core.Grant{{UID: "ge", Audience: "node-a", LeaseExpiry: past}},
+			grants: []core.Grant{{UID: "ge", Tenant: "acme", Audience: "node-a", LeaseExpiry: past}},
 			token:  "ge", want: core.DeferredFallback, wantErr: core.ErrGrantExpired},
 		{name: "expired unhealthy is shed", health: "down", tier: core.TierCheckpoint,
-			grants: []core.Grant{{UID: "ge", Audience: "node-a", LeaseExpiry: past}},
+			grants: []core.Grant{{UID: "ge", Tenant: "acme", Audience: "node-a", LeaseExpiry: past}},
 			token:  "ge", want: core.Shed, wantErr: core.ErrGrantExpired},
 		{name: "a grant the home removed is fallback while healthy, its fiber released", health: "up", tier: core.TierCheckpoint,
 			grants: []core.Grant{g1}, setup: removed, token: "g1", want: core.DeferredFallback, wantErr: core.ErrGrantRevoked},
 		{name: "a grant the home removed is shed while unhealthy", health: "down", tier: core.TierCheckpoint,
 			grants: []core.Grant{g1}, setup: removed, token: "g1", want: core.Shed, wantErr: core.ErrGrantRevoked},
 		{name: "min_tier above runtime is needs-tier at admission", health: "down", tier: core.TierWarm,
-			grants: []core.Grant{{UID: "gt", Audience: "node-a", MinTier: core.TierCheckpoint}},
+			grants: []core.Grant{{UID: "gt", Tenant: "acme", Audience: "node-a", MinTier: core.TierCheckpoint}},
 			token:  "gt", want: core.NeedsTier, wantErr: core.ErrNeedsTier},
 		{name: "parked session on warm runtime is needs-tier", health: "down", tier: core.TierWarm, grants: []core.Grant{g1},
 			setup: func(t *testing.T, a *core.Agent) {
@@ -223,12 +223,12 @@ func TestCloneOutcomes(t *testing.T) {
 		{name: "unset isolation on a shared-kernel runtime is needs-tier", health: "up", tier: core.TierCheckpoint, grants: []core.Grant{g1},
 			setup: shared, token: "g1", want: core.NeedsTier, wantErr: core.ErrNeedsIsolation},
 		{name: "untrusted on a shared-kernel runtime is needs-tier", health: "up", tier: core.TierCheckpoint,
-			grants: []core.Grant{{UID: "gu", Audience: "node-a", Policy: core.Policy{Isolation: core.Untrusted}}},
+			grants: []core.Grant{{UID: "gu", Tenant: "acme", Audience: "node-a", Policy: core.Policy{Isolation: core.Untrusted}}},
 			setup:  shared, token: "gu", want: core.NeedsTier, wantErr: core.ErrNeedsIsolation},
 		{name: "trusted on a shared-kernel runtime creates", health: "up", tier: core.TierCheckpoint, grants: []core.Grant{trusted},
 			setup: shared, token: "gtr", want: core.OK, running: 1},
 		{name: "untrusted on an isolating runtime creates", health: "up", tier: core.TierCheckpoint,
-			grants: []core.Grant{{UID: "gu", Audience: "node-a", Policy: core.Policy{Isolation: core.Untrusted}}},
+			grants: []core.Grant{{UID: "gu", Tenant: "acme", Audience: "node-a", Policy: core.Policy{Isolation: core.Untrusted}}},
 			token:  "gu", want: core.OK, running: 1},
 		{name: "grant at its task limit is shed", health: "up", tier: core.TierCheckpoint, grants: []core.Grant{g1},
 			setup: func(t *testing.T, a *core.Agent) {
@@ -244,7 +244,7 @@ func TestCloneOutcomes(t *testing.T) {
 		{name: "payload too large is invalid", health: "up", tier: core.TierCheckpoint, grants: []core.Grant{g1},
 			token: "g1", payload: core.MaxPayload + 1, want: core.Invalid, wantErr: core.ErrPayloadTooLarge},
 		{name: "sync audit failure fails the clone as internal", health: "up", tier: core.TierCheckpoint,
-			grants: []core.Grant{{UID: "gs", Audience: "node-a", Policy: core.Policy{Durability: core.Sync}}},
+			grants: []core.Grant{{UID: "gs", Tenant: "acme", Audience: "node-a", Policy: core.Policy{Durability: core.Sync}}},
 			setup:  func(t *testing.T, a *core.Agent) { a.Audit = failingAuditor{} },
 			token:  "gs", want: core.Internal, wantErr: core.ErrAudit, running: 0},
 		// The exit for the fiber the clone will mint (fence g1/1/1) is
@@ -351,7 +351,7 @@ func (r blockingRuntime) Release(_ context.Context, id string, _ bool) error {
 // counts it, and the caller gets the miss the sweep implies. A fresh clone
 // afterwards creates under the current epoch.
 func TestCloneRacesSweep(t *testing.T) {
-	g := core.Grant{UID: "g1", Audience: "node-a", TemplateDigest: "sha256:t", LeaseExpiry: time.Now().Add(time.Hour)}
+	g := core.Grant{UID: "g1", Tenant: "acme", Audience: "node-a", TemplateDigest: "sha256:t", LeaseExpiry: time.Now().Add(time.Hour)}
 	ctx := context.Background()
 	cases := []struct {
 		name     string
@@ -480,7 +480,7 @@ func TestCloneRacesSweep(t *testing.T) {
 // under the next fence, and a released name is free for a fresh create.
 // The steps run in order against one agent.
 func TestCloneIdempotentAndResume(t *testing.T) {
-	g := core.Grant{UID: "g1", Audience: "node-a", FiberMax: 2}
+	g := core.Grant{UID: "g1", Tenant: "acme", Audience: "node-a", FiberMax: 2}
 	a := newAgent(t, "up", core.TierCheckpoint, g)
 	ctx := context.Background()
 	req := core.CloneRequest{GrantJWT: []byte("g1"), Session: "S", Deadline: time.Second}
@@ -549,8 +549,8 @@ func TestCloneIdempotentAndResume(t *testing.T) {
 // ledger must follow the runtime. A fiber the runtime ended is parked or
 // gone even if a later step failed, or its slot stays taken forever.
 func TestParkOutcomes(t *testing.T) {
-	g := core.Grant{UID: "g1", Audience: "node-a", FiberMax: 1}
-	gs := core.Grant{UID: "g1", Audience: "node-a", FiberMax: 1, Policy: core.Policy{Durability: core.Sync}}
+	g := core.Grant{UID: "g1", Tenant: "acme", Audience: "node-a", FiberMax: 1}
+	gs := core.Grant{UID: "g1", Tenant: "acme", Audience: "node-a", FiberMax: 1, Policy: core.Policy{Durability: core.Sync}}
 	cases := []struct {
 		name      string
 		grant     core.Grant // zero = g
@@ -699,7 +699,7 @@ func TestWatchAndSampler(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			g := core.Grant{UID: "g1", Audience: "node-a"}
+			g := core.Grant{UID: "g1", Tenant: "acme", Audience: "node-a"}
 			a := newAgent(t, "up", core.TierCheckpoint, g)
 			a.Runtime = fakeRuntime{tier: core.TierCheckpoint, exits: make(chan core.FiberExit, 8), statsFail: tc.statsFail}
 			a.StatusInterval = tc.interval

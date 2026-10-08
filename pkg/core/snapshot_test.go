@@ -48,11 +48,11 @@ func (l *listingRuntime) Release(_ context.Context, id string, _ bool) error {
 //     delivers it again, and a denial lapses with its entry
 func TestSnapshotRoundTripAndReconcile(t *testing.T) {
 	now := time.Now()
-	live := core.Grant{UID: "live", Audience: "node-a", FiberMax: 3, LeaseExpiry: now.Add(time.Hour)}
-	dead := core.Grant{UID: "dead", Audience: "node-a", LeaseExpiry: now.Add(-time.Minute)}
+	live := core.Grant{UID: "live", Tenant: "acme", Audience: "node-a", FiberMax: 3, LeaseExpiry: now.Add(time.Hour)}
+	dead := core.Grant{UID: "dead", Tenant: "acme", Audience: "node-a", LeaseExpiry: now.Add(-time.Minute)}
 	// A renewal of live minted before the removal, and a grant with no lease.
-	renewed := core.Grant{UID: "live", Audience: "node-a", FiberMax: 3, LeaseExpiry: now.Add(3 * time.Hour)}
-	forever := core.Grant{UID: "forever", Audience: "node-a", FiberMax: 1}
+	renewed := core.Grant{UID: "live", Tenant: "acme", Audience: "node-a", FiberMax: 3, LeaseExpiry: now.Add(3 * time.Hour)}
+	forever := core.Grant{UID: "forever", Tenant: "acme", Audience: "node-a", FiberMax: 1}
 	tokens := acceptVerifier{grants: map[string]core.Grant{"live": live, "dead": dead, "live-renewed": renewed, "forever": forever}}
 	ctx := context.Background()
 	clone := func(a *core.Agent, session string) (core.CloneResponse, core.StatusCode, error) {
@@ -227,7 +227,7 @@ func TestSnapshotRoundTripAndReconcile(t *testing.T) {
 // Watch subscribers wake on every ledger change. The steps run in order
 // against one agent, and each starts with no file.
 func TestSnapshotPersistsWhatBootReads(t *testing.T) {
-	g := core.Grant{UID: "g1", Audience: "node-a", FiberMax: 4}
+	g := core.Grant{UID: "g1", Tenant: "acme", Audience: "node-a", FiberMax: 4}
 	a := newAgent(t, "up", core.TierCheckpoint, g)
 	path := filepath.Join(t.TempDir(), "ledger.json")
 	a.Store = &core.SnapshotStore{Path: path}
@@ -313,7 +313,7 @@ func TestSnapshotPersistsWhatBootReads(t *testing.T) {
 func TestReconcileReverifiesSnapshotGrants(t *testing.T) {
 	now := time.Now()
 	lease := now.Add(time.Hour)
-	good := core.Grant{UID: "good", Audience: "node-a", FiberMax: 1, LeaseExpiry: lease, Token: "good-token"}
+	good := core.Grant{UID: "good", Tenant: "acme", Audience: "node-a", FiberMax: 1, LeaseExpiry: lease, Token: "good-token"}
 	parkedS := core.SessionSnapshot{Name: "S", GrantUID: "good", State: core.StateParked, DeltaRef: "delta"}
 	cases := []struct {
 		name         string
@@ -334,20 +334,20 @@ func TestReconcileReverifiesSnapshotGrants(t *testing.T) {
 		{name: "a token that fails for real is dropped with its parked session", snapshot: good, parked: true,
 			accepts: map[string]core.Grant{}, wantReport: core.ReconcileReport{GrantsUnverified: 1, ParkedDropped: 1}},
 		{name: "an entry without a token is dropped, never trusted",
-			snapshot: core.Grant{UID: "good", Audience: "node-a", FiberMax: 1, LeaseExpiry: lease},
+			snapshot: core.Grant{UID: "good", Tenant: "acme", Audience: "node-a", FiberMax: 1, LeaseExpiry: lease},
 			accepts:  map[string]core.Grant{"good-token": good}, wantReport: core.ReconcileReport{GrantsUnverified: 1}},
 		{name: "a token signed for another grant does not re-admit this one",
-			snapshot:   core.Grant{UID: "good", Audience: "node-a", FiberMax: 1, LeaseExpiry: lease, Token: "other-token"},
-			accepts:    map[string]core.Grant{"other-token": {UID: "other", Audience: "node-a", LeaseExpiry: lease}},
+			snapshot:   core.Grant{UID: "good", Tenant: "acme", Audience: "node-a", FiberMax: 1, LeaseExpiry: lease, Token: "other-token"},
+			accepts:    map[string]core.Grant{"other-token": {UID: "other", Tenant: "acme", Audience: "node-a", LeaseExpiry: lease}},
 			wantReport: core.ReconcileReport{GrantsUnverified: 1}},
 		{name: "a token for another home is dropped", snapshot: good,
-			accepts:    map[string]core.Grant{"good-token": {UID: "good", Audience: "node-b", LeaseExpiry: lease}},
+			accepts:    map[string]core.Grant{"good-token": {UID: "good", Tenant: "acme", Audience: "node-b", LeaseExpiry: lease}},
 			wantReport: core.ReconcileReport{GrantsUnverified: 1}},
 		{name: "the claims come from the token, not the file: a forged fibers.max is ignored",
-			snapshot: core.Grant{UID: "good", Audience: "node-a", FiberMax: 1000, LeaseExpiry: lease, Token: "good-token"},
+			snapshot: core.Grant{UID: "good", Tenant: "acme", Audience: "node-a", FiberMax: 1000, LeaseExpiry: lease, Token: "good-token"},
 			accepts:  map[string]core.Grant{"good-token": good}, wantAdmitted: true, wantReport: core.ReconcileReport{GrantsReadmitted: 1}},
 		{name: "an expired entry is counted expired before any verification",
-			snapshot: core.Grant{UID: "good", Audience: "node-a", LeaseExpiry: now.Add(-time.Minute)},
+			snapshot: core.Grant{UID: "good", Tenant: "acme", Audience: "node-a", LeaseExpiry: now.Add(-time.Minute)},
 			accepts:  map[string]core.Grant{}, wantReport: core.ReconcileReport{GrantsExpired: 1}},
 	}
 	for _, tc := range cases {
@@ -439,7 +439,7 @@ func snapshotHolds(s core.Snapshot, uid, session string) bool {
 // against one agent and a clock they advance.
 func TestSweepYieldsExpiredGrants(t *testing.T) {
 	now := time.Unix(1_000_000, 0)
-	g := core.Grant{UID: "g1", Audience: "node-a", FiberMax: 3, LeaseExpiry: now.Add(time.Minute)}
+	g := core.Grant{UID: "g1", Tenant: "acme", Audience: "node-a", FiberMax: 3, LeaseExpiry: now.Add(time.Minute)}
 	a := newAgent(t, "up", core.TierCheckpoint, g)
 	a.Ledger.Now = func() time.Time { return now }
 	ctx := context.Background()
@@ -591,7 +591,7 @@ func TestSnapshotStoreConcurrentWrites(t *testing.T) {
 // snapshot that cannot be written or encoded is an error that leaves the
 // file as it was.
 func TestSnapshotStoreLoadAndPersist(t *testing.T) {
-	g := core.Grant{UID: "g1", FiberMax: 2}
+	g := core.Grant{UID: "g1", Tenant: "acme", FiberMax: 2}
 	cases := []struct {
 		name       string
 		before     string // the file's content before, "" means none
@@ -609,7 +609,7 @@ func TestSnapshotStoreLoadAndPersist(t *testing.T) {
 		{name: "a missing directory fails the write", missingDir: true, persist: &g, wantPerErr: true},
 		// A time past year 9999 has no JSON form.
 		{name: "a snapshot that does not encode fails the write and keeps the file", before: `{"epoch":7}`,
-			persist: &core.Grant{UID: "g2", LeaseExpiry: time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)}, wantPerErr: true},
+			persist: &core.Grant{UID: "g2", Tenant: "acme", LeaseExpiry: time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)}, wantPerErr: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -715,8 +715,8 @@ func TestReconcileOrphans(t *testing.T) {
 // and both sessions, each once, until the held grant is admitted again.
 func TestReconcileHoldsBesideAdmitted(t *testing.T) {
 	lease := time.Now().Add(time.Hour)
-	good := core.Grant{UID: "good", Audience: "node-a", FiberMax: 1, LeaseExpiry: lease, Token: "good-token"}
-	held := core.Grant{UID: "held", Audience: "node-a", FiberMax: 1, LeaseExpiry: lease, Token: "held-token"}
+	good := core.Grant{UID: "good", Tenant: "acme", Audience: "node-a", FiberMax: 1, LeaseExpiry: lease, Token: "good-token"}
+	held := core.Grant{UID: "held", Tenant: "acme", Audience: "node-a", FiberMax: 1, LeaseExpiry: lease, Token: "held-token"}
 	cases := []struct {
 		name       string
 		readmit    bool // the held grant's token is presented once it can be checked

@@ -18,6 +18,6 @@ On arm64, add `-mbranch-protection=none` to the whole program.
 
 fiberd launches the template itself. Map the grant's template digest to its command with `-template`, such as `-template "default=/path/to/mytemplate --flag"`, where `default` matches any digest. `zygotectl build` and `zygotectl push` instead publish it as an artifact that a home pulls by digest.
 
-The contract for template authors, the wire protocol, the exit codes and the fork-safety rules are in [docs/design/zygote.md](../docs/design/zygote.md).
+The contract for template authors, the wire protocol and the fork-safety rules are in [docs/design/zygote.md](../docs/design/zygote.md).
 
-One rule on randomness. Every copy of the template holds its random state, and a fork is not the only copy. Reseed every generator the template owns in each new incarnation, not only in `on_fiber`. That is after a restore returns (gVisor) and when the fence published beside the endpoint changes (a CRIU resume on proc or runc), as `refzygote.c` does in `reseed_rngs`.
+One rule on randomness. Every copy of the template holds its random state, and a fork is not the only copy. Reseed every generator the template owns in each new incarnation, not only in `on_fiber`. That is after a restore returns (gVisor) and when the fence file the agent publishes changes (a CRIU resume on proc or runc, [runtime-host.md](../docs/design/runtime-host.md) says where it is), as `refzygote.c` does in `reseed_rngs`.

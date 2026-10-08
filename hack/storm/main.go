@@ -39,7 +39,7 @@ import (
 type opts struct {
 	target, nodeID, issuerKey, issuerURL, cgRoot, rootEvents string
 	tlsCA, tlsCert, tlsKey                                   string
-	isolation                                                string
+	isolation, tenant                                        string
 	fibers                                                   int
 	ceiling, step                                            uint64
 	overcommit                                               float64
@@ -52,6 +52,7 @@ func main() {
 	flag.StringVar(&o.nodeID, "node-id", "storm-node", "grant audience")
 	flag.StringVar(&o.issuerKey, "issuer-key", "", "private JWK to mint the grant with")
 	flag.StringVar(&o.issuerURL, "issuer", "", "issuer URL")
+	flag.StringVar(&o.tenant, "tenant", "storm", "the grant's tenant, which its named sessions are filed under")
 	flag.IntVar(&o.fibers, "fibers", 8, "named sessions to clone")
 	flag.Uint64Var(&o.ceiling, "ceiling", 160<<20, "the grant's block ceiling the home was started with (bytes)")
 	flag.Float64Var(&o.overcommit, "overcommit", 2, "aggregate demand as a multiple of the ceiling")
@@ -100,7 +101,7 @@ func run(o opts) int {
 	}
 	perFiber := uint64(float64(o.ceiling) * o.overcommit / float64(o.fibers))
 	g := core.Grant{
-		UID: fmt.Sprintf("storm-%d", time.Now().Unix()), Audience: o.nodeID, TemplateDigest: "sha256:storm",
+		UID: fmt.Sprintf("storm-%d", time.Now().Unix()), Audience: o.nodeID, TemplateDigest: "sha256:storm", Tenant: o.tenant,
 		FiberMax: o.fibers, WBudgetBytes: perFiber + 8<<20, LeaseExpiry: time.Now().Add(time.Hour),
 		Policy: core.Policy{PSISomeAvg10Shed: 5, PSISomeAvg10Park: 10, Isolation: iso},
 	}

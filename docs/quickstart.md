@@ -29,7 +29,7 @@ until curl -sf localhost:8485/healthz >/dev/null; do sleep 0.2; done
 # a grant for this node (-aud must equal the agent's -node-id),
 # 2 fibers of 1 MiB working set each, a 10 minute lease
 T=$(bin/grant-issuer mint -key $STATE/issuer.json -issuer http://127.0.0.1:8686 \
-     -aud node-a -uid g1 -max 2 -w-budget 1Mi -min-tier FIBER_WARM -ttl 10m)
+     -aud node-a -uid g1 -tenant demo -max 2 -w-budget 1Mi -min-tier FIBER_WARM -ttl 10m)
 clone() { curl -s -w ' [http %{http_code}]\n' -X POST localhost:8485/v1/clone -d "$1"; }
 
 clone "{\"grantJwt\":\"$T\",\"session\":\"S\"}"   # CREATE, fiberId g1/1/1
@@ -71,7 +71,7 @@ bin/grant-issuer serve -key /tmp/issuer.json -addr 127.0.0.1:8686 &
 bin/fiberd -state /tmp/fiberd -node-id node-a -verifier jwks -issuer http://127.0.0.1:8686 \
   -insecure-plaintext -http :8485 -runtime proc -template "default=$PWD/bin/refzygote --http" &
 until curl -sf localhost:8485/healthz >/dev/null; do sleep 0.2; done
-T=$(bin/grant-issuer mint -key /tmp/issuer.json -issuer http://127.0.0.1:8686 -aud node-a -uid g1 -isolation TRUSTED)
+T=$(bin/grant-issuer mint -key /tmp/issuer.json -issuer http://127.0.0.1:8686 -aud node-a -uid g1 -tenant demo -isolation TRUSTED)
 EP=$(curl -s -X POST localhost:8485/v1/clone -d "{\"grantJwt\":\"$T\",\"session\":\"S\"}" | jq -r .endpoint)
 curl -s --unix-socket ${EP#unix://} -X POST http://fiber/incr           # 1, the fiber's own counter
 curl -s --unix-socket ${EP#unix://} -X POST http://fiber/incr           # 2

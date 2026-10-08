@@ -50,35 +50,22 @@ sequenceDiagram
 
 | Step | Where | Why there |
 | --- | --- | --- |
-| `/sys` read-only, every mount under it | zygote, at PREPARE | Grant-wide. A mount added under `/sys` after that never reaches the private namespace |
+| `/sys` read-only, every mount under it, `/sys/firmware` covered | zygote, at PREPARE | Grant-wide. A mount added under `/sys` after that never reaches the private namespace |
 | DROP (the restore root) | zygote at PREPARE, and each fiber | Grant-wide, and repeated per fiber because it is one system call and fails closed |
 | RUNDIR narrowed | zygote, at PREPARE | Grant-wide. The zygote's cwd moves onto the bind and every fiber inherits it there |
-| HIDE covered | zygote, at PREPARE | Grant-wide. A HIDE directory that did not exist yet is looked for again at each birth and covered then, as the old code did at every birth. A HIDE directory that holds the zygote's own executable (the template cache, for a registry template) is covered with the executable bound back at its path, read-only, from a descriptor opened before the cover, since CRIU names a mapped file by a path that must resolve ([runtime-host.md](runtime-host.md)) |
+| HIDE covered | zygote, at PREPARE | Grant-wide. Each path is resolved through symlinks first, so the executable inside it is still found. A HIDE directory that did not exist yet is looked for again at each birth and covered then. A HIDE directory that holds the zygote's own executable (the template cache, for a registry template) is covered with the executable bound back at its path, read-only, from a descriptor opened before the cover, since CRIU names a mapped file by a path that must resolve ([runtime-host.md](runtime-host.md)) |
 | `MS_REC` `MS_PRIVATE` on `/` | each fiber | The copy is private already. The call restates it, and a refusal ends the child before anything else is mounted |
 | fresh `/proc` for the pid namespace | each fiber | Its own |
-| `/proc/sys` bound onto itself and read-only | each fiber, after its `/proc` | A fiber's fresh `/proc` is a mount of its own and would cover a bind the zygote made, leaving the fiber's `/proc/sys` writable |
+| `/proc/sys`, `/proc/sysrq-trigger`, `/proc/bus`, `/proc/fs` and `/proc/irq` bound onto themselves and read-only, `/proc/scsi` and `/proc/acpi` covered | each fiber, after its `/proc` | A fiber's fresh `/proc` is a mount of its own and would cover a bind the zygote made, leaving the fiber's `/proc/sys` writable. The list is runc's for a container, and `/proc/sysrq-trigger` takes a write from euid 0 with no capability |
 | capabilities dropped, user-namespace filter | each fiber | Its own |
 
-**Confinement fails closed.** When a step the agent asked for is refused, no fiber runs short of it. A step that fails at PREPARE, or a zygote with no namespace of its own (`FIBERD_OWN_MNTNS` unset, `fz_init` skipped, a thread before it, `unshare` refused), sets one reason, and every mount-namespace CLONE is answered with an ERROR naming it, while fibers without a mount namespace are still served. A step that fails in the child ends it before any application code, and the CLONE is answered with an ERROR naming the step.
+**Confinement fails closed.** When a step the agent asked for is refused, no fiber runs short of it. A step that fails at PREPARE, or a zygote with no namespace of its own (`FIBERD_OWN_MNTNS` unset, `fz_init` skipped, a thread before it, `unshare` refused), sets one reason, and every mount-namespace CLONE is answered with an ERROR naming it, while fibers without a mount namespace are still served. A step that fails in the child ends it before any application code, with an exit code from 110 to 125 for that step, and the CLONE is answered with an ERROR naming the step (`exit_why` in `libfiberzygote.c`).
 
-| Exit | The child could not |
-| --- | --- |
-| 110 | make its mount namespace private. Nothing is mounted after this, since a change to a shared mount would propagate back to the zygote |
-| 111 | mount its own `/proc` |
-| 112 | unmount a DROP path |
-| 113 | cover a HIDE path that appeared after READY with an empty read-only tmpfs |
-| 114 | drop its capabilities (`no_new_privs`, empty sets, empty bounding set) |
-| 115 | make `/proc/sys` read-only on its fresh `/proc` |
-| 116 | retired. The run directory is narrowed at PREPARE, and a failure there refuses every mount-namespace CLONE |
-| 117 | install the seccomp filter that denies user namespaces |
-| 120, 121 | set up its descriptors, or read its handoff identity |
-| 125 | join its cgroup leaf on the legacy clone |
-
-**Nested user namespaces.** With `FIBERD_USERNS_NESTED=deny`, which the runc launcher sets, the zygote writes 0 to `user.max_user_namespaces` in its own user namespace and drops CAP_SYS_RESOURCE before READY. It refuses to do so in the initial user namespace. Every fiber also gets a seccomp filter. `unshare` and `clone` with CLONE_NEWUSER and `setns` onto a user namespace answer EPERM, and `clone3` answers ENOSYS so libc falls back to `clone`. On x86_64 a system call number with the x32 bit set kills the process, because the x32 table numbers these calls differently and the filter could otherwise be sidestepped through it. A checkpoint carries the filter into the fresh user namespace a restore puts the fiber in.
+**Nested user namespaces.** With `FIBERD_USERNS_NESTED=deny`, which the runc launcher sets, the zygote writes 0 to `user.max_user_namespaces` in its own user namespace and drops CAP_SYS_RESOURCE before READY. It refuses to do so in the initial user namespace. Each of its fibers also gets a seccomp filter. `unshare` and `clone` with CLONE_NEWUSER and `setns` onto a user namespace answer EPERM, and `clone3` answers ENOSYS so libc falls back to `clone`. On x86_64 a system call number with the x32 bit set kills the process, because the x32 table numbers these calls differently and the filter could otherwise be sidestepped through it. A checkpoint carries the filter into the fresh user namespace a restore puts the fiber in.
 
 **Checkpoints.** A fiber's mount tree is the same shape it was when each child built it, since the copy carries the same mounts with the same flags, so a park dumps and a resume restores as before. The zygote now has a mount namespace of its own too, so its self-checkpoint (the parent for deltas) names its mounts the way a fiber's park does.
 
-**Fork safety.** The raw clone copies one thread and runs no atfork handlers, so a lock another thread held at that instant stays held in the copy, malloc's and stdio's included. Between the clone and `on_fiber` the library allocates nothing, takes no lock and uses no stdio, and the fiber's environment is built in the parent before the clone. It reseeds no random generator either, since `srandom` takes a lock. A template reseeds its own from `getrandom` in every new incarnation, libc's `random()` included. That is in `on_fiber`, after a gVisor restore returns, and when the fence beside the endpoint changes after a CRIU resume, as refzygote's `reseed_rngs` does ([zygote/README.md](../../zygote/README.md)).
+**Fork safety.** The raw clone copies one thread and runs no atfork handlers, so a lock another thread held at that instant stays held in the copy, malloc's and stdio's included. Between the clone and `on_fiber` the library allocates nothing, takes no lock and uses no stdio, and the fiber's environment is built in the parent before the clone. It reseeds no random generator either, since `srandom` takes a lock. A template reseeds its own from `getrandom` in every new incarnation, libc's `random()` included. That is in `on_fiber`, after a gVisor restore returns, and when its fence file changes after a CRIU resume ([runtime-host.md](runtime-host.md)), as refzygote's `reseed_rngs` does ([zygote/README.md](../../zygote/README.md)).
 
 **arm64.** Build the whole program with `-mbranch-protection=none`. A restored process keeps stale pointer-authentication keys, so a return address signed before the checkpoint fails to authenticate.
 
@@ -90,4 +77,4 @@ sequenceDiagram
 - The handoff identity lives in the fiber's memory, never the zygote's, so no key lands in a template checkpoint. A [parked](../glossary.md#park) fiber's key is in its delta, which is sealed ([artifact.md](artifact.md)).
 - ASLR (address-space layout randomisation) is off, as the contract requires. What that costs is in [security.md](../security.md#known-gaps).
 - A HIDE path is covered when a fiber is born. A fiber already running when the host first creates that path can read it. The agent creates every real HIDE target before any grant warms.
-- proc fibers may create nested user namespaces. The read-only `/sys` and `/proc/sys` mounts still hold inside them, so the kernel refuses a fresh writable `proc` or `sysfs`.
+- proc fibers may create nested user namespaces. The read-only `/sys` and `/proc` locks still hold inside them, so the kernel refuses a fresh writable `proc` or `sysfs`.

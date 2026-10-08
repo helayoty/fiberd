@@ -74,7 +74,7 @@ func jsonGrant(t *testing.T, g core.Grant) string {
 func TestCloneAttachParkResume(t *testing.T) {
 	h := newHome(t, core.TierCheckpoint)
 	ctx := context.Background()
-	g := jsonGrant(t, core.Grant{UID: "g1", Audience: "node-a", FiberMax: 2})
+	g := jsonGrant(t, core.Grant{UID: "g1", Audience: "node-a", Tenant: "acme", FiberMax: 2})
 
 	var first, last consumer.Fiber // the session's first and latest clone
 	clone := func() (*consumer.Fiber, error) {
@@ -194,7 +194,7 @@ func TestWatchStreamsStatus(t *testing.T) {
 			h := newHome(t, core.TierCheckpoint)
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			g := jsonGrant(t, core.Grant{UID: "g4", Audience: "node-a", FiberMax: 2})
+			g := jsonGrant(t, core.Grant{UID: "g4", Audience: "node-a", Tenant: "acme", FiberMax: 2})
 			for i := 0; i < tc.clones; i++ {
 				if _, err := h.client.Clone(ctx, g, "", time.Second, nil); err != nil {
 					t.Fatal(err)

@@ -22,12 +22,12 @@ import (
 
 var repoUnsafe = regexp.MustCompile(`[^a-z0-9._-]+`)
 
-// domainRepoFor is the repository a grant's sessions are published under:
-// one per session domain, named after it, disambiguated by a hash.
-func domainRepoFor(registry string, g core.Grant) string {
-	domain := g.SessionDomain()
+// domainRepoFor is the repository the sessions of a domain (a grant's
+// core.Grant.SessionDomain) are published under: one per domain, named
+// after it, disambiguated by a hash.
+func domainRepoFor(registry, domain string) string {
 	sum := sha256.Sum256([]byte(domain))
-	name := repoUnsafe.ReplaceAllString(strings.ToLower(strings.TrimPrefix(domain, "sha256:")), "-")
+	name := repoUnsafe.ReplaceAllString(strings.ToLower(strings.Replace(domain, "sha256:", "", 1)), "-")
 	name = strings.Trim(name, "-._")
 	if name == "" {
 		name = "g"
@@ -71,9 +71,15 @@ func pushDelta(ctx context.Context, cfg Config, src, ref string, ann map[string]
 }
 
 // sealContext is what a delta for session of g pushed now is sealed for.
-func (c Config) sealContext(g core.Grant, session, fence string, now time.Time) artifact.SealContext {
-	return artifact.SealContext{Domain: g.SessionDomain(), Session: session, Fence: fence,
-		Expires: now.Add(deltaTTL).UTC().Truncate(time.Second)}
+// The domain carries the grant's tenant, so the seal key derived for it
+// and the header the seal checks both differ per tenant.
+func (c Config) sealContext(g core.Grant, session, fence string, now time.Time) (artifact.SealContext, error) {
+	domain, err := g.SessionDomain()
+	if err != nil {
+		return artifact.SealContext{}, err
+	}
+	return artifact.SealContext{Domain: domain, Session: session, Fence: fence,
+		Expires: now.Add(deltaTTL).UTC().Truncate(time.Second)}, nil
 }
 
 // checkSigned refuses a signed delta whose annotations name another
@@ -183,7 +189,11 @@ func ExportDelta(ctx context.Context, cfg Config, g core.Grant, session, dir str
 	if err := cfg.checkDeltaRegistry(); err != nil {
 		return nil, err
 	}
-	repo := domainRepoFor(cfg.DeltaRegistry, g)
+	domain, err := g.SessionDomain()
+	if err != nil {
+		return nil, fmt.Errorf("host: export %s/%s: %w", g.UID, session, err)
+	}
+	repo := domainRepoFor(cfg.DeltaRegistry, domain)
 	ref := repo + ":" + sessionTag(session)
 	loc, found, err := artifact.Resolve(ctx, ref, cfg.RegistryPlainHTTP)
 	if err != nil {
@@ -198,7 +208,7 @@ func ExportDelta(ctx context.Context, cfg Config, g core.Grant, session, dir str
 	if err := cfg.DeltaKeys.Verify(loc); err != nil {
 		return nil, fmt.Errorf("host: refusing to export %s/%s: %w", g.UID, session, err)
 	}
-	if err := checkSigned(loc.Annotations, g.SessionDomain(), session, time.Now()); err != nil {
+	if err := checkSigned(loc.Annotations, domain, session, time.Now()); err != nil {
 		return nil, fmt.Errorf("host: refusing to export %s/%s: %w", g.UID, session, err)
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -216,7 +226,7 @@ func ExportDelta(ctx context.Context, cfg Config, g core.Grant, session, dir str
 		return nil, err
 	}
 	files := []string{ExportDeltaFile, ExportInfoFile}
-	info := ExportInfo{Session: session, Domain: g.SessionDomain(), Digest: loc.Digest, Annotations: loc.Annotations,
+	info := ExportInfo{Session: session, Domain: domain, Digest: loc.Digest, Annotations: loc.Annotations,
 		Parent: loc.Annotations[artifact.AnnotationParent]}
 	if info.Parent != "" {
 		// The parent travels with the delta, and so does its signed
@@ -242,7 +252,7 @@ func ExportDelta(ctx context.Context, cfg Config, g core.Grant, session, dir str
 	if err := os.WriteFile(filepath.Join(dir, ExportInfoFile), b, 0o644); err != nil {
 		return nil, err
 	}
-	if err := artifact.Delete(ctx, ref, cfg.RegistryPlainHTTP); err != nil {
+	if _, err := artifact.Delete(ctx, ref, cfg.RegistryPlainHTTP); err != nil {
 		return nil, fmt.Errorf("host: retire %s after export: %w", ref, err)
 	}
 	return files, nil
@@ -264,7 +274,11 @@ func ImportDelta(ctx context.Context, cfg Config, g core.Grant, session, dir str
 	if err := json.Unmarshal(b, &info); err != nil {
 		return fmt.Errorf("host: import %s: %w", ExportInfoFile, err)
 	}
-	repo := domainRepoFor(cfg.DeltaRegistry, g)
+	domain, err := g.SessionDomain()
+	if err != nil {
+		return fmt.Errorf("host: import %s/%s: %w", g.UID, session, err)
+	}
+	repo := domainRepoFor(cfg.DeltaRegistry, domain)
 	// The delta is opened in the clear below, so the working directory
 	// goes under DeltaDir, which fibers never see, and not the system temp
 	// dir, which they share. A caller without a DeltaDir (one that is not
@@ -290,9 +304,9 @@ func ImportDelta(ctx context.Context, cfg Config, g core.Grant, session, dir str
 	//
 	// The domain is g's, never the export's. Every home derives seal keys
 	// from one master, so any domain's delta opens here, and the unsigned
-	// info file must not move one tenant's session into another's grant.
-	// The session name is the export's, so a golden snapshot can be
-	// imported as many sessions.
+	// info file must not move one tenant's session into another tenant's
+	// grant. The session name is the export's, so a golden snapshot can
+	// be imported as many sessions.
 	if err := artifact.Untar(filepath.Join(dir, ExportDeltaFile), filepath.Join(tmp, "delta")); err != nil {
 		return fmt.Errorf("host: import delta: %w", err)
 	}
@@ -300,7 +314,6 @@ func ImportDelta(ctx context.Context, cfg Config, g core.Grant, session, dir str
 		return fmt.Errorf("host: import %s/%s: %w", g.UID, session, err)
 	}
 	now := time.Now()
-	domain := g.SessionDomain()
 	if err := checkSigned(info.Annotations, domain, info.Session, now); err != nil {
 		return fmt.Errorf("host: import %s/%s: %w", g.UID, session, err)
 	}
@@ -351,6 +364,10 @@ func ImportDelta(ctx context.Context, cfg Config, g core.Grant, session, dir str
 	ann[artifact.AnnotationGrant] = g.UID
 	ann[artifact.AnnotationHome] = cfg.HomeID
 	ref := repo + ":" + sessionTag(session)
-	_, err = pushDelta(ctx, cfg, filepath.Join(tmp, "delta"), ref, ann, cfg.sealContext(g, session, sealed.Fence, now))
+	sc, err := cfg.sealContext(g, session, sealed.Fence, now)
+	if err != nil {
+		return err
+	}
+	_, err = pushDelta(ctx, cfg, filepath.Join(tmp, "delta"), ref, ann, sc)
 	return err
 }

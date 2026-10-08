@@ -431,8 +431,9 @@ func TestParkResumeKeepsState(t *testing.T) {
 					}
 				}
 			},
+			// Under its birth fence's name, the one the fiber knows.
 			fenceFile: func(core.FiberHandle) string {
-				return filepath.Join("/tmp", "fz-"+fmt.Sprint(os.Getpid()), "g5", "1-2.fence")
+				return filepath.Join("/tmp", "fz-"+fmt.Sprint(os.Getpid()), "g5", "1-1.fence")
 			},
 		},
 	}
@@ -698,10 +699,14 @@ func TestParkIsWSizedDelta(t *testing.T) {
 
 // TestFiberCannotWriteHostControls pins that a fiber cannot write host
 // sysctls such as core_pattern, a path to host root, or any grant's cgroup
-// limits. A fiber is euid 0, and sysctl and kernfs let euid 0 write on the
-// owner bit alone, so only its read-only mounts stand in the way. Each
-// control must answer EROFS at birth and after a park and resume, because
-// CRIU rebuilds the mount namespace.
+// limits, nor the controls under /proc that runc and Docker make
+// read-only or mask for a container. A fiber is euid 0, and sysctl, proc
+// and kernfs let euid 0 write on the owner bit alone, so only its
+// read-only mounts stand in the way. /proc/sysrq-trigger is the worst of
+// them, since a write there reboots or crashes the node, and the old
+// library left it writable on the fiber's fresh /proc. Each control must
+// answer EROFS (or sit under a read-only mount, or be gone) at birth and
+// after a park and resume, because CRIU rebuilds the mount namespace.
 func TestFiberCannotWriteHostControls(t *testing.T) {
 	rt := newRuntime(t)
 	ctx := context.Background()
@@ -731,11 +736,24 @@ func TestFiberCannotWriteHostControls(t *testing.T) {
 	cases := []struct {
 		name, path string
 		own        bool // path is relative to the fiber's own cgroup
+		// probe is the refzygote probe, wopen when empty, and want its
+		// answer, EROFS when empty.
+		probe, want string
 	}{
 		{name: "core_pattern", path: "/proc/sys/kernel/core_pattern"},
 		{name: "modprobe", path: "/proc/sys/kernel/modprobe"},
 		{name: "cgroup root procs", path: "/sys/fs/cgroup/cgroup.procs"},
 		{name: "own memory.max", path: "memory.max", own: true},
+		{name: "sysrq-trigger", path: "/proc/sysrq-trigger"},
+		{name: "default irq affinity", path: "/proc/irq/default_smp_affinity"},
+		{name: "latency_stats", path: "/proc/latency_stats"},
+		{name: "/proc/bus read-only", path: "/proc/bus", probe: "rdonly", want: "ro"},
+		{name: "/proc/fs read-only", path: "/proc/fs", probe: "rdonly", want: "ro"},
+		{name: "/proc/irq read-only", path: "/proc/irq", probe: "rdonly", want: "ro"},
+		{name: "/proc/scsi masked", path: "/proc/scsi", probe: "rdonly", want: "ro"},
+		{name: "scsi devices masked", path: "/proc/scsi/scsi", probe: "stat", want: "ENOENT"},
+		{name: "/proc/acpi masked", path: "/proc/acpi", probe: "rdonly", want: "ro"},
+		{name: "/sys/firmware masked", path: "/sys/firmware", probe: "rdonly", want: "ro"},
 	}
 	probe := func(when, endpoint string) {
 		own := ownCgroup(endpoint)
@@ -751,8 +769,12 @@ func TestFiberCannotWriteHostControls(t *testing.T) {
 				if _, err := os.Stat(path); err != nil {
 					t.Skipf("%s: %v", path, err)
 				}
-				if got := talk(t, endpoint, "wopen "+path); got != "EROFS" {
-					t.Errorf("open %s for writing = %q, want EROFS", path, got)
+				probe, want := tc.probe, tc.want
+				if probe == "" {
+					probe, want = "wopen", "EROFS"
+				}
+				if got := talk(t, endpoint, probe+" "+path); got != want {
+					t.Errorf("%s %s = %q, want %q", probe, path, got, want)
 				}
 			})
 		}
@@ -885,7 +907,7 @@ func TestSessionMovesThroughRegistry(t *testing.T) {
 	// One grant per home (its own uid and audience), the same template:
 	// that template is the domain the session moves within.
 	grantFor := func(home string) core.Grant {
-		return core.Grant{UID: "mob-" + home, Audience: home, TemplateDigest: digest, FiberMax: 4, WBudgetBytes: 32 << 20, LeaseExpiry: time.Now().Add(time.Hour),
+		return core.Grant{UID: "mob-" + home, Audience: home, Tenant: "acme", TemplateDigest: digest, FiberMax: 4, WBudgetBytes: 32 << 20, LeaseExpiry: time.Now().Add(time.Hour),
 			Policy: core.Policy{Isolation: core.Trusted}}
 	}
 	mk := func(home string, keys artifact.Keys) (*core.Agent, core.Runtime) {
@@ -914,7 +936,7 @@ func TestSessionMovesThroughRegistry(t *testing.T) {
 		t.Skip("criu not usable here")
 	}
 	req := core.CloneRequest{GrantJWT: []byte("g"), Session: "S", Deadline: 5 * time.Second}
-	domainRepo := reg + "/deltas/" + strings.TrimPrefix(digest, "sha256:")[:40] + "-" + shortHash(digest)
+	domainRepo := domainRepo(reg, "acme", digest)
 
 	r1, code, err := a.Clone(ctx, req)
 	if err != nil || code != core.OK || r1.Kind != core.ActCreate {
@@ -1094,7 +1116,7 @@ func TestMobilityParityGate(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { rt.(interface{ Close() }).Close() })
-		g := core.Grant{UID: "par-" + home, Audience: home, TemplateDigest: digest, FiberMax: 4, WBudgetBytes: 32 << 20, LeaseExpiry: time.Now().Add(time.Hour),
+		g := core.Grant{UID: "par-" + home, Audience: home, Tenant: "acme", TemplateDigest: digest, FiberMax: 4, WBudgetBytes: 32 << 20, LeaseExpiry: time.Now().Add(time.Hour),
 			Policy: core.Policy{Isolation: core.Trusted}}
 		return &core.Agent{NodeID: home, Ledger: core.NewLedger(1), Budget: core.NewBudget(1000, 1<<20),
 			Runtime: rt, Verify: tokenVerifier{"g": g},
@@ -1131,7 +1153,7 @@ func TestMobilityParityGate(t *testing.T) {
 		t.Fatalf("series B clone = %d %v, want DeferredFallback ErrIncompatible", code, err)
 	}
 	// The tag is still there: nobody claimed it.
-	domainRepo := reg + "/deltas/" + strings.TrimPrefix(digest, "sha256:")[:40] + "-" + shortHash(digest)
+	domainRepo := domainRepo(reg, "acme", digest)
 	if _, found, err := artifact.Resolve(ctx, domainRepo+":"+sessionTag("S"), true); err != nil || !found {
 		t.Fatalf("refused session must stay published: found=%v err=%v", found, err)
 	}
@@ -1147,9 +1169,17 @@ func TestMobilityParityGate(t *testing.T) {
 	_, _ = c.Release(ctx, r2.FiberID, true)
 }
 
-func shortHash(s string) string {
-	sum := sha256.Sum256([]byte(s))
-	return hex.EncodeToString(sum[:4])
+// domainRepo is where a tenant's sessions on a template live in reg, as
+// the host names it: the domain "<tenant>/<digest>" made safe and cut to
+// 40 characters, then a hash of the whole domain.
+func domainRepo(reg, tenant, digest string) string {
+	domain := tenant + "/" + digest
+	sum := sha256.Sum256([]byte(domain))
+	name := strings.ReplaceAll(strings.Replace(domain, "sha256:", "", 1), "/", "-")
+	if len(name) > 40 {
+		name = name[:40]
+	}
+	return reg + "/deltas/" + name + "-" + hex.EncodeToString(sum[:4])
 }
 
 func sessionTag(s string) string {
@@ -1324,7 +1354,7 @@ func TestResumedDeltaRetiredAndDiscarded(t *testing.T) {
 	if _, err := artifact.Push(ctx, out, reg+"/zygotes/ref:v1", true); err != nil {
 		t.Fatal(err)
 	}
-	g := core.Grant{UID: "ret-a", Audience: "home-a", TemplateDigest: digest, FiberMax: 4, WBudgetBytes: 32 << 20,
+	g := core.Grant{UID: "ret-a", Audience: "home-a", Tenant: "acme", TemplateDigest: digest, FiberMax: 4, WBudgetBytes: 32 << 20,
 		LeaseExpiry: time.Now().Add(time.Hour), Policy: core.Policy{Isolation: core.Trusted}}
 	rt, err := newHost(host.Config{
 		Registry: reg + "/zygotes/ref", RegistryPlainHTTP: true, TemplateCache: t.TempDir(),
@@ -1346,7 +1376,7 @@ func TestResumedDeltaRetiredAndDiscarded(t *testing.T) {
 	a := &core.Agent{NodeID: "home-a", Ledger: core.NewLedger(1), Budget: core.NewBudget(1000, 1<<20),
 		Runtime: rt, Verify: tokenVerifier{"g": g}, Health: core.NewSourceHealth(time.Minute, time.Now())}
 	req := core.CloneRequest{GrantJWT: []byte("g"), Session: "S", Deadline: 5 * time.Second}
-	tag := reg + "/deltas/" + strings.TrimPrefix(digest, "sha256:")[:40] + "-" + shortHash(digest) + ":" + sessionTag("S")
+	tag := domainRepo(reg, "acme", digest) + ":" + sessionTag("S")
 	published := func(t *testing.T) bool {
 		t.Helper()
 		_, found, err := artifact.Resolve(ctx, tag, true)

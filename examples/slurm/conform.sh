@@ -74,7 +74,7 @@ issuer() {
 # job: submit the conformance allocation and wait for the agent.
 job() {
   local tok
-  tok=$(dexec grant-issuer mint -key "$KEY" -issuer "$ISSUER_URL" -aud "$NODE" -template sha256:conform \
+  tok=$(dexec grant-issuer mint -key "$KEY" -issuer "$ISSUER_URL" -aud "$NODE" -tenant slurm -template sha256:conform \
         -max 4 -warm 1 -w-budget 32Mi -min-tier FIBER_CHECKPOINT -isolation TRUSTED -ttl 2h)
   local id
   # The suite's grants ask for 4 fibers; the allocation must have 4 CPUs.
@@ -138,7 +138,7 @@ storm() {
     wait_for 120 "conformance job gone" sh -c "! docker exec $NAME squeue -h -j $(job_id) 2>/dev/null | grep -q ."
   fi
   dexec scontrol update nodename="$NODE" state=resume >/dev/null 2>&1 || true
-  tok=$(dexec grant-issuer mint -key "$KEY" -issuer "$ISSUER_URL" -aud "$NODE" -template sha256:storm-ready \
+  tok=$(dexec grant-issuer mint -key "$KEY" -issuer "$ISSUER_URL" -aud "$NODE" -tenant slurm -template sha256:storm-ready \
         -max 1 -warm 1 -w-budget 16Mi -min-tier FIBER_CHECKPOINT -isolation TRUSTED -ttl 2h)
   # The storm's grant asks for 8 fibers; the allocation must have 8 CPUs.
   id=$(dexec sbatch --parsable --ntasks=1 --cpus-per-task=8 --mem=384M --job-name=fiberd-storm \

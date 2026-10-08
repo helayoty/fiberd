@@ -70,14 +70,9 @@ func TestRelayedTCPOverProc(t *testing.T) {
 		name    string
 		relayed bool
 		lo, hi  int
-		// newFence is whether the resumed fiber reports its new fence. A
-		// relayed fiber serves a unix socket and reads the fence file the
-		// agent publishes beside it. One on a tcp listener of its own has
-		// no such path and keeps the fence it was born with.
-		newFence bool
 	}{
 		{name: "direct: the zygote binds the port", lo: 44000, hi: 44003},
-		{name: "relayed: the zygote binds a unix socket, the agent the port", relayed: true, lo: 44010, hi: 44013, newFence: true},
+		{name: "relayed: the zygote binds a unix socket, the agent the port", relayed: true, lo: 44010, hi: 44013},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -123,12 +118,11 @@ func TestRelayedTCPOverProc(t *testing.T) {
 			if got := talk(t, h2.Endpoint, "get"); got != "2" {
 				t.Fatalf("counter after resume = %q, want 2", got)
 			}
-			wantFence := h1.ID
-			if tc.newFence {
-				wantFence = h2.ID
-			}
-			if got := talk(t, h2.Endpoint, "fence"); got != wantFence {
-				t.Fatalf("fence after resume = %q, want %s", got, wantFence)
+			// The resumed fiber reports its new fence either way: a relayed
+			// fiber reads the fence file beside its unix socket, one on a
+			// tcp listener of its own the file named by its birth fence.
+			if got := talk(t, h2.Endpoint, "fence"); got != h2.ID {
+				t.Fatalf("fence after resume = %q, want %s", got, h2.ID)
 			}
 			if err := rt.Release(ctx, h2.ID, true); err != nil {
 				t.Fatal(err)

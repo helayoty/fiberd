@@ -17,6 +17,7 @@ var (
 	ErrLeaseTooLong   = errors.New("grant: lease longer than this home accepts")
 	ErrEmptyGrant     = errors.New("grant: grant_uid is empty")
 	ErrBadUID         = errors.New("grant: grant_uid must be a DNS-1123 label (lowercase alphanumerics and '-', at most 63)")
+	ErrBadTenant      = errors.New("grant: tenant must be one path segment (alphanumerics, '.', '_' and '-', at most 253)")
 )
 
 // Key set errors.

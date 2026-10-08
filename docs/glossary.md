@@ -56,8 +56,11 @@ The three outcomes of a [clone](#clone). Create forks a new [fiber](#fiber), att
 ## Session
 A name the caller gives a [fiber](#fiber) whose state should last, such as "my worker". The name stays the same while the fiber behind it is parked, resumed or moved, and a clone without a name gets an anonymous fiber that nothing can resume later.
 
+## Tenant
+Who a [grant](#grant) belongs to at the [issuer](#issuer), such as a Kubernetes namespace or a Slurm account. A named [session](#session) is filed under its tenant, so a grant of another tenant never finds it, and a grant without a tenant runs anonymous [fibers](#fiber) only.
+
 ## Session class
-A label in a [grant](#grant)'s policy that names the domain its [deltas](#delta) are published and encrypted under. Only a grant of the same class can resume them, and a grant without one uses its [template](#template) digest as the domain.
+A label in a [grant](#grant)'s policy that names, within the grant's [tenant](#tenant), the domain its [deltas](#delta) are published and encrypted under. Only a grant of the same tenant and class can resume them, and a grant without a class uses its [template](#template) digest in place of one.
 
 ## Park
 Save a running [session](#session)'s state as a [delta](#delta) and stop its [fiber](#fiber), which frees its memory. A later [clone](#clone) of the same session resumes it, on this [home](#home) or on another one.

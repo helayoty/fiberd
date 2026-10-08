@@ -53,8 +53,12 @@ func Sign(g core.Grant, key *jose.JSONWebKey, now time.Time) (string, error) {
 	if g.UID == "" || g.Issuer == "" || g.Audience == "" {
 		return "", errors.New("grant: uid, issuer and audience are required to sign")
 	}
-	// Every home would refuse this UID, so the issuer learns at mint time.
+	// Every home would refuse this UID or tenant, so the issuer learns at
+	// mint time.
 	if err := checkUID(g.UID); err != nil {
+		return "", err
+	}
+	if err := checkTenant(g.Tenant); err != nil {
 		return "", err
 	}
 	if key == nil || key.IsPublic() {
@@ -159,6 +163,9 @@ func verifyParsed(tok *jwt.JSONWebToken, pub *jose.JSONWebKey, opts VerifyOption
 	if err := checkUID(g.UID); err != nil {
 		return core.Grant{}, err
 	}
+	if err := checkTenant(g.Tenant); err != nil {
+		return core.Grant{}, err
+	}
 	if std.ID != g.UID || std.Issuer != g.Issuer || len(std.Audience) != 1 || std.Audience[0] != g.Audience {
 		return core.Grant{}, ErrClaimMismatch
 	}
@@ -196,6 +203,22 @@ func checkUID(uid string) error {
 	}
 	if !uidPattern.MatchString(uid) {
 		return fmt.Errorf("%w: %q", ErrBadUID, uid)
+	}
+	return nil
+}
+
+// tenantPattern bounds a tenant name: one path segment of letters,
+// digits, ".", "_" and "-", at most 253 characters. It becomes the first
+// half of the session domain "<tenant>/<class or digest>", so "/" and
+// whitespace are out and the domain splits at its first "/" without
+// ambiguity. A Kubernetes namespace and a Slurm account both fit.
+var tenantPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$`)
+
+// checkTenant is the single check every verified grant's tenant passes
+// through. Empty is allowed: such a grant runs anonymous fibers only.
+func checkTenant(tenant string) error {
+	if tenant != "" && !tenantPattern.MatchString(tenant) {
+		return fmt.Errorf("%w: %q", ErrBadTenant, tenant)
 	}
 	return nil
 }

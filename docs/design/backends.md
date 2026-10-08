@@ -45,7 +45,7 @@ flowchart LR
 | gVisor | a `runsc` sandbox restored from the template image | `runsc checkpoint`, a full image | yes, the Sentry serves its syscalls | `FIBER_SNAPSHOT` |
 | Hyperlight | a micro-VM inside the grant's helper process, with no process or leaf of its own | the helper's snapshot | yes, the hypervisor | `FIBER_SNAPSHOT` |
 
-A backend whose tools are missing, such as `runsc` or the Hyperlight helper, offers no tier. The agent then refuses to start, with an error that names the backend and the reason.
+A backend whose tools are missing, such as `runsc` or the Hyperlight helper, offers no tier. The agent then refuses to start, with an error that names the backend and the reason. runc does not look for `runc`, `unshare` or `mount` when it opens, so a home without them fails at warm instead ([user-namespaces.md](user-namespaces.md#security-notes-and-known-gaps)).
 
 **proc.** One zygote per grant, linked with libfiberzygote and driven over a control socketpair at the zygote's fd 3 ([zygote.md](zygote.md)). Every fiber gets its own pid namespace, a private mount namespace with the agent's paths covered, and no capabilities. Fibers serve unix or TCP endpoints. proc is the reference backend and the one the conformance suite runs against.
 

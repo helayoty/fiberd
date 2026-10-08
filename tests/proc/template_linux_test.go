@@ -55,17 +55,42 @@ func pushTemplates(t *testing.T, args ...[]string) (repo string, digests []strin
 // no parent checkpoint, cannot write or remount, and a park and resume
 // keep the view and the state. The zygote's self-checkpoint, the parent
 // every delta is computed against, still works with the cache hidden.
+//
+// The same holds when the cache is reached through a symlink. The agent
+// hides the cache by the path it was configured with, while the kernel
+// names the zygote's executable resolved, and the old zygote compared
+// the two as they were. The cover then landed on the real directory
+// with the executable not bound back, and every park of the grant
+// failed ("Can't lookup mount ... path=<real>/cache/zygote").
 func TestRegistryTemplateHidden(t *testing.T) {
 	cases := []struct {
-		name string
+		name  string
+		state func(t *testing.T) string
 	}{
-		{name: "current library"},
+		{name: "current library", state: func(t *testing.T) string { return t.TempDir() }},
+		{name: "state directory reached through a symlink", state: symlinkedStateDir},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			hiddenTemplateRoundTrip(t, t.TempDir())
+			hiddenTemplateRoundTrip(t, tc.state(t))
 		})
 	}
+}
+
+// symlinkedStateDir is a state directory named through a symlink, so
+// the template cache under it has a symlink component in its path.
+func symlinkedStateDir(t *testing.T) string {
+	t.Helper()
+	base := t.TempDir()
+	real := filepath.Join(base, "real")
+	if err := os.Mkdir(real, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	return link
 }
 
 // narrowEnv, set in the environment of this test binary, has TestMain

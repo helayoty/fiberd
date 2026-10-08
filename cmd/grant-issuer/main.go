@@ -4,7 +4,7 @@
 //
 //	grant-issuer keygen -alg EdDSA -out key.json
 //	grant-issuer mint   -key key.json -issuer http://issuer:8686 -aud node-a \
-//	                    -template sha256:... -max 8 -warm 2 -w-budget 64Mi \
+//	                    -tenant team-a -template sha256:... -max 8 -warm 2 -w-budget 64Mi \
 //	                    -min-tier FIBER_WARM -isolation TRUSTED -ttl 10m > grant.jwt
 //	grant-issuer serve  -key key.json -addr :8686 [-issuer http://issuer:8686]
 //
@@ -84,6 +84,7 @@ func mint(args []string, stdout, stderr io.Writer) error {
 	aud := fs.String("aud", "", "audience: the home's node id")
 	uid := fs.String("uid", "", "grant uid (default: random)")
 	template := fs.String("template", "", "template digest (OCI digest of the zygote artifact or image)")
+	tenant := fs.String("tenant", "", "the grant's tenant, which its named sessions are filed under (a grant without one runs anonymous fibers only)")
 	maxF := fs.Uint("max", 1, "fibers.max")
 	warm := fs.Uint("warm", 0, "fibers.warm")
 	wBudget := fs.String("w-budget", "0", "per-fiber dirtied working set ceiling, bytes with optional Ki/Mi/Gi suffix (0 = unlimited)")
@@ -144,7 +145,7 @@ func mint(args []string, stdout, stderr io.Writer) error {
 	}
 	now := time.Now()
 	g := core.Grant{
-		UID: *uid, Audience: *aud, TemplateDigest: *template,
+		UID: *uid, Audience: *aud, TemplateDigest: *template, Tenant: *tenant,
 		FiberMax: int(*maxF), FiberWarm: int(*warm), WBudgetBytes: w, MinTier: tier,
 		LeaseExpiry:  now.Add(*ttl).Truncate(time.Second),
 		Policy:       core.Policy{Durability: d, PSISomeAvg10Shed: *psiShed, PSISomeAvg10Park: *psiPark, Isolation: iso, EndpointMode: mode},

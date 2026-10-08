@@ -13,17 +13,25 @@ func TestDiscardDelta(t *testing.T) {
 	cases := []struct {
 		name    string
 		ref     func(deltas, outside string) string
+		fence   string // the manifest's fence, "" for no manifest
 		wantErr bool
 		gone    bool // the ref's directory no longer exists
+		// portsLeft is how many of the two held ports (g1/1/1 on 40000,
+		// g1/1/2 on 40001) are still held afterwards.
+		portsLeft int
 	}{
 		{name: "a claimed copy in the delta store is removed",
-			ref: func(d, _ string) string { return filepath.Join(d, "g1", "claimed-s-1") }, gone: true},
+			ref: func(d, _ string) string { return filepath.Join(d, "g1", "claimed-s-1") }, gone: true, portsLeft: 2},
+		{name: "a parked delta claimed elsewhere is removed and gives its port back",
+			ref: func(d, _ string) string { return filepath.Join(d, "g1", "claimed-s-1") }, fence: "g1/1/1", gone: true, portsLeft: 1},
+		{name: "a delta of another fence frees no port but its own",
+			ref: func(d, _ string) string { return filepath.Join(d, "g1", "claimed-s-1") }, fence: "g1/1/9", gone: true, portsLeft: 2},
 		{name: "a path outside the delta store is refused",
-			ref: func(_, o string) string { return o }, wantErr: true},
+			ref: func(_, o string) string { return o }, wantErr: true, portsLeft: 2},
 		{name: "a path climbing out of the store is refused",
-			ref: func(d, o string) string { return filepath.Join(d, "..", filepath.Base(o)) }, wantErr: true},
+			ref: func(d, o string) string { return filepath.Join(d, "..", filepath.Base(o)) }, wantErr: true, portsLeft: 2},
 		{name: "the store itself is refused",
-			ref: func(d, _ string) string { return d }, wantErr: true},
+			ref: func(d, _ string) string { return d }, wantErr: true, portsLeft: 2},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -34,11 +42,19 @@ func TestDiscardDelta(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			r := &Runtime{cfg: Config{DeltaDir: deltas}}
+			r := &Runtime{cfg: Config{DeltaDir: deltas}, ports: map[int]string{40000: "g1/1/1", 40001: "g1/1/2"}}
 			ref := tc.ref(deltas, outside)
+			if tc.fence != "" {
+				if err := writeJSON(filepath.Join(ref, "manifest.json"), manifest{Fence: tc.fence, GrantUID: "g1", Endpoint: "tcp://127.0.0.1:40000"}); err != nil {
+					t.Fatal(err)
+				}
+			}
 			err := r.DiscardDelta(context.Background(), ref)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("DiscardDelta(%s) = %v, want error %v", ref, err, tc.wantErr)
+			}
+			if len(r.ports) != tc.portsLeft {
+				t.Fatalf("ports held = %v, want %d", r.ports, tc.portsLeft)
 			}
 			if _, serr := os.Stat(ref); os.IsNotExist(serr) != tc.gone {
 				t.Fatalf("%s gone = %v, want %v", ref, os.IsNotExist(serr), tc.gone)

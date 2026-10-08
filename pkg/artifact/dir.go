@@ -195,39 +195,53 @@ func PullDir(ctx context.Context, ref, dst string, plainHTTP bool) (string, erro
 // missing manifest is not an error: the goal is that it be gone. A tag
 // is deleted as a tag first (some registries keep tag entries when the
 // manifest is deleted by digest), then the manifest by digest.
-func Delete(ctx context.Context, ref string, plainHTTP bool) error {
+//
+// removed reports whether this call took the reference away. Two
+// deleters of one tag race on the registry's one delete, and only the
+// one whose delete found it wins. A claim of a parked session is that
+// delete, so a caller that is told false lost the claim.
+func Delete(ctx context.Context, ref string, plainHTTP bool) (removed bool, err error) {
 	if IsFileRef(ref) {
 		return fileDelete(ref)
 	}
 	repo, target, err := repository(ref, plainHTTP)
 	if err != nil {
-		return err
+		return false, err
 	}
 	desc, err := repo.Resolve(ctx, target)
 	if err != nil {
 		if isNotFound(err) {
-			return nil
+			return false, nil
 		}
-		return err
+		return false, err
 	}
 	isTag := !strings.HasPrefix(target, "sha256:")
+	untagged := false // the tag went by reference, so the manifest's fate does not decide
 	if isTag {
 		// Registries differ: some delete tags by reference, registry:2
 		// refuses (400) and instead drops tags when the manifest goes.
-		if err := deleteByReference(ctx, repo, target, plainHTTP); err != nil && !isNotFound(err) && !errors.Is(err, errUntagUnsupported) {
-			return fmt.Errorf("artifact: untag %s: %w", ref, err)
+		switch err := deleteByReference(ctx, repo, target, plainHTTP); {
+		case err == nil:
+			removed, untagged = true, true
+		case isNotFound(err):
+			untagged = true // another deleter took it first
+		case errors.Is(err, errUntagUnsupported):
+		default:
+			return false, fmt.Errorf("artifact: untag %s: %w", ref, err)
 		}
 	}
 	if err := repo.Manifests().Delete(ctx, desc); err != nil && !isNotFound(err) {
-		return fmt.Errorf("artifact: delete %s: %w", ref, err)
+		return false, fmt.Errorf("artifact: delete %s: %w", ref, err)
+	} else if !untagged {
+		removed = err == nil
 	}
 	if isTag {
 		// Either path must have made the tag stop pointing at the manifest.
 		if again, err := repo.Resolve(ctx, target); err == nil && again.Digest == desc.Digest {
-			return fmt.Errorf("artifact: %s still resolves after delete; the registry does not support deletion", ref)
+			return false, fmt.Errorf("artifact: %s still resolves after delete; the registry does not support deletion", ref)
 		}
 	}
-	return nil
+	return removed, nil
 }
 
 var errUntagUnsupported = errors.New("registry does not delete by tag")

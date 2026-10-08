@@ -106,7 +106,7 @@ func TestMissCarriesDetail(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newHarness(t, core.TierCheckpoint)
 			ctx := context.Background()
-			g := jsonGrant(t, core.Grant{UID: "g1", Audience: "node-a", FiberMax: 1})
+			g := jsonGrant(t, core.Grant{UID: "g1", Audience: "node-a", Tenant: "acme", FiberMax: 1})
 			if _, err := h.client.Clone(ctx, &grantv1.CloneRequest{GrantJwt: g}); err != nil {
 				t.Fatalf("first clone: %v", err)
 			}
@@ -184,7 +184,7 @@ func TestEveryOutcomeMaps(t *testing.T) {
 func TestAdmissionRejectsUnknownFields(t *testing.T) {
 	h := newHarness(t, core.TierCheckpoint)
 	ctx := context.Background()
-	g := jsonGrant(t, core.Grant{UID: "g1", Audience: "node-a"})
+	g := jsonGrant(t, core.Grant{UID: "g1", Audience: "node-a", Tenant: "acme"})
 
 	// Build a wire message that carries field 99 ("image") alongside the
 	// legal fields.
@@ -225,8 +225,8 @@ func TestAdmissionRejectsUnknownFields(t *testing.T) {
 func TestIdempotentAttachAndTierFloor(t *testing.T) {
 	h := newHarness(t, core.TierWarm)
 	ctx := context.Background()
-	g := jsonGrant(t, core.Grant{UID: "g1", Audience: "node-a"})
-	gc := jsonGrant(t, core.Grant{UID: "g2", Audience: "node-a", MinTier: core.TierCheckpoint})
+	g := jsonGrant(t, core.Grant{UID: "g1", Audience: "node-a", Tenant: "acme"})
+	gc := jsonGrant(t, core.Grant{UID: "g2", Audience: "node-a", Tenant: "acme", MinTier: core.TierCheckpoint})
 
 	var first *grantv1.CloneResponse
 	clone := func(grantJWT, session string) func() (*grantv1.CloneResponse, error) {
@@ -283,7 +283,7 @@ func TestCallerOwnsItsGrantsFibers(t *testing.T) {
 	other := tlsconf.Caller{Thumbprint: "other-x5t"}
 	h := newHarness(t, core.TierCheckpoint, func(a *core.Agent) { a.Verify = boundVerifier{thumbprint: owner.Thumbprint} })
 	gw := (&rpc.Gateway{Server: h.server}).Handler()
-	g := jsonGrant(t, core.Grant{UID: "g1", Audience: "node-a"})
+	g := jsonGrant(t, core.Grant{UID: "g1", Audience: "node-a", Tenant: "acme"})
 
 	park := func(ctx context.Context, id string) error {
 		_, err := h.server.Park(ctx, &grantv1.ParkRequest{FiberId: id})
@@ -354,7 +354,7 @@ func TestWatchReportsOOM(t *testing.T) {
 			h := newHarness(t, core.TierCheckpoint)
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			g := jsonGrant(t, core.Grant{UID: "g1", Audience: "node-a", FiberMax: 2, WBudgetBytes: 1 << 20})
+			g := jsonGrant(t, core.Grant{UID: "g1", Audience: "node-a", Tenant: "acme", FiberMax: 2, WBudgetBytes: 1 << 20})
 			for _, d := range tc.dirty {
 				if _, err := h.client.Clone(ctx, &grantv1.CloneRequest{GrantJwt: g, Payload: []byte(`{"dirty_bytes": ` + d + `}`)}); err != nil {
 					t.Fatalf("clone dirtying %s bytes: %v", d, err)
@@ -453,7 +453,7 @@ func TestWatchEnds(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newHarness(t, core.TierCheckpoint)
-			if _, err := h.client.Clone(context.Background(), &grantv1.CloneRequest{GrantJwt: jsonGrant(t, core.Grant{UID: "g1", Audience: "node-a"})}); err != nil {
+			if _, err := h.client.Clone(context.Background(), &grantv1.CloneRequest{GrantJwt: jsonGrant(t, core.Grant{UID: "g1", Audience: "node-a", Tenant: "acme"})}); err != nil {
 				t.Fatal(err)
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

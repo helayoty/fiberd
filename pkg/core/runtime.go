@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"fmt"
 	"time"
 )
 
@@ -117,16 +118,23 @@ type FiberExit struct {
 	Detail  string
 }
 
-// SessionDomain is the namespace a session name lives in when it moves
-// between homes: the grant's session_class when the issuer set one, else
-// the template digest. Two homes each hold their own grant; what they
-// share is the template (a session's state is a delta over its pages)
-// or an issuer-chosen class.
-func (g Grant) SessionDomain() string {
-	if g.Policy.SessionClass != "" {
-		return g.Policy.SessionClass
+// SessionDomain is the namespace a session name lives in when it is
+// parked and when it moves between homes: the grant's tenant, then its
+// session_class when the issuer set one, else the template digest. Two
+// homes each hold their own grant; what they share is the tenant and
+// the template (a session's state is a delta over its pages) or an
+// issuer-chosen class. Grant UIDs cannot stand in for the tenant,
+// because a session moves between homes whose grants differ. A grant
+// without a tenant has no domain, so nothing named is ever filed under
+// it or looked up for it.
+func (g Grant) SessionDomain() (string, error) {
+	if g.Tenant == "" {
+		return "", fmt.Errorf("%w: grant %s", ErrNoTenant, g.UID)
 	}
-	return g.TemplateDigest
+	if g.Policy.SessionClass != "" {
+		return g.Tenant + "/" + g.Policy.SessionClass, nil
+	}
+	return g.Tenant + "/" + g.TemplateDigest, nil
 }
 
 // DeltaPublisher is implemented by runtimes that can put a parked delta

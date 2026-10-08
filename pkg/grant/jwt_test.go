@@ -23,7 +23,7 @@ import (
 func sample(now time.Time) core.Grant {
 	return core.Grant{
 		UID: "g-1", Issuer: "https://issuer.test", Audience: "node-a",
-		TemplateDigest: "sha256:abc", FiberMax: 4, FiberWarm: 1, WBudgetBytes: 1 << 20,
+		TemplateDigest: "sha256:abc", Tenant: "team-a", FiberMax: 4, FiberWarm: 1, WBudgetBytes: 1 << 20,
 		MinTier: core.TierWarm, LeaseExpiry: now.Add(10 * time.Minute).Truncate(time.Second),
 		Policy:           core.Policy{Durability: core.Sync, PSISomeAvg10Park: 20, Isolation: core.Trusted, EndpointMode: core.EndpointHandoff},
 		CallerThumbprint: "x5t-of-the-caller",
@@ -123,6 +123,12 @@ func TestVerify(t *testing.T) {
 	noExp := edited(func(m map[string]any) { delete(m, "exp") })
 	laterExp := edited(func(m map[string]any) { m["exp"] = m["exp"].(float64) + 60 })
 	noIat := edited(func(m map[string]any) { delete(m, "iat") })
+	// withTenant forges the sample under tenant with the right key. Sign
+	// refuses a malformed tenant, so the claim is rewritten instead.
+	withTenant := func(tenant string) string {
+		return edited(func(m map[string]any) { m["grant"].(map[string]any)["tenant"] = tenant })
+	}
+	noTenant := edited(func(m map[string]any) { delete(m["grant"].(map[string]any), "tenant") })
 	twoAud := edited(func(m map[string]any) { m["aud"] = []string{"node-a", "node-b"} })
 
 	cases := []struct {
@@ -181,6 +187,15 @@ func TestVerify(t *testing.T) {
 		{name: "a path-traversal uid is refused", token: withUID("../etc"), pub: &pub, opts: grant.VerifyOptions{Audience: "node-a"}, want: grant.ErrBadUID},
 		{name: "a uid with a slash is refused", token: withUID("a/b"), pub: &pub, opts: grant.VerifyOptions{Audience: "node-a"}, want: grant.ErrBadUID},
 		{name: "a uid with a space or newline is refused", token: withUID("a b\nCLONE x"), pub: &pub, opts: grant.VerifyOptions{Audience: "node-a"}, want: grant.ErrBadUID},
+		// The tenant is the first half of the session domain, split at
+		// its first slash, so it is one path segment or nothing.
+		{name: "no tenant verifies", token: noTenant, pub: &pub, opts: grant.VerifyOptions{Audience: "node-a"}, wantOK: true},
+		{name: "a namespace-like tenant verifies", token: withTenant("tenant-a"), pub: &pub, opts: grant.VerifyOptions{Audience: "node-a"}, wantOK: true},
+		{name: "an account-like tenant with case, dots and underscores verifies", token: withTenant("Team.A_1"), pub: &pub, opts: grant.VerifyOptions{Audience: "node-a"}, wantOK: true},
+		{name: "a tenant with a slash is refused", token: withTenant("team/a"), pub: &pub, opts: grant.VerifyOptions{Audience: "node-a"}, want: grant.ErrBadTenant},
+		{name: "a tenant with a space is refused", token: withTenant("team a"), pub: &pub, opts: grant.VerifyOptions{Audience: "node-a"}, want: grant.ErrBadTenant},
+		{name: "a tenant starting with a dot is refused", token: withTenant(".."), pub: &pub, opts: grant.VerifyOptions{Audience: "node-a"}, want: grant.ErrBadTenant},
+		{name: "a 254-character tenant is refused", token: withTenant(strings.Repeat("a", 254)), pub: &pub, opts: grant.VerifyOptions{Audience: "node-a"}, want: grant.ErrBadTenant},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -314,6 +329,8 @@ func TestSignRefuses(t *testing.T) {
 		{name: "a DNS-1123 label signs", edit: func(g *core.Grant) { g.UID = "storm-123" }},
 		{name: "uppercase is refused at signing", edit: func(g *core.Grant) { g.UID = "Storm" }, wantErr: grant.ErrBadUID},
 		{name: "a path is refused at signing", edit: func(g *core.Grant) { g.UID = "../g" }, wantErr: grant.ErrBadUID},
+		{name: "a tenant with a slash is refused at signing", edit: func(g *core.Grant) { g.Tenant = "team/a" }, wantErr: grant.ErrBadTenant},
+		{name: "no tenant signs", edit: func(g *core.Grant) { g.Tenant = "" }},
 		{name: "an empty uid is refused", edit: func(g *core.Grant) { g.UID = "" }, wantMsg: "required to sign"},
 		{name: "an empty issuer is refused", edit: func(g *core.Grant) { g.Issuer = "" }, wantMsg: "required to sign"},
 		{name: "an empty audience is refused", edit: func(g *core.Grant) { g.Audience = "" }, wantMsg: "required to sign"},

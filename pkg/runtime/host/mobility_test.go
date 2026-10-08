@@ -34,6 +34,26 @@ func signingKey(t *testing.T, kid string) *jose.JSONWebKey {
 	return &jose.JSONWebKey{Key: priv, KeyID: kid, Algorithm: string(jose.EdDSA)}
 }
 
+// domainOf is the session domain of a test grant, which has a tenant.
+func domainOf(t *testing.T, g core.Grant) string {
+	t.Helper()
+	d, err := g.SessionDomain()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return d
+}
+
+// sealFor is cfg's seal context for a test grant, which has a tenant.
+func sealFor(t *testing.T, cfg Config, g core.Grant, session, fence string, now time.Time) artifact.SealContext {
+	t.Helper()
+	sc, err := cfg.sealContext(g, session, fence, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sc
+}
+
 func write(t *testing.T, dir string, files map[string]string) {
 	t.Helper()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -65,12 +85,12 @@ func TestExportImportDelta(t *testing.T) {
 	c := Config{DeltaRegistry: artifact.FileScheme + filepath.Join(root, "c"), DeltaKeys: artifact.Keys{Signer: keyC, Seal: sealAB}, HomeID: "home-c"}
 	d := Config{DeltaRegistry: artifact.FileScheme + filepath.Join(root, "d"),
 		DeltaKeys: artifact.Keys{Signer: signingKey(t, "home-d"), Trust: []jose.JSONWebKey{keyA.Public()}, Seal: sealD}, HomeID: "home-d"}
-	g := core.Grant{UID: "g1", TemplateDigest: "sha256:tmpl"}
-	g2 := core.Grant{UID: "g2", TemplateDigest: "sha256:tmpl"}                                                    // another grant, same domain
-	g3 := core.Grant{UID: "g3", TemplateDigest: "sha256:tmpl", Policy: core.Policy{SessionClass: "other-domain"}} // another domain
+	g := core.Grant{UID: "g1", Tenant: "acme", TemplateDigest: "sha256:tmpl"}
+	g2 := core.Grant{UID: "g2", Tenant: "acme", TemplateDigest: "sha256:tmpl"}                                                    // another grant, same domain
+	g3 := core.Grant{UID: "g3", Tenant: "acme", TemplateDigest: "sha256:tmpl", Policy: core.Policy{SessionClass: "other-domain"}} // another domain
 
 	parentSHA := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-	repo := domainRepoFor(a.DeltaRegistry, g)
+	repo := domainRepoFor(a.DeltaRegistry, domainOf(t, g))
 	write(t, filepath.Join(root, "parent"), map[string]string{"pages-1.img": "template pages"})
 	if _, err := artifact.PushDir(ctx, filepath.Join(root, "parent"), repo+":"+parentTag(parentSHA), artifact.ArtifactTypeParent,
 		map[string]string{artifact.AnnotationParent: parentSHA}, keyA, false); err != nil {
@@ -79,17 +99,17 @@ func TestExportImportDelta(t *testing.T) {
 	write(t, filepath.Join(root, "delta"), map[string]string{"pages-1.img": "dirty pages", "manifest.json": `{"fence":"g1/1/1"}`, "dump.log": "x"})
 	ann := map[string]string{artifact.AnnotationGrant: "g1", artifact.AnnotationHome: "home-a",
 		artifact.AnnotationParent: parentSHA, artifact.AnnotationWBytes: "11", "io.fiberd.arch": "arm64"}
-	if _, err := pushDelta(ctx, a, filepath.Join(root, "delta"), repo+":"+sessionTag("S"), ann, a.sealContext(g, "S", "g1/1/1", time.Now())); err != nil {
+	if _, err := pushDelta(ctx, a, filepath.Join(root, "delta"), repo+":"+sessionTag("S"), ann, sealFor(t, a, g, "S", "g1/1/1", time.Now())); err != nil {
 		t.Fatal(err)
 	}
 	// The same delta parked two days ago under E, past the default TTL.
 	if _, err := pushDelta(ctx, a, filepath.Join(root, "delta"), repo+":"+sessionTag("E"), ann,
-		a.sealContext(g, "E", "g1/1/1", time.Now().Add(-2*deltaTTL))); err != nil {
+		sealFor(t, a, g, "E", "g1/1/1", time.Now().Add(-2*deltaTTL))); err != nil {
 		t.Fatal(err)
 	}
 
 	out := filepath.Join(root, "out")
-	repoB := domainRepoFor(b.DeltaRegistry, g2)
+	repoB := domainRepoFor(b.DeltaRegistry, domainOf(t, g2))
 	var loc artifact.Located
 	steps := []struct {
 		name string
@@ -160,7 +180,7 @@ func TestExportImportDelta(t *testing.T) {
 			}
 			for _, tc := range cases {
 				t.Run(tc.name, func(t *testing.T) {
-					ref := domainRepoFor(a.DeltaRegistry, tc.grant) + ":" + sessionTag(tc.session)
+					ref := domainRepoFor(a.DeltaRegistry, domainOf(t, tc.grant)) + ":" + sessionTag(tc.session)
 					if _, err := artifact.PushDir(ctx, pulled, ref, artifact.ArtifactTypeDelta, sloc.Annotations, nil, false); err != nil {
 						t.Fatal(err)
 					}
@@ -205,7 +225,7 @@ func TestExportImportDelta(t *testing.T) {
 					session := "P" + strconv.Itoa(i)
 					dann := maps.Clone(ann)
 					dann[artifact.AnnotationParent] = tc.sha
-					if _, err := pushDelta(ctx, a, filepath.Join(root, "delta"), repo+":"+sessionTag(session), dann, a.sealContext(g, session, "g1/1/1", time.Now())); err != nil {
+					if _, err := pushDelta(ctx, a, filepath.Join(root, "delta"), repo+":"+sessionTag(session), dann, sealFor(t, a, g, session, "g1/1/1", time.Now())); err != nil {
 						t.Fatal(err)
 					}
 					if _, err := ExportDelta(ctx, a, g, session, t.TempDir()); !errors.Is(err, artifact.ErrUntrusted) {
@@ -332,7 +352,7 @@ func TestExportImportDelta(t *testing.T) {
 			if err := ImportDelta(ctx, b, g3, "S2", out); !errors.Is(err, artifact.ErrUntrusted) {
 				t.Fatalf("import = %v, want ErrUntrusted", err)
 			}
-			repo3 := strings.TrimPrefix(domainRepoFor(b.DeltaRegistry, g3), artifact.FileScheme)
+			repo3 := strings.TrimPrefix(domainRepoFor(b.DeltaRegistry, domainOf(t, g3)), artifact.FileScheme)
 			if _, err := os.Stat(repo3); !os.IsNotExist(err) {
 				t.Fatalf("the other domain's repository %s exists after a refused import (%v)", repo3, err)
 			}
@@ -350,7 +370,7 @@ func TestExportImportDelta(t *testing.T) {
 			if loc.ArtifactType != artifact.ArtifactTypeDelta || loc.Annotations[artifact.AnnotationSession] != "S2" ||
 				loc.Annotations[artifact.AnnotationGrant] != "g2" || loc.Annotations[artifact.AnnotationHome] != "home-b" ||
 				loc.Annotations[artifact.AnnotationParent] != parentSHA || loc.Annotations[artifact.AnnotationWBytes] != "11" ||
-				loc.Annotations["io.fiberd.arch"] != "arm64" || loc.Annotations[artifact.AnnotationDomain] != g2.SessionDomain() ||
+				loc.Annotations["io.fiberd.arch"] != "arm64" || loc.Annotations[artifact.AnnotationDomain] != domainOf(t, g2) ||
 				loc.Annotations[artifact.AnnotationSealKey] != sealAB.ID {
 				t.Fatalf("imported annotations %v", loc.Annotations)
 			}
@@ -375,7 +395,7 @@ func TestExportImportDelta(t *testing.T) {
 			if got, _ := os.ReadFile(filepath.Join(dst, "pages-1.img")); strings.Contains(string(got), "dirty pages") {
 				t.Fatal("the imported delta was pushed in the clear")
 			}
-			sc, err := artifact.OpenDir(dst, sealAB, g2.SessionDomain(), "S2", time.Now())
+			sc, err := artifact.OpenDir(dst, sealAB, domainOf(t, g2), "S2", time.Now())
 			if err != nil || sc.Fence != "g1/1/1" {
 				t.Fatalf("open the imported delta: %+v %v", sc, err)
 			}
@@ -442,7 +462,8 @@ func TestExportImportDelta(t *testing.T) {
 }
 
 // TestRepositoryNames checks where a grant's sessions live in the registry, a
-// name safe for any registry and distinct per domain.
+// name safe for any registry and distinct per domain, and that a grant
+// without a tenant has no domain to live in.
 func TestRepositoryNames(t *testing.T) {
 	long := strings.Repeat("abcdefghij", 5)
 	cases := []struct {
@@ -451,22 +472,28 @@ func TestRepositoryNames(t *testing.T) {
 		// prefix is the repository name before the hash suffix.
 		prefix string
 	}{
-		{name: "a template digest loses its algorithm prefix", grant: core.Grant{TemplateDigest: "sha256:ABC123"}, prefix: "abc123"},
-		{name: "a session class is used as is, lower-cased and made safe", grant: core.Grant{TemplateDigest: "sha256:x", Policy: core.Policy{SessionClass: "Team/Alpha Models"}}, prefix: "team-alpha-models"},
-		{name: "a long domain is cut to 40 characters", grant: core.Grant{Policy: core.Policy{SessionClass: long}}, prefix: long[:40]},
-		{name: "a domain with no safe characters is named g", grant: core.Grant{Policy: core.Policy{SessionClass: "///"}}, prefix: "g"},
-		{name: "an empty domain is named g", grant: core.Grant{}, prefix: "g"},
+		{name: "a template digest loses its algorithm prefix", grant: core.Grant{Tenant: "acme", TemplateDigest: "sha256:ABC123"}, prefix: "acme-abc123"},
+		{name: "a session class is used as is, lower-cased and made safe", grant: core.Grant{Tenant: "acme", TemplateDigest: "sha256:x", Policy: core.Policy{SessionClass: "Team/Alpha Models"}}, prefix: "acme-team-alpha-models"},
+		{name: "a long domain is cut to 40 characters", grant: core.Grant{Tenant: "t", Policy: core.Policy{SessionClass: long}}, prefix: ("t-" + long)[:40]},
+		{name: "a domain with no safe characters after the tenant keeps the tenant", grant: core.Grant{Tenant: "t", Policy: core.Policy{SessionClass: "///"}}, prefix: "t"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			repo := domainRepoFor("reg.example/deltas/", tc.grant)
-			sum := sha256.Sum256([]byte(tc.grant.SessionDomain()))
+			domain := domainOf(t, tc.grant)
+			repo := domainRepoFor("reg.example/deltas/", domain)
+			sum := sha256.Sum256([]byte(domain))
 			want := "reg.example/deltas/" + tc.prefix + "-" + hex.EncodeToString(sum[:4])
 			if repo != want {
 				t.Fatalf("domainRepoFor = %s, want %s", repo, want)
 			}
-			if other := domainRepoFor("reg.example/deltas", core.Grant{Policy: core.Policy{SessionClass: "other"}}); other == repo {
+			if other := domainRepoFor("reg.example/deltas", domainOf(t, core.Grant{Tenant: "other", Policy: tc.grant.Policy, TemplateDigest: tc.grant.TemplateDigest})); other == repo {
+				t.Fatal("two tenants share a repository")
+			}
+			if other := domainRepoFor("reg.example/deltas", domainOf(t, core.Grant{Tenant: tc.grant.Tenant, Policy: core.Policy{SessionClass: "other"}})); other == repo {
 				t.Fatal("two domains share a repository")
+			}
+			if _, err := (core.Grant{TemplateDigest: "sha256:x"}).SessionDomain(); !errors.Is(err, core.ErrNoTenant) {
+				t.Fatalf("a grant without a tenant has a domain: %v", err)
 			}
 			if sessionTag("S") == sessionTag("T") || !strings.HasPrefix(sessionTag("S"), "s-") || len(sessionTag("S")) != 26 {
 				t.Fatalf("sessionTag = %s", sessionTag("S"))
@@ -516,8 +543,8 @@ func TestExportImportRefusals(t *testing.T) {
 	keyA := signingKey(t, "home-a")
 	seal := &artifact.SealKey{ID: "seal", Key: make([]byte, 32)}
 	a := Config{DeltaRegistry: artifact.FileScheme + filepath.Join(root, "a"), DeltaKeys: artifact.Keys{Signer: keyA, Seal: seal}, HomeID: "home-a"}
-	g := core.Grant{UID: "g1", TemplateDigest: "sha256:tmpl"}
-	repo := domainRepoFor(a.DeltaRegistry, g)
+	g := core.Grant{UID: "g1", Tenant: "acme", TemplateDigest: "sha256:tmpl"}
+	repo := domainRepoFor(a.DeltaRegistry, domainOf(t, g))
 	parentSHA := strings.Repeat("ab", 32)
 	write(t, filepath.Join(root, "parent"), map[string]string{"pages-1.img": "template pages"})
 	write(t, filepath.Join(root, "delta"), map[string]string{"pages-1.img": "dirty pages", "manifest.json": `{"fence":"g1/1/1"}`})
@@ -529,7 +556,7 @@ func TestExportImportRefusals(t *testing.T) {
 	// holds a delta.
 	for _, tc := range []struct{ session, parent, typ string }{{"NP", strings.Repeat("0a", 32), ""}, {"MT", strings.Repeat("cd", 32), artifact.ArtifactTypeDelta}} {
 		ann := map[string]string{artifact.AnnotationParent: tc.parent}
-		if _, err := pushDelta(ctx, a, filepath.Join(root, "delta"), repo+":"+sessionTag(tc.session), ann, a.sealContext(g, tc.session, "g1/1/1", time.Now())); err != nil {
+		if _, err := pushDelta(ctx, a, filepath.Join(root, "delta"), repo+":"+sessionTag(tc.session), ann, sealFor(t, a, g, tc.session, "g1/1/1", time.Now())); err != nil {
 			t.Fatal(err)
 		}
 		if tc.typ != "" {
@@ -539,7 +566,7 @@ func TestExportImportRefusals(t *testing.T) {
 		}
 	}
 	// A full export, to break in various ways.
-	if _, err := pushDelta(ctx, a, filepath.Join(root, "delta"), repo+":"+sessionTag("F"), map[string]string{}, a.sealContext(g, "F", "g1/1/1", time.Now())); err != nil {
+	if _, err := pushDelta(ctx, a, filepath.Join(root, "delta"), repo+":"+sessionTag("F"), map[string]string{}, sealFor(t, a, g, "F", "g1/1/1", time.Now())); err != nil {
 		t.Fatal(err)
 	}
 	full := filepath.Join(root, "full")
@@ -567,7 +594,7 @@ func TestExportImportRefusals(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := pushDelta(ctx, a, filepath.Join(root, "delta"), repo+":"+sessionTag(withParent),
-		map[string]string{artifact.AnnotationParent: parentSHA, "io.fiberd.libc": "glibc"}, a.sealContext(g, withParent, "g1/1/1", time.Now())); err != nil {
+		map[string]string{artifact.AnnotationParent: parentSHA, "io.fiberd.libc": "glibc"}, sealFor(t, a, g, withParent, "g1/1/1", time.Now())); err != nil {
 		t.Fatal(err)
 	}
 	exported := filepath.Join(root, "exported")
@@ -652,7 +679,7 @@ func TestExportImportRefusals(t *testing.T) {
 			if err := ImportDelta(ctx, b, g, "S", exported); err != nil {
 				return err
 			}
-			ploc, found, err := artifact.Resolve(ctx, domainRepoFor(b.DeltaRegistry, g)+":"+parentTag(parentSHA), false)
+			ploc, found, err := artifact.Resolve(ctx, domainRepoFor(b.DeltaRegistry, domainOf(t, g))+":"+parentTag(parentSHA), false)
 			if err != nil || !found {
 				return fmt.Errorf("imported parent: found %v: %w", found, err)
 			}
@@ -662,7 +689,7 @@ func TestExportImportRefusals(t *testing.T) {
 			return errors.New("imported")
 		}, errText: "imported"},
 		{name: "export: the delta's files are gone from the registry", run: func(t *testing.T) error {
-			if _, err := pushDelta(ctx, a, filepath.Join(root, "delta"), repo+":"+sessionTag("LD"), map[string]string{}, a.sealContext(g, "LD", "g1/1/1", time.Now())); err != nil {
+			if _, err := pushDelta(ctx, a, filepath.Join(root, "delta"), repo+":"+sessionTag("LD"), map[string]string{}, sealFor(t, a, g, "LD", "g1/1/1", time.Now())); err != nil {
 				t.Fatal(err)
 			}
 			breakBlob(t, repo+":"+sessionTag("LD"))
@@ -675,7 +702,7 @@ func TestExportImportRefusals(t *testing.T) {
 				map[string]string{artifact.AnnotationParent: lost}, keyA, false); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := pushDelta(ctx, a, filepath.Join(root, "delta"), repo+":"+sessionTag("LP"), map[string]string{artifact.AnnotationParent: lost}, a.sealContext(g, "LP", "g1/1/1", time.Now())); err != nil {
+			if _, err := pushDelta(ctx, a, filepath.Join(root, "delta"), repo+":"+sessionTag("LP"), map[string]string{artifact.AnnotationParent: lost}, sealFor(t, a, g, "LP", "g1/1/1", time.Now())); err != nil {
 				t.Fatal(err)
 			}
 			breakBlob(t, repo+":"+parentTag(lost))
@@ -755,6 +782,53 @@ func TestPushDeltaErrors(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if _, err := pushDelta(context.Background(), cfg, tc.src(t), "file:///nowhere/repo:tag", nil, artifact.SealContext{}); err == nil {
 				t.Fatal("pushed a delta that does not exist")
+			}
+		})
+	}
+}
+
+// TestSealContextPerTenant checks that the seal context, and so the key a
+// delta is sealed under, carries the grant's tenant. A delta sealed for
+// one tenant's session opens for another grant of that tenant, and not
+// for a grant of another tenant on the same template, class and session.
+func TestSealContextPerTenant(t *testing.T) {
+	seal := &artifact.SealKey{ID: "seal", Key: make([]byte, 32)}
+	cfg := Config{DeltaKeys: artifact.Keys{Seal: seal}}
+	owner := core.Grant{UID: "g1", Tenant: "acme", TemplateDigest: "sha256:tmpl"}
+	cases := []struct {
+		name   string
+		opener core.Grant
+		want   error // nil opens
+	}{
+		{name: "the same tenant through another grant", opener: core.Grant{UID: "g2", Tenant: "acme", TemplateDigest: "sha256:tmpl"}},
+		{name: "another tenant on the same template", opener: core.Grant{UID: "g2", Tenant: "globex", TemplateDigest: "sha256:tmpl"}, want: artifact.ErrSealed},
+		{name: "no tenant at all", opener: core.Grant{UID: "g2", TemplateDigest: "sha256:tmpl"}, want: core.ErrNoTenant},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			now := time.Now()
+			src, sealed := filepath.Join(t.TempDir(), "src"), filepath.Join(t.TempDir(), "sealed")
+			write(t, src, map[string]string{"pages-1.img": "dirty pages"})
+			sc := sealFor(t, cfg, owner, "S", "g1/1/1", now)
+			if sc.Domain != "acme/sha256:tmpl" {
+				t.Fatalf("seal domain = %q, want the tenant and template", sc.Domain)
+			}
+			if err := artifact.SealDir(src, sealed, seal, sc); err != nil {
+				t.Fatal(err)
+			}
+			domain, err := tc.opener.SessionDomain()
+			if err != nil {
+				if !errors.Is(err, tc.want) {
+					t.Fatalf("SessionDomain = %v, want %v", err, tc.want)
+				}
+				return
+			}
+			_, err = artifact.OpenDir(sealed, seal, domain, "S", now)
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("open for %s = %v, want %v", domain, err, tc.want)
+			}
+			if got, _ := os.ReadFile(filepath.Join(sealed, "pages-1.img")); (string(got) == "dirty pages") != (tc.want == nil) {
+				t.Fatalf("pages after open = %q", got)
 			}
 		})
 	}

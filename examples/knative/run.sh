@@ -51,7 +51,7 @@ for _ in $(seq 1 100); do curl -sf --max-time 2 --unix-socket "$STATE/private/ad
 curl -sf --max-time 5 --unix-socket "$STATE/private/admin.sock" http://x/healthz >/dev/null || { echo "home did not come up"; tail -n 20 "$STATE/fiberd.log"; exit 1; }
 
 # 2. the revision's grant: FIBER_SNAPSHOT, two fibers, 32 MiB each.
-bin/grant-issuer mint -key "$STATE/issuer-key.json" -issuer "$ISSUER_URL" -aud "$NODE" \
+bin/grant-issuer mint -key "$STATE/issuer-key.json" -issuer "$ISSUER_URL" -aud "$NODE" -tenant knative \
   -template sha256:hello -max 2 -warm 1 -w-budget 32Mi -min-tier FIBER_SNAPSHOT -ttl 1h >"$STATE/hello.jwt"
 
 # 3. the activator.

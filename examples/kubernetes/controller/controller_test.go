@@ -402,6 +402,8 @@ func TestReconcileMintsTheSpec(t *testing.T) {
 			func(g core.Grant, _ time.Time) bool { return g.Policy.Durability == core.Sync }},
 		{"the session class passes through", func(spec map[string]any) { spec["sessionClass"] = "gold" },
 			func(g core.Grant, _ time.Time) bool { return g.Policy.SessionClass == "gold" }},
+		{"the namespace is the tenant", func(map[string]any) {},
+			func(g core.Grant, _ time.Time) bool { return g.Tenant == "tenant-a" }},
 		{"no device budget is none", func(spec map[string]any) { delete(spec, "deviceBudget") },
 			func(g core.Grant, _ time.Time) bool { return g.DeviceBudget == core.DeviceBudget{} }},
 		{"no W budget is unlimited", func(spec map[string]any) { delete(spec, "wBudget") },

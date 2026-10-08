@@ -44,6 +44,16 @@
  * fence the agent sent. A longer one is refused, never cut. */
 #define FENCE_MAX 128
 
+/* The ready record is the one byte 'r'. The zygote takes anything else
+ * on the pipe as a fiber that misused it. */
+#define READY_BYTE 'r'
+
+/* A control line is at most SEND_MAX - 1 characters. The longest is the
+ * ERROR naming a HIDE path that could not be covered (prepare_reason),
+ * which must reach the agent whole rather than be dropped. */
+#define RUNDIR_MAX 4096
+#define SEND_MAX (RUNDIR_MAX + 512)
+
 extern char **environ;
 
 static int ready_fd = -1;
@@ -94,7 +104,6 @@ static int ndrop;
 /* The agent's run directory and this grant's directory in it (RUNDIR),
  * in static storage the child reads without allocating. Empty until the
  * agent sends them. */
-#define RUNDIR_MAX 4096
 static char rundir_parent[RUNDIR_MAX];
 static char rundir_own[RUNDIR_MAX];
 
@@ -153,7 +162,7 @@ static int write_all(int fd, const char *buf, size_t n) {
 
 static int sendf(int fd, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 static int sendf(int fd, const char *fmt, ...) {
-    char buf[1024];
+    char buf[SEND_MAX];
     va_list ap; va_start(ap, fmt);
     int n = vsnprintf(buf, sizeof buf, fmt, ap);
     va_end(ap);
@@ -296,7 +305,7 @@ static const char *exit_why(int code) {
     case EX_MNT_DROP: return "could not unmount a DROP path";
     case EX_MNT_HIDE: return "could not cover a HIDE path that appeared after READY";
     case EX_CAPS: return "could not drop its capabilities";
-    case EX_MNT_RO: return "could not make /proc/sys read-only";
+    case EX_MNT_RO: return "could not make the host controls under /proc read-only";
     case EX_USERNS: return "could not install the user namespace filter";
     case EX_FDS: return "could not set up its descriptors";
     case EX_IDENTITY: return "did not get its handoff identity";
@@ -347,16 +356,34 @@ static int forget_doomed(pid_t pid) {
     return 0;
 }
 
+/* reported_ready says whether a pending child's pipe holds its ready
+ * record, without waiting on it. A child that reported and ended while
+ * the loop sat in a bounded wait on another child (settle_pending, doom)
+ * is reaped before its pipe is ever polled. It was a fiber that ran and
+ * exited, not a birth that failed, and its CLONE is answered so. */
+static int reported_ready(int fd) {
+    struct pollfd p = { .fd = fd, .events = POLLIN };
+    if (poll(&p, 1, 0) <= 0 || !(p.revents & POLLIN)) return 0;
+    unsigned char rec[2];
+    ssize_t n;
+    do n = read(fd, rec, sizeof rec); while (n < 0 && errno == EINTR);
+    return n == 1 && rec[0] == READY_BYTE;
+}
+
 static void reap(int ctl_fd) {
     int status;
     pid_t pid;
     while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
         if (forget_doomed(pid)) continue;
         int i = pending_index(pid);
-        if (i >= 0) { /* died before it ever reported ready */
+        if (i >= 0 && !reported_ready(pending[i].ready_fd)) { /* died before it ever reported ready */
             send_died(ctl_fd, pending[i].fence, status);
             drop_pending(i);
             continue;
+        }
+        if (i >= 0) { /* ready, then gone, both inside one bounded wait */
+            sendf(ctl_fd, "CLONED %s %d", pending[i].fence, (int)pid);
+            drop_pending(i);
         }
         forget(pid);
         if (WIFSIGNALED(status))
@@ -463,7 +490,8 @@ static void unescape_mount(char *s) {
  *     zygote's own namespace (lock_sys, from prepare_ns), and every
  *     fiber's copy carries the flags. A mount the host adds under /sys
  *     after that never reaches the zygote's namespace, which is private,
- *     so no fiber sees it at all.
+ *     so no fiber sees it at all. /sys/firmware is covered with an empty
+ *     tmpfs besides.
  *
  * lock_sys reads mountinfo with raw syscalls into a stack buffer and
  * splits it by hand, allocating nothing. The rule above scrub_and_run
@@ -478,6 +506,55 @@ static void unescape_mount(char *s) {
 static int lock_procsys(void) {
     if (mount("/proc/sys", "/proc/sys", NULL, MS_BIND, NULL) < 0 || ro_remount("/proc/sys") < 0) return -1;
     return 0;
+}
+
+/* lock_proc takes away the rest of what a fiber could write or see
+ * under its fresh /proc, the paths runc and Docker list for a container.
+ * /proc/sysrq-trigger is root-owned 0200 and its write asks for no
+ * capability, so without this a euid-0 fiber with every capability
+ * dropped reboots, crashes or powers off the node wherever kernel.sysrq
+ * allows it, which is the default on the major distributions. The same
+ * owner-bit rule writes the smp_affinity files under /proc/irq and
+ * what is under /proc/bus and /proc/fs (nfsd). Each is bound onto
+ * itself and made read-only, as /proc/sys is. /proc/scsi (its scsi
+ * file takes devices
+ * off the host) and /proc/acpi (wakeup rewires the host's wakeup
+ * devices) are covered with an empty read-only tmpfs, which CRIU dumps
+ * and restores as it does a HIDE cover. A path this kernel does not have
+ * is skipped, as runc skips it. One that exists and cannot be locked
+ * fails the birth, since a fiber must not run with it writable.
+ *
+ * runc's masked files are not covered. /proc/kcore and /proc/kmsg ask
+ * for a capability the fiber lacks (CAP_SYS_RAWIO, CAP_SYSLOG). The rest
+ * (/proc/keys, /proc/timer_list, /proc/sched_debug) are read-only to
+ * begin with, and a mask would be a bind of another file, which CRIU
+ * restores as the host's own path (pkg/sys/criu/mounts.go names a file
+ * mount by its path), so a resumed fiber would see them again. The one
+ * writable among them, /proc/latency_stats, is made read-only instead.
+ * Allocation-free, for mount_ns. */
+static const char *const proc_ro[] = { "/proc/sysrq-trigger", "/proc/bus", "/proc/fs", "/proc/irq", "/proc/latency_stats" };
+static const char *const proc_masked[] = { "/proc/scsi", "/proc/acpi" };
+
+/* cover_empty mounts an empty read-only tmpfs over the directory at
+ * path. Returns 0, -1 with errno, or 0 having done nothing when there is
+ * no such path. */
+static int cover_empty(const char *path) {
+    struct stat st;
+    if (stat(path, &st) < 0) return errno == ENOENT ? 0 : -1;
+    if (!S_ISDIR(st.st_mode)) { errno = ENOTDIR; return -1; }
+    return mount("tmpfs", path, "tmpfs", MS_RDONLY | MS_NOSUID | MS_NODEV | MS_NOEXEC, "size=4k,mode=0555");
+}
+
+static int lock_proc(void) {
+    int rc = 0;
+    struct stat st;
+    for (size_t i = 0; i < sizeof proc_ro / sizeof proc_ro[0]; i++) {
+        if (stat(proc_ro[i], &st) < 0) { if (errno != ENOENT) rc = -1; continue; }
+        if (mount(proc_ro[i], proc_ro[i], NULL, MS_BIND, NULL) < 0 || ro_remount(proc_ro[i]) < 0) rc = -1;
+    }
+    for (size_t i = 0; i < sizeof proc_masked / sizeof proc_masked[0]; i++)
+        if (cover_empty(proc_masked[i]) < 0) rc = -1;
+    return rc;
 }
 
 static int lock_sys(void) {
@@ -523,6 +600,10 @@ static int lock_sys(void) {
     int e = errno;
     close(fd);
     errno = e;
+    /* /sys/firmware (DMI tables, EFI variables, ACPI tables) is readable
+     * by euid 0 and says what the node is. Covered once, here, as runc
+     * and Docker mask it. */
+    if (cover_empty("/sys/firmware") < 0) rc = -1;
     return rc;
 }
 
@@ -686,9 +767,10 @@ static int drop_paths_now(void) {
  * prepared one (prepare_ns). What is grant-wide is already there, /sys
  * read-only, the run directory narrowed and the HIDE directories
  * covered, so what remains is the fiber's own. Its /proc shows only its
- * pid namespace, /proc/sys on that fresh /proc is read-only, the DROP
- * paths are gone, and a HIDE directory that did not exist at PREPARE is
- * covered now if it has appeared. Returns the F_ bits of the steps that
+ * pid namespace, /proc/sys and the other host controls on that fresh
+ * /proc are read-only or covered (lock_proc), the DROP paths are gone,
+ * and a HIDE directory that did not exist at PREPARE is covered now if
+ * it has appeared. Returns the F_ bits of the steps that
  * failed, 0 when all went through, and the child ends on any of them.
  *
  * The copy is already private, since every mount in the zygote's
@@ -703,7 +785,7 @@ static int mount_ns(int own_pidns) {
     int failed = 0;
     if (mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL) < 0) return F_PRIVATE;
     if (own_pidns && mount("proc", "/proc", "proc", MS_NOSUID | MS_NODEV | MS_NOEXEC, NULL) < 0) failed |= F_PROC;
-    if (lock_procsys() < 0) failed |= F_RO;
+    if (lock_procsys() < 0 || lock_proc() < 0) failed |= F_RO;
     if (drop_paths_now() < 0) failed |= F_DROP;
     for (int i = 0; i < nhide; i++)
         if (!hide_covered[i] && cover_hide(i) < 0) failed |= F_HIDE;
@@ -769,6 +851,16 @@ static int prepare_ns(void) {
     if (lock_sys() < 0) failed |= F_RO;
     if (drop_paths_now() < 0) failed |= F_DROP;
     if (rundir_parent[0] && narrow_rundir() < 0) failed |= F_RUNDIR;
+    /* The agent names a HIDE path as it was configured and the kernel
+     * names the executable resolved (/proc/self/exe). With a symlink in
+     * the path, under() would miss, the cover would land on the real
+     * directory with the executable not bound back, and no park of the
+     * grant could name it. Each path is resolved here, where allocating
+     * is fine. One that does not exist yet keeps its name. */
+    for (int i = 0; i < nhide; i++) {
+        char *real = realpath(hide_paths[i], NULL);
+        if (real) { free(hide_paths[i]); hide_paths[i] = real; }
+    }
     for (int i = 0; i < nhide; i++) {
         int c = cover_hide(i);
         if (c < 0 && hide_i < 0) {
@@ -1138,10 +1230,6 @@ void fz_init(int argc, char **argv) {
     /* If exec fails we carry on randomised, and deltas will be larger. */
     own_mountns();
 }
-
-/* The ready record is the one byte 'r'. The zygote takes anything else
- * on the pipe as a fiber that misused it. */
-#define READY_BYTE 'r'
 
 void fz_fiber_ready(void) {
     if (ready_fd < 0) return;

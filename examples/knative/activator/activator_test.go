@@ -177,7 +177,7 @@ func TestActivator(t *testing.T) {
 		{
 			name: "scale from zero, attach, park when idle, resume",
 			config: func(t *testing.T, w *world) activator.Config {
-				g := jsonGrant(t, core.Grant{UID: "rev-a", Audience: "home-a", FiberMax: 4})
+				g := jsonGrant(t, core.Grant{UID: "rev-a", Audience: "home-a", Tenant: "knative", FiberMax: 4})
 				return activator.Config{Revisions: []activator.Revision{{Name: "hello", Grant: g}}, Idle: 200 * time.Millisecond, Dial: w.dial}
 			},
 			steps: []step{
@@ -196,7 +196,7 @@ func TestActivator(t *testing.T) {
 			// Two revisions on one grant that allows a single fiber.
 			name: "misses become Knative fallbacks",
 			config: func(t *testing.T, w *world) activator.Config {
-				g := jsonGrant(t, core.Grant{UID: "rev-b", Audience: "home-a", FiberMax: 1})
+				g := jsonGrant(t, core.Grant{UID: "rev-b", Audience: "home-a", Tenant: "knative", FiberMax: 1})
 				return activator.Config{Revisions: []activator.Revision{{Name: "one", Grant: g}, {Name: "two", Grant: g}}, Dial: w.dial}
 			},
 			steps: []step{
@@ -214,7 +214,7 @@ func TestActivator(t *testing.T) {
 		{
 			name: "http mode proxies to the guest",
 			config: func(t *testing.T, w *world) activator.Config {
-				g := jsonGrant(t, core.Grant{UID: "rev-c", Audience: "home-a", FiberMax: 1})
+				g := jsonGrant(t, core.Grant{UID: "rev-c", Audience: "home-a", Tenant: "knative", FiberMax: 1})
 				// An HTTP guest behind the endpoint.
 				guestSrv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 					_, _ = fmt.Fprintf(rw, "hello from %s", r.URL.Path)

@@ -118,6 +118,12 @@ message CapacityGrant {
   string audience = 3;
   // OCI digest of the zygote artifact, or of the template image.
   string template_digest = 4;
+  // The issuer's tenant the grant belongs to (a Kubernetes namespace, a
+  // Slurm account). A named session is filed under its tenant when it is
+  // parked, so another tenant's grant on the same template never finds
+  // it. A grant without a tenant runs anonymous fibers only: a named
+  // Clone or Park under it fails with FailedPrecondition.
+  string tenant = 11;
   FiberLimits fibers = 5;
   // Maximum dirtied working set per fiber, in bytes. Enforced as the
   // fiber's cgroup memory.max; also the mobility budget for deltas.

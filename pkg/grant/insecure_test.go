@@ -32,6 +32,8 @@ func TestInsecureJSONVerifier(t *testing.T) {
 		{name: "a path-traversal uid is refused", token: `{"grantUid":"../../etc"}`, want: grant.ErrBadUID},
 		{name: "a uid with a newline is refused", token: `{"grantUid":"g\nCLONE x"}`, want: grant.ErrBadUID},
 		{name: "a 64-character uid is refused", token: `{"grantUid":"` + strings.Repeat("a", 64) + `"}`, want: grant.ErrBadUID},
+		{name: "a tenant verifies", token: `{"grantUid":"g-1","tenant":"Team.A_1"}`},
+		{name: "a tenant with a slash is refused", token: `{"grantUid":"g-1","tenant":"team/a"}`, want: grant.ErrBadTenant},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

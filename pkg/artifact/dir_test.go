@@ -99,6 +99,22 @@ func dropsTagWithManifest(tag string) middleware {
 	}
 }
 
+// hides lets matching requests through and then answers status instead
+// of the registry's reply, as a registry where another client's delete
+// landed first would.
+func hides(method, kind, prefix string, status int) middleware {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if !matches(r, method, kind, prefix) {
+				next.ServeHTTP(w, r)
+				return
+			}
+			next.ServeHTTP(httptest.NewRecorder(), r)
+			w.WriteHeader(status)
+		})
+	}
+}
+
 // corrupt flips the last byte of every manifest the registry serves.
 func corrupt(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -152,17 +168,20 @@ func TestDelete(t *testing.T) {
 		// gone and kept are references under the registry that must and
 		// must not resolve afterwards. "@" stands for r@<digest>.
 		gone, kept []string
+		removed    bool // the delete took the reference, as a claim needs
 	}{
-		{name: "a tag goes, and the manifest with it", gone: []string{"r:t", "@"}},
-		{name: "a digest goes", ref: "@", gone: []string{"@"}},
+		{name: "a tag goes, and the manifest with it", gone: []string{"r:t", "@"}, removed: true},
+		{name: "a digest goes", ref: "@", gone: []string{"@"}, removed: true},
 		{name: "a missing tag is already gone", ref: "r:missing", kept: []string{"r:t"}},
 		{name: "a missing repository is already gone", ref: "other:t", kept: []string{"r:t"}},
 		{name: "a registry that refuses to untag (400) drops the tag with the manifest",
-			mw: chain(answer(http.MethodDelete, "manifest", "t", http.StatusBadRequest), dropsTagWithManifest("t")), gone: []string{"r:t", "@"}},
+			mw: chain(answer(http.MethodDelete, "manifest", "t", http.StatusBadRequest), dropsTagWithManifest("t")), gone: []string{"r:t", "@"}, removed: true},
 		{name: "a registry that does not allow untag (405) drops the tag with the manifest",
-			mw: chain(answer(http.MethodDelete, "manifest", "t", http.StatusMethodNotAllowed), dropsTagWithManifest("t")), gone: []string{"r:t", "@"}},
-		{name: "an untag that finds nothing (404) is fine",
+			mw: chain(answer(http.MethodDelete, "manifest", "t", http.StatusMethodNotAllowed), dropsTagWithManifest("t")), gone: []string{"r:t", "@"}, removed: true},
+		{name: "an untag that finds nothing (404) is fine, but another deleter took the tag",
 			mw: chain(answer(http.MethodDelete, "manifest", "t", http.StatusNotFound), dropsTagWithManifest("t")), gone: []string{"r:t", "@"}},
+		{name: "a manifest delete that finds nothing (404) where untag is refused: another deleter took it",
+			mw: chain(answer(http.MethodDelete, "manifest", "t", http.StatusBadRequest), hides(http.MethodDelete, "manifest", "sha256:", http.StatusNotFound), dropsTagWithManifest("t")), gone: []string{"r:t", "@"}},
 		{name: "a registry that deletes neither way is an error",
 			mw: answer(http.MethodDelete, "manifest", "t", http.StatusBadRequest), want: "does not support deletion"},
 		{name: "an untag that fails is an error",
@@ -171,8 +190,8 @@ func TestDelete(t *testing.T) {
 			mw: hangUp(http.MethodDelete, "manifest", "t"), want: "untag", kept: []string{"r:t", "@"}},
 		{name: "a manifest delete that fails is an error",
 			mw: answer(http.MethodDelete, "manifest", "sha256:", http.StatusForbidden), want: "artifact: delete", kept: []string{"@"}},
-		{name: "a manifest delete that finds nothing is fine",
-			mw: answer(http.MethodDelete, "manifest", "sha256:", http.StatusNotFound), gone: []string{"r:t"}, kept: []string{"@"}},
+		{name: "a manifest delete that finds nothing is fine once the tag went",
+			mw: answer(http.MethodDelete, "manifest", "sha256:", http.StatusNotFound), gone: []string{"r:t"}, kept: []string{"@"}, removed: true},
 		{name: "a resolve that fails is an error",
 			mw: answer(http.MethodHead, "manifest", "", http.StatusForbidden), want: "403"},
 		{name: "a reference that does not parse", ref: "UPPER:t", want: "UPPER"},
@@ -193,9 +212,9 @@ func TestDelete(t *testing.T) {
 			if c.ref != "" {
 				ref = c.ref
 			}
-			err := artifact.Delete(ctx, full(ref), true)
-			if c.want == "" && err != nil {
-				t.Fatalf("Delete: %v", err)
+			removed, err := artifact.Delete(ctx, full(ref), true)
+			if c.want == "" && (err != nil || removed != c.removed) {
+				t.Fatalf("Delete = %v %v, want removed %v", removed, err, c.removed)
 			}
 			if c.want != "" && (err == nil || !strings.Contains(err.Error(), c.want)) {
 				t.Fatalf("Delete = %v, want an error about %q", err, c.want)

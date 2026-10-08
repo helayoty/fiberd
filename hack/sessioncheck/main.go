@@ -36,6 +36,7 @@ import (
 type opts struct {
 	target, nodeID, issuerKey, issuerURL string
 	isolation, session, wantScheme       string
+	tenant                               string
 	timeout                              time.Duration
 }
 
@@ -45,6 +46,7 @@ func main() {
 	flag.StringVar(&o.nodeID, "node-id", "", "grant audience: the home's node id")
 	flag.StringVar(&o.issuerKey, "issuer-key", "", "private JWK to mint the grant with")
 	flag.StringVar(&o.issuerURL, "issuer", "", "issuer URL")
+	flag.StringVar(&o.tenant, "tenant", "check", "the grant's tenant, which its named sessions are filed under")
 	flag.StringVar(&o.isolation, "isolation", "UNTRUSTED", "the grant's isolation, UNTRUSTED or TRUSTED")
 	flag.StringVar(&o.session, "session", "s1", "the session name to clone, park and resume")
 	flag.StringVar(&o.wantScheme, "want-scheme", "", "fail unless the endpoint has this scheme (tcp or unix)")
@@ -69,7 +71,7 @@ func run(o opts) error {
 		return fmt.Errorf("-isolation: %w", err)
 	}
 	g := core.Grant{
-		UID: fmt.Sprintf("check-%d", time.Now().Unix()), Audience: o.nodeID, TemplateDigest: "sha256:check",
+		UID: fmt.Sprintf("check-%d", time.Now().Unix()), Audience: o.nodeID, TemplateDigest: "sha256:check", Tenant: o.tenant,
 		FiberMax: 2, WBudgetBytes: 32 << 20, LeaseExpiry: time.Now().Add(time.Hour),
 		Policy: core.Policy{Isolation: iso},
 	}

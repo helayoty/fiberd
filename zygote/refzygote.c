@@ -46,6 +46,9 @@
  *                      path succeeds (undone at once), else the errno's
  *                      name (proves whether a fiber may lift a read-only
  *                      bind it was given)
+ *   rdonly <path>   -> "ro" or "rw", what statvfs says of the mount that
+ *                      holds path, else the errno's name (proves which
+ *                      host controls sit under a read-only mount)
  *
  * A handoff fiber (FIBERD_HANDOFF_FD set) serves the same protocol inside
  * TLS 1.3 on the connections the agent passes it through fz_accept(),
@@ -64,7 +67,9 @@
  * misuse the readiness pipe at fd 3 the way a buggy workload would. 1
  * writes a stray byte on it before reporting, 2 closes it and never
  * reports, and 3 calls fz_report, which must fail in a fiber. The zygote
- * must refuse such a fiber and go on serving.
+ * must refuse such a fiber and go on serving. "exit_after_ready" has the
+ * fiber end with exit 0 right after reporting ready, for the zygote's
+ * CLONED then EXITED.
  *
  * --http makes every fiber serve HTTP/1.1 on its endpoint instead of the
  * line protocol, for consumers that route web traffic to fibers (an
@@ -114,6 +119,7 @@
 #include <sys/random.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <sys/un.h>
 #include <unistd.h>
 #include <sched.h>
@@ -262,16 +268,28 @@ static const char *cur_endpoint; /* this fiber's endpoint, for the fence file */
 static const char *cur_fence;
 
 /* The fence this incarnation lives under: the one the agent published
- * beside the unix endpoint after a resume (the fence in memory is the
- * birth fence, stale then), else fallback, the fence in memory. A fiber
- * behind the agent's tcp relay serves a unix socket too and reads the
- * file beside it. A gVisor incarnation has no fence file: its fence
- * comes from the restore-time spec and is current already. */
+ * after a resume (the fence in memory is the birth fence, stale then),
+ * else fallback, the fence in memory. The file sits beside the unix
+ * endpoint; a fiber behind the agent's tcp relay serves a unix socket
+ * too and reads the file beside it. One that binds tcp itself, or takes
+ * handed-off connections, has no socket, and finds the file in its
+ * working directory (its grant's run directory) under the name of its
+ * birth fence, <epoch>-<seq>.fence, the one fence it knows. A gVisor
+ * incarnation has no fence file: its fence comes from the restore-time
+ * spec and is current already. */
 static const char *live_fence(char *buf, size_t n, const char *fallback) {
     const char *ep = cur_endpoint ? cur_endpoint : "";
     if (strncmp(ep, "unix://", 7) == 0) ep += 7;
+    char path[300] = "";
     if (ep[0] == '/') {
-        char path[300]; snprintf(path, sizeof path, "%s.fence", ep);
+        snprintf(path, sizeof path, "%s.fence", ep);
+    } else if (cur_fence) {
+        /* <grant>/<epoch>/<seq> -> <epoch>-<seq>.fence */
+        const char *e = strchr(cur_fence, '/');
+        const char *s = e ? strchr(e + 1, '/') : NULL;
+        if (e && s) snprintf(path, sizeof path, "%.*s-%s.fence", (int)(s - e - 1), e + 1, s + 1);
+    }
+    if (path[0]) {
         FILE *f = fopen(path, "r");
         if (f) {
             if (fgets(buf, (int)n, f)) { buf[strcspn(buf, "\r\n")] = 0; fclose(f); if (buf[0]) return buf; }
@@ -404,6 +422,14 @@ static void remount_errno(const char *path, char *out, size_t n) {
         return;
     }
     errname(errno, out, n);
+}
+
+/* rdonly_errno writes "ro" or "rw" for the mount holding path, as
+ * statvfs reports its flags, else the errno's name. */
+static void rdonly_errno(const char *path, char *out, size_t n) {
+    struct statvfs sv;
+    if (statvfs(path, &sv) < 0) { errname(errno, out, n); return; }
+    snprintf(out, n, "%s\n", (sv.f_flag & ST_RDONLY) ? "ro" : "rw");
 }
 
 /* mkdir_errno writes what mkdir(path) answers, removing a directory it
@@ -668,6 +694,7 @@ static int serve_client(conn_t *c, const char *fence, unsigned long *counter) {
         else if (strncmp(line, "mount ", 6) == 0) mount_errno(line + 6, out, sizeof out);
         else if (strncmp(line, "mkdir ", 6) == 0) mkdir_errno(line + 6, out, sizeof out);
         else if (strncmp(line, "remount ", 8) == 0) remount_errno(line + 8, out, sizeof out);
+        else if (strncmp(line, "rdonly ", 7) == 0) rdonly_errno(line + 7, out, sizeof out);
         else if (strncmp(line, "reserve ", 8) == 0) { char rp[128]; snprintf(out, sizeof out, "%s\n", device_reserve(strtoull(line + 8, NULL, 10), rp, sizeof rp)); }
         else if (strcmp(line, "devfree") == 0) { char rp[128]; snprintf(out, sizeof out, "%s\n", device_reserve(0, rp, sizeof rp)); }
         else snprintf(out, sizeof out, "err unknown command\n");
@@ -796,6 +823,8 @@ static int on_fiber(const fz_fiber_t *f) {
     default: break;
     }
     fz_fiber_ready();
+    /* "exit_after_ready" is a fiber that ran and ended at once. */
+    if (payload_num(f->payload, f->payload_len, "\"exit_after_ready\"")) return 0;
 
     /* Birth payload: grow the working set as instructed. Over the grant's
      * w_budget this is where the kernel kills us. */

@@ -328,14 +328,23 @@ func TestFileRegistryDelete(t *testing.T) {
 		del         string
 		kept, gone  []string // tags that must and must not resolve afterwards
 		contentGone bool     // the pushed digest no longer resolves
+		// again deletes del a second time, as a second home claiming
+		// the same session would, and wantAgain is what that reports.
+		again       bool
+		wantRemoved bool // the first delete took the target
+		wantAgain   bool
 	}{
 		{name: "deleting the only tag drops the tag and its content", typ: ArtifactTypeDelta,
 			ann:  map[string]string{AnnotationSession: "S", AnnotationWBytes: "5"},
-			tags: []string{"s-1234"}, del: "s-1234", gone: []string{"s-1234"}, contentGone: true},
+			tags: []string{"s-1234"}, del: "s-1234", gone: []string{"s-1234"}, contentGone: true, wantRemoved: true},
 		{name: "deleting one of two tags keeps the content the other points at", typ: ArtifactTypeParent,
-			tags: []string{"one", "two"}, del: "one", kept: []string{"two"}, gone: []string{"one"}},
-		{name: "deleting a missing tag is fine", typ: ArtifactTypeDelta,
+			tags: []string{"one", "two"}, del: "one", kept: []string{"two"}, gone: []string{"one"}, wantRemoved: true},
+		{name: "deleting a missing tag is fine, and took nothing", typ: ArtifactTypeDelta,
 			del: "missing", gone: []string{"missing"}},
+		{name: "the second delete of one tag reports that it lost", typ: ArtifactTypeDelta,
+			tags: []string{"s-1234"}, del: "s-1234", gone: []string{"s-1234"}, contentGone: true, wantRemoved: true, again: true},
+		{name: "the second delete of one digest reports that it lost", typ: ArtifactTypeDelta,
+			tags: []string{"s-1234"}, del: "@", gone: []string{"s-1234"}, contentGone: true, wantRemoved: true, again: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -352,8 +361,17 @@ func TestFileRegistryDelete(t *testing.T) {
 				}
 				digest = d
 			}
-			if err := Delete(ctx, repo+":"+tc.del, false); err != nil {
-				t.Fatalf("delete: %v", err)
+			target := repo + ":" + tc.del
+			if tc.del == "@" {
+				target = repo + "@" + digest
+			}
+			if removed, err := Delete(ctx, target, false); err != nil || removed != tc.wantRemoved {
+				t.Fatalf("delete = %v %v, want removed %v", removed, err, tc.wantRemoved)
+			}
+			if tc.again {
+				if removed, err := Delete(ctx, target, false); err != nil || removed != tc.wantAgain {
+					t.Fatalf("second delete = %v %v, want removed %v", removed, err, tc.wantAgain)
+				}
 			}
 			for _, tag := range tc.kept {
 				if _, found, _ := Resolve(ctx, repo+":"+tag, false); !found {
@@ -562,7 +580,7 @@ func TestFileRegistryFaults(t *testing.T) {
 			case "pull":
 				_, err = PullDir(ctx, ref, filepath.Join(root, "dst", "out"), false)
 			case "delete":
-				err = Delete(ctx, ref, false)
+				_, err = Delete(ctx, ref, false)
 			}
 			if c.ok != (err == nil) || found != c.found {
 				t.Fatalf("%s %s = found %v, %v; want ok %v, found %v", c.op, ref, found, err, c.ok, c.found)

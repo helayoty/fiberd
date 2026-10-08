@@ -34,7 +34,7 @@ sequenceDiagram
 - A token over 8 KiB is refused before parsing.
 - Only EdDSA and ES256 are accepted, before any key lookup, so `none` and symmetric algorithms never reach verification. The token has exactly one signature and a `kid`, and its algorithm must match the key's.
 - The registered claims (`iss`, `aud`, `jti`, `exp`) must agree with the grant claim inside the token.
-- The UID must be a DNS-1123 label ([grant fields](../protocol.md#grant-fields)).
+- The UID must be a DNS-1123 label, and the tenant, when set, one path segment ([grant fields](../protocol.md#grant-fields)).
 - The audience must be this home and the issuer the configured one.
 - With `-max-lease`, a grant signed for longer (`exp` minus `iat`), or with no lease, is refused.
 

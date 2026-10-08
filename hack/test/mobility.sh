@@ -48,7 +48,7 @@ trap 'kill $PIDS 2>/dev/null; wait $PIDS 2>/dev/null || true' EXIT
 start_home home-a 18484 18485
 start_home home-b 18486 18487
 
-mint() { bin/grant-issuer mint -key "$STATE/issuer-key.json" -issuer "$ISSUER_URL" -aud "$1" -template "$DIGEST" -max 4 -w-budget 64Mi -min-tier FIBER_CHECKPOINT -isolation TRUSTED -ttl 1h; }
+mint() { bin/grant-issuer mint -key "$STATE/issuer-key.json" -issuer "$ISSUER_URL" -aud "$1" -tenant acme -template "$DIGEST" -max 4 -w-budget 64Mi -min-tier FIBER_CHECKPOINT -isolation TRUSTED -ttl 1h; }
 TA=$(mint home-a); TB=$(mint home-b)
 j() { python3 -c 'import json,sys;print(json.dumps(sys.argv[1]))' "$1" 2>/dev/null || printf '"%s"' "$1"; }
 clone() { curl -s -X POST "http://127.0.0.1:$1/v1/clone" -d "{\"grantJwt\":$(j "$2"),\"session\":\"S\"}"; }

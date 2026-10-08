@@ -121,13 +121,19 @@ type Grant struct {
 	Issuer         string // OIDC issuer URL; also what Miss.issuer reports
 	Audience       string // the home that may exercise this grant
 	TemplateDigest string // OCI digest of the zygote artifact or image
-	FiberMax       int    // <= 0 means unlimited (ceiling is the cgroup only)
-	FiberWarm      int
-	WBudgetBytes   uint64 // per-fiber dirtied working set ceiling; 0 = unlimited
-	MinTier        Tier
-	LeaseExpiry    time.Time // zero = no expiry
-	Policy         Policy
-	DeviceBudget   DeviceBudget
+	// Tenant is who the grant belongs to at the issuer (a Kubernetes
+	// namespace, a Slurm account). It is the first half of the session
+	// domain: a parked session is filed under it, so another tenant's
+	// grant on the same template never finds it. Empty means the grant
+	// runs anonymous fibers only.
+	Tenant       string
+	FiberMax     int // <= 0 means unlimited (ceiling is the cgroup only)
+	FiberWarm    int
+	WBudgetBytes uint64 // per-fiber dirtied working set ceiling; 0 = unlimited
+	MinTier      Tier
+	LeaseExpiry  time.Time // zero = no expiry
+	Policy       Policy
+	DeviceBudget DeviceBudget
 	// CallerThumbprint is the x5t#S256 of the one client certificate the
 	// grant may be presented over.
 	CallerThumbprint string

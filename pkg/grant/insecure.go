@@ -25,5 +25,8 @@ func (InsecureJSONVerifier) Verify(_ context.Context, token []byte) (core.Grant,
 	if err := checkUID(g.UID); err != nil {
 		return core.Grant{}, err
 	}
+	if err := checkTenant(g.Tenant); err != nil {
+		return core.Grant{}, err
+	}
 	return g, nil
 }

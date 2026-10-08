@@ -587,8 +587,14 @@ type CapacityGrant struct {
 	// Target environment id: the home that may exercise this grant.
 	Audience string `protobuf:"bytes,3,opt,name=audience,proto3" json:"audience,omitempty"`
 	// OCI digest of the zygote artifact, or of the template image.
-	TemplateDigest string       `protobuf:"bytes,4,opt,name=template_digest,json=templateDigest,proto3" json:"template_digest,omitempty"`
-	Fibers         *FiberLimits `protobuf:"bytes,5,opt,name=fibers,proto3" json:"fibers,omitempty"`
+	TemplateDigest string `protobuf:"bytes,4,opt,name=template_digest,json=templateDigest,proto3" json:"template_digest,omitempty"`
+	// The issuer's tenant the grant belongs to (a Kubernetes namespace, a
+	// Slurm account). A named session is filed under its tenant when it is
+	// parked, so another tenant's grant on the same template never finds
+	// it. A grant without a tenant runs anonymous fibers only: a named
+	// Clone or Park under it fails with FailedPrecondition.
+	Tenant string       `protobuf:"bytes,11,opt,name=tenant,proto3" json:"tenant,omitempty"`
+	Fibers *FiberLimits `protobuf:"bytes,5,opt,name=fibers,proto3" json:"fibers,omitempty"`
 	// Maximum dirtied working set per fiber, in bytes. Enforced as the
 	// fiber's cgroup memory.max; also the mobility budget for deltas.
 	WBudgetBytes uint64                 `protobuf:"varint,6,opt,name=w_budget_bytes,json=wBudgetBytes,proto3" json:"w_budget_bytes,omitempty"`
@@ -655,6 +661,13 @@ func (x *CapacityGrant) GetAudience() string {
 func (x *CapacityGrant) GetTemplateDigest() string {
 	if x != nil {
 		return x.TemplateDigest
+	}
+	return ""
+}
+
+func (x *CapacityGrant) GetTenant() string {
+	if x != nil {
+		return x.Tenant
 	}
 	return ""
 }
@@ -1204,12 +1217,13 @@ const file_grant_v1_grant_proto_rawDesc = "" +
 	"\x04warm\x18\x02 \x01(\rR\x04warm\":\n" +
 	"\fDeviceBudget\x12\x14\n" +
 	"\x05bytes\x18\x01 \x01(\x04R\x05bytes\x12\x14\n" +
-	"\x05class\x18\x02 \x01(\tR\x05class\"\xcb\x03\n" +
+	"\x05class\x18\x02 \x01(\tR\x05class\"\xe3\x03\n" +
 	"\rCapacityGrant\x12\x1b\n" +
 	"\tgrant_uid\x18\x01 \x01(\tR\bgrantUid\x12\x16\n" +
 	"\x06issuer\x18\x02 \x01(\tR\x06issuer\x12\x1a\n" +
 	"\baudience\x18\x03 \x01(\tR\baudience\x12'\n" +
-	"\x0ftemplate_digest\x18\x04 \x01(\tR\x0etemplateDigest\x124\n" +
+	"\x0ftemplate_digest\x18\x04 \x01(\tR\x0etemplateDigest\x12\x16\n" +
+	"\x06tenant\x18\v \x01(\tR\x06tenant\x124\n" +
 	"\x06fibers\x18\x05 \x01(\v2\x1c.fiberd.grant.v1.FiberLimitsR\x06fibers\x12$\n" +
 	"\x0ew_budget_bytes\x18\x06 \x01(\x04R\fwBudgetBytes\x120\n" +
 	"\bmin_tier\x18\a \x01(\x0e2\x15.fiberd.grant.v1.TierR\aminTier\x12=\n" +

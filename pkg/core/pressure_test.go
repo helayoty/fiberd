@@ -46,7 +46,7 @@ type recorder struct {
 // fibers released. It yields when pressure persists with nothing left and
 // clears once pressure drops. The steps run in order.
 func TestPressureLadder(t *testing.T) {
-	g := core.Grant{UID: "g1", Audience: "node-a", FiberMax: 10,
+	g := core.Grant{UID: "g1", Tenant: "acme", Audience: "node-a", FiberMax: 10,
 		Policy: core.Policy{PSISomeAvg10Shed: 10, PSISomeAvg10Park: 25}}
 	a := newAgent(t, "up", core.TierCheckpoint, g)
 	src := &fakePressure{}
@@ -194,7 +194,7 @@ func TestPressureReclaimVictim(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			g := core.Grant{UID: "g1", Audience: "node-a", FiberMax: 10}
+			g := core.Grant{UID: "g1", Tenant: "acme", Audience: "node-a", FiberMax: 10}
 			a := newAgent(t, "up", tc.tier, g)
 			src := &fakePressure{}
 			var parked, released, yielded []string
@@ -405,7 +405,7 @@ func TestPressureWatermarks(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			l := core.NewLedger(1)
-			l.AdmitGrant(core.Grant{UID: "g1", Policy: tc.policy})
+			l.AdmitGrant(core.Grant{UID: "g1", Tenant: "acme", Policy: tc.policy})
 			src := &fakePressure{}
 			src.set("g1", tc.psi)
 			ctl := &core.PressureController{Ledger: l, Source: src}

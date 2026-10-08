@@ -107,6 +107,29 @@ func TestHideFailureRefusesClone(t *testing.T) {
 			wantErr: []string{"could not prepare the mount namespace", "HIDE: too many paths"},
 		},
 		{
+			name: "a long uncoverable path is still named in the reason",
+			hide: func(t *testing.T, dir string) ([]string, string) {
+				// Five directories of 200 characters, then a file, so the
+				// ERROR naming the path passes the 1024 bytes the old
+				// zygote's send buffer held. It dropped the line, and the
+				// agent saw a bare EOF instead of the reason.
+				long := dir
+				for i := 0; i < 5; i++ {
+					long = filepath.Join(long, strings.Repeat("d", 200))
+				}
+				if err := os.MkdirAll(long, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				file := filepath.Join(long, "a-file")
+				if err := os.WriteFile(file, []byte("visible\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				secretDir, secret := secretUnder(t, dir)
+				return []string{file, secretDir}, secret
+			},
+			wantErr: []string{"the zygote could not cover a HIDE path", strings.Repeat("d", 200) + "/a-file: Not a directory"},
+		},
+		{
 			name: "every path covered, the fiber runs",
 			hide: func(t *testing.T, dir string) ([]string, string) {
 				secretDir, secret := secretUnder(t, dir)

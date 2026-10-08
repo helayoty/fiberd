@@ -31,10 +31,11 @@ type remoteRecord struct {
 //	<DeltaRegistry>/<domain>:p-<parent sha>      a zygote checkpoint a
 //	                                             delta depends on
 //
-// The domain is the grant's session domain (session_class, else the
-// template digest): two homes hold different grants, but a session's
-// state is a delta over one template's pages, so that is what they
-// share.
+// The domain is the grant's session domain, its tenant and then its
+// session_class, else the template digest: two homes hold different
+// grants, but a session's state is a delta over one template's pages,
+// and the tenant keeps one tenant's sessions out of another's reach on
+// the same template.
 //
 // A home publishes after every park of a named session and records the
 // digest it pushed beside the delta. Another home finds the session by
@@ -44,7 +45,15 @@ type remoteRecord struct {
 // next Clone(S) that its recorded digest is no longer at the tag and
 // forgets its stale copy.
 
-func (r *Runtime) domainRepo(g core.Grant) string { return domainRepoFor(r.cfg.DeltaRegistry, g) }
+// domainRepo is the repository g's sessions live in and the domain they
+// are sealed and signed for.
+func (r *Runtime) domainRepo(g core.Grant) (repo, domain string, err error) {
+	domain, err = g.SessionDomain()
+	if err != nil {
+		return "", "", fmt.Errorf("host: %w", err)
+	}
+	return domainRepoFor(r.cfg.DeltaRegistry, domain), domain, nil
+}
 
 // PublishDelta implements core.DeltaPublisher.
 func (r *Runtime) PublishDelta(ctx context.Context, deltaRef string, g core.Grant, session string) (string, error) {
@@ -56,7 +65,10 @@ func (r *Runtime) PublishDelta(ctx context.Context, deltaRef string, g core.Gran
 		return "", err
 	}
 	grantUID := g.UID
-	repo := r.domainRepo(g)
+	repo, _, err := r.domainRepo(g)
+	if err != nil {
+		return "", err
+	}
 	if m.Delta && m.Parent != "" {
 		if err := r.publishParent(ctx, repo, m.Parent); err != nil {
 			return "", fmt.Errorf("host: publish parent: %w", err)
@@ -71,7 +83,14 @@ func (r *Runtime) PublishDelta(ctx context.Context, deltaRef string, g core.Gran
 		artifact.AnnotationGrant:  grantUID,
 	}
 	r.host.Annotate(ann) // what a claiming home must be able to restore
-	digest, err := pushDelta(ctx, r.cfg, deltaRef, ref, ann, r.cfg.sealContext(g, session, m.Fence, time.Now()))
+	if _, local := r.cfg.Command(m.Template); local {
+		delete(ann, artifact.AnnotationTemplates) // a -template executable is not in the cache
+	}
+	sc, err := r.cfg.sealContext(g, session, m.Fence, time.Now())
+	if err != nil {
+		return "", err
+	}
+	digest, err := pushDelta(ctx, r.cfg, deltaRef, ref, ann, sc)
 	if err != nil {
 		return "", err
 	}
@@ -109,7 +128,11 @@ func (r *Runtime) FindDelta(ctx context.Context, g core.Grant, session string) (
 	if r.cfg.checkDeltaRegistry() != nil {
 		return core.RemoteDelta{}, false, nil
 	}
-	ref := r.domainRepo(g) + ":" + sessionTag(session)
+	repo, domain, err := r.domainRepo(g)
+	if err != nil {
+		return core.RemoteDelta{}, false, err
+	}
+	ref := repo + ":" + sessionTag(session)
 	loc, found, err := artifact.Resolve(ctx, ref, r.cfg.RegistryPlainHTTP)
 	if err != nil || !found {
 		return core.RemoteDelta{}, false, err
@@ -122,7 +145,7 @@ func (r *Runtime) FindDelta(ctx context.Context, g core.Grant, session string) (
 	if err := r.cfg.DeltaKeys.Verify(loc); err != nil {
 		return core.RemoteDelta{}, true, &core.RemoteMiss{Err: fmt.Errorf("host: refusing %s/%s: %w", g.UID, session, err)}
 	}
-	if err := checkSigned(loc.Annotations, g.SessionDomain(), session, time.Now()); err != nil {
+	if err := checkSigned(loc.Annotations, domain, session, time.Now()); err != nil {
 		return core.RemoteDelta{}, true, &core.RemoteMiss{Err: fmt.Errorf("host: refusing %s/%s: %w", g.UID, session, err)}
 	}
 	w, _ := strconv.ParseUint(loc.Annotations[artifact.AnnotationWBytes], 10, 64)
@@ -130,6 +153,9 @@ func (r *Runtime) FindDelta(ctx context.Context, g core.Grant, session string) (
 	// The parity gate for a session made elsewhere: found, but not ours
 	// to take unless its pages can restore here.
 	if made, ok := artifact.PlatformFromAnnotations(loc.Annotations); ok {
+		if made.Templates != r.host.Templates && templateAt(made.Templates, g.TemplateDigest) {
+			made.Templates = "" // a home on the same machine opens it where it is
+		}
 		if err := r.cfg.Parity.Check(r.host, made); err != nil {
 			return rd, true, &core.RemoteMiss{
 				Err:           fmt.Errorf("%w: %s/%s parked on %s (%s): %w", core.ErrIncompatible, g.UID, session, rd.Home, made, err),
@@ -140,20 +166,34 @@ func (r *Runtime) FindDelta(ctx context.Context, g core.Grant, session string) (
 	return rd, true, nil
 }
 
+// templateAt reports whether the executable of template digest is in the
+// template cache dir on this machine, where a proc restore reopens it.
+func templateAt(dir, digest string) bool {
+	hex, ok := sha256Hex(digest)
+	if !ok || dir == "" {
+		return false
+	}
+	_, err := os.Stat(artifact.ZygotePath(filepath.Join(dir, hex)))
+	return err == nil
+}
+
 // ClaimDelta implements core.DeltaFinder: pull by the digest that was
 // found, open it for this session, fetch the parent if this home lacks
 // it, then delete the tag so no other home can claim the same state.
 // Content addressing makes what is pulled what FindDelta verified.
 func (r *Runtime) ClaimDelta(ctx context.Context, g core.Grant, session string, rd core.RemoteDelta) (string, error) {
 	grantUID := g.UID
-	repo := r.domainRepo(g)
+	repo, domain, err := r.domainRepo(g)
+	if err != nil {
+		return "", err
+	}
 	ref := repo + ":" + sessionTag(session)
 	dst := filepath.Join(r.cfg.DeltaDir, grantUID, fmt.Sprintf("claimed-%s-%d", sessionTag(session), time.Now().UnixNano()))
 	if _, err := artifact.PullDir(ctx, repo+"@"+rd.Handle, dst, r.cfg.RegistryPlainHTTP); err != nil {
 		_ = os.RemoveAll(dst)
 		return "", err
 	}
-	if _, err := artifact.OpenDir(dst, r.cfg.DeltaKeys.Seal, g.SessionDomain(), session, time.Now()); err != nil {
+	if _, err := artifact.OpenDir(dst, r.cfg.DeltaKeys.Seal, domain, session, time.Now()); err != nil {
 		_ = os.RemoveAll(dst)
 		return "", fmt.Errorf("host: claim %s/%s: %w", grantUID, session, err)
 	}
@@ -171,7 +211,9 @@ func (r *Runtime) ClaimDelta(ctx context.Context, g core.Grant, session string, 
 			}
 		}
 	}
-	// The claim: the tag must still point at what we pulled.
+	// The claim: the tag must still point at what we pulled, and its
+	// delete must be ours. Two homes that both passed the check race on
+	// the delete, and the registry hands the tag to exactly one.
 	loc, found, err := artifact.Resolve(ctx, ref, r.cfg.RegistryPlainHTTP)
 	if err != nil {
 		_ = os.RemoveAll(dst)
@@ -181,21 +223,32 @@ func (r *Runtime) ClaimDelta(ctx context.Context, g core.Grant, session string, 
 		_ = os.RemoveAll(dst)
 		return "", errors.New("host: session was claimed or re-parked elsewhere meanwhile")
 	}
-	if err := artifact.Delete(ctx, ref, r.cfg.RegistryPlainHTTP); err != nil {
+	removed, err := artifact.Delete(ctx, ref, r.cfg.RegistryPlainHTTP)
+	if err != nil {
 		_ = os.RemoveAll(dst)
 		return "", fmt.Errorf("host: claim %s: %w", ref, err)
+	}
+	if !removed {
+		_ = os.RemoveAll(dst)
+		return "", errors.New("host: session was claimed by another home meanwhile")
 	}
 	log.Printf("host: claimed %s/%s from %s (%d bytes) -> %s", grantUID, session, rd.Home, rd.WBytes, dst)
 	return dst, nil
 }
 
-// DiscardDelta implements core.DeltaDiscarder. It removes a claimed copy
-// that nothing will resume, because the session was already here. Only a
-// path inside this home's delta store is touched.
+// DiscardDelta implements core.DeltaDiscarder. It removes a delta nothing
+// will resume here: a claimed copy of a session that was already here, or
+// a parked session another home claimed. Only a path inside this home's
+// delta store is touched. A tcp port the parked fiber kept for its resume
+// goes back with the delta.
 func (r *Runtime) DiscardDelta(_ context.Context, ref string) error {
 	rel, err := filepath.Rel(r.cfg.DeltaDir, ref)
 	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, "../") {
 		return fmt.Errorf("host: %s is not a delta of this home", ref)
+	}
+	var m manifest
+	if err := readJSON(filepath.Join(ref, "manifest.json"), &m); err == nil && m.Fence != "" {
+		r.freePorts(m.Fence)
 	}
 	return os.RemoveAll(ref)
 }
@@ -207,19 +260,30 @@ func (r *Runtime) pullParent(ctx context.Context, repo, sha string) error {
 		return fmt.Errorf("parent hash %q is not a sha256", sha)
 	}
 	dst := filepath.Join(r.parentsDir(), sha)
-	tmp := dst + ".pull"
-	_ = os.RemoveAll(tmp)
-	loc, found, err := artifact.Resolve(ctx, repo+":"+parentTag(sha), r.cfg.RegistryPlainHTTP)
+	if err := os.MkdirAll(r.parentsDir(), 0o755); err != nil {
+		return err
+	}
+	// A directory of this pull's own: concurrent claims of deltas over
+	// one parent each pull it, and the first rename into place wins.
+	tmp, err := os.MkdirTemp(r.parentsDir(), "."+sha[:12]+".pull-")
 	if err != nil {
 		return err
 	}
+	loc, found, err := artifact.Resolve(ctx, repo+":"+parentTag(sha), r.cfg.RegistryPlainHTTP)
+	if err != nil {
+		_ = os.RemoveAll(tmp)
+		return err
+	}
 	if !found {
+		_ = os.RemoveAll(tmp)
 		return fmt.Errorf("parent %s is not published", sha[:12])
 	}
 	if loc.ArtifactType != artifact.ArtifactTypeParent {
+		_ = os.RemoveAll(tmp)
 		return fmt.Errorf("parent %s is %q, not a parent checkpoint", sha[:12], loc.ArtifactType)
 	}
 	if err := r.cfg.DeltaKeys.Verify(loc); err != nil {
+		_ = os.RemoveAll(tmp)
 		return fmt.Errorf("parent %s: %w", sha[:12], err)
 	}
 	if _, err := artifact.PullDir(ctx, repo+"@"+loc.Digest, tmp, r.cfg.RegistryPlainHTTP); err != nil {
@@ -242,9 +306,19 @@ func (r *Runtime) pullParent(ctx context.Context, repo, sha string) error {
 		_ = os.RemoveAll(tmp)
 		return fmt.Errorf("pulled parent hashes to %s, want %s", got[:12], sha[:12])
 	}
+	// A link an earlier warm left to an artifact's images since removed
+	// would make the rename fail forever; it is a dangling store entry.
+	if st, err := os.Lstat(dst); err == nil && st.Mode()&os.ModeSymlink != 0 {
+		if _, err := os.Stat(dst); err != nil {
+			_ = os.Remove(dst)
+		}
+	}
 	if err := os.Rename(tmp, dst); err != nil {
 		_ = os.RemoveAll(tmp)
-		return err
+		if _, again := os.Stat(dst); again != nil {
+			return err
+		}
+		// Another claim filed the same parent meanwhile.
 	}
 	log.Printf("host: pulled parent checkpoint %s", sha[:12])
 	return nil
@@ -283,7 +357,7 @@ func (r *Runtime) RetireDelta(ctx context.Context, deltaRef string) error {
 		return err
 	}
 	if found && loc.Digest == rec.Digest {
-		if err := artifact.Delete(ctx, rec.Ref, r.cfg.RegistryPlainHTTP); err != nil {
+		if _, err := artifact.Delete(ctx, rec.Ref, r.cfg.RegistryPlainHTTP); err != nil {
 			return fmt.Errorf("host: retire %s: %w", rec.Ref, err)
 		}
 		log.Printf("host: retired %s@%s", rec.Ref, rec.Digest[:19])

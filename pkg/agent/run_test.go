@@ -202,7 +202,7 @@ func jsonGrant(t *testing.T, g core.Grant) string {
 }
 
 func testGrant(uid string) core.Grant {
-	return core.Grant{UID: uid, Audience: nodeID, FiberMax: 2, MinTier: core.TierBasic,
+	return core.Grant{UID: uid, Audience: nodeID, Tenant: "acme", FiberMax: 2, MinTier: core.TierBasic,
 		LeaseExpiry: time.Now().Add(10 * time.Minute)}
 }
 

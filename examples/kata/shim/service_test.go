@@ -233,7 +233,7 @@ func TestPodContainersAreFibers(t *testing.T) {
 	h := newHome(t)
 	s, pub, sd := newService(t, h.dial)
 	ctx := context.Background()
-	g := jsonGrant(t, core.Grant{UID: "g1", Audience: "node-a", FiberMax: 2})
+	g := jsonGrant(t, core.Grant{UID: "g1", Audience: "node-a", Tenant: "acme", FiberMax: 2})
 	app := func(extra map[string]string) map[string]string {
 		an := map[string]string{
 			criType: "container", criSandboxID: "sb1",
@@ -385,7 +385,7 @@ func TestCreateMisses(t *testing.T) {
 		return nil, fmt.Errorf("dial %s: %w", addr, errdefs.ErrUnavailable)
 	})
 	ctx := context.Background()
-	g := jsonGrant(t, core.Grant{UID: "g2", Audience: "node-a", FiberMax: 1})
+	g := jsonGrant(t, core.Grant{UID: "g2", Audience: "node-a", Tenant: "acme", FiberMax: 1})
 	withGrant := map[string]string{criType: "container", fshim.AnnotGrant: g}
 	onFake := map[string]string{criType: "container", fshim.AnnotGrant: "grant-jwt", fshim.AnnotHome: fake.addr}
 	unreachable := map[string]string{criType: "container", fshim.AnnotGrant: g, fshim.AnnotHome: "10.0.0.1:1"}

@@ -281,6 +281,8 @@ var isolating = map[string]bool{"gvisor": true, "hyperlight": true}
 
 // grantOf is the protocol grant a CapacityGrant describes, addressed to
 // its Pod (whose node id is its name) and valid for one lease from now.
+// Its tenant is the CapacityGrant's namespace, so a parked session is
+// never found by a grant from another namespace on the same template.
 func grantOf(cg *CapacityGrant, lease time.Duration, now time.Time) (core.Grant, error) {
 	w, err := ParseBytes(cg.Spec.WBudget)
 	if err != nil {
@@ -310,7 +312,7 @@ func grantOf(cg *CapacityGrant, lease time.Duration, now time.Time) (core.Grant,
 		return core.Grant{}, fmt.Errorf("spec.durability %q", cg.Spec.Durability)
 	}
 	g := core.Grant{
-		UID: cg.Metadata.UID, Audience: PodName(cg), TemplateDigest: cg.Spec.Template,
+		UID: cg.Metadata.UID, Audience: PodName(cg), TemplateDigest: cg.Spec.Template, Tenant: cg.Metadata.Namespace,
 		FiberMax: cg.Spec.Fibers.Max, FiberWarm: cg.Spec.Fibers.Warm, WBudgetBytes: w, MinTier: tier,
 		LeaseExpiry: now.Add(lease).Truncate(time.Second),
 		Policy:      core.Policy{Durability: d, SessionClass: cg.Spec.SessionClass, Isolation: iso},

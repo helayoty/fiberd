@@ -16,7 +16,8 @@ import (
 // splices every accepted connection to the fiber's socket under the run
 // directory. Bytes are copied, never read, so TLS end to end keeps the
 // agent blind. It dials the one path the host minted for the fence and
-// nothing a caller sends can change that.
+// nothing a caller sends can change that. The socket is reached by its
+// inode, so a link the fiber plants at that name leads nowhere.
 //
 //	caller --tcp--> relay (agent) --unix--> <run-dir>/<grant>/<epoch>-<seq>.sock
 //
@@ -146,11 +147,11 @@ func (r *relay) give() {
 }
 
 // splice copies c to the fiber's socket and back until both directions
-// are done, then closes both.
+// are done, then closes both. The socket is reached by its inode, not by
+// a name the fiber could point elsewhere (dialFiberSocket).
 func (r *relay) splice(c net.Conn) {
 	defer r.untrack(c)
-	d := net.Dialer{Timeout: relayDialTimeout}
-	u, err := d.Dial("unix", r.sock)
+	u, err := dialFiberSocket(r.sock, relayDialTimeout)
 	if err != nil {
 		r.refused.Add(1)
 		log.Printf("host: relay %s: %v", r.sock, err)

@@ -59,7 +59,7 @@ func (j *jsonGrants) Grant(_ context.Context, tmpl Template, memory uint64) (str
 		if memory == 0 {
 			memory = 32 << 20
 		}
-		g = core.Grant{UID: "g-" + tmpl.Name, Audience: "worker-1", TemplateDigest: tmpl.Digest(), FiberMax: j.fiberMax, FiberWarm: 1,
+		g = core.Grant{UID: "g-" + tmpl.Name, Audience: "worker-1", Tenant: "substrate", TemplateDigest: tmpl.Digest(), FiberMax: j.fiberMax, FiberWarm: 1,
 			WBudgetBytes: memory, MinTier: core.TierCheckpoint, LeaseExpiry: time.Now().Add(time.Hour)}
 		j.minted[tmpl.Digest()] = g
 	}

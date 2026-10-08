@@ -35,13 +35,14 @@ Verification does not reject a token merely because `exp` is in the past. Lease 
 - `issuer` identifies the authority that signed the grant.
 - `audience` names the home allowed to exercise the grant.
 - `template_digest` fixes the pre-admitted OCI template or artifact.
+- `tenant` names who the grant belongs to at the issuer, such as a Kubernetes namespace or a Slurm account. It is one path segment of letters, digits, `.`, `_` and `-`, at most 253 characters, starting with a letter or digit. A grant with any other value is refused as unauthenticated. A named [session](glossary.md#session) is filed under its tenant ([artifact.md](design/artifact.md)), so a grant without a tenant runs anonymous fibers only. A named `Clone` or `Park` under it fails with `FailedPrecondition`.
 - `fibers.max` limits concurrent running fibers for the grant. Zero means no protocol-level count limit, while the enclosing resource boundary still applies.
 - `fibers.warm` is carried through conversion but is not consumed by the runtime. It does not reserve or pre-create a [warm](glossary.md#warm) fiber pool.
 - `w_budget_bytes` is the per-fiber [W](glossary.md#w-working-set) ceiling. Zero means unlimited at this layer. Enforcement is described in [resources.md](resources.md).
 - `min_tier` is the lowest [tier](glossary.md#tier) the grant accepts. From lowest to highest the tiers are `FIBER_BASIC`, `FIBER_WARM`, `FIBER_CHECKPOINT`, `FIBER_SNAPSHOT` and `FIBER_FABRIC`. `FIBER_FABRIC` is reserved, and no home offers it. A home's tier comes from its [backend](design/backends.md).
 - `lease_expiry` is the time after which the home stops holding the grant.
 - `policy.durability` selects best-effort or synchronous audit handling.
-- `policy.session_class` is the grant's [session class](glossary.md#session-class), the domain its deltas are published and sealed under ([artifact.md](design/artifact.md)). `policy.audit_class` is carried as a label.
+- `policy.session_class` is the grant's [session class](glossary.md#session-class), which names, within the tenant, the domain its deltas are published and sealed under ([artifact.md](design/artifact.md)). `policy.audit_class` is carried as a label.
 - `policy.psi_some_avg10_shed` and `policy.psi_some_avg10_park` override the pressure watermarks when non-zero.
 - `policy.isolation` is `UNTRUSTED` or `TRUSTED`, and unset means `UNTRUSTED`. An untrusted grant is admitted only by a home whose runtime isolates tenants from the host kernel (gVisor or Hyperlight). Any other home refuses it with `FailedPrecondition`.
 - `policy.endpoint_mode` is the [endpoint mode](glossary.md#endpoint-mode), `DIRECT` or `HANDOFF`, and unset means `DIRECT`. A `DIRECT` fiber listens on its own endpoint. A `HANDOFF` fiber is reached over TLS through the home's [handoff](glossary.md#handoff) listener. A `HANDOFF` grant must be bound to a caller certificate, and an unbound one is refused with `Unauthenticated`. A home that does not hand off connections refuses the grant with `FailedPrecondition` at admission, like a tier gap.

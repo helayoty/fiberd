@@ -15,7 +15,7 @@ make compare-phase4    # a KVM host: everything, plus Firecracker and fiberd Hyp
 make compare-down      # delete the compare cluster and its registry
 ```
 
-Results are JSON lines under `bin/compare-state/<phase>/`, and `go run ./cmd/summarize bin/compare-state/*/*.jsonl` prints the tables. The phases use a kind cluster named `compare` with its own registry at `localhost:5002`, and touch no other cluster. Phase 1 writes the digests of the templates it pushed to `bin/compare-state/templates.env`. Phase 4 needs a host with `/dev/kvm`. `run/kvm-host.sh` sets one up, or use the manual `bench-compare` GitHub workflow.
+Results are JSON lines under `bin/compare-state/<phase>/`, and `go run ./cmd/summarize bin/compare-state/*/*.jsonl` prints the tables. The phases use a kind cluster named `compare` with its own registry at `localhost:5002`, and touch no other cluster. Phase 1 writes the digests of the templates it pushed to `bin/compare-state/templates.env`. Phase 4 needs a host with `/dev/kvm`. `run/kvm-host.sh` sets up an x86_64 one, or use the manual `bench-compare` GitHub workflow.
 
 ## Layout
 

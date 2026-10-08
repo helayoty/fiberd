@@ -15,8 +15,10 @@ import (
 // fiberd-slurm and a fake curl that answers /healthz with a fixed code.
 // A 503, which a poisoned audit spool answers, makes the script stop the
 // agent and start it again in the same allocation. A 200, or a socket
-// that does not answer (000), leaves the agent running. SIGTERM then ends
-// the script cleanly, and only once the agent has drained.
+// that does not answer (000), leaves the agent running. An agent that
+// crashes is started again. One that exits 0 by itself left because its
+// job ended, so the script ends with it. SIGTERM otherwise ends the
+// script cleanly, and only once the agent has drained.
 func TestJobRestartsUnhealthyAgent(t *testing.T) {
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skip("no bash")
@@ -33,11 +35,19 @@ func TestJobRestartsUnhealthyAgent(t *testing.T) {
 		// write a marker when done. The script must not exit before that,
 		// or slurmstepd kills the drain.
 		drains bool
+		// exit makes the fake agent exit with this code at once. A
+		// "term" agent exits 0 on SIGTERM, as fiberd-slurm does.
+		exit string
+		// ends means the script exits by itself, with no SIGTERM.
+		ends bool
 	}{
 		{name: "a healthy agent keeps running", code: "200"},
 		{name: "an agent not answering yet is left alone", code: "000"},
 		{name: "a 503 restarts the agent", code: "503", restarts: true},
+		{name: "a 503 restarts an agent that exits 0 on SIGTERM", code: "503", exit: "term", restarts: true},
 		{name: "SIGTERM waits for the agent to drain", code: "200", drains: true},
+		{name: "a crashing agent is restarted", code: "200", exit: "1", restarts: true},
+		{name: "an agent whose job ended is not restarted", code: "200", exit: "0", ends: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -51,6 +61,13 @@ func TestJobRestartsUnhealthyAgent(t *testing.T) {
 				// the script exits, not when the agent does.
 				agent = "exec >/dev/null 2>&1\necho start >> " + starts +
 					"\ntrap 'kill $s; sleep 0.5; echo done > " + drained + "; exit 0' TERM\nsleep 30 & s=$!\nwait $s\n"
+			}
+			switch tc.exit {
+			case "":
+			case "term":
+				agent = "echo start >> " + starts + "\ntrap 'kill $s; exit 0' TERM\nsleep 30 & s=$!\nwait $s\n"
+			default:
+				agent = "echo start >> " + starts + "\nexit " + tc.exit + "\n"
 			}
 			if err := os.Mkdir(bin, 0o755); err != nil {
 				t.Fatal(err)
@@ -72,6 +89,8 @@ func TestJobRestartsUnhealthyAgent(t *testing.T) {
 			if err := cmd.Start(); err != nil {
 				t.Fatal(err)
 			}
+			done := make(chan error, 1)
+			go func() { done <- cmd.Wait() }()
 			count := func() int {
 				b, _ := os.ReadFile(starts)
 				return strings.Count(string(b), "start")
@@ -88,11 +107,11 @@ func TestJobRestartsUnhealthyAgent(t *testing.T) {
 					t.Fatalf("agent started %d times, want 1\n%s", n, out.String())
 				}
 			}
-			if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
-				t.Fatal(err)
+			if !tc.ends {
+				if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+					t.Fatal(err)
+				}
 			}
-			done := make(chan error, 1)
-			go func() { done <- cmd.Wait() }()
 			select {
 			case err := <-done:
 				if err != nil {
@@ -100,13 +119,13 @@ func TestJobRestartsUnhealthyAgent(t *testing.T) {
 				}
 			case <-time.After(15 * time.Second):
 				_ = cmd.Process.Kill()
-				t.Fatalf("script kept running after SIGTERM\n%s", out.String())
+				t.Fatalf("script kept running, SIGTERM sent = %v\n%s", !tc.ends, out.String())
 			}
 			if _, err := os.Stat(drained); tc.drains && err != nil {
 				t.Fatalf("script exited before the agent drained: %v\n%s", err, out.String())
 			}
-			if tc.restarts != strings.Contains(out.String(), "/healthz is 503") {
-				t.Fatalf("restart log = %v, want %v\n%s", !tc.restarts, tc.restarts, out.String())
+			if health := tc.code == "503"; health != strings.Contains(out.String(), "/healthz is 503") {
+				t.Fatalf("restart log = %v, want %v\n%s", !health, health, out.String())
 			}
 		})
 	}

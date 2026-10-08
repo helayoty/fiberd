@@ -30,6 +30,10 @@ type Platform struct {
 	// "gvisor", ...). Empty for a template artifact (any backend that
 	// reads the format may warm it) and for facts recorded before it.
 	Backend string `json:"backend,omitempty"`
+	// Templates is the template cache path, for a backend whose restore
+	// reopens a cached template executable by that path (proc). Empty
+	// for any other, and for a session whose template is not cached.
+	Templates string `json:"templates,omitempty"`
 }
 
 // Host is the platform this process runs on.
@@ -45,10 +49,11 @@ func (c Config) Platform() Platform {
 
 // Annotations for platform facts on delta and parent manifests.
 const (
-	AnnotationArch    = "io.fiberd.arch"
-	AnnotationKernel  = "io.fiberd.kernel"
-	AnnotationLibc    = "io.fiberd.libc"
-	AnnotationBackend = "io.fiberd.backend"
+	AnnotationArch      = "io.fiberd.arch"
+	AnnotationKernel    = "io.fiberd.kernel"
+	AnnotationLibc      = "io.fiberd.libc"
+	AnnotationBackend   = "io.fiberd.backend"
+	AnnotationTemplates = "io.fiberd.templates"
 )
 
 // Annotate adds the platform to a manifest annotation map.
@@ -59,19 +64,25 @@ func (p Platform) Annotate(m map[string]string) {
 	if p.Backend != "" {
 		m[AnnotationBackend] = p.Backend
 	}
+	if p.Templates != "" {
+		m[AnnotationTemplates] = p.Templates
+	}
 }
 
 // PlatformFromAnnotations reads a platform back; ok is false when the
 // manifest carries none (a publisher from before the parity gate).
 func PlatformFromAnnotations(m map[string]string) (Platform, bool) {
-	p := Platform{Arch: m[AnnotationArch], Kernel: m[AnnotationKernel], Libc: m[AnnotationLibc], Backend: m[AnnotationBackend]}
-	return p, p.Arch != "" || p.Kernel != "" || p.Libc != "" || p.Backend != ""
+	p := Platform{Arch: m[AnnotationArch], Kernel: m[AnnotationKernel], Libc: m[AnnotationLibc], Backend: m[AnnotationBackend], Templates: m[AnnotationTemplates]}
+	return p, p != Platform{}
 }
 
 func (p Platform) String() string {
 	s := fmt.Sprintf("%s/%s/%s", p.Arch, p.Kernel, p.Libc)
 	if p.Backend != "" {
 		s += "/" + p.Backend
+	}
+	if p.Templates != "" {
+		s += " templates=" + p.Templates
 	}
 	return s
 }
@@ -98,9 +109,10 @@ const (
 )
 
 // Parity says how strictly a home requires a checkpoint's platform to
-// match its own. The architecture and the backend are always required to
-// match; there is no level at which a foreign instruction set or another
-// mechanism's image format can restore. The zero value is strict: exact
+// match its own. The architecture, the backend and the template cache path
+// are always required to match; there is no level at which a foreign
+// instruction set, another mechanism's image format or a missing template
+// executable can restore. The zero value is strict: exact
 // kernel release and exact libc.
 type Parity struct {
 	Kernel string // ParityExact (default), ParitySeries or ParityOff
@@ -167,6 +179,9 @@ func (p Parity) Check(host, want Platform) error {
 	}
 	if want.Backend != "" && host.Backend != "" && want.Backend != host.Backend {
 		return fmt.Errorf("%w: made by backend %s, this home runs %s", ErrParity, want.Backend, host.Backend)
+	}
+	if want.Templates != "" && host.Templates != "" && want.Templates != host.Templates {
+		return fmt.Errorf("%w: restore reopens the template under %s, this home caches templates under %s", ErrParity, want.Templates, host.Templates)
 	}
 	switch p.Kernel {
 	case ParityOff:

@@ -35,7 +35,7 @@ func TestGateway(t *testing.T) {
 	for _, h := range []*harness{ckpt, warm} {
 		gws[h] = (&rpc.Gateway{Server: h.server, Health: rpc.HealthFunc(func() uint64 { return 7 }, h.health, core.TierCheckpoint, nil)}).Handler()
 	}
-	g1 := jsonGrant(t, core.Grant{UID: "g1", Audience: "node-a", FiberMax: 2})
+	g1 := jsonGrant(t, core.Grant{UID: "g1", Audience: "node-a", Tenant: "acme", FiberMax: 2})
 	full := jsonGrant(t, core.Grant{UID: "g2", Audience: "node-a", FiberMax: 1})
 	high := jsonGrant(t, core.Grant{UID: "g3", Audience: "node-a", MinTier: core.TierCheckpoint})
 	cloneBody := func(grantJWT, extra string) string {

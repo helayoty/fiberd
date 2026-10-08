@@ -436,3 +436,46 @@ func TestRelayClose(t *testing.T) {
 		})
 	}
 }
+
+// TestReleaseKeepsPortUntilExit checks that a release, discarding or
+// not, gives a running fiber's port back only once the fiber has ended
+// and its relay closed, so a clone meanwhile cannot be handed a port the
+// relay still binds.
+func TestReleaseKeepsPortUntilExit(t *testing.T) {
+	g := core.Grant{UID: "g1", TemplateDigest: "sha256:tmpl", FiberMax: 4, WBudgetBytes: 64 * mib}
+	cases := []struct {
+		name    string
+		discard bool
+	}{
+		{name: "a discarding release", discard: true},
+		{name: "a release"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sb := relayBackend(core.TierSnapshot)
+			f := newParkFixture(t, sb, g, func(c *Config) { c.Endpoints = tcpPolicy })
+			// The fiber ignores the kill for a while.
+			sb.mu.Lock()
+			sb.noExit = true
+			sb.mu.Unlock()
+			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+			defer cancel()
+			if err := f.r.Release(ctx, f.h.ID, tc.discard); !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("Release = %v, want the wait for the exit to time out", err)
+			}
+			f.r.mu.Lock()
+			holder := f.r.ports[40000]
+			f.r.mu.Unlock()
+			if holder != f.h.ID {
+				t.Fatalf("port 40000 held by %q while the fiber's relay still binds it, want %s", holder, f.h.ID)
+			}
+			if got := mustSay(t, f.h.Endpoint, "ping"); got != "g1/1/1:ping" {
+				t.Fatalf("ping = %q", got)
+			}
+			// Its end frees the port with the relay.
+			sb.die(f.h.ID, "signal:SIGKILL")
+			waitFor(t, "the port to be freed", func() bool { return heldPorts(f.r) == 0 })
+			refusesDial(t, f.h.Endpoint)
+		})
+	}
+}

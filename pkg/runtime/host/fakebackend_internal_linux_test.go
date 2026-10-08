@@ -79,6 +79,9 @@ type fakeBackend struct {
 	// noExit makes Kill and an async Park end nothing, so no exit is ever
 	// reported for the fiber.
 	noExit bool
+	// parkGate, when set, holds every Park after it has begun until the
+	// channel is closed, so a test can end the fiber under the dump.
+	parkGate chan struct{}
 	// endpointFile makes Clone leave a file at the unix endpoint path, as
 	// the bound socket of a real fiber would.
 	endpointFile bool
@@ -203,6 +206,12 @@ func (b *fakeBackend) Park(_ context.Context, fiberID string, spec backend.ParkS
 	f := b.fibers[fiberID]
 	if f == nil || !f.alive {
 		return fmt.Errorf("fake: no running fiber %q", fiberID)
+	}
+	if gate := b.parkGate; gate != nil {
+		// The dump takes a while, and the fiber may die meanwhile (die).
+		b.mu.Unlock()
+		<-gate
+		b.mu.Lock()
 	}
 	if b.parkErr != nil {
 		// A failed dump still leaves its log behind.

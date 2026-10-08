@@ -62,7 +62,7 @@ func TestRemoveDenialLapse(t *testing.T) {
 				token = now.Add(tc.token)
 			}
 			if tc.held {
-				a.Ledger.AdmitGrant(core.Grant{UID: "g1", Audience: "node-a", LeaseExpiry: lease})
+				a.Ledger.AdmitGrant(core.Grant{UID: "g1", Tenant: "acme", Audience: "node-a", LeaseExpiry: lease})
 			}
 			a.Remove(context.Background(), "g1")
 			if got := r.Denied("g1", token, now.Add(tc.at)); got != tc.want {

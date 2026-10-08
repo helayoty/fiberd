@@ -337,3 +337,118 @@ func truncate(s string) string {
 func isReset(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "reset")
 }
+
+// listenAt listens on a unix socket at path and answers every connection
+// with "LEAK", so a caller spliced there by mistake can tell.
+func listenAt(t *testing.T, path string) net.Listener {
+	t.Helper()
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			_, _ = c.Write([]byte("LEAK"))
+			_ = c.Close()
+		}
+	}()
+	t.Cleanup(func() { _ = ln.Close() })
+	return ln
+}
+
+// TestRelayRefusesPlantedNames checks that the relay reaches what is a
+// socket at the fiber's name and never follows a link planted there. The
+// fiber writes its grant's run directory, so a link at its own socket's
+// name could point the relay at another grant's socket, the agent's, or
+// any socket the agent can reach. A caller is closed instead.
+func TestRelayRefusesPlantedNames(t *testing.T) {
+	cases := []struct {
+		name string
+		// plant puts something at the socket name.
+		plant func(t *testing.T, dir, name string)
+		// served is whether a caller reaches a fiber: the echo at the name.
+		served bool
+	}{
+		{name: "a link to another socket in the directory", plant: func(t *testing.T, dir, name string) {
+			listenAt(t, filepath.Join(dir, "victim.sock"))
+			if err := os.Symlink("victim.sock", filepath.Join(dir, name)); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "a link to a socket outside the directory", plant: func(t *testing.T, dir, name string) {
+			other, err := os.MkdirTemp("", "relay")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.RemoveAll(other) })
+			listenAt(t, filepath.Join(other, "admin.sock"))
+			if err := os.Symlink(filepath.Join(other, "admin.sock"), filepath.Join(dir, name)); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "a regular file", plant: func(t *testing.T, dir, name string) {
+			if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "a directory", plant: func(t *testing.T, dir, name string) {
+			if err := os.Mkdir(filepath.Join(dir, name), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "nothing at all", plant: func(*testing.T, string, string) {}},
+		{name: "the fiber's own socket", plant: func(t *testing.T, dir, name string) {
+			ln, err := net.Listen("unix", filepath.Join(dir, name))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = ln.Close() })
+			go func() {
+				for {
+					c, err := ln.Accept()
+					if err != nil {
+						return
+					}
+					go echo(c)
+				}
+			}()
+		}, served: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, err := os.MkdirTemp("", "relay")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.RemoveAll(dir) })
+			tc.plant(t, dir, "1-7.sock")
+			r, err := listenRelay("tcp4", "127.0.0.1:0", filepath.Join(dir, "1-7.sock"), 0, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(r.Close)
+			c := dialRelay(t, r)
+			if _, err := c.Write([]byte("hello")); err != nil {
+				t.Fatal(err)
+			}
+			buf := make([]byte, 16)
+			n, rerr := c.Read(buf)
+			if tc.served {
+				if rerr != nil || string(buf[:n]) != "hello" {
+					t.Fatalf("read %q %v through the relay, want the echo", buf[:n], rerr)
+				}
+				return
+			}
+			if n != 0 || rerr == nil {
+				t.Fatalf("the caller read %q (%v); want it closed with nothing", buf[:n], rerr)
+			}
+			if r.refused.Load() != 1 {
+				t.Fatalf("refused = %d, want 1", r.refused.Load())
+			}
+		})
+	}
+}

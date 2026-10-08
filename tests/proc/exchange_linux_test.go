@@ -66,7 +66,7 @@ func httpAgent(t *testing.T, home, registry string) (*core.Agent, host.Config, c
 		}
 		_ = os.RemoveAll(cfg.RunDir)
 	})
-	g := core.Grant{UID: "x-" + home, Audience: home, TemplateDigest: "sha256:ref", FiberMax: 4, WBudgetBytes: 32 << 20, LeaseExpiry: time.Now().Add(time.Hour),
+	g := core.Grant{UID: "x-" + home, Audience: home, Tenant: "acme", TemplateDigest: "sha256:ref", FiberMax: 4, WBudgetBytes: 32 << 20, LeaseExpiry: time.Now().Add(time.Hour),
 		Policy: core.Policy{Isolation: core.Trusted}}
 	a := &core.Agent{NodeID: home, Ledger: core.NewLedger(1), Budget: core.NewBudget(1000, 1<<20),
 		Runtime: rt, Verify: tokenVerifier{"g": g},
@@ -188,9 +188,22 @@ func TestSessionExportImport(t *testing.T) {
 		t.Fatalf("count on B = %d %q, want 3", st, body)
 	}
 	// The same shipped files imported under a third name: another
-	// session from the same state (a template's golden state, many actors).
+	// session from the same state (a template's golden state, many
+	// actors). Its restored listener binds the socket name S2's fiber
+	// serves on, the name the park minted, so it cannot come up beside
+	// S2 on this home and is refused rather than spliced onto S2's
+	// socket. Once S2 is parked, it resumes.
 	if err := host.ImportDelta(ctx, cfgB, gB, "S3", out); err != nil {
 		t.Fatalf("second import: %v", err)
+	}
+	if _, _, err := b.Clone(ctx, core.CloneRequest{GrantJWT: []byte("g"), Session: "S3", Deadline: 5 * time.Second}); err == nil || !strings.Contains(err.Error(), "is held by") {
+		t.Fatalf("B clone S3 beside S2 = %v, want a refusal naming S2's fiber", err)
+	}
+	if st, body := httpTo(t, r2.Endpoint, "GET", "/count"); st != 200 || body != "3" {
+		t.Fatalf("count on B after the refused S3 = %d %q, want S2 still served", st, body)
+	}
+	if _, code, err := b.Park(ctx, r2.FiberID, true); err != nil || code != core.OK {
+		t.Fatalf("B park S2: %v %d", err, code)
 	}
 	r4, code, err := b.Clone(ctx, core.CloneRequest{GrantJWT: []byte("g"), Session: "S3", Deadline: 5 * time.Second})
 	if err != nil || code != core.OK || r4.Kind != core.ActResume {
@@ -199,6 +212,5 @@ func TestSessionExportImport(t *testing.T) {
 	if st, body := httpTo(t, r4.Endpoint, "GET", "/count"); st != 200 || body != "3" {
 		t.Fatalf("count of S3 on B = %d %q, want 3", st, body)
 	}
-	_, _ = b.Release(ctx, r2.FiberID, true)
 	_, _ = b.Release(ctx, r4.FiberID, true)
 }

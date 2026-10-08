@@ -48,6 +48,9 @@ type Config struct {
 	// CgroupRoot, when set, is used as the delegated subtree as it is;
 	// empty means the Pod's own cgroup, delegated.
 	CgroupRoot string
+	// Tenant is what the grants' named sessions (the actors) are filed
+	// under. Default "substrate".
+	Tenant string
 	// Grant sizing.
 	Lease         time.Duration  // default 24h
 	FiberMax      int            // default 4
@@ -96,6 +99,9 @@ func New(cfg Config) (*Home, error) {
 	}
 	if cfg.FiberMax <= 0 {
 		cfg.FiberMax = 4
+	}
+	if cfg.Tenant == "" {
+		cfg.Tenant = "substrate"
 	}
 	if cfg.DefaultBudget == 0 {
 		cfg.DefaultBudget = 64 << 20
@@ -180,7 +186,7 @@ func (h *Home) Grant(_ context.Context, tmpl herder.Template, memoryBytes uint64
 		budget = h.cfg.DefaultBudget
 	}
 	g := core.Grant{
-		UID: GrantUID(tmpl), Audience: h.cfg.Audience, TemplateDigest: tmpl.Digest(),
+		UID: GrantUID(tmpl), Audience: h.cfg.Audience, TemplateDigest: tmpl.Digest(), Tenant: h.cfg.Tenant,
 		FiberMax: h.cfg.FiberMax, FiberWarm: 1, WBudgetBytes: budget, MinTier: h.cfg.MinTier,
 		LeaseExpiry: now.Add(h.cfg.Lease),
 		Policy:      core.Policy{Isolation: h.cfg.Isolation},

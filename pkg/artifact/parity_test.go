@@ -12,6 +12,8 @@ func TestParityCheck(t *testing.T) {
 	host := artifact.Platform{Arch: "arm64", Kernel: "6.10.14-linuxkit", Libc: "(gnu libc) 2.36"}
 	proc := host
 	proc.Backend = "proc"
+	procCache := proc
+	procCache.Templates = "/var/lib/fiberd/templates"
 	off := artifact.Parity{Kernel: artifact.ParityOff, Libc: artifact.ParityOff}
 	cases := []struct {
 		name   string
@@ -43,6 +45,12 @@ func TestParityCheck(t *testing.T) {
 			want: artifact.Platform{Arch: "arm64", Backend: "proc"}, ok: true},
 		{name: "backend never relaxes", parity: off, local: proc,
 			want: artifact.Platform{Arch: "arm64", Backend: "gvisor"}},
+		{name: "same template cache path passes", parity: artifact.Strict, local: procCache,
+			want: artifact.Platform{Arch: "arm64", Backend: "proc", Templates: "/var/lib/fiberd/templates"}, ok: true},
+		{name: "template cache path unknown on either side passes", parity: artifact.Strict, local: proc,
+			want: artifact.Platform{Arch: "arm64", Backend: "proc", Templates: "/srv/fiberd/templates"}, ok: true},
+		{name: "template cache path never relaxes", parity: off, local: procCache,
+			want: artifact.Platform{Arch: "arm64", Backend: "proc", Templates: "/srv/fiberd/templates"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -123,6 +131,7 @@ func TestPlatformAnnotationsRoundTrip(t *testing.T) {
 	}
 	explicit := artifact.Platform{Arch: "amd64", Kernel: "6.8.0", Libc: "(gnu libc) 2.39"}
 	gvisor := artifact.Platform{Arch: "amd64", Backend: "gvisor"}
+	runc := artifact.Platform{Arch: "amd64", Backend: "runc", Templates: "/var/lib/fiberd/templates"}
 	cases := []struct {
 		name string
 		m    map[string]string
@@ -132,6 +141,7 @@ func TestPlatformAnnotationsRoundTrip(t *testing.T) {
 		{name: "an annotated platform reads back", m: annotated(explicit), want: explicit, ok: true},
 		{name: "the detected host platform reads back", m: annotated(artifact.Host()), want: artifact.Host(), ok: true},
 		{name: "a backend reads back", m: annotated(gvisor), want: gvisor, ok: true},
+		{name: "a template cache path reads back", m: annotated(runc), want: runc, ok: true},
 		{name: "a backend alone is a platform", m: map[string]string{artifact.AnnotationBackend: "proc"},
 			want: artifact.Platform{Backend: "proc"}, ok: true},
 		{name: "empty annotations report no platform", m: map[string]string{}},
@@ -159,6 +169,8 @@ func TestStrings(t *testing.T) {
 			want: "arm64/6.10.14/(gnu libc) 2.36"},
 		{name: "a platform with its backend", got: artifact.Platform{Arch: "arm64", Kernel: "6.10.14", Libc: "musl", Backend: "gvisor"},
 			want: "arm64/6.10.14/musl/gvisor"},
+		{name: "a platform with its template cache path", got: artifact.Platform{Arch: "arm64", Kernel: "6.10.14", Libc: "glibc", Backend: "proc", Templates: "/var/lib/fiberd/templates"},
+			want: "arm64/6.10.14/glibc/proc templates=/var/lib/fiberd/templates"},
 		{name: "a config's build host, without a backend", got: artifact.Config{Arch: "amd64", Kernel: "6.8.0", Libc: "glibc"}.Platform(),
 			want: "amd64/6.8.0/glibc"},
 		{name: "the zero parity is strict", got: artifact.Parity{}, want: "kernel=exact,libc=exact"},
