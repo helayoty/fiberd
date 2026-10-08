@@ -142,9 +142,10 @@ func ownerOf(cg *CapacityGrant) []kube.OwnerReference {
 }
 
 // securityContext is the agent container's security context. It is
-// privileged when asked, and for runtimes whose needs are not measured.
-// Otherwise it adds only the proc runtime's capabilities and leaves seccomp
-// unconfined, because criu cannot dump from under a filter.
+// privileged when asked, and for every runtime but proc. That is a known
+// gap. caps.Runc measures what runc needs but is not applied here, and
+// gVisor's and Hyperlight's needs are not measured. A proc Pod gets only
+// caps.Proc and no seccomp filter, because criu cannot dump from under one.
 func securityContext(runtime string, privileged *bool) *SecurityContext {
 	if privileged != nil && *privileged || privileged == nil && runtime != "proc" {
 		return &SecurityContext{Privileged: true}
@@ -157,15 +158,20 @@ func securityContext(runtime string, privileged *bool) *SecurityContext {
 		SeccompProfile: &SeccompProfile{Type: "Unconfined"}}
 }
 
+// runtimeOf is the agent's -runtime for ps. It defaults to proc.
+func runtimeOf(ps PodSpec) string {
+	if ps.Runtime == "" {
+		return "proc"
+	}
+	return ps.Runtime
+}
+
 // BuildPod is the Pod spec for a CapacityGrant: fiberd-k8s as PID 1, the
 // projected grant volume, the readiness gate, the cgroup and criu
 // privileges, the block ceiling as the container's limits.
 func BuildPod(cg *CapacityGrant, issuerURL string, lease time.Duration) *Pod {
 	ps := cg.Spec.Pod
-	runtime := ps.Runtime
-	if runtime == "" {
-		runtime = "proc"
-	}
+	runtime := runtimeOf(ps)
 	family := ps.EndpointFamily
 	if family == "" {
 		family = "inet4"

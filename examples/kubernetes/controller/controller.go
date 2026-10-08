@@ -15,6 +15,7 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -145,6 +146,13 @@ func (c *Controller) reconcileOne(ctx context.Context, cg *CapacityGrant) error 
 	if err != nil {
 		return err
 	}
+	// The grant is checked before anything is made. A Pod for a spec that
+	// cannot be minted, or minted but not served, would only sit there.
+	now := c.now()
+	g, err := grantOf(cg, lease, now)
+	if err != nil {
+		return err
+	}
 	// 1. The Pod.
 	var p Pod
 	switch err := c.Client.Get(ctx, c.podPath(cg), &p); {
@@ -162,7 +170,6 @@ func (c *Controller) reconcileOne(ctx context.Context, cg *CapacityGrant) error 
 	// uid is the resource's uid, so a renewal is the same grant with a
 	// longer lease.
 	st := Status{GrantUID: cg.Metadata.UID, PodName: PodName(cg)}
-	now := c.now()
 	renew := true
 	if exp, err := time.Parse(time.RFC3339, cg.Status.ExpiresAt); err == nil && cg.Status.GrantUID == cg.Metadata.UID {
 		renew = exp.Sub(now) < lease/2
@@ -181,10 +188,6 @@ func (c *Controller) reconcileOne(ctx context.Context, cg *CapacityGrant) error 
 		return fmt.Errorf("get secret: %w", err)
 	}
 	if renew {
-		g, err := grantOf(cg, lease, now)
-		if err != nil {
-			return err
-		}
 		tok, err := c.Issuer.Mint(g)
 		if err != nil {
 			return fmt.Errorf("mint: %w", err)
@@ -261,6 +264,11 @@ func leaseOf(cg *CapacityGrant) (time.Duration, error) {
 	return d, nil
 }
 
+// isolating holds the spec.pod.runtime values whose backend implements
+// backend.Isolator. The agent refuses every Clone of an untrusted grant
+// on any other runtime, so such a grant is refused here instead.
+var isolating = map[string]bool{"gvisor": true, "hyperlight": true}
+
 // grantOf is the protocol grant a CapacityGrant describes, addressed to
 // its Pod (whose node id is its name) and valid for one lease from now.
 func grantOf(cg *CapacityGrant, lease time.Duration, now time.Time) (core.Grant, error) {
@@ -277,6 +285,10 @@ func grantOf(cg *CapacityGrant, lease time.Duration, now time.Time) (core.Grant,
 	iso, err := core.ParseIsolation(cg.Spec.Isolation)
 	if err != nil {
 		return core.Grant{}, fmt.Errorf("spec.isolation: %w", err)
+	}
+	if iso.Untrusted() && !isolating[runtimeOf(cg.Spec.Pod)] {
+		return core.Grant{}, errors.New("spec.isolation UNTRUSTED needs an isolating runtime (gvisor or hyperlight); " +
+			"set spec.pod.runtime, or set spec.isolation TRUSTED if the code is trusted")
 	}
 	var d core.Durability
 	switch strings.ToLower(cg.Spec.Durability) {

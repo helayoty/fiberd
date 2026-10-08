@@ -210,8 +210,8 @@ func TestReconcileLifecycle(t *testing.T) {
 				t.Fatalf("renewed grant = %+v", g)
 			}
 		}},
-		// A regression test: the merge patch kept the old Pod's node and
-		// endpoint after the Pod was replaced.
+		// A replaced Pod's node and endpoint must leave the status, which
+		// a merge patch would otherwise keep.
 		{"a replaced Pod clears the old node and endpoint from status", func(t *testing.T) {
 			srv.Delete(podPath)
 			if err := c.Reconcile(ctx); err != nil {
@@ -313,6 +313,22 @@ func TestReconcileRenewal(t *testing.T) {
 	}
 }
 
+// needsIsolation is the status message for an UNTRUSTED grant on a runtime
+// that shares the node's kernel.
+const needsIsolation = "spec.isolation UNTRUSTED needs an isolating runtime (gvisor or hyperlight); " +
+	"set spec.pod.runtime, or set spec.isolation TRUSTED if the code is trusted"
+
+// onRuntime sets spec.pod.runtime, or leaves it to its default when name
+// is empty.
+func onRuntime(spec map[string]any, name string) {
+	pod := spec["pod"].(map[string]any)
+	if name == "" {
+		delete(pod, "runtime")
+		return
+	}
+	pod["runtime"] = name
+}
+
 // TestReconcileMintsTheSpec checks how each optional spec field reaches the
 // minted grant.
 func TestReconcileMintsTheSpec(t *testing.T) {
@@ -327,8 +343,19 @@ func TestReconcileMintsTheSpec(t *testing.T) {
 			func(g core.Grant, now time.Time) bool { return g.LeaseExpiry.Equal(now.Add(90 * time.Second)) }},
 		{"no minimum tier is the basic tier", func(spec map[string]any) { delete(spec, "minTier") },
 			func(g core.Grant, _ time.Time) bool { return g.MinTier == core.TierBasic }},
-		{"no isolation is unspecified, which is untrusted", func(spec map[string]any) { delete(spec, "isolation") },
+		{"no isolation on gvisor is unspecified, which is untrusted",
+			func(spec map[string]any) { delete(spec, "isolation"); onRuntime(spec, "gvisor") },
 			func(g core.Grant, _ time.Time) bool { return g.Policy.Isolation.Untrusted() }},
+		{"UNTRUSTED on gvisor is untrusted",
+			func(spec map[string]any) { spec["isolation"] = "UNTRUSTED"; onRuntime(spec, "gvisor") },
+			func(g core.Grant, _ time.Time) bool { return g.Policy.Isolation == core.Untrusted }},
+		{"UNTRUSTED on hyperlight is untrusted",
+			func(spec map[string]any) { spec["isolation"] = "UNTRUSTED"; onRuntime(spec, "hyperlight") },
+			func(g core.Grant, _ time.Time) bool { return g.Policy.Isolation == core.Untrusted }},
+		{"TRUSTED on proc is trusted", func(spec map[string]any) { spec["isolation"] = "TRUSTED"; onRuntime(spec, "proc") },
+			func(g core.Grant, _ time.Time) bool { return g.Policy.Isolation == core.Trusted }},
+		{"TRUSTED on runc is trusted", func(spec map[string]any) { spec["isolation"] = "TRUSTED"; onRuntime(spec, "runc") },
+			func(g core.Grant, _ time.Time) bool { return g.Policy.Isolation == core.Trusted }},
 		{"no durability is best effort", func(spec map[string]any) { delete(spec, "durability") },
 			func(g core.Grant, _ time.Time) bool { return g.Policy.Durability == core.BestEffort }},
 		{"durability best_effort is best effort", func(spec map[string]any) { spec["durability"] = "Best_Effort" },
@@ -378,6 +405,11 @@ func TestReconcileInvalidSpecLandsInStatus(t *testing.T) {
 		{"an unknown isolation", func(spec map[string]any) { spec["isolation"] = "HOSTILE" }, "spec.isolation"},
 		{"an unknown durability", func(spec map[string]any) { spec["durability"] = "maybe" }, "spec.durability"},
 		{"an unparseable device budget", func(spec map[string]any) { spec["deviceBudget"].(map[string]any)["bytes"] = "huge" }, "spec.deviceBudget.bytes"},
+		{"UNTRUSTED on proc", func(spec map[string]any) { spec["isolation"] = "UNTRUSTED"; onRuntime(spec, "proc") }, needsIsolation},
+		{"UNTRUSTED on runc", func(spec map[string]any) { spec["isolation"] = "UNTRUSTED"; onRuntime(spec, "runc") }, needsIsolation},
+		{"no isolation on proc", func(spec map[string]any) { delete(spec, "isolation"); onRuntime(spec, "proc") }, needsIsolation},
+		{"every default, which is UNTRUSTED on proc",
+			func(spec map[string]any) { delete(spec, "isolation"); onRuntime(spec, "") }, needsIsolation},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -401,8 +433,11 @@ func TestReconcileInvalidSpecLandsInStatus(t *testing.T) {
 			if srv.Get(secretPath) != nil {
 				t.Fatal("a grant was minted from an invalid spec")
 			}
-			// A regression test: the merge patch of a good pass left the
-			// old message in place.
+			if srv.Get(podPath) != nil {
+				t.Fatal("a grant Pod was created from an invalid spec")
+			}
+			// A good pass must clear the old message, which a merge patch
+			// would otherwise keep.
 			srv.Update(cgPath, func(o map[string]any) { o["spec"] = good })
 			if err := c.Reconcile(context.Background()); err != nil {
 				t.Fatal(err)
@@ -422,7 +457,7 @@ func TestReconcileAPIFailures(t *testing.T) {
 		name       string
 		prep       func(srv *kubetest.Server, c *controller.Controller)
 		wantErr    string // what Reconcile returns
-		message    string // in the status; "" means none
+		message    string // in the status, or "" for none
 		wantSecret bool
 		check      func(t *testing.T, srv *kubetest.Server, calls []kubetest.Call) // calls of the pass
 	}{
@@ -463,7 +498,7 @@ func TestReconcileAPIFailures(t *testing.T) {
 		{name: "a status that cannot be written is tried once more, with the error, and the pass goes on",
 			prep: func(srv *kubetest.Server, _ *controller.Controller) {
 				srv.Put("/apis/fiberd.io/v1alpha1/namespaces/tenant-b/capacitygrants/other",
-					map[string]any{"spec": map[string]any{"pod": map[string]any{"image": "i"}}})
+					map[string]any{"spec": map[string]any{"isolation": "TRUSTED", "pod": map[string]any{"image": "i"}}})
 				srv.Fail("PATCH", statusPath, 500, 0)
 			},
 			wantSecret: true,
@@ -524,8 +559,8 @@ func TestReconcileAPIFailures(t *testing.T) {
 	}
 }
 
-// TestRun checks the reconcile loop: a failed pass is logged and retried
-// on the next tick, and Run returns once ctx ends without waiting for one.
+// TestRun checks that a failed pass is logged and retried on the next
+// tick, and that Run returns once ctx ends without waiting for one.
 func TestRun(t *testing.T) {
 	cases := []struct {
 		name     string

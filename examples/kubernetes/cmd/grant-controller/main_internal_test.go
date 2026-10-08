@@ -31,9 +31,9 @@ func getJSON(url string, dst any) error {
 	return json.Unmarshal(b, dst)
 }
 
-// TestRun checks the controller command: where its client, namespace and
-// key come from, the discovery document and JWKS it serves, the reconcile
-// loop it runs, and what stops it from starting.
+// TestRun checks the controller command. It covers where its client,
+// namespace and key come from, the discovery document and JWKS it serves,
+// the reconcile loop it runs, and what stops it from starting.
 func TestRun(t *testing.T) {
 	busy, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -59,8 +59,8 @@ func TestRun(t *testing.T) {
 				srv.Fail("GET", "/api/v1/namespaces/fiberd-system/secrets/grant-issuer-key", 500, 1)
 			},
 			wantErr: "kube: 500"},
-		// A regression test: a listen failure was only logged, and the
-		// controller went on minting grants no Pod could verify.
+		// A listen failure must stop the controller. Otherwise it would
+		// mint grants that no Pod could verify.
 		{name: "an address that cannot be listened on is an error", args: []string{"-addr", busy.Addr().String()},
 			wantErr: "address already in use"},
 		{name: "the defaults: this Pod's namespace, the issuer named after it, the default key Secret",
@@ -74,7 +74,7 @@ func TestRun(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			srv := kubetest.New()
 			t.Cleanup(srv.Close)
-			srv.Put(cgPath, map[string]any{"spec": map[string]any{"pod": map[string]any{"image": "i"}}})
+			srv.Put(cgPath, map[string]any{"spec": map[string]any{"isolation": "TRUSTED", "pod": map[string]any{"image": "i"}}})
 			if tc.prep != nil {
 				tc.prep(srv)
 			}
@@ -142,7 +142,7 @@ func TestRun(t *testing.T) {
 			if err := json.Unmarshal([]byte(decodeData(t, sec)), &stored); err != nil || stored.KeyID != set.Keys[0].KeyID || !set.Keys[0].IsPublic() {
 				t.Fatalf("served kid %s public %v, stored kid %s (%v)", set.Keys[0].KeyID, set.Keys[0].IsPublic(), stored.KeyID, err)
 			}
-			// The reconcile loop runs: the CapacityGrant gets its Pod.
+			// The reconcile loop runs, so the CapacityGrant gets its Pod.
 			for deadline := time.Now().Add(10 * time.Second); srv.Get("/api/v1/namespaces/tenant-a/pods/conform-grant") == nil; time.Sleep(5 * time.Millisecond) {
 				if time.Now().After(deadline) {
 					t.Fatal("the CapacityGrant was never reconciled")
