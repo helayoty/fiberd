@@ -74,6 +74,8 @@ type Container struct {
 	SecurityContext *SecurityContext  `json:"securityContext,omitempty"`
 	VolumeMounts    []VolumeMount     `json:"volumeMounts"`
 	ReadinessProbe  *Probe            `json:"readinessProbe,omitempty"`
+	StartupProbe    *Probe            `json:"startupProbe,omitempty"`
+	LivenessProbe   *Probe            `json:"livenessProbe,omitempty"`
 	Labels          map[string]string `json:"-"`
 }
 
@@ -116,11 +118,25 @@ type VolumeMount struct {
 }
 
 type Probe struct {
-	TCPSocket struct {
-		Port int `json:"port"`
-	} `json:"tcpSocket"`
-	PeriodSeconds int `json:"periodSeconds,omitempty"`
+	Exec             *ExecAction      `json:"exec,omitempty"`
+	TCPSocket        *TCPSocketAction `json:"tcpSocket,omitempty"`
+	PeriodSeconds    int              `json:"periodSeconds,omitempty"`
+	TimeoutSeconds   int              `json:"timeoutSeconds,omitempty"`
+	FailureThreshold int              `json:"failureThreshold,omitempty"`
 }
+
+type ExecAction struct {
+	Command []string `json:"command"`
+}
+
+type TCPSocketAction struct {
+	Port int `json:"port"`
+}
+
+// healthz is the exec probe of the agent's /healthz on its admin socket.
+// It fails on the 503 a poisoned audit spool answers, and on a socket
+// that is not up yet. -state matches the agent's.
+var healthz = []string{"fiberd-k8s", "-state", "/var/lib/fiberd", "-healthz"}
 
 // PodName is the grant Pod's name for a CapacityGrant.
 func PodName(cg *CapacityGrant) string { return cg.Metadata.Name + "-grant" }
@@ -199,15 +215,19 @@ func BuildPod(cg *CapacityGrant, issuerURL string, lease time.Duration) *Pod {
 		args = append(args, "-admin-unsafe")
 	}
 	args = append(args, ps.Args...)
-	// The grant label is set last: Services select a grant's Pod by it, so
+	// The grant label is set last. Services select a grant's Pod by it, so
 	// the spec's labels must not move it.
 	labels := map[string]string{}
 	for k, v := range ps.Labels {
 		labels[k] = v
 	}
 	labels[GrantLabel] = cg.Metadata.Name
-	probe := &Probe{PeriodSeconds: 2}
-	probe.TCPSocket.Port = agentPort
+	// Readiness is the agent's port. Liveness is /healthz, so a poisoned
+	// audit spool restarts the agent, which is what clears it. The startup
+	// probe holds liveness off while the agent waits for its Pod IP.
+	ready := &Probe{TCPSocket: &TCPSocketAction{Port: agentPort}, PeriodSeconds: 2}
+	startup := &Probe{Exec: &ExecAction{Command: healthz}, PeriodSeconds: 2, TimeoutSeconds: 5, FailureThreshold: 60}
+	live := &Probe{Exec: &ExecAction{Command: healthz}, PeriodSeconds: 10, TimeoutSeconds: 5, FailureThreshold: 3}
 	return &Pod{
 		APIVersion: "v1", Kind: "Pod",
 		Metadata: kube.ObjectMeta{Name: PodName(cg), Namespace: cg.Metadata.Namespace, Labels: labels,
@@ -240,7 +260,9 @@ func BuildPod(cg *CapacityGrant, issuerURL string, lease time.Duration) *Pod {
 					{Name: "state", MountPath: "/var/lib/fiberd"},
 					{Name: "run", MountPath: "/run/fiberd"},
 				},
-				ReadinessProbe: probe,
+				ReadinessProbe: ready,
+				StartupProbe:   startup,
+				LivenessProbe:  live,
 			}},
 		},
 	}

@@ -10,9 +10,9 @@ import (
 	"github.com/helayoty/fiberd/examples/kubernetes/kube"
 )
 
-// TestBuildPod checks the grant Pod a CapacityGrant becomes: fiberd-k8s as
-// PID 1 with its flags, the node id from the Pod's name, the projected
-// grant, the readiness gate, the owner and the security context.
+// TestBuildPod checks the grant Pod a CapacityGrant becomes. It pins
+// fiberd-k8s as PID 1 with its flags, the node id from the Pod's name, the
+// projected grant, the readiness gate, the owner and the security context.
 func TestBuildPod(t *testing.T) {
 	yes, no := true, false
 	privileged := &controller.SecurityContext{Privileged: true}
@@ -60,8 +60,8 @@ func TestBuildPod(t *testing.T) {
 			pod:  controller.PodSpec{Devices: []string{"/dev/sim0"}},
 			args: append(base("proc", "inet4"), "-devices", "/dev/sim0"), sa: "fiberd-grant",
 			labels: map[string]string{controller.GrantLabel: "g"}, sc: measured},
-		// A regression test: the spec's labels were applied last and could
-		// move the Pod out of its grant's Services.
+		// The spec's labels must not move the Pod out of its grant's
+		// Services.
 		{name: "the spec cannot relabel the Pod as another grant's",
 			pod:  controller.PodSpec{Labels: map[string]string{controller.GrantLabel: "someone-else"}},
 			args: base("proc", "inet4"), sa: "fiberd-grant", labels: map[string]string{controller.GrantLabel: "g"}, sc: measured},
@@ -116,8 +116,8 @@ func TestBuildPod(t *testing.T) {
 			if !reflect.DeepEqual(c.Args, tc.args) {
 				t.Fatalf("args = %q\nwant %q", c.Args, tc.args)
 			}
-			// -node-id is the Pod's name: Kubernetes expands $(FIBERD_NODE_ID)
-			// in args from this env var.
+			// -node-id is the Pod's name, because Kubernetes expands
+			// $(FIBERD_NODE_ID) in args from this env var.
 			if len(c.Env) != 1 || c.Env[0].Name != "FIBERD_NODE_ID" || c.Env[0].ValueFrom.FieldRef.FieldPath != "metadata.name" {
 				t.Fatalf("env = %+v", c.Env)
 			}
@@ -130,8 +130,15 @@ func TestBuildPod(t *testing.T) {
 				t.Fatalf("mounts = %+v", c.VolumeMounts)
 			}
 			if !reflect.DeepEqual(c.Ports, []controller.ContainerPort{{Name: "grpc", ContainerPort: 8484}}) ||
-				c.ReadinessProbe.TCPSocket.Port != 8484 || c.ReadinessProbe.PeriodSeconds != 2 {
-				t.Fatalf("ports %+v, probe %+v", c.Ports, c.ReadinessProbe)
+				!reflect.DeepEqual(c.ReadinessProbe, &controller.Probe{TCPSocket: &controller.TCPSocketAction{Port: 8484}, PeriodSeconds: 2}) {
+				t.Fatalf("ports %+v, readiness probe %+v", c.Ports, c.ReadinessProbe)
+			}
+			// Liveness is the admin socket's /healthz, which a poisoned
+			// audit spool turns to 503, so the kubelet restarts the agent.
+			healthz := &controller.ExecAction{Command: []string{"fiberd-k8s", "-state", "/var/lib/fiberd", "-healthz"}}
+			if !reflect.DeepEqual(c.LivenessProbe, &controller.Probe{Exec: healthz, PeriodSeconds: 10, TimeoutSeconds: 5, FailureThreshold: 3}) ||
+				!reflect.DeepEqual(c.StartupProbe, &controller.Probe{Exec: healthz, PeriodSeconds: 2, TimeoutSeconds: 5, FailureThreshold: 60}) {
+				t.Fatalf("liveness probe %+v, startup probe %+v", c.LivenessProbe, c.StartupProbe)
 			}
 			if !reflect.DeepEqual(c.SecurityContext, tc.sc) {
 				g, _ := json.Marshal(c.SecurityContext)
