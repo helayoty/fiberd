@@ -387,6 +387,12 @@ func TestWarmRefusals(t *testing.T) {
 		}, wantText: "is a directory"},
 		{name: "command does not exist", argv: []string{"/nonexistent/zygote"}, wantText: "start zygote"},
 		{name: "greets with something other than READY", script: "notready", wantErr: ErrZygote, wantText: `expected READY, got "HELLO"`},
+		// The zygote could not build the mount namespace its fibers copy
+		// and said so instead of READY. The old backend only knew READY
+		// first and the reason after it, so the warm went through and
+		// the home reported a template ready that refused every clone.
+		{name: "could not prepare its mount namespace", script: "unprepared", wantErr: ErrZygote,
+			wantText: "could not prepare the mount namespace its fibers need: the zygote could not cover a HIDE path (/var/lib/fiberd/templates: Permission denied)"},
 		{name: "exits before READY", script: "quit", wantText: "did not become ready"},
 		{name: "never says READY", script: "silent", timeout: 100 * time.Millisecond, wantErr: context.DeadlineExceeded},
 		{name: "a relative hide path", script: "never", hide: []string{"relative/dir"}, wantText: "cannot hide"},

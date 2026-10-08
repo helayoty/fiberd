@@ -29,8 +29,10 @@
 // space. The host queues the grant's TLS identity as the handoff channel's
 // first message. A child that cannot get every confinement it asked for
 // ends before it runs, and the zygote sends ERROR. A zygote that could not
-// prepare its namespace says READY, then ERROR ? with the reason, and
-// answers every mount-namespace CLONE with an ERROR.
+// prepare its namespace sends ERROR ? with the reason instead of READY and
+// ends, and Warm fails with that reason. Every fiber of a plain proc grant
+// asks for a mount namespace, so such a zygote is no warm template and the
+// home must not report the grant ready on it.
 package proc
 
 import (
@@ -729,8 +731,15 @@ func (b *Backend) Warm(ctx context.Context, spec backend.WarmSpec) (backend.Warm
 			ready <- err
 			return
 		}
-		if strings.TrimSpace(line) != "READY" {
-			ready <- fmt.Errorf("%w: expected READY, got %q", ErrZygote, strings.TrimSpace(line))
+		line = strings.TrimSpace(line)
+		if reason, refused := strings.CutPrefix(line, "ERROR ? "); refused {
+			// The zygote could not build the mount namespace its fibers
+			// copy. Every fiber here asks for one, so the warm fails.
+			ready <- fmt.Errorf("%w: the zygote could not prepare the mount namespace its fibers need: %s", ErrZygote, reason)
+			return
+		}
+		if line != "READY" {
+			ready <- fmt.Errorf("%w: expected READY, got %q", ErrZygote, line)
 			return
 		}
 		ready <- nil
@@ -997,9 +1006,11 @@ func (b *Backend) read(z *zygote, rd *bufio.Reader) {
 		case "ERROR":
 			switch {
 			case len(fields) >= 2 && fields[1] == "?":
-				// The zygote refused a setup line or could not prepare
-				// its mount namespace, not a clone. It refuses all of
-				// the grant's mount-namespace clones after that.
+				// Not a clone: a setup line that came after READY, or a
+				// message the zygote does not know. It refuses all of the
+				// grant's mount-namespace clones after a late setup line.
+				// A namespace it could not prepare never gets here, since
+				// that ends the zygote before READY and fails Warm.
 				log.Printf("%s: zygote for %s: %s", b.Name(), z.id, strings.Join(fields[2:], " "))
 			case len(fields) >= 2:
 				z.reply(fields[1], cloneResult{err: fmt.Errorf("%w: %s", ErrZygote, strings.Join(fields[2:], " "))})

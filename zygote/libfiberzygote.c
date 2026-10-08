@@ -62,8 +62,10 @@ static void block_sigchld(void) {
 }
 
 /* Why a HIDE, DROP, RUNDIR or PREPARE line was refused, or NULL. A mntns
- * fiber would run with less hidden than the agent asked for, so every
- * later mntns CLONE is refused instead. */
+ * fiber would run with less hidden than the agent asked for. Set before
+ * READY, it is sent as the ERROR the zygote ends on instead of READY,
+ * and the agent fails the warm. Set after READY (a setup line that came
+ * late), every later mntns CLONE is refused with it instead. */
 static const char *paths_refused;
 
 /* The zygote's own mount namespace. fz_init takes it (own_mountns) when
@@ -609,8 +611,14 @@ static int under(const char *path, const char *dir) {
  * names a mapped file by its path, which must resolve in the fiber's
  * namespace to the file it maps, so a fiber whose executable sat under
  * a plain cover could not be parked. The bind is a mount the agent
- * names on restore, like the run directory's. Allocation-free, for
- * mount_ns. Returns 0 or -1. */
+ * names on restore, like the run directory's.
+ *
+ * The directories are made 0755, like the run directory's cover
+ * (narrow_rundir), never 0555. The zygote runs with the agent's narrow
+ * capability set, which has no CAP_DAC_OVERRIDE, so uid 0 cannot
+ * create anything in a directory without its owner's write bit. What
+ * seals the cover is the read-only remount cover_hide ends with, which
+ * no fiber can undo. Allocation-free, for mount_ns. Returns 0 or -1. */
 static int bind_exe_back(const char *dir, int src) {
     char path[RUNDIR_MAX];
     size_t n = strlen(self_exe);
@@ -618,7 +626,7 @@ static int bind_exe_back(const char *dir, int src) {
     memcpy(path, self_exe, n + 1);
     for (char *p = path + strlen(dir) + 1; (p = strchr(p, '/')) != NULL; p++) {
         *p = 0;
-        if (mkdir(path, 0555) < 0 && errno != EEXIST) return -1;
+        if (mkdir(path, 0755) < 0 && errno != EEXIST) return -1;
         *p = '/';
     }
     int fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0555);
@@ -634,22 +642,27 @@ static int bind_exe_back(const char *dir, int src) {
 
 /* cover_hide covers HIDE path i with an empty read-only tmpfs. Returns 1
  * when it did, 0 when the path does not exist (nothing to hide yet) and
- * -1 when it exists and could not be covered. A path that is not a
- * directory fails, because a file cannot be covered without CRIU binding
- * the original back on restore. A path that holds the zygote's own
- * executable gets the executable bound back inside the cover
- * (bind_exe_back) before the cover is made read-only. Allocation-free,
- * for mount_ns. */
+ * -1 when it exists and could not be covered, with errno set. A path
+ * that is not a directory fails, because a file cannot be covered
+ * without CRIU binding the original back on restore. A path that holds
+ * the zygote's own executable gets the executable bound back inside the
+ * cover (bind_exe_back) before the cover is made read-only. That cover
+ * is mounted 0755, so the zygote can build in it without
+ * CAP_DAC_OVERRIDE (see bind_exe_back), and sealed by the remount.
+ * Allocation-free, for mount_ns. */
 static int cover_hide(int i) {
     struct stat st;
     if (stat(hide_paths[i], &st) < 0) return errno == ENOENT ? 0 : -1;
-    if (!S_ISDIR(st.st_mode)) return -1;
+    if (!S_ISDIR(st.st_mode)) {
+        errno = ENOTDIR;
+        return -1;
+    }
     if (!under(self_exe, hide_paths[i]))
         return mount("tmpfs", hide_paths[i], "tmpfs", MS_RDONLY | MS_NOSUID | MS_NODEV | MS_NOEXEC, "size=4k,mode=0555") < 0 ? -1 : 1;
     int src = open(self_exe, O_PATH | O_CLOEXEC);
     if (src < 0) return -1;
     int rc = 1;
-    if (mount("tmpfs", hide_paths[i], "tmpfs", MS_NOSUID | MS_NODEV | MS_NOEXEC, "size=64k,mode=0555") < 0 ||
+    if (mount("tmpfs", hide_paths[i], "tmpfs", MS_NOSUID | MS_NODEV | MS_NOEXEC, "size=64k,mode=0755") < 0 ||
         bind_exe_back(hide_paths[i], src) < 0 ||
         mount(NULL, hide_paths[i], NULL, MS_REMOUNT | MS_RDONLY | MS_NOSUID | MS_NODEV | MS_NOEXEC, "size=64k") < 0)
         rc = -1;
@@ -707,13 +720,19 @@ static int mount_exit(int failed) {
     return EX_MNT_HIDE;
 }
 
-/* prepare_why is the reason every mntns CLONE is refused after the first
- * of prepare_ns's failed steps, in the order prepare_ns takes them. */
-static const char *prepare_why(int failed) {
+/* prepare_why is the reason the zygote refuses to serve after the first
+ * of prepare_ns's failed steps, in the order prepare_ns takes them. A
+ * HIDE failure names the path and the error, since the cause is in the
+ * agent's environment (a capability it lacks, a mount it cannot make)
+ * and the agent's log is where it is read. */
+static char prepare_reason[RUNDIR_MAX + 96];
+static const char *prepare_why(int failed, int hide_i, int hide_errno) {
     if (failed & F_RO) return "the zygote could not make /sys read-only in its namespace";
     if (failed & F_DROP) return "the zygote could not unmount a DROP path";
     if (failed & F_RUNDIR) return "the zygote could not narrow the run directory";
-    return "the zygote could not cover a HIDE path";
+    snprintf(prepare_reason, sizeof prepare_reason, "the zygote could not cover a HIDE path (%s: %s)",
+             hide_i >= 0 ? hide_paths[hide_i] : "?", strerror(hide_errno));
+    return prepare_reason;
 }
 
 /* prepare_ns fills the zygote's own mount namespace with what every
@@ -733,17 +752,18 @@ static const char *prepare_why(int failed) {
  *
  * Fails closed. Any step refused, or no namespace of the zygote's own
  * to work in (fz_init skipped, a thread before it, unshare refused),
- * sets paths_refused, and every mntns CLONE is answered with an ERROR
- * naming it. A line refused earlier keeps its reason and nothing is
- * mounted, since no mntns fiber will be born either way. Returns 0, or
- * -1 with paths_refused set. */
+ * sets paths_refused, and fz_serve answers the agent with an ERROR
+ * naming it instead of READY, since every fiber of a plain proc grant
+ * asks for a mount namespace and the agent fails the warm. A line
+ * refused earlier keeps its reason and nothing is mounted. Returns 0,
+ * or -1 with paths_refused set. */
 static int prepare_ns(void) {
     if (paths_refused) return -1;
     if (!have_own_ns) {
         paths_refused = own_ns_why[0] ? own_ns_why : "fz_init did not run, so the zygote has no mount namespace of its own";
         return -1;
     }
-    int failed = 0;
+    int failed = 0, hide_i = -1, hide_errno = 0;
     ssize_t n = readlink("/proc/self/exe", self_exe, sizeof self_exe - 1);
     self_exe[n > 0 ? n : 0] = 0;
     if (lock_sys() < 0) failed |= F_RO;
@@ -751,11 +771,15 @@ static int prepare_ns(void) {
     if (rundir_parent[0] && narrow_rundir() < 0) failed |= F_RUNDIR;
     for (int i = 0; i < nhide; i++) {
         int c = cover_hide(i);
+        if (c < 0 && hide_i < 0) {
+            hide_i = i;
+            hide_errno = errno;
+        }
         if (c < 0) failed |= F_HIDE;
         hide_covered[i] = c > 0;
     }
     if (failed) {
-        paths_refused = prepare_why(failed);
+        paths_refused = prepare_why(failed, hide_i, hide_errno);
         return -1;
     }
     ns_prepared = 1;
@@ -789,10 +813,9 @@ static int thread_count(void) {
  * already made the serving thread would be in one namespace and the
  * others in the host's, and CRIU refuses to checkpoint a tree whose
  * threads differ in namespace. A template with a thread before fz_init
- * is refused here, and the reason refuses every mntns CLONE at PREPARE
- * (fail closed, see prepare_ns). So does a kernel or a capability set
- * that refuses the namespace. The zygote then serves fibers without a
- * mount namespace as before, and no fiber runs less confined than the
+ * is refused here, and the reason ends the zygote at PREPARE instead of
+ * READY (fail closed, see prepare_ns). So does a kernel or a capability
+ * set that refuses the namespace. No fiber runs less confined than the
  * agent asked. */
 static void own_mountns(void) {
     if (!getenv("FIBERD_OWN_MNTNS")) {
@@ -1537,13 +1560,19 @@ int fz_serve(int ctl_fd, fz_on_fiber on_fiber) {
         deny_nested_userns = 1;
     }
     /* The setup lines and the namespace they describe come before READY,
-     * so READY means every mntns fiber's namespace is ready to copy. */
+     * so READY means every mntns fiber's namespace is ready to copy. A
+     * zygote that could not build it says so instead of READY and ends.
+     * Every fiber of a plain proc grant asks for a mount namespace, so
+     * a zygote that would refuse them all is no warm template, and the
+     * agent must fail the warm rather than report the grant ready. */
     int setup = read_setup(ctl_fd);
     if (setup <= 0) return setup;
+    if (paths_refused) {
+        sendf(ctl_fd, "ERROR ? %s", paths_refused);
+        errno = ENOTRECOVERABLE;
+        return -1;
+    }
     if (sendf(ctl_fd, "READY") < 0) return -1;
-    /* After READY, which the agent reads first and alone. The agent logs
-     * the line, and every mntns CLONE is answered with the same reason. */
-    if (paths_refused && sendf(ctl_fd, "ERROR ? %s; every mntns CLONE is refused", paths_refused) < 0) return -1;
     g_ctl_fd = ctl_fd; /* from here on other threads may fz_report */
     static char line[MAX_LINE];
     static struct pollfd fds[2 + MAX_PENDING];

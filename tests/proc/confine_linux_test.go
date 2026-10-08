@@ -60,21 +60,24 @@ func cloneDirect(t *testing.T, be *procbackend.Backend, w backend.Warm, dir, fen
 // TestHideFailureRefusesClone pins that a fiber runs only when every HIDE
 // path is covered, so a hidden secret is never left visible. The zygote
 // covers the paths once, in its own mount namespace before READY, so a
-// path that cannot be covered refuses every clone of the grant, as more
-// paths than the zygote holds do. The property is the old one, that no
-// fiber runs with a HIDE path uncovered. The old code found out in each
-// child, which ended with exit 113, and the wording follows the move.
+// path that cannot be covered fails the warm, as more paths than the
+// zygote holds do, and no clone is ever asked of such a zygote. The
+// property is the old one, that no fiber runs with a HIDE path
+// uncovered. The oldest code found out in each child, which ended with
+// exit 113. The code after it had the zygote say READY and refuse every
+// clone, which let a home report ready on a grant that served nothing.
 func TestHideFailureRefusesClone(t *testing.T) {
 	cases := []struct {
 		name string
 		// hide makes the grant's HIDE paths under dir. secret is a file
 		// the fiber must not read when it runs.
 		hide func(t *testing.T, dir string) (hide []string, secret string)
-		// wantErr names what the clone error must say, or nil for success.
+		// wantErr names what the warm's error must say, or nil for
+		// success, when a fiber runs.
 		wantErr []string
 	}{
 		{
-			name: "an uncoverable path refuses the clone",
+			name: "an uncoverable path fails the warm",
 			hide: func(t *testing.T, dir string) ([]string, string) {
 				file := filepath.Join(dir, "a-file")
 				if err := os.WriteFile(file, []byte("visible\n"), 0o600); err != nil {
@@ -83,10 +86,10 @@ func TestHideFailureRefusesClone(t *testing.T) {
 				secretDir, secret := secretUnder(t, dir)
 				return []string{file, secretDir}, secret
 			},
-			wantErr: []string{"refused", "the zygote could not cover a HIDE path"},
+			wantErr: []string{"could not prepare the mount namespace", "the zygote could not cover a HIDE path"},
 		},
 		{
-			name: "a refused HIDE line refuses every clone",
+			name: "a refused HIDE line fails the warm",
 			hide: func(t *testing.T, dir string) ([]string, string) {
 				// The zygote holds 16 paths. The secret is the 17th, whose
 				// HIDE line it refuses.
@@ -101,7 +104,7 @@ func TestHideFailureRefusesClone(t *testing.T) {
 				secretDir, secret := secretUnder(t, dir)
 				return append(hide, secretDir), secret
 			},
-			wantErr: []string{"refused", "HIDE: too many paths"},
+			wantErr: []string{"could not prepare the mount namespace", "HIDE: too many paths"},
 		},
 		{
 			name: "every path covered, the fiber runs",
@@ -115,17 +118,17 @@ func TestHideFailureRefusesClone(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
 			hide, secret := tc.hide(t, dir)
-			be, w := warmDirect(t, dir, hide)
-			_, err := cloneDirect(t, be, w, dir, "gd/1-1", "")
 			if tc.wantErr != nil {
+				_, _, err := tryWarmArgv(t, dir, "gd", []string{zygoteBin, "--heap-mb", "16"}, hide)
 				for _, want := range tc.wantErr {
 					if err == nil || !strings.Contains(err.Error(), want) {
-						t.Fatalf("clone = %v, want it refused with an error mentioning %q", err, want)
+						t.Fatalf("warm = %v, want it to fail with an error mentioning %q", err, want)
 					}
 				}
 				return
 			}
-			if err != nil {
+			be, w := warmDirect(t, dir, hide)
+			if _, err := cloneDirect(t, be, w, dir, "gd/1-1", ""); err != nil {
 				t.Fatalf("clone: %v", err)
 			}
 			ep := filepath.Join(dir, "gd-1-1.sock")

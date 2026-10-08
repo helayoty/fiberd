@@ -39,6 +39,7 @@ import (
 	"github.com/helayoty/fiberd/pkg/grant"
 	"github.com/helayoty/fiberd/pkg/handoff"
 	"github.com/helayoty/fiberd/pkg/runtime/host"
+	"github.com/helayoty/fiberd/pkg/sys/caps"
 	"github.com/helayoty/fiberd/pkg/tlsconf"
 )
 
@@ -113,6 +114,14 @@ func TestZygoteBuildFlags(t *testing.T) {
 }
 
 func TestMain(m *testing.M) {
+	// First, before anything that must not run twice, since Narrow
+	// re-executes the binary (see TestRegistryTemplateNarrowedCaps).
+	if os.Getenv(narrowEnv) != "" {
+		if err := caps.Narrow(caps.Proc); err != nil {
+			fmt.Fprintf(os.Stderr, "skipping proc tests: cannot narrow the capability bounding set: %v\n", err)
+			os.Exit(0)
+		}
+	}
 	if cgRoot == "" {
 		cgRoot = "/sys/fs/cgroup/fiberd"
 	}

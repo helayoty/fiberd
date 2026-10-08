@@ -37,24 +37,27 @@ func earlyThread(t *testing.T) string {
 	return earlyThreadBin
 }
 
-// TestPrepareFailureRefusesEveryClone pins that a zygote which could not
-// prepare the mount namespace its fibers copy still says READY, names the
-// reason in its log, and refuses every mount-namespace clone of the grant
-// with that reason, in order, without a birth. The zygote prepares before
-// READY, so the first clone is refused as surely as the last, and no
-// fiber ever runs less confined than the agent asked. The old code found
-// a HIDE failure in each child instead (exit 113), and had no zygote-side
-// step to fail. A template that starts a thread before fz_init is one
-// such failure, since the library cannot then take a namespace for the
-// whole process.
-func TestPrepareFailureRefusesEveryClone(t *testing.T) {
+// TestPrepareFailureFailsTheWarm pins that a zygote which could not
+// prepare the mount namespace its fibers copy is no warm template. It
+// answers PREPARE with ERROR ? naming the reason instead of READY and
+// ends, Warm fails with that reason, the zygote's log names it, and no
+// fiber is born. Every fiber of a plain proc grant asks for a mount
+// namespace, so a zygote that would refuse them all must not let the home
+// report the grant ready. The old zygote said READY first and the reason
+// after it, so the warm went through, the home reported the template
+// ready, and every clone was then refused. That is what the compare-proc
+// grant Pod did in kind, sitting ready behind a cover its zygote could
+// not build. A HIDE path that is a file is one such failure, and a
+// template that starts a thread before fz_init is another, since the
+// library cannot then take a namespace for the whole process.
+func TestPrepareFailureFailsTheWarm(t *testing.T) {
 	cases := []struct {
 		name string
 		// argv is the template, and hide the HIDE paths, set up under
-		// dir. wantErr is what every clone error must mention, and
-		// wantLog what the zygote's log must.
+		// dir. wantErr is what Warm's error must mention, and wantLog
+		// what the zygote's log must.
 		argv    func(t *testing.T, dir string) (argv, hide []string)
-		wantErr []string
+		wantErr func(dir string) []string
 		wantLog string
 	}{
 		{
@@ -66,7 +69,9 @@ func TestPrepareFailureRefusesEveryClone(t *testing.T) {
 				}
 				return []string{zygoteBin, "--heap-mb", "16"}, []string{file}
 			},
-			wantErr: []string{"refused", "the zygote could not cover a HIDE path"},
+			wantErr: func(dir string) []string {
+				return []string{"could not prepare the mount namespace", "the zygote could not cover a HIDE path (" + filepath.Join(dir, "a-file") + ": Not a directory)"}
+			},
 			wantLog: "PREPARE refused: the zygote could not cover a HIDE path",
 		},
 		{
@@ -74,7 +79,9 @@ func TestPrepareFailureRefusesEveryClone(t *testing.T) {
 			argv: func(t *testing.T, dir string) ([]string, []string) {
 				return []string{earlyThread(t)}, []string{hiddenDir}
 			},
-			wantErr: []string{"refused", "a thread existed before fz_init, so the zygote took no mount namespace of its own"},
+			wantErr: func(string) []string {
+				return []string{"could not prepare the mount namespace", "a thread existed before fz_init, so the zygote took no mount namespace of its own"}
+			},
 			wantLog: "PREPARE refused: a thread existed before fz_init",
 		},
 	}
@@ -82,16 +89,16 @@ func TestPrepareFailureRefusesEveryClone(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
 			argv, hide := tc.argv(t, dir)
-			be, w := warmArgv(t, dir, "gp", argv, hide)
-			for _, fence := range []string{"gp/1-1", "gp/1-2"} {
-				_, err := cloneDirect(t, be, w, dir, fence, "")
-				for _, want := range tc.wantErr {
-					if err == nil || !strings.Contains(err.Error(), want) {
-						t.Fatalf("clone %s = %v, want it refused with an error mentioning %q", fence, err, want)
-					}
+			_, _, err := tryWarmArgv(t, dir, "gp", argv, hide)
+			for _, want := range tc.wantErr(dir) {
+				if err == nil || !strings.Contains(err.Error(), want) {
+					t.Fatalf("warm = %v, want it to fail with an error mentioning %q", err, want)
 				}
-				if _, err := os.Stat(filepath.Join(dir, strings.ReplaceAll(fence, "/", "-")+".sock")); err == nil {
-					t.Fatalf("a fiber of %s serves although its clone was refused", fence)
+			}
+			ents, _ := os.ReadDir(dir)
+			for _, e := range ents {
+				if strings.HasSuffix(e.Name(), ".sock") {
+					t.Fatalf("a fiber serves at %s although the warm failed", e.Name())
 				}
 			}
 			b, err := os.ReadFile(filepath.Join(dir, "zygote.log"))

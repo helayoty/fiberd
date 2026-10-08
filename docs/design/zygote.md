@@ -34,9 +34,9 @@ sequenceDiagram
 | Line | From | What it says |
 | --- | --- | --- |
 | REBIND | agent, runc only | A new control socket, made inside the container's network namespace so a checkpoint finds it. It comes first |
-| HIDE, DROP, RUNDIR | agent | Before READY, what every mount-namespace fiber covers, what it unmounts and which one run-directory entry it keeps. DROP names the resume restore root, a bind of the host's `/` ([sys.md](sys.md)). A refused one turns every later mount-namespace CLONE into an ERROR |
+| HIDE, DROP, RUNDIR | agent | Before READY, what every mount-namespace fiber covers, what it unmounts and which one run-directory entry it keeps. DROP names the resume restore root, a bind of the host's `/` ([sys.md](sys.md)). A refused one ends the zygote with an `ERROR ?` instead of READY, and the agent fails the warm |
 | PREPARE | agent | Ends the setup lines. `PREPARE mntns` has the zygote build the view the lines describe in its own mount namespace, once. `PREPARE none`, which the runc launcher sends, says no fiber will ask for a mount namespace. A setup line after READY, or any other line before PREPARE, is a protocol error |
-| READY | zygote | The template is warm and its namespace is built. Sent once, after REBIND, the nested-namespace cap when the environment asks for it, and PREPARE. A zygote that could not prepare says READY, then `ERROR ?` with the reason |
+| READY | zygote | The template is warm and its namespace is built. Sent once, after REBIND, the nested-namespace cap when the environment asks for it, and PREPARE. A zygote that could not prepare its namespace sends `ERROR ?` with the reason instead and ends. Every fiber of a plain proc grant asks for a mount namespace, so the agent fails the warm and the home never reports that grant ready |
 | CLONE | agent | The fence (at most 127 characters), endpoint, deadline, hex payload and options `pidns`, `mntns`, `nocaps` and `handoff`. The leaf's cgroup descriptor and then the handoff channel ride in SCM_RIGHTS |
 | CLONED, ERROR | zygote | The new fiber's fence and pid, or why the clone failed |
 | EXITED | zygote | A fiber ended, with its exit code or signal |

@@ -74,13 +74,14 @@
  *                     one FIBERD_OWN_MNTNS had fz_init take), and every
  *                     mntns fiber starts from a copy. With none, no fiber
  *                     will ask for a mount namespace, and a mntns CLONE
- *                     is refused. A setup line refused, or a step
- *                     of PREPARE that fails, still gets READY, then an
- *                     ERROR ? line naming the reason, and every mntns
- *                     CLONE is refused with it. Any other line before
- *                     PREPARE, or a setup line after READY, is a protocol
- *                     error. The first ends the zygote and the second
- *                     refuses every mntns CLONE.
+ *                     is refused. A setup line refused, or a step of
+ *                     PREPARE that fails, gets an ERROR ? line naming the
+ *                     reason instead of READY, and the zygote ends, since
+ *                     a plain proc grant's fibers all ask for a mount
+ *                     namespace and the agent fails the warm. Any other
+ *                     line before PREPARE, or a setup line after READY,
+ *                     is a protocol error. The first ends the zygote and
+ *                     the second refuses every mntns CLONE.
  *   zygote -> agent   READY
  *   agent  -> zygote  CLONE <fence> <endpoint> <deadline_ms> <hex-payload|-> [opts]
  *                     The fence is at most 127 characters and the endpoint

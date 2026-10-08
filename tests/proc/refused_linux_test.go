@@ -29,6 +29,17 @@ const capSysAdmin = 21
 // -1. The zygote itself runs in the test's cgroup.
 func warmArgv(t *testing.T, dir, grant string, argv []string, hide []string) (*procbackend.Backend, backend.Warm) {
 	t.Helper()
+	be, w, err := tryWarmArgv(t, dir, grant, argv, hide)
+	if err != nil {
+		t.Fatalf("warm %v: %v", argv, err)
+	}
+	return be, w
+}
+
+// tryWarmArgv is warmArgv for a warm that may fail. It returns the
+// backend, the warm instance and Warm's error.
+func tryWarmArgv(t *testing.T, dir, grant string, argv []string, hide []string) (*procbackend.Backend, backend.Warm, error) {
+	t.Helper()
 	be := procbackend.NewBackend(procbackend.Options{})
 	t.Cleanup(be.Close)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -41,10 +52,7 @@ func warmArgv(t *testing.T, dir, grant string, argv []string, hide []string) (*p
 		WorkDir:       dir,
 		Hide:          hide,
 	})
-	if err != nil {
-		t.Fatalf("warm %v: %v", argv, err)
-	}
-	return be, w
+	return be, w, err
 }
 
 // procStatus is one field of /proc/<pid>/status, "" when absent.
@@ -140,10 +148,13 @@ func births(t *testing.T, trace string) (clone3, legacy int) {
 // Two refusals meet here. The kernel refuses CLONE_NEWPID with EPERM, and
 // birth asks once, never retrying with fewer namespaces or falling back
 // to the legacy clone (a property the old code had too). And the zygote,
-// refused its own mount namespace in fz_init, refuses every mntns CLONE
-// before any birth, so no clone3 is even asked for. The old code asked
-// the kernel, which refused CLONE_NEWNS the same way, so this case is
-// new in where the refusal lands and the same in that no fiber runs.
+// refused its own mount namespace in fz_init, ends at PREPARE mntns with
+// the reason instead of READY, before any birth, so no clone3 is even
+// asked for and the agent fails the warm. The oldest code asked the
+// kernel, which refused CLONE_NEWNS the same way. The code after it said
+// READY and refused each mntns CLONE, which let a home report ready on
+// a grant that served nothing. Where the refusal lands has moved twice,
+// and no fiber runs either way.
 func TestRefusedNamespacesRefuseClone(t *testing.T) {
 	for _, tool := range []string{"strace", "setpriv"} {
 		if _, err := exec.LookPath(tool); err != nil {
@@ -161,28 +172,45 @@ func TestRefusedNamespacesRefuseClone(t *testing.T) {
 	}
 	cases := []struct {
 		name string
-		// opts are the CLONE options sent on the raw channel after
-		// PREPARE none (the kernel's refusal) or PREPARE mntns (the
-		// zygote's).
-		setup, opts string
-		// wantErr is what the ERROR line must contain, and births how
-		// many clone3 calls each CLONE costs.
-		wantErr string
-		births  int
+		// setup is the setup line sent on the raw channel. With PREPARE
+		// none the zygote serves and the kernel refuses each CLONE. With
+		// PREPARE mntns the zygote itself ends on wantFirst, the reason
+		// it has no mount namespace of its own, and nothing is born.
+		setup, wantFirst string
+		// opts are the CLONE options sent after READY, wantErr what the
+		// ERROR line must contain, and births how many clone3 calls
+		// each CLONE costs.
+		opts, wantErr string
+		births        int
 	}{
-		{name: "the kernel refuses the pid namespace once per CLONE", setup: "PREPARE mntns\n", opts: "pidns", wantErr: "clone: Operation not permitted", births: 1},
-		{name: "the zygote without a namespace of its own refuses a mntns CLONE before any birth", setup: "PREPARE mntns\n", opts: "pidns,mntns",
-			wantErr: "refused: the mount namespace cannot hide what the agent asked (the zygote could not take a mount namespace of its own: unshare: errno 1)", births: 0},
+		{name: "the kernel refuses the pid namespace once per CLONE", setup: "PREPARE none\n", opts: "pidns", wantErr: "clone: Operation not permitted", births: 1},
+		{name: "the zygote without a namespace of its own ends at PREPARE mntns before any birth", setup: "PREPARE mntns\n",
+			wantFirst: "ERROR ? the zygote could not take a mount namespace of its own: unshare: errno 1"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
 			trace := filepath.Join(dir, "clone.strace")
-			uc, rd := rawZygoteWith(t, dir, unprivileged(trace), tc.setup)
-			// READY first, then the one line that says why no mntns
-			// fiber will be born, which the agent logs.
-			if got := readLine(t, uc, rd); !strings.HasPrefix(got, "ERROR ? the zygote could not take a mount namespace of its own: unshare: errno 1; every mntns CLONE is refused") {
-				t.Fatalf("after READY the zygote said %q, want the reason it has no mount namespace of its own", got)
+			uc, rd := rawZygoteWith(t, dir, unprivileged(trace), "")
+			if _, err := uc.Write([]byte(tc.setup)); err != nil {
+				t.Fatal(err)
+			}
+			first := readLine(t, uc, rd)
+			if tc.wantFirst != "" {
+				if first != tc.wantFirst {
+					t.Fatalf("the zygote answered PREPARE mntns with %q, want %q", first, tc.wantFirst)
+				}
+				// Then nothing: the zygote has ended, with no birth asked.
+				if got := readLine(t, uc, rd); got != "" {
+					t.Fatalf("after the refusal the zygote said %q, want it ended", got)
+				}
+				if c3, legacy := births(t, trace); c3 != 0 || legacy != 0 {
+					t.Fatalf("births: clone3 %d, legacy clone %d, want none", c3, legacy)
+				}
+				return
+			}
+			if first != "READY" {
+				t.Fatalf("first line %q, want READY", first)
 			}
 			// The clones share the zygote on purpose and run in order,
 			// each one more clone of it.

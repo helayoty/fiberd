@@ -69,6 +69,8 @@ func TestMain(m *testing.M) {
 //	notready  greets with something other than READY
 //	silent    never says READY
 //	quit      exits before READY
+//	unprepared could not prepare its mount namespace: ERROR ? with the
+//	          reason instead of READY, then exits, as libfiberzygote does
 func fakeZygote(script, pid string) {
 	conn, err := net.FileConn(os.NewFile(3, "ctl"))
 	if err != nil {
@@ -89,6 +91,9 @@ func fakeZygote(script, pid string) {
 	switch script {
 	case "quit":
 		os.Exit(0)
+	case "unprepared":
+		say("ERROR ? the zygote could not cover a HIDE path (/var/lib/fiberd/templates: Permission denied)\n")
+		os.Exit(1)
 	case "notready":
 		say("HELLO\n")
 	case "silent":
