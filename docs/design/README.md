@@ -40,7 +40,7 @@ These have no design doc of their own.
 | `pkg/tlsconf/tlsconftest` | Throwaway certificates for tests that need mutual TLS |
 | `pkg/runtime/stub` | An in-memory runtime for tests and the conformance suite |
 | `pkg/core/coretest` | Helpers for tests of code built on `pkg/core` |
-| `internal/cli` | The subcommand plumbing that grant-issuer and zygotectl share |
+| `internal/cli` | The plumbing the commands share, which is subcommand dispatch and the version `-version` prints |
 | `cmd/fiberd` | The agent on a standalone host |
 | `cmd/grant-issuer` | The reference [issuer](../glossary.md#issuer), which mints grants and serves its public keys |
 | `cmd/audit-verify` | Checks a home's audit spool |

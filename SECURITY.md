@@ -10,7 +10,7 @@ Include the version, the backend, how to reproduce it and the impact.
 
 In scope is the code in this repository and what the releases ship. That is the binaries, the libfiberzygote library and the `ghcr.io/helayoty/fiberd` image. Bugs in dependencies such as criu, runc or gVisor belong to their projects, unless fiberd uses them unsafely.
 
-fiberd is a reference implementation and not yet production-ready. The gaps that [docs/production-readiness.md](docs/production-readiness.md) lists are known and need no report. [docs/security.md](docs/security.md) states the trust boundaries, and a way across one is a vulnerability.
+The gaps that [docs/production-readiness.md](docs/production-readiness.md) lists are known and need no report. [docs/security.md](docs/security.md) states the trust boundaries, and a way across one is a vulnerability.
 
 ## What to expect
 
