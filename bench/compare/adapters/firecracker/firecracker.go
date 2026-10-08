@@ -423,7 +423,10 @@ func waitSocket(ctx context.Context, path string, exited chan error) error {
 		case err := <-exited:
 			// Put it back so kill does not block on an empty channel.
 			exited <- err
-			return fmt.Errorf("%s: the handler exited before listening: %v", path, err)
+			if err == nil {
+				return fmt.Errorf("%s: the handler exited before listening, with status 0", path)
+			}
+			return fmt.Errorf("%s: the handler exited before listening: %w", path, err)
 		case <-time.After(2 * time.Millisecond):
 		}
 	}
