@@ -3,7 +3,8 @@
 #
 # Every result file carries the host load, and a phase refuses to time
 # anything when the 1 minute load exceeds the core count, since a noisy
-# host invalidates the run (docs/design/compare.md, phase 0).
+# host invalidates the run (docs/design/compare.md, phase 0). Each timed
+# run first waits for the load a build or deploy left behind to fall.
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 STATE=${COMPARE_STATE:-$ROOT/bin/compare-state}
 RUNS=${COMPARE_RUNS:-3}
@@ -33,6 +34,18 @@ require_quiet_host() {
     echo "load $l exceeds $n cores: refusing to time anything (COMPARE_FORCE=1 overrides)" >&2
     [ "${COMPARE_FORCE:-0}" = 1 ] || exit 3
   fi
+}
+
+# wait_quiet_host waits up to COMPARE_QUIET_WAIT seconds (default 300) for
+# the 1 minute load to fall to the core count, then applies
+# require_quiet_host.
+wait_quiet_host() {
+  local deadline=$((SECONDS + ${COMPARE_QUIET_WAIT:-300}))
+  while [ "$(awk -v l="$(load1)" -v n="$(ncpu)" 'BEGIN { print (l > n) ? 1 : 0 }')" = 1 ] &&
+    [ "$SECONDS" -lt "$deadline" ]; do
+    sleep 10
+  done
+  require_quiet_host
 }
 
 # templates are the digests of the counter artifacts phase 1 pushed to
@@ -67,6 +80,7 @@ control_plane_flags() {
 run_in_client() { # run_in_client <system> <class> <args...>
   local system=$1 class=$2; shift 2
   echo "== $system"
+  wait_quiet_host
   # shellcheck disable=SC2046  # the flag strings are lists
   client_exec compare -adapter "${ADAPTER:?}" -system "$system" -class "$class" -runs "$RUNS" -bursts "$BURSTS" \
     -out "/out/$system.jsonl" $(control_plane_flags) "$@"

@@ -38,8 +38,10 @@ if want microvm; then
   install -m 0755 bin/compare-bin/compare bin/compare-bin/summarize bin/
   fc_flags=(-adapter firecracker -runs "$RUNS" -bursts "$BURSTS" -kernel "$FC_KERNEL" -rootfs "$out/rootfs.ext4"
     -work-dir "$out/fc-work" -netns "$PWD/bench/compare/adapters/firecracker/netns.sh" -resume -density "$DENSITY")
+  wait_quiet_host
   sudo bin/compare "${fc_flags[@]}" -system firecracker-file -class microvm -snapshot-dir "$out/fc-snapshot" -out "$out/firecracker-file.jsonl"
   if [ -n "${COMPARE_UFFD_HANDLER:-}" ]; then
+    wait_quiet_host
     sudo bin/compare "${fc_flags[@]}" -system firecracker-uffd -class microvm -snapshot-dir "$out/fc-snapshot" \
       -uffd-handler "$COMPARE_UFFD_HANDLER" -out "$out/firecracker-uffd.jsonl"
   fi

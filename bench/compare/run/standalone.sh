@@ -14,6 +14,8 @@
 # FIBERD_REGISTRY overrides), the way a production home gets its
 # templates, so the sandbox rootfs holds no workload.
 set -euo pipefail
+# shellcheck source=lib.sh
+. "$(dirname "$0")/lib.sh"
 cd "$(dirname "$0")/../../.."
 OUT=${COMPARE_OUT:-/src/bin/compare-state/phase2}
 RUNS=${COMPARE_RUNS:-3}
@@ -82,6 +84,7 @@ trap 'stop_home; [ -n "$issuer_pid" ] && kill "$issuer_pid" 2>/dev/null || true'
 measure() { # measure <system> <class> <runtime> <args...>
   local system=$1 class=$2 rt=$3; shift 3
   echo "== $system"
+  wait_quiet_host
   bin/compare -adapter fiberd -system "$system" -class "$class" -runs "$RUNS" -bursts "$BURSTS" -out "$OUT/$system.jsonl" \
     -target "$ADDR" -node-id "compare-$rt" -issuer-key "$STATE/issuer-key.json" -issuer "$ISSUER_URL" \
     -cgroup-root "$CGROOT" -resume -density "$DENSITY" "$@"
