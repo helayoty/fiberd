@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -60,6 +61,42 @@ var (
 	zygoteErr  error
 )
 
+// zygoteBuildFlags mirrors ZYGOTE_CFLAGS and ZYGOTE_LDFLAGS in the
+// Makefile, so the tests run the zygote hardened as it ships. On arm64
+// that includes -mbranch-protection=none, because a restored process
+// keeps stale pointer-authentication keys. goarch is runtime.GOARCH.
+func zygoteBuildFlags(goarch string) []string {
+	flags := []string{"-D_FORTIFY_SOURCE=3", "-O2", "-fstack-protector-strong", "-fstack-clash-protection", "-fPIE",
+		"-Wformat=2", "-Werror=format-security"}
+	if goarch == "arm64" {
+		flags = append(flags, "-mbranch-protection=none")
+	}
+	return append(flags, "-pie", "-Wl,-z,relro,-z,now")
+}
+
+// TestZygoteBuildFlags pins the arm64 flag that keeps pointer
+// authentication out of the zygote. Without it a restored fiber traps on
+// a FEAT_FPAC CPU, and some toolchains default to
+// -mbranch-protection=standard.
+func TestZygoteBuildFlags(t *testing.T) {
+	cases := []struct {
+		name   string
+		goarch string
+		want   bool
+	}{
+		{name: "arm64 disables branch protection", goarch: "arm64", want: true},
+		{name: "amd64 has no such flag", goarch: "amd64", want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := slices.Contains(zygoteBuildFlags(tc.goarch), "-mbranch-protection=none")
+			if got != tc.want {
+				t.Fatalf("zygoteBuildFlags(%q) has -mbranch-protection=none: %v, want %v", tc.goarch, got, tc.want)
+			}
+		})
+	}
+}
+
 // refzygote builds the reference zygote once, so a grant can be warmed.
 // It skips the test when there is no C toolchain.
 func refzygote(t *testing.T) string {
@@ -71,8 +108,9 @@ func refzygote(t *testing.T) string {
 			return
 		}
 		zygoteBin = filepath.Join(dir, "refzygote")
-		out, err := exec.Command("gcc", "-O2", "-pthread", "-DFZ_TLS", "-o", zygoteBin,
-			"../../zygote/refzygote.c", "../../zygote/libfiberzygote.c", "-lssl", "-lcrypto").CombinedOutput()
+		args := append(zygoteBuildFlags(runtime.GOARCH), "-pthread", "-DFZ_TLS", "-o", zygoteBin,
+			"../../zygote/refzygote.c", "../../zygote/libfiberzygote.c", "-lssl", "-lcrypto")
+		out, err := exec.Command("gcc", args...).CombinedOutput()
 		if err != nil {
 			zygoteErr = fmt.Errorf("%w: %s", err, out)
 		}
@@ -163,8 +201,8 @@ func TestRunHostRuntime(t *testing.T) {
 	}
 }
 
-// seedGrants leaves what a previous run would: a snapshot holding grant
-// "kept", and cgroups for it and for grant "stale".
+// seedGrants leaves what a previous run would, a snapshot holding grant
+// "kept" and cgroups for it and for grant "stale".
 func seedGrants(t *testing.T, state, cg string) {
 	t.Helper()
 	g := testGrant("kept")
@@ -188,7 +226,7 @@ func seedGrants(t *testing.T, state, cg string) {
 	}
 }
 
-// TestRunHostRuntimeRefuses: what only the host runtime checks.
+// TestRunHostRuntimeRefuses covers what only the host runtime checks.
 func TestRunHostRuntimeRefuses(t *testing.T) {
 	cases := []struct {
 		name, want string

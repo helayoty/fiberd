@@ -21,6 +21,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -41,16 +43,16 @@ import (
 )
 
 // newHost opens the host runtime over the fork backend, as fiberd
-// -runtime proc does: a fiber that cannot get its namespaces or drop its
-// privileges is refused. A caller may pass its own fork backend (a timed
-// one, for the benchmarks).
+// -runtime proc does. A fiber that cannot get its namespaces or drop its
+// privileges is refused. A caller may pass its own fork backend, such as a
+// timed one for the benchmarks.
 func newHost(c host.Config) (core.Runtime, error) {
 	if c.Backend == nil {
 		c.Backend = procbackend.New(procbackend.Options{})
 	}
 	c.FiberHide = append(c.FiberHide, hiddenDir)
 	if c.Handoff == nil {
-		// Routes handoff fibers without listening: tests hand them
+		// Routes handoff fibers without listening. Tests hand them
 		// connections through Deliver.
 		c.Handoff = &handoff.Router{}
 		c.HandoffKey = make([]byte, 32)
@@ -74,6 +76,42 @@ var (
 	deltaKeys artifact.Keys
 )
 
+// zygoteBuildFlags mirrors ZYGOTE_CFLAGS and ZYGOTE_LDFLAGS in the
+// Makefile, so the tests run the zygote hardened as it ships. On arm64
+// that includes -mbranch-protection=none, because a restored process
+// keeps stale pointer-authentication keys. goarch is runtime.GOARCH.
+func zygoteBuildFlags(goarch string) []string {
+	flags := []string{"-D_FORTIFY_SOURCE=3", "-O2", "-fstack-protector-strong", "-fstack-clash-protection", "-fPIE",
+		"-Wformat=2", "-Werror=format-security"}
+	if goarch == "arm64" {
+		flags = append(flags, "-mbranch-protection=none")
+	}
+	return append(flags, "-pie", "-Wl,-z,relro,-z,now")
+}
+
+// TestZygoteBuildFlags pins the arm64 flag that keeps pointer
+// authentication out of the zygote the tests build. Without it a restored
+// fiber traps on a FEAT_FPAC CPU, and some toolchains default to
+// -mbranch-protection=standard.
+func TestZygoteBuildFlags(t *testing.T) {
+	cases := []struct {
+		name   string
+		goarch string
+		want   bool
+	}{
+		{name: "arm64 disables branch protection", goarch: "arm64", want: true},
+		{name: "amd64 has no such flag", goarch: "amd64", want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := slices.Contains(zygoteBuildFlags(tc.goarch), "-mbranch-protection=none")
+			if got != tc.want {
+				t.Fatalf("zygoteBuildFlags(%q) has -mbranch-protection=none: %v, want %v", tc.goarch, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestMain(m *testing.M) {
 	if cgRoot == "" {
 		cgRoot = "/sys/fs/cgroup/fiberd"
@@ -89,7 +127,9 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 	zygoteBin = filepath.Join(dir, "refzygote")
-	build := exec.Command("gcc", "-O2", "-pthread", "-DFZ_TLS", "-o", zygoteBin, "../../zygote/refzygote.c", "../../zygote/libfiberzygote.c", "-lssl", "-lcrypto")
+	args := append(zygoteBuildFlags(runtime.GOARCH),
+		"-pthread", "-DFZ_TLS", "-o", zygoteBin, "../../zygote/refzygote.c", "../../zygote/libfiberzygote.c", "-lssl", "-lcrypto")
+	build := exec.Command("gcc", args...)
 	build.Stderr = os.Stderr
 	if err := build.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "skipping proc tests: cannot build refzygote: %v\n", err)
@@ -204,7 +244,7 @@ func talk(t *testing.T, endpoint, line string) string {
 	return talkOver(t, c, line)
 }
 
-// handOff connects to a handoff fiber the way the agent does: one end of
+// handOff connects to a handoff fiber the way the agent does. One end of
 // a fresh socket pair is passed to the fiber, and the other is returned
 // as the caller's TLS client, presenting cert.
 func handOff(t *testing.T, rt core.Runtime, fiberID string, cert tls.Certificate) net.Conn {
@@ -363,7 +403,7 @@ func TestParkResumeKeepsState(t *testing.T) {
 			fenceFile: func(h core.FiberHandle) string { return fiberendpoint.UnixPath(h.Endpoint) + ".fence" },
 		},
 		{
-			// The fiber never listens and terminates TLS itself; its
+			// The fiber never listens and terminates TLS itself. Its
 			// channel to the host is external to the checkpoint and
 			// replaced on resume.
 			name:      "handoff",
@@ -545,9 +585,9 @@ func TestParkIsWSizedDelta(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// What a fiber is, born and resumed: the init of its own pid
-	// namespace, without capabilities it could use or regain, and blind
-	// to what the agent hides in its mount namespace.
+	// Born or resumed, a fiber is the init of its own pid namespace,
+	// without capabilities it could use or regain, and blind to what the
+	// agent hides in its mount namespace.
 	secret := filepath.Join(hiddenDir, "secret")
 	if b, err := os.ReadFile(secret); err != nil || len(b) == 0 {
 		t.Fatalf("the agent cannot read its own secret: %v", err)
@@ -569,7 +609,7 @@ func TestParkIsWSizedDelta(t *testing.T) {
 	}
 	probe("born", h.Endpoint)
 
-	// Siblings: neither sees the other's processes, and each has a mount
+	// Neither sibling sees the other's processes, and each has a mount
 	// namespace of its own, apart from the agent's.
 	sib, err := rt.Clone(ctx, core.CloneSpec{Grant: g, Fence: core.Fence{GrantUID: "g9", Epoch: 1, Seq: 3}, Deadline: 2 * time.Second})
 	if err != nil {
@@ -594,7 +634,7 @@ func TestParkIsWSizedDelta(t *testing.T) {
 		}
 		ns[link] = true
 	}
-	// Siblings draw their own randomness: each fiber's generator is
+	// Siblings draw their own randomness. Each fiber's generator is
 	// reseeded at birth, so the first values differ instead of repeating
 	// what the zygote's seed would give.
 	for _, cmd := range []string{"random"} {
@@ -647,15 +687,12 @@ func TestParkIsWSizedDelta(t *testing.T) {
 	_ = rt.Release(ctx, h2.ID, true)
 }
 
-// TestFiberCannotWriteHostControls: a fiber is euid 0 in the initial user
-// namespace with every capability dropped, and sysctl and kernfs let
-// euid 0 through on the owner write bit alone, no capability asked. The
-// only thing between the fiber and the host's sysctls (core_pattern,
-// modprobe: host root) and the cgroup tree (its own and other grants'
-// limits) is the read-only mount its namespace gives them. Each control
-// is opened for writing from inside the fiber, never written, and must
-// answer EROFS: at birth and again after a park and resume, since CRIU
-// rebuilds the mount namespace.
+// TestFiberCannotWriteHostControls pins that a fiber cannot write host
+// sysctls such as core_pattern, a path to host root, or any grant's cgroup
+// limits. A fiber is euid 0, and sysctl and kernfs let euid 0 write on the
+// owner bit alone, so only its read-only mounts stand in the way. Each
+// control must answer EROFS at birth and after a park and resume, because
+// CRIU rebuilds the mount namespace.
 func TestFiberCannotWriteHostControls(t *testing.T) {
 	rt := newRuntime(t)
 	ctx := context.Background()
@@ -667,9 +704,9 @@ func TestFiberCannotWriteHostControls(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// ownCgroup is the cgroup of the fiber serving endpoint, as both it
-	// and this test see it (neither has a cgroup namespace of its own);
-	// each incarnation has one of its own.
+	// ownCgroup is the cgroup of the fiber serving endpoint. Neither the
+	// fiber nor this test has a cgroup namespace, so both see the same
+	// path. Each incarnation has a cgroup of its own.
 	ownCgroup := func(endpoint string) string {
 		b, err := os.ReadFile(fmt.Sprintf("/proc/%d/cgroup", peerPID(t, endpoint)))
 		if err != nil {
@@ -716,7 +753,7 @@ func TestFiberCannotWriteHostControls(t *testing.T) {
 		_ = rt.Release(ctx, h.ID, true)
 		return
 	}
-	// A sync park ends the born incarnation; the resumed one gets its
+	// A sync park ends the born incarnation. The resumed one gets its
 	// mount namespace from CRIU and must be as closed.
 	ref, err := rt.Park(ctx, h.ID, true)
 	if err != nil {
@@ -885,7 +922,7 @@ func TestSessionMovesThroughRegistry(t *testing.T) {
 		t.Fatalf("delta not published at %s: found=%v err=%v", domainRepo, found, err)
 	}
 
-	// A home with a key of its own does not trust A's: it finds S, will
+	// A home with a key of its own does not trust A's. It finds S, will
 	// not take it, and names no home from the unverified manifest.
 	own, err := grant.GenerateKey(jose.EdDSA)
 	if err != nil {
@@ -1195,7 +1232,8 @@ func TestCeilingAndPressureSource(t *testing.T) {
 	t.Logf("grant PSI some avg10 = %.2f%%", psi)
 	// The block ceiling landed on the grant cgroup: memory.high is at
 	// least fibers.max * w_budget.
-	// Only this process's runtimes: earlier runs may have left theirs.
+	// Only this process's runtimes count, because earlier runs may have
+	// left theirs.
 	matches, _ := filepath.Glob(filepath.Join(cgRoot, fmt.Sprintf("t%d-*", os.Getpid()), "g4", "memory.high"))
 	if len(matches) != 1 {
 		t.Fatalf("grant cgroup memory.high not found: %v", matches)

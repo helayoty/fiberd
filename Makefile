@@ -9,6 +9,21 @@ PKGS    := ./...
 # Integrations are their own modules; test and lint run in each.
 EXAMPLES := examples/kubernetes examples/slurm examples/knative examples/kata examples/substrate
 
+# Hardening for every build of the zygote, refzygote and the library. The
+# flags are defined here once. The Dockerfiles, hack/gvisor/rootfs.sh, the
+# release workflow and the Go tests that build refzygote mirror these
+# lines, each saying so. The static archive takes the compile flags with
+# -fPIC in place of -fPIE and no link flags. On aarch64 (arm64) every
+# build also takes -mbranch-protection=none. A restored process keeps
+# stale pointer-authentication keys, so a PAC instruction run after a
+# restore traps on a FEAT_FPAC CPU. Some toolchains default to
+# -mbranch-protection=standard, so the flag is always spelled out.
+ZYGOTE_CFLAGS  := -D_FORTIFY_SOURCE=3 -O2 -fstack-protector-strong -fstack-clash-protection -fPIE -Wformat=2 -Werror=format-security
+ZYGOTE_LDFLAGS := -pie -Wl,-z,relro,-z,now
+ifneq ($(filter aarch64 arm64,$(shell uname -m)),)
+ZYGOTE_CFLAGS += -mbranch-protection=none
+endif
+
 .PHONY: all build test vet lint proto proto-lint proto-check clean \
         bench zygote conform-stub conform-signed conform-proc conform-gvisor conform-runc conform-hyperlight-fake conform-hyperlight \
         hyperlight-helper linux-hyperlight-check overcommit kind-up kind-down kind-image conform-kind slurm-up slurm-down conform-slurm example-knative example-knative-kvm example-kata example-substrate \
@@ -144,12 +159,12 @@ proto-check: proto proto-lint ## fail if generated code is out of date (CI)
 	@git diff --exit-code -- api/ || \
 	  (echo "generated proto code is stale: run 'make proto' and commit" && exit 1)
 
-## C: the zygote library + reference workload.
+## The zygote library and the reference workload.
 ## Linux only (clone3, close_range); build them inside the dev container.
 
-zygote: ## build bin/refzygote, the reference zygote and conformance template, with TLS for handoff grants
+zygote: ## build bin/refzygote, the reference zygote, with TLS for handoff grants
 	@mkdir -p $(BIN)
-	$(CC) -O2 -Wall -Wextra -pthread -DFZ_TLS -o $(BIN)/refzygote zygote/refzygote.c zygote/libfiberzygote.c -lssl -lcrypto
+	$(CC) $(ZYGOTE_CFLAGS) $(ZYGOTE_LDFLAGS) -Wall -Wextra -pthread -DFZ_TLS -o $(BIN)/refzygote zygote/refzygote.c zygote/libfiberzygote.c -lssl -lcrypto
 
 ## Linux-only work runs in the dev container (hack/dev): privileged,
 ## private cgroup namespace, criu installed. Needs Docker.

@@ -29,15 +29,18 @@ RUN if ! command -v criu >/dev/null 2>&1; then \
     && rm -rf /tmp/fiberd-criu
 WORKDIR /src
 COPY . .
-# fiberd is static and reproducible. The zygote library uses the release
-# archive's flags. On aarch64 it is built without PAC branch protection,
-# because a process restored from a checkpoint keeps stale PAC keys (see
-# docker/criu/Dockerfile).
+# fiberd is static and reproducible. The zygote library takes ZYGOTE_CFLAGS
+# from the Makefile with -fPIC in place of -fPIE, since the archive links
+# into PIE templates and shared objects alike, and no link flags, since an
+# archive is not linked. On aarch64 it is built without PAC branch
+# protection, because a process restored from a checkpoint keeps stale PAC
+# keys (see docker/criu/Dockerfile).
 ENV CGO_ENABLED=0 GOFLAGS=-trimpath
 RUN set -eu; mkdir -p /out/bin /out/lib; \
     go build -ldflags "-s -w -buildid=" -o /out/bin/fiberd ./cmd/fiberd; \
     flags=""; if [ "$(uname -m)" = aarch64 ]; then flags="-mbranch-protection=none"; fi; \
-    gcc -O2 -Wall -Wextra -fPIC -pthread $flags -ffile-prefix-map="$PWD"=. \
+    gcc -D_FORTIFY_SOURCE=3 -O2 -fstack-protector-strong -fstack-clash-protection -fPIC -Wformat=2 -Werror=format-security \
+      -Wall -Wextra -pthread $flags -ffile-prefix-map="$PWD"=. \
       -c zygote/libfiberzygote.c -o /tmp/libfiberzygote.o; \
     ar rcsD /out/lib/libfiberzygote.a /tmp/libfiberzygote.o
 

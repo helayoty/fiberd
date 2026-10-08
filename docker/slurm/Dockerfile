@@ -16,8 +16,9 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 WORKDIR /src
 COPY . .
 # Go binaries are static and reproducible. The reference zygote is built
-# with TLS (-DFZ_TLS) so it can serve handoff grants. On aarch64 it is built
-# without PAC branch protection (see docker/criu/Dockerfile).
+# with TLS (-DFZ_TLS) so it can serve handoff grants, with ZYGOTE_CFLAGS and
+# ZYGOTE_LDFLAGS from the Makefile. On aarch64 it is built without PAC
+# branch protection (see docker/criu/Dockerfile).
 # The agent is built with the fiberd_testhooks tag, since the conformance run
 # drives the test-only admin controls (-admin-unsafe). The release image
 # (docker/fiberd) is built without it.
@@ -28,7 +29,8 @@ RUN set -eu; mkdir -p /out; \
     go test -c -ldflags "$ldflags" -o /out/grant-conform ./tests/conform; \
     (cd examples/slurm && go build -tags fiberd_testhooks -ldflags "$ldflags" -o /out/ ./cmd/...); \
     flags=""; if [ "$(uname -m)" = aarch64 ]; then flags="-mbranch-protection=none"; fi; \
-    gcc -O2 -Wall -Wextra -pthread $flags -DFZ_TLS -o /out/refzygote \
+    gcc -D_FORTIFY_SOURCE=3 -O2 -fstack-protector-strong -fstack-clash-protection -fPIE -Wformat=2 -Werror=format-security \
+      -pie -Wl,-z,relro,-z,now -Wall -Wextra -pthread $flags -DFZ_TLS -o /out/refzygote \
       zygote/refzygote.c zygote/libfiberzygote.c -lssl -lcrypto
 
 FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587

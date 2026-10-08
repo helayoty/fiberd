@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Build the rootfs the gvisor and runc backends run the reference workload
-# in: a statically linked refzygote at /bin/refzygote and the mount points
-# a sandbox needs. Nothing else; the rootfs is a directory runsc's gofer
-# serves, or runc copies per grant, and every fiber is restored from a
-# checkpoint taken of this workload.
+# in. It holds a statically linked refzygote at /bin/refzygote and the
+# mount points a sandbox needs, nothing else. runsc's gofer serves the
+# directory, or runc copies it per grant, and every fiber is restored from
+# a checkpoint taken of this workload.
 #
 #   hack/gvisor/rootfs.sh <dir>        (inside the dev container)
 set -euo pipefail
@@ -28,19 +28,22 @@ elif [ "$ARCH" = aarch64 ]; then
   exit 1
 fi
 if [ "$ARCH" = aarch64 ]; then FLAGS="$FLAGS -mbranch-protection=none"; fi
-# With TLS, so handoff grants work on the runc backend (static OpenSSL;
-# the lookup warnings are about resolver calls the zygote never makes).
+# With TLS, so handoff grants work on the runc backend. The static
+# OpenSSL's lookup warnings are about resolver calls the zygote never
+# makes. ZYGOTE_CFLAGS and ZYGOTE_LDFLAGS from the Makefile, with
+# -static-pie in place of -pie so the binary stays self-contained.
 # shellcheck disable=SC2086  # $FLAGS is a list
-gcc -static -O2 -Wall -pthread $FLAGS -DFZ_TLS -o "$OUT/bin/refzygote" zygote/refzygote.c zygote/libfiberzygote.c -lssl -lcrypto -ldl 2>&1 | grep -v "requires at runtime the shared libraries\|^/usr/bin/ld: .*in function" >&2 || true
+gcc -static-pie -D_FORTIFY_SOURCE=3 -O2 -fstack-protector-strong -fstack-clash-protection -fPIE -Wformat=2 -Werror=format-security \
+  -Wl,-z,relro,-z,now -Wall -pthread $FLAGS -DFZ_TLS -o "$OUT/bin/refzygote" zygote/refzygote.c zygote/libfiberzygote.c -lssl -lcrypto -ldl 2>&1 | grep -v "requires at runtime the shared libraries\|^/usr/bin/ld: .*in function" >&2 || true
 [ -x "$OUT/bin/refzygote" ] || { echo "rootfs.sh: refzygote did not build" >&2; exit 1; }
 if [ "$ARCH" = aarch64 ]; then
   command -v objdump >/dev/null || { echo "rootfs.sh: objdump is needed to check $OUT/bin/refzygote for PAC" >&2; exit 1; }
-  # Every pointer authentication instruction: the link register signing
-  # pairs a function sits between when it is checkpointed, the signing
-  # returns and the authenticated branches. The one exemption is the
-  # pair in libgcc's unwinder (uw_update_context), which authenticates a
-  # return address only for a frame whose unwind info says it was
-  # signed, and this count is what proves no frame here is.
+  # Count every pointer authentication instruction. A checkpoint can land
+  # between a function's signing pair, and the signing returns and the
+  # authenticated branches trap as well. The one exemption is the pair in
+  # libgcc's unwinder (uw_update_context), which authenticates a return
+  # address only for a frame whose unwind info says it was signed, and
+  # this count is what proves no frame here is.
   n=$(objdump -d "$OUT/bin/refzygote" | awk '/^[0-9a-f]+ <.*>:/{sym=$2} $3 ~ /^(pac|aut|reta|bra|blra)/ && !(sym == "<uw_update_context>:" && ($3 == "autia1716" || $3 == "autib1716")){n++} END{print n+0}')
   [ "$n" = 0 ] || { echo "rootfs.sh: $n PAC instructions in $OUT/bin/refzygote; a restore would trap on a FEAT_FPAC CPU" >&2; exit 1; }
 fi

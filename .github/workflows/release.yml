@@ -153,8 +153,12 @@ jobs:
             rm -rf "$staging"
           done
           # Ship the zygote library that templates link, as source and as a
-          # static library per Linux architecture. arm64 builds without pointer
-          # authentication because CRIU-restored processes cannot use it.
+          # static library per Linux architecture. The compile flags are
+          # ZYGOTE_CFLAGS from the Makefile with -fPIC in place of -fPIE, since
+          # the archive links into PIE templates and shared objects alike, and
+          # no link flags, since an archive is not linked. arm64 builds without
+          # pointer authentication because CRIU-restored processes cannot use
+          # it.
           pack() { # pack <archive> <dir>
             tar -C "$2" --sort=name --mtime="@$SOURCE_DATE_EPOCH" \
               --owner=0 --group=0 --numeric-owner -cf - . | gzip -9n > "dist/$1"
@@ -168,7 +172,8 @@ jobs:
             if [[ "$arch" == arm64 ]]; then
               cc=aarch64-linux-gnu-gcc flags=-mbranch-protection=none
             fi
-            "$cc" -O2 -Wall -Wextra -pthread $flags -ffile-prefix-map="$PWD"=. \
+            "$cc" -D_FORTIFY_SOURCE=3 -O2 -fstack-protector-strong -fstack-clash-protection -fPIC \
+              -Wformat=2 -Werror=format-security -Wall -Wextra -pthread $flags -ffile-prefix-map="$PWD"=. \
               -c zygote/libfiberzygote.c -o "$lib/libfiberzygote.o"
             rm -f "$lib/libfiberzygote.a"
             ar rcsD "$lib/libfiberzygote.a" "$lib/libfiberzygote.o"
