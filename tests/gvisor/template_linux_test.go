@@ -85,9 +85,16 @@ func probe(t *testing.T, state string, args ...string) string {
 }
 
 // stagedCopy is where a home's gvisor backend keeps the verified copy of
-// grant g's template executable, the directory every sandbox binds.
-func stagedCopy(state, grant string) string {
-	return filepath.Join(state, "templates", grant, "template", "zygote")
+// grant g's template executable, the directory every sandbox binds. The
+// directory is the template sandbox's own, named by its cid, and one
+// instance of the grant is warm at a time.
+func stagedCopy(t *testing.T, state, grant string) string {
+	t.Helper()
+	matches, _ := filepath.Glob(filepath.Join(state, "templates", "w-"+grant+"-*", "template", "zygote"))
+	if len(matches) != 1 {
+		t.Fatalf("staged copies of %s in %s = %v, want one", grant, state, matches)
+	}
+	return matches[0]
 }
 
 // TestRegistryTemplate is a registry template on gVisor: the home pulls
@@ -120,7 +127,7 @@ func TestRegistryTemplate(t *testing.T) {
 				t.Fatalf("cached config = %+v (%v), want a static template", cfg, err)
 			}
 			zygoteSum = cfg.ZygoteSHA256
-			if sum := sha256File(t, stagedCopy(stateA, "rt1")); sum != zygoteSum {
+			if sum := sha256File(t, stagedCopy(t, stateA, "rt1")); sum != zygoteSum {
 				t.Fatalf("staged copy hashes to %s, want the artifact's %s", sum, zygoteSum)
 			}
 			if h, err = a.Clone(ctx, core.CloneSpec{Grant: g, Fence: core.Fence{GrantUID: "rt1", Epoch: 1, Seq: 1}, Deadline: 5 * time.Second}); err != nil {
@@ -158,7 +165,7 @@ func TestRegistryTemplate(t *testing.T) {
 					t.Fatalf("probe %s = %q, want %s", tc.args, got, tc.want)
 				}
 			}
-			if _, err := os.Stat(filepath.Join(filepath.Dir(stagedCopy(stateA, "rt1")), "x")); err == nil {
+			if _, err := os.Stat(filepath.Join(filepath.Dir(stagedCopy(t, stateA, "rt1")), "x")); err == nil {
 				t.Fatal("a write inside the sandbox reached the host copy")
 			}
 		}},
@@ -173,7 +180,7 @@ func TestRegistryTemplate(t *testing.T) {
 			if got := talk(t, h2.Endpoint, "ping"); got != "pong" {
 				t.Fatalf("ping = %q", got)
 			}
-			if sum := sha256File(t, stagedCopy(stateA, "rt1")); sum != zygoteSum {
+			if sum := sha256File(t, stagedCopy(t, stateA, "rt1")); sum != zygoteSum {
 				t.Fatalf("the rewrite reached the staged copy: %s", sum)
 			}
 			_ = a.Release(ctx, h2.ID, false)
@@ -186,7 +193,7 @@ func TestRegistryTemplate(t *testing.T) {
 			if sum := sha256File(t, artifact.ZygotePath(cacheA)); sum != zygoteSum {
 				t.Fatalf("cache entry hashes to %s after the second warm, want it pulled again to %s", sum, zygoteSum)
 			}
-			if sum := sha256File(t, stagedCopy(stateB, "rt1")); sum != zygoteSum {
+			if sum := sha256File(t, stagedCopy(t, stateB, "rt1")); sum != zygoteSum {
 				t.Fatalf("second home's copy hashes to %s, want %s", sum, zygoteSum)
 			}
 		}},
@@ -214,7 +221,7 @@ func TestRegistryTemplate(t *testing.T) {
 			if got := probe(t, stateC, "ls", "/fiberd/template"); got != "zygote" {
 				t.Fatalf("ls on the resuming home = %q", got)
 			}
-			if stateC == stateA || sha256File(t, stagedCopy(stateC, "rt1")) != zygoteSum {
+			if stateC == stateA || sha256File(t, stagedCopy(t, stateC, "rt1")) != zygoteSum {
 				t.Fatal("the resuming home must bind its own verified copy")
 			}
 			_ = c.Release(ctx, h3.ID, true)

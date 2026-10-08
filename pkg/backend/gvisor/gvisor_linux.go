@@ -119,7 +119,11 @@ type warm struct {
 	cid     string // runsc container id
 	argv    []string
 	workDir string
-	images  string // template checkpoint
+	// dir is this incarnation's own directory under <state>/templates,
+	// named by its cid, so the reaper that removes it never takes a
+	// successor's. It holds the bundle, the images and the staged copy.
+	dir    string
+	images string // template checkpoint
 	// template is the host directory bound at backend.TemplateMount in
 	// every sandbox of this instance: the backend's own verified copy of
 	// the registry template's executable. Empty for a template that
@@ -322,7 +326,13 @@ func (b *Backend) writeBundle(dir string, argv, env []string, workDir, images, t
 	s.Process.Cwd = "/"
 	s.Process.Args = argv
 	s.Process.Env = append([]string{"PATH=/bin:/usr/bin"}, env...)
+	// The rootfs is one host directory shared by every sandbox of every
+	// grant, served by the gofer with the agent's credentials, and the
+	// workload is uid 0 in its sandbox. Read-only, or one fiber rewrites
+	// /bin/refzygote for every later sandbox. /host and /tmp below are
+	// the sandbox's writable paths.
 	s.Root.Path = b.opt.Rootfs
+	s.Root.Readonly = true
 	s.Hostname = "fiber"
 	add := func(dst, typ, src string, opts ...string) {
 		m := struct {
@@ -402,8 +412,10 @@ func (b *Backend) newCID(kind, name string) string {
 }
 
 // sweep ends every sandbox a previous life of this backend left in its
-// root. Nothing there is this life's, since no incarnation has started
-// yet, and a cid is never reused across lives.
+// root, then clears the bundle and template directories they used.
+// Nothing there is this life's, since no incarnation has started yet,
+// and a cid is never reused across lives. When runsc cannot list, the
+// sandboxes are left alone and so are their directories.
 func (b *Backend) sweep() {
 	out, err := b.runsc(context.Background(), -1, "list", "-quiet")
 	if err != nil {
@@ -411,6 +423,18 @@ func (b *Backend) sweep() {
 	}
 	for _, id := range strings.Fields(out) {
 		_, _ = b.runsc(context.Background(), -1, "delete", "-force", id)
+	}
+	for _, sub := range []string{"bundles", "templates"} {
+		ents, err := os.ReadDir(filepath.Join(b.opt.StateDir, sub))
+		if err != nil {
+			continue
+		}
+		for _, e := range ents {
+			p := filepath.Join(b.opt.StateDir, sub, e.Name())
+			if err := os.RemoveAll(p); err != nil {
+				log.Printf("gvisor: sweep %s: %v", p, err)
+			}
+		}
 	}
 }
 
@@ -471,17 +495,24 @@ func (b *Backend) Warm(ctx context.Context, sp backend.WarmSpec) (backend.Warm, 
 	if err := os.MkdirAll(sp.WorkDir, 0o755); err != nil {
 		return backend.Warm{}, err
 	}
-	tdir := filepath.Join(b.opt.StateDir, "templates", cid(sp.GrantUID))
-	w := &warm{id: sp.GrantUID, cid: b.newCID("w", sp.GrantUID), argv: sp.Template.Argv, workDir: sp.WorkDir,
-		images: filepath.Join(tdir, "images")}
-	_ = os.RemoveAll(tdir)
-	if err := os.MkdirAll(tdir, 0o755); err != nil {
+	w := &warm{id: sp.GrantUID, cid: b.newCID("w", sp.GrantUID), argv: sp.Template.Argv, workDir: sp.WorkDir}
+	w.dir = filepath.Join(b.opt.StateDir, "templates", w.cid)
+	w.images = filepath.Join(w.dir, "images")
+	if err := os.MkdirAll(w.dir, 0o755); err != nil {
 		return backend.Warm{}, err
 	}
+	// A warm that fails leaves nothing of its directory. The reaper takes
+	// it for one that ran.
+	warmed := false
+	defer func() {
+		if !warmed {
+			_ = os.RemoveAll(w.dir)
+		}
+	}()
 	if sp.Template.Dir != "" {
 		// The backend's own verified copy of the executable, bound into
 		// every sandbox of this instance (backend.StageTemplate).
-		dir := filepath.Join(tdir, "template")
+		dir := filepath.Join(w.dir, "template")
 		argv, err := backend.StageTemplate(sp.Template, dir)
 		if err != nil {
 			return backend.Warm{}, fmt.Errorf("gvisor: %w", err)
@@ -492,7 +523,7 @@ func (b *Backend) Warm(ctx context.Context, sp backend.WarmSpec) (backend.Warm, 
 	// sandbox and every fiber share the grant's run directory as /host.
 	marker := filepath.Join(sp.WorkDir, readyMarker)
 	_ = os.Remove(marker)
-	bundle := filepath.Join(tdir, "bundle")
+	bundle := filepath.Join(w.dir, "bundle")
 	if err := b.writeBundle(bundle, w.argv, []string{"FIBERD_FENCE=none"}, sp.WorkDir, "", w.template); err != nil {
 		return backend.Warm{}, err
 	}
@@ -511,6 +542,7 @@ func (b *Backend) Warm(ctx context.Context, sp backend.WarmSpec) (backend.Warm, 
 		_, _ = b.runsc(context.Background(), -1, "delete", "-force", w.cid)
 		return backend.Warm{}, fmt.Errorf("gvisor: template checkpoint: %w", err)
 	}
+	warmed = true
 	// The footprint of a sandbox restored from this image, measured by
 	// restoring one into the empty probe cgroup the host offers: a fresh
 	// sandbox (its own sentry, gofer and page tables) costs more than the
@@ -623,6 +655,10 @@ func (b *Backend) waitWarm(w *warm) {
 	defer b.reapers.Done()
 	_, _ = b.runsc(context.Background(), -1, "wait", w.cid)
 	_, _ = b.runsc(context.Background(), -1, "delete", "-force", w.cid)
+	// The image and the staged copy go with the sandbox. The directory is
+	// this incarnation's own, so a successor already warmed under the
+	// same grant keeps its own.
+	_ = os.RemoveAll(w.dir)
 	b.mu.Lock()
 	gone := b.warms[w.id] == w
 	if gone {
@@ -676,6 +712,8 @@ func (b *Backend) start(ctx context.Context, images, workDir, template string, a
 	_ = os.Remove(endpoint)
 	// The image is read, not cached, in the fiber's leaf.
 	if _, err := b.runsc(ctx, cgroupFD, "restore", "--detach", "--image-path", images, "--bundle", x.bundle, directIO, x.cid); err != nil {
+		// No sandbox, so no reaper to take the bundle.
+		_ = os.RemoveAll(x.bundle)
 		return backend.Fiber{}, fmt.Errorf("%w (%s)", err, leafDiag(cgroupFD))
 	}
 	b.mu.Lock()

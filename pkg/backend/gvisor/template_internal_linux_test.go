@@ -125,7 +125,6 @@ func TestStageTemplate(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			w, err := b.Warm(ctx, backend.WarmSpec{GrantUID: "g", Template: tpl, CgroupFD: -1, ProbeCgroupFD: -1, WorkDir: workDir})
-			tdir := filepath.Join(b.opt.StateDir, "templates", "g")
 			if tc.wantText != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantText) {
 					t.Fatalf("Warm = %v, want %q", err, tc.wantText)
@@ -133,14 +132,15 @@ func TestStageTemplate(t *testing.T) {
 				if findCall(f.calls(), "run") != "" {
 					t.Fatal("a refused template started a sandbox")
 				}
-				if _, err := os.Stat(filepath.Join(tdir, "template", "zygote")); err == nil {
-					t.Fatal("a refused template left its copy behind")
+				if ents, _ := os.ReadDir(filepath.Join(b.opt.StateDir, "templates")); len(ents) != 0 {
+					t.Fatalf("a refused template left %v behind", ents)
 				}
 				return
 			}
 			if err != nil {
 				t.Fatalf("Warm: %v", err)
 			}
+			tdir := filepath.Join(b.opt.StateDir, "templates", warmCID(t, b, "g"))
 			staged := filepath.Join(tdir, "template")
 			b.mu.Lock()
 			got := b.warms[w.ID]

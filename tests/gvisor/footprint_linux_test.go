@@ -103,10 +103,11 @@ func TestProbeFootprintInLeaf(t *testing.T) {
 					t.Fatalf("the probe leaf holds %q (%v) after Warm", procs, err)
 				}
 			}
-			for _, left := range []string{filepath.Join(state, "templates", "fp", "probe-bundle"), filepath.Join(workDir, "probe.sock")} {
-				if _, err := os.Lstat(left); err == nil {
-					t.Fatalf("%s left behind", left)
-				}
+			if left, _ := filepath.Glob(filepath.Join(state, "templates", "*", "probe-bundle")); len(left) != 0 {
+				t.Fatalf("%v left behind", left)
+			}
+			if _, err := os.Lstat(filepath.Join(workDir, "probe.sock")); err == nil {
+				t.Fatal("probe.sock left behind")
 			}
 		})
 	}

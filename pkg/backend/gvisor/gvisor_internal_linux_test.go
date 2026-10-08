@@ -385,6 +385,11 @@ func TestWriteBundle(t *testing.T) {
 				strings.Join(s.Process.Env, " ") != strings.Join(wantEnv, " ") || s.Root.Path != "/rootfs" || s.Hostname != "fiber" {
 				t.Fatalf("spec = %+v", s)
 			}
+			// The rootfs is shared by every sandbox of every grant and
+			// served with the agent's credentials, so it is read-only.
+			if !s.Root.Readonly {
+				t.Fatalf("root = %+v, want read-only", s.Root)
+			}
 			var mounts []string
 			for _, m := range s.Mounts {
 				mounts = append(mounts, m.Destination+":"+m.Type+":"+m.Source+":"+strings.Join(m.Options, ","))
@@ -665,7 +670,7 @@ func TestWarm(t *testing.T) {
 			if pid := f.pidOf(wc); pid == 0 || w.ID != "g" || w.PID != pid || w.Bytes != 0 || w.TotalBytes != 0 {
 				t.Fatalf("Warm = %+v, want id g and the sandbox pid %d", w, pid)
 			}
-			tdir := filepath.Join(b.opt.StateDir, "templates", "g")
+			tdir := filepath.Join(b.opt.StateDir, "templates", wc)
 			if _, err := os.Stat(filepath.Join(tdir, "images", imageFile)); err != nil {
 				t.Fatalf("template image not written: %v", err)
 			}
@@ -711,6 +716,10 @@ func TestWarm(t *testing.T) {
 			b.mu.Unlock()
 			if n != 0 {
 				t.Fatalf("%d templates registered after Unwarm", n)
+			}
+			// The image and the staged copy went with the sandbox.
+			if _, err := os.Stat(tdir); err == nil {
+				t.Fatalf("%s is still there after Unwarm and its reaper", tdir)
 			}
 			// The grant can be warmed again, as the host does once the
 			// template is gone. The new incarnation has a cid of its own.
@@ -780,7 +789,7 @@ func TestProbeFootprint(t *testing.T) {
 				}
 				return
 			}
-			tdir := filepath.Join(b.opt.StateDir, "templates", "g")
+			tdir := filepath.Join(b.opt.StateDir, "templates", warmCID(t, b, "g"))
 			probe := warmCID(t, b, "g") + "-probe"
 			restore := "restore --detach --image-path " + filepath.Join(tdir, "images") + " --bundle " + filepath.Join(tdir, "probe-bundle") + " --direct " + probe
 			if findCall(calls, restore) == "" {
@@ -875,7 +884,7 @@ func TestClone(t *testing.T) {
 			if strings.Contains(string(cfgJSON), "FIBERD_PAYLOAD=010203") != (len(tc.payload) > 0) {
 				t.Fatalf("bundle payload: %s", cfgJSON)
 			}
-			tdir := filepath.Join(b.opt.StateDir, "templates", "g")
+			tdir := filepath.Join(b.opt.StateDir, "templates", warmCID(t, b, "g"))
 			calls := f.calls()
 			if findCall(calls, "restore --detach --image-path "+filepath.Join(tdir, "images")+" --bundle "+bundle+" --direct "+fc) == "" {
 				t.Fatalf("no restore among\n%s", strings.Join(calls, "\n"))
@@ -955,6 +964,15 @@ func TestCloneRefusals(t *testing.T) {
 				if f.alive(fc) {
 					t.Fatal("the sandbox of a fiber that never served is still running")
 				}
+			}
+			// A refused clone leaves no bundle: a restore that failed has
+			// no reaper to take it, and one that was killed has its reaper.
+			if !tc.bundles {
+				bundles := filepath.Join(b.opt.StateDir, "bundles")
+				waitFor(t, "the bundle to go", func() bool {
+					ents, _ := os.ReadDir(bundles)
+					return len(ents) == 0
+				})
 			}
 		})
 	}
@@ -1350,16 +1368,39 @@ func TestSweep(t *testing.T) {
 			if err := f.startSandbox("w-old-7", bundle, knobs{}, &out); err != nil || !f.alive("w-old-7") {
 				t.Fatalf("the leftover sandbox did not start: %v %s", err, out.String())
 			}
-			b := newBackend(Options{Runsc: "runsc", Rootfs: t.TempDir(), StateDir: filepath.Join(t.TempDir(), "state")}, f.run)
+			// What the previous life left on disk: a fiber's bundle and a
+			// template's directory, and a stray file beside them.
+			state := filepath.Join(t.TempDir(), "state")
+			stale := []string{filepath.Join(state, "bundles", "f-old-9"), filepath.Join(state, "templates", "w-old-7", "images")}
+			for _, d := range stale {
+				if err := os.MkdirAll(d, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(d, "x"), []byte("x"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			b := newBackend(Options{Runsc: "runsc", Rootfs: t.TempDir(), StateDir: state}, f.run)
 			t.Cleanup(b.Close)
+			left := 0
+			for _, sub := range []string{"bundles", "templates"} {
+				ents, _ := os.ReadDir(filepath.Join(state, sub))
+				left += len(ents)
+			}
 			if tc.wantGone {
 				if f.alive("w-old-7") || findCall(f.calls(), "delete -force w-old-7") == "" {
 					t.Fatal("the leftover was not deleted through runsc")
+				}
+				if left != 0 {
+					t.Fatalf("%d stale bundle or template directories left after the sweep", left)
 				}
 				return
 			}
 			if !f.alive("w-old-7") || findCall(f.calls(), "delete") != "" {
 				t.Fatal("something was deleted without a listing")
+			}
+			if left != len(stale) {
+				t.Fatalf("%d of %d directories left without a listing, want all of them", left, len(stale))
 			}
 		})
 	}
@@ -1392,7 +1433,10 @@ func TestCIDReuse(t *testing.T) {
 				if _, err := b.Warm(ctx, backend.WarmSpec{GrantUID: "g", Template: backend.Template{Argv: []string{"/bin/refzygote", "--gvisor"}}, CgroupFD: -1, ProbeCgroupFD: -1, WorkDir: workDir}); err != nil {
 					t.Fatalf("second Warm: %v", err)
 				}
-				return warmCID(t, b, "g"), ""
+				// The successor's own template directory, which the
+				// first's reaper must not take with its own.
+				cid := warmCID(t, b, "g")
+				return cid, filepath.Join(b.opt.StateDir, "templates", cid, "bundle")
 			},
 			settle: func(t *testing.T, b *Backend, f *fakeRunsc, second string) {
 				b.Unwarm("g")
@@ -1446,6 +1490,10 @@ func TestCIDReuse(t *testing.T) {
 				if _, err := os.Stat(filepath.Join(bundle, "config.json")); err != nil {
 					t.Fatalf("the late reaper removed the successor's bundle: %v", err)
 				}
+			}
+			// The first's own directory went with it.
+			if _, err := os.Stat(filepath.Join(b.opt.StateDir, "templates", first)); err == nil {
+				t.Fatalf("the reaper left the template directory of %s", first)
 			}
 			if second == first {
 				t.Fatalf("the successor reuses cid %s", first)
