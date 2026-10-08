@@ -1,33 +1,47 @@
 //go:build linux
 
-// Package proc is the fork backend: one zygote process per grant, linked
-// with zygote/libfiberzygote, asked to fork fibers over a socketpair
-// inherited as fd 3, and checkpointed with CRIU. It is the reference
-// backend and the one the conformance suite runs against.
+// Package proc is the fork backend. It runs one zygote per grant, linked
+// with zygote/libfiberzygote, which forks fibers on request over a
+// socketpair inherited as fd 3. CRIU checkpoints them. It is the reference
+// backend that the conformance suite runs against.
 //
-// Line protocol on the control socket (zygote side in libfiberzygote.c):
+// The control socket carries lines. The zygote side is libfiberzygote.c.
+// The host speaks first.
 //
+//	host   -> zygote HIDE <dir> | DROP <path> | RUNDIR <parent> <own>   (any number)
+//	host   -> zygote PREPARE mntns|none                                 (ends the setup)
 //	zygote -> host   READY
-//	host   -> zygote HIDE <dir> | DROP <path> | RUNDIR <parent> <own>   (once, before any CLONE)
-//	                 (RUNDIR names the run directory every grant's directory sits under and this grant's own:
-//	                 a fiber with a mount namespace sees the parent covered and only its own directory bound back)
-//	host   -> zygote CLONE <fence> <endpoint> <deadline_ms> <payload-hex|-> [opt,opt...]   + SCM_RIGHTS cgroup fd, then the handoff channel
-//	                 (the options are any of pidns, mntns, nocaps and handoff, comma-separated. With none the field is
-//	                 empty and the line ends in a space, which the zygote's strtok_r reads as no options.
-//	                 The host has already queued the grant's TLS identity as the channel's first message; the backend
-//	                 passes the channel through)
+//	host   -> zygote CLONE <fence> <endpoint> <deadline_ms> <payload-hex|-> [opt,opt...]   + SCM_RIGHTS cgroup fd [, handoff channel]
 //	zygote -> host   CLONED <fence> <pid>  |  ERROR <fence> <text>
-//	                 (a child that cannot get every confinement it was asked for ends before it runs: ERROR)
 //	zygote -> host   EXITED <pid> exit:<n>|signal:<name>
+//
+// RUNDIR names the directory all grants' run directories sit under, and this
+// grant's own. A fiber with a mount namespace sees the parent covered and
+// only its own directory bound back. PREPARE mntns has the zygote build
+// that view once, in a mount namespace of its own, before it says READY,
+// and every fiber's namespace is a copy of it. The namespace itself is
+// taken at fz_init, before any thread, when FIBERD_OWN_MNTNS is in the
+// zygote's environment. A launcher's fibers get no mount namespace, so
+// its zygote is started without the variable and sent PREPARE none and
+// nothing else.
+// CLONE options are any of pidns, mntns, nocaps and handoff,
+// comma-separated. With none the field is empty and the line ends in a
+// space. The host queues the grant's TLS identity as the handoff channel's
+// first message. A child that cannot get every confinement it asked for
+// ends before it runs, and the zygote sends ERROR. A zygote that could not
+// prepare its namespace says READY, then ERROR ? with the reason, and
+// answers every mount-namespace CLONE with an ERROR.
 package proc
 
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"net"
@@ -54,16 +68,14 @@ type Options struct {
 	// criu and computed as deltas; the launcher supplies what criu needs
 	// to dump and restore trees that live in its namespaces.
 	Launcher Launcher
-	// RootBind is where the host's / is bind-mounted, on the first
-	// resume that needs it, as the root of a restored fiber's mount
-	// namespace (default fiberd-root-<pid> under the temp directory).
-	// Every fiber born afterwards unmounts it from its own namespace:
-	// the bind shows the root filesystem without what HIDE covers. The
-	// backend makes the leaf directory itself (its parent must be a
-	// place only the agent writes), refuses a symlink or a directory
-	// another user owns, keeps the bind private, and unmounts and
-	// removes it at Close. A bind a previous run left at the same path
-	// is unmounted when the backend opens.
+	// RootBind is where the host's / is bind-mounted as the root of a
+	// restored fiber's mount namespace, on the first resume that needs it
+	// (default fiberd-root-<pid> under the temp directory). Every later
+	// fiber unmounts it from its own namespace, because the bind would show
+	// what HIDE covers. The backend makes the leaf directory and removes it
+	// at Close, so its parent must be a place only the agent writes. It
+	// refuses a symlink or another user's directory there, and unmounts a
+	// stale bind at the same path when it opens.
 	RootBind string
 }
 
@@ -102,11 +114,12 @@ type Launcher interface {
 	// it (the run directory is bind-mounted into its namespace).
 	Endpoint(spec backend.WarmSpec, hostPath string) string
 	// DumpExtra and RestoreExtra are criu arguments for a tree that
-	// lives inside the launcher's namespaces. RestoreExtra is given the
-	// image directory and may have to make what the restore needs on
+	// lives inside the launcher's namespaces. Both are given the image
+	// directory. DumpExtra may record there what its restore will need
+	// to know. RestoreExtra may have to make what the restore needs on
 	// this home first (a root filesystem for a grant it never warmed,
 	// images the restored tree's own identity may read).
-	DumpExtra(spec backend.WarmSpec) []string
+	DumpExtra(spec backend.WarmSpec, dir string) ([]string, error)
 	RestoreExtra(spec backend.WarmSpec, dir string) ([]string, error)
 }
 
@@ -129,10 +142,10 @@ type Backend struct {
 	byPID map[pidKey]*fiber
 	exits chan backend.Exit
 
-	// defaultRoot: RootBind was not configured and is fiberd-root-<pid>
-	// under the temp directory, so stale siblings of dead pids are this
-	// backend's to clean. rootHeld: this backend holds a reference to the
-	// bind at RootBind (both under rootMu).
+	// defaultRoot means RootBind is the default fiberd-root-<pid>, so this
+	// backend cleans stale siblings left by dead pids. rootHeld means this
+	// backend holds a reference to the bind at RootBind. Both are under
+	// rootMu.
 	defaultRoot bool
 	rootHeld    bool
 }
@@ -179,7 +192,7 @@ func (b *Backend) bindRoot() error {
 	return nil
 }
 
-// unbindRoot drops this backend's reference; the last one unmounts the
+// unbindRoot drops this backend's reference. The last one unmounts the
 // bind and removes the directory.
 func (b *Backend) unbindRoot() {
 	dir := b.opt.RootBind
@@ -226,12 +239,11 @@ func heldByLiveProcess(pidfile string, self int) bool {
 	return !errors.Is(syscall.Kill(pid, 0), syscall.ESRCH)
 }
 
-// mountRoot binds / at dir, a leaf directory this process creates (or
-// finds, after an unclean shutdown) and checks before mounting over
-// it: mount(2) follows a symlink planted there, and a directory someone
-// else owns is theirs to replace. The bind is made private so nothing
-// mounted under the restore root later propagates anywhere. Callers hold
-// rootMu.
+// mountRoot binds / at dir, a leaf directory this process creates, or
+// finds after an unclean shutdown. It checks dir before mounting over it,
+// because mount(2) follows a planted symlink and a directory someone else
+// owns is theirs to replace. The bind is private so nothing mounted under
+// it propagates. Callers hold rootMu.
 func mountRoot(dir string) error {
 	if !filepath.IsAbs(dir) {
 		return errors.New("want an absolute path")
@@ -270,7 +282,7 @@ func mountRoot(dir string) error {
 	if err == nil {
 		err = syscall.Mount("/", dir, "", syscall.MS_BIND, "")
 		if err == nil {
-			// MS_BIND ignores propagation flags; a second call sets them.
+			// MS_BIND ignores propagation flags, so a second call sets them.
 			if err = syscall.Mount("", dir, "", syscall.MS_PRIVATE, ""); err != nil {
 				_ = syscall.Unmount(dir, syscall.MNT_DETACH)
 			}
@@ -287,14 +299,10 @@ func mountRoot(dir string) error {
 	return err
 }
 
-// reapStaleRoots unmounts restore roots a previous run of this process's
-// configuration left behind. That is a bind of / at dir itself, unless
-// the holder file beside it names a live process (another agent
-// configured with the same RootBind), and, with siblings, at
-// fiberd-root-<pid> next to it for a pid no live process has. Nothing
-// else is touched. A bind someone else made, or one a live backend in
-// this process holds, stays. Several binds stacked at one path (a run
-// per crash) come off one per pass.
+// reapStaleRoots unmounts restore roots that earlier runs left behind. It
+// takes a bind of / at dir, unless the holder file names a live process.
+// With siblings it also takes fiberd-root-<pid> beside dir for a dead pid.
+// Any other bind stays. Binds stacked at one path come off one per pass.
 func reapStaleRoots(dir string, siblings bool) {
 	rootMu.Lock()
 	defer rootMu.Unlock()
@@ -336,7 +344,7 @@ func reapStaleRoots(dir string, siblings bool) {
 				continue
 			}
 			log.Printf("proc: unmounted stale restore root %s", p)
-			_ = os.Remove(p) // fails while another bind is stacked underneath; the next pass gets it
+			_ = os.Remove(p) // fails while a bind is stacked underneath, and the next pass gets it
 			_ = os.Remove(holderFile(p))
 		}
 	}
@@ -449,7 +457,7 @@ type zygote struct {
 // the fiber from it when CLONED arrives (see cloned), so what the fiber
 // needs beyond the zygote's line is here.
 type pending struct {
-	ch      chan cloneResult // buffered 1; written once, by whoever takes the entry
+	ch      chan cloneResult // buffered 1, written once by whoever takes the entry
 	handoff bool
 }
 
@@ -459,9 +467,8 @@ type cloneResult struct {
 	err error
 }
 
-// parseCloned reads a CLONED line's fields after the keyword: <fence>
-// <pid>, and anything after them is ignored. ok is false when the line
-// names no fiber (too short, or a pid that is not a positive number).
+// parseCloned reads <fence> <pid> after the CLONED keyword and ignores the
+// rest. ok is false when the line is too short or the pid is not positive.
 func parseCloned(fields []string) (fence string, pid int, ok bool) {
 	if len(fields) < 2 {
 		return "", 0, false
@@ -475,17 +482,16 @@ func parseCloned(fields []string) (fence string, pid int, ok bool) {
 
 type fiber struct {
 	id       string
-	pid      int // as the host sees it (under Backend.mu); 0 when unknown, never signalled then
+	pid      int // as the host sees it, under Backend.mu. 0 when unknown, and then never signalled
 	zpid     int // as the zygote reported it (its own pid namespace); 0 for restored trees
 	warmID   string
 	restored *criu.Restored
 	handoff  bool // holds a handoff channel at handoffFD
-	// runDir is where, in the fiber's own mount namespace, its grant's
-	// run directory is bound (RUNDIR): the path it was born with, which
-	// a checkpoint keeps across every park and resume while the host's
-	// directory behind it is the resuming grant's. "" for a fiber
-	// without one (a launcher's, or one restored from a checkpoint
-	// without the record).
+	// runDir is where the fiber's mount namespace binds its grant's run
+	// directory (RUNDIR). The path is fixed at birth and survives every
+	// park and resume, while the host directory behind it is the resuming
+	// grant's. It is "" for a launcher's fiber or a restore without the
+	// record.
 	runDir string
 }
 
@@ -532,7 +538,7 @@ func NewBackend(o Options) *Backend {
 		exits: make(chan backend.Exit, 1024)}
 	if o.Launcher == nil {
 		// A launcher's fibers restore in its container, never on the
-		// restore root; only the fork backend proper owns one.
+		// restore root. Only the plain fork backend owns one.
 		reapStaleRoots(o.RootBind, defaultRoot)
 	}
 	if err := b.criu.Available(context.Background()); err == nil {
@@ -556,7 +562,7 @@ func (b *Backend) Tier() core.Tier { return b.tier }
 // a listening tcp socket on its port like any other.
 func (b *Backend) EndpointSchemes() []string { return []string{"unix", "tcp"} }
 
-// Handoff implements backend.Handoffer: libfiberzygote keeps the channel
+// Handoff implements backend.Handoffer. libfiberzygote keeps the channel
 // at a fixed descriptor, and criu treats it as external.
 func (b *Backend) Handoff() bool { return true }
 
@@ -594,6 +600,25 @@ func (b *Backend) Warm(ctx context.Context, spec backend.WarmSpec) (backend.Warm
 
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.ExtraFiles = []*os.File{childF} // fd 3 in the zygote
+	if b.opt.Launcher == nil && spec.Template.ZygoteSHA256 != "" {
+		// A registry template is exec'd from a descriptor whose bytes
+		// were hashed against what the host verified, so a swap of the
+		// cache entry between the host's check and this exec runs
+		// nothing. A rewrite in place is kept off by the hide list, which
+		// covers the cache for every fiber. The descriptor is the
+		// zygote's fd 4, open across the exec so a script template's
+		// interpreter can read it too; a fiber closes everything above
+		// its own descriptors. The zygote's /proc/self/exe still names
+		// the path, which is what CRIU records.
+		exe, err := openVerified(argv[0], spec.Template.ZygoteSHA256)
+		if err != nil {
+			_ = parentF.Close()
+			return backend.Warm{}, fmt.Errorf("proc: template %s: %w", spec.Template.Digest, err)
+		}
+		defer func() { _ = exe.Close() }()
+		cmd.ExtraFiles = append(cmd.ExtraFiles, exe)
+		cmd.Path = exeFDPath
+	}
 	// The zygote's stdio goes to a log file, not to our stderr: a regular
 	// file is something criu can checkpoint the zygote with; a pipe to a
 	// process outside the tree is not.
@@ -601,9 +626,15 @@ func (b *Backend) Warm(ctx context.Context, spec backend.WarmSpec) (backend.Warm
 		_ = parentF.Close()
 		return backend.Warm{}, err
 	}
-	zlog, err := os.OpenFile(filepath.Join(spec.WorkDir, "zygote.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	// The grant's fibers write this directory as uid 0, so a name in
+	// it may be a link one planted. The log is opened by name and never
+	// through a link, and a warm over a planted one is refused.
+	zlog, err := os.OpenFile(filepath.Join(spec.WorkDir, "zygote.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND|syscall.O_NOFOLLOW, 0o644)
 	if err != nil {
 		_ = parentF.Close()
+		if errors.Is(err, syscall.ELOOP) {
+			err = fmt.Errorf("proc: %s/zygote.log is a link, not a file; refusing to write through it", spec.WorkDir)
+		}
 		return backend.Warm{}, err
 	}
 	defer func() { _ = zlog.Close() }()
@@ -619,7 +650,11 @@ func (b *Backend) Warm(ctx context.Context, spec backend.WarmSpec) (backend.Warm
 		}
 	} else {
 		cmd.Stdin, cmd.Stdout, cmd.Stderr = devnull, zlog, zlog
-		cmd.Env = []string{"PATH=/usr/bin:/bin"} // nothing grant-specific: identical pages on every home
+		// Nothing grant-specific, so the pages are identical on every
+		// home. FIBERD_OWN_MNTNS has the zygote take a mount namespace
+		// of its own in fz_init, before any thread, which it prepares
+		// for its fibers before READY (see sendSetup).
+		cmd.Env = []string{"PATH=/usr/bin:/bin", ownMntnsEnv}
 		if len(spec.Devices) > 0 {
 			// The fabric channel: the one grant-specific thing an engine
 			// needs at warm-up (a CUDA engine reads it as its visible set).
@@ -644,7 +679,7 @@ func (b *Backend) Warm(ctx context.Context, spec backend.WarmSpec) (backend.Warm
 		_ = parentF.Close()
 		return backend.Warm{}, fmt.Errorf("%s: start zygote %v: %w", b.Name(), argv, err)
 	}
-	// The zygote holds its own copy now. Ours must go before READY is
+	// The zygote holds its own copy. Ours must close before READY is
 	// awaited, or a zygote that dies first leaves the socket open on this
 	// side and Warm waits for the whole deadline instead of seeing EOF.
 	_ = childF.Close()
@@ -673,6 +708,16 @@ func (b *Backend) Warm(ctx context.Context, spec backend.WarmSpec) (backend.Warm
 			_ = uc.Close()
 			uc = ch
 		}
+	}
+	// The setup lines go first. The zygote prepares the mount namespace
+	// every fiber copies from them and says READY from inside it, so
+	// READY means the view is built. A launcher's fibers get no mount
+	// namespace (see Clone), and its zygote is told only that.
+	if err := sendSetup(uc, spec.Hide, b.opt.RootBind, spec.WorkDir, b.opt.Launcher == nil); err != nil {
+		endZygote(cmd)
+		_ = uc.Close()
+		b.release(&zygote{spec: spec})
+		return backend.Warm{}, err
 	}
 	z := &zygote{id: spec.GrantUID, spec: spec, cmd: cmd, pid: cmd.Process.Pid, ctl: uc, pend: map[string]*pending{}, gone: make(chan struct{})}
 
@@ -713,11 +758,6 @@ func (b *Backend) Warm(ctx context.Context, spec backend.WarmSpec) (backend.Warm
 			return backend.Warm{}, err
 		}
 		z.pid = pid
-	} else if err := sendPaths(uc, spec.Hide, b.opt.RootBind, spec.WorkDir); err != nil {
-		endZygote(cmd)
-		_ = uc.Close()
-		b.release(z)
-		return backend.Warm{}, err
 	}
 	b.mu.Lock()
 	b.zygotes[z.id] = z
@@ -727,38 +767,76 @@ func (b *Backend) Warm(ctx context.Context, spec backend.WarmSpec) (backend.Warm
 	return backend.Warm{ID: z.id, PID: z.pid}, nil
 }
 
-// sendPaths tells the zygote what every fiber with a mount namespace of
-// its own covers (hide), unmounts (drop) and keeps of the run directory
-// (rundir): workDir is the grant's directory, and the directory holding
-// it is the run directory shared by every grant, which the fiber sees
-// covered. workDir is the host's view, the same path the zygote and its
-// fibers see without a launcher.
-func sendPaths(c *net.UnixConn, hide []string, drop, workDir string) error {
-	var msg strings.Builder
-	for _, p := range hide {
-		if !filepath.IsAbs(p) || strings.ContainsAny(p, " \t\r\n") {
-			return fmt.Errorf("proc: cannot hide %q: want an absolute path without whitespace", p)
-		}
-		msg.WriteString("HIDE " + filepath.Clean(p) + "\n")
-	}
-	msg.WriteString("DROP " + drop + "\n")
-	parent, own, err := runDirPair(workDir)
+// openVerified opens the executable at path read-only and hashes its
+// bytes through that descriptor. It returns the descriptor only when they
+// hash to sha, the hash the host verified the cache entry at, so an exec
+// through the descriptor (exeFDPath) runs the bytes that were checked and
+// not whatever the path leads to by then.
+func openVerified(path, sha string) (*os.File, error) {
+	f, err := os.Open(path)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	msg.WriteString("RUNDIR " + parent + " " + own + "\n")
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	if sum := hex.EncodeToString(h.Sum(nil)); sum != sha {
+		_ = f.Close()
+		return nil, fmt.Errorf("executable %s hashes to %s, the host verified %s; the cache changed under it", path, sum[:12], sha[:12])
+	}
+	return f, nil
+}
+
+// exeFDPath is the path Warm execs a registry template through: the
+// verified descriptor, which it passes as the zygote's fd 4, right after
+// the control socket at fd 3.
+const exeFDPath = "/proc/self/fd/4"
+
+// ownMntnsEnv tells libfiberzygote to take a private mount namespace of
+// its own at fz_init, so PREPARE mntns has one to fill. A launcher's
+// zygote is started without it and keeps the container's namespace.
+const ownMntnsEnv = "FIBERD_OWN_MNTNS=1"
+
+// sendSetup tells the zygote, before READY, what a fiber with its own
+// mount namespace covers (hide), unmounts (drop) and keeps of the run
+// directory, then PREPARE mntns, on which the zygote builds that view in
+// a mount namespace of its own. workDir is the grant's directory as the
+// host sees it, which is also the zygote's view without a launcher. Its
+// parent is the run directory all grants share, and fibers see it
+// covered. With mntns false, a launcher's zygote, the paths are left out
+// and PREPARE none is all that is sent. A zygote that exited already
+// fails the write, which is reported as it not becoming ready.
+func sendSetup(c *net.UnixConn, hide []string, drop, workDir string, mntns bool) error {
+	var msg strings.Builder
+	if mntns {
+		for _, p := range hide {
+			if !filepath.IsAbs(p) || strings.ContainsAny(p, " \t\r\n") {
+				return fmt.Errorf("proc: cannot hide %q: want an absolute path without whitespace", p)
+			}
+			msg.WriteString("HIDE " + filepath.Clean(p) + "\n")
+		}
+		msg.WriteString("DROP " + drop + "\n")
+		parent, own, err := runDirPair(workDir)
+		if err != nil {
+			return err
+		}
+		msg.WriteString("RUNDIR " + parent + " " + own + "\n")
+		msg.WriteString("PREPARE mntns\n")
+	} else {
+		msg.WriteString("PREPARE none\n")
+	}
 	if _, err := c.Write([]byte(msg.String())); err != nil {
-		return fmt.Errorf("proc: send HIDE/DROP/RUNDIR: %w", err)
+		return fmt.Errorf("proc: zygote did not become ready: sending its setup lines: %w", err)
 	}
 	return nil
 }
 
-// runDirPair is the RUNDIR line's two paths for a grant's run directory:
-// the directory holding it, which every fiber sees covered, and the
-// directory itself. A run directory the fiber could not be told about
-// (relative, with whitespace, or sitting right under /, where the cover
-// would be the root) is an error: the backend never warms a grant whose
-// fibers would see every other grant's endpoints.
+// runDirPair returns the RUNDIR line's two paths, the parent that fibers
+// see covered and the grant's own directory. A path that is relative,
+// holds whitespace or sits right under / is an error, because the backend
+// never warms a grant whose fibers would see other grants' endpoints.
 func runDirPair(workDir string) (parent, own string, err error) {
 	if !filepath.IsAbs(workDir) || strings.ContainsAny(workDir, " \t\r\n") {
 		return "", "", fmt.Errorf("proc: run directory %q: want an absolute path without whitespace", workDir)
@@ -787,10 +865,8 @@ func (b *Backend) release(z *zygote) {
 // hostPID finds, among the processes in the fiber's leaf cgroup, the one
 // the zygote reported as pid in its own pid namespace: the fiber's root
 // as the host sees it. Without a launcher the two are the same. With
-// one, a pid that cannot be translated (no cgroup to look in, or the
-// process already gone from it) is 0, not the container's number: that
-// number may be some other process's on the host, and the fiber must
-// never be signalled under it.
+// one, a pid that cannot be translated is 0, never the container's
+// number, because that number may be another process's on the host.
 func (b *Backend) hostPID(cgroupFD int, reported int) int {
 	if b.opt.Launcher == nil {
 		return reported
@@ -826,6 +902,9 @@ func (b *Backend) hostPID(cgroupFD int, reported int) int {
 
 // CheckpointWarm implements backend.SelfCheckpointer: dump the zygote's
 // pages while it keeps running, treating the control socket as external.
+// A plain zygote lives in the mount namespace it prepared for its fibers,
+// so its mounts are named the way a fiber's are at Park (the single-file
+// mounts, and the run directory bind by name).
 func (b *Backend) CheckpointWarm(ctx context.Context, warmID, dir string) error {
 	b.mu.Lock()
 	z, ok := b.zygotes[warmID]
@@ -838,9 +917,43 @@ func (b *Backend) CheckpointWarm(ctx context.Context, warmID, dir string) error 
 		extra = []string{"--external", "unix[" + ino + "]"}
 	}
 	if b.opt.Launcher != nil {
-		extra = append(extra, b.opt.Launcher.DumpExtra(z.spec)...)
+		more, err := b.opt.Launcher.DumpExtra(z.spec, dir)
+		if err != nil {
+			return err
+		}
+		extra = append(extra, more...)
+	} else {
+		mounts, err := mountExtra(z.pid, filepath.Clean(z.spec.WorkDir), dir)
+		if err != nil {
+			return fmt.Errorf("proc: mounts of the zygote for %s: %w", warmID, err)
+		}
+		extra = append(extra, mounts...)
 	}
 	return b.criu.DumpWith(ctx, z.pid, dir, true, extra)
+}
+
+// mountExtra is the criu dump arguments for the mount namespace of pid,
+// a plain zygote or one of its fibers, written beside the images in dir.
+// nil when pid shares the host's namespace. The run directory bind at
+// runDir is dumped by name, like the single-file mounts. Autodetection
+// would record the host path it came from, and a resume binds the
+// resuming grant's directory instead.
+func mountExtra(pid int, runDir, dir string) ([]string, error) {
+	extra, err := criu.DumpMounts(pid, dir)
+	if err != nil {
+		return nil, err
+	}
+	if extra != nil && runDir != "" && mountedAt(pid, runDir) {
+		rec, err := json.Marshal(runDirRecord{MountPoint: runDir})
+		if err != nil {
+			return nil, err
+		}
+		if err := os.WriteFile(filepath.Join(dir, runDirFile), rec, 0o600); err != nil {
+			return nil, err
+		}
+		extra = append(extra, "--external", "mnt["+runDir+"]:"+runDirKey)
+	}
+	return extra, nil
 }
 
 func (b *Backend) Unwarm(id string) {
@@ -878,15 +991,15 @@ func (b *Backend) read(z *zygote, rd *bufio.Reader) {
 				b.cloned(z, fence, cloneResult{pid: pid})
 			case len(fields) >= 2:
 				// A fiber the backend cannot name a pid for is not one it
-				// can hand out; the zygote ends it at the deadline.
+				// can hand out. The zygote ends it at the deadline.
 				z.reply(fields[1], cloneResult{err: fmt.Errorf("%w: malformed %q", ErrZygote, strings.TrimSpace(line))})
 			}
 		case "ERROR":
 			switch {
 			case len(fields) >= 2 && fields[1] == "?":
-				// Not about a clone: a HIDE, DROP or RUNDIR line the
-				// zygote refused. It refuses the grant's clones from
-				// then on.
+				// The zygote refused a setup line or could not prepare
+				// its mount namespace, not a clone. It refuses all of
+				// the grant's mount-namespace clones after that.
 				log.Printf("%s: zygote for %s: %s", b.Name(), z.id, strings.Join(fields[2:], " "))
 			case len(fields) >= 2:
 				z.reply(fields[1], cloneResult{err: fmt.Errorf("%w: %s", ErrZygote, strings.Join(fields[2:], " "))})
@@ -988,20 +1101,15 @@ func (z *zygote) reply(fence string, res cloneResult) {
 	}
 }
 
-// cloned handles a CLONED line. The fiber is registered under the
-// reported pid here, in the reader, before Clone is answered. The zygote
-// may write EXITED for it in the same breath (a fiber that reports ready
-// and exits within one of its poll iterations), and the reader handles
-// that line next, so the fiber must already be in byPID or the exit is
-// lost. Without a launcher the reported pid is the host's. With one it
-// is the container's number, which may be some other process's on the
-// host, so the fiber has no host pid until Clone translates it (that
-// needs the caller's cgroup fd, which the caller may close as soon as
-// Clone returns).
+// cloned handles a CLONED line. The reader registers the fiber under the
+// reported pid before Clone is answered, because the zygote may send
+// EXITED for it right after and that exit must find it in byPID. With a
+// launcher the reported pid is the container's number, so the fiber has
+// no host pid until Clone translates it with the caller's cgroup fd.
 func (b *Backend) cloned(z *zygote, fence string, res cloneResult) {
 	p, ok := z.take(fence)
 	if !ok {
-		return // Clone gave up; the zygote kills the child at its deadline
+		return // Clone gave up, and the zygote kills the child at its deadline
 	}
 	f := &fiber{id: fence, pid: res.pid, zpid: res.pid, warmID: z.id, handoff: p.handoff}
 	if b.opt.Launcher != nil {
@@ -1019,8 +1127,8 @@ func (b *Backend) cloned(z *zygote, fence string, res cloneResult) {
 	p.ch <- res
 }
 
-// forget drops a fiber Clone could not hand to its caller without
-// reporting an exit for it; a later EXITED under its pid finds nothing.
+// forget drops a fiber Clone could not hand to its caller, without
+// reporting an exit. A later EXITED under its pid finds nothing.
 func (b *Backend) forget(f *fiber) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -1091,8 +1199,8 @@ func (b *Backend) Clone(ctx context.Context, warmID string, spec backend.FiberSp
 		payload = hex.EncodeToString(spec.Payload)
 	}
 	// A launcher's fibers already live in its container's mount
-	// namespace; the agent's paths are not in it. They keep the
-	// container's capabilities: CRIU will not dump a fiber without
+	// namespace, which holds none of the agent's paths. They keep the
+	// container's capabilities, because CRIU will not dump a fiber without
 	// capabilities whose /proc is not its own pid namespace's.
 	var opts []string
 	if spec.OwnPIDNS {
@@ -1137,10 +1245,10 @@ func (b *Backend) Clone(ctx context.Context, warmID string, spec backend.FiberSp
 		if res.err != nil {
 			return backend.Fiber{}, res.err
 		}
-		// The reader registered f under the zygote's pid; the host's
-		// is found while the caller's cgroup fd is still open. A fiber
-		// that has already exited keeps whatever it had: it is out of
-		// b.fibers and nothing signals it.
+		// The reader registered f under the zygote's pid. The host's pid
+		// is found here, while the caller's cgroup fd is still open. A
+		// fiber that already exited is out of b.fibers, so nothing
+		// signals it.
 		f := res.f
 		pid := b.hostPID(spec.CgroupFD, res.pid)
 		b.mu.Lock()
@@ -1159,12 +1267,11 @@ func (b *Backend) Clone(ctx context.Context, warmID string, spec backend.FiberSp
 	}
 }
 
-// abandon is Clone returning without a fiber. The pending entry goes, so
-// a later CLONED finds no one to answer, and a fiber the reader has
-// already registered is forgotten, since its caller never learns of it.
-// The zygote kills a child nobody waited for at its deadline. Whoever
-// takes the entry sends on reply exactly once, so when the take here
-// fails the reader (or zygoteGone) has it and its answer is on its way.
+// abandon is Clone returning without a fiber. It drops the pending entry
+// and forgets any fiber the reader already registered, since the caller
+// never learns of it. The zygote kills the unwaited child at its deadline.
+// Whoever takes the entry sends on reply exactly once, so a failed take
+// here means the reader or zygoteGone is already answering.
 func (b *Backend) abandon(z *zygote, fence string, reply chan cloneResult) {
 	if _, ok := z.take(fence); ok {
 		return
@@ -1202,26 +1309,14 @@ func (b *Backend) Park(ctx context.Context, fiberID string, spec backend.ParkSpe
 		// can name for criu. A dump without them would not restore.
 		return fmt.Errorf("proc: fiber %q: its zygote is gone, cannot name its container's mounts", fiberID)
 	case b.opt.Launcher != nil:
-		extra = b.opt.Launcher.DumpExtra(z.spec)
+		var err error
+		if extra, err = b.opt.Launcher.DumpExtra(z.spec, spec.Dir); err != nil {
+			return err
+		}
 	case b.opt.Launcher == nil:
 		var err error
-		if extra, err = criu.DumpMounts(pid, spec.Dir); err != nil {
+		if extra, err = mountExtra(pid, f.runDir, spec.Dir); err != nil {
 			return fmt.Errorf("proc: mounts of %s: %w", fiberID, err)
-		}
-		// The bind of the grant's run directory is dumped by name, like
-		// the single-file mounts: autodetection would record the host
-		// path it was bound from, and a resume binds the resuming
-		// grant's directory instead (see Resume). Skipped when the
-		// fiber has no such mount.
-		if extra != nil && f.runDir != "" && mountedAt(pid, f.runDir) {
-			rec, err := json.Marshal(runDirRecord{MountPoint: f.runDir})
-			if err != nil {
-				return err
-			}
-			if err := os.WriteFile(filepath.Join(spec.Dir, runDirFile), rec, 0o600); err != nil {
-				return err
-			}
-			extra = append(extra, "--external", "mnt["+f.runDir+"]:"+runDirKey)
 		}
 	}
 	if f.handoff {
@@ -1245,9 +1340,9 @@ func (b *Backend) Park(ctx context.Context, fiberID string, spec backend.ParkSpe
 	return b.criu.DumpWith(ctx, pid, spec.Dir, spec.Sync, extra)
 }
 
-// handoffInherit is what restores a handoff checkpoint in dir with ch as
-// its new channel: the criu arguments and the files they refer to.
-// Every other checkpoint takes neither, and ch must then be nil.
+// handoffInherit returns the criu arguments and files that restore a
+// handoff checkpoint in dir with ch as its new channel. Every other
+// checkpoint takes neither, and ch must then be nil.
 func handoffInherit(dir string, ch *os.File) ([]string, []*os.File, error) {
 	b, err := os.ReadFile(filepath.Join(dir, handoffFile))
 	switch {
@@ -1267,11 +1362,10 @@ func handoffInherit(dir string, ch *os.File) ([]string, []*os.File, error) {
 	return []string{"--inherit-fd", "fd[3]:socket:[" + rec.Inode + "]"}, []*os.File{ch}, nil
 }
 
-// runDirInherit is what binds a checkpoint's run directory mount, if
-// dir records one, to workDir, the resuming grant's run directory: the
-// criu arguments and the mount point to remember for the next park. A
-// checkpoint without the record (a fiber whose run directory was never
-// narrowed) takes nothing.
+// runDirInherit returns the criu arguments that bind the run directory
+// mount dir records to workDir, the resuming grant's run directory, plus
+// the mount point to remember for the next park. A checkpoint without
+// the record takes nothing.
 func runDirInherit(dir, workDir string) ([]string, string, error) {
 	b, err := os.ReadFile(filepath.Join(dir, runDirFile))
 	if errors.Is(err, os.ErrNotExist) {
@@ -1332,10 +1426,10 @@ func (b *Backend) Resume(ctx context.Context, spec backend.ResumeSpec) (backend.
 			if err := b.bindRoot(); err != nil {
 				return backend.Fiber{}, err
 			}
-			// The fiber's own run directory, if the checkpoint has one,
-			// is bound to the resuming grant's: the one the host dials
-			// and writes the fence file in. Its path in the fiber's
-			// namespace stays what it was born with.
+			// The fiber's run directory, if the checkpoint has one, is
+			// bound to the resuming grant's, where the host dials and
+			// writes the fence file. Its path inside the fiber stays the
+			// one it was born with.
 			var more []string
 			if more, runDir, err = runDirInherit(spec.Dir, spec.WorkDir); err != nil {
 				return backend.Fiber{}, err
@@ -1376,8 +1470,8 @@ func (b *Backend) Resume(ctx context.Context, spec backend.ResumeSpec) (backend.
 
 // Kill ends the fiber's root process; the exit is reported like any other.
 // A fiber already reported gone is a no-op. One whose host pid is unknown
-// is an error, never a signal: kill(2) of 0 is this process group, and a
-// negative or guessed number is some other process.
+// is an error, never a signal, because kill(2) of 0 is this process group
+// and a negative or guessed number is some other process.
 func (b *Backend) Kill(fiberID string) error {
 	b.mu.Lock()
 	f, ok := b.fibers[fiberID]

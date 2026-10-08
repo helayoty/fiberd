@@ -15,42 +15,55 @@
  *   incr            -> <n>       (per-fiber counter; state that must survive
  *                                 a park/resume, see phase 6)
  *   get             -> <n>
- *   random          -> <n>       (libc random(): proves each fiber is
- *                                 reseeded, not left on the zygote's seed)
- *   fence           -> <fence>
+ *   random          -> <n>       (libc random(), reseeded in every new
+ *                                 incarnation: at the fork, after a
+ *                                 restore, and when the fence changes
+ *                                 under a resumed fiber, so no two
+ *                                 copies draw the same sequence)
+ *   getrandom       -> <hex>     (8 bytes straight from getrandom(2):
+ *                                 shows whether the kernel's entropy is
+ *                                 fresh in a copy, with no template
+ *                                 state in between)
+ *   fence           -> <fence>   (the current one: after a resume the agent
+ *                                 publishes the new fence beside a unix
+ *                                 endpoint, and that file wins over the
+ *                                 birth fence in memory)
  *   getenv <NAME>   -> value or "-" (proves the scrub: only FIBERD_* exist)
  *   status <Key>    -> that field of /proc/self/status, or "-"
- *                      (CapEff, NoNewPrivs: proves the privilege drop)
+ *                      (CapEff and NoNewPrivs prove the privilege drop)
  *   read <path>     -> the file's first line, or "-" when it cannot be
  *                      read (proves what the mount namespace hides)
- *   wopen <path>    -> what open(path, O_WRONLY) says: the errno's name
- *                      (EROFS, EACCES, EPERM, ENOENT, or "errno <n>"),
- *                      or "ok" when it opened; nothing is ever written
+ *   wopen <path>    -> "ok" when open(path, O_WRONLY) succeeds, else the
+ *                      errno's name (EROFS, EACCES, EPERM, ENOENT, or
+ *                      "errno <n>"). Nothing is ever written.
  *                      (proves which host controls are read-only)
- *   stat <path>     -> what stat(path) finds: "dir", "file", "sock",
- *                      "other", or the errno's name when it fails
- *                      (ENOENT, EACCES, or "errno <n>"); nothing is
- *                      opened or changed (proves what the mount
- *                      namespace shows of other grants' directories)
- *   quit            -> closes the connection
+ *   stat <path>     -> what stat(path) finds, "dir", "file", "sock" or
+ *                      "other", else the errno's name (ENOENT, EACCES,
+ *                      or "errno <n>"). Nothing is opened or changed.
+ *                      (proves what the mount namespace shows of other
+ *                      grants' directories)
+ *   remount <path>  -> "ok" when a read-write remount of the mount at
+ *                      path succeeds (undone at once), else the errno's
+ *                      name (proves whether a fiber may lift a read-only
+ *                      bind it was given)
  *
- * A handoff fiber (FIBERD_HANDOFF_FD set) serves the same protocol on the
- * connections the agent passes it through fz_accept() instead of a
- * listener of its own, inside TLS 1.3: it serves the grant's identity
+ * A handoff fiber (FIBERD_HANDOFF_FD set) serves the same protocol inside
+ * TLS 1.3 on the connections the agent passes it through fz_accept(),
+ * instead of a listener of its own. It serves the grant's identity
  * (fz_handoff_identity(), sent down the channel at birth, never a file)
  * and accepts only the client certificate whose x5t#S256 that identity
- * names. That needs a build with -DFZ_TLS and OpenSSL 3; without it a
+ * names. That needs a build with -DFZ_TLS and OpenSSL 3. Without it a
  * handoff fiber refuses to start.
  *
  * The clone payload, if any, is JSON with an optional "dirty_bytes": the
  * fiber dirties that much right after reporting ready, which is how
  * conformance case C6 drives a fiber over its W budget; and an optional
- * "device_bytes", reserved from the engine the same way. Two keys
- * are for the runtime's own tests: "ready_delay_ms" delays the ready
- * report (a fiber that misses its deadline), and "ready_misuse" makes a
- * fiber misuse the readiness pipe at fd 3 the way a buggy workload would
- * (1 writes a stray byte on it before reporting, 2 closes it and never
- * reports, 3 calls fz_report, which must fail in a fiber); the zygote
+ * "device_bytes", reserved from the engine the same way. Two keys are
+ * for the runtime's own tests. "ready_delay_ms" delays the ready report,
+ * for a fiber that misses its deadline. "ready_misuse" makes a fiber
+ * misuse the readiness pipe at fd 3 the way a buggy workload would. 1
+ * writes a stray byte on it before reporting, 2 closes it and never
+ * reports, and 3 calls fz_report, which must fail in a fiber. The zygote
  * must refuse such a fiber and go on serving.
  *
  * --http makes every fiber serve HTTP/1.1 on its endpoint instead of the
@@ -81,7 +94,7 @@
  * and payload from the restore-time environment (/proc/gvisor/spec_environ),
  * serves on /host (the grant's run directory, bind-mounted), closes its
  * endpoint on SIGUSR1 so the sandbox can be checkpointed, and re-binds
- * under the next fence when restored again.
+ * under the next fence when restored again. --http applies there too.
  */
 #define _GNU_SOURCE
 #include "libfiberzygote.h"
@@ -98,6 +111,7 @@
 #include <netinet/in.h>
 #include <stdint.h>
 #include <sys/mman.h>
+#include <sys/random.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -114,7 +128,6 @@
 #include <openssl/rand.h>
 #include <openssl/ssl.h>
 #include <openssl/x509.h>
-#include <sys/random.h>
 #include <sys/time.h>
 #endif
 
@@ -248,10 +261,13 @@ static void engine_start(size_t mb) {
 static const char *cur_endpoint; /* this fiber's endpoint, for the fence file */
 static const char *cur_fence;
 
-/* The fence the engine should file the slice under: the one published
- * beside a unix endpoint after a resume (the in-process fence is stale
- * then), else the one this incarnation was born with. */
-static const char *current_fence(char *buf, size_t n) {
+/* The fence this incarnation lives under: the one the agent published
+ * beside the unix endpoint after a resume (the fence in memory is the
+ * birth fence, stale then), else fallback, the fence in memory. A fiber
+ * behind the agent's tcp relay serves a unix socket too and reads the
+ * file beside it. A gVisor incarnation has no fence file: its fence
+ * comes from the restore-time spec and is current already. */
+static const char *live_fence(char *buf, size_t n, const char *fallback) {
     const char *ep = cur_endpoint ? cur_endpoint : "";
     if (strncmp(ep, "unix://", 7) == 0) ep += 7;
     if (ep[0] == '/') {
@@ -262,8 +278,11 @@ static const char *current_fence(char *buf, size_t n) {
             fclose(f);
         }
     }
-    return cur_fence ? cur_fence : "?";
+    return fallback ? fallback : "?";
 }
+
+/* The fence the engine should file the slice under. */
+static const char *current_fence(char *buf, size_t n) { return live_fence(buf, n, cur_fence); }
 
 /* device_reserve asks the engine for a slice of bytes (0 releases it) and
  * returns the engine's reply line. */
@@ -317,20 +336,20 @@ static void errname(int e, char *out, size_t n) {
     }
 }
 
-/* wopen_errno writes what open(path, O_WRONLY) answers: the errno's name,
- * or "ok" when the open succeeds (the descriptor is closed at once). It
- * never writes a byte, so it is safe to point at a sysctl or a cgroup
- * control: the open alone tells whether the mount is read-only. */
+/* wopen_errno writes "ok" when open(path, O_WRONLY) succeeds (the
+ * descriptor is closed at once), else the errno's name. It never writes
+ * a byte, so it is safe to point at a sysctl or a cgroup control. The
+ * open alone tells whether the mount is read-only. */
 static void wopen_errno(const char *path, char *out, size_t n) {
     int fd = open(path, O_WRONLY | O_CLOEXEC | O_NOCTTY);
     if (fd >= 0) { close(fd); snprintf(out, n, "ok\n"); return; }
     errname(errno, out, n);
 }
 
-/* connect_errno writes what a TCP connect to "a.b.c.d:port" answers
- * within two seconds: "ok" (the peer accepted, the socket is closed at
- * once), or the errno's name. The one way a fiber can show whether a
- * host listener is reachable from its network namespace. */
+/* connect_errno writes "ok" when a TCP connect to "a.b.c.d:port"
+ * succeeds within two seconds (the socket is closed at once), else the
+ * errno's name. It is the one way a fiber can show whether a host
+ * listener is reachable from its network namespace. */
 static void connect_errno(const char *addr, char *out, size_t n) {
     char host[64]; unsigned port;
     if (sscanf(addr, "%63[^:]:%u", host, &port) != 2) { errname(EINVAL, out, n); return; }
@@ -374,6 +393,17 @@ static void mount_errno(const char *fstype, char *out, size_t n) {
     if (rc == 0) umount2(dir, MNT_DETACH);
     rmdir(dir);
     if (rc == 0) snprintf(out, n, "ok\n"); else errname(saved, out, n);
+}
+
+/* remount_errno writes what a read-write bind remount of the mount at
+ * path answers. One that succeeds is put back read-only at once. */
+static void remount_errno(const char *path, char *out, size_t n) {
+    if (mount(NULL, path, NULL, MS_REMOUNT | MS_BIND, NULL) == 0) {
+        mount(NULL, path, NULL, MS_REMOUNT | MS_BIND | MS_RDONLY, NULL);
+        snprintf(out, n, "ok\n");
+        return;
+    }
+    errname(errno, out, n);
 }
 
 /* mkdir_errno writes what mkdir(path) answers, removing a directory it
@@ -444,8 +474,8 @@ static int conn_write(conn_t *c, const void *p, size_t n) {
     return write(c->fd, p, n) == (ssize_t)n ? 0 : -1;
 }
 
-/* conn_line reads one line without its newline; 0 at end of stream. A
- * line longer than n is cut to n-1 bytes. */
+/* conn_line reads one line without its newline and returns 0 at end of
+ * stream. A line longer than n is cut to n-1 bytes. */
 static int conn_line(conn_t *c, char *line, size_t n) {
     size_t m = 0;
     for (;;) {
@@ -476,7 +506,7 @@ static void conn_close(conn_t *c) {
 static SSL_CTX *tls_ctx;
 static const char *tls_caller;
 
-/* The caller's certificate is self-signed; what makes it trusted is the
+/* The caller's certificate is self-signed. What makes it trusted is the
  * pin checked after the handshake, so chain verification accepts it. */
 static int tls_any_chain(int ok, X509_STORE_CTX *x) { (void)ok; (void)x; return 1; }
 
@@ -506,7 +536,7 @@ static const char *tls_load(void) {
     if (!ctx) return "SSL_CTX_new failed";
     SSL_CTX_set_min_proto_version(ctx, TLS1_3_VERSION);
     SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT, tls_any_chain);
-    /* No resumption: every connection presents the caller's certificate. */
+    /* No resumption, so every connection presents the caller's certificate. */
     SSL_CTX_set_session_cache_mode(ctx, SSL_SESS_CACHE_OFF);
     SSL_CTX_set_options(ctx, SSL_OP_NO_TICKET);
     SSL_CTX_set_num_tickets(ctx, 0);
@@ -527,8 +557,8 @@ static const char *tls_load(void) {
     return NULL;
 }
 
-/* tls_caller_ok: the peer's certificate is the grant's caller (RFC 8705
- * x5t#S256, the base64url SHA-256 of its DER). */
+/* tls_caller_ok reports whether the peer's certificate is the grant's
+ * caller (RFC 8705 x5t#S256, the base64url SHA-256 of its DER). */
 static int tls_caller_ok(SSL *s) {
     X509 *peer = SSL_get1_peer_certificate(s);
     if (!peer) return 0;
@@ -545,16 +575,24 @@ static int tls_caller_ok(SSL *s) {
     return strcmp(b64, tls_caller) == 0;
 }
 
-/* tls_start runs the handshake on c and checks the caller. Forked fibers
- * and fibers restored from one checkpoint start with the same DRBG
- * state, so each handshake first mixes in fresh kernel entropy. A caller
- * that stalls the handshake is dropped after 5 s. */
-static int tls_start(conn_t *c) {
+/* tls_reseed mixes fresh kernel entropy into both of OpenSSL's DRBGs.
+ * Forked fibers and fibers restored from one checkpoint start with the
+ * same DRBG state, and a CRIU resume keeps the pid, so OpenSSL's own
+ * fork check never notices a copy. */
+static int tls_reseed(void) {
     unsigned char seed[32];
     if (getrandom(seed, sizeof seed, 0) != (ssize_t)sizeof seed) return -1;
     EVP_RAND_CTX *drbg[2] = { RAND_get0_public(NULL), RAND_get0_private(NULL) };
     for (int i = 0; i < 2; i++)
         if (!drbg[i] || EVP_RAND_reseed(drbg[i], 0, NULL, 0, seed, sizeof seed) != 1) return -1;
+    return 0;
+}
+
+/* tls_start runs the handshake on c and checks the caller, after a
+ * reseed of its own (see tls_reseed). A caller that stalls the handshake
+ * is dropped after 5 s. */
+static int tls_start(conn_t *c) {
+    if (tls_reseed() < 0) return -1;
     struct timeval tv = { .tv_sec = 5 }, none = { 0 };
     setsockopt(c->fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
     setsockopt(c->fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
@@ -568,6 +606,35 @@ static int tls_start(conn_t *c) {
 }
 #endif
 
+/* reseed_rngs gives every generator this template owns a fresh seed from
+ * the kernel. It runs once per incarnation: in the child at the fork,
+ * after a restore returns (gVisor), and when a resumed fiber sees a new
+ * fence (CRIU keeps the pid and the parked RNG state, so nothing else
+ * marks the copy). Both libc generators are seeded, since rand() keeps
+ * its own state on some libcs. OpenSSL's DRBGs are reseeded once they
+ * exist, which is in a handoff fiber; tls_start does it again per
+ * handshake. */
+static void reseed_rngs(void) {
+    unsigned seed[2] = { 0, 0 };
+    if (getrandom(seed, sizeof seed, 0) == (ssize_t)sizeof seed) { srandom(seed[0]); srand(seed[1]); }
+#ifdef FZ_TLS
+    if (tls_ctx) (void)tls_reseed();
+#endif
+}
+
+/* The fence this process last served under. A resumed fiber finds a new
+ * one in the file beside its endpoint (live_fence) and reseeds before it
+ * serves the connection it just accepted. */
+static char seen_fence[128];
+
+static void reseed_if_new_fence(const char *fallback) {
+    char fb[128];
+    const char *now = live_fence(fb, sizeof fb, fallback);
+    if (strcmp(now, seen_fence) == 0) return;
+    snprintf(seen_fence, sizeof seen_fence, "%s", now);
+    reseed_rngs();
+}
+
 static int serve_client(conn_t *c, const char *fence, unsigned long *counter) {
     char line[256];
     while (conn_line(c, line, sizeof line)) {
@@ -577,9 +644,14 @@ static int serve_client(conn_t *c, const char *fence, unsigned long *counter) {
         else if (strncmp(line, "dirty ", 6) == 0) { size_t n = dirty((size_t)strtoull(line + 6, NULL, 10)); snprintf(out, sizeof out, "ok %zu\n", n); }
         else if (strcmp(line, "incr") == 0) snprintf(out, sizeof out, "%lu\n", ++*counter);
         else if (strcmp(line, "get") == 0) snprintf(out, sizeof out, "%lu\n", *counter);
-        else if (strcmp(line, "fence") == 0) snprintf(out, sizeof out, "%s\n", fence);
+        else if (strcmp(line, "fence") == 0) { char fb[128]; snprintf(out, sizeof out, "%s\n", live_fence(fb, sizeof fb, fence)); }
         else if (strcmp(line, "pid") == 0) snprintf(out, sizeof out, "%d\n", (int)getpid());
         else if (strcmp(line, "random") == 0) snprintf(out, sizeof out, "%ld\n", random());
+        else if (strcmp(line, "getrandom") == 0) {
+            unsigned char b[8];
+            if (getrandom(b, sizeof b, 0) != (ssize_t)sizeof b) errname(errno, out, sizeof out);
+            else snprintf(out, sizeof out, "%02x%02x%02x%02x%02x%02x%02x%02x\n", b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]);
+        }
         else if (strcmp(line, "rss") == 0) {
             /* resident bytes as this process's kernel sees them */
             long size = 0, pages = 0; FILE *sm = fopen("/proc/self/statm", "r");
@@ -595,9 +667,9 @@ static int serve_client(conn_t *c, const char *fence, unsigned long *counter) {
         else if (strcmp(line, "unshare user") == 0) unshare_errno(out, sizeof out);
         else if (strncmp(line, "mount ", 6) == 0) mount_errno(line + 6, out, sizeof out);
         else if (strncmp(line, "mkdir ", 6) == 0) mkdir_errno(line + 6, out, sizeof out);
+        else if (strncmp(line, "remount ", 8) == 0) remount_errno(line + 8, out, sizeof out);
         else if (strncmp(line, "reserve ", 8) == 0) { char rp[128]; snprintf(out, sizeof out, "%s\n", device_reserve(strtoull(line + 8, NULL, 10), rp, sizeof rp)); }
         else if (strcmp(line, "devfree") == 0) { char rp[128]; snprintf(out, sizeof out, "%s\n", device_reserve(0, rp, sizeof rp)); }
-        else if (strcmp(line, "quit") == 0) break;
         else snprintf(out, sizeof out, "err unknown command\n");
         if (conn_write(c, out, strlen(out)) < 0) break;
     }
@@ -640,7 +712,7 @@ static int serve_http(conn_t *c, const char *fence, unsigned long *counter) {
     if (strcmp(method, "POST") == 0 && (strcmp(target, "/") == 0 || strcmp(target, "/incr") == 0)) {
         snprintf(body, sizeof body, "%lu\n", ++*counter); http_reply(c, 200, "OK", body); return 0;
     }
-    if (strcmp(target, "/fence") == 0) { snprintf(body, sizeof body, "%s\n", fence); http_reply(c, 200, "OK", body); return 0; }
+    if (strcmp(target, "/fence") == 0) { char fb[128]; snprintf(body, sizeof body, "%s\n", live_fence(fb, sizeof fb, fence)); http_reply(c, 200, "OK", body); return 0; }
     if (strcmp(method, "POST") == 0 && strcmp(target, "/dirty") == 0) {
         const char *b = strstr(query, "bytes=");
         size_t got = dirty(b ? (size_t)strtoull(b + 6, NULL, 10) : 0);
@@ -690,6 +762,11 @@ static int listen_endpoint(const char *ep) {
 static int on_fiber(const fz_fiber_t *f) {
     cur_endpoint = f->endpoint;
     cur_fence = f->fence;
+    /* This fiber's random() would otherwise replay the zygote's
+     * sequence, the same in every sibling. The library leaves reseeding
+     * to the template (see fz_on_fiber). */
+    snprintf(seen_fence, sizeof seen_fence, "%s", f->fence);
+    reseed_rngs();
     int handoff = getenv("FIBERD_HANDOFF_FD") != NULL;
     if (handoff) {
 #ifdef FZ_TLS
@@ -711,7 +788,7 @@ static int on_fiber(const fz_fiber_t *f) {
     unsigned long long delay = payload_num(f->payload, f->payload_len, "\"ready_delay_ms\"");
     if (delay) usleep((useconds_t)(delay * 1000));
     /* "ready_misuse" is a buggy workload's treatment of fd 3, for tests
-     * of the zygote: it must not take the zygote down with the fiber. */
+     * that the zygote refuses the fiber and keeps serving. */
     switch (payload_num(f->payload, f->payload_len, "\"ready_misuse\"")) {
     case 1: (void)!write(3, "x", 1); break;
     case 2: close(3); break;
@@ -733,6 +810,12 @@ static int on_fiber(const fz_fiber_t *f) {
     for (;;) {
         int fd = handoff ? fz_accept() : accept4(s, NULL, NULL, SOCK_CLOEXEC);
         if (fd < 0) { if (errno == EINTR) continue; return 5; }
+        /* A resume lands here, mid-accept, with the parked RNG state. A
+         * fiber serving a unix socket sees the new fence beside it and
+         * reseeds before this first connection is served. A tcp or
+         * handoff fiber has no file to watch, so only its per-handshake
+         * TLS reseed covers it. */
+        reseed_if_new_fence(f->fence);
         conn_t c = { .fd = fd };
 #ifdef FZ_TLS
         if (handoff && tls_start(&c) < 0) { close(fd); continue; }
@@ -819,7 +902,8 @@ static int gvisor_serve_once(const char *fence, const char *ep, const unsigned c
         int c = accept4(s, NULL, NULL, SOCK_CLOEXEC);
         if (c < 0) continue;
         conn_t cc = { .fd = c };
-        serve_client(&cc, fence, counter);
+        if (http_mode) serve_http(&cc, fence, counter);
+        else serve_client(&cc, fence, counter);
         conn_close(&cc);
     }
     close(s);
@@ -854,8 +938,11 @@ static int gvisor_main(void) {
             continue;
         }
         /* "restore": running in a freshly restored sandbox under the new
-         * spec. Its environment names the fence; give it a moment in
-         * case it is still being installed. */
+         * spec. Every sandbox restored from one image holds the same RNG
+         * state, so reseed before anything draws from it. Its environment
+         * names the fence; give it a moment in case it is still being
+         * installed. */
+        reseed_rngs();
         char *fence = NULL, *ep = NULL, *ph = NULL;
         for (int i = 0; i < 3000; i++) {
             free(fence); free(ep); free(ph);
@@ -883,16 +970,14 @@ int main(int argc, char **argv) {
     gvisor_mode = gvisor;
     if (!gvisor) fz_init(argc, argv); /* gVisor: no fork, no CoW delta, so no need to pin the layout */
     size_t heap_mb = 64, device_mb = 0;
-    int ctl_fd = 3;
     const char *logpath = NULL;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--heap-mb") == 0 && i + 1 < argc) heap_mb = (size_t)atoi(argv[++i]);
         else if (strcmp(argv[i], "--device-mb") == 0 && i + 1 < argc) device_mb = (size_t)atoi(argv[++i]);
-        else if (strcmp(argv[i], "--ctl-fd") == 0 && i + 1 < argc) ctl_fd = atoi(argv[++i]);
         else if (strcmp(argv[i], "--log") == 0 && i + 1 < argc) logpath = argv[++i];
         else if (strcmp(argv[i], "--gvisor") == 0) {}
         else if (strcmp(argv[i], "--http") == 0) http_mode = 1;
-        else { fprintf(stderr, "usage: %s [--heap-mb N] [--device-mb N] [--ctl-fd N] [--log PATH] [--gvisor] [--http]\n", argv[0]); return 2; }
+        else { fprintf(stderr, "usage: %s [--heap-mb N] [--device-mb N] [--log PATH] [--gvisor] [--http]\n", argv[0]); return 2; }
     }
     if (logpath) {
         /* Reopen stdio from inside: a zygote that is a container's init
@@ -911,7 +996,8 @@ int main(int argc, char **argv) {
     OPENSSL_init_ssl(OPENSSL_INIT_LOAD_SSL_STRINGS | OPENSSL_INIT_LOAD_CRYPTO_STRINGS, NULL);
 #endif
     if (device_mb) engine_start(device_mb); /* the engine thread reports once fz_serve is up */
-    int rc = fz_serve(ctl_fd, on_fiber);
+    /* The control channel is fd 3, where fiberd puts it. */
+    int rc = fz_serve(3, on_fiber);
     if (rc < 0) { perror("refzygote: fz_serve"); return 1; }
     return 0;
 }

@@ -5,7 +5,9 @@ package proc
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,9 +28,9 @@ import (
 	"github.com/helayoty/fiberd/pkg/sys/criu"
 )
 
-// criuKnobs script the fake criu: what `check` and `dump` exit with, and
-// how `restore` behaves ("yes" writes the pid file and waits for the
-// release file, "no" fails at once, "hang" never writes one).
+// criuKnobs script the fake criu. They set what `check` and `dump` exit
+// with, and how `restore` behaves. "yes" writes the pid file and waits for
+// the release file, "no" fails at once, and "hang" never writes one.
 type criuKnobs struct {
 	checkExit   int
 	dumpExit    int
@@ -280,7 +282,7 @@ func (l *fakeLauncher) Channel(_ context.Context, _ backend.WarmSpec, _ *exec.Cm
 	if !l.ownPair {
 		return boot, nil
 	}
-	_ = l.ownChild.Close() // started: the zygote holds its own copy
+	_ = l.ownChild.Close() // the started zygote holds its own copy
 	c, err := net.FileConn(l.own)
 	_ = l.own.Close()
 	if err != nil {
@@ -311,7 +313,9 @@ func (l *fakeLauncher) Release(backend.WarmSpec)      { l.record("release") }
 func (l *fakeLauncher) Endpoint(_ backend.WarmSpec, p string) string {
 	return filepath.Join(l.endpointRoot, filepath.Base(p))
 }
-func (l *fakeLauncher) DumpExtra(backend.WarmSpec) []string { return []string{"--dump-extra"} }
+func (l *fakeLauncher) DumpExtra(backend.WarmSpec, string) ([]string, error) {
+	return []string{"--dump-extra"}, nil
+}
 func (l *fakeLauncher) RestoreExtra(_ backend.WarmSpec, dir string) ([]string, error) {
 	l.record("restoreExtra:" + dir)
 	if l.restoreExtraErr != nil {
@@ -320,7 +324,7 @@ func (l *fakeLauncher) RestoreExtra(_ backend.WarmSpec, dir string) ([]string, e
 	return []string{"--restore-extra"}, nil
 }
 
-// TestBackendFacts: what the backend says about itself, with and without
+// TestBackendFacts checks what the backend says about itself, with and without
 // criu and with a launcher naming it.
 func TestBackendFacts(t *testing.T) {
 	cases := []struct {
@@ -352,8 +356,8 @@ func TestBackendFacts(t *testing.T) {
 	}
 }
 
-// TestWarmRefusals: every way Warm fails before the zygote serves, and
-// what is left behind (nothing registered, the launcher released).
+// TestWarmRefusals checks every way Warm fails before the zygote serves.
+// Nothing is left registered, and the launcher is released.
 func TestWarmRefusals(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -477,10 +481,12 @@ func zombieChildren(t *testing.T) []int {
 	return zombies
 }
 
-// TestWarmTellsTheZygoteItsPaths: a zygote the backend starts itself is
-// told what to hide and drop and its run directory, in that order,
-// before any CLONE. A launcher's zygote is told nothing, and the launcher
-// names its pid and may move the conversation onto its own channel.
+// TestWarmTellsTheZygoteItsPaths checks that a zygote the backend starts is
+// told what to hide and drop and its run directory, in that order, then
+// PREPARE mntns, all before it is expected to say READY. A launcher's
+// zygote is told only PREPARE none, since its fibers get no mount
+// namespace, and the launcher names its pid and may move the
+// conversation onto its own channel.
 func TestWarmTellsTheZygoteItsPaths(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -518,9 +524,10 @@ func TestWarmTellsTheZygoteItsPaths(t *testing.T) {
 				t.Fatalf("Warm = %+v, zygote %+v, want id g and the process pid", w, z)
 			}
 			if tc.launcher != nil {
-				// Only a CLONE would reach it; nothing has yet.
-				if lines := recvLines(workDir); strings.Join(lines, "") != "" {
-					t.Fatalf("a launcher's zygote read %q, want nothing", lines)
+				// No paths, since its fibers share the container's
+				// namespace, and no CLONE has been sent.
+				if got := waitRecv(t, workDir, "PREPARE"); strings.Join(got, "\n") != "PREPARE none" {
+					t.Fatalf("a launcher's zygote read %q, want PREPARE none alone", got)
 				}
 				if calls := tc.launcher.recorded(); strings.Join(calls, ",") != "command,channel,pid" {
 					t.Fatalf("launcher calls = %v, want command,channel,pid", calls)
@@ -534,8 +541,8 @@ func TestWarmTellsTheZygoteItsPaths(t *testing.T) {
 			for _, h := range tc.hide {
 				want = append(want, "HIDE "+filepath.Clean(h))
 			}
-			want = append(want, "DROP "+rootBind, "RUNDIR "+filepath.Dir(workDir)+" "+workDir)
-			got := waitRecv(t, workDir, "RUNDIR")
+			want = append(want, "DROP "+rootBind, "RUNDIR "+filepath.Dir(workDir)+" "+workDir, "PREPARE mntns")
+			got := waitRecv(t, workDir, "PREPARE")
 			if strings.Join(got, "\n") != strings.Join(want, "\n") {
 				t.Fatalf("the zygote read\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 			}
@@ -543,7 +550,8 @@ func TestWarmTellsTheZygoteItsPaths(t *testing.T) {
 	}
 }
 
-// TestWarmInCgroup: the zygote is born in the cgroup the host hands over.
+// TestWarmInCgroup checks that the zygote is born in the cgroup the host
+// hands over.
 func TestWarmInCgroup(t *testing.T) {
 	cases := []struct {
 		name string
@@ -587,10 +595,9 @@ func warmed(t *testing.T, script string, pid int, launcher Launcher) (*Backend, 
 	return b, w, workDir
 }
 
-// TestCloneLine: the CLONE line carries the fence, the endpoint as the
-// zygote sees it, the deadline in ms, the payload in hex and the
-// confinement options, and the cgroup and handoff descriptors ride with
-// it.
+// TestCloneLine checks that the CLONE line carries the fence, the endpoint as
+// the zygote sees it, the deadline in ms, the payload in hex and the
+// confinement options, and the cgroup and handoff descriptors ride with it.
 func TestCloneLine(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -679,8 +686,8 @@ func TestCloneLine(t *testing.T) {
 	}
 }
 
-// TestCloneReplies: every answer a zygote can give to CLONE, and the
-// zygote dying instead, are errors the caller can name. The grant's warm
+// TestCloneReplies checks that every answer a zygote can give to CLONE, and
+// the zygote dying instead, are errors the caller can name. The grant's warm
 // instance is reported gone when the zygote is.
 func TestCloneReplies(t *testing.T) {
 	cases := []struct {
@@ -747,8 +754,8 @@ func TestCloneReplies(t *testing.T) {
 	}
 }
 
-// TestCloneWithoutAZygoteToAnswer: no warm instance, a control channel
-// that cannot be written, and a zygote already gone when the reply is
+// TestCloneWithoutAZygoteToAnswer checks that no warm instance, a control
+// channel that cannot be written, and a zygote already gone when the reply is
 // awaited are each errors with nothing left pending.
 func TestCloneWithoutAZygoteToAnswer(t *testing.T) {
 	cases := []struct {
@@ -805,9 +812,9 @@ func pairConn(t *testing.T) *net.UnixConn {
 	return c.(*net.UnixConn)
 }
 
-// TestDeviceReports: an engine's DEVICE lines are the warm instance's
-// usage and capacity and each fiber's slice, which EVICT asks it to
-// drop. Without an engine there is nothing to report or evict.
+// TestDeviceReports checks that an engine's DEVICE lines are the warm
+// instance's usage and capacity and each fiber's slice, which EVICT asks it
+// to drop. Without an engine there is nothing to report or evict.
 func TestDeviceReports(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -864,8 +871,8 @@ func TestDeviceReports(t *testing.T) {
 	}
 }
 
-// TestEvictWithoutAChannel: an EVICT the engine can no longer be sent is
-// an error naming the send, not a lost request.
+// TestEvictWithoutAChannel checks that an EVICT that cannot reach the
+// engine is an error naming the send, not a lost request.
 func TestEvictWithoutAChannel(t *testing.T) {
 	cases := []struct {
 		name string
@@ -882,8 +889,8 @@ func TestEvictWithoutAChannel(t *testing.T) {
 	}
 }
 
-// TestUnwarm: ending a warm instance kills its zygote and reports the
-// instance gone once. An unknown id is nothing to do.
+// TestUnwarm checks that ending a warm instance kills its zygote and reports
+// the instance gone once. An unknown id is nothing to do.
 func TestUnwarm(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -921,8 +928,8 @@ func TestUnwarm(t *testing.T) {
 	}
 }
 
-// TestSocketpair: without a launcher any pair does. With one the pair
-// is the launcher's, for the instance named, and there must be one.
+// TestSocketpair checks that without a launcher any pair does. With one the
+// pair is the launcher's, for the instance named, and there must be one.
 func TestSocketpair(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -963,7 +970,7 @@ func TestSocketpair(t *testing.T) {
 	}
 }
 
-// TestCheckpointWarm: the zygote is dumped running, with its control
+// TestCheckpointWarm checks that the zygote is dumped running, with its control
 // socket external, plus whatever the launcher's container needs.
 func TestCheckpointWarm(t *testing.T) {
 	cases := []struct {
@@ -1033,10 +1040,10 @@ func fakeCgroup(t *testing.T, pids ...int) int {
 	return int(d.Fd())
 }
 
-// TestHostPIDTranslation: with a launcher the zygote's pid is a number in
-// its own namespace; the host's is the process in the fiber's leaf whose
-// NSpid shows that number one level down. Processes gone from the leaf
-// and processes without that level are passed over.
+// TestHostPIDTranslation checks pid translation with a launcher. The
+// zygote's pid is a number in its own namespace. The host's pid is the
+// process in the fiber's leaf whose NSpid shows that number one level
+// down. Processes gone from the leaf or without that level are skipped.
 func TestHostPIDTranslation(t *testing.T) {
 	requireRoot(t)
 	child := hold(t, syscall.CLONE_NEWPID)
@@ -1060,8 +1067,9 @@ func TestHostPIDTranslation(t *testing.T) {
 	}
 }
 
-// TestKillSignalsTheTranslatedPID: a launcher's fiber is signalled under
-// the host pid Clone found for it, never the number the zygote reported.
+// TestKillSignalsTheTranslatedPID checks that a launcher's fiber is signalled
+// under the host pid Clone found for it, never the number the zygote
+// reported.
 func TestKillSignalsTheTranslatedPID(t *testing.T) {
 	requireRoot(t)
 	cases := []struct {
@@ -1108,10 +1116,10 @@ func mountPointOf(t *testing.T, pid int) string {
 	return ""
 }
 
-// TestPark: a fiber is dumped with its own mount namespace's mounts named
-// (and its run directory bind recorded), its handoff channel external,
-// running on with Sync, through the launcher's arguments when it has
-// one. What cannot be dumped is refused before criu runs.
+// TestPark checks that a fiber is dumped with its own mount namespace's
+// mounts named (and its run directory bind recorded), its handoff channel
+// external, running on with Sync, through the launcher's arguments when it
+// has one. What cannot be dumped is refused before criu runs.
 func TestPark(t *testing.T) {
 	requireRoot(t)
 	cases := []struct {
@@ -1181,7 +1189,7 @@ func TestPark(t *testing.T) {
 				b.fibers["f"] = &fiber{id: "f", pid: pid, warmID: "g", runDir: runDir, handoff: tc.handoff}
 			}
 			if tc.zygote {
-				// A zygote by record only, for the launcher's arguments;
+				// A zygote by record only, for the launcher's arguments.
 				// Close must not find it.
 				b.zygotes["g"] = &zygote{id: "g", spec: backend.WarmSpec{GrantUID: "g"}}
 				t.Cleanup(func() { delete(b.zygotes, "g") })
@@ -1260,8 +1268,8 @@ func TestPark(t *testing.T) {
 	}
 }
 
-// TestHandoffInherit: a checkpoint of a handoff fiber names the inode
-// its channel had, and a resume must bring a replacement; any other
+// TestHandoffInherit checks that a checkpoint of a handoff fiber names the
+// inode its channel had, and a resume must bring a replacement. Any other
 // checkpoint takes none.
 func TestHandoffInherit(t *testing.T) {
 	cases := []struct {
@@ -1329,7 +1337,7 @@ func writeMounts(t *testing.T, dir string) {
 	}
 }
 
-// TestResume: a checkpoint is restored under the resuming grant's
+// TestResume checks that a checkpoint is restored under the resuming grant's
 // directory, with the restore root bound when it has a mount namespace,
 // its handoff channel replaced, and its end reported as the fiber's exit.
 // A launcher is told of the tree it prepared for, and when it is gone.
@@ -1482,8 +1490,8 @@ func TestResume(t *testing.T) {
 	}
 }
 
-// TestFinishAndForgetOnce: a fiber's exit is reported once, and a fiber
-// forgotten or replaced under its fence is not touched again.
+// TestFinishAndForgetOnce checks that a fiber's exit is reported once, and a
+// fiber forgotten or replaced under its fence is not touched again.
 func TestFinishAndForgetOnce(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -1548,9 +1556,9 @@ func writeCheckpoint(t *testing.T, dir string, fill byte) {
 	}
 }
 
-// TestDeltaCodec: the backend's delta codec is criu's. A checkpoint is
-// computed as a delta over the parent, recognised as one, read back and
-// merged whole again. Anything but a criu parent is refused.
+// TestDeltaCodec checks that the backend's delta codec is criu's. A
+// checkpoint is computed as a delta over the parent, recognised as one, read
+// back and merged whole again. Anything but a criu parent is refused.
 func TestDeltaCodec(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -1627,7 +1635,7 @@ type notAParent struct{}
 func (notAParent) SHA256() string { return "" }
 func (notAParent) Close()         {}
 
-// TestMountinfo: the mount table reader, its escape decoding, and the
+// TestMountinfo checks the mount table reader, its escape decoding, and the
 // questions asked of it (is this a mount point, is this a dead sibling's
 // restore root).
 func TestMountinfo(t *testing.T) {
@@ -1738,8 +1746,8 @@ func unmountLater(t *testing.T, point string) {
 	})
 }
 
-// TestMountRoot: the restore root is a private bind of / at a leaf this
-// process made and checked. A path it cannot trust is refused, and a
+// TestMountRoot checks that the restore root is a private bind of / at a leaf
+// this process made and checked. A path it cannot trust is refused, and a
 // directory it made for a refused mount goes again.
 func TestMountRoot(t *testing.T) {
 	requireRoot(t)
@@ -1851,8 +1859,8 @@ func TestMountRoot(t *testing.T) {
 	}
 }
 
-// TestRootBindShared: backends naming the same restore root share one
-// bind, which the last to close unmounts. A backend without one has
+// TestRootBindShared checks that backends naming the same restore root share
+// one bind, which the last to close unmounts. A backend without one has
 // nothing to give up.
 func TestRootBindShared(t *testing.T) {
 	requireRoot(t)
@@ -1946,10 +1954,10 @@ func bindSlash(t *testing.T, point, holder string) {
 	}
 }
 
-// TestReapStaleRoots: binds of / a dead run left at this configuration's
-// path, and at dead pids' default paths beside it, are unmounted. Binds a
-// live process records, binds a backend here holds, binds that are not
-// of /, and binds elsewhere stay.
+// TestReapStaleRoots checks that binds of / a dead run left at this
+// configuration's path, and at dead pids' default paths beside it, are
+// unmounted. Binds a live process records, binds a backend here holds, binds
+// that are not of /, and binds elsewhere stay.
 func TestReapStaleRoots(t *testing.T) {
 	requireRoot(t)
 	cases := []struct {
@@ -2025,6 +2033,134 @@ func TestReapStaleRoots(t *testing.T) {
 				if _, err := os.Lstat(p); err == nil {
 					t.Errorf("%s still exists, want it removed", p)
 				}
+			}
+		})
+	}
+}
+
+// sha256Hex is the hex SHA-256 of a file's bytes.
+func sha256Hex(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+// TestOpenVerified checks that a registry template's executable is
+// verified through the descriptor it is exec'd from: the bytes are hashed
+// against what the host verified, a mismatch is refused, and an exec
+// through the descriptor runs those bytes even after the path was
+// swapped, for a script as for a binary.
+func TestOpenVerified(t *testing.T) {
+	cases := []struct {
+		name    string
+		sha     func(path string) string
+		missing bool
+		wantErr string
+	}{
+		{name: "the verified bytes", sha: func(p string) string { return sha256Hex(t, p) }},
+		{name: "a hash the bytes do not match", sha: func(string) string { return strings.Repeat("0", 64) }, wantErr: "hashes to"},
+		{name: "no file", sha: func(string) string { return strings.Repeat("0", 64) }, missing: true, wantErr: "no such file"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "zygote")
+			if !tc.missing {
+				if err := os.WriteFile(path, []byte("#!/bin/sh\necho verified\n"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			f, err := openVerified(path, tc.sha(path))
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("openVerified = %v, want %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("openVerified: %v", err)
+			}
+			defer func() { _ = f.Close() }()
+			// The path now leads elsewhere; the descriptor still runs what
+			// was verified. As in Warm, the descriptor is passed as fd 4,
+			// after a stand-in for the control socket at fd 3.
+			if err := os.WriteFile(path+".new", []byte("#!/bin/sh\necho swapped\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Rename(path+".new", path); err != nil {
+				t.Fatal(err)
+			}
+			devnull, err := os.Open(os.DevNull)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = devnull.Close() }()
+			cmd := exec.Command(path)
+			cmd.ExtraFiles = []*os.File{devnull, f}
+			cmd.Path = exeFDPath
+			out, err := cmd.Output()
+			if err != nil || strings.TrimSpace(string(out)) != "verified" {
+				t.Fatalf("exec through the descriptor = %q %v, want the verified bytes", out, err)
+			}
+		})
+	}
+}
+
+// TestWarmVerifiesRegistryTemplate checks that Warm refuses a registry
+// template (one with a verified hash) whose executable no longer hashes
+// to it, before anything starts, and runs one that does. A launcher's
+// template is the launcher's to verify (runc stages its own copy).
+func TestWarmVerifiesRegistryTemplate(t *testing.T) {
+	cases := []struct {
+		name     string
+		sha      func(exe string) string
+		launcher *fakeLauncher
+		wantErr  string
+	}{
+		{name: "the executable the host verified", sha: func(exe string) string { return sha256Hex(t, exe) }},
+		{name: "an executable that changed since", sha: func(string) string { return strings.Repeat("0", 64) }, wantErr: "hashes to"},
+		{name: "a launcher verifies its own copy", sha: func(string) string { return strings.Repeat("0", 64) }, launcher: &fakeLauncher{}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			bin, _ := fakeCRIU(t, criuKnobs{})
+			var launcher Launcher
+			if tc.launcher != nil {
+				launcher = tc.launcher
+			}
+			b := NewBackend(Options{CRIU: bin, Launcher: launcher, RootBind: filepath.Join(t.TempDir(), "root")})
+			t.Cleanup(b.Close)
+			argv := fakeArgv(t, "never", impossiblePID(t))
+			tpl := backend.Template{Argv: argv, Dir: filepath.Dir(argv[0]), Digest: "sha256:test", ZygoteSHA256: tc.sha(argv[0])}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			w, err := b.Warm(ctx, backend.WarmSpec{GrantUID: "g", Template: tpl, CgroupFD: -1, ProbeCgroupFD: -1, WorkDir: t.TempDir()})
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("Warm = %v, want %q", err, tc.wantErr)
+				}
+				b.mu.Lock()
+				n := len(b.zygotes)
+				b.mu.Unlock()
+				if n != 0 {
+					t.Fatalf("%d zygotes registered after a refused template, want none", n)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Warm: %v", err)
+			}
+			if tc.launcher != nil {
+				return
+			}
+			// The zygote runs the file at the path, exec'd through the
+			// verified descriptor, and the path is what /proc names.
+			exe, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", w.PID))
+			if err != nil || exe != argv[0] {
+				t.Fatalf("zygote exe = %q (%v), want %q", exe, err, argv[0])
 			}
 		})
 	}

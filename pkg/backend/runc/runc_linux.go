@@ -1,28 +1,13 @@
 //go:build linux
 
-// Package runc is the fork backend's zygote inside an OCI container. It
-// is the proc backend with a launcher. `runc run` starts the zygote as
-// the container's init with the control socket preserved as fd 3, the
-// grant's run directory bind-mounted at /host and the zygote's cgroup as
-// the container's. Everything else is the proc backend. Fibers are
-// forked by the zygote into their leaves (the container shares the
-// host's cgroup namespace, so clone3 into a leaf works as it does for
-// plain processes), checkpointed with criu from outside as trees living
-// in the container's mount namespace (the root filesystem, /host and
-// runc's device binds are external mounts), and restored with the same
-// root. Tier FIBER_CHECKPOINT, deltas over the zygote's self-checkpoint.
-//
-// What the container adds over proc is a root filesystem of its own and
-// user, pid, mount, network, ipc and uts namespaces around the zygote
-// and its fibers. The user namespace maps the container's ids to a range
-// of host ids derived from the grant uid (see IDPool), so the zygote and
-// every fiber are an unprivileged host uid. The kernel then refuses them
-// the host's sysctls, sysfs knobs and cgroup limits by ownership, and the
-// read-only mounts are a second line. The root filesystem is a per-grant
-// copy of the configured one, chowned to the range. The network
-// namespace holds the loopback alone, so a fiber reaches neither the
-// network nor the host's loopback, and fibers serve unix sockets or
-// handed-off connections only.
+// Package runc is the proc backend with a launcher that runs the zygote as
+// the init of an OCI container. The container gets a per-grant copy of the
+// root filesystem, the grant's run directory at /host, and user, pid,
+// mount, network, ipc and uts namespaces. The user namespace maps to a host
+// id range derived from the grant uid (see IDPool), so the kernel refuses
+// fibers the host's sysctls, sysfs knobs and cgroup limits by ownership.
+// The network namespace holds only the loopback, so fibers serve unix
+// sockets or handed-off connections.
 package runc
 
 import (
@@ -53,7 +38,7 @@ type Options struct {
 	// Runc names the runc binary (default "runc").
 	Runc string
 	// Rootfs is the directory every grant's root filesystem is copied
-	// from; template commands are paths inside it. Required.
+	// from. Template commands are paths inside it. Required.
 	Rootfs string
 	// StateDir holds runc's container state, the bundles and the
 	// per-grant root filesystem copies (default /var/lib/fiberd/runc).
@@ -83,6 +68,13 @@ type launcher struct {
 	// The copy lives exactly as long as the grant holds the range here.
 	fsMu    sync.Mutex
 	fsLocks map[string]*sync.Mutex
+
+	// staged maps a container id to the directory holding the launcher's
+	// verified copy of the grant's registry template, bound at
+	// backend.TemplateMount in its container, from Command until Release.
+	// A grant on a template from the rootfs has no entry.
+	smu    sync.Mutex
+	staged map[string]string
 }
 
 // fsLock is the grant's lock for its hold and root filesystem copy.
@@ -105,11 +97,11 @@ func (l *launcher) fsLock(spec backend.WarmSpec) *sync.Mutex {
 // usable id space or that overlaps a range the host has handed out in
 // /etc/subuid or /etc/subgid.
 //
-// Nothing of a previous agent holds a range when the backend opens: the
-// agent kills every fiber of a prior epoch at reconcile, and a stale
-// container is ended here and again when its grant is warmed. So the
-// claims start empty, and every root filesystem copy and bundle under
-// the state directory is a leftover and is swept.
+// No previous agent holds a range when the backend opens. The agent kills
+// every fiber of a prior epoch at reconcile, and a stale container is
+// ended here and again when its grant is warmed. So the claims start
+// empty, and every root filesystem copy and bundle under the state
+// directory is a leftover to sweep.
 func New(o Options) (backend.Backend, error) {
 	if o.Runc == "" {
 		o.Runc = "runc"
@@ -152,7 +144,7 @@ func (l *launcher) sweep() {
 			}
 		}
 	}
-	for _, sub := range []string{"rootfs", "bundles"} {
+	for _, sub := range []string{"rootfs", "bundles", "templates"} {
 		ents, err := os.ReadDir(filepath.Join(l.opt.StateDir, sub))
 		if err != nil {
 			continue
@@ -174,9 +166,11 @@ func (b *Backend) Platform() artifact.Platform {
 	return artifact.Platform{Libc: "rootfs-" + filepath.Base(b.l.opt.Rootfs)}
 }
 
-// EndpointSchemes: the container's network namespace has no route out,
-// so a tcp endpoint could never be dialled. Fibers serve unix sockets
-// under /host (and handed-off connections, see proc.Backend.Handoff).
+// EndpointSchemes is unix only. The container's network namespace has no
+// route out, so a tcp endpoint bound inside it could never be dialled.
+// Fibers serve unix sockets under /host, which the host relays a tcp
+// port to under a tcp policy, or handed-off connections (see
+// proc.Backend.Handoff).
 func (b *Backend) EndpointSchemes() []string { return []string{"unix"} }
 
 // MappedRoot implements backend.IDMapper.
@@ -202,6 +196,48 @@ func (l *launcher) bundle(spec backend.WarmSpec) string {
 // rootfs is where the grant's copy of the root filesystem lives.
 func (l *launcher) rootfs(spec backend.WarmSpec) string {
 	return filepath.Join(l.opt.StateDir, "rootfs", l.cid(spec))
+}
+
+// templateDir is where the grant's verified copy of its registry
+// template lives, the directory its container binds at
+// backend.TemplateMount.
+func (l *launcher) templateDir(spec backend.WarmSpec) string {
+	return filepath.Join(l.opt.StateDir, "templates", l.cid(spec))
+}
+
+// stagedFor is the staged template directory of the grant's warm
+// instance on this home, or "" when it has none.
+func (l *launcher) stagedFor(spec backend.WarmSpec) string {
+	l.smu.Lock()
+	defer l.smu.Unlock()
+	return l.staged[l.cid(spec)]
+}
+
+// setStaged records, or with "" forgets, the grant's staged directory.
+func (l *launcher) setStaged(spec backend.WarmSpec, dir string) {
+	l.smu.Lock()
+	defer l.smu.Unlock()
+	if dir == "" {
+		delete(l.staged, l.cid(spec))
+		return
+	}
+	if l.staged == nil {
+		l.staged = map[string]string{}
+	}
+	l.staged[l.cid(spec)] = dir
+}
+
+// templateFile, beside a checkpoint of a fiber whose container binds a
+// registry template, records that the tree holds the mount at
+// backend.TemplateMount. The dump names that mount templateKey, an
+// external mount, and the restore binds this home's verified copy there.
+const (
+	templateFile = "fiberd-template.json"
+	templateKey  = "template"
+)
+
+type templateRecord struct {
+	MountPoint string `json:"mountpoint"`
 }
 
 func (l *launcher) runc(ctx context.Context, args ...string) (string, error) {
@@ -307,6 +343,39 @@ func (l *launcher) Command(spec backend.WarmSpec, argv []string, ctl, logf *os.F
 	if err := prepareWorkDir(spec.WorkDir, rng); err != nil {
 		return nil, err
 	}
+	// A registry template lives in the host's cache, outside the rootfs.
+	// The launcher's own verified copy of its executable is bound
+	// read-only at backend.TemplateMount, and the command runs from
+	// there (backend.StageTemplate). The copy is the mapped root's to
+	// read and run (mode 0555) and nobody's to write.
+	mounts := []map[string]any{
+		{"destination": "/proc", "type": "proc", "source": "proc"},
+		{"destination": "/dev", "type": "tmpfs", "source": "tmpfs", "options": []string{"nosuid", "strictatime", "mode=755", "size=65536k"}},
+		// sysfs read-only. The grant's user namespace owns the
+		// network namespace, which is what lets it mount sysfs at
+		// all, and the kernel refuses the mapped root every knob by
+		// ownership before the mount flag is looked at. No cgroup
+		// mount. The zygote is handed each leaf as a descriptor and
+		// never needs the hierarchy by path.
+		{"destination": "/sys", "type": "sysfs", "source": "sysfs", "options": []string{"nosuid", "noexec", "nodev", "ro"}},
+		{"destination": "/host", "type": "bind", "source": spec.WorkDir, "options": []string{"rbind", "rw"}},
+	}
+	tdir := l.templateDir(spec)
+	_ = os.RemoveAll(tdir)
+	l.setStaged(spec, "")
+	if spec.Template.Dir != "" {
+		staged := filepath.Join(tdir, "template")
+		defer func() {
+			if err != nil {
+				_ = os.RemoveAll(tdir)
+			}
+		}()
+		if argv, err = backend.StageTemplate(spec.Template, staged); err != nil {
+			return nil, fmt.Errorf("runc: %w", err)
+		}
+		mounts = append(mounts, map[string]any{"destination": backend.TemplateMount, "type": "bind", "source": staged, "options": backend.TemplateMountOptions})
+		l.setStaged(spec, staged)
+	}
 	// The host opened the log as root. The zygote reopens it from inside
 	// as the mapped root, which needs group write.
 	if err := logf.Chmod(0o664); err != nil {
@@ -346,18 +415,7 @@ func (l *launcher) Command(spec backend.WarmSpec, argv []string, ctl, logf *os.F
 		},
 		"root":     map[string]any{"path": rootfs, "readonly": false},
 		"hostname": "fiber",
-		"mounts": []map[string]any{
-			{"destination": "/proc", "type": "proc", "source": "proc"},
-			{"destination": "/dev", "type": "tmpfs", "source": "tmpfs", "options": []string{"nosuid", "strictatime", "mode=755", "size=65536k"}},
-			// sysfs read-only. The grant's user namespace owns the
-			// network namespace, which is what lets it mount sysfs at
-			// all, and the kernel refuses the mapped root every knob by
-			// ownership before the mount flag is looked at. No cgroup
-			// mount. The zygote is handed each leaf as a descriptor and
-			// never needs the hierarchy by path.
-			{"destination": "/sys", "type": "sysfs", "source": "sysfs", "options": []string{"nosuid", "noexec", "nodev", "ro"}},
-			{"destination": "/host", "type": "bind", "source": spec.WorkDir, "options": []string{"rbind", "rw"}},
-		},
+		"mounts":   mounts,
 		"linux": map[string]any{
 			// No cgroup namespace, since the zygote's clone3 into a leaf
 			// needs to see the host's hierarchy. The network namespace is
@@ -432,8 +490,11 @@ type rootfsRecord struct {
 // mountpoints are the directories the container's mounts need in the
 // root filesystem. runc makes them in the copy when it starts the
 // container, and a restore with --root needs them there before any
-// container has run on this home.
-var mountpoints = []string{"proc", "dev", "sys", "host", "tmp"}
+// container has run on this home. backend.TemplateMount is among them
+// whether or not the grant binds a template, so a copy made for a
+// restore has it; it stays an empty directory for a template from the
+// rootfs.
+var mountpoints = []string{"proc", "dev", "sys", "host", "tmp", strings.TrimPrefix(backend.TemplateMount, "/")}
 
 // ensureRootfs makes the grant's copy of the root filesystem, chowned
 // to its range, or keeps the one an earlier hold left when it matches.
@@ -454,12 +515,7 @@ func (l *launcher) ensureRootfs(spec backend.WarmSpec, rng IDRange) (string, err
 		return "", fmt.Errorf("runc: copy rootfs for %s: %w", spec.GrantUID, err)
 	}
 	for _, d := range mountpoints {
-		p := filepath.Join(dst, d)
-		if err := os.Mkdir(p, 0o755); err != nil && !errors.Is(err, fs.ErrExist) {
-			_ = os.RemoveAll(dst)
-			return "", err
-		}
-		if err := os.Lchown(p, int(rng.Start), int(rng.Start)); err != nil {
+		if err := makeMountpoint(dst, d, rng); err != nil {
 			_ = os.RemoveAll(dst)
 			return "", err
 		}
@@ -473,6 +529,27 @@ func (l *launcher) ensureRootfs(spec backend.WarmSpec, rng IDRange) (string, err
 		return "", err
 	}
 	return dst, nil
+}
+
+// makeMountpoint makes rel under root, every level of it, owned by the
+// mapped root so it can be walked from inside the container. A level
+// that is already there is left as it is.
+func makeMountpoint(root, rel string, rng IDRange) error {
+	p := root
+	for _, part := range strings.Split(rel, "/") {
+		p = filepath.Join(p, part)
+		err := os.Mkdir(p, 0o755)
+		if errors.Is(err, fs.ErrExist) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if err := os.Lchown(p, int(rng.Start), int(rng.Start)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func readRootfsMarker(dir string) (rootfsRecord, error) {
@@ -688,14 +765,17 @@ func (l *launcher) PID(ctx context.Context, spec backend.WarmSpec, _ *exec.Cmd) 
 	return st.PID, nil
 }
 
-// Release ends the container, removes its bundle and gives the zygote's
-// hold on the grant's id range back. The root filesystem copy goes with
-// it unless a fiber restored on this home still runs in the range.
+// Release ends the container, removes its bundle and its staged
+// template, and gives the zygote's hold on the grant's id range back.
+// The root filesystem copy goes with it unless a fiber restored on this
+// home still runs in the range.
 func (l *launcher) Release(spec backend.WarmSpec) {
 	ctx := context.Background()
 	_, _ = l.runc(ctx, "kill", l.cid(spec), "KILL")
 	_, _ = l.runc(ctx, "delete", "-f", l.cid(spec))
 	_ = os.RemoveAll(l.bundle(spec))
+	l.setStaged(spec, "")
+	_ = os.RemoveAll(l.templateDir(spec))
 	l.drop(spec, true)
 }
 
@@ -707,18 +787,14 @@ func (l *launcher) Endpoint(spec backend.WarmSpec, hostPath string) string {
 	return "/host/" + strings.TrimPrefix(hostPath, spec.WorkDir+"/")
 }
 
-// emptyNet: criu neither dumps nor restores the contents of the network
-// namespace. The container's namespace holds the loopback and the
-// tunnel devices the kernel puts in every new namespace, which criu
-// cannot dump. The restored tree gets a fresh, empty namespace of its
-// own, never the host's, and Restored brings its loopback up. criu
-// cannot restore the tree into the container's namespaces either. The
-// restored user namespace is a new one from the image, and from there
-// the container's are a sibling's, so the fiber's own seccomp filter is
-// what keeps nested user namespaces denied after a resume (see
-// zygote/libfiberzygote.c). On dump the network lock is skipped too. It
-// keeps TCP peers quiet while established connections are dumped and
-// needs iptables on the home, and a fiber's endpoints are unix sockets.
+// emptyNet and netExtra are criu's network flags. criu cannot dump the
+// tunnel devices the kernel puts in every new network namespace, so the
+// restored tree gets a fresh, empty one of its own, never the host's, and
+// Restored brings its loopback up. Its user namespace is new too, a
+// sibling of the container's, so the fiber's own seccomp filter is what
+// keeps nested user namespaces denied after a resume (see
+// zygote/libfiberzygote.c). The dump skips the network lock, which needs
+// iptables and only guards TCP peers. A fiber's endpoints are unix sockets.
 var (
 	emptyNet = []string{"--empty-ns", "net"}
 	netExtra = append(append([]string{}, emptyNet...), "--network-lock", "skip")
@@ -757,13 +833,52 @@ func shareImages(dir string, rng IDRange) error {
 }
 
 // DumpExtra names the mounts that come from outside the container's
-// mount namespace, the run directory and runc's device binds.
-func (l *launcher) DumpExtra(backend.WarmSpec) []string {
+// mount namespace, the run directory, runc's device binds and, for a
+// grant on a registry template, the template bind, which it also
+// records beside the images in dir so the restore knows to bind one.
+func (l *launcher) DumpExtra(spec backend.WarmSpec, dir string) ([]string, error) {
 	extra := append([]string{"--external", "mnt[/host]:host"}, netExtra...)
 	for _, d := range deviceBinds {
 		extra = append(extra, "--external", "mnt[/dev/"+d+"]:dev-"+d)
 	}
-	return extra
+	if spec.Template.Dir != "" {
+		rec, err := json.Marshal(templateRecord{MountPoint: backend.TemplateMount})
+		if err != nil {
+			return nil, err
+		}
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return nil, err
+		}
+		if err := os.WriteFile(filepath.Join(dir, templateFile), rec, 0o600); err != nil {
+			return nil, err
+		}
+		extra = append(extra, "--external", "mnt["+backend.TemplateMount+"]:"+templateKey)
+	}
+	return extra, nil
+}
+
+// templateBind returns the restore argument that binds this home's
+// verified template copy where the checkpoint in dir had one, or nothing
+// for a checkpoint taken without a template mount. A checkpoint with one
+// needs the grant's warm instance on this home, which is what staged and
+// verified the copy, so without it the restore is refused by name.
+func (l *launcher) templateBind(spec backend.WarmSpec, dir string) ([]string, error) {
+	b, err := os.ReadFile(filepath.Join(dir, templateFile))
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var rec templateRecord
+	if err := json.Unmarshal(b, &rec); err != nil || rec.MountPoint != backend.TemplateMount {
+		return nil, fmt.Errorf("runc: %s in %s: malformed", templateFile, dir)
+	}
+	staged := l.stagedFor(spec)
+	if staged == "" {
+		return nil, fmt.Errorf("runc: checkpoint was taken with a registry template at %s, which warm instance %q does not have here", backend.TemplateMount, spec.GrantUID)
+	}
+	return []string{"--external", "mnt[" + templateKey + "]:" + staged}, nil
 }
 
 // RestoreExtra gives the restored tree the grant's root filesystem copy
@@ -793,7 +908,11 @@ func (l *launcher) RestoreExtra(spec backend.WarmSpec, dir string) (extra []stri
 	for _, d := range deviceBinds {
 		extra = append(extra, "--external", "mnt[dev-"+d+"]:/dev/"+d)
 	}
-	return extra, nil
+	bind, err := l.templateBind(spec, dir)
+	if err != nil {
+		return nil, err
+	}
+	return append(extra, bind...), nil
 }
 
 var (

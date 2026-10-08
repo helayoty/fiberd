@@ -62,6 +62,21 @@ func TestConfigDerivations(t *testing.T) {
 			cfg:   Config{PrivateDir: "state/private", RunDir: "/run/fiberd"},
 			grant: sized, grantPids: 5 * fiberPidsMax, quota: 4 * 4 * 32 << 20, ceiling: 160 << 20,
 			hide: []string{token}, skipped: []string{"state/private"}},
+		// A proc fiber runs as the agent's uid and could rewrite a cached
+		// template, so the cache is hidden like the keys and the deltas.
+		{name: "the template cache is hidden without being listed, once, after the private dir",
+			cfg: Config{DeltaDir: "/var/lib/fiberd/deltas", PrivateDir: "/var/lib/fiberd/private", TemplateCache: "/var/lib/fiberd/templates/", RunDir: "/run/fiberd",
+				FiberHide: []string{"/srv/grants", "/var/lib/fiberd/templates"}},
+			grant: sized, grantPids: 5 * fiberPidsMax, quota: 4 * 4 * 32 << 20, ceiling: 160 << 20,
+			hide: []string{token, "/var/lib/fiberd/deltas", "/var/lib/fiberd/private", "/var/lib/fiberd/templates", "/srv/grants"}},
+		{name: "a template cache holding the run dir is an error",
+			cfg:   Config{TemplateCache: "/var/lib/fiberd/templates", RunDir: "/var/lib/fiberd/templates/run"},
+			grant: sized, grantPids: 5 * fiberPidsMax, quota: 4 * 4 * 32 << 20, ceiling: 160 << 20,
+			wantErr: "inside TemplateCache /var/lib/fiberd/templates"},
+		{name: "a template cache that is the run dir is an error",
+			cfg:   Config{TemplateCache: "/var/lib/fiberd/templates/", RunDir: "/var/lib/fiberd/templates"},
+			grant: sized, grantPids: 5 * fiberPidsMax, quota: 4 * 4 * 32 << 20, ceiling: 160 << 20,
+			wantErr: "inside TemplateCache"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

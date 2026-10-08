@@ -151,7 +151,7 @@ func statusField(t *testing.T, pid int, key string) string {
 	return ""
 }
 
-// nsOf is the namespace link of pid, "net:[4026531840]".
+// nsOf is the namespace link of pid, such as "net:[4026531840]".
 func nsOf(t *testing.T, pid int, ns string) string {
 	t.Helper()
 	l, err := os.Readlink(fmt.Sprintf("/proc/%d/ns/%s", pid, ns))
@@ -246,14 +246,12 @@ func parkResume(t *testing.T, rt core.Runtime, g core.Grant, h core.FiberHandle,
 	return h2
 }
 
-// TestFiberIsolation: the zygote and its fibers are the grant's mapped
-// root, an unprivileged host uid, in namespaces of their own. The kernel
-// refuses them the host by identity (EACCES on sysctls, before the
-// read-only mount is even consulted), they cannot mount the cgroup
-// hierarchy or make a user namespace, and their network namespace holds
-// a loopback that leads nowhere, not to the host's. Every probe runs on
-// a fiber as born and again after a park and resume, since a restore
-// rebuilds the namespaces.
+// TestFiberIsolation pins that the zygote and its fibers run as the
+// grant's mapped root, an unprivileged host uid, in namespaces of their
+// own. The kernel refuses them host sysctls by identity, they cannot mount
+// the cgroup hierarchy or make a user namespace, and their loopback is not
+// the host's. Each probe repeats after a park and resume, because a
+// restore rebuilds the namespaces.
 func TestFiberIsolation(t *testing.T) {
 	hm := newHome(t, nil)
 	ctx := context.Background()
@@ -349,11 +347,10 @@ func TestFiberIsolation(t *testing.T) {
 	_ = hm.rt.Release(ctx, h2.ID, true)
 }
 
-// TestCgroupDelegationIsProcsOnly: of the grant's cgroup and each fiber
-// leaf, the mapped root owns cgroup.procs (what clone3 into the leaf
-// checks) and nothing else. Writability is asked as that uid with
-// access(2), which honours the same checks the kernel applies to a
-// write and changes nothing.
+// TestCgroupDelegationIsProcsOnly pins that, in the grant's cgroup and
+// each fiber leaf, the mapped root owns only cgroup.procs, which clone3
+// into the leaf checks. Writability is asked as that uid with access(2),
+// which applies the kernel's write checks and changes nothing.
 func TestCgroupDelegationIsProcsOnly(t *testing.T) {
 	if _, err := exec.LookPath("setpriv"); err != nil {
 		t.Skip("setpriv not installed")
@@ -409,10 +406,11 @@ func TestCgroupDelegationIsProcsOnly(t *testing.T) {
 	}
 }
 
-// TestEndpointFamilies: fibers serve unix sockets under the run
+// TestEndpointFamilies pins that fibers serve unix sockets under the run
 // directory and handed-off connections, both across park and resume. A
-// tcp family is refused when the runtime opens, since the container's
-// network namespace leads nowhere.
+// tcp family is relayed, decided when the runtime opens, because the
+// container's network namespace leads nowhere. relay_linux_test.go has
+// the bytes going through.
 func TestEndpointFamilies(t *testing.T) {
 	caller, callerX5t := callerCert(t)
 	cases := []struct {
@@ -452,29 +450,34 @@ func TestEndpointFamilies(t *testing.T) {
 			_ = hm.rt.Release(ctx, h2.ID, true)
 		})
 	}
-	t.Run("tcp refused at open", func(t *testing.T) {
+	t.Run("tcp relayed at open", func(t *testing.T) {
 		name := fmt.Sprintf("rc%d", time.Now().UnixNano()%1_000_000)
 		be, err := runcbackend.New(runcbackend.Options{Rootfs: rootfs, StateDir: filepath.Join(work, name)})
 		if err != nil {
 			t.Fatal(err)
 		}
-		_, err = host.New(host.Config{
+		rt, err := host.New(host.Config{
 			Backend:    be,
 			Templates:  map[string]string{"default": "/bin/refzygote"},
 			CgroupRoot: filepath.Join(cgRoot, name),
 			RunDir:     filepath.Join("/tmp", "fz-"+name),
+			DeltaDir:   filepath.Join(work, name, "deltas"),
 			Endpoints:  fiberendpoint.Policy{Family: fiberendpoint.Inet4, Host: "127.0.0.1"},
 		})
-		if err == nil || !strings.Contains(err.Error(), "cannot serve tcp") {
-			t.Fatalf("err = %v, want a refusal of tcp endpoints", err)
+		if err != nil {
+			t.Fatalf("New = %v, want a relaying home", err)
+		}
+		defer rt.Close()
+		if !rt.Relays() {
+			t.Fatal("a runc home under a tcp family must relay")
 		}
 	})
 }
 
-// TestResumeOnSecondHome: a fiber parked on one home resumes on another
-// with its own state, run directory and root filesystem copy. The grant
-// gets the same host ids there, since the range follows from its uid
-// and the pool, so the restored namespace maps as the dumped one did.
+// TestResumeOnSecondHome pins that a fiber parked on one home resumes on
+// another with its own state, run directory and root filesystem copy. The
+// grant's id range follows from its uid and the pool, so the restored
+// namespace maps as the dumped one did.
 func TestResumeOnSecondHome(t *testing.T) {
 	cases := []struct {
 		name string
@@ -537,9 +540,9 @@ func TestResumeOnSecondHome(t *testing.T) {
 	}
 }
 
-// TestRangeCollisionRefused: two grants that hash to one slot cannot
-// both be admitted on a home. The second is refused before any cgroup
-// or container of its exists, and the first keeps running.
+// TestRangeCollisionRefused pins that two grants hashing to one slot
+// cannot both be admitted on a home. The second is refused before any
+// cgroup or container of its exists, and the first keeps running.
 func TestRangeCollisionRefused(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -581,10 +584,10 @@ func TestRangeCollisionRefused(t *testing.T) {
 	}
 }
 
-// TestWarmOwnership: what a warm leaves on the host for the grant. The
-// root filesystem copy and the zygote's files belong to the mapped root,
-// the run directory stays root's with the grant's group able to create
-// in it, and the copy goes with the warm instance.
+// TestWarmOwnership pins who owns what a warm leaves on the host. The root
+// filesystem copy and the zygote's files belong to the mapped root, the
+// run directory stays root's with the grant's group able to create in it,
+// and the copy goes with the warm instance.
 func TestWarmOwnership(t *testing.T) {
 	hm := newHome(t, nil)
 	ctx := context.Background()
@@ -602,9 +605,9 @@ func TestWarmOwnership(t *testing.T) {
 		wantGID  int
 		wantMode os.FileMode // 0 for any
 	}{
-		// The mapped root walks through the state directory to its copy. runc
-		// once made it 0700 as a side effect of `runc list`, and every warm
-		// then failed with EACCES.
+		// The mapped root walks through the state directory to its copy.
+		// `runc list` makes it 0700 as a side effect, which would fail
+		// every warm with EACCES.
 		{name: "state directory searchable", path: hm.stateDir, wantUID: 0, wantGID: 0, wantMode: 0o755},
 		{name: "rootfs copy", path: copyDir, wantUID: start, wantGID: start},
 		{name: "zygote binary in the copy", path: filepath.Join(copyDir, "bin", "refzygote"), wantUID: start, wantGID: start},
@@ -642,10 +645,10 @@ func TestWarmOwnership(t *testing.T) {
 	})
 }
 
-// TestResumeAfterEngineLoss: a parked session resumes whether or not the
-// grant's zygote is still up. An engine that dies takes its container and
-// root filesystem copy with it, and the resume makes what it needs again,
-// never racing the removal.
+// TestResumeAfterEngineLoss pins that a parked session resumes whether or
+// not the grant's zygote is still up. An engine that dies takes its
+// container and root filesystem copy with it, and the resume makes what it
+// needs again without racing the removal.
 func TestResumeAfterEngineLoss(t *testing.T) {
 	cases := []struct {
 		name     string

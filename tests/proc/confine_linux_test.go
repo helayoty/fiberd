@@ -18,9 +18,9 @@ import (
 // warmDirect opens the fork backend on its own, without the host
 // runtime, and warms one zygote for a grant whose run directory is dir
 // and that hides the given paths. Fibers are forked into the test's own
-// cgroup (no leaf), which is what these tests need: they are about the
-// zygote's answers, not accounting. Their endpoints go under dir: a
-// fiber sees nothing else of dir's parent (see TestFiberSeesOnlyItsRunDir).
+// cgroup with no leaf, because these tests are about the zygote's answers,
+// not accounting. Their endpoints go under dir, the only part of dir's
+// parent a fiber sees.
 func warmDirect(t *testing.T, dir string, hide []string) (*procbackend.Backend, backend.Warm) {
 	t.Helper()
 	be := procbackend.NewBackend(procbackend.Options{})
@@ -57,19 +57,20 @@ func cloneDirect(t *testing.T, be *procbackend.Backend, w backend.Warm, dir, fen
 	})
 }
 
-// TestHideFailureRefusesClone: a fiber that cannot have every HIDE path
-// covered does not run. A path that cannot be covered (a regular file: a
-// tmpfs cannot be mounted over it) ends the child with EX_MNT_HIDE. More
-// paths than the zygote holds get the HIDE line refused, and from then
-// on every clone of the grant is refused. With every path coverable the
-// fiber runs, the secret covered and its capabilities gone.
+// TestHideFailureRefusesClone pins that a fiber runs only when every HIDE
+// path is covered, so a hidden secret is never left visible. The zygote
+// covers the paths once, in its own mount namespace before READY, so a
+// path that cannot be covered refuses every clone of the grant, as more
+// paths than the zygote holds do. The property is the old one, that no
+// fiber runs with a HIDE path uncovered. The old code found out in each
+// child, which ended with exit 113, and the wording follows the move.
 func TestHideFailureRefusesClone(t *testing.T) {
 	cases := []struct {
 		name string
 		// hide makes the grant's HIDE paths under dir. secret is a file
 		// the fiber must not read when it runs.
 		hide func(t *testing.T, dir string) (hide []string, secret string)
-		// wantErr names what the clone error must say; nil for success.
+		// wantErr names what the clone error must say, or nil for success.
 		wantErr []string
 	}{
 		{
@@ -82,7 +83,7 @@ func TestHideFailureRefusesClone(t *testing.T) {
 				secretDir, secret := secretUnder(t, dir)
 				return []string{file, secretDir}, secret
 			},
-			wantErr: []string{"died before ready", "exit:113"}, // EX_MNT_HIDE
+			wantErr: []string{"refused", "the zygote could not cover a HIDE path"},
 		},
 		{
 			name: "a refused HIDE line refuses every clone",

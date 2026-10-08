@@ -21,8 +21,8 @@ import (
 	"github.com/helayoty/fiberd/pkg/core"
 )
 
-// fakeZygoteArg, as os.Args[1], makes the test binary a scripted zygote:
-// os.Args[2] is the script, os.Args[3] the pid it reports. The backend
+// fakeZygoteArg, as os.Args[1], makes the test binary a scripted zygote.
+// os.Args[2] is the script, and os.Args[3] the pid it reports. The backend
 // hands the zygote a fixed environment, so argv is the only switch.
 const fakeZygoteArg = "fake-zygote"
 
@@ -235,7 +235,7 @@ func warmFake(t *testing.T, b *Backend, script string, pid int) backend.Warm {
 	return w
 }
 
-// TestExitRightAfterCloneIsReported: the zygote may answer CLONE and
+// TestExitRightAfterCloneIsReported covers a zygote that answers CLONE and
 // report the fiber's exit in one write. The reader must have the fiber
 // registered before it reads the EXITED line, or the exit is lost and
 // the host waits forever for it.
@@ -243,7 +243,7 @@ func TestExitRightAfterCloneIsReported(t *testing.T) {
 	cases := []struct {
 		name     string
 		script   string
-		deadline time.Duration // the caller's; 0 for generous
+		deadline time.Duration // the caller's, 0 for generous
 		wantErr  error         // from Clone
 		wantExit bool          // an Exit for the fence within a second
 	}{
@@ -292,8 +292,8 @@ func TestExitRightAfterCloneIsReported(t *testing.T) {
 				}
 			}
 
-			// The fiber is gone either way: nothing to signal, and a
-			// Kill is not a kill(2) of some pid.
+			// The fiber is gone either way. There is nothing to signal,
+			// and a Kill is not a kill(2) of some pid.
 			if err := b.Kill(fence); err != nil && !errors.Is(err, syscall.ESRCH) {
 				t.Fatalf("Kill after exit: %v", err)
 			}
@@ -307,9 +307,9 @@ func TestExitRightAfterCloneIsReported(t *testing.T) {
 	}
 }
 
-// TestKillNeverSignalsAnUnknownPID: kill(2) of 0 is this process group
-// and of a negative number a whole group; a fiber whose host pid the
-// backend does not know is refused, not guessed.
+// TestKillNeverSignalsAnUnknownPID checks that Kill refuses a fiber whose
+// host pid the backend does not know, never guessing. kill(2) of 0 is this
+// process group, and of a negative number a whole group.
 func TestKillNeverSignalsAnUnknownPID(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -335,8 +335,8 @@ func TestKillNeverSignalsAnUnknownPID(t *testing.T) {
 	}
 }
 
-// TestHostPIDWithLauncherNeverGuesses: without a cgroup to look in, a
-// launcher's fiber has no host pid rather than the container's number.
+// TestHostPIDWithLauncherNeverGuesses checks that without a cgroup to look
+// in, a launcher's fiber has no host pid rather than the container's number.
 func TestHostPIDWithLauncherNeverGuesses(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -358,7 +358,7 @@ func TestHostPIDWithLauncherNeverGuesses(t *testing.T) {
 	}
 }
 
-// TestParseCloned: the CLONED line names the fiber by fence and pid.
+// TestParseCloned checks that the CLONED line names the fiber by fence and pid.
 // Fields after those two are ignored.
 func TestParseCloned(t *testing.T) {
 	cases := []struct {
@@ -406,12 +406,12 @@ func (nopLauncher) Restored(backend.WarmSpec, int) error                    { re
 func (nopLauncher) RestoredGone(backend.WarmSpec)                           {}
 func (nopLauncher) Release(backend.WarmSpec)                                {}
 func (nopLauncher) Endpoint(_ backend.WarmSpec, p string) string            { return p }
-func (nopLauncher) DumpExtra(backend.WarmSpec) []string                     { return nil }
+func (nopLauncher) DumpExtra(backend.WarmSpec, string) ([]string, error)    { return nil, nil }
 func (nopLauncher) RestoreExtra(backend.WarmSpec, string) ([]string, error) { return nil, nil }
 
-// TestRunDirPair: the RUNDIR line names the directory holding every
-// grant's run directory and the grant's own; a run directory the fiber
-// could not be told about safely is refused before any zygote is warmed.
+// TestRunDirPair checks that the RUNDIR line names the directory holding
+// every grant's run directory and the grant's own. A run directory the
+// fiber could not be told about safely is refused before any warm.
 func TestRunDirPair(t *testing.T) {
 	cases := []struct {
 		name, workDir string
@@ -441,13 +441,13 @@ func TestRunDirPair(t *testing.T) {
 	}
 }
 
-// TestRunDirInherit: a checkpoint that records its run directory mount
-// is restored with that mount bound to the resuming grant's directory;
-// one without the record (never narrowed) takes nothing.
+// TestRunDirInherit checks that a checkpoint recording its run directory
+// mount is restored with it bound to the resuming grant's directory. One
+// without the record takes nothing.
 func TestRunDirInherit(t *testing.T) {
 	cases := []struct {
 		name    string
-		record  string // the file's content; "" for no file
+		record  string // the file's content, "" for no file
 		workDir string
 		want    []string
 		wantMP  string
@@ -531,13 +531,13 @@ func warmFakeFor(t *testing.T, b *Backend, grant, script string, pid int) backen
 	return w
 }
 
-// TestExitLandsOnTheReportingZygotesFiber: two zygotes, each the init of
+// TestExitLandsOnTheReportingZygotesFiber covers two zygotes, each the init of
 // a pid namespace, both report pid N for their fiber. An EXITED from one
 // must end that one's fiber and leave the other's alone.
 func TestExitLandsOnTheReportingZygotesFiber(t *testing.T) {
 	cases := []struct {
 		name     string
-		scripts  [2]string // zygote 1 and 2; "late" exits, "never" does not
+		scripts  [2]string // zygote 1 and 2. "late" exits, "never" does not
 		wantExit int       // which zygote's fiber exits (1 or 2)
 	}{
 		{name: "first zygote's fiber exits", scripts: [2]string{"late", "never"}, wantExit: 1},
@@ -578,7 +578,7 @@ func TestExitLandsOnTheReportingZygotesFiber(t *testing.T) {
 	}
 }
 
-// TestAbandon: Clone giving up without a fiber leaves nothing behind
+// TestAbandon checks that Clone giving up without a fiber leaves nothing behind
 // whether the reader has answered yet or not. Whoever takes the pending
 // entry sends once, so an abandon that finds the entry gone waits for
 // that one send.
@@ -628,8 +628,8 @@ func TestAbandon(t *testing.T) {
 	}
 }
 
-// TestClonedPIDWithLauncher: the pid a launcher's zygote reports is the
-// container's number, never a host pid to signal. Until Clone has
+// TestClonedPIDWithLauncher checks that the pid a launcher's zygote reports
+// is the container's number, never a host pid to signal. Until Clone has
 // translated it the fiber has none.
 func TestClonedPIDWithLauncher(t *testing.T) {
 	cases := []struct {
@@ -664,13 +664,13 @@ func TestClonedPIDWithLauncher(t *testing.T) {
 	}
 }
 
-// TestParkNeedsTheLaunchersZygote: a launcher's fiber whose zygote is
-// gone cannot be dumped, since only the launcher names its container's
+// TestParkNeedsTheLaunchersZygote checks that a launcher's fiber whose zygote
+// is gone cannot be dumped, since only the launcher names its container's
 // mounts for criu.
 func TestParkNeedsTheLaunchersZygote(t *testing.T) {
 	cases := []struct {
 		name string
-		pid  int    // the fiber's host pid; 0 for unknown
+		pid  int    // the fiber's host pid, 0 for unknown
 		want string // in the error
 	}{
 		{name: "zygote gone", pid: 1 << 30, want: "zygote is gone"},
@@ -689,7 +689,7 @@ func TestParkNeedsTheLaunchersZygote(t *testing.T) {
 	}
 }
 
-// TestHeldByLiveProcess: the holder file beside a restore root says
+// TestHeldByLiveProcess checks that the holder file beside a restore root says
 // whether another live agent has it. Anything else means nobody does.
 func TestHeldByLiveProcess(t *testing.T) {
 	cases := []struct {
@@ -714,6 +714,76 @@ func TestHeldByLiveProcess(t *testing.T) {
 			}
 			if got := heldByLiveProcess(pidfile, os.Getpid()); got != tc.want {
 				t.Fatalf("heldByLiveProcess(%q) = %v, want %v", tc.content, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestWarmNeverLogsThroughALink pins that the zygote's log is opened by
+// name and never through a link. The grant's fibers write the run
+// directory as uid 0, so one could plant zygote.log as a link to any
+// file on the host, and the next warm of the grant (after the zygote
+// died) would append the zygote's output there as root.
+func TestWarmNeverLogsThroughALink(t *testing.T) {
+	cases := []struct {
+		name string
+		// plant prepares the run directory's zygote.log.
+		plant   func(t *testing.T, dir, victim string)
+		wantErr string
+	}{
+		{name: "no log yet: made and appended", plant: func(*testing.T, string, string) {}},
+		{name: "a regular log is appended", plant: func(t *testing.T, dir, _ string) {
+			if err := os.WriteFile(filepath.Join(dir, "zygote.log"), []byte("earlier\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "a link to another file is refused", plant: func(t *testing.T, dir, victim string) {
+			if err := os.Symlink(victim, filepath.Join(dir, "zygote.log")); err != nil {
+				t.Fatal(err)
+			}
+		}, wantErr: "zygote.log is a link"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			exe, err := os.Executable()
+			if err != nil {
+				t.Fatal(err)
+			}
+			dir := filepath.Join(t.TempDir(), "g")
+			if err := os.Mkdir(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			victim := filepath.Join(t.TempDir(), "victim")
+			if err := os.WriteFile(victim, []byte("untouched\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			tc.plant(t, dir, victim)
+			b := NewBackend(Options{})
+			t.Cleanup(b.Close)
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_, err = b.Warm(ctx, backend.WarmSpec{
+				GrantUID:      "g",
+				Template:      backend.Template{Argv: []string{exe, fakeZygoteArg, "early", "4242"}},
+				CgroupFD:      -1,
+				ProbeCgroupFD: -1,
+				WorkDir:       dir,
+			})
+			switch {
+			case tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)):
+				t.Fatalf("Warm = %v, want an error mentioning %q", err, tc.wantErr)
+			case tc.wantErr == "" && err != nil:
+				t.Fatalf("Warm: %v", err)
+			}
+			if got, _ := os.ReadFile(victim); string(got) != "untouched\n" {
+				t.Fatalf("the victim file reads %q, want it untouched", got)
+			}
+			st, lerr := os.Lstat(filepath.Join(dir, "zygote.log"))
+			if lerr != nil {
+				t.Fatal(lerr)
+			}
+			if (st.Mode()&os.ModeSymlink != 0) != (tc.wantErr != "") {
+				t.Fatalf("zygote.log mode = %v after the warm", st.Mode())
 			}
 		})
 	}

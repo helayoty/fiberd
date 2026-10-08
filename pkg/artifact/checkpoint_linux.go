@@ -17,9 +17,10 @@ import (
 )
 
 // checkpointZygote starts the zygote the way a home does (control channel
-// on fd 3, standard descriptors on /dev/null), waits for READY, dumps it
-// leaving it running, then ends it. The images are the zygote's memory
-// exactly as every fiber inherits it at fork.
+// on fd 3, standard descriptors on /dev/null), tells it PREPARE none,
+// since no fiber is forked here and it is to stay in this namespace,
+// waits for READY, dumps it leaving it running, then ends it. The images
+// are the zygote's memory exactly as every fiber inherits it at fork.
 func checkpointZygote(ctx context.Context, o BuildOptions, imagesDir string) error {
 	fds, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_STREAM|syscall.SOCK_CLOEXEC, 0)
 	if err != nil {
@@ -54,6 +55,9 @@ func checkpointZygote(ctx context.Context, o BuildOptions, imagesDir string) err
 		_ = cmd.Process.Kill()
 		<-waited
 	}()
+	// The agent speaks first (zygote/libfiberzygote.h). A zygote that
+	// exited already fails the write, and is reported below as such.
+	_, _ = parent.Write([]byte("PREPARE none\n"))
 
 	ready := make(chan error, 1)
 	go func() {

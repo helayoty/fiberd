@@ -5,6 +5,8 @@ package runc
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -75,9 +77,9 @@ func calls(t *testing.T, logPath string) []string {
 	return out
 }
 
-// templateRootfs makes a small root filesystem: a directory with a
-// file, a file owned by a low uid the copy shifts into the grant's
-// range, a symlink and a fifo the copy skips.
+// templateRootfs makes a small root filesystem. It holds a directory with
+// a file, a file owned by a low uid the copy shifts into the grant's
+// range, a symlink, and a fifo the copy skips.
 func templateRootfs(t *testing.T) string {
 	t.Helper()
 	dir := filepath.Join(t.TempDir(), "rootfs")
@@ -111,6 +113,44 @@ func newLauncher(t *testing.T, runcBody string) (*launcher, string) {
 func warmSpec(t *testing.T, grant string) backend.WarmSpec {
 	t.Helper()
 	return backend.WarmSpec{GrantUID: grant, WorkDir: filepath.Join(t.TempDir(), "run", grant), CgroupFD: -1, ProbeCgroupFD: -1}
+}
+
+// registryTemplate writes a pulled template cache entry as the host
+// leaves it (the executable, its config, digest and images) and returns
+// the template the host hands Warm for it. Only the executable may ever
+// reach a container.
+func registryTemplate(t *testing.T, executable []byte) backend.Template {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "cache", strings.Repeat("ab", 32))
+	if err := os.MkdirAll(filepath.Join(dir, "images"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, content := range map[string]string{"config.json": `{"args":[]}`, "DIGEST": "sha256:abab\n", "images/pages-1.img": "pages"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, "zygote"), executable, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(executable)
+	return backend.Template{Digest: "sha256:" + strings.Repeat("ab", 32), Argv: []string{filepath.Join(dir, "zygote"), "--heap-mb", "8"},
+		Dir: dir, ZygoteSHA256: hex.EncodeToString(sum[:])}
+}
+
+// templateMountOf returns the source of the template mount in a bundle's
+// config, or "" when it has none, checking the mount's options.
+func templateMountOf(t *testing.T, cfg ociConfig) string {
+	t.Helper()
+	for _, m := range cfg.Mounts {
+		if m.Destination == backend.TemplateMount {
+			if m.Type != "bind" || !reflect.DeepEqual(m.Options, backend.TemplateMountOptions) {
+				t.Fatalf("template mount = %+v, want a bind with %v", m, backend.TemplateMountOptions)
+			}
+			return m.Source
+		}
+	}
+	return ""
 }
 
 // owner is the uid and gid of path.
@@ -210,7 +250,7 @@ func readConfig(t *testing.T, bundle string) ociConfig {
 	return cfg
 }
 
-// TestCommand: the bundle runc runs the zygote from, and what Command
+// TestCommand checks the bundle runc runs the zygote from, and what Command
 // prepares around it. Every failure gives the grant's hold back.
 func TestCommand(t *testing.T) {
 	needRoot(t)
@@ -372,6 +412,67 @@ func TestCommand(t *testing.T) {
 					t.Errorf("cgroupsPath = %q, want %s", cfg.Linux.CgroupsPath, want)
 				}
 			}},
+		{name: "a template from the rootfs gets no template mount and no staged copy", grant: "g1",
+			check: func(t *testing.T, l *launcher, spec backend.WarmSpec, cfg ociConfig, _ *exec.Cmd) {
+				if src := templateMountOf(t, cfg); src != "" || len(cfg.Mounts) != 4 {
+					t.Errorf("mounts = %v, want the four without a template", cfg.Mounts)
+				}
+				if exists(l.templateDir(spec)) || l.stagedFor(spec) != "" {
+					t.Error("a rootfs template left a staged directory")
+				}
+				// The mount point is in every copy, so a restore on a home
+				// that never warmed the grant finds it.
+				if uid, _ := owner(t, filepath.Join(l.rootfs(spec), "fiberd", "template")); uid != testPool.Range("g1").Start {
+					t.Errorf("template mount point owner = %d, want the mapped root", uid)
+				}
+			}},
+		{name: "a registry template: the verified copy alone, bound read-only, the command inside the mount", grant: "g1",
+			setup: func(t *testing.T, _ *launcher, spec *backend.WarmSpec, _ *os.File) {
+				spec.Template = registryTemplate(t, []byte("#!/bin/sh\nexit 0\n"))
+			},
+			check: func(t *testing.T, l *launcher, spec backend.WarmSpec, cfg ociConfig, _ *exec.Cmd) {
+				staged := filepath.Join(l.templateDir(spec), "template")
+				if src := templateMountOf(t, cfg); src != staged {
+					t.Errorf("template mount source = %q, want the staged copy %q", src, staged)
+				}
+				if want := []string{"/fiberd/template/zygote", "--heap-mb", "8", "--log", "/host/zygote.log"}; !reflect.DeepEqual(cfg.Process.Args, want) {
+					t.Errorf("args = %v, want %v", cfg.Process.Args, want)
+				}
+				if l.stagedFor(spec) != staged {
+					t.Errorf("stagedFor = %q, want %q", l.stagedFor(spec), staged)
+				}
+				entries, err := os.ReadDir(staged)
+				if err != nil || len(entries) != 1 || entries[0].Name() != "zygote" {
+					t.Fatalf("staged directory holds %v (%v), want zygote alone", entries, err)
+				}
+				// The mapped root is an id outside the copy's owner, so the
+				// other bits are what it gets: read and exec, no write.
+				if uid, _ := owner(t, filepath.Join(staged, "zygote")); uid != 0 || mode(t, filepath.Join(staged, "zygote")) != 0o555 {
+					t.Errorf("staged copy = uid %d mode %o, want root's 0555", uid, mode(t, filepath.Join(staged, "zygote")))
+				}
+				if mode(t, staged) != 0o755 {
+					t.Errorf("staged directory mode %o, want 0755", mode(t, staged))
+				}
+				// The cache is not what is bound: a rewrite after the warm
+				// changes nothing the container sees.
+				if err := os.WriteFile(spec.Template.Argv[0], []byte("#!/bin/sh\nrm -rf /\n"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				data, _ := os.ReadFile(filepath.Join(staged, "zygote"))
+				if sum := sha256.Sum256(data); hex.EncodeToString(sum[:]) != spec.Template.ZygoteSHA256 {
+					t.Error("a cache rewrite reached the staged copy")
+				}
+			}},
+		{name: "a registry template whose cache entry changed is refused before anything runs", grant: "g1", wantErr: "staged executable hashes to",
+			setup: func(t *testing.T, _ *launcher, spec *backend.WarmSpec, _ *os.File) {
+				spec.Template = registryTemplate(t, []byte("#!/bin/sh\nexit 0\n"))
+				spec.Template.ZygoteSHA256 = strings.Repeat("0", 64)
+			}},
+		{name: "a registry template without a verified hash is refused", grant: "g1", wantErr: "without a verified executable hash",
+			setup: func(t *testing.T, _ *launcher, spec *backend.WarmSpec, _ *os.File) {
+				spec.Template = registryTemplate(t, []byte("#!/bin/sh\nexit 0\n"))
+				spec.Template.ZygoteSHA256 = ""
+			}},
 		{name: "a missing rootfs", grant: "g1", wantErr: "unusable",
 			setup: func(_ *testing.T, l *launcher, _ *backend.WarmSpec, _ *os.File) { l.opt.Rootfs += "-missing" }},
 		{name: "a rootfs that is a file", grant: "g1", wantErr: "unusable",
@@ -453,6 +554,9 @@ func TestCommand(t *testing.T) {
 				if exists(l.rootfs(spec)) {
 					t.Fatal("the failed Command left the rootfs copy")
 				}
+				if exists(l.templateDir(spec)) || l.stagedFor(spec) != "" {
+					t.Fatal("the failed Command left a staged template")
+				}
 				return
 			}
 			if err != nil {
@@ -466,8 +570,8 @@ func TestCommand(t *testing.T) {
 	}
 }
 
-// TestSweep: a new backend ends the containers a previous life left in
-// runc's state and removes every bundle and rootfs copy.
+// TestSweep checks that a new backend ends the containers a previous life
+// left in runc's state and removes every bundle and rootfs copy.
 func TestSweep(t *testing.T) {
 	needRoot(t)
 	cases := []struct {
@@ -494,7 +598,7 @@ func TestSweep(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			leftovers := []string{filepath.Join(l.opt.StateDir, "rootfs", "w-old"), filepath.Join(l.opt.StateDir, "bundles", "w-old")}
+			leftovers := []string{filepath.Join(l.opt.StateDir, "rootfs", "w-old"), filepath.Join(l.opt.StateDir, "bundles", "w-old"), filepath.Join(l.opt.StateDir, "templates", "w-old")}
 			for _, p := range leftovers {
 				if err := os.MkdirAll(p, 0o755); err != nil {
 					t.Fatal(err)
@@ -544,8 +648,8 @@ func TestSweep(t *testing.T) {
 	}
 }
 
-// TestHoldDrop: the rootfs copy lives exactly as long as some user of
-// the grant holds its range, and is remade when it is not the copy the
+// TestHoldDrop checks that the rootfs copy lives exactly as long as some user
+// of the grant holds its range, and is remade when it is not the copy the
 // grant needs.
 func TestHoldDrop(t *testing.T) {
 	needRoot(t)
@@ -680,7 +784,7 @@ func TestHoldDrop(t *testing.T) {
 	}
 }
 
-// TestCopyTree: what the copy keeps, skips and shifts, and what it
+// TestCopyTree checks what the copy keeps, skips and shifts, and what it
 // refuses.
 func TestCopyTree(t *testing.T) {
 	needRoot(t)
@@ -803,7 +907,7 @@ func TestCopyTree(t *testing.T) {
 	}
 }
 
-// TestReadRootfsMarker: the marker, or why it cannot be read.
+// TestReadRootfsMarker checks that the marker is read, or why it cannot be.
 func TestReadRootfsMarker(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -834,7 +938,8 @@ func TestReadRootfsMarker(t *testing.T) {
 	}
 }
 
-// TestCgroupPath: an open cgroup directory as the path runc wants.
+// TestCgroupPath checks that an open cgroup directory resolves to the path
+// runc wants.
 func TestCgroupPath(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -895,8 +1000,8 @@ func startSleep(t *testing.T) *exec.Cmd {
 	return cmd
 }
 
-// TestChannel: the control conversation moves onto a pair made in the
-// container's network namespace, sent to the zygote as REBIND.
+// TestChannel checks that the control conversation moves onto a pair made in
+// the container's network namespace, sent to the zygote as REBIND.
 func TestChannel(t *testing.T) {
 	needRoot(t)
 	cases := []struct {
@@ -991,7 +1096,7 @@ func fileConn(t *testing.T, fd int, name string) *net.UnixConn {
 	return c.(*net.UnixConn)
 }
 
-// TestPID: the container's init from `runc state`.
+// TestPID checks that the container's init is read from `runc state`.
 func TestPID(t *testing.T) {
 	needRoot(t)
 	cases := []struct {
@@ -1027,7 +1132,7 @@ func TestPID(t *testing.T) {
 	}
 }
 
-// TestRelease: the container is ended, its bundle goes, and the
+// TestRelease checks that the container is ended, its bundle goes, and the
 // zygote's hold is given back. The rootfs copy stays for a restored
 // fiber that still runs in the range.
 func TestRelease(t *testing.T) {
@@ -1055,12 +1160,20 @@ func TestRelease(t *testing.T) {
 			if err := os.MkdirAll(l.bundle(spec), 0o755); err != nil {
 				t.Fatal(err)
 			}
+			staged := filepath.Join(l.templateDir(spec), "template")
+			if err := os.MkdirAll(staged, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			l.setStaged(spec, staged)
 			l.Release(spec)
 			if got, want := calls(t, logPath), []string{"kill w-g1 KILL", "delete -f w-g1"}; !reflect.DeepEqual(got, want) {
 				t.Errorf("runc calls = %v, want %v", got, want)
 			}
 			if exists(l.bundle(spec)) {
 				t.Error("the bundle survived Release")
+			}
+			if exists(l.templateDir(spec)) || l.stagedFor(spec) != "" {
+				t.Error("the staged template survived Release")
 			}
 			if exists(copyDir) != tc.fiberLive {
 				t.Errorf("rootfs copy exists = %v, want %v", exists(copyDir), tc.fiberLive)
@@ -1078,7 +1191,8 @@ func TestRelease(t *testing.T) {
 	}
 }
 
-// TestEndpoint: a host path in the run directory as the zygote sees it.
+// TestEndpoint checks that a host path in the run directory maps to where
+// the zygote sees it.
 func TestEndpoint(t *testing.T) {
 	cases := []struct {
 		name string
@@ -1100,19 +1214,44 @@ func TestEndpoint(t *testing.T) {
 	}
 }
 
-// TestDumpExtra: criu is told which mounts come from outside and to
-// leave the network namespace alone.
+// TestDumpExtra checks that criu is told which mounts come from outside and to
+// leave the network namespace alone, and that a grant on a registry
+// template has its template bind named too and recorded beside the
+// images for the restore.
 func TestDumpExtra(t *testing.T) {
-	want := []string{"--external", "mnt[/host]:host", "--empty-ns", "net", "--network-lock", "skip"}
+	base := []string{"--external", "mnt[/host]:host", "--empty-ns", "net", "--network-lock", "skip"}
 	for _, d := range []string{"null", "zero", "full", "random", "urandom", "tty"} {
-		want = append(want, "--external", "mnt[/dev/"+d+"]:dev-"+d)
+		base = append(base, "--external", "mnt[/dev/"+d+"]:dev-"+d)
 	}
-	if got := (&launcher{}).DumpExtra(backend.WarmSpec{}); !reflect.DeepEqual(got, want) {
-		t.Fatalf("DumpExtra = %v, want %v", got, want)
+	cases := []struct {
+		name     string
+		template backend.Template
+		want     []string
+		record   bool
+	}{
+		{name: "a template from the rootfs", want: base},
+		{name: "a registry template names its bind", template: backend.Template{Dir: "/cache/x", Argv: []string{"/cache/x/zygote"}},
+			want: append(append([]string{}, base...), "--external", "mnt["+backend.TemplateMount+"]:template"), record: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), "images")
+			got, err := (&launcher{}).DumpExtra(backend.WarmSpec{GrantUID: "g1", Template: tc.template}, dir)
+			if err != nil || !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("DumpExtra = %v %v, want %v", got, err, tc.want)
+			}
+			b, err := os.ReadFile(filepath.Join(dir, templateFile))
+			if (err == nil) != tc.record {
+				t.Fatalf("record %s: %q %v, want one %v", templateFile, b, err, tc.record)
+			}
+			if tc.record && !strings.Contains(string(b), backend.TemplateMount) {
+				t.Fatalf("record = %s, want the mount point", b)
+			}
+		})
 	}
 }
 
-// TestRestoreExtra: a restore takes a fiber's hold, prepares the run
+// TestRestoreExtra checks that a restore takes a fiber's hold, prepares the run
 // directory and the images for the mapped root, and names the copy and
 // the external mounts. Every failure gives the hold back.
 func TestRestoreExtra(t *testing.T) {
@@ -1120,8 +1259,12 @@ func TestRestoreExtra(t *testing.T) {
 	cases := []struct {
 		name    string
 		setup   func(t *testing.T, l *launcher, spec *backend.WarmSpec, images string)
+		staged  string // this home's staged template copy, "" for none
 		wantErr string
 		wantIs  error
+		// wantBind is what follows the device binds: the template bind
+		// of this home's copy, or nothing.
+		wantBind []string
 	}{
 		{name: "the restore arguments and what the mapped root may read"},
 		{name: "another grant holds the slot", wantIs: ErrRangeCollision,
@@ -1140,11 +1283,30 @@ func TestRestoreExtra(t *testing.T) {
 					t.Fatal(err)
 				}
 			}},
+		// A checkpoint taken with a template bind is restored with this
+		// home's own verified copy, the one its warm instance staged.
+		{name: "a checkpoint with a template bind, the grant warm here", staged: "/state/templates/w-g1/template",
+			setup: func(t *testing.T, _ *launcher, _ *backend.WarmSpec, images string) {
+				templateRecordIn(t, images, backend.TemplateMount)
+			},
+			wantBind: []string{"--external", "mnt[template]:/state/templates/w-g1/template"}},
+		{name: "a checkpoint with a template bind, the grant not warm here", wantErr: "does not have here",
+			setup: func(t *testing.T, _ *launcher, _ *backend.WarmSpec, images string) {
+				templateRecordIn(t, images, backend.TemplateMount)
+			}},
+		{name: "a record naming another mount point is malformed", staged: "/state/templates/w-g1/template", wantErr: "malformed",
+			setup: func(t *testing.T, _ *launcher, _ *backend.WarmSpec, images string) {
+				templateRecordIn(t, images, "/elsewhere")
+			}},
+		{name: "a checkpoint without a template bind binds none, warm or not", staged: "/state/templates/w-g1/template"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			l, _ := newLauncher(t, "")
 			spec := warmSpec(t, "g1")
+			if tc.staged != "" {
+				l.setStaged(spec, tc.staged)
+			}
 			rng := testPool.Range("g1")
 			images := filepath.Join(t.TempDir(), "images")
 			for _, p := range []string{"pages-1.img", "core-1.img"} {
@@ -1181,6 +1343,7 @@ func TestRestoreExtra(t *testing.T) {
 			for _, d := range deviceBinds {
 				want = append(want, "--external", "mnt[dev-"+d+"]:/dev/"+d)
 			}
+			want = append(want, tc.wantBind...)
 			if !reflect.DeepEqual(extra, want) {
 				t.Errorf("extra = %v, want %v", extra, want)
 			}
@@ -1209,8 +1372,21 @@ func TestRestoreExtra(t *testing.T) {
 	}
 }
 
-// TestSocketpair: a pair made in the instance's network namespace, both
-// ends usable.
+// templateRecordIn writes the record a dump of a container with a
+// template bind leaves beside its images.
+func templateRecordIn(t *testing.T, images, mountpoint string) {
+	t.Helper()
+	b, err := json.Marshal(templateRecord{MountPoint: mountpoint})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(images, templateFile), b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestSocketpair checks that a pair made in the instance's network
+// namespace has both ends usable.
 func TestSocketpair(t *testing.T) {
 	needRoot(t)
 	cases := []struct {
@@ -1247,7 +1423,7 @@ func TestSocketpair(t *testing.T) {
 	}
 }
 
-// TestRestored: the loopback of a restored tree's fresh network
+// TestRestored checks that the loopback of a restored tree's fresh network
 // namespace is brought up.
 func TestRestored(t *testing.T) {
 	needRoot(t)
@@ -1327,7 +1503,7 @@ func loUp(t *testing.T, pid int) bool {
 	return false
 }
 
-// TestMappedRoot: the grant's mapped root is the start of its range,
+// TestMappedRoot checks that the grant's mapped root is the start of its range,
 // unless another grant holds the slot here.
 func TestMappedRoot(t *testing.T) {
 	needRoot(t)
@@ -1377,8 +1553,8 @@ func mountReadOnly(t *testing.T, path string) {
 	}
 }
 
-// TestPrepareWorkDir: the run directory is root's with the grant's
-// mapped gid and group write, or the reason it cannot be.
+// TestPrepareWorkDir checks that the run directory is root's with the
+// grant's mapped gid and group write, or the reason it cannot be.
 func TestPrepareWorkDir(t *testing.T) {
 	needRoot(t)
 	rng := testPool.Range("g1")
@@ -1426,7 +1602,7 @@ func TestPrepareWorkDir(t *testing.T) {
 	}
 }
 
-// TestShareImages: the images the restored tree reads itself get the
+// TestShareImages checks that the images the restored tree reads itself get the
 // grant's mapped gid, and what stops that is reported.
 func TestShareImages(t *testing.T) {
 	needRoot(t)

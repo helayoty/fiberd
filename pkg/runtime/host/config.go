@@ -37,6 +37,12 @@ type Config struct {
 	RegistryPlainHTTP bool
 	// TemplateCache holds pulled artifacts, one directory per digest
 	// (default /var/lib/fiberd/templates), and the parent-checkpoint store.
+	// It is hidden from fibers like PrivateDir and DeltaDir: a proc fiber
+	// runs as the agent's uid and could otherwise rewrite a cached
+	// template between the host's check and the exec, or read another
+	// grant's. A proc fiber still sees its own template's executable,
+	// bound back read-only at its path inside the cover, because CRIU
+	// names a mapped file by its path (zygote/libfiberzygote.c).
 	TemplateCache string
 	// CgroupRoot is the delegated cgroup v2 subtree (from the home).
 	CgroupRoot string
@@ -129,23 +135,24 @@ const (
 	deltaTTL = 24 * time.Hour
 )
 
-// DefaultFiberHide is hidden from every fiber: the Kubernetes
+// DefaultFiberHide is hidden from every fiber. It holds the Kubernetes
 // service-account token of the home's Pod.
 var DefaultFiberHide = []string{"/var/run/secrets/kubernetes.io/serviceaccount"}
 
-// fiberHide is what fibers must not see: the defaults, DeltaDir,
-// PrivateDir and FiberHide, cleaned and without duplicates. Relative
-// paths and extra directories holding RunDir are returned as skipped.
-// DeltaDir or PrivateDir holding RunDir is an error. Fiber endpoints
-// live in RunDir, so the deltas or keys beside them would be visible.
+// fiberHide lists what fibers must not see. That is the defaults,
+// DeltaDir, PrivateDir, TemplateCache and FiberHide, cleaned and without
+// duplicates. Relative paths and extra directories holding RunDir are
+// returned as skipped. DeltaDir, PrivateDir or TemplateCache holding
+// RunDir is an error, because fiber endpoints live in RunDir and the
+// deltas, keys or templates would be visible.
 func (c Config) fiberHide() (hide, skipped []string, err error) {
-	for _, d := range []struct{ name, path string }{{"DeltaDir", c.DeltaDir}, {"PrivateDir", c.PrivateDir}} {
+	for _, d := range []struct{ name, path string }{{"DeltaDir", c.DeltaDir}, {"PrivateDir", c.PrivateDir}, {"TemplateCache", c.TemplateCache}} {
 		if filepath.IsAbs(d.path) && holds(filepath.Clean(d.path), c.RunDir) {
 			return nil, nil, fmt.Errorf("host: RunDir %s is inside %s %s, which fibers must not see; move it out", c.RunDir, d.name, d.path)
 		}
 	}
 	seen := map[string]bool{}
-	for _, p := range append(append(append([]string{}, DefaultFiberHide...), c.DeltaDir, c.PrivateDir), c.FiberHide...) {
+	for _, p := range append(append(append([]string{}, DefaultFiberHide...), c.DeltaDir, c.PrivateDir, c.TemplateCache), c.FiberHide...) {
 		if p == "" {
 			continue
 		}

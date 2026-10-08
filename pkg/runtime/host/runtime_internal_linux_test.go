@@ -166,7 +166,7 @@ func TestNewPlatform(t *testing.T) {
 		be   backend.Backend
 		mod  func(*Config)
 		want artifact.Platform
-		hide []string // besides the defaults, DeltaDir and the run dir rules
+		hide []string // besides the defaults, DeltaDir, PrivateDir, TemplateCache and the run dir rules
 	}{
 		{name: "detected, named after the backend", be: newFakeBackend(core.TierWarm),
 			want: artifact.Platform{Arch: detected.Arch, Kernel: detected.Kernel, Libc: detected.Libc, Backend: "fake"}},
@@ -208,11 +208,13 @@ func TestNewPlatform(t *testing.T) {
 			if r.cfg.PrivateDir != "" && !strings.HasPrefix(r.cfg.PrivateDir, cwd) {
 				t.Fatalf("PrivateDir %q was not made absolute under %s", r.cfg.PrivateDir, cwd)
 			}
-			want := append([]string{DefaultFiberHide[0], r.cfg.DeltaDir}, r.cfg.PrivateDir)
-			if r.cfg.PrivateDir == "" {
-				want = want[:2]
+			// The cache is hidden with the keys and the deltas: a proc
+			// fiber could rewrite a cached template otherwise.
+			want := []string{DefaultFiberHide[0], r.cfg.DeltaDir}
+			if r.cfg.PrivateDir != "" {
+				want = append(want, r.cfg.PrivateDir)
 			}
-			want = append(want, tc.hide...)
+			want = append(append(want, r.cfg.TemplateCache), tc.hide...)
 			if strings.Join(r.hide, ",") != strings.Join(want, ",") {
 				t.Fatalf("hide = %v, want %v", r.hide, want)
 			}

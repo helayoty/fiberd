@@ -25,8 +25,8 @@ const capSysAdmin = 21
 // warmArgv opens the fork backend on its own and warms one zygote from
 // the given argv, which may wrap the zygote in a launcher (strace,
 // setpriv, noclone3), with dir as the grant's run directory. Fibers are
-// forked into the cgroup each Clone names (none when the caller passes
-// -1); the zygote itself runs in the test's.
+// forked into the cgroup each Clone names, or none when the caller passes
+// -1. The zygote itself runs in the test's cgroup.
 func warmArgv(t *testing.T, dir, grant string, argv []string, hide []string) (*procbackend.Backend, backend.Warm) {
 	t.Helper()
 	be := procbackend.NewBackend(procbackend.Options{})
@@ -102,10 +102,10 @@ func atoiOrFatal(t *testing.T, what, s string) int {
 	return n
 }
 
-// birthLine is one clone3 or legacy clone call in strace -f output: the
-// call's name, then its flags. A call that another tracee's event
-// interleaved ends in "<unfinished ...>", and the "<... resumed>" line
-// that follows is not a second call.
+// birthLine matches one clone3 or legacy clone call in strace -f output,
+// capturing the call's name and then its flags. A call that another
+// tracee's event interleaved ends in "<unfinished ...>", and the
+// "<... resumed>" line that follows is not a second call.
 var birthLine = regexp.MustCompile(`^\d+\s+(clone3?)\((?:\{flags=|child_stack=[^,]*, flags=)([^,}]*)`)
 
 // births counts the clone3 and legacy clone calls in an strace -f trace
@@ -131,16 +131,19 @@ func births(t *testing.T, trace string) (clone3, legacy int) {
 	return clone3, legacy
 }
 
-// TestRefusedNamespacesRefuseClone: a zygote without CAP_SYS_ADMIN is
-// refused CLONE_NEWNS and CLONE_NEWPID with EPERM. The clone is refused
-// with that error, and no fiber runs without its namespaces. Birth asks
-// once: it neither retries with fewer namespaces nor falls back to the
-// legacy clone, which is for kernels without clone3. The zygote serves
-// on and refuses the next clone the same way.
+// TestRefusedNamespacesRefuseClone pins that a zygote without
+// CAP_SYS_ADMIN serves no fiber short of its namespaces, and that the
+// zygote serves on after each refusal. setpriv takes the capability out
+// of the bounding set, so the zygote has lost it after exec, and strace
+// -f records the clone calls to count.
 //
-// The zygote is wrapped in setpriv, which takes CAP_SYS_ADMIN out of the
-// bounding set so it is gone from the zygote's effective set after exec,
-// and in strace -f, whose output file is the count.
+// Two refusals meet here. The kernel refuses CLONE_NEWPID with EPERM, and
+// birth asks once, never retrying with fewer namespaces or falling back
+// to the legacy clone (a property the old code had too). And the zygote,
+// refused its own mount namespace in fz_init, refuses every mntns CLONE
+// before any birth, so no clone3 is even asked for. The old code asked
+// the kernel, which refused CLONE_NEWNS the same way, so this case is
+// new in where the refusal lands and the same in that no fiber runs.
 func TestRefusedNamespacesRefuseClone(t *testing.T) {
 	for _, tool := range []string{"strace", "setpriv"} {
 		if _, err := exec.LookPath(tool); err != nil {
@@ -150,44 +153,61 @@ func TestRefusedNamespacesRefuseClone(t *testing.T) {
 	if !hasCap(t, procStatus(t, os.Getpid(), "CapEff"), capSysAdmin) {
 		t.Skip("the test itself lacks CAP_SYS_ADMIN; a refusal would say nothing about the zygote's")
 	}
-	dir := t.TempDir()
-	trace := filepath.Join(dir, "clone.strace")
-	be, w := warmArgv(t, dir, "gr", []string{
-		"strace", "-f", "-qq", "-e", "trace=clone,clone3", "-o", trace,
-		"setpriv", "--bounding-set", "-sys_admin", "--inh-caps", "-sys_admin",
-		zygoteBin, "--heap-mb", "16",
-	}, []string{hiddenDir})
-
-	// The cases share the zygote on purpose and run in order: each is one
-	// more clone of it.
-	cases := []struct {
-		name  string
-		fence string
-	}{
-		{name: "first clone is refused", fence: "gr/1-1"},
-		{name: "the zygote serves on and refuses the next", fence: "gr/1-2"},
-	}
-	seen := 0
-	for _, tc := range cases {
-		ok := t.Run(tc.name, func(t *testing.T) {
-			_, err := cloneDirect(t, be, w, dir, tc.fence, "")
-			if err == nil || !strings.Contains(err.Error(), "clone: Operation not permitted") {
-				t.Fatalf("clone = %v, want it refused with clone: Operation not permitted", err)
-			}
-			if _, err := os.Stat(filepath.Join(dir, strings.ReplaceAll(tc.fence, "/", "-")+".sock")); err == nil {
-				t.Fatalf("a fiber of %s serves although its clone was refused", tc.fence)
-			}
-			// strace prints a call before the tracee runs on, so every
-			// call of this birth is in the file before ERROR was sent.
-			c3, legacy := births(t, trace)
-			if c3-seen != 1 || legacy != 0 {
-				b, _ := os.ReadFile(trace)
-				t.Fatalf("births for %s: clone3 %d, legacy clone %d, want one clone3 and no legacy clone; trace so far:\n%s", tc.fence, c3-seen, legacy, b)
-			}
-			seen = c3
-		})
-		if !ok {
-			return
+	unprivileged := func(trace string) []string {
+		return []string{
+			"strace", "-f", "-qq", "-e", "trace=clone,clone3", "-o", trace,
+			"setpriv", "--bounding-set", "-sys_admin", "--inh-caps", "-sys_admin",
 		}
+	}
+	cases := []struct {
+		name string
+		// opts are the CLONE options sent on the raw channel after
+		// PREPARE none (the kernel's refusal) or PREPARE mntns (the
+		// zygote's).
+		setup, opts string
+		// wantErr is what the ERROR line must contain, and births how
+		// many clone3 calls each CLONE costs.
+		wantErr string
+		births  int
+	}{
+		{name: "the kernel refuses the pid namespace once per CLONE", setup: "PREPARE mntns\n", opts: "pidns", wantErr: "clone: Operation not permitted", births: 1},
+		{name: "the zygote without a namespace of its own refuses a mntns CLONE before any birth", setup: "PREPARE mntns\n", opts: "pidns,mntns",
+			wantErr: "refused: the mount namespace cannot hide what the agent asked (the zygote could not take a mount namespace of its own: unshare: errno 1)", births: 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			trace := filepath.Join(dir, "clone.strace")
+			uc, rd := rawZygoteWith(t, dir, unprivileged(trace), tc.setup)
+			// READY first, then the one line that says why no mntns
+			// fiber will be born, which the agent logs.
+			if got := readLine(t, uc, rd); !strings.HasPrefix(got, "ERROR ? the zygote could not take a mount namespace of its own: unshare: errno 1; every mntns CLONE is refused") {
+				t.Fatalf("after READY the zygote said %q, want the reason it has no mount namespace of its own", got)
+			}
+			// The clones share the zygote on purpose and run in order,
+			// each one more clone of it.
+			seen := 0
+			for _, fence := range []string{"gr/1-1", "gr/1-2"} {
+				line := fmt.Sprintf("CLONE %s %s/%s.sock 2000 - %s", fence, dir, strings.ReplaceAll(fence, "/", "-"), tc.opts)
+				if _, err := uc.Write([]byte(line + "\n")); err != nil {
+					t.Fatal(err)
+				}
+				got := readLine(t, uc, rd)
+				if !strings.HasPrefix(got, "ERROR "+fence+" ") || !strings.Contains(got, tc.wantErr) {
+					t.Fatalf("reply to %s = %q, want it refused with an error mentioning %q", fence, got, tc.wantErr)
+				}
+				if _, err := os.Stat(filepath.Join(dir, strings.ReplaceAll(fence, "/", "-")+".sock")); err == nil {
+					t.Fatalf("a fiber of %s serves although its clone was refused", fence)
+				}
+				// strace prints a call before the tracee runs on, so every
+				// call of this birth is in the file before ERROR was sent.
+				c3, legacy := births(t, trace)
+				if c3-seen != tc.births || legacy != 0 {
+					b, _ := os.ReadFile(trace)
+					t.Fatalf("births for %s: clone3 %d, legacy clone %d, want %d clone3 and no legacy clone; trace so far:\n%s", fence, c3-seen, legacy, tc.births, b)
+				}
+				seen = c3
+			}
+		})
 	}
 }
