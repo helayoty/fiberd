@@ -39,10 +39,15 @@ curl -fsSLo fc.tgz "https://github.com/firecracker-microvm/firecracker/releases/
 echo "$FC_SHA256  fc.tgz" | sha256sum -c -
 tar xzf fc.tgz && sudo install -m 0755 "release-$FC_VERSION-$ARCH/firecracker-$FC_VERSION-$ARCH" /usr/local/bin/firecracker
 firecracker --version
-# A 6.1 guest kernel from Firecracker's CI bucket. It has no published
-# checksum, so use it only on a throwaway benchmark host. The rootfs is
+# A 6.1 guest kernel from Firecracker's CI bucket. The bucket publishes no
+# checksums, so the pins below were taken on 2026-10-08. The rootfs is
 # built by the harness from counter.c.
-curl -fsSLo vmlinux "https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.12/$ARCH/vmlinux-6.1.102" || echo "fetch a guest kernel by hand (docs/getting-started.md)"
+case "$ARCH" in
+  x86_64) KERNEL_SHA256=e20e46d0c36c55c0d1014eb20576171b3f3d922260d9f792017aeff53af3d4f2 ;;
+  aarch64) KERNEL_SHA256=e3544b10603acbf3db492cb52e000d22ba202cb4b63b9add027565683e11c591 ;;
+esac
+curl -fsSLo vmlinux "https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.15/$ARCH/vmlinux-6.1.155"
+echo "$KERNEL_SHA256  vmlinux" | sha256sum -c -
 sudo setfacl -m "u:$USER:rw" /dev/kvm
 
 # fiberd: the dev image has runsc, criu, Rust and cargo-hyperlight. The

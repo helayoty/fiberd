@@ -50,6 +50,12 @@ jobs:
       # From the release's .sha256.txt files, pinned so a changed tarball fails.
       FC_SHA256_X86_64: 06094a1108ae9e82aa4c23a775aa92758f53f1175d422270d9d6162cb9ade558
       FC_SHA256_AARCH64: e351ebe4f7a16b5873bbd51005d2e6767103cff4d5ebc829df2d3f95a93e2256
+      # A guest kernel from Firecracker's CI bucket. The bucket publishes no
+      # checksums, so these were taken on 2026-10-08 and pin what was fetched.
+      FC_KERNEL_CI: v1.15
+      FC_KERNEL: 6.1.155
+      FC_KERNEL_SHA256_X86_64: e20e46d0c36c55c0d1014eb20576171b3f3d922260d9f792017aeff53af3d4f2
+      FC_KERNEL_SHA256_AARCH64: e3544b10603acbf3db492cb52e000d22ba202cb4b63b9add027565683e11c591
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -104,7 +110,12 @@ jobs:
           echo "$sum  fc.tgz" | sha256sum -c -
           tar xzf fc.tgz && sudo install -m 0755 "release-$FC_VERSION-$arch/firecracker-$FC_VERSION-$arch" /usr/local/bin/firecracker
           firecracker --version
-          curl -fsSLo vmlinux "https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.12/$arch/vmlinux-6.1.102"
+          case "$arch" in
+            x86_64) ksum=$FC_KERNEL_SHA256_X86_64 ;;
+            aarch64) ksum=$FC_KERNEL_SHA256_AARCH64 ;;
+          esac
+          curl -fsSLo vmlinux "https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/$FC_KERNEL_CI/$arch/vmlinux-$FC_KERNEL"
+          echo "$ksum  vmlinux" | sha256sum -c -
       - name: build the Hyperlight helper
         if: inputs.groups == 'all' || inputs.groups == 'microvm'
         run: make hyperlight-helper
