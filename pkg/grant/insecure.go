@@ -2,7 +2,6 @@ package grant
 
 import (
 	"context"
-	"errors"
 	"fmt"
 
 	"google.golang.org/protobuf/encoding/protojson"
@@ -17,16 +16,14 @@ import (
 // configured. fiberd refuses to start with it unless told explicitly.
 type InsecureJSONVerifier struct{}
 
-var ErrEmptyGrant = errors.New("grant: grant_uid is empty")
-
 func (InsecureJSONVerifier) Verify(_ context.Context, token []byte) (core.Grant, error) {
 	var p grantv1.CapacityGrant
 	if err := protojson.Unmarshal(token, &p); err != nil {
 		return core.Grant{}, fmt.Errorf("grant: decode json grant: %w", err)
 	}
 	g := FromProto(&p)
-	if g.UID == "" {
-		return core.Grant{}, ErrEmptyGrant
+	if err := checkUID(g.UID); err != nil {
+		return core.Grant{}, err
 	}
 	return g, nil
 }

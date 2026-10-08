@@ -205,10 +205,12 @@ func (c *PressureController) reclaim(ctx context.Context, grantUID string) bool 
 	})
 	v := fibers[0]
 	if v.Session != "" && c.Park != nil {
-		if err := c.Park(ctx, v.ID); err == nil {
+		err := c.Park(ctx, v.ID)
+		if err == nil {
 			log.Printf("pressure: parked %s (session %s, W=%d)", v.ID, v.Session, v.WUsed)
 			return true
 		}
+		log.Printf("pressure: park %s (session %s) failed, releasing instead: %v", v.ID, v.Session, err)
 	}
 	if c.Release != nil {
 		if err := c.Release(ctx, v.ID); err == nil {

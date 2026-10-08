@@ -8,6 +8,9 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
+	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -19,7 +22,6 @@ type Snapshot struct {
 	SavedAt  time.Time         `json:"saved_at"`
 	Grants   []Grant           `json:"grants"`
 	Sessions []SessionSnapshot `json:"sessions"`
-	Fibers   []FiberSnapshot   `json:"fibers"`
 }
 
 type SessionSnapshot struct {
@@ -29,13 +31,6 @@ type SessionSnapshot struct {
 	Fence    Fence        `json:"fence"`
 	DeltaRef string       `json:"delta_ref,omitempty"`
 	FiberID  string       `json:"fiber_id,omitempty"`
-}
-
-type FiberSnapshot struct {
-	ID       string `json:"id"`
-	GrantUID string `json:"grant_uid"`
-	Session  string `json:"session,omitempty"`
-	Fence    Fence  `json:"fence"`
 }
 
 // Snapshot captures the ledger.
@@ -53,48 +48,79 @@ func (l *Ledger) Snapshot() Snapshot {
 		}
 		s.Sessions = append(s.Sessions, ss)
 	}
-	for id, ref := range l.fibers {
-		fs := FiberSnapshot{ID: id, GrantUID: ref.grantUID, Fence: ref.fence}
-		if ref.sessionKey != "" {
-			if sess, ok := l.sessions[ref.sessionKey]; ok {
-				fs.Session = sess.Name
-			}
-		}
-		s.Fibers = append(s.Fibers, fs)
-	}
 	return s
 }
 
-// RestoreParked re-registers a parked session from a snapshot. Its fence
-// is the one it was parked under (an older epoch): resume mints a new
-// one, so the old value only documents lineage.
-func (l *Ledger) RestoreParked(s SessionSnapshot) {
+// RestoreParked re-registers a parked session from a snapshot, or one
+// claimed from another home. Its fence is the old one it was parked under.
+// Resume mints a new one, so the old value only documents lineage. It
+// returns false when the grant is not admitted or the ledger already holds
+// the session. That entry is reality, and a parked entry written over it
+// would resume the session a second time.
+func (l *Ledger) RestoreParked(s SessionSnapshot) bool {
+	return l.restoreParked(s) == nil
+}
+
+// errSessionHeld is restoreParked's refusal when the ledger already holds
+// the session, as opposed to ErrGrantUnknown when its grant is not
+// admitted. locate treats the two differently.
+var errSessionHeld = errors.New("ledger: session already held by this home")
+
+// restoreParked is RestoreParked with the reason for a refusal.
+func (l *Ledger) restoreParked(s SessionSnapshot) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if _, ok := l.grants[s.GrantUID]; !ok {
-		return
+		return ErrGrantUnknown
 	}
 	key := s.GrantUID + "/" + s.Name
+	if _, ok := l.sessions[key]; ok {
+		return errSessionHeld
+	}
 	l.sessions[key] = &Session{Name: s.Name, GrantUID: s.GrantUID, State: StateParked, Fence: s.Fence, DeltaRef: s.DeltaRef}
+	return nil
 }
 
-// SnapshotStore persists snapshots atomically at Path (tmp + rename).
-type SnapshotStore struct{ Path string }
+// SnapshotStore persists snapshots atomically at Path. Each write goes to
+// its own temporary file and is renamed into place, so a reader never sees
+// a mix. It is safe for concurrent use. Use it by pointer.
+type SnapshotStore struct {
+	Path string
 
-func (st SnapshotStore) Save(s Snapshot) error {
+	mu      sync.Mutex    // one write at a time
+	asked   atomic.Uint64 // Persist calls so far
+	covered uint64        // the asked count the last Persist write captured after
+	lastErr error         // that write's result
+}
+
+// Persist writes snapshot() so that the file reflects every change made
+// before the call. Writes run one at a time and each captures the ledger
+// inside the lock, so a later write never holds an older snapshot.
+// Concurrent callers share writes. A write captures the ledger after every
+// call that arrived before it started, so a caller it covered returns its
+// result without writing again.
+func (st *SnapshotStore) Persist(snapshot func() Snapshot) error {
+	n := st.asked.Add(1)
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.covered >= n {
+		return st.lastErr
+	}
+	st.covered = st.asked.Load()
+	st.lastErr = st.write(snapshot())
+	return st.lastErr
+}
+
+func (st *SnapshotStore) write(s Snapshot) error {
 	b, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
 		return err
 	}
-	tmp := st.Path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, st.Path)
+	return writeFileAtomic(st.Path, b, 0o600)
 }
 
 // Load returns the snapshot, or an empty one when none exists.
-func (st SnapshotStore) Load() (Snapshot, error) {
+func (st *SnapshotStore) Load() (Snapshot, error) {
 	b, err := os.ReadFile(st.Path)
 	if errors.Is(err, os.ErrNotExist) {
 		return Snapshot{}, nil
@@ -123,36 +149,88 @@ type DeltaChecker interface {
 type ReconcileReport struct {
 	GrantsReadmitted int
 	GrantsExpired    int
-	ParkedRestored   int
-	ParkedDropped    int
-	OrphansKilled    int
+	// GrantsUnverified counts snapshot entries whose token did not verify
+	// again at boot, or that carried none. They are not re-admitted.
+	GrantsUnverified int
+	// GrantsUnavailable counts snapshot entries whose token the verifier
+	// could not check at boot (ErrVerifyUnavailable, as when the key set
+	// was never loaded). They are not re-admitted, but they stay in the
+	// snapshot with their parked sessions until the grant is admitted again
+	// or a later boot finds it expired.
+	GrantsUnavailable int
+	ParkedRestored    int
+	ParkedDropped     int
+	// ParkedHeld counts parked sessions kept in the snapshot under a grant
+	// the verifier could not check.
+	ParkedHeld    int
+	OrphansKilled int
+}
+
+// heldGrant is a snapshot entry Reconcile could not verify because the
+// verifier was unavailable, with the parked sessions it owns. Nothing in it
+// is trusted. It is only carried into the next snapshot.
+type heldGrant struct {
+	grant    Grant
+	sessions []SessionSnapshot
 }
 
 // Reconcile is the boot step between epoch++ and opening the warm path:
 //
-//  1. every unexpired grant in the snapshot is re-admitted (its template
-//     warmed again: the previous zygote died with the previous agent);
+//  1. every unexpired grant in the snapshot whose token verifies again is
+//     re-admitted and its template warmed again, since the previous zygote
+//     died with the previous agent. An entry whose token fails, is for
+//     another grant or home, or is missing is dropped. An entry the
+//     verifier cannot check yet is held. It is not admitted, but it stays
+//     in the snapshot so a redelivery or a later boot can still restore it;
 //  2. every parked session whose delta still exists is remembered, so a
 //     Clone(S) after restart resumes it under the new epoch;
 //  3. every fiber the runtime still reports is from a prior epoch by
 //     construction and is killed: its fence is invalid, and nothing
 //     minted before the restart validates after it.
 //
-// Reality wins over the snapshot at every step.
+// Reality wins over the snapshot at every step. The snapshot is a file on
+// the home's disk, so only a grant's signature re-admits it, never the
+// file.
 func (a *Agent) Reconcile(ctx context.Context, snap Snapshot) (ReconcileReport, error) {
 	var rep ReconcileReport
 	now := a.Ledger.Now()
+	untokened := 0
 	for _, g := range snap.Grants {
 		if g.Expired(now) {
 			rep.GrantsExpired++
 			_ = a.audit(ctx, BestEffort, AuditRecord{Event: "expire", Fence: Fence{GrantUID: g.UID, Epoch: a.Ledger.Epoch()}, Detail: "at boot"})
 			continue
 		}
-		if _, err := a.Admit(ctx, g); err != nil {
+		if g.Token == "" {
+			rep.GrantsUnverified++
+			untokened++
+			continue
+		}
+		vg, err := a.reverify(ctx, g)
+		if err != nil {
+			if errors.Is(err, ErrVerifyUnavailable) {
+				// The verifier cannot decide, which says nothing about the
+				// token. Dropping the entry here would lose its parked
+				// sessions for good at the persist below, so it is held
+				// instead.
+				rep.GrantsUnavailable++
+				a.hold(g)
+				log.Printf("reconcile: holding %s, not re-admitted until its token can be checked: %v", g.UID, err)
+				continue
+			}
+			rep.GrantsUnverified++
+			log.Printf("reconcile: not re-admitting %s: %v", g.UID, err)
+			_ = a.audit(ctx, BestEffort, AuditRecord{Event: "refuse", Fence: Fence{GrantUID: g.UID, Epoch: a.Ledger.Epoch()}, Detail: "at boot: " + err.Error()})
+			continue
+		}
+		if _, err := a.Admit(ctx, vg); err != nil {
 			log.Printf("reconcile: re-admit %s: %v", g.UID, err)
 			continue
 		}
 		rep.GrantsReadmitted++
+	}
+	if untokened > 0 {
+		log.Printf("reconcile: %d snapshot grant(s) carried no token and were not re-admitted; a valid token presented again admits each", untokened)
 	}
 	checker, canCheck := a.Runtime.(DeltaChecker)
 	for _, s := range snap.Sessions {
@@ -163,11 +241,14 @@ func (a *Agent) Reconcile(ctx context.Context, snap Snapshot) (ReconcileReport, 
 			rep.ParkedDropped++
 			continue
 		}
-		if _, ok := a.Ledger.Grant(s.GrantUID); !ok {
+		if a.holdParked(s) {
+			rep.ParkedHeld++
+			continue
+		}
+		if !a.Ledger.RestoreParked(s) {
 			rep.ParkedDropped++
 			continue
 		}
-		a.Ledger.RestoreParked(s)
 		rep.ParkedRestored++
 	}
 	running, err := a.Runtime.List(ctx)
@@ -188,8 +269,108 @@ func (a *Agent) Reconcile(ctx context.Context, snap Snapshot) (ReconcileReport, 
 		rep.OrphansKilled++
 		_ = a.audit(ctx, BestEffort, AuditRecord{Event: "orphan", Fence: fence, FiberID: h.ID, Detail: "killed at boot: prior epoch"})
 	}
+	a.persist()
 	a.notify()
 	return rep, nil
+}
+
+// reverify checks a snapshot entry's token the way Clone checks a
+// presented one, and returns what the token says, with the token kept, in
+// place of what the file says.
+func (a *Agent) reverify(ctx context.Context, g Grant) (Grant, error) {
+	vg, err := a.Verify.Verify(ctx, []byte(g.Token))
+	if err != nil {
+		return Grant{}, fmt.Errorf("snapshot token: %w", err)
+	}
+	if vg.UID != g.UID {
+		return Grant{}, fmt.Errorf("snapshot token is for grant %q", vg.UID)
+	}
+	if a.NodeID != "" && vg.Audience != a.NodeID {
+		return Grant{}, fmt.Errorf("%w: aud=%q node=%q", ErrWrongAudience, vg.Audience, a.NodeID)
+	}
+	vg.Token = g.Token
+	return vg, nil
+}
+
+// hold keeps a snapshot grant the verifier could not check, so persist
+// carries it into the next snapshot. The entry is the file's, unverified,
+// and nothing reads it but the next boot.
+func (a *Agent) hold(g Grant) {
+	a.heldMu.Lock()
+	defer a.heldMu.Unlock()
+	if a.held == nil {
+		a.held = make(map[string]*heldGrant)
+	}
+	a.held[g.UID] = &heldGrant{grant: g}
+}
+
+// holdParked files a parked session under its held grant and reports
+// whether it did. Its delta stays on disk, and Admit restores it once the
+// grant is admitted again.
+func (a *Agent) holdParked(s SessionSnapshot) bool {
+	a.heldMu.Lock()
+	defer a.heldMu.Unlock()
+	h, ok := a.held[s.GrantUID]
+	if ok {
+		h.sessions = append(h.sessions, s)
+	}
+	return ok
+}
+
+// restoreHeld registers the parked sessions held since boot under uid,
+// which Admit has just admitted again, and lets the held entry go.
+func (a *Agent) restoreHeld(uid string) {
+	a.heldMu.Lock()
+	h, ok := a.held[uid]
+	delete(a.held, uid)
+	a.heldMu.Unlock()
+	if !ok {
+		return
+	}
+	for _, s := range h.sessions {
+		if !a.Ledger.RestoreParked(s) {
+			log.Printf("admit: parked session %s/%s held since boot was not restored; the ledger already holds the session", uid, s.Name)
+		}
+	}
+}
+
+// snapshot is what persist writes. It is the ledger plus the entries boot
+// held because the verifier was unavailable. Without them the first persist
+// after boot would drop those grants and their parked sessions from the
+// file for good.
+func (a *Agent) snapshot() Snapshot {
+	s := a.Ledger.Snapshot()
+	a.heldMu.Lock()
+	defer a.heldMu.Unlock()
+	if len(a.held) == 0 {
+		return s
+	}
+	admitted := make(map[string]bool, len(s.Grants))
+	for _, g := range s.Grants {
+		admitted[g.UID] = true
+	}
+	known := make(map[string]bool, len(s.Sessions))
+	for _, sess := range s.Sessions {
+		known[sess.GrantUID+"/"+sess.Name] = true
+	}
+	uids := make([]string, 0, len(a.held))
+	for uid := range a.held {
+		uids = append(uids, uid)
+	}
+	sort.Strings(uids)
+	for _, uid := range uids {
+		if admitted[uid] {
+			continue
+		}
+		h := a.held[uid]
+		s.Grants = append(s.Grants, h.grant)
+		for _, sess := range h.sessions {
+			if !known[sess.GrantUID+"/"+sess.Name] {
+				s.Sessions = append(s.Sessions, sess)
+			}
+		}
+	}
+	return s
 }
 
 // Sweep is the lease reaper's step: every admitted grant whose lease has

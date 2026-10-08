@@ -22,7 +22,6 @@ import (
 // timestamp older than the lease TTL into a hard failure.
 type Cache struct {
 	IssuerURL string
-	HTTP      *http.Client
 	// MinRefresh rate-limits refreshes triggered by unknown kids or
 	// staleness (default one minute). Explicit Refresh calls ignore it.
 	MinRefresh time.Duration
@@ -42,11 +41,6 @@ type Cache struct {
 	refreshing sync.Mutex
 }
 
-var (
-	ErrUnknownKey  = errors.New("grant: no key for kid")
-	ErrNeverLoaded = errors.New("grant: key set never loaded")
-)
-
 func (c *Cache) now() time.Time {
 	if c.Now != nil {
 		return c.Now()
@@ -54,12 +48,8 @@ func (c *Cache) now() time.Time {
 	return time.Now()
 }
 
-func (c *Cache) http() *http.Client {
-	if c.HTTP != nil {
-		return c.HTTP
-	}
-	return &http.Client{Timeout: 5 * time.Second}
-}
+// jwksClient fetches discovery documents and key sets.
+var jwksClient = &http.Client{Timeout: 5 * time.Second}
 
 func (c *Cache) minRefresh() time.Duration {
 	if c.MinRefresh > 0 {
@@ -83,22 +73,31 @@ func (c *Cache) LastRefresh() time.Time {
 func (c *Cache) Key(ctx context.Context, kid string) (*jose.JSONWebKey, error) {
 	c.mu.Lock()
 	k, ok := c.keys[kid]
+	c.mu.Unlock()
+	if ok {
+		return &k, nil
+	}
+	err := c.refreshRateLimited(ctx)
+	c.mu.Lock()
+	k, ok = c.keys[kid]
 	loaded := !c.lastRefresh.IsZero()
 	c.mu.Unlock()
 	if ok {
 		return &k, nil
 	}
-	if err := c.refreshRateLimited(ctx); err != nil && !loaded {
+	// A set that is still not loaded is an outage, even when the refresh
+	// was rate-limited away because an earlier attempt just failed.
+	if !loaded {
+		if err == nil {
+			err = errNotReached
+		}
 		return nil, fmt.Errorf("%w: %w", ErrNeverLoaded, err)
 	}
-	c.mu.Lock()
-	k, ok = c.keys[kid]
-	c.mu.Unlock()
-	if !ok {
-		return nil, fmt.Errorf("%w %q", ErrUnknownKey, kid)
-	}
-	return &k, nil
+	return nil, fmt.Errorf("%w %q", ErrUnknownKey, kid)
 }
+
+// errNotReached explains a rate-limited miss on a set never loaded.
+var errNotReached = errors.New("issuer not reached yet, next attempt is rate-limited")
 
 // RefreshIfDue refreshes unless a refresh was attempted within MinRefresh.
 // It reports whether an attempt was made.
@@ -197,7 +196,7 @@ func (c *Cache) getJSON(ctx context.Context, url string, dst any) error {
 		return err
 	}
 	req.Header.Set("Accept", "application/json")
-	resp, err := c.http().Do(req)
+	resp, err := jwksClient.Do(req)
 	if err != nil {
 		return err
 	}

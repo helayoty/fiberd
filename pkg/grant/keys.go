@@ -55,7 +55,21 @@ func SaveKey(path string, k *jose.JSONWebKey) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, b, 0o600)
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	// Opening an existing file keeps its mode, so tighten it before the
+	// private key lands in it.
+	if err := f.Chmod(0o600); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if _, err := f.Write(b); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
 }
 
 // LoadKey reads a JWK written by SaveKey (or any JWK JSON).

@@ -18,6 +18,9 @@ type CloneRequest struct {
 	Session  string        // optional: "" = anonymous fiber
 	Deadline time.Duration // hard budget for the runtime work
 	Payload  []byte        // opaque, size-capped, delivered as data, never config
+	// CallerThumbprint is the x5t#S256 of the client certificate the
+	// request arrived over.
+	CallerThumbprint string
 }
 
 type CloneResponse struct {
@@ -25,6 +28,11 @@ type CloneResponse struct {
 	Endpoint string
 	Fence    Fence
 	Kind     Action
+	// RoutingKey and ServerKeySHA256 are set for a handoff fiber. They are
+	// the TLS server name to send to Endpoint and the pin of the key the
+	// fiber must present.
+	RoutingKey      string
+	ServerKeySHA256 string
 }
 
 // StatusCode is the transport-agnostic outcome. pkg/rpc maps it to gRPC
@@ -69,29 +77,8 @@ const (
 	DefaultResumeDeadline = 2 * time.Second
 )
 
-var (
-	ErrPayloadTooLarge = errors.New("agent: payload exceeds 4096 bytes")
-	ErrDeadline        = errors.New("agent: clone missed deadline")
-	ErrWrongAudience   = errors.New("agent: grant audience is not this home")
-	ErrNotReady        = errors.New("agent: template not ready on this home")
-	// ErrVerifyUnavailable is wrapped by a Verifier that cannot decide
-	// because its key material is missing or stale, not because the token
-	// is bad. That is a control-plane reachability problem: the answer is
-	// SHED (back off), never Unauthenticated (give up).
-	ErrVerifyUnavailable = errors.New("agent: cannot verify offline; key material unavailable")
-	// ErrDeltaTooLarge: the session's parked state exceeds the grant's W
-	// budget, so it is not moved here. The Miss names the home that has
-	// it.
-	ErrDeltaTooLarge = errors.New("agent: parked state exceeds w_budget_bytes; not moving it")
-	// ErrIncompatible: the session's parked state was made on a platform
-	// (architecture, kernel, libc) this home cannot restore. Not moved
-	// here; the Miss names the home that has it.
-	ErrIncompatible = errors.New("agent: parked state was made on an incompatible platform; not moving it")
-	// ErrNeedsDevice: the grant carries a device budget and this home's
-	// template offers no such device. Like a tier gap it is a
-	// FailedPrecondition, never a silent CPU-only fiber.
-	ErrNeedsDevice = errors.New("agent: grant needs a device class this home does not offer")
-)
+// sweepEvery paces the lease reaper.
+const sweepEvery = 5 * time.Second
 
 // DeadlineAdvisor is implemented by runtimes whose create or resume is
 // slower than a process fork: what a Clone without an explicit deadline
@@ -143,6 +130,9 @@ type Agent struct {
 	// NodeID is this home's identity; a grant's audience must match it.
 	// Empty disables the check (tests).
 	NodeID string
+	// RequireBoundGrants refuses grants without a caller certificate
+	// binding. Set it whenever the transport is mutual TLS.
+	RequireBoundGrants bool
 
 	Ledger  *Ledger
 	Budget  *Budget
@@ -153,12 +143,10 @@ type Agent struct {
 	// Pressure, when set, is consulted before any new fiber: a grant that
 	// is shedding answers SHED. Nil means no pressure input.
 	Pressure *PressureController
-	// Store, when set, receives a ledger snapshot after every state
-	// transition, so a restart can re-admit grants and remember parked
+	// Store, when set, receives a ledger snapshot after every transition
+	// a restart needs, so boot can re-admit grants and remember parked
 	// sessions.
 	Store *SnapshotStore
-	// SweepInterval paces the lease reaper (default 5s).
-	SweepInterval time.Duration
 	// MobilityBudget overrides the grant's w_budget_bytes as the largest
 	// parked state this home will pull (tests, or a home-level cap).
 	MobilityBudget func(g Grant) uint64
@@ -177,6 +165,10 @@ type Agent struct {
 	Fabric func(ctx context.Context, g Grant) (FabricChannel, func(), error)
 	// Epoch, when set, lets BumpEpoch revoke every fence in place.
 	Epoch *EpochStore
+	// Revoked, when set, is the deny-list Remove adds to and Admit
+	// refuses from. Nil means a removed grant is re-admitted by the next
+	// Clone that presents a valid token for it.
+	Revoked *Revoked
 
 	fabricMu sync.Mutex
 	fabrics  map[string]func() // grant uid -> release
@@ -192,6 +184,13 @@ type Agent struct {
 	// right after commit so the slot is never leaked.
 	pendingMu sync.Mutex
 	pending   map[string]FiberExit
+
+	// held are snapshot grants boot could not verify because the verifier
+	// was unavailable, with their parked sessions. They are not admitted,
+	// but every snapshot written carries them until the grant is admitted
+	// again or a later boot finds it expired.
+	heldMu sync.Mutex
+	held   map[string]*heldGrant
 }
 
 // Clone is the warm path. Every hop below is home-local memory or disk.
@@ -207,18 +206,34 @@ func (a *Agent) Clone(ctx context.Context, req CloneRequest) (CloneResponse, Sta
 		}
 		return CloneResponse{}, Unauthenticated, fmt.Errorf("capability: %w", err)
 	}
+	g.Token = string(req.GrantJWT)
 	if a.NodeID != "" && g.Audience != a.NodeID {
 		return CloneResponse{}, Unauthenticated, fmt.Errorf("%w: aud=%q node=%q", ErrWrongAudience, g.Audience, a.NodeID)
+	}
+	switch {
+	case g.CallerThumbprint != "" && g.CallerThumbprint != req.CallerThumbprint:
+		return CloneResponse{}, Unauthenticated, ErrCallerMismatch
+	case g.CallerThumbprint == "" && a.RequireBoundGrants:
+		return CloneResponse{}, Unauthenticated, ErrUnboundGrant
+	case g.CallerThumbprint == "" && g.Policy.EndpointMode == EndpointHandoff:
+		return CloneResponse{}, Unauthenticated, ErrHandoffUnbound
 	}
 
 	// 2. Self-admission: a verified grant that names this home is admitted
 	// on first sight. Its signature is the async lane's proof, carried
 	// inline. The template is warmed synchronously; homes pre-warm grants
 	// they are told about ahead of time so this is normally a no-op.
-	if _, known := a.Ledger.Grant(g.UID); !known {
+	if held, known := a.Ledger.Grant(g.UID); !known {
 		if code, err := a.Admit(ctx, g); err != nil {
 			return CloneResponse{}, code, err
 		}
+	} else if held.CallerThumbprint != g.CallerThumbprint {
+		// The token names another caller than the admitted grant, as when
+		// the issuer re-mints the UID with a new cnf. Park, Release and
+		// Watch authorize against the admitted grant, so a fiber from this
+		// token would answer to the wrong caller. Refuse until the grant is
+		// delivered again.
+		return CloneResponse{}, Unauthenticated, fmt.Errorf("%w: the token names another caller than the admitted grant", ErrCallerMismatch)
 	}
 
 	// 3. Backpressure before any work: the thrash budget, then the pressure
@@ -232,15 +247,21 @@ func (a *Agent) Clone(ctx context.Context, req CloneRequest) (CloneResponse, Sta
 
 	// 3b. Mobility: a named session this home does not hold may be parked
 	// elsewhere. Ask the shared store; bring it here if its delta fits the
-	// grant's W budget, else send the caller to the home that has it.
+	// grant's W budget, else send the caller to the home that has it. This
+	// runs under the session's gate, which resolveHeld then takes over. Two
+	// first sights of one session wait for each other, so the second finds
+	// what the first claimed instead of claiming it again.
+	var hold *sessionHold
 	if req.Session != "" {
+		hold = a.Ledger.holdSession(g.UID, req.Session)
 		if code, err := a.locate(ctx, g, req.Session); err != nil {
+			hold.release()
 			return CloneResponse{}, code, err
 		}
 	}
 
 	// 4. Ledger: resolve attach | resume | create, mint or reuse the fence.
-	act, fence, ref, commit, unlock, err := a.Ledger.Resolve(g.UID, req.Session, a.Runtime.Tier())
+	act, fence, ref, commit, unlock, err := a.Ledger.resolveHeld(hold, g.UID, req.Session, a.Runtime.Tier())
 	if err != nil {
 		if unlock != nil {
 			unlock()
@@ -253,7 +274,7 @@ func (a *Agent) Clone(ctx context.Context, req CloneRequest) (CloneResponse, Sta
 		if err := a.audit(ctx, g.Policy.Durability, AuditRecord{Event: "attach", Fence: fence, Session: req.Session}); err != nil {
 			return CloneResponse{}, Internal, err
 		}
-		return CloneResponse{FiberID: fence.String(), Endpoint: ref, Fence: fence, Kind: ActAttach}, OK, nil
+		return a.routed(CloneResponse{FiberID: fence.String(), Endpoint: ref, Fence: fence, Kind: ActAttach}), OK, nil
 	}
 	if shedding {
 		// A new fiber under memory pressure: refuse. The reservation is
@@ -287,14 +308,53 @@ func (a *Agent) Clone(ctx context.Context, req CloneRequest) (CloneResponse, Sta
 		if errors.Is(err, context.DeadlineExceeded) {
 			return CloneResponse{}, DeferredFallback, ErrDeadline
 		}
+		if errors.Is(err, ErrPressure) {
+			// The grant is at its own task limit. That is its own
+			// pressure, not a capacity question for the control plane.
+			return CloneResponse{}, Shed, err
+		}
 		return CloneResponse{}, DeferredFallback, err
 	}
 
-	commit(Session{Name: req.Session, GrantUID: g.UID, State: StateRunning, Fence: fence, Handle: h})
-
-	// 6. Audit before ack: under Sync the record is remote first.
+	// 6. Audit before commit and ack, so under Sync the record is durable
+	// first. A failed record rolls the birth back. The fiber is released
+	// uncommitted, its slot returns and a resumed session stays parked. If
+	// the release itself fails, the fiber is committed anyway so a process
+	// that may still run stays counted.
 	if err := a.audit(ctx, g.Policy.Durability, AuditRecord{Event: act.String(), Fence: fence, Session: req.Session, FiberID: h.ID}); err != nil {
+		if rerr := a.Runtime.Release(ctx, h.ID, false); rerr != nil {
+			log.Printf("clone: roll back %s: %v", h.ID, rerr)
+			if !commit(Session{Name: req.Session, GrantUID: g.UID, State: StateRunning, Fence: fence, Handle: h}) {
+				log.Printf("clone: %s may still run under a revoked grant or epoch and could not be released", h.ID)
+			}
+		}
+		a.pendingMu.Lock()
+		delete(a.pending, h.ID)
+		a.pendingMu.Unlock()
 		return CloneResponse{}, Internal, err
+	}
+
+	// 7. Commit. The ledger refuses if the grant was revoked or the epoch
+	// moved while the runtime worked. The sweep from Yield or BumpEpoch
+	// missed this fiber, so it would outlive the revocation. Release it
+	// here and return the miss the sweep implies. A resumed session stays
+	// parked with its delta.
+	if !commit(Session{Name: req.Session, GrantUID: g.UID, State: StateRunning, Fence: fence, Handle: h}) {
+		code, cerr := a.swept(g, fence)
+		if rerr := a.Runtime.Release(ctx, h.ID, false); rerr != nil {
+			// Not committed either, since there is no grant entry or epoch
+			// to count it under. The runtime's List at the next start finds
+			// it.
+			log.Printf("clone: %s born under a revoked grant or epoch could not be released: %v", h.ID, rerr)
+		}
+		a.pendingMu.Lock()
+		delete(a.pending, h.ID)
+		a.pendingMu.Unlock()
+		_ = a.audit(ctx, BestEffort, AuditRecord{Event: "release", Fence: fence, Session: req.Session, FiberID: h.ID, Detail: cerr.Error()})
+		return CloneResponse{}, code, cerr
+	}
+	if act == ActResume {
+		a.persist() // the session runs now, so boot must not resume it
 	}
 	a.notify()
 
@@ -307,15 +367,25 @@ func (a *Agent) Clone(ctx context.Context, req CloneRequest) (CloneResponse, Sta
 	if died {
 		a.OnExit(ctx, ex)
 	}
-	return CloneResponse{FiberID: h.ID, Endpoint: h.Endpoint, Fence: fence, Kind: act}, OK, nil
+	return a.routed(CloneResponse{FiberID: h.ID, Endpoint: h.Endpoint, Fence: fence, Kind: act}), OK, nil
 }
 
-// locate settles where a named session's parked state is before Resolve:
+// routed adds what a caller needs to reach a handoff fiber.
+func (a *Agent) routed(r CloneResponse) CloneResponse {
+	if hr, ok := a.Runtime.(HandoffRouter); ok {
+		if key, pin, ok := hr.HandoffRoute(r.FiberID); ok {
+			r.RoutingKey, r.ServerKeySHA256 = key, pin
+		}
+	}
+	return r
+}
+
+// locate settles where a named session's parked state is before resolveHeld:
 //
-//   - parked here and still ours: nothing to do, Resolve resumes it;
+//   - parked here and still ours: nothing to do, resolveHeld resumes it;
 //   - parked here but claimed elsewhere since: forget it, then as unknown;
 //   - unknown here and found in the shared store: claim it (pull delta
-//     and parent) if w_used <= w_budget, so Resolve resumes it; else a
+//     and parent) if w_used <= w_budget, so resolveHeld resumes it; else a
 //     capacity miss naming the home that holds it.
 func (a *Agent) locate(ctx context.Context, g Grant, session string) (StatusCode, error) {
 	finder, ok := a.Runtime.(DeltaFinder)
@@ -328,6 +398,7 @@ func (a *Agent) locate(ctx context.Context, g Grant, session string) (StatusCode
 		}
 		log.Printf("mobility: session %s/%s was claimed by another home; forgetting the local copy", g.UID, session)
 		a.Ledger.ForgetSession(g.UID, session)
+		a.persist()
 		_ = a.audit(ctx, BestEffort, AuditRecord{Event: "migrate-out", Fence: Fence{GrantUID: g.UID, Epoch: a.Ledger.Epoch()}, Session: session})
 	}
 	rd, found, err := finder.FindDelta(ctx, g, session)
@@ -357,17 +428,64 @@ func (a *Agent) locate(ctx context.Context, g Grant, session string) (StatusCode
 		err = &RemoteMiss{Err: fmt.Errorf("%w: claim: %w", ErrNotReady, err), PreferredHome: rd.Home}
 		return a.missCode(err), err
 	}
-	a.Ledger.RestoreParked(SessionSnapshot{Name: session, GrantUID: g.UID, State: StateParked, DeltaRef: ref})
-	_ = a.audit(ctx, g.Policy.Durability, AuditRecord{Event: "migrate-in", Fence: Fence{GrantUID: g.UID, Epoch: a.Ledger.Epoch()}, Session: session, Detail: fmt.Sprintf("from %s, %d bytes", rd.Home, rd.WBytes)})
+	if err := a.Ledger.restoreParked(SessionSnapshot{Name: session, GrantUID: g.UID, State: StateParked, DeltaRef: ref}); err != nil {
+		if !errors.Is(err, errSessionHeld) {
+			// The grant was revoked while the claim ran (a sweep, the
+			// ladder, Remove). The claim took the store's tag, so the copy
+			// at ref is the only one of this session. It is kept on disk,
+			// unregistered, and the caller gets the miss the revocation
+			// implies, as a commit after a sweep does.
+			code, cerr := a.swept(g, Fence{GrantUID: g.UID, Epoch: a.Ledger.Epoch()})
+			log.Printf("WARNING: mobility: %s/%s was claimed from %s but its grant was revoked meanwhile (%v); the only copy of its state is kept at %s and is not registered", g.UID, session, rd.Home, cerr, ref)
+			_ = a.audit(ctx, BestEffort, AuditRecord{Event: "migrate-in", Fence: Fence{GrantUID: g.UID, Epoch: a.Ledger.Epoch()}, Session: session, Detail: fmt.Sprintf("from %s, kept unregistered at %s: %v", rd.Home, ref, cerr)})
+			return code, cerr
+		}
+		// The session arrived here meanwhile. The entry already here is
+		// the one that resumes, and this claim pulled a second copy.
+		// resolveHeld attaches or resumes.
+		log.Printf("mobility: %s/%s is already here; dropping the copy claimed meanwhile, %s", g.UID, session, ref)
+		if dd, ok := a.Runtime.(DeltaDiscarder); ok {
+			if err := dd.DiscardDelta(ctx, ref); err != nil {
+				log.Printf("mobility: discard %s: %v", ref, err)
+			}
+		}
+		return OK, nil
+	}
+	a.persist()
+	// The session is ours now either way. A sync audit failure still
+	// refuses this clone, as Park and Release do after their change.
+	if err := a.audit(ctx, g.Policy.Durability, AuditRecord{Event: "migrate-in", Fence: Fence{GrantUID: g.UID, Epoch: a.Ledger.Epoch()}, Session: session, Detail: fmt.Sprintf("from %s, %d bytes", rd.Home, rd.WBytes)}); err != nil {
+		return Internal, err
+	}
 	return OK, nil
+}
+
+// DeltaDiscarder is implemented by runtimes that can drop a local delta
+// ref nothing will resume, such as a claim that found the session already
+// here. Without it the copy is left in place and logged.
+type DeltaDiscarder interface {
+	DiscardDelta(ctx context.Context, deltaRef string) error
 }
 
 // Admit records a verified grant and warms its template. Concurrent
 // admissions of the same UID wait for the first; a second delivery of an
 // already-admitted grant refreshes it in place.
 func (a *Agent) Admit(ctx context.Context, g Grant) (StatusCode, error) {
+	if a.Revoked != nil && a.Revoked.Denied(g.UID, g.LeaseExpiry, a.Ledger.Now()) {
+		return a.missCode(ErrGrantRevoked), fmt.Errorf("%w: %s", ErrGrantRevoked, g.UID)
+	}
 	if g.MinTier > a.Runtime.Tier() {
 		return NeedsTier, fmt.Errorf("%w: grant needs %s, runtime is %s", ErrNeedsTier, g.MinTier, a.Runtime.Tier())
+	}
+	if g.Policy.Isolation.Untrusted() {
+		if iso, ok := a.Runtime.(Isolator); !ok || !iso.IsolatesTenants() {
+			return NeedsTier, fmt.Errorf("%w: grant %s is %s", ErrNeedsIsolation, g.UID, g.Policy.Isolation)
+		}
+	}
+	if g.Policy.EndpointMode == EndpointHandoff {
+		if hr, ok := a.Runtime.(HandoffRouter); !ok || !hr.HandsOff() {
+			return NeedsTier, fmt.Errorf("%w: grant %s", ErrNeedsHandoff, g.UID)
+		}
 	}
 	if g.Expired(a.Ledger.Now()) {
 		// Capacity the home does not hold; the miss code follows lane
@@ -431,15 +549,19 @@ func (a *Agent) Admit(ctx context.Context, g Grant) (StatusCode, error) {
 		// engine holds a device of the class the grant budgets for.
 		dc, ok := a.Runtime.(DeviceCapable)
 		if !ok || !dc.OffersDevice(g.UID, g.DeviceBudget.Class) {
+			// The grant is refused, so nothing would release its channel.
+			a.releaseFabric(g.UID)
 			return NeedsTier, fmt.Errorf("%w: class %q", ErrNeedsDevice, g.DeviceBudget.Class)
 		}
 	}
 	a.Ledger.AdmitGrant(g)
+	a.restoreHeld(g.UID)
 	detail := g.TemplateDigest
 	if fabric.Kind != "" {
 		detail += fmt.Sprintf(" fabric=%s devices=%d %s", fabric.Kind, len(fabric.Devices), fabric.Detail)
 	}
 	_ = a.audit(ctx, BestEffort, AuditRecord{Event: "admit", Fence: Fence{GrantUID: g.UID, Epoch: a.Ledger.Epoch()}, Detail: detail})
+	a.persist()
 	a.notify()
 	return OK, nil
 }
@@ -455,12 +577,51 @@ func (a *Agent) releaseFabric(grantUID string) {
 	}
 }
 
-// Revoke drops a grant and releases its fabric channel: what the home's
-// lane, the reaper and the ladder's last rung all go through. Fibers
-// under it drain by lease non-renewal; parked deltas are kept.
+// Revoke drops a grant and releases its fabric channel. Remove, the reaper
+// and the ladder's last rung all go through it. It releases no fibers and
+// denies nothing. Yield and Remove do that.
 func (a *Agent) Revoke(grantUID string) {
 	a.Ledger.RevokeGrant(grantUID)
 	a.releaseFabric(grantUID)
+}
+
+// Remove is the home taking a grant away (GrantRemoved on its lane). The
+// UID is denied until every token for it has expired. The grant is yielded
+// so its running fibers stop now, not at lease expiry. Parked deltas are
+// kept but cannot resume here while the UID is denied.
+func (a *Agent) Remove(ctx context.Context, grantUID string) {
+	if a.Revoked != nil {
+		g, known := a.Ledger.Grant(grantUID)
+		lease := g.LeaseExpiry
+		if !known {
+			// The grant was swept on lease expiry already, or never
+			// admitted, so there is no lease to go by, and a zero one
+			// would deny the UID for good. Deny it for the ttl from now
+			// instead. Only a grant admitted with no lease is denied for
+			// good.
+			lease = a.Ledger.Now()
+		}
+		if err := a.Revoked.Add(grantUID, lease, a.Ledger.Now()); err != nil {
+			log.Printf("WARNING: revoke %s: persisting the deny-list: %v; it is denied until the agent restarts", grantUID, err)
+		}
+	}
+	a.Yield(ctx, grantUID, "removed by the home")
+}
+
+// Redeliver lifts a removed grant's denial when the home's lane delivers
+// it again (GrantAdded). The lane is the authority. A token that only
+// arrives in a Clone request never lifts it.
+func (a *Agent) Redeliver(ctx context.Context, grantUID string) {
+	if a.Revoked == nil {
+		return
+	}
+	lifted, err := a.Revoked.Clear(grantUID)
+	if err != nil {
+		log.Printf("WARNING: redeliver %s: persisting the deny-list: %v", grantUID, err)
+	}
+	if lifted {
+		_ = a.audit(ctx, BestEffort, AuditRecord{Event: "redeliver", Fence: Fence{GrantUID: grantUID, Epoch: a.Ledger.Epoch()}, Detail: "the home delivered the grant again"})
+	}
 }
 
 // BumpEpoch is scope loss without a restart: the home has learned that
@@ -479,20 +640,28 @@ func (a *Agent) BumpEpoch(ctx context.Context, reason string) (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
-	fibers := a.Ledger.RunningFibers()
+	// Move the epoch first, then sweep. A clone that resolved under the
+	// old epoch and commits after this is refused by the ledger and
+	// released by its Clone, so nothing minted before survives. A fiber
+	// minted under the new epoch between the two calls is kept.
 	a.Ledger.BumpEpoch(next)
-	for _, id := range fibers {
+	released := 0
+	for _, id := range a.Ledger.RunningFibers() {
 		fence, ok := a.Ledger.Fiber(id)
-		if !ok {
+		if !ok || fence.Epoch >= next {
 			continue
 		}
 		if err := a.Runtime.Release(ctx, id, false); err != nil {
 			log.Printf("epoch bump: release %s: %v", id, err)
 		}
 		a.Ledger.OnRelease(id)
-		_ = a.audit(ctx, a.durability(fence.GrantUID), AuditRecord{Event: "scope-revoked", Fence: fence, FiberID: id, Detail: reason})
+		if err := a.audit(ctx, a.durability(fence.GrantUID), AuditRecord{Event: "scope-revoked", Fence: fence, FiberID: id, Detail: reason}); err != nil {
+			log.Printf("epoch bump: audit %s: %v", id, err)
+		}
+		released++
 	}
-	log.Printf("epoch bumped to %d (%s): %d running fibers released, prior fences invalid", next, reason, len(fibers))
+	log.Printf("epoch bumped to %d (%s): %d running fibers released, prior fences invalid", next, reason, released)
+	a.persist()
 	a.notify()
 	return next, nil
 }
@@ -501,9 +670,10 @@ func (a *Agent) BumpEpoch(ctx context.Context, reason string) (uint64, error) {
 // home" (unknown, full, expired, not ready) is SHED while the grant lane
 // is unhealthy and DEFERRED_FALLBACK while it is healthy — a miss must not
 // queue into a dead control plane. Nil Health fails toward healthy,
-// matching boot bias. A tier gap is neither: it is FailedPrecondition.
+// matching boot bias. A tier, device, isolation or handoff gap is
+// neither. It is FailedPrecondition.
 func (a *Agent) missCode(err error) StatusCode {
-	if errors.Is(err, ErrNeedsTier) || errors.Is(err, ErrNeedsDevice) {
+	if errors.Is(err, ErrNeedsTier) || errors.Is(err, ErrNeedsDevice) || errors.Is(err, ErrNeedsIsolation) || errors.Is(err, ErrNeedsHandoff) {
 		return NeedsTier
 	}
 	if a.Health != nil && !a.Health.Healthy(time.Now()) {
@@ -512,20 +682,54 @@ func (a *Agent) missCode(err error) StatusCode {
 	return DeferredFallback
 }
 
+// swept names why a clone's commit was refused. The grant was removed
+// (denied) or yielded (unknown), or the epoch moved under its fence. A
+// re-admission since does not help, because the fiber's reservation was
+// under the old entry. All three mean this home no longer holds the
+// capacity, so the code is the miss code and the consumer falls back or
+// backs off. NotFound is only for Park and Release on a dead fence.
+func (a *Agent) swept(g Grant, fence Fence) (StatusCode, error) {
+	if epoch := a.Ledger.Epoch(); epoch != fence.Epoch {
+		err := fmt.Errorf("%w: epoch moved from %d to %d during clone", ErrFiberUnknown, fence.Epoch, epoch)
+		return a.missCode(err), err
+	}
+	if a.Revoked != nil && a.Revoked.Denied(g.UID, g.LeaseExpiry, a.Ledger.Now()) {
+		err := fmt.Errorf("%w: %s, during clone", ErrGrantRevoked, g.UID)
+		return a.missCode(err), err
+	}
+	err := fmt.Errorf("%w: %s revoked during clone", ErrGrantUnknown, g.UID)
+	return a.missCode(err), err
+}
+
 // Park checkpoints a named session's delta and frees its running tier.
+//
+// The ledger follows the runtime. A ref back from Runtime.Park means the
+// delta exists and the fiber is gone or going, so the session is parked in
+// the ledger even if a later step failed. Otherwise the slot stays taken by
+// a fiber nothing can park or release, and its delta sits orphaned on disk.
+// For the same reason, a failed sync audit record is returned only after
+// the snapshot and the watchers have seen the change.
 func (a *Agent) Park(ctx context.Context, fiberID string, sync bool) (string, StatusCode, error) {
 	fence, ok := a.Ledger.Fiber(fiberID)
 	if !ok {
 		return "", NotFound, ErrFiberUnknown
 	}
-	ref, err := a.Runtime.Park(ctx, fiberID, sync)
-	if err != nil {
-		return "", Internal, err
+	ref, perr := a.Runtime.Park(ctx, fiberID, sync)
+	if ref == "" {
+		// Nothing was parked, so the fiber runs on and the ledger is right.
+		if errors.Is(perr, ErrDeltaQuota) {
+			return "", Shed, perr
+		}
+		if perr == nil {
+			perr = errors.New("park: the runtime returned no delta ref")
+		}
+		return "", Internal, perr
 	}
 	session := a.Ledger.OnPark(fiberID, ref)
-	if err := a.audit(ctx, a.durability(fence.GrantUID), AuditRecord{Event: "park", Fence: fence, FiberID: fiberID, Session: session, Detail: ref}); err != nil {
-		return ref, Internal, err
+	if perr != nil {
+		log.Printf("park %s: parked as %s, then: %v", fiberID, ref, perr)
 	}
+	aerr := a.audit(ctx, a.durability(fence.GrantUID), AuditRecord{Event: "park", Fence: fence, FiberID: fiberID, Session: session, Detail: ref})
 	// A named session's delta is published so any home can claim it;
 	// failure to publish leaves it resumable here only.
 	if pub, ok := a.Runtime.(DeltaPublisher); ok && session != "" {
@@ -536,12 +740,21 @@ func (a *Agent) Park(ctx context.Context, fiberID string, sync bool) (string, St
 			_ = a.audit(ctx, BestEffort, AuditRecord{Event: "publish", Fence: fence, Session: session, Detail: remote})
 		}
 	}
+	a.persist()
 	a.notify()
+	switch {
+	case perr != nil:
+		return ref, Internal, perr
+	case aerr != nil:
+		return ref, Internal, aerr
+	}
 	return ref, OK, nil
 }
 
 // Release destroys a fiber and frees its name; discard also drops any
-// parked delta of the same session.
+// parked delta of the same session. As in Park, a sync audit record that
+// fails after the ledger changed is reported only after the snapshot and
+// the watchers have seen the change.
 func (a *Agent) Release(ctx context.Context, fiberID string, discard bool) (StatusCode, error) {
 	fence, ok := a.Ledger.Fiber(fiberID)
 	if !ok {
@@ -551,21 +764,25 @@ func (a *Agent) Release(ctx context.Context, fiberID string, discard bool) (Stat
 		return Internal, err
 	}
 	a.Ledger.OnRelease(fiberID)
-	if err := a.audit(ctx, a.durability(fence.GrantUID), AuditRecord{Event: "release", Fence: fence, FiberID: fiberID}); err != nil {
+	err := a.audit(ctx, a.durability(fence.GrantUID), AuditRecord{Event: "release", Fence: fence, FiberID: fiberID})
+	a.notify()
+	if err != nil {
 		return Internal, err
 	}
-	a.notify()
 	return OK, nil
 }
 
 // Yield is the ladder's last rung and the reaper's verb: the grant is
 // revoked and every running fiber under it is released, each with its
 // audit record. Parked deltas are kept (they are the only state that
-// cannot be rebuilt); nothing new is admitted under this UID until the
-// home delivers the grant again.
+// cannot be rebuilt). A valid token presented again re-admits the grant.
+// Only Remove denies it.
 func (a *Agent) Yield(ctx context.Context, grantUID string, reason string) {
-	fibers := a.Ledger.FibersOf(grantUID)
+	// Revoke first, then list. A clone that commits after the revocation
+	// is refused by the ledger and released by its Clone, so the list
+	// below holds every fiber the grant has.
 	a.Revoke(grantUID)
+	fibers := a.Ledger.FibersOf(grantUID)
 	for _, f := range fibers {
 		fence, ok := a.Ledger.Fiber(f.ID)
 		if !ok {
@@ -578,6 +795,7 @@ func (a *Agent) Yield(ctx context.Context, grantUID string, reason string) {
 		_ = a.audit(ctx, BestEffort, AuditRecord{Event: "yield", Fence: fence, Session: f.Session, FiberID: f.ID, Detail: reason})
 	}
 	_ = a.audit(ctx, BestEffort, AuditRecord{Event: "revoke", Fence: Fence{GrantUID: grantUID, Epoch: a.Ledger.Epoch()}, Detail: reason})
+	a.persist()
 	a.notify()
 }
 
@@ -590,10 +808,6 @@ func (a *Agent) Run(ctx context.Context) {
 	}
 	tick := time.NewTicker(interval)
 	defer tick.Stop()
-	sweepEvery := a.SweepInterval
-	if sweepEvery <= 0 {
-		sweepEvery = 5 * time.Second
-	}
 	sweep := time.NewTicker(sweepEvery)
 	defer sweep.Stop()
 	exits := a.Runtime.Exits()
@@ -617,11 +831,10 @@ func (a *Agent) Run(ctx context.Context) {
 	}
 }
 
-// OnExit records a fiber that died without Park or Release: the slot is
-// freed and an audit record written. Run feeds it from Runtime.Exits; a
-// home that learns of deaths another way (a cgroup event, a supervisor)
-// may call it directly. An exit for a fiber not yet committed is held
-// until its Clone commits.
+// OnExit records a fiber that died without Park or Release. The slot is
+// freed and an audit record written. Run feeds it from Runtime.Exits, and
+// a Clone that commits replays an exit held for it. An exit for a fiber
+// not yet committed is held until its Clone commits.
 func (a *Agent) OnExit(ctx context.Context, ex FiberExit) {
 	fence, session, ok := a.Ledger.OnFiberExit(ex.FiberID)
 	if !ok {
@@ -650,7 +863,6 @@ func (a *Agent) sample(ctx context.Context) {
 			continue
 		}
 		a.Ledger.SetFiberW(id, st.WUsedBytes)
-		a.Ledger.SetFiberDevice(id, st.DeviceUsedBytes)
 		total += st.WUsedBytes
 	}
 	if len(ids) > 0 && a.Budget != nil {
@@ -720,14 +932,21 @@ func (a *Agent) unsubscribe(ch chan struct{}) {
 	}
 }
 
-// notify wakes Watch subscribers and persists the ledger. Every state
-// transition ends here, so the snapshot never lags a transition.
-func (a *Agent) notify() {
-	if a.Store != nil {
-		if err := a.Store.Save(a.Ledger.Snapshot()); err != nil {
-			log.Printf("snapshot: %v", err)
-		}
+// persist writes the ledger snapshot. Only transitions boot reads back
+// call it, which are admit, revoke, park, resume, claim, forget and an
+// epoch move. Creating, attaching, releasing and exiting a fiber change
+// nothing Reconcile restores, so a warm-path clone writes no file.
+func (a *Agent) persist() {
+	if a.Store == nil {
+		return
 	}
+	if err := a.Store.Persist(a.snapshot); err != nil {
+		log.Printf("snapshot: %v", err)
+	}
+}
+
+// notify wakes Watch subscribers. Every state transition ends here.
+func (a *Agent) notify() {
 	a.changedMu.Lock()
 	defer a.changedMu.Unlock()
 	for _, ch := range a.changed {
