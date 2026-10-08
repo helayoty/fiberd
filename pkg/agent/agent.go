@@ -21,6 +21,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -418,6 +419,13 @@ func RunContext(ctx context.Context, c *Config, newHome HomeFactory) error {
 		c.Advertise = h.AdvertisedEndpoint()
 	}
 
+	// serving counts the goroutines that accept on a listener Run bound.
+	// Run returns only when they have, so the addresses are free again by
+	// then. A listener's Close returns early when another Close of it is
+	// under way, and the socket is gone only once its Accept has returned.
+	var serving sync.WaitGroup
+	defer serving.Wait()
+
 	var rt core.Runtime
 	var hrt *host.Runtime // the host runtime, nil for the stub
 	var router *handoff.Router
@@ -634,7 +642,7 @@ func RunContext(ctx context.Context, c *Config, newHome HomeFactory) error {
 	// Closed on every return, so a start that fails below leaves no admin
 	// server behind.
 	defer func() { _ = adminSrv.Close() }()
-	go func() { _ = adminSrv.Serve(al) }()
+	serving.Go(func() { _ = adminSrv.Serve(al) })
 
 	// 6. Open the warm path.
 	srv := &rpc.Server{Agent: ag, Issuer: c.Issuer}
@@ -650,14 +658,16 @@ func RunContext(ctx context.Context, c *Config, newHome HomeFactory) error {
 	// The gateway listens here, not in its goroutine, so an address it
 	// cannot bind fails the start instead of leaving an agent without it.
 	var hl net.Listener
+	var hs *http.Server
 	if c.HTTPAddr != "" {
 		if hl, err = net.Listen("tcp", c.HTTPAddr); err != nil {
 			_ = gl.Close()
 			return fmt.Errorf("-http %s: %w", c.HTTPAddr, err)
 		}
 		gw := &rpc.Gateway{Server: srv, Health: healthz}
-		hs := &http.Server{Handler: gw.Handler(), TLSConfig: serverTLS, ReadHeaderTimeout: 5 * time.Second}
-		go func() {
+		hs = &http.Server{Handler: gw.Handler(), TLSConfig: serverTLS, ReadHeaderTimeout: 5 * time.Second}
+		defer func() { _ = hs.Close() }()
+		serving.Go(func() {
 			log.Printf("fiberd json gateway on %s", hl.Addr())
 			serve := func() error { return hs.Serve(hl) }
 			if serverTLS != nil {
@@ -666,24 +676,20 @@ func RunContext(ctx context.Context, c *Config, newHome HomeFactory) error {
 			if err := serve(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				log.Printf("gateway: %v", err)
 			}
-		}()
+		})
 		go func() { <-ctx.Done(); _ = hs.Close() }()
 	}
 	if router != nil {
-		go func() {
+		serving.Go(func() {
 			log.Printf("fiberd handoff on %s (callers dial %s)", handoffLn.Addr(), router.Advertise)
 			if err := router.Serve(handoffLn); err != nil {
 				log.Printf("handoff: %v", err)
 			}
-		}()
+		})
 	}
 	go func() {
 		<-ctx.Done()
 		gs.GracefulStop()
-		_ = adminSrv.Close()
-		if handoffLn != nil {
-			_ = handoffLn.Close()
-		}
 	}()
 	log.Printf("fiberd warm path on %s tier=%s admin=%s (no control plane needed beyond this point)", gl.Addr(), rt.Tier(), adminSock)
 	if c.ready != nil {
@@ -697,8 +703,15 @@ func RunContext(ctx context.Context, c *Config, newHome HomeFactory) error {
 		c.ready(gl.Addr(), ha, ho)
 	}
 	// A stop that lands before Serve starts makes it return
-	// ErrServerStopped. That is a clean stop too.
-	if err := gs.Serve(gl); err != nil && !errors.Is(err, grpc.ErrServerStopped) {
+	// ErrServerStopped. That is a clean stop too. Serve returns once
+	// GracefulStop is through. The handoff listener closes here, before
+	// the deferred runtime close takes the fibers it routes to, and the
+	// other listeners close in the defers above.
+	err = gs.Serve(gl)
+	if handoffLn != nil {
+		_ = handoffLn.Close()
+	}
+	if err != nil && !errors.Is(err, grpc.ErrServerStopped) {
 		return fmt.Errorf("serve: %w", err)
 	}
 	return nil
