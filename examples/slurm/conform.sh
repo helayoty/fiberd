@@ -93,7 +93,9 @@ restart() {
   local pid before
   before=$(healthy | tr -d ' \n')
   pid=$(dexec pgrep -f "^fiberd-slurm -state /var/lib/fiberd/job-$(job_id)" | head -1)
-  dexec kill -TERM "$pid" # fiberd-job.sh restarts it in the same allocation; the epoch bumps
+  # A crash: fiberd-job.sh restarts the agent in the same allocation and
+  # the epoch bumps. A clean exit 0 would mean the job ended.
+  dexec kill -KILL "$pid"
   wait_for 60 "agent back with a new epoch" sh -c "[ \"\$($0 healthz | tr -d ' \n')\" != \"$before\" ]"
 }
 healthz() { healthy; }
