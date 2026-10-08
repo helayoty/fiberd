@@ -172,7 +172,7 @@ func TestMutualTLS(t *testing.T) {
 	cases := []struct {
 		name    string
 		allowed string // Config.AllowedClientID
-		client  []byte // the client's bundle; nil presents none
+		client  []byte // the client's bundle, or nil to present none
 		rotate  bool   // the worker's certificate is rotated before the request
 		ok      bool
 	}{
@@ -238,8 +238,8 @@ func TestMutualTLS(t *testing.T) {
 	}
 }
 
-// fakeFiberEndpoint is a fiber standing in: it answers with the method
-// and path it got.
+// fakeFiberEndpoint stands in for a fiber. It answers with the method and
+// path it got.
 func fakeFiberEndpoint(t *testing.T) string {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.WriteString(w, "fiber "+r.Method+" "+r.URL.Path)
@@ -248,9 +248,9 @@ func fakeFiberEndpoint(t *testing.T) string {
 	return "tcp://" + srv.Listener.Addr().String()
 }
 
-// TestServe checks the plain-HTTP server's lifetime: it routes until its
-// context ends and then returns nil, and a listener that cannot accept is
-// an error.
+// TestServe checks that the plain-HTTP server routes until its context
+// ends and then returns nil, and that a listener that cannot accept is an
+// error.
 func TestServe(t *testing.T) {
 	cases := []struct {
 		name   string

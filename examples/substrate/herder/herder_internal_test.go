@@ -121,9 +121,8 @@ func TestStartFailures(t *testing.T) {
 	}
 }
 
-// TestReady checks the readiness wait: every container with a readyz is
-// probed at its path on the fiber's endpoint until it answers or its
-// timeout passes.
+// TestReady checks that every container with a readyz is probed at its
+// path on the fiber's endpoint until it answers or its timeout passes.
 func TestReady(t *testing.T) {
 	container := func(name, path string, timeoutSeconds int32) *ateompbContainer {
 		return &ateompbContainer{Name: name, Readyz: &ateompbReadyz{HttpGet: &ateompbHTTPGet{Path: path}, TimeoutSeconds: timeoutSeconds}}
@@ -132,7 +131,7 @@ func TestReady(t *testing.T) {
 	cases := []struct {
 		name       string
 		containers []*ateompbContainer
-		failures   int           // the probe fails this often first; -1 is always
+		failures   int           // the probe fails this often first, or always for -1
 		timeout    time.Duration // Config.ReadyTimeout
 		cancelled  bool          // the caller's context is already done
 		probed     []string      // the paths probed, in order
@@ -189,7 +188,7 @@ func TestReady(t *testing.T) {
 }
 
 // TestLifecycleFailures checks checkpoint and terminate when the agent
-// does not follow: the actor stays where atelet can act on it again.
+// does not follow. The actor stays where atelet can act on it again.
 func TestLifecycleFailures(t *testing.T) {
 	ctx := context.Background()
 	gone := func(t *testing.T, w *worker) {
@@ -331,7 +330,7 @@ func (f *fakeFibers) Watch(_ *emptypb.Empty, stream grantv1.Fibers_WatchServer) 
 	return nil
 }
 
-// TestRunReconnects checks that the stats survive a broken Watch stream:
+// TestRunReconnects checks that the stats survive a broken Watch stream.
 // Run dials again and the next report lands, and Run returns once its
 // context ends.
 func TestRunReconnects(t *testing.T) {
@@ -382,7 +381,7 @@ func TestRunReconnects(t *testing.T) {
 	}
 }
 
-// TestHTTPProbe checks the default readiness probe: a GET of the path on
+// TestHTTPProbe checks the default readiness probe, a GET of the path on
 // the fiber's endpoint that must answer 200.
 func TestHTTPProbe(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -401,7 +400,7 @@ func TestHTTPProbe(t *testing.T) {
 		name     string
 		endpoint string
 		path     string
-		err      string // empty: ready
+		err      string // empty when ready
 	}{
 		{name: "200 is ready", endpoint: live, path: "/readyz"},
 		{name: "any other status is not", endpoint: live, path: "/other", err: "status 503"},

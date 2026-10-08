@@ -1,10 +1,10 @@
 # An ActorTemplate (protojson-shaped ateapipb.ActorTemplate) for an actor
 # that is a fiber. The container image is what atelet pulls and prepares
 # a bundle for; the herder does not run it: in this phase the workload is
-# the reference zygote the worker image carries, named by the herder's
-# ATEOM_FIBERD_TEMPLATE (the key "${ATESPACE}/${TEMPLATE}" or "default").
-# Readiness and resources are honoured: the fiber is probed at /readyz
-# and the memory limit becomes the grant's W budget.
+# the reference workload inside the worker image's gVisor rootfs, named
+# by the herder's ATEOM_FIBERD_TEMPLATE (the key "${ATESPACE}/${TEMPLATE}"
+# or "default"). Readiness and resources are honoured: the fiber is
+# probed at /readyz and the memory limit becomes the grant's W budget.
 metadata:
   atespace: ${ATESPACE}
   name: ${TEMPLATE}

@@ -4,6 +4,7 @@ package herder_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -12,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -25,6 +27,8 @@ import (
 	"google.golang.org/grpc/test/bufconn"
 
 	"github.com/helayoty/fiberd/pkg/artifact"
+	"github.com/helayoty/fiberd/pkg/backend"
+	gvisorbackend "github.com/helayoty/fiberd/pkg/backend/gvisor"
 	procbackend "github.com/helayoty/fiberd/pkg/backend/proc"
 	"github.com/helayoty/fiberd/pkg/consumer"
 	"github.com/helayoty/fiberd/pkg/core"
@@ -40,10 +44,13 @@ import (
 )
 
 // The whole worker, in process, driven the way atelet drives it: an
-// agent over the fork backend with a file delta registry, the substrate
+// agent over a sandbox backend with a file delta registry, the substrate
 // home minting grants and serving its keys, the ingress in front, and
-// fake atelet directories under a temp root. Needs the dev container
-// (a writable cgroup root, gcc, criu); skipped elsewhere.
+// fake atelet directories under a temp root. The image's backend is
+// gVisor, so that is the path the lifecycle runs on first. The proc
+// backend runs the same lifecycle, as proof that the herder is a plain
+// consumer and takes no backend for granted. Needs the dev container (a
+// writable cgroup root, gcc, runsc, criu); skipped elsewhere.
 
 // workerKeys are the delta keys every worker shares. A pool's workers must
 // share them so a snapshot taken on one restores on another.
@@ -63,9 +70,14 @@ var workerKeys = sync.OnceValue(func() artifact.Keys {
 	return artifact.Keys{Signer: k, Seal: seal}
 })
 
-func zygote(t *testing.T) (bin, cgRoot string) {
+// work holds every worker's state. Not a tmpfs: gVisor's template and
+// park images would be memory there.
+const work = "/var/lib/fiberd-test/substrate"
+
+// cgroupRoot is the delegated subtree the dev container offers, or a skip.
+func cgroupRoot(t *testing.T) string {
 	t.Helper()
-	cgRoot = os.Getenv("FIBERD_CGROUP_ROOT")
+	cgRoot := os.Getenv("FIBERD_CGROUP_ROOT")
 	if cgRoot == "" {
 		cgRoot = "/sys/fs/cgroup/fiberd"
 	}
@@ -74,13 +86,83 @@ func zygote(t *testing.T) (bin, cgRoot string) {
 	} else {
 		_ = f.Close()
 	}
-	bin = filepath.Join(t.TempDir(), "refzygote")
-	build := exec.Command("gcc", "-O2", "-pthread", "-o", bin, "../../../zygote/refzygote.c", "../../../zygote/libfiberzygote.c")
+	return cgRoot
+}
+
+// backendCase is one sandbox backend the worker can run on: how to open
+// it under a state directory and the template command it runs.
+type backendCase struct {
+	name     string
+	open     func(t *testing.T, stateDir string) backend.Backend
+	template string
+}
+
+// gvisorRootfs builds the rootfs every sandbox runs in, once, the way the
+// image does (hack/gvisor/rootfs.sh), or skips without runsc.
+var gvisorRootfs = sync.OnceValues(func() (string, error) {
+	if _, err := exec.LookPath("runsc"); err != nil {
+		return "", err
+	}
+	dir := filepath.Join(work, "rootfs")
+	_ = os.RemoveAll(dir)
+	build := exec.Command("../../../hack/gvisor/rootfs.sh", dir)
 	build.Stderr = os.Stderr
 	if err := build.Run(); err != nil {
-		t.Skipf("cannot build refzygote: %v", err)
+		return "", fmt.Errorf("hack/gvisor/rootfs.sh: %w", err)
 	}
-	return bin, cgRoot
+	return dir, nil
+})
+
+// procZygote builds refzygote for the proc backend, once.
+var procZygote = sync.OnceValues(func() (string, error) {
+	bin := filepath.Join(work, "refzygote")
+	if err := os.MkdirAll(work, 0o755); err != nil {
+		return "", err
+	}
+	args := []string{"-O2", "-pthread"}
+	// As in the Makefile's ZYGOTE_CFLAGS, arm64 builds take no pointer
+	// authentication, since a restored process keeps stale PAC keys.
+	if runtime.GOARCH == "arm64" {
+		args = append(args, "-mbranch-protection=none")
+	}
+	build := exec.Command("gcc", append(args, "-o", bin, "../../../zygote/refzygote.c", "../../../zygote/libfiberzygote.c")...)
+	build.Stderr = os.Stderr
+	if err := build.Run(); err != nil {
+		return "", fmt.Errorf("gcc: %w", err)
+	}
+	return bin, nil
+})
+
+// backends are the cases the lifecycle runs on: the image's, then proc.
+func backends() []backendCase {
+	return []backendCase{
+		{name: "gvisor", template: "/bin/refzygote --heap-mb 8 --gvisor --http",
+			open: func(t *testing.T, stateDir string) backend.Backend {
+				rootfs, err := gvisorRootfs()
+				if err != nil {
+					t.Skipf("gvisor backend not usable here: %v", err)
+				}
+				return gvisorbackend.New(gvisorbackend.Options{Rootfs: rootfs, StateDir: stateDir})
+			}},
+		{name: "proc", open: func(t *testing.T, _ string) backend.Backend {
+			if _, err := procZygote(); err != nil {
+				t.Skipf("cannot build refzygote: %v", err)
+			}
+			return procbackend.New(procbackend.Options{})
+		}},
+	}
+}
+
+// templateOf is the case's template command (proc's names the binary it built).
+func (bc backendCase) templateOf(t *testing.T) string {
+	if bc.template != "" {
+		return bc.template
+	}
+	bin, err := procZygote()
+	if err != nil {
+		t.Skip(err)
+	}
+	return bin + " --heap-mb 8 --http"
 }
 
 // worker is one Substrate worker Pod's worth of fiberd.
@@ -91,10 +173,15 @@ type worker struct {
 	paths   herder.Paths
 }
 
-func newWorker(t *testing.T, name, bin, cgRoot, base string) *worker {
+func newWorker(t *testing.T, name string, bc backendCase, cgRoot, base string) *worker {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
+	state := filepath.Join(work, fmt.Sprintf("%s-%s-%d", bc.name, name, time.Now().UnixNano()%1_000_000))
+	if err := os.MkdirAll(state, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(state) })
 
 	// The home: its own issuer on a loopback server.
 	isrv := httptest.NewServer(nil)
@@ -106,19 +193,22 @@ func newWorker(t *testing.T, name, bin, cgRoot, base string) *worker {
 	}
 	isrv.Config.Handler = h.Handler()
 
-	// The agent over the fork backend, publishing to a file registry.
+	// The agent over the case's backend, publishing to a file registry.
 	hc := host.Config{
-		Backend:       procbackend.New(procbackend.Options{}),
-		Templates:     map[string]string{"default": bin + " --heap-mb 8 --http"},
+		Backend:       bc.open(t, filepath.Join(state, "backend")),
+		Templates:     map[string]string{"default": bc.templateOf(t)},
 		CgroupRoot:    h.CgroupRoot(),
 		RunDir:        filepath.Join("/tmp", "fz-"+name),
-		DeltaDir:      t.TempDir(),
-		TemplateCache: t.TempDir(),
-		DeltaRegistry: artifact.FileScheme + filepath.Join(t.TempDir(), "registry"),
+		DeltaDir:      filepath.Join(state, "deltas"),
+		TemplateCache: filepath.Join(state, "templates"),
+		DeltaRegistry: artifact.FileScheme + filepath.Join(state, "registry"),
 		DeltaKeys:     workerKeys(),
 		HomeID:        name,
 	}
 	rt, err := host.New(hc)
+	if errors.Is(err, host.ErrNoTier) {
+		t.Skipf("%s backend not usable here: %v", bc.name, err)
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,7 +217,7 @@ func newWorker(t *testing.T, name, bin, cgRoot, base string) *worker {
 		_ = os.RemoveAll(hc.RunDir)
 	})
 	if rt.Tier() < core.TierCheckpoint {
-		t.Skip("criu not usable here")
+		t.Skipf("%s backend cannot park here (tier %s)", bc.name, rt.Tier())
 	}
 	ag := &core.Agent{
 		NodeID: name, Ledger: core.NewLedger(1), Budget: core.NewBudget(1000, 1<<20),
@@ -216,12 +306,19 @@ type snapshot struct {
 	files []string
 }
 
+// TestActorLifecycleAcrossWorkers runs the lifecycle on each backend.
 func TestActorLifecycleAcrossWorkers(t *testing.T) {
-	bin, cgRoot := zygote(t)
+	cgRoot := cgroupRoot(t)
+	for _, bc := range backends() {
+		t.Run(bc.name, func(t *testing.T) { lifecycleAcrossWorkers(t, bc, cgRoot) })
+	}
+}
+
+func lifecycleAcrossWorkers(t *testing.T, bc backendCase, cgRoot string) {
 	ctx := context.Background()
 	base := t.TempDir()
-	a := newWorker(t, "worker-a", bin, cgRoot, filepath.Join(base, "node-a"))
-	b := newWorker(t, "worker-b", bin, cgRoot, filepath.Join(base, "node-b"))
+	a := newWorker(t, "worker-a", bc, cgRoot, filepath.Join(base, "node-a"))
+	b := newWorker(t, "worker-b", bc, cgRoot, filepath.Join(base, "node-b"))
 
 	// Run the golden boot on A: the template's first actor.
 	run, ckpt, _, _ := actorReq("golden")
@@ -259,11 +356,11 @@ func TestActorLifecycleAcrossWorkers(t *testing.T) {
 	}
 	snapshots := map[string]snapshot{"golden": {on: a, files: resp.GetSnapshotFiles()}} // by actor uid
 
-	// Each step is atelet moving an actor. It downloads a snapshot into the
-	// actor's restore-state, restores the actor on a worker and drives its
-	// count through the ingress. Then it removes the actor by checkpoint,
-	// whose snapshot a later step uses, or by terminate. Either way the
-	// ingress forgets the actor and the worker is free. Steps run in order.
+	// Each step is atelet moving an actor. It restores the actor on a
+	// worker from a downloaded snapshot, drives its count through the
+	// ingress, then removes it by checkpoint, whose snapshot a later step
+	// uses, or by terminate. Either way the ingress forgets the actor and
+	// the worker is free. Steps run in order.
 	cases := []struct {
 		name       string
 		from       string // the snapshot's actor uid
@@ -272,7 +369,7 @@ func TestActorLifecycleAcrossWorkers(t *testing.T) {
 		incr       int    // POST /incr after the restore
 		count      string // GET /count after that
 		checkpoint bool
-		readyz     string // a readyz path the actor never answers 200 on: the restore fails
+		readyz     string // a readyz path the actor never answers 200 on, so the restore fails
 	}{
 		{name: "x1 restores on B from the golden snapshot, a new session from the template's state, and counts to three",
 			from: "golden", to: b, uid: "x1", incr: 3, count: "3", checkpoint: true},

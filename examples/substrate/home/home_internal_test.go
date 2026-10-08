@@ -2,16 +2,19 @@ package home
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/helayoty/fiberd/pkg/core"
 	"github.com/helayoty/fiberd/pkg/grant"
 	fhome "github.com/helayoty/fiberd/pkg/home"
+	"github.com/helayoty/fiberd/pkg/sys/cgroup"
 
 	"github.com/helayoty/fiberd/examples/substrate/herder"
 )
@@ -50,7 +53,7 @@ func TestWhatTheHomeOffers(t *testing.T) {
 }
 
 // TestGrantFailures checks minting that cannot sign and a lane nobody
-// drains: neither may lose the grant the herder asked for.
+// drains. Neither may lose the grant the herder asked for.
 func TestGrantFailures(t *testing.T) {
 	ctx := context.Background()
 	priv, err := grant.GenerateKey("EdDSA")
@@ -93,10 +96,11 @@ func TestGrantFailures(t *testing.T) {
 	}
 }
 
-// TestProbeConfig checks where liveness comes from: always alive without
-// a probe, else atelet's socket answering a connect.
+// TestProbeConfig checks that liveness is always alive without a probe,
+// and otherwise follows atelet's socket answering a connect.
 func TestProbeConfig(t *testing.T) {
-	// A short directory: unix socket paths are limited to about 100 bytes.
+	// A short directory, because unix socket paths are limited to about
+	// 100 bytes.
 	dir, err := os.MkdirTemp("/tmp", "sh")
 	if err != nil {
 		t.Fatal(err)
@@ -179,3 +183,62 @@ func TestRun(t *testing.T) {
 }
 
 var _ fhome.Home = (*Home)(nil)
+
+// TestDelegateOwn checks when the home remounts the Pod's cgroup mount:
+// only after a read-only failure, and the delegation is then retried.
+func TestDelegateOwn(t *testing.T) {
+	errOther := errors.New("cgroup: enable memory: permission denied")
+	errRemount := errors.New("mount: operation not permitted")
+	cases := []struct {
+		name       string
+		delegate   []error // one result per attempt
+		remount    error
+		wantErr    error
+		wantROFS   bool // the read-only cause stays in the error
+		wantRemnts int
+		wantCalls  int
+	}{
+		{name: "a writable mount delegates at once", delegate: []error{nil}, wantCalls: 1},
+		{name: "a read-only mount is remounted and the delegation retried",
+			delegate:   []error{fmt.Errorf("cgroup: agent leaf: %w", &os.PathError{Op: "mkdir", Path: "/sys/fs/cgroup/agent", Err: syscall.EROFS})},
+			wantRemnts: 1, wantCalls: 2},
+		{name: "a read-only mount that cannot be remounted fails with both reasons",
+			delegate: []error{fmt.Errorf("cgroup: %w", syscall.EROFS)}, remount: errRemount,
+			wantErr: errRemount, wantROFS: true, wantRemnts: 1, wantCalls: 1},
+		{name: "a remount that does not help reports the second failure",
+			delegate: []error{fmt.Errorf("cgroup: %w", syscall.EROFS), errOther},
+			wantErr:  errOther, wantRemnts: 1, wantCalls: 2},
+		{name: "any other failure is not a reason to remount", delegate: []error{errOther},
+			wantErr: errOther, wantCalls: 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			calls, remounts := 0, 0
+			delegate := func(d cgroup.Dir) (cgroup.Dir, error) {
+				var err error
+				if calls < len(tc.delegate) {
+					err = tc.delegate[calls] // attempts past the list succeed
+				}
+				calls++
+				if err != nil {
+					return cgroup.Dir{}, err
+				}
+				return d.Child("fiberd"), nil
+			}
+			remount := func(string) error { remounts++; return tc.remount }
+			got, err := delegateOwn(t.TempDir(), delegate, remount)
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("err = %v, want %v", err, tc.wantErr)
+			}
+			if tc.wantErr == nil && filepath.Base(got.Path) != "fiberd" {
+				t.Fatalf("delegated %q, want the fiberd subtree", got.Path)
+			}
+			if errors.Is(err, syscall.EROFS) != tc.wantROFS {
+				t.Fatalf("err = %v: read-only cause present = %v, want %v", err, !tc.wantROFS, tc.wantROFS)
+			}
+			if calls != tc.wantCalls || remounts != tc.wantRemnts {
+				t.Fatalf("%d delegations and %d remounts, want %d and %d", calls, remounts, tc.wantCalls, tc.wantRemnts)
+			}
+		})
+	}
+}

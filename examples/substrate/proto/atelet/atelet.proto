@@ -1,0 +1,75 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+syntax = "proto3";
+
+package atelet;
+
+// Trimmed from agent-substrate/substrate at commit 85ce8ed5. The service
+// and its two messages come from internal/proto/ateletpb/atelet.proto.
+// WorkerResources, Resources and Limits come from
+// pkg/proto/ateapipb/ateapi.proto (package ateapi) and live here so the
+// file stands alone. Message names are not on the wire. The package
+// `atelet`, the service, the method and every field number are, so they
+// are unchanged. Only SetWorkerCapacity is kept, the one call this worker
+// makes. Regenerate with `buf generate` in this directory's module.
+option go_package = "github.com/helayoty/fiberd/examples/substrate/proto/atelet;ateletpb";
+
+// AteomSupport provides callouts for ateom.
+//
+// Called by individual ateom pods over a local connection, authenticated with
+// ateom's k8s pod identity mTLS certificate.
+service AteomSupport {
+  // Report capacity and supply for this worker back to atelet.
+  rpc SetWorkerCapacity(SetWorkerCapacityRequest) returns (SetWorkerCapacityResponse) {}
+}
+
+message SetWorkerCapacityRequest {
+  // What the worker can supply, in the same vocabulary the control plane
+  // records and an ActorTemplate asks in.
+  WorkerResources capacity = 1;
+}
+
+message SetWorkerCapacityResponse {
+}
+
+// ateapi.WorkerResources.
+message WorkerResources {
+  // Resources match the Actor's definition of resources.
+  // They are matched by name and used for placement.
+  Resources resources = 1;
+
+  // A count of Actors.  Workers can use this to limit the number of Actors
+  // that can be placed on them, constraining the costs of other things that
+  // are not captured in the resources above, but which still have costs -
+  // netns, mounts, file descriptors, etc.
+  int32 actors = 2;
+}
+
+// ateapi.Resources.
+message Resources {
+  // limits is the maximum amount of compute resources allowed. Only "cpu"
+  // and "memory" are supported, each at most once, and each quantity must be
+  // greater than zero; the cpu limit must be less than 1000 cores.
+  repeated Limits limits = 1;
+}
+
+// ateapi.Limits.
+message Limits {
+  string name = 1;
+
+  // quantity is in Kubernetes resource.Quantity string form (e.g. "500m",
+  // "2Gi").
+  string quantity = 2;
+}

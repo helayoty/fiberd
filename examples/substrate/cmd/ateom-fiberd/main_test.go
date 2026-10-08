@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -19,22 +20,30 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-jose/go-jose/v4"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/protobuf/proto"
 
+	"github.com/helayoty/fiberd/pkg/agent"
+	"github.com/helayoty/fiberd/pkg/artifact"
+	"github.com/helayoty/fiberd/pkg/grant"
+
+	"github.com/helayoty/fiberd/examples/substrate/capacity"
 	"github.com/helayoty/fiberd/examples/substrate/herder"
 	"github.com/helayoty/fiberd/examples/substrate/ingress"
+	ateletpb "github.com/helayoty/fiberd/examples/substrate/proto/atelet"
 	ateompb "github.com/helayoty/fiberd/examples/substrate/proto/ateom"
 )
 
 // TestMain keeps a SIGTERM aimed at a stopping agent from ending the test
-// binary: while this is registered, Go never applies the default action.
+// binary. While a handler is registered, Go never applies the default action.
 func TestMain(m *testing.M) {
 	sig := make(chan os.Signal, 16)
 	signal.Notify(sig, syscall.SIGTERM)
 	go func() {
 		for range sig {
-			// Absorbed: the agent under test handles its own stop.
+			// The agent under test handles its own stop.
 		}
 	}()
 	os.Exit(m.Run())
@@ -52,6 +61,56 @@ func TestEnv(t *testing.T) {
 			t.Setenv("ATEOM_FIBERD_TEST_ENV", tc.value)
 			if got := env("ATEOM_FIBERD_TEST_ENV", "default"); got != tc.want {
 				t.Fatalf("env = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRuntimeEnv checks which backend the image's environment selects:
+// gVisor with the image's rootfs unless told otherwise, and no gVisor
+// worker without its rootfs.
+func TestRuntimeEnv(t *testing.T) {
+	rootfs := t.TempDir()
+	type runtime struct{ name, rootfs, runsc, criu string }
+	cases := []struct {
+		name string
+		env  map[string]string
+		want runtime
+		err  string
+	}{
+		{name: "gvisor on a rootfs with runsc from PATH", env: map[string]string{"ATEOM_FIBERD_GVISOR_ROOTFS": rootfs},
+			want: runtime{"gvisor", rootfs, "runsc", "criu"}},
+		{name: "another runsc", env: map[string]string{"ATEOM_FIBERD_GVISOR_ROOTFS": rootfs, "ATEOM_FIBERD_RUNSC": "/opt/runsc"},
+			want: runtime{"gvisor", rootfs, "/opt/runsc", "criu"}},
+		{name: "the image's default rootfs path", env: map[string]string{"ATEOM_FIBERD_RUNTIME": "stub"},
+			want: runtime{"stub", "/var/lib/fiberd/gvisor-rootfs", "runsc", "criu"}},
+		{name: "proc with its own criu, for tests of the mechanism", env: map[string]string{"ATEOM_FIBERD_RUNTIME": "proc", "ATEOM_FIBERD_CRIU": "/opt/criu"},
+			want: runtime{"proc", "/var/lib/fiberd/gvisor-rootfs", "runsc", "/opt/criu"}},
+		{name: "gvisor without its rootfs refuses", env: map[string]string{"ATEOM_FIBERD_GVISOR_ROOTFS": "/nonexistent/rootfs"},
+			err: "ATEOM_FIBERD_GVISOR_ROOTFS: /nonexistent/rootfs is not a directory"},
+		{name: "gvisor with a file for a rootfs refuses", env: map[string]string{"ATEOM_FIBERD_GVISOR_ROOTFS": "/dev/null"},
+			err: "ATEOM_FIBERD_GVISOR_ROOTFS: /dev/null is not a directory"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, k := range []string{"ATEOM_FIBERD_RUNTIME", "ATEOM_FIBERD_GVISOR_ROOTFS", "ATEOM_FIBERD_RUNSC", "ATEOM_FIBERD_CRIU"} {
+				t.Setenv(k, tc.env[k])
+			}
+			var c agent.Config
+			c.Bind(flag.NewFlagSet("fiberd", flag.ContinueOnError))
+			err := runtimeEnv(&c)
+			if tc.err != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.err) {
+					t.Fatalf("runtimeEnv = %v, want an error with %q", err, tc.err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := runtime{c.RuntimeName, c.GvisorRootfs, c.Runsc, c.CRIUBin}
+			if got != tc.want {
+				t.Fatalf("runtime config = %+v, want %+v", got, tc.want)
 			}
 		})
 	}
@@ -102,7 +161,35 @@ func TestParseArgs(t *testing.T) {
 	}
 }
 
-// TestWaitTCP checks the wait for the agent's port: it ends when the port
+// TestReadyz checks the kubelet's readiness answer. A warming template
+// and an unhealthy agent are both 503, so a poisoned audit spool keeps
+// actors off this worker. Only a warm, healthy worker is 200.
+func TestReadyz(t *testing.T) {
+	poisoned := errors.New(`healthz: 503 Service Unavailable: {"audit":"poisoned"}`)
+	cases := []struct {
+		name    string
+		ready   bool
+		healthz error
+		status  int
+		body    string
+	}{
+		{name: "warm and healthy is ok", ready: true, status: http.StatusOK, body: "ok"},
+		{name: "a warming template is 503", ready: false, status: http.StatusServiceUnavailable, body: "warming"},
+		{name: "a poisoned spool is 503 with the agent's answer", ready: true, healthz: poisoned,
+			status: http.StatusServiceUnavailable, body: poisoned.Error()},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			readyz(func() bool { return tc.ready }, func(context.Context) error { return tc.healthz })(rec, httptest.NewRequest("GET", "/readyz", nil))
+			if body := strings.TrimSpace(rec.Body.String()); rec.Code != tc.status || body != tc.body {
+				t.Fatalf("readyz = %d %q, want %d %q", rec.Code, body, tc.status, tc.body)
+			}
+		})
+	}
+}
+
+// TestWaitTCP checks that the wait for the agent's port ends when the port
 // accepts, when the agent fails or exits, when the caller gives up, or at
 // the timeout.
 func TestWaitTCP(t *testing.T) {
@@ -182,8 +269,31 @@ func shortDir(t *testing.T) string {
 	return d
 }
 
-// worker is the environment one run gets: fiberd on the stub runtime,
-// under a temp state dir and a fake cgroup root.
+// sharedKeys writes a delta signing key and a seal key, as the deploy
+// mounts them, and returns their paths.
+func sharedKeys(t *testing.T) (key, seal string) {
+	d := t.TempDir()
+	key, seal = filepath.Join(d, "delta-key.json"), filepath.Join(d, "delta-seal-key.json")
+	k, err := grant.GenerateKey(jose.EdDSA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sk, err := artifact.GenerateSealKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := grant.SaveKey(key, k); err != nil {
+		t.Fatal(err)
+	}
+	if err := grant.SaveKey(seal, sk); err != nil {
+		t.Fatal(err)
+	}
+	return key, seal
+}
+
+// worker is the environment one run gets. That is fiberd on the stub
+// runtime, under a temp state dir and a fake cgroup root, with the pool's
+// shared delta keys.
 type worker struct {
 	agent, ready, ingress string
 	base                  string
@@ -198,13 +308,15 @@ func newWorker(t *testing.T) worker {
 	t.Setenv("ATEOM_FIBERD_CGROUP_ROOT", t.TempDir())
 	t.Setenv("ATEOM_FIBERD_TEMPLATE", "default=/bin/zygote --http; ;")
 	t.Setenv("ATEOM_FIBERD_RUN_DIR", t.TempDir())
-	for _, k := range []string{"ATEOM_FIBERD_DELTA_KEY", "ATEOM_FIBERD_DELTA_TRUST", "ATEOM_FIBERD_DELTA_SEAL_KEY"} {
-		t.Setenv(k, "")
-	}
+	key, seal := sharedKeys(t)
+	t.Setenv("ATEOM_FIBERD_DELTA_KEY", key)
+	t.Setenv("ATEOM_FIBERD_DELTA_SEAL_KEY", seal)
+	t.Setenv("ATEOM_FIBERD_DELTA_TRUST", "")
 	return w
 }
 
-// stopAgent ends an agent a failed run left behind: it stops on SIGTERM.
+// stopAgent stops, with SIGTERM, an agent a failed run left behind, and
+// waits until its port closes.
 func stopAgent(t *testing.T, addr string) {
 	if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
 		t.Fatal(err)
@@ -238,10 +350,20 @@ func TestRunRefuses(t *testing.T) {
 		{name: "an isolation that does not exist", env: map[string]string{"ATEOM_FIBERD_ISOLATION": "SOMEWHAT"},
 			err: "ATEOM_FIBERD_ISOLATION"},
 		{name: "no pod uid: the home has no audience", podUID: "-", err: "audience and issuer URL are required"},
-		{name: "a delta key that cannot be read", env: map[string]string{"ATEOM_FIBERD_DELTA_KEY": "/nonexistent/key.json"},
+		{name: "no delta key: a worker never makes its own", env: map[string]string{"ATEOM_FIBERD_DELTA_KEY": ""},
+			err: "ATEOM_FIBERD_DELTA_KEY is required"},
+		{name: "no seal key: a worker never makes its own", env: map[string]string{"ATEOM_FIBERD_DELTA_SEAL_KEY": ""},
+			err: "ATEOM_FIBERD_DELTA_SEAL_KEY is required"},
+		{name: "a delta key that is not mounted", env: map[string]string{"ATEOM_FIBERD_DELTA_KEY": "/nonexistent/key.json"},
+			err: "ATEOM_FIBERD_DELTA_KEY: stat /nonexistent/key.json"},
+		{name: "a seal key that is not mounted", env: map[string]string{"ATEOM_FIBERD_DELTA_SEAL_KEY": "/nonexistent/seal.json"},
+			err: "ATEOM_FIBERD_DELTA_SEAL_KEY: stat /nonexistent/seal.json"},
+		{name: "a delta key that is not a key", env: map[string]string{"ATEOM_FIBERD_DELTA_KEY": "/dev/null"},
 			err: "-delta-key"},
 		{name: "an agent that cannot start", env: map[string]string{"ATEOM_FIBERD_RUNTIME": "warp"},
 			err: "agent did not come up"},
+		{name: "gvisor without its rootfs", env: map[string]string{"ATEOM_FIBERD_RUNTIME": "gvisor", "ATEOM_FIBERD_GVISOR_ROOTFS": "/nonexistent/rootfs"},
+			err: "ATEOM_FIBERD_GVISOR_ROOTFS: /nonexistent/rootfs is not a directory"},
 		{name: "an ingress credential bundle that cannot be read", cred: "/nonexistent/cred.pem",
 			err: "ingress: credential bundle", agentUp: true},
 		{name: "a base path that cannot hold the worker's directory", base: func(t *testing.T, _ worker) string {
@@ -317,6 +439,31 @@ func httpGet(t *testing.T, url, actor string) (int, string) {
 	return resp.StatusCode, strings.TrimSpace(string(b))
 }
 
+// fakeAtelet is atelet's AteomSupport service on the node's socket. It
+// records the capacity the worker reports.
+type fakeAtelet struct {
+	ateletpb.UnimplementedAteomSupportServer
+	got chan *ateletpb.WorkerResources
+}
+
+func (a *fakeAtelet) SetWorkerCapacity(_ context.Context, req *ateletpb.SetWorkerCapacityRequest) (*ateletpb.SetWorkerCapacityResponse, error) {
+	a.got <- req.GetCapacity()
+	return &ateletpb.SetWorkerCapacityResponse{}, nil
+}
+
+func serveAtelet(t *testing.T, paths herder.Paths) *fakeAtelet {
+	l, err := net.Listen("unix", paths.SupportSocket())
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := &fakeAtelet{got: make(chan *ateletpb.WorkerResources, 4)}
+	gs := grpc.NewServer()
+	ateletpb.RegisterAteomSupportServer(gs, a)
+	go func() { _ = gs.Serve(l) }()
+	t.Cleanup(gs.Stop)
+	return a
+}
+
 // TestRunServesAWorker runs a whole worker as Substrate starts it and
 // drives it as atelet, the kubelet and the router do, then stops it with
 // SIGTERM. Steps run in order on the one worker.
@@ -325,6 +472,14 @@ func TestRunServesAWorker(t *testing.T) {
 	log.SetOutput(logs)
 	t.Cleanup(func() { log.SetOutput(os.Stderr) })
 	w := newWorker(t)
+	limits := t.TempDir()
+	for name, v := range map[string]string{capacity.CPUFile: "1000", capacity.MemoryFile: "1073741824"} {
+		if err := os.WriteFile(filepath.Join(limits, name), []byte(v+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("ATEOM_FIBERD_CAPACITY_DIR", limits)
+	support := serveAtelet(t, herder.Paths{Base: w.base})
 	done := make(chan error, 1)
 	go func() {
 		done <- run("p-1", w.ingress, "", "", ingress.DefaultAllowedClientID, w.ready, herder.Paths{Base: w.base})
@@ -357,6 +512,19 @@ func TestRunServesAWorker(t *testing.T) {
 		name string
 		do   func(t *testing.T)
 	}{
+		{"the worker reports what it can host to atelet", func(t *testing.T) {
+			// Without this report Substrate places no actor here.
+			want := &ateletpb.WorkerResources{Actors: 1, Resources: &ateletpb.Resources{Limits: []*ateletpb.Limits{
+				{Name: "cpu", Quantity: "1000m"}, {Name: "memory", Quantity: "1073741824"}}}}
+			select {
+			case got := <-support.got:
+				if !proto.Equal(got, want) {
+					t.Fatalf("capacity = %v, want %v", got, want)
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatalf("the worker never reported its capacity\n%s", logs)
+			}
+		}},
 		{"a fresh worker has no actor", func(t *testing.T) {
 			resp, err := atelet.GetActiveWorkloadStats(ctx, &ateompb.GetActiveWorkloadStatsRequest{})
 			if err != nil || resp.GetNoSampleReason() != ateompb.NoSampleReason_NO_SAMPLE_REASON_NO_WORKLOAD {
@@ -381,8 +549,8 @@ func TestRunServesAWorker(t *testing.T) {
 			}
 		}},
 		{"the router reaches the actor's fiber", func(t *testing.T) {
-			// The stub runtime's fibers serve nothing: routed is a bad
-			// gateway, not a misdirection.
+			// The stub runtime's fibers serve nothing, so a routed request
+			// is a bad gateway, not a misdirection.
 			if st, _ := httpGet(t, "http://"+w.ingress+"/", "team-a/counter-a1"); st != http.StatusBadGateway {
 				t.Fatalf("ingress = %d, want 502 from the routed fiber", st)
 			}
@@ -476,8 +644,8 @@ func TestRunLogsListenFailures(t *testing.T) {
 	}
 }
 
-// TestMainExit runs main in a child process and checks its exit status:
-// 0 for -h, 2 for a bad command line, 1 for any other failure.
+// TestMainExit runs main in a child process and checks its exit status.
+// It is 0 for -h, 2 for a bad command line and 1 for any other failure.
 func TestMainExit(t *testing.T) {
 	if args, ok := os.LookupEnv("ATEOM_FIBERD_TEST_ARGS"); ok {
 		os.Args = append([]string{"ateom-fiberd"}, strings.Fields(args)...)

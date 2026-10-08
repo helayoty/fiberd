@@ -1,6 +1,6 @@
 // ateom-fiberd is a Substrate sandbox-class herder whose actors are
 // fibers: one binary that runs fiberd's agent (the substrate home, the
-// proc backend, a file delta registry) and, in front of it, the gRPC
+// gVisor backend, a file delta registry) and, in front of it, the gRPC
 // service atelet drives, the mTLS ingress atenet-router dials and the
 // readiness endpoint the kubelet probes. It takes the exact arguments
 // Substrate's controller gives every worker container, so a WorkerPool
@@ -33,6 +33,7 @@ import (
 	fhome "github.com/helayoty/fiberd/pkg/home"
 	"github.com/helayoty/fiberd/pkg/runtime/host"
 
+	"github.com/helayoty/fiberd/examples/substrate/capacity"
 	"github.com/helayoty/fiberd/examples/substrate/herder"
 	subhome "github.com/helayoty/fiberd/examples/substrate/home"
 	"github.com/helayoty/fiberd/examples/substrate/ingress"
@@ -64,8 +65,8 @@ type options struct {
 
 // parseArgs reads Substrate's worker container arguments
 // (cmd/atecontroller) from args into fs. The egress and CONNECT listeners
-// are accepted and not served: fibers use the Pod's network directly and
-// have one port.
+// are accepted but not served, because fibers use the Pod's network
+// directly and have one port.
 func parseArgs(fs *flag.FlagSet, args []string) (options, error) {
 	podUID := fs.String("pod-uid", env("POD_UID", ""), "the worker Pod's uid (Substrate keys the herder by it)")
 	listen := fs.String("atunnel-listen-address", ":443", "ingress: where atenet-router connects (mTLS)")
@@ -98,7 +99,7 @@ func run(podUID, listen, credBundle, trustBundle, clientID, readyAddr string, pa
 	stateDir := env("ATEOM_FIBERD_STATE", "/var/lib/fiberd")
 	agentAddr := env("ATEOM_FIBERD_LISTEN", "127.0.0.1:8484")
 	templates := map[string]string{}
-	for _, e := range strings.Split(env("ATEOM_FIBERD_TEMPLATE", "default=/usr/local/bin/refzygote --heap-mb 16 --http"), ";") {
+	for _, e := range strings.Split(env("ATEOM_FIBERD_TEMPLATE", defaultTemplate), ";") {
 		if strings.TrimSpace(e) == "" {
 			continue
 		}
@@ -117,6 +118,11 @@ func run(podUID, listen, credBundle, trustBundle, clientID, readyAddr string, pa
 	iso, err := core.ParseIsolation(env("ATEOM_FIBERD_ISOLATION", "UNTRUSTED"))
 	if err != nil {
 		return fmt.Errorf("ATEOM_FIBERD_ISOLATION: %w", err)
+	}
+	// The shared keys are checked before the home touches any cgroup.
+	deltaKey, sealKey, err := sharedDeltaKeys()
+	if err != nil {
+		return err
 	}
 	h, err := subhome.New(subhome.Config{
 		Audience: podUID, IssuerURL: issuerURL, ProbeSocket: paths.SupportSocket(),
@@ -140,17 +146,17 @@ func run(podUID, listen, credBundle, trustBundle, clientID, readyAddr string, pa
 	c.Listen, c.NodeID, c.StateDir = agentAddr, podUID, stateDir
 	c.Verifier, c.Issuer = "jwks", issuerURL
 	c.InsecurePlaintext = true
-	c.RuntimeName = env("ATEOM_FIBERD_RUNTIME", "proc")
-	c.CRIUBin = env("ATEOM_FIBERD_CRIU", c.CRIUBin)
+	if err := runtimeEnv(&c); err != nil {
+		return err
+	}
 	c.Templates = templates
 	c.RunDir = env("ATEOM_FIBERD_RUN_DIR", "/run/fiberd")
 	c.DeltaRegistry = registry
-	c.DeltaKey, c.DeltaTrust = os.Getenv("ATEOM_FIBERD_DELTA_KEY"), os.Getenv("ATEOM_FIBERD_DELTA_TRUST")
-	c.DeltaSealKey = os.Getenv("ATEOM_FIBERD_DELTA_SEAL_KEY")
+	c.DeltaKey, c.DeltaSealKey = deltaKey, sealKey
+	c.DeltaTrust = os.Getenv("ATEOM_FIBERD_DELTA_TRUST")
 	c.Finish()
-	// Load the keys before the agent starts, or it would race this to
-	// generate them. Snapshots restore on other workers only when they
-	// share the keys.
+	// Load the keys before the agent starts, so a bad key stops the worker
+	// before it serves anything.
 	deltaKeys, err := c.LoadDeltaKeys()
 	if err != nil {
 		return err
@@ -183,6 +189,14 @@ func run(podUID, listen, credBundle, trustBundle, clientID, readyAddr string, pa
 		log.Printf("ingress: not listening on %s: %v (actors are reachable only through the herder's tests)", listen, err)
 	}
 
+	// The capacity report. Substrate places no actor on a worker until it
+	// says what it can host, so a bad bundle stops the worker here.
+	report, err := capacity.New(capacity.Config{Socket: paths.SupportSocket(), CredentialBundle: credBundle,
+		TrustBundle: trustBundle, Dir: env("ATEOM_FIBERD_CAPACITY_DIR", capacity.Dir)})
+	if err != nil {
+		return err
+	}
+
 	// The herder atelet drives.
 	svc := herder.New(herder.Config{
 		Client: client, Grants: h, Router: ing, Paths: paths,
@@ -200,6 +214,13 @@ func run(podUID, listen, credBundle, trustBundle, clientID, readyAddr string, pa
 	}
 	gs := grpc.NewServer()
 	ateompb.RegisterAteomServer(gs, svc)
+	// Reported once atelet's calls can reach the herder: an actor may be
+	// placed here as soon as atelet accepts it.
+	go func() {
+		if err := report.Run(ctx); err != nil && ctx.Err() == nil {
+			log.Printf("capacity: %v", err)
+		}
+	}()
 	go func() {
 		<-ctx.Done()
 		svc.Drain()
@@ -208,13 +229,7 @@ func run(podUID, listen, credBundle, trustBundle, clientID, readyAddr string, pa
 
 	// Readiness for the kubelet: the agent up and every minted template warm.
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) {
-		if !h.Ready() {
-			http.Error(w, "warming", http.StatusServiceUnavailable)
-			return
-		}
-		_, _ = w.Write([]byte("ok\n"))
-	})
+	mux.HandleFunc("GET /readyz", readyz(h.Ready, c.Healthz))
 	go func() {
 		srv := &http.Server{Addr: readyAddr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 		go func() { <-ctx.Done(); _ = srv.Close() }()
@@ -230,6 +245,68 @@ func run(podUID, listen, credBundle, trustBundle, clientID, readyAddr string, pa
 		return nil
 	}
 	return err
+}
+
+// readyz is the kubelet's readiness check. It is 503 while a template
+// warms, and while the agent's /healthz is not 200, as when its audit
+// spool is poisoned. Substrate then places no actor here.
+func readyz(ready func() bool, healthz func(context.Context) error) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !ready() {
+			http.Error(w, "warming", http.StatusServiceUnavailable)
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		defer cancel()
+		if err := healthz(ctx); err != nil {
+			http.Error(w, err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = w.Write([]byte("ok\n"))
+	}
+}
+
+// defaultTemplate is what every ActorTemplate runs unless
+// ATEOM_FIBERD_TEMPLATE names something else: the reference workload as
+// a gVisor sandbox's init, serving HTTP, at its path inside the rootfs.
+const defaultTemplate = "default=/bin/refzygote --heap-mb 16 --gvisor --http"
+
+// runtimeEnv picks the agent's backend from the image's environment. The
+// default is gvisor, so every actor runs behind its own sandbox kernel and
+// the pool's `sandboxClass: gvisor` holds. ATEOM_FIBERD_RUNTIME selects
+// another backend for tests of the mechanism. A gvisor worker whose
+// rootfs is missing refuses to start, since an agent without one would
+// serve and never warm a template.
+func runtimeEnv(c *agent.Config) error {
+	c.RuntimeName = env("ATEOM_FIBERD_RUNTIME", "gvisor")
+	c.GvisorRootfs = env("ATEOM_FIBERD_GVISOR_ROOTFS", "/var/lib/fiberd/gvisor-rootfs")
+	c.Runsc = env("ATEOM_FIBERD_RUNSC", c.Runsc)
+	c.CRIUBin = env("ATEOM_FIBERD_CRIU", c.CRIUBin)
+	if c.RuntimeName == "gvisor" {
+		if st, err := os.Stat(c.GvisorRootfs); err != nil || !st.IsDir() {
+			return fmt.Errorf("ATEOM_FIBERD_GVISOR_ROOTFS: %s is not a directory (the image builds one with hack/gvisor/rootfs.sh)", c.GvisorRootfs)
+		}
+	}
+	return nil
+}
+
+// sharedDeltaKeys returns the paths of the delta keys every worker of a
+// pool shares. A worker without them refuses to start. Keys it generated
+// for itself would keep its snapshots from restoring on any other worker.
+func sharedDeltaKeys() (key, seal string, err error) {
+	for _, k := range []struct {
+		env  string
+		path *string
+	}{{"ATEOM_FIBERD_DELTA_KEY", &key}, {"ATEOM_FIBERD_DELTA_SEAL_KEY", &seal}} {
+		*k.path = os.Getenv(k.env)
+		if *k.path == "" {
+			return "", "", fmt.Errorf("%s is required, so that every worker shares the pool's delta keys", k.env)
+		}
+		if _, err := os.Stat(*k.path); err != nil {
+			return "", "", fmt.Errorf("%s: %w (mount the pool's shared delta keys there)", k.env, err)
+		}
+	}
+	return key, seal, nil
 }
 
 // waitTCP waits for addr to accept connections, or for the agent to fail.

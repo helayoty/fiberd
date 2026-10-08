@@ -13,11 +13,13 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log"
 	"net"
 	"net/http"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/go-jose/go-jose/v4"
@@ -117,11 +119,11 @@ func New(cfg Config) (*Home, error) {
 	}
 	root := cfg.CgroupRoot
 	if root == "" {
-		own, err := cgroup.Delegate(cgroup.Own("/sys/fs/cgroup"))
+		own, err := delegateOwn(cgroupMount, func(d cgroup.Dir) (cgroup.Dir, error) { return cgroup.Delegate(d) }, remountRW)
 		if err != nil {
 			return nil, fmt.Errorf("substrate home: delegate the pod's cgroup: %w", err)
 		}
-		root = own.Child("fiberd").Path
+		root = own.Path
 	}
 	return &Home{
 		cfg:    cfg,
@@ -132,6 +134,26 @@ func New(cfg Config) (*Home, error) {
 		grants: map[string]minted{},
 		ready:  map[string]bool{},
 	}, nil
+}
+
+const cgroupMount = "/sys/fs/cgroup"
+
+// delegateOwn delegates the Pod's own cgroup for the runtime. A worker
+// Pod that is not privileged has its cgroup mount read-only, so the first
+// attempt fails with EROFS. CAP_SYS_ADMIN, which Substrate grants its
+// gVisor class, allows remounting it read-write, and then the delegation
+// is tried once more. Any other failure is returned as it is.
+func delegateOwn(mount string, delegate func(cgroup.Dir) (cgroup.Dir, error), remount func(string) error) (cgroup.Dir, error) {
+	own := cgroup.Own(mount)
+	d, err := delegate(own)
+	if !errors.Is(err, syscall.EROFS) {
+		return d, err
+	}
+	if rerr := remount(mount); rerr != nil {
+		return cgroup.Dir{}, fmt.Errorf("%w (remount %s read-write: %w)", err, mount, rerr)
+	}
+	log.Printf("substrate home: remounted %s read-write (the pod's cgroup mount was read-only)", mount)
+	return delegate(own)
 }
 
 // Handler serves discovery and the JWKS; mount it at IssuerURL.

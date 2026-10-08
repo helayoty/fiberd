@@ -32,11 +32,10 @@ func newHome(t *testing.T, cfg Config) (*Home, string) {
 	return h, srv.URL
 }
 
-// TestGrantsAreMintedPerTemplateAndVerifiable checks that each run of a
-// template asks for its grant. The first run mints one sized by the actor's
-// memory limit and announces it on the lane. The same template again gets
-// the same grant, and another template gets another. Every token verifies
-// against the home's own key set.
+// TestGrantsAreMintedPerTemplateAndVerifiable checks that a template's
+// first run mints a grant sized by the actor's memory limit and announces
+// it on the lane. The same template again gets the same grant, another
+// template gets another, and every token verifies against the home's keys.
 func TestGrantsAreMintedPerTemplateAndVerifiable(t *testing.T) {
 	ctx := context.Background()
 	h, issuer := newHome(t, Config{Isolation: core.Trusted})
