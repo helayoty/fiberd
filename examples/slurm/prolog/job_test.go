@@ -16,7 +16,7 @@ import (
 // A 503, which a poisoned audit spool answers, makes the script stop the
 // agent and start it again in the same allocation. A 200, or a socket
 // that does not answer (000), leaves the agent running. SIGTERM then ends
-// the script cleanly.
+// the script cleanly, and only once the agent has drained.
 func TestJobRestartsUnhealthyAgent(t *testing.T) {
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skip("no bash")
@@ -29,21 +29,34 @@ func TestJobRestartsUnhealthyAgent(t *testing.T) {
 		name     string
 		code     string
 		restarts bool
+		// drains makes the fake agent take a while to stop on SIGTERM and
+		// write a marker when done. The script must not exit before that,
+		// or slurmstepd kills the drain.
+		drains bool
 	}{
 		{name: "a healthy agent keeps running", code: "200"},
 		{name: "an agent not answering yet is left alone", code: "000"},
 		{name: "a 503 restarts the agent", code: "503", restarts: true},
+		{name: "SIGTERM waits for the agent to drain", code: "200", drains: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
 			bin := filepath.Join(dir, "bin")
 			starts := filepath.Join(dir, "starts")
+			drained := filepath.Join(dir, "drained")
+			agent := "echo start >> " + starts + "\nexec sleep 30\n"
+			if tc.drains {
+				// Its output goes elsewhere, so the test's pipes close when
+				// the script exits, not when the agent does.
+				agent = "exec >/dev/null 2>&1\necho start >> " + starts +
+					"\ntrap 'kill $s; sleep 0.5; echo done > " + drained + "; exit 0' TERM\nsleep 30 & s=$!\nwait $s\n"
+			}
 			if err := os.Mkdir(bin, 0o755); err != nil {
 				t.Fatal(err)
 			}
 			for name, body := range map[string]string{
-				"fiberd-slurm": "echo start >> " + starts + "\nexec sleep 30\n",
+				"fiberd-slurm": agent,
 				"curl":         "printf %s " + tc.code + "\n",
 			} {
 				if err := os.WriteFile(filepath.Join(bin, name), []byte("#!/bin/sh\n"+body), 0o755); err != nil {
@@ -88,6 +101,9 @@ func TestJobRestartsUnhealthyAgent(t *testing.T) {
 			case <-time.After(15 * time.Second):
 				_ = cmd.Process.Kill()
 				t.Fatalf("script kept running after SIGTERM\n%s", out.String())
+			}
+			if _, err := os.Stat(drained); tc.drains && err != nil {
+				t.Fatalf("script exited before the agent drained: %v\n%s", err, out.String())
 			}
 			if tc.restarts != strings.Contains(out.String(), "/healthz is 503") {
 				t.Fatalf("restart log = %v, want %v\n%s", !tc.restarts, tc.restarts, out.String())

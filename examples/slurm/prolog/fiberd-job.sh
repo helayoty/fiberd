@@ -51,6 +51,8 @@ while [ "$stopping" = 0 ]; do
   watcher=$!
   wait "$agent"
   rc=$?
+  # A trapped signal ends the wait early. Wait again for the agent's drain.
+  [ "$stopping" = 1 ] && wait "$agent" 2>/dev/null
   kill "$watcher" 2>/dev/null
   agent=""
   [ "$stopping" = 1 ] && break
