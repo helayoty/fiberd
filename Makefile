@@ -24,9 +24,22 @@ ZYGOTE_LDFLAGS := -pie -Wl,-z,relro,-z,now
 ifneq ($(filter aarch64 arm64,$(shell uname -m)),)
 ZYGOTE_CFLAGS += -mbranch-protection=none
 endif
+# Seconds per fuzz harness (make fuzz).
+FUZZTIME ?= 120
+# Where the conformance targets that run in the dev container keep their
+# state and logs. On macOS it is the named volume fiberd-conform, mounted
+# at /conform by hack/dev/run.sh, because bin/ in the shared folder is slow
+# enough to time tests out. The volume outlives the container, so
+# `make conform-logs` reads it. Linux and CI keep bin/, where CI uploads
+# the logs from.
+ifeq ($(shell uname -s),Darwin)
+CONFORM_DIR ?= /conform
+else
+CONFORM_DIR ?= $(BIN)
+endif
 
 .PHONY: all build test vet lint proto proto-lint proto-check clean \
-        bench zygote conform-stub conform-signed conform-proc conform-gvisor conform-runc conform-hyperlight-fake conform-hyperlight \
+        bench zygote fuzz conform-stub conform-signed conform-logs conform-proc conform-gvisor conform-runc conform-hyperlight-fake conform-hyperlight \
         hyperlight-helper linux-hyperlight-check overcommit kind-up kind-down kind-image conform-kind slurm-up slurm-down conform-slurm example-knative example-knative-kvm example-kata example-substrate \
         registry-start mobility linux-shell linux-check linux-gvisor-check linux-test linux-lint bench-e2e \
         compare-phase0 compare-phase1 compare-phase2 compare-phase3 compare-phase4 compare-down
@@ -46,16 +59,19 @@ conform-signed: ## same, over real signed grants: grant-issuer serve + -verifier
 	CONFORM_SIGNED=1 CONFORM_STATE=$(BIN)/conform-state-signed hack/conform/stub.sh run
 
 conform-proc: ## C1-C10 against the fork runtime with real cgroups, inside the Linux dev container
-	hack/dev/run.sh env CONFORM_RUNTIME=proc CONFORM_SIGNED=1 CONFORM_STATE=$(BIN)/conform-state-proc hack/conform/stub.sh run
+	hack/dev/run.sh env CONFORM_RUNTIME=proc CONFORM_SIGNED=1 CONFORM_STATE=$(CONFORM_DIR)/conform-state-proc hack/conform/stub.sh run
 
 conform-gvisor: ## C1-C10 against the gvisor backend (a runsc sandbox per fiber), inside the Linux dev container
-	hack/dev/run.sh env CONFORM_RUNTIME=gvisor CONFORM_SIGNED=1 CONFORM_STATE=$(BIN)/conform-state-gvisor hack/conform/stub.sh run
+	hack/dev/run.sh env CONFORM_RUNTIME=gvisor CONFORM_SIGNED=1 CONFORM_STATE=$(CONFORM_DIR)/conform-state-gvisor hack/conform/stub.sh run
 
 conform-runc: ## C1-C10 against the runc backend (the zygote as an OCI container's init), inside the Linux dev container
-	hack/dev/run.sh env CONFORM_RUNTIME=runc CONFORM_SIGNED=1 CONFORM_STATE=$(BIN)/conform-state-runc hack/conform/stub.sh run
+	hack/dev/run.sh env CONFORM_RUNTIME=runc CONFORM_SIGNED=1 CONFORM_STATE=$(CONFORM_DIR)/conform-state-runc hack/conform/stub.sh run
 
 conform-hyperlight-fake: ## C1-C10 against the hyperlight backend over the fake helper (no hypervisor), inside the Linux dev container
-	hack/dev/run.sh env CONFORM_RUNTIME=hyperlight CONFORM_SIGNED=1 CONFORM_STATE=$(BIN)/conform-state-hyperlight hack/conform/stub.sh run
+	hack/dev/run.sh env CONFORM_RUNTIME=hyperlight CONFORM_SIGNED=1 CONFORM_STATE=$(CONFORM_DIR)/conform-state-hyperlight hack/conform/stub.sh run
+
+conform-logs: ## list the logs the dev-container conformance targets left in $(CONFORM_DIR)
+	hack/dev/run.sh find $(CONFORM_DIR) -path '*conform-state-*' -name '*.log'
 
 hyperlight-helper: ## build the Hyperlight guest and helper (Rust) into bin/, inside the dev container
 	hack/dev/run.sh hack/hyperlight/build.sh
@@ -66,7 +82,7 @@ linux-hyperlight-check: ## probe /dev/kvm and run the helper's self-test (needs 
 conform-hyperlight: ## C1-C10 against the hyperlight backend with the real helper (needs /dev/kvm on the host)
 	FIBERD_DEV_DOCKER_ARGS="--device /dev/kvm" hack/dev/run.sh env CONFORM_RUNTIME=hyperlight CONFORM_SIGNED=1 \
 	  CONFORM_HL_HELPER=/src/bin/hyperlight-helper CONFORM_HL_GUEST=/src/bin/hyperlight-guest \
-	  CONFORM_STATE=$(BIN)/conform-state-hyperlight-kvm hack/conform/stub.sh run
+	  CONFORM_STATE=$(CONFORM_DIR)/conform-state-hyperlight-kvm hack/conform/stub.sh run
 
 ## The Kubernetes example (examples/kubernetes, its own module): the issuer
 ## as a controller, a grant Pod with the agent as PID 1, conformance from
@@ -79,10 +95,10 @@ kind-up: ## create the kind cluster (examples/kubernetes/kind/kind.yaml)
 kind-down: ## delete the kind cluster
 	examples/kubernetes/kind/conform.sh down
 
-kind-image: ## build fiberd:kind (fiberd-k8s, grant-controller, zygote, criu) and load it into the cluster
+kind-image: ## build fiberd:kind (fiberd-k8s, grant-controller, zygote, criu, runsc and a gVisor rootfs) and load it into the cluster
 	examples/kubernetes/kind/conform.sh image
 
-conform-kind: ## C1-C10 + the overcommit storm against grant Pods in kind (needs docker, kind, kubectl, go)
+conform-kind: ## C1-C10, the overcommit storm and an UNTRUSTED gVisor session check against grant Pods in kind (needs docker, kind, kubectl, go)
 	examples/kubernetes/kind/conform.sh run
 
 ## The Slurm example (examples/slurm, its own module): a one-node Slurm in
@@ -168,6 +184,10 @@ zygote: ## build bin/refzygote, the reference zygote, with TLS for handoff grant
 	@mkdir -p $(BIN)
 	$(CC) $(ZYGOTE_CFLAGS) $(ZYGOTE_LDFLAGS) -Wall -Wextra -pthread -DFZ_TLS -o $(BIN)/refzygote zygote/refzygote.c zygote/libfiberzygote.c -lssl -lcrypto
 
+fuzz: ## fuzz the zygote's parsers (libFuzzer) and the handoff parser (go test -fuzz), FUZZTIME seconds each
+	FUZZTIME=$(FUZZTIME) FUZZ_OUT=$(BIN)/fuzz zygote/fuzz/run.sh
+	$(GO) test -run='^$$' -fuzz=FuzzServerName -fuzztime=$(FUZZTIME)s ./pkg/handoff/
+
 ## Linux-only work runs in the dev container (hack/dev): privileged,
 ## private cgroup namespace, criu installed. Needs Docker.
 
@@ -186,10 +206,10 @@ linux-test: ## unit tests inside the container (Linux-only packages included), f
 linux-lint: ## golangci-lint inside the container, so the Linux-only files are analysed too (what CI runs)
 	hack/dev/run.sh make lint
 
-bench: ## the 50-way storm and throughput through the proc runtime (TestStormNumbers), in the container
+bench: ## the 50-way storm and throughput through the proc runtime, in the container
 	hack/dev/run.sh env FIBERD_BENCH=1 go test -count=1 -v -run TestStormNumbers ./tests/proc/
 
-bench-e2e: ## time Clone over gRPC end to end, per stage, in the container (audit and snapshot on a disk volume)
+bench-e2e: ## time Clone over gRPC end to end, per stage, in the container
 	FIBERD_DEV_DOCKER_ARGS="-v fiberd-bench:/bench" hack/dev/run.sh env FIBERD_BENCH=1 FIBERD_BENCH_STATE=/bench \
 	  go test -count=1 -v -run TestE2ECloneNumbers ./tests/proc/
 

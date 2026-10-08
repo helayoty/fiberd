@@ -5,7 +5,9 @@
 #   hack/dev/run.sh bash                 interactive shell
 #   hack/dev/run.sh go test ./...        anything else
 #
-# Module and build caches live in named volumes so rebuilds are fast.
+# Module, build and cargo registry caches live in named volumes so
+# rebuilds are fast. The fiberd-conform volume at /conform holds
+# conformance state and logs on macOS (see CONFORM_DIR in the Makefile).
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
@@ -37,6 +39,8 @@ exec docker run --rm $tty $net ${FIBERD_DEV_DOCKER_ARGS:-} \
   -v "$PWD:/src" \
   -v fiberd-gomod:/go/pkg/mod \
   -v fiberd-gocache:/root/.cache/go-build \
+  -v fiberd-cargo-registry:/usr/local/cargo/registry \
+  -v fiberd-conform:/conform \
   -e GOTOOLCHAIN=auto \
   -w /src \
   "$IMAGE" "$@"

@@ -49,6 +49,34 @@ jobs:
             examples/kubernetes/go.sum
       - run: make lint
 
+  fuzz:
+    name: fuzz the zygote's parsers (libFuzzer) and the handoff SNI parser (go test -fuzz)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: install clang with libFuzzer
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends clang libclang-rt-dev
+      # 60 seconds per harness. A crash fails the job and leaves its input
+      # under bin/fuzz/crashes/ (the Go fuzzer writes to testdata/fuzz/).
+      - run: make fuzz FUZZTIME=60
+      - name: keep the crashing inputs
+        if: failure()
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzz-crashes
+          path: |
+            bin/fuzz/crashes/
+            bin/fuzz/*.log
+            pkg/handoff/testdata/fuzz/
+          if-no-files-found: ignore
+
   unit:
     name: unit tests (${{ matrix.os }})
     strategy:
