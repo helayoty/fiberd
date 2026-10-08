@@ -54,6 +54,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/helayoty/fiberd/pkg/backend"
 	"github.com/helayoty/fiberd/pkg/core"
@@ -521,6 +522,17 @@ type runDirRecord struct {
 // handoffFile, in a checkpoint of a handoff fiber, records the inode
 // its channel had, the key criu restores a replacement under.
 const handoffFile = "handoff.json"
+
+// parkQuiesce bounds how long Park retries a dump that failed on a
+// connection from outside the container.
+const parkQuiesce = time.Second
+
+// hostSocket reports a dump that failed on a socket from outside the
+// dumped network namespace. A connection accepted from the host is one,
+// since the kernel makes the accepted end in the dialer's namespace.
+func hostSocket(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "Unix socket") && strings.Contains(err.Error(), "not found")
+}
 
 type handoffRecord struct {
 	Inode string `json:"inode"`
@@ -1352,7 +1364,16 @@ func (b *Backend) Park(ctx context.Context, fiberID string, spec backend.ParkSpe
 		}
 		extra = append(extra, "--external", "unix["+ino+"]")
 	}
-	return b.criu.DumpWith(ctx, pid, spec.Dir, spec.Sync, extra)
+	err := b.criu.DumpWith(ctx, pid, spec.Dir, spec.Sync, extra)
+	// The fiber closes a host connection moments after its client does.
+	for end := time.Now().Add(parkQuiesce); b.opt.Launcher != nil && hostSocket(err) && time.Now().Before(end); {
+		time.Sleep(20 * time.Millisecond)
+		err = b.criu.DumpWith(ctx, pid, spec.Dir, spec.Sync, extra)
+	}
+	if b.opt.Launcher != nil && hostSocket(err) {
+		return fmt.Errorf("%s: park %s: a client from outside the container is still connected: %w", b.Name(), fiberID, err)
+	}
+	return err
 }
 
 // handoffInherit returns the criu arguments and files that restore a

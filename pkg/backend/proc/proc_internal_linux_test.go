@@ -2171,3 +2171,22 @@ func TestWarmVerifiesRegistryTemplate(t *testing.T) {
 		})
 	}
 }
+
+func TestHostSocket(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "criu cannot find a host socket", err: errors.New("criu dump pid 7: exit status 1: Error (criu/sk-unix.c:351): unix: Unix socket 60373 not found"), want: true},
+		{name: "another dump failure", err: errors.New("criu dump pid 7: exit status 1: Error (criu/cr-dump.c:2011): Dumping FAILED")},
+		{name: "no error"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := hostSocket(tc.err); got != tc.want {
+				t.Fatalf("hostSocket = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
