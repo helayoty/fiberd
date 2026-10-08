@@ -33,7 +33,7 @@ func TestGateway(t *testing.T) {
 	warm := newHarness(t, core.TierWarm)
 	gws := map[*harness]http.Handler{}
 	for _, h := range []*harness{ckpt, warm} {
-		gws[h] = (&rpc.Gateway{Server: h.server, Health: rpc.HealthFunc(func() uint64 { return 7 }, h.health, core.TierCheckpoint)}).Handler()
+		gws[h] = (&rpc.Gateway{Server: h.server, Health: rpc.HealthFunc(func() uint64 { return 7 }, h.health, core.TierCheckpoint, nil)}).Handler()
 	}
 	g1 := jsonGrant(t, core.Grant{UID: "g1", Audience: "node-a", FiberMax: 2})
 	full := jsonGrant(t, core.Grant{UID: "g2", Audience: "node-a", FiberMax: 1})
@@ -207,19 +207,34 @@ func checkStatusBody(t *testing.T, body []byte, code codes.Code, miss *grantv1.M
 	}
 }
 
-// Without a Health func, /healthz still answers, with an empty object.
+// TestGatewayHealthz pins the /healthz body and status. Without a Health
+// func it is an empty object. A poisoned audit spool is a 503 with the
+// word "poisoned", never the fsync error, which names the spool's path.
+// A stale lane alone stays 200, so the two read apart.
 func TestGatewayHealthz(t *testing.T) {
-	health := core.NewSourceHealth(10*time.Second, time.Now())
+	fresh := core.NewSourceHealth(10*time.Second, time.Now())
+	stale := core.NewSourceHealth(10*time.Second, time.Now().Add(-time.Minute))
+	ok := func() error { return nil }
+	poisoned := func() error { return errors.New("sync /var/lib/fiberd/private/audit.jsonl: input/output error") }
 	cases := []struct {
-		name string
-		gw   *rpc.Gateway
-		want map[string]any
+		name   string
+		gw     *rpc.Gateway
+		status int
+		want   map[string]any
 	}{
-		{name: "no health func is an empty object", gw: &rpc.Gateway{}, want: map[string]any{}},
-		{name: "no lane omits lane health", gw: &rpc.Gateway{Health: rpc.HealthFunc(func() uint64 { return 3 }, nil, core.TierWarm)},
-			want: map[string]any{"epoch": float64(3), "tier": core.TierWarm.String()}},
-		{name: "a fresh lane is healthy", gw: &rpc.Gateway{Health: rpc.HealthFunc(func() uint64 { return 4 }, health, core.TierBasic)},
-			want: map[string]any{"epoch": float64(4), "tier": core.TierBasic.String(), "grantLaneHealthy": true}},
+		{name: "no health func is an empty object", gw: &rpc.Gateway{}, status: http.StatusOK, want: map[string]any{}},
+		{name: "no lane and no spool omit their keys", gw: &rpc.Gateway{Health: rpc.HealthFunc(func() uint64 { return 3 }, nil, core.TierWarm, nil)},
+			status: http.StatusOK, want: map[string]any{"epoch": float64(3), "tier": core.TierWarm.String()}},
+		{name: "a fresh lane and a healthy spool are 200", gw: &rpc.Gateway{Health: rpc.HealthFunc(func() uint64 { return 4 }, fresh, core.TierBasic, ok)},
+			status: http.StatusOK, want: map[string]any{"epoch": float64(4), "tier": core.TierBasic.String(), "grantLaneHealthy": true, "audit": "ok"}},
+		{name: "a stale lane alone is still 200", gw: &rpc.Gateway{Health: rpc.HealthFunc(func() uint64 { return 5 }, stale, core.TierBasic, ok)},
+			status: http.StatusOK, want: map[string]any{"epoch": float64(5), "tier": core.TierBasic.String(), "grantLaneHealthy": false, "audit": "ok"}},
+		{name: "a poisoned spool is 503 without the fsync error", gw: &rpc.Gateway{Health: rpc.HealthFunc(func() uint64 { return 6 }, fresh, core.TierBasic, poisoned)},
+			status: http.StatusServiceUnavailable,
+			want:   map[string]any{"epoch": float64(6), "tier": core.TierBasic.String(), "grantLaneHealthy": true, "audit": "poisoned"}},
+		{name: "a stale lane and a poisoned spool are both reported", gw: &rpc.Gateway{Health: rpc.HealthFunc(func() uint64 { return 7 }, stale, core.TierBasic, poisoned)},
+			status: http.StatusServiceUnavailable,
+			want:   map[string]any{"epoch": float64(7), "tier": core.TierBasic.String(), "grantLaneHealthy": false, "audit": "poisoned"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -229,8 +244,9 @@ func TestGatewayHealthz(t *testing.T) {
 			if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 				t.Fatalf("healthz %q: %v", rec.Body.String(), err)
 			}
-			if rec.Code != http.StatusOK || len(got) != len(tc.want) {
-				t.Fatalf("healthz = %d %v, want 200 %v", rec.Code, got, tc.want)
+			if rec.Code != tc.status || len(got) != len(tc.want) || rec.Header().Get("Content-Type") != "application/json" ||
+				strings.Contains(rec.Body.String(), "/var/lib") {
+				t.Fatalf("healthz = %d %v, want %d %v", rec.Code, got, tc.status, tc.want)
 			}
 			for k, v := range tc.want {
 				if got[k] != v {

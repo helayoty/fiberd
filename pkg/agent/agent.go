@@ -11,7 +11,6 @@ package agent
 import (
 	"context"
 	"crypto/ed25519"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -109,6 +108,9 @@ type Config struct {
 	// open. Tests use it to find ":0" ports. http and handoff are nil when
 	// off.
 	ready func(grpc, http, handoff net.Addr)
+	// auditHealth, when set, replaces the spool's Poisoned on /healthz.
+	// Tests use it, since a real fsync cannot be made to fail.
+	auditHealth func() error
 }
 
 // The port range inet4 and inet6 endpoints are handed out from, one port
@@ -617,12 +619,13 @@ func RunContext(ctx context.Context, c *Config, newHome HomeFactory) error {
 	go home.Drive(ctx, h, ag)
 
 	// 5. Admin socket.
-	healthz := rpc.HealthFunc(ep.Current, h.Health(), rt.Tier())
+	auditHealth := spool.Poisoned
+	if c.auditHealth != nil {
+		auditHealth = c.auditHealth
+	}
+	healthz := rpc.HealthFunc(ep.Current, h.Health(), rt.Tier(), auditHealth)
 	admin := http.NewServeMux()
-	admin.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(healthz())
-	})
+	admin.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { rpc.WriteHealth(w, healthz()) })
 	c.hooks.register(admin, h, ag, healthz)
 	adminSock := c.AdminSocket()
 	_ = os.Remove(adminSock)
