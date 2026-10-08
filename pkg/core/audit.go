@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -115,7 +116,11 @@ type Spool struct {
 	syncCond *sync.Cond // broadcast when an fsync ends
 	syncing  bool       // an fsync is in flight
 	synced   uint64     // every record written up to this count is durable
-	poison   error      // the first fsync failure. Sticky, so no fsync runs after it
+
+	// poison is the first fsync failure. It is sticky, so no fsync runs
+	// after it. It is written under syncMu and read without a lock, so
+	// Poisoned costs the append path nothing.
+	poison atomic.Pointer[error]
 }
 
 // OpenSpool opens or creates the spool, resumes the sequence and the
@@ -230,8 +235,8 @@ func (s *Spool) syncThrough(n uint64) error {
 		switch {
 		case s.synced >= n:
 			return nil
-		case s.poison != nil:
-			return s.poison
+		case s.poison.Load() != nil:
+			return *s.poison.Load()
 		case s.syncing:
 			s.syncCond.Wait()
 			continue
@@ -245,13 +250,23 @@ func (s *Spool) syncThrough(n uint64) error {
 		s.syncMu.Lock()
 		s.syncing = false
 		if err != nil {
-			s.poison = err
+			s.poison.Store(&err)
 			log.Printf("audit: fsync failed, sync records are refused until restart: %v", err)
 		} else {
 			s.synced = max(s.synced, upto)
 		}
 		s.syncCond.Broadcast()
 	}
+}
+
+// Poisoned returns the fsync failure that poisoned the spool, or nil. A
+// poisoned spool refuses every Sync record until the agent restarts, so
+// the agent reports it on /healthz. It takes no lock.
+func (s *Spool) Poisoned() error {
+	if p := s.poison.Load(); p != nil {
+		return *p
+	}
+	return nil
 }
 
 // write assigns rec the next sequence number, chains and writes it. On

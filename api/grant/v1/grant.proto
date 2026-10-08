@@ -43,14 +43,14 @@ enum Durability {
   // the OS has not flushed yet.
   BEST_EFFORT = 1;
   // Ack only once the record is durable on local disk. After a failed
-  // fsync, operations under the grant fail until the agent restarts.
+  // fsync, every SYNC operation fails until the agent restarts.
   SYNC = 2;
 }
 
 // Isolation is whether the issuer trusts the grant's code with the host
-// kernel. Unset is UNTRUSTED: only a home whose backend sandboxes fibers
-// from the host (gVisor, Hyperlight) may serve it. A home that does not
-// refuses the grant with FailedPrecondition.
+// kernel. Unset is UNTRUSTED. Only a home whose backend sandboxes fibers
+// from the host (gVisor, Hyperlight) may serve it. Other homes refuse the
+// grant with FailedPrecondition.
 enum Isolation {
   ISOLATION_UNSPECIFIED = 0;
   UNTRUSTED = 1;
@@ -59,7 +59,7 @@ enum Isolation {
 
 // EndpointMode is how callers reach a grant's fibers. HANDOFF needs a
 // grant bound to a caller certificate and a home whose backend can pass
-// connections to fibers (proc, runc); others refuse the grant with
+// connections to fibers (proc, runc). Other homes refuse the grant with
 // FailedPrecondition.
 enum EndpointMode {
   // Each fiber listens on an endpoint of its own.

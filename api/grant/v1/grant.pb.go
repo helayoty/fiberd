@@ -111,7 +111,7 @@ const (
 	// the OS has not flushed yet.
 	Durability_BEST_EFFORT Durability = 1
 	// Ack only once the record is durable on local disk. After a failed
-	// fsync, operations under the grant fail until the agent restarts.
+	// fsync, every SYNC operation fails until the agent restarts.
 	Durability_SYNC Durability = 2
 )
 
@@ -157,9 +157,9 @@ func (Durability) EnumDescriptor() ([]byte, []int) {
 }
 
 // Isolation is whether the issuer trusts the grant's code with the host
-// kernel. Unset is UNTRUSTED: only a home whose backend sandboxes fibers
-// from the host (gVisor, Hyperlight) may serve it. A home that does not
-// refuses the grant with FailedPrecondition.
+// kernel. Unset is UNTRUSTED. Only a home whose backend sandboxes fibers
+// from the host (gVisor, Hyperlight) may serve it. Other homes refuse the
+// grant with FailedPrecondition.
 type Isolation int32
 
 const (
@@ -211,7 +211,7 @@ func (Isolation) EnumDescriptor() ([]byte, []int) {
 
 // EndpointMode is how callers reach a grant's fibers. HANDOFF needs a
 // grant bound to a caller certificate and a home whose backend can pass
-// connections to fibers (proc, runc); others refuse the grant with
+// connections to fibers (proc, runc). Other homes refuse the grant with
 // FailedPrecondition.
 type EndpointMode int32
 

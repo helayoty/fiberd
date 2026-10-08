@@ -12,15 +12,13 @@ import (
 )
 
 // TestSpoolFsyncFailure pins what a failed fsync means. Every sync append
-// whose record no earlier fsync made durable returns ErrAudit wrapping the
-// fsync error, whether it led the fsync, waited on it, or wrote while it
-// ran. The failure is sticky. A later sync append is refused without
-// another fsync, a best-effort append still lands, Close returns the
-// failure, and what is on disk still verifies.
+// no earlier fsync made durable gets ErrAudit wrapping the fsync error,
+// whether it led, waited or wrote during the fsync. The failure is sticky.
+// Later sync appends are refused without an fsync, best-effort appends
+// still land, Close returns the failure, and the disk still verifies.
 //
 // The first fsync is held until every waiter has written its record.
-// failOn says which fsync call fails: the first (the leader alone is
-// covered) or the second (the group fsync covering every waiter).
+// failOn picks the failing fsync, the leader's own or the group one.
 func TestSpoolFsyncFailure(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -134,6 +132,45 @@ func TestSpoolFsyncFailure(t *testing.T) {
 			}
 			if _, err := core.VerifySpool(dir+"/audit.jsonl", nil); err != nil {
 				t.Fatalf("VerifySpool: %v", err)
+			}
+		})
+	}
+}
+
+// TestSpoolPoisoned pins what Poisoned reports, since /healthz turns it
+// into a 503. It is nil until an fsync fails, then the fsync error, and
+// it stays so after Close. A best-effort append runs no fsync, so a
+// failing fsync poisons the spool only at Close, which fsyncs.
+func TestSpoolPoisoned(t *testing.T) {
+	boom := errors.New("EIO")
+	cases := []struct {
+		name  string
+		fsync func(*os.File) error
+		d     core.Durability
+		want  error // after the append
+		close error // after Close
+	}{
+		{name: "a healthy spool reports nil", fsync: (*os.File).Sync, d: core.Sync},
+		{name: "a failed fsync poisons the spool", fsync: func(*os.File) error { return boom }, d: core.Sync, want: boom, close: boom},
+		{name: "best effort runs no fsync until Close", fsync: func(*os.File) error { return boom }, d: core.BestEffort, close: boom},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s, err := core.OpenSpool(t.TempDir(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := s.Poisoned(); err != nil {
+				t.Fatalf("Poisoned on a new spool = %v, want nil", err)
+			}
+			core.SetSpoolFsync(s, tc.fsync)
+			_ = s.Append(context.Background(), tc.d, core.AuditRecord{Event: "park", Fence: core.Fence{GrantUID: "g", Epoch: 1, Seq: 1}})
+			if got := s.Poisoned(); !errors.Is(got, tc.want) || (tc.want == nil) != (got == nil) {
+				t.Fatalf("Poisoned = %v, want %v", got, tc.want)
+			}
+			_ = s.Close()
+			if got := s.Poisoned(); !errors.Is(got, tc.close) || (tc.close == nil) != (got == nil) {
+				t.Fatalf("Poisoned after Close = %v, want %v", got, tc.close)
 			}
 		})
 	}
