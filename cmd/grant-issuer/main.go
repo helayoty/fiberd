@@ -39,6 +39,9 @@ import (
 	"github.com/helayoty/fiberd/pkg/tlsconf"
 )
 
+// version is set at link time with -ldflags "-X main.version=v0.1.0".
+var version string
+
 func main() {
 	os.Exit(run(context.Background(), os.Args[1:], os.Stdout, os.Stderr))
 }
@@ -46,11 +49,20 @@ func main() {
 // run dispatches a subcommand. It returns exit code 0 on success or -h,
 // 2 for a usage error, and 1 when the subcommand fails.
 func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
-	return cli.Run(args, "usage: grant-issuer keygen|mint|serve [flags]; -h on a subcommand for its flags", map[string]cli.Command{
-		"keygen": func(a []string) error { return keygen(a, stdout, stderr) },
-		"mint":   func(a []string) error { return mint(a, stdout, stderr) },
-		"serve":  func(a []string) error { return serve(ctx, a, stderr) },
+	return cli.Run(args, "usage: grant-issuer keygen|mint|serve [flags], or -version; -h on a subcommand for its flags", map[string]cli.Command{
+		"-version":  printVersion(stdout),
+		"--version": printVersion(stdout),
+		"keygen":    func(a []string) error { return keygen(a, stdout, stderr) },
+		"mint":      func(a []string) error { return mint(a, stdout, stderr) },
+		"serve":     func(a []string) error { return serve(ctx, a, stderr) },
 	}, stderr)
+}
+
+func printVersion(stdout io.Writer) cli.Command {
+	return func([]string) error {
+		_, err := fmt.Fprintln(stdout, "grant-issuer", cli.Version(version))
+		return err
+	}
 }
 
 func keygen(args []string, stdout, stderr io.Writer) error {

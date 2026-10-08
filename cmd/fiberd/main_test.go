@@ -57,9 +57,11 @@ func TestRun(t *testing.T) {
 		// its admin socket answers.
 		serve      bool
 		wantCode   int
+		wantStdout string
 		wantStderr string
 	}{
 		{name: "-h prints the flags", args: []string{"-h"}, wantCode: 0, wantStderr: "-verifier"},
+		{name: "-version prints the version and serves nothing", args: []string{"-version"}, wantCode: 0, wantStdout: "fiberd "},
 		{name: "an unknown flag", args: []string{"-nope"}, wantCode: 2, wantStderr: "flag provided but not defined: -nope"},
 		{name: "a bad flag value", args: []string{"-stale-ttl", "later"}, wantCode: 2, wantStderr: "invalid value"},
 		{name: "no verifier", args: []string{"-insecure-plaintext"}, wantCode: 1, wantStderr: "-verifier is required"},
@@ -78,9 +80,9 @@ func TestRun(t *testing.T) {
 			args := append([]string{"-state", state, "-listen", "127.0.0.1:0", "-runtime", "stub"}, tc.args...)
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			var stderr syncBuffer
+			var stdout, stderr syncBuffer
 			done := make(chan int, 1)
-			go func() { done <- run(ctx, args, &stderr) }()
+			go func() { done <- run(ctx, args, &stdout, &stderr) }()
 			if tc.serve {
 				deadline := time.Now().Add(20 * time.Second)
 				for !adminHealthy(sock) {
@@ -106,6 +108,9 @@ func TestRun(t *testing.T) {
 			}
 			if !strings.Contains(stderr.String(), tc.wantStderr) {
 				t.Fatalf("stderr %q, want %q", stderr.String(), tc.wantStderr)
+			}
+			if !strings.HasPrefix(stdout.String(), tc.wantStdout) {
+				t.Fatalf("stdout %q, want it to start with %q", stdout.String(), tc.wantStdout)
 			}
 			if tc.serve {
 				if _, err := os.Stat(sock); !errors.Is(err, os.ErrNotExist) {

@@ -13,29 +13,40 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"log"
 	"os"
 
+	"github.com/helayoty/fiberd/internal/cli"
 	"github.com/helayoty/fiberd/pkg/agent"
 )
 
+// version is set at link time with -ldflags "-X main.version=v0.1.0".
+var version string
+
 func main() {
-	os.Exit(run(context.Background(), os.Args[1:], os.Stderr))
+	os.Exit(run(context.Background(), os.Args[1:], os.Stdout, os.Stderr))
 }
 
 // run is fiberd until ctx ends, SIGINT or SIGTERM. It returns exit code
-// 0 for a clean stop or -h, 2 for bad flags, and 1 when the agent fails.
-func run(ctx context.Context, args []string, stderr io.Writer) int {
+// 0 for a clean stop, -h or -version, 2 for bad flags, and 1 when the
+// agent fails.
+func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("fiberd", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	var c agent.Config
 	c.Bind(fs)
+	showVersion := fs.Bool("version", false, "print the version and exit")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
 		}
 		return 2
+	}
+	if *showVersion {
+		_, _ = fmt.Fprintln(stdout, "fiberd", cli.Version(version))
+		return 0
 	}
 	c.Finish()
 	logger := log.New(stderr, "", log.LstdFlags)

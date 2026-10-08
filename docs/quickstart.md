@@ -62,7 +62,7 @@ curl -s -X POST localhost:8485/v1/park -d '{"fiberId":"g1/1/2"}'   # 404, the re
 
 ## Dial a real fiber
 
-The fork [zygote](glossary.md#zygote), [cgroups](glossary.md#cgroup), [CRIU](glossary.md#criu) and the sandbox [backends](glossary.md#backend) need a Linux kernel. On a Mac, `hack/dev/run.sh bash` opens a shell in the Linux dev container, with this repository at `/src`. Run these steps there, since the container has every tool they use, `jq` included. They start the agent with `-runtime proc`, the proc backend, and refzygote, the reference template, serving HTTP.
+The fork [zygote](glossary.md#zygote), [cgroups](glossary.md#cgroup), [CRIU](glossary.md#criu) and the sandbox [backends](glossary.md#backend) need a Linux kernel. On a Mac, `hack/dev/run.sh bash` opens a shell in the Linux dev container, with this repository at `/src`. Run these steps there, since the container has every tool they use, `jq` included. The `make build zygote` there replaces the Mac binaries in `bin/` with Linux ones, so run `make build` on the Mac again afterwards. They start the agent with `-runtime proc`, the proc backend, and refzygote, the reference template, serving HTTP.
 
 ```bash
 make build zygote

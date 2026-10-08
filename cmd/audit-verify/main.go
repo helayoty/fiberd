@@ -18,8 +18,12 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 
+	"github.com/helayoty/fiberd/internal/cli"
 	"github.com/helayoty/fiberd/pkg/core"
 )
+
+// version is set at link time with -ldflags "-X main.version=v0.1.0".
+var version string
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
@@ -32,8 +36,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	spool := fs.String("spool", "/var/lib/fiberd/private/audit.jsonl", "the audit spool to check")
 	trust := fs.String("trust", "", "JWK or JWKS of the Ed25519 keys checkpoints may be signed with (required). A private JWK counts as its public half")
+	showVersion := fs.Bool("version", false, "print the version and exit")
 	if err := fs.Parse(args); err != nil {
 		return 2
+	}
+	if *showVersion {
+		_, _ = fmt.Fprintln(stdout, "audit-verify", cli.Version(version))
+		return 0
 	}
 	fail := func(format string, a ...any) int {
 		_, _ = fmt.Fprintf(stderr, "audit-verify: "+format+"\n", a...)

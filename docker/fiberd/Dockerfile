@@ -1,8 +1,11 @@
 # The fiberd agent image, the one the release publishes. It holds fiberd,
 # criu for FIBER_CHECKPOINT, and the zygote library (header and static
-# archive) so a template image can build its zygote from this one.
+# archive) so a template image can build its zygote from this one. The
+# licenses and notices are under /usr/share/doc.
 #
 #   docker build -t fiberd -f docker/fiberd/Dockerfile .   (from the repo root)
+#
+# The release passes --build-arg VERSION=<tag>, which fiberd -version prints.
 #
 # Both base images are pinned by digest. Refresh them with
 # `docker buildx imagetools inspect <image:tag>`. The criu tarball is checked
@@ -36,8 +39,11 @@ COPY . .
 # protection, because a process restored from a checkpoint keeps stale PAC
 # keys (see docker/criu/Dockerfile).
 ENV CGO_ENABLED=0 GOFLAGS=-trimpath
-RUN set -eu; mkdir -p /out/bin /out/lib; \
-    go build -ldflags "-s -w -buildid=" -o /out/bin/fiberd ./cmd/fiberd; \
+ARG VERSION=""
+RUN set -eu; mkdir -p /out/bin /out/lib /out/doc; \
+    go build -ldflags "-s -w -buildid= -X main.version=${VERSION}" -o /out/bin/fiberd ./cmd/fiberd; \
+    hack/release/third-party-notices.sh ./cmd/fiberd > /out/doc/THIRD_PARTY_NOTICES; \
+    cp LICENSE NOTICE /out/doc/; \
     flags=""; if [ "$(uname -m)" = aarch64 ]; then flags="-mbranch-protection=none"; fi; \
     gcc -D_FORTIFY_SOURCE=3 -O2 -fstack-protector-strong -fstack-clash-protection -fPIC -Wformat=2 -Werror=format-security \
       -Wall -Wextra -pthread $flags -ffile-prefix-map="$PWD"=. \
@@ -45,10 +51,9 @@ RUN set -eu; mkdir -p /out/bin /out/lib; \
     ar rcsD /out/lib/libfiberzygote.a /tmp/libfiberzygote.o
 
 FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587
-# The release workflow adds version, revision, created and title labels.
-# These static ones cover local builds.
+# Labels for local builds. The release workflow adds the rest.
 LABEL org.opencontainers.image.source="https://github.com/helayoty/fiberd" \
-      org.opencontainers.image.description="fiberd, the fiber agent, with criu and the zygote library" \
+      org.opencontainers.image.description="The fiberd agent with criu and the zygote library" \
       org.opencontainers.image.licenses="Apache-2.0"
 ARG DEBIAN_FRONTEND=noninteractive
 # The libraries criu links against, and nothing else.
@@ -59,6 +64,8 @@ COPY --from=build --chmod=0755 /usr/local/sbin/criu /usr/local/sbin/criu
 COPY --from=build --chmod=0755 /out/bin/fiberd /usr/local/bin/fiberd
 COPY --from=build --chmod=0644 /out/lib/libfiberzygote.a /usr/local/lib/libfiberzygote.a
 COPY --chmod=0644 zygote/libfiberzygote.h /usr/local/include/libfiberzygote.h
+COPY --from=build /usr/share/doc/criu /usr/share/doc/criu
+COPY --from=build /out/doc /usr/share/doc/fiberd
 # No USER on purpose. fiberd creates namespaces and cgroups and runs criu,
 # so it starts as root and drops the capabilities it does not need
 # (pkg/sys/caps).

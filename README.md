@@ -43,6 +43,24 @@ Read in this order, and look up any term in the [glossary](docs/glossary.md).
 6. The [examples](#examples) for fiberd in real environments.
 7. [Protocol](docs/protocol.md) for the wire contract, and [Benchmarks](docs/benchmarks.md) for measured results.
 
+## Install
+
+Each release has an archive per platform, named `fiberd_<version>_<os>_<arch>.tar.gz`, for linux or darwin on amd64 or arm64. The libfiberzygote archives hold the [zygote library](zygote/README.md). Check the checksum and provenance before you unpack.
+
+```bash
+gh release download v0.1.0 -R helayoty/fiberd -p fiberd_0.1.0_linux_amd64.tar.gz -p SHA256SUMS
+shasum -a 256 --ignore-missing -c SHA256SUMS
+gh attestation verify fiberd_0.1.0_linux_amd64.tar.gz -R helayoty/fiberd
+tar -xzf fiberd_0.1.0_linux_amd64.tar.gz
+./fiberd -version
+```
+
+The image `ghcr.io/helayoty/fiberd:<version>` holds fiberd, criu and the zygote library.
+
+```bash
+gh attestation verify oci://ghcr.io/helayoty/fiberd:0.1.0 -R helayoty/fiberd
+```
+
 ## Start
 
 ```bash

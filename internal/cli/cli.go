@@ -1,6 +1,7 @@
-// Package cli is the subcommand plumbing grant-issuer and zygotectl
-// share. Run picks the subcommand and turns its outcome into an exit
-// code. ParseFlags marks a flag error as a usage error.
+// Package cli is the plumbing fiberd's commands share. Run picks the
+// subcommand of grant-issuer or zygotectl and turns its outcome into an
+// exit code. ParseFlags marks a flag error as a usage error. Version is
+// what every command's -version prints.
 package cli
 
 import (

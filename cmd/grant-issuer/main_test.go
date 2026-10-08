@@ -65,6 +65,7 @@ func TestRunDispatch(t *testing.T) {
 		name       string
 		args       []string
 		want       int
+		wantStdout string
 		wantStderr string
 	}{
 		{name: "no subcommand is a usage error", want: 2, wantStderr: "usage: grant-issuer"},
@@ -74,12 +75,14 @@ func TestRunDispatch(t *testing.T) {
 		{name: "-h on a subcommand prints its flags", args: []string{"mint", "-h"}, want: 0, wantStderr: "-aud"},
 		{name: "an unknown flag is a usage error", args: []string{"keygen", "-bogus"}, want: 2, wantStderr: "flag provided but not defined: -bogus"},
 		{name: "serve rejects a bad flag", args: []string{"serve", "-addr"}, want: 2, wantStderr: "flag needs an argument"},
+		{name: "-version prints the version", args: []string{"-version"}, want: 0, wantStdout: "grant-issuer "},
+		{name: "--version prints the version", args: []string{"--version"}, want: 0, wantStdout: "grant-issuer "},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			code, _, stderr := call(context.Background(), tc.args...)
-			if code != tc.want || !strings.Contains(stderr, tc.wantStderr) {
-				t.Fatalf("exit %d, stderr %q, want %d with %q", code, stderr, tc.want, tc.wantStderr)
+			code, stdout, stderr := call(context.Background(), tc.args...)
+			if code != tc.want || !strings.HasPrefix(stdout, tc.wantStdout) || !strings.Contains(stderr, tc.wantStderr) {
+				t.Fatalf("exit %d, stdout %q, stderr %q, want %d with %q and %q", code, stdout, stderr, tc.want, tc.wantStdout, tc.wantStderr)
 			}
 		})
 	}

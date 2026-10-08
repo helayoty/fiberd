@@ -41,6 +41,7 @@ func TestRunDispatch(t *testing.T) {
 		name       string
 		args       []string
 		want       int
+		wantStdout string
 		wantStderr string
 	}{
 		{name: "no subcommand is a usage error", want: 2, wantStderr: "usage: zygotectl"},
@@ -54,12 +55,14 @@ func TestRunDispatch(t *testing.T) {
 		{name: "inspect needs -dir", args: []string{"inspect"}, want: 1, wantStderr: "-dir is required"},
 		{name: "build rejects a bad flag", args: []string{"build", "-skip-images=maybe"}, want: 2, wantStderr: "invalid boolean value"},
 		{name: "inspect rejects a bad flag", args: []string{"inspect", "-dir"}, want: 2, wantStderr: "flag needs an argument"},
+		{name: "-version prints the version", args: []string{"-version"}, want: 0, wantStdout: "zygotectl "},
+		{name: "--version prints the version", args: []string{"--version"}, want: 0, wantStdout: "zygotectl "},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			code, _, stderr := call(tc.args...)
-			if code != tc.want || !strings.Contains(stderr, tc.wantStderr) {
-				t.Fatalf("exit %d, stderr %q, want %d with %q", code, stderr, tc.want, tc.wantStderr)
+			code, stdout, stderr := call(tc.args...)
+			if code != tc.want || !strings.HasPrefix(stdout, tc.wantStdout) || !strings.Contains(stderr, tc.wantStderr) {
+				t.Fatalf("exit %d, stdout %q, stderr %q, want %d with %q and %q", code, stdout, stderr, tc.want, tc.wantStdout, tc.wantStderr)
 			}
 		})
 	}

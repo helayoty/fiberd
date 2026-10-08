@@ -196,6 +196,7 @@ func TestRun(t *testing.T) {
 		{name: "a trust key without a kid fails", trust: jose.JSONWebKey{Key: pub},
 			want: 1, wantErr: "is not an Ed25519 key with a kid"},
 		{name: "an unknown flag is a usage error", args: []string{"-bogus"}, want: 2, wantErr: "flag provided but not defined: -bogus"},
+		{name: "-version prints the version and checks nothing", args: []string{"-version"}, want: 0, wantOut: []string{"audit-verify "}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

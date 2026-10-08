@@ -22,6 +22,9 @@ import (
 	"github.com/helayoty/fiberd/pkg/sys/criu"
 )
 
+// version is set at link time with -ldflags "-X main.version=v0.1.0".
+var version string
+
 func main() {
 	os.Exit(run(context.Background(), os.Args[1:], os.Stdout, os.Stderr))
 }
@@ -29,12 +32,21 @@ func main() {
 // run dispatches a subcommand. It returns exit code 0 on success or -h,
 // 2 for a usage error, and 1 when the subcommand fails.
 func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
-	return cli.Run(args, "usage: zygotectl build|push|pull|inspect [flags]; -h on a subcommand for its flags", map[string]cli.Command{
-		"build":   func(a []string) error { return build(ctx, a, stdout, stderr) },
-		"push":    func(a []string) error { return push(ctx, a, stdout, stderr) },
-		"pull":    func(a []string) error { return pull(ctx, a, stdout, stderr) },
-		"inspect": func(a []string) error { return inspect(a, stdout, stderr) },
+	return cli.Run(args, "usage: zygotectl build|push|pull|inspect [flags], or -version; -h on a subcommand for its flags", map[string]cli.Command{
+		"-version":  printVersion(stdout),
+		"--version": printVersion(stdout),
+		"build":     func(a []string) error { return build(ctx, a, stdout, stderr) },
+		"push":      func(a []string) error { return push(ctx, a, stdout, stderr) },
+		"pull":      func(a []string) error { return pull(ctx, a, stdout, stderr) },
+		"inspect":   func(a []string) error { return inspect(a, stdout, stderr) },
 	}, stderr)
+}
+
+func printVersion(stdout io.Writer) cli.Command {
+	return func([]string) error {
+		_, err := fmt.Fprintln(stdout, "zygotectl", cli.Version(version))
+		return err
+	}
 }
 
 func build(ctx context.Context, args []string, stdout, stderr io.Writer) error {
