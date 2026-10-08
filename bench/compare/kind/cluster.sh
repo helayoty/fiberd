@@ -101,7 +101,7 @@ gvisor_up() {
     docker exec "$NODE" sh -c "test -x /usr/local/bin/$b" 2>/dev/null && continue
     curl -fsSL -o "$work/$b" "https://storage.googleapis.com/gvisor/releases/release/$RUNSC_RELEASE/$arch/$b"
     curl -fsSL -o "$work/$b.sha512" "https://storage.googleapis.com/gvisor/releases/release/$RUNSC_RELEASE/$arch/$b.sha512"
-    (cd "$work" && sed "s| .*| $b|" "$b.sha512" | shasum -a 512 -c -)
+    (cd "$work" && sed "s| .*|  $b|" "$b.sha512" | shasum -a 512 -c -)
     docker cp "$work/$b" "$NODE:/usr/local/bin/$b"
     docker exec "$NODE" chmod 0755 "/usr/local/bin/$b"
   done
