@@ -501,9 +501,6 @@ type DeltaDiscarder interface {
 // admissions of the same UID wait for the first; a second delivery of an
 // already-admitted grant refreshes it in place.
 func (a *Agent) Admit(ctx context.Context, g Grant) (StatusCode, error) {
-	if a.Revoked != nil && a.Revoked.Denied(g.UID, g.LeaseExpiry, a.Ledger.Now()) {
-		return a.missCode(ErrGrantRevoked), fmt.Errorf("%w: %s", ErrGrantRevoked, g.UID)
-	}
 	if g.MinTier > a.Runtime.Tier() {
 		return NeedsTier, fmt.Errorf("%w: grant needs %s, runtime is %s", ErrNeedsTier, g.MinTier, a.Runtime.Tier())
 	}
@@ -547,6 +544,12 @@ func (a *Agent) Admit(ctx context.Context, g Grant) (StatusCode, error) {
 		a.admitMu.Unlock()
 		close(done)
 	}()
+	// Denied is checked once this admission is in admitting. A Remove
+	// that denies the UID either is seen here or waits for this admission
+	// and yields what it admitted.
+	if a.Revoked != nil && a.Revoked.Denied(g.UID, g.LeaseExpiry, a.Ledger.Now()) {
+		return a.missCode(ErrGrantRevoked), fmt.Errorf("%w: %s", ErrGrantRevoked, g.UID)
+	}
 
 	// The fabric channel comes before the template: an engine needs its
 	// devices at warm-up. It is released with the grant.
@@ -633,6 +636,18 @@ func (a *Agent) Remove(ctx context.Context, grantUID string) {
 		}
 		if err := a.Revoked.Add(grantUID, lease, a.Ledger.Now()); err != nil {
 			log.Printf("WARNING: revoke %s: persisting the deny-list: %v; it is denied until the agent restarts", grantUID, err)
+		}
+		// An admission that passed its deny check before the Add above
+		// may still be warming. The yield below waits for it, so it
+		// finds the grant that admission admits.
+		a.admitMu.Lock()
+		wait := a.admitting[grantUID]
+		a.admitMu.Unlock()
+		if wait != nil {
+			select {
+			case <-wait:
+			case <-ctx.Done():
+			}
 		}
 	}
 	a.Yield(ctx, grantUID, "removed by the home")
@@ -752,6 +767,12 @@ func (a *Agent) Park(ctx context.Context, fiberID string, sync bool) (string, St
 		if g, known := a.Ledger.Grant(fence.GrantUID); known && g.Tenant == "" {
 			return "", NeedsTier, fmt.Errorf("%w: grant %s, session %q", ErrNoTenant, g.UID, session)
 		}
+		// The session's gate, which Clone holds through a resume. A
+		// Clone(S) that arrives during the park waits until the delta is
+		// parked and published, so it never resumes a checkpoint that
+		// is then published as the session's current state.
+		hold := a.Ledger.holdSession(fence.GrantUID, session)
+		defer hold.release()
 	}
 	ref, perr := a.Runtime.Park(ctx, fiberID, sync)
 	if ref == "" {
@@ -877,6 +898,11 @@ func (a *Agent) Yield(ctx context.Context, grantUID string, reason string) {
 			a.discardDelta(ctx, fence, f.Session, deltaRef)
 		}
 		_ = a.audit(ctx, BestEffort, AuditRecord{Event: "yield", Fence: fence, Session: f.Session, FiberID: f.ID, Detail: reason})
+	}
+	// The warm template goes with the fibers. A re-admission warms it
+	// again.
+	if td, ok := a.Runtime.(TemplateDropper); ok {
+		td.DropTemplate(grantUID)
 	}
 	_ = a.audit(ctx, BestEffort, AuditRecord{Event: "revoke", Fence: Fence{GrantUID: grantUID, Epoch: a.Ledger.Epoch()}, Detail: reason})
 	a.persist()

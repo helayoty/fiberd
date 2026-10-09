@@ -309,7 +309,8 @@ func TestAdmitOutcomes(t *testing.T) {
 // fiber under it, with a yield record for each and one revoke record. A
 // fiber the runtime cannot release leaves the ledger all the same, since
 // the grant that counted it is gone. A fiber that exits on its own while
-// Yield works is recorded as its exit, not released again.
+// Yield works is recorded as its exit, not released again. The warm
+// template is dropped last, and a valid token re-admits the grant.
 func TestYield(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -374,6 +375,93 @@ func TestYield(t *testing.T) {
 			}
 			if _, ok := coretest.GrantStatus(a.Ledger, "g1"); ok {
 				t.Fatal("a status is still published for the yielded grant")
+			}
+			if len(rt.dropped) != 1 || rt.dropped[0] != "g1" {
+				t.Fatalf("templates dropped = %v, want the yielded grant's", rt.dropped)
+			}
+			if r, code, err := a.Clone(ctx, core.CloneRequest{GrantJWT: []byte("g1"), Deadline: time.Second}); err != nil || code != core.OK || r.Kind != core.ActCreate {
+				t.Fatalf("clone after the yield = %v %d %v, want a fresh create under the re-admitted grant", r.Kind, code, err)
+			}
+		})
+	}
+}
+
+// TestRemoveWaitsForAdmit removes a grant while its admission is warming
+// the template. Remove waits for that admission and yields what it
+// admitted, so the grant ends up denied and unknown, and a Clone with its
+// token is refused. Before the fix Admit checked the deny-list before it
+// registered itself, so a Remove between that check and the warm-up had
+// nothing to wait for or yield, and the admission then landed a grant
+// that was denied on paper and admitted in fact.
+func TestRemoveWaitsForAdmit(t *testing.T) {
+	cases := []struct {
+		name     string
+		inflight bool // the admission is warming when Remove runs
+	}{
+		{name: "remove during the warm-up waits for it and yields the grant", inflight: true},
+		{name: "remove of an admitted grant yields it", inflight: false},
+	}
+	type result struct {
+		code core.StatusCode
+		err  error
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			g := core.Grant{UID: "g1", Tenant: "acme", Audience: "node-a", LeaseExpiry: time.Now().Add(time.Hour)}
+			a := newAgent(t, "up", core.TierCheckpoint, g)
+			rt := prepRuntime{fakeRuntime: fakeRuntime{tier: core.TierCheckpoint}, started: make(chan struct{}, 2), proceed: make(chan struct{})}
+			a.Runtime = rt
+			rv, err := core.OpenRevoked(filepath.Join(t.TempDir(), "revoked.json"), time.Hour, time.Now())
+			if err != nil {
+				t.Fatal(err)
+			}
+			a.Revoked = rv
+			ctx := context.Background()
+			admitted := make(chan result, 1)
+			go func() {
+				code, err := a.Admit(ctx, g)
+				admitted <- result{code, err}
+			}()
+			select {
+			case <-rt.started:
+			case <-time.After(5 * time.Second):
+				t.Fatal("the admission never warmed the template")
+			}
+			if !tc.inflight {
+				close(rt.proceed)
+				if r := <-admitted; r.code != core.OK {
+					t.Fatalf("admit = %d %v, want OK", r.code, r.err)
+				}
+			}
+			removed := make(chan struct{})
+			go func() {
+				defer close(removed)
+				a.Remove(ctx, "g1")
+			}()
+			if tc.inflight {
+				select {
+				case <-removed:
+					t.Fatal("Remove returned while the admission was still warming")
+				case <-time.After(100 * time.Millisecond):
+				}
+				close(rt.proceed)
+				// The admission passed its deny check before the removal, so
+				// it lands, and the removal yields what it landed.
+				if r := <-admitted; r.code != core.OK {
+					t.Fatalf("admit = %d %v, want OK", r.code, r.err)
+				}
+			}
+			<-removed
+			if !rv.Denied("g1", g.LeaseExpiry, time.Now()) {
+				t.Fatal("the removed grant is not denied")
+			}
+			if _, ok := a.Ledger.Grant("g1"); ok {
+				t.Fatal("the removed grant is still admitted")
+			}
+			a.Runtime = fakeRuntime{tier: core.TierCheckpoint}
+			r, code, err := a.Clone(ctx, core.CloneRequest{GrantJWT: []byte("g1"), Deadline: time.Second})
+			if code == core.OK || !errors.Is(err, core.ErrGrantRevoked) {
+				t.Fatalf("clone under the removed grant = %s %d %v, want refused as revoked", r.FiberID, code, err)
 			}
 		})
 	}

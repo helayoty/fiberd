@@ -342,6 +342,12 @@ func (b *fakeBackend) warmed() int {
 	return b.warmCalls
 }
 
+func (b *fakeBackend) unwarmedIDs() []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]string(nil), b.unwarmed...)
+}
+
 func (b *fakeBackend) parked() []backend.ParkSpec {
 	b.mu.Lock()
 	defer b.mu.Unlock()

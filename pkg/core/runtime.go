@@ -154,6 +154,14 @@ type DeltaRetirer interface {
 	RetireDelta(ctx context.Context, deltaRef string) error
 }
 
+// TemplateDropper is implemented by runtimes that can end a grant's warm
+// template. The agent calls it at the end of a yield, once the grant's
+// fibers are released, so a revoked grant holds no pages. The next
+// admission warms the template again.
+type TemplateDropper interface {
+	DropTemplate(grantUID string)
+}
+
 // RemoteDelta is what a finder learns about a parked session elsewhere
 // without pulling it: how much it costs to move, and where it lives.
 type RemoteDelta struct {

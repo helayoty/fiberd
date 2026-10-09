@@ -79,6 +79,11 @@ type Ledger struct {
 	// and deleted when the last in-flight resolveHeld drops them, so the map is
 	// bounded by concurrency, not by session names ever seen.
 	perSession map[string]*sessionGate
+
+	// seqHigh is the last seq a revoked grant minted, so a re-admission
+	// in the same epoch continues the sequence and never re-mints a
+	// fence a released fiber held.
+	seqHigh map[string]uint64
 }
 
 type sessionGate struct {
@@ -109,6 +114,7 @@ func NewLedger(epoch uint64) *Ledger {
 		sessions:   make(map[string]*Session),
 		fibers:     make(map[string]*fiberRef),
 		perSession: make(map[string]*sessionGate),
+		seqHigh:    make(map[string]uint64),
 	}
 }
 
@@ -135,7 +141,8 @@ func (l *Ledger) BumpEpoch(epoch uint64) {
 // proof that admission and quota already happened; nothing is re-checked
 // on the warm path. Idempotent on the UID: a re-delivery refreshes the
 // mutable fields in place and never resets nextSeq (fences would be
-// reminted) or live (the ceiling would be corrupted).
+// reminted) or live (the ceiling would be corrupted). A grant admitted
+// again after a revocation continues where it left off.
 func (l *Ledger) AdmitGrant(g Grant) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -143,7 +150,7 @@ func (l *Ledger) AdmitGrant(g Grant) {
 		e.grant = g
 		return
 	}
-	l.grants[g.UID] = &grantEntry{grant: g}
+	l.grants[g.UID] = &grantEntry{grant: g, nextSeq: l.seqHigh[g.UID]}
 }
 
 // Grant returns the admitted grant, if any.
@@ -168,10 +175,14 @@ func (l *Ledger) GrantBoundTo(uid, thumbprint string) bool {
 }
 
 // RevokeGrant drops the grant. Fibers under it drain by lease
-// non-renewal; the reaper (Phase 3.5) tears them down.
+// non-renewal; the reaper (Phase 3.5) tears them down. The last minted
+// seq is kept for a re-admission.
 func (l *Ledger) RevokeGrant(uid string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if e, ok := l.grants[uid]; ok {
+		l.seqHigh[uid] = e.nextSeq
+	}
 	delete(l.grants, uid)
 }
 
@@ -491,29 +502,28 @@ func (l *Ledger) onGone(fiberID string) (fence Fence, name, deltaRef string, ok 
 }
 
 // Statuses computes the view for every admitted grant, sorted by UID.
+// One pass over the fibers and one over the sessions, however many
+// grants there are.
 func (l *Ledger) Statuses() []Status {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	out := make([]Status, 0, len(l.grants))
+	slot := make(map[string]int, len(l.grants))
 	for uid, e := range l.grants {
-		out = append(out, l.statusLocked(uid, e))
+		slot[uid] = len(out)
+		out = append(out, Status{GrantUID: uid, Running: e.live,
+			Latest: Fence{GrantUID: uid, Epoch: l.epoch, Seq: e.nextSeq}})
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].GrantUID < out[j].GrantUID })
-	return out
-}
-
-func (l *Ledger) statusLocked(uid string, e *grantEntry) Status {
-	st := Status{GrantUID: uid, Running: e.live,
-		Latest: Fence{GrantUID: uid, Epoch: l.epoch, Seq: e.nextSeq}}
 	for _, ref := range l.fibers {
-		if ref.grantUID == uid {
-			st.WUsedBytes += ref.wUsed
+		if i, ok := slot[ref.grantUID]; ok {
+			out[i].WUsedBytes += ref.wUsed
 		}
 	}
 	for _, s := range l.sessions {
-		if s.GrantUID == uid && s.State == StateParked {
-			st.Parked++
+		if i, ok := slot[s.GrantUID]; ok && s.State == StateParked {
+			out[i].Parked++
 		}
 	}
-	return st
+	sort.Slice(out, func(i, j int) bool { return out[i].GrantUID < out[j].GrantUID })
+	return out
 }

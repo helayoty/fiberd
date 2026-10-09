@@ -1622,3 +1622,76 @@ func TestFileHelpers(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) { tc.run(t, t.TempDir()) })
 	}
 }
+
+// TestDropTemplate checks what the host does when the agent drops a
+// yielded grant's template. The warm instance is unwarmed and forgotten,
+// its pages lose their memory.min on the grant's cgroups and in the
+// root's sum, the backend's later report of its exit changes nothing,
+// and the next clone warms the grant again. A grant that was never
+// warmed is nothing to drop.
+func TestDropTemplate(t *testing.T) {
+	g := core.Grant{UID: "g1", TemplateDigest: "sha256:tmpl", WBudgetBytes: 64 * mib}
+	cases := []struct {
+		name string
+		warm bool // the grant was warmed before the drop
+	}{
+		{name: "a warm grant's instance ends and its pages are unprotected", warm: true},
+		{name: "a grant never warmed is nothing to drop", warm: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			be := newFakeBackend(core.TierWarm)
+			r := newTestRuntime(t, be, nil)
+			ctx := context.Background()
+			gcg := r.root.Child("g1")
+			cgroups := []cgroup.Dir{gcg.Child("zygote"), gcg}
+			if tc.warm {
+				if err := r.PrepareTemplate(ctx, g); err != nil {
+					t.Fatal(err)
+				}
+				// The fake instance has no pages. Protect some, as a real
+				// one's are.
+				r.mu.Lock()
+				r.warms["g1"].minBytes = mib
+				r.mu.Unlock()
+				for _, d := range cgroups {
+					if err := d.SetMemoryMin(mib); err != nil {
+						t.Fatal(err)
+					}
+				}
+				r.protectTemplates()
+				if got := cgFile(t, r.root, "memory.min"); got != fmt.Sprint(mib) {
+					t.Fatalf("root memory.min before the drop = %s, want %d", got, mib)
+				}
+			}
+			r.DropTemplate("g1")
+			wantUnwarmed := 0
+			if tc.warm {
+				wantUnwarmed = 1
+			}
+			if ids := be.unwarmedIDs(); len(ids) != wantUnwarmed {
+				t.Fatalf("unwarmed %v, want %d", ids, wantUnwarmed)
+			}
+			if r.warmOf("g1") != nil {
+				t.Fatal("the dropped warm instance is still known")
+			}
+			if got := cgFile(t, r.root, "memory.min"); got != "0" {
+				t.Fatalf("root memory.min after the drop = %s, want 0", got)
+			}
+			if tc.warm {
+				for _, d := range cgroups {
+					if got := cgFile(t, d, "memory.min"); got != "0" {
+						t.Fatalf("%s memory.min after the drop = %s, want 0", d.Path, got)
+					}
+				}
+				// The backend reports the instance's end after the drop.
+				be.warmGone("g1")
+				noExit(t, r)
+			}
+			h, err := r.Clone(ctx, core.CloneSpec{Grant: g, Fence: core.Fence{GrantUID: "g1", Epoch: 1, Seq: 2}})
+			if err != nil || h.ID != "g1/1/2" || be.warmed() != wantUnwarmed+1 {
+				t.Fatalf("clone after the drop = %+v %v, warmed %d times, want a fiber under a fresh warm", h, err, be.warmed())
+			}
+		})
+	}
+}

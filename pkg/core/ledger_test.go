@@ -166,6 +166,11 @@ func TestResolve(t *testing.T) {
 			createFiber(t, l, grant, "", "f1") // mints seq 1
 			l.AdmitGrant(grantMax(4))
 		}, grant: grant, wantAct: core.ActCreate, seqAfter: 1},
+		{name: "revoke then re-admit continues the sequence", max: 4, setup: func(t *testing.T, l *core.Ledger) {
+			createFiber(t, l, grant, "", "f1") // mints seq 1
+			l.RevokeGrant(grant)
+			l.AdmitGrant(grantMax(4))
+		}, grant: grant, wantAct: core.ActCreate, seqAfter: 1},
 		{name: "unexpired lease", admit: &core.Grant{UID: grant, LeaseExpiry: now.Add(time.Minute)}, tier: core.TierWarm, grant: grant, wantAct: core.ActCreate},
 		{name: "expired lease", admit: &core.Grant{UID: grant, LeaseExpiry: now.Add(-time.Second)}, tier: core.TierWarm, grant: grant, wantErr: core.ErrGrantExpired},
 		{name: "lease expiring exactly now is expired", admit: &core.Grant{UID: grant, LeaseExpiry: now}, tier: core.TierWarm, grant: grant, wantErr: core.ErrGrantExpired},
@@ -403,6 +408,61 @@ func TestStatusesSorted(t *testing.T) {
 			}
 			if fmt.Sprint(got) != fmt.Sprint(tc.want) {
 				t.Fatalf("statuses = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestStatusesManyGrants checks the view over several grants at once, with
+// running fibers, parked sessions and sampled W spread across them. What
+// a revoked grant left behind counts for nobody.
+func TestStatusesManyGrants(t *testing.T) {
+	cases := []struct {
+		name  string
+		setup func(t *testing.T, l *core.Ledger)
+		want  []core.Status
+	}{
+		{name: "no grants", setup: func(*testing.T, *core.Ledger) {}, want: []core.Status{}},
+		{name: "running, parked and W spread over three grants", setup: func(t *testing.T, l *core.Ledger) {
+			for _, uid := range []string{"g3", "g1", "g2"} {
+				l.AdmitGrant(core.Grant{UID: uid})
+			}
+			createFiber(t, l, "g1", "S1", "f1")
+			createFiber(t, l, "g1", "", "f2")
+			l.SetFiberW("f1", 100)
+			l.SetFiberW("f2", 50)
+			l.OnPark("f1", "d1")
+			createFiber(t, l, "g2", "S2", "f3")
+			createFiber(t, l, "g2", "S3", "f4")
+			l.SetFiberW("f3", 7)
+			l.OnPark("f3", "d3")
+			l.OnPark("f4", "d4")
+		}, want: []core.Status{
+			{GrantUID: "g1", Running: 1, Parked: 1, WUsedBytes: 50, Latest: core.Fence{GrantUID: "g1", Epoch: 3, Seq: 2}},
+			{GrantUID: "g2", Running: 0, Parked: 2, WUsedBytes: 0, Latest: core.Fence{GrantUID: "g2", Epoch: 3, Seq: 2}},
+			{GrantUID: "g3", Running: 0, Parked: 0, WUsedBytes: 0, Latest: core.Fence{GrantUID: "g3", Epoch: 3, Seq: 0}},
+		}},
+		{name: "a revoked grant's parked session and fiber count for nobody", setup: func(t *testing.T, l *core.Ledger) {
+			l.AdmitGrant(core.Grant{UID: "g1"})
+			l.AdmitGrant(core.Grant{UID: "g2"})
+			createFiber(t, l, "g1", "S1", "f1")
+			createFiber(t, l, "g1", "", "f2")
+			l.SetFiberW("f2", 100)
+			l.OnPark("f1", "d1")
+			createFiber(t, l, "g2", "", "f3")
+			l.SetFiberW("f3", 5)
+			l.RevokeGrant("g1")
+		}, want: []core.Status{
+			{GrantUID: "g2", Running: 1, WUsedBytes: 5, Latest: core.Fence{GrantUID: "g2", Epoch: 3, Seq: 1}},
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			l := core.NewLedger(3)
+			tc.setup(t, l)
+			got := l.Statuses()
+			if fmt.Sprintf("%+v", got) != fmt.Sprintf("%+v", tc.want) {
+				t.Fatalf("statuses = %+v, want %+v", got, tc.want)
 			}
 		})
 	}

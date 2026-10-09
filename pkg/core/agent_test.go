@@ -459,11 +459,11 @@ func TestCloneRacesSweep(t *testing.T) {
 			if err != nil || code != core.OK || again.Kind != core.ActCreate {
 				t.Fatalf("clone after the sweep = %v %d %v, want a fresh create", again.Kind, code, err)
 			}
-			// After a yield the re-admitted grant mints from seq 1 again, so
-			// the new fence may equal the swept fiber's. The ledger must
-			// know only the new one under it.
-			if again.Fence.Epoch != tc.wantEpoch {
-				t.Fatalf("clone after the sweep = %s epoch %d, want epoch %d", again.FiberID, again.Fence.Epoch, tc.wantEpoch)
+			// The re-admitted grant continues its sequence, so the fresh
+			// clone never carries the swept fiber's fence. The ledger
+			// knows only the new one.
+			if again.FiberID == id || again.Fence.Epoch != tc.wantEpoch {
+				t.Fatalf("clone after the sweep = %s, want a fence the swept fiber %s never held, in epoch %d", again.FiberID, id, tc.wantEpoch)
 			}
 			if f, ok := a.Ledger.Fiber(again.FiberID); !ok || f != again.Fence {
 				t.Fatalf("ledger fiber %s = %+v %v, want the fresh clone's fence %+v", again.FiberID, f, ok, again.Fence)
@@ -845,4 +845,56 @@ type brokenAuditor struct{}
 
 func (brokenAuditor) Append(context.Context, core.Durability, core.AuditRecord) error {
 	return core.ErrAudit
+}
+
+// TestReadmitMintsNewFences yields a grant and clones under it again. The
+// re-admitted grant continues its fence sequence, so the new fiber never
+// carries an ID a released fiber held, a stale Release of the old ID finds
+// nothing and leaves the new fiber running, and a session parked before
+// the yield resumes under a newer fence than it was parked with. Before
+// the fix the re-admission restarted the sequence, so Clone, Yield, Clone
+// handed out one fiber ID twice, and a host, which names a fiber's
+// cgroup, socket, port and delta by its fence, could not tell them apart.
+func TestReadmitMintsNewFences(t *testing.T) {
+	cases := []struct {
+		name     string
+		session  string
+		park     bool // the first fiber is parked before the yield
+		wantKind core.Action
+	}{
+		{name: "anonymous fiber", wantKind: core.ActCreate},
+		{name: "named session", session: "S", wantKind: core.ActCreate},
+		{name: "a parked session resumes under a newer fence", session: "S", park: true, wantKind: core.ActResume},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			g := core.Grant{UID: "g1", Tenant: "acme", Audience: "node-a", FiberMax: 4}
+			a := newAgent(t, "up", core.TierCheckpoint, g)
+			ctx := context.Background()
+			req := core.CloneRequest{GrantJWT: []byte("g1"), Session: tc.session, Deadline: time.Second}
+			first, code, err := a.Clone(ctx, req)
+			if err != nil || code != core.OK {
+				t.Fatalf("first clone = %d %v", code, err)
+			}
+			if tc.park {
+				if _, code, err := a.Park(ctx, first.FiberID, false); err != nil || code != core.OK {
+					t.Fatalf("park = %d %v", code, err)
+				}
+			}
+			a.Yield(ctx, "g1", "ladder")
+			again, code, err := a.Clone(ctx, req) // the token re-admits the grant
+			if err != nil || code != core.OK || again.Kind != tc.wantKind {
+				t.Fatalf("clone after the yield = %v %d %v, want %v", again.Kind, code, err, tc.wantKind)
+			}
+			if again.FiberID == first.FiberID || again.Fence.Seq <= first.Fence.Seq {
+				t.Fatalf("clone after the yield = %s, want a fence past the first clone's %+v", again.FiberID, first.Fence)
+			}
+			if code, err := a.Release(ctx, first.FiberID, false); code != core.NotFound || !errors.Is(err, core.ErrFiberUnknown) {
+				t.Fatalf("stale release of %s = %d %v, want NotFound", first.FiberID, code, err)
+			}
+			if f, ok := a.Ledger.Fiber(again.FiberID); !ok || f != again.Fence {
+				t.Fatalf("after the stale release, fiber %s = %+v %v, want it still running", again.FiberID, f, ok)
+			}
+		})
+	}
 }

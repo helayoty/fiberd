@@ -931,6 +931,29 @@ func (r *Runtime) warmGone(grantUID string) {
 	log.Printf("host: warm instance gone grant=%s", grantUID)
 }
 
+// DropTemplate implements core.TemplateDropper. The yielded grant's warm
+// instance ends and its pages lose their protection. The backend may
+// report the instance's exit afterwards, which warmGone then finds
+// already done.
+func (r *Runtime) DropTemplate(grantUID string) {
+	r.mu.Lock()
+	z := r.warms[grantUID]
+	delete(r.warms, grantUID)
+	r.mu.Unlock()
+	r.forgetIdentity(grantUID)
+	if z == nil {
+		return
+	}
+	r.be.Unwarm(z.id)
+	for _, d := range []cgroup.Dir{z.zcg, z.cg} {
+		if err := d.SetMemoryMin(0); err != nil {
+			log.Printf("host: unprotect template of %s: %v", grantUID, err)
+		}
+	}
+	r.protectTemplates()
+	log.Printf("host: warm instance dropped grant=%s", grantUID)
+}
+
 func (r *Runtime) finish(f *fiber, reason, detail string) {
 	r.mu.Lock()
 	if r.fibers[f.id] != f {

@@ -900,3 +900,101 @@ func TestNamedSessionNeedsTenant(t *testing.T) {
 		})
 	}
 }
+
+// slowPublish is a mobileRuntime whose publish announces itself and then
+// waits for the test, like a push that takes time.
+type slowPublish struct {
+	*mobileRuntime
+	enter chan struct{}
+	wait  chan struct{}
+}
+
+func (s slowPublish) PublishDelta(ctx context.Context, ref string, g core.Grant, session string) (string, error) {
+	s.enter <- struct{}{}
+	<-s.wait
+	return s.mobileRuntime.PublishDelta(ctx, ref, g, session)
+}
+
+// TestParkRacesClone clones under a grant while a park of its session S
+// is between the ledger's park and the publish. A Clone(S) waits for the
+// park to finish, so it resumes the delta after it is published and its
+// resume withdraws that copy. A clone of another session is not held.
+// Before the fix Park took no session gate, so the clone resumed S from
+// the ledger's parked state while the publish was still running, the
+// publish then put the superseded checkpoint in the store, and another
+// home claimed it, so S ran twice.
+func TestParkRacesClone(t *testing.T) {
+	cases := []struct {
+		name       string
+		session    string // what the concurrent clone asks for
+		wantWait   bool   // it waits for the park
+		wantKind   core.Action
+		wantStored bool        // S is still published once both are done
+		wantOnB    core.Action // what B's Clone(S) then does
+	}{
+		{name: "a clone of the parking session waits and resumes after the publish", session: "S", wantWait: true, wantKind: core.ActResume, wantOnB: core.ActCreate},
+		{name: "a clone of another session is not held", session: "T", wantKind: core.ActCreate, wantStored: true, wantOnB: core.ActResume},
+	}
+	type result struct {
+		r    core.CloneResponse
+		code core.StatusCode
+		err  error
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ga := core.Grant{UID: "ga", Tenant: "acme", Audience: "A", TemplateDigest: "sha256:t", FiberMax: 4, WBudgetBytes: 10 << 20}
+			gb := core.Grant{UID: "gb", Tenant: "acme", Audience: "B", TemplateDigest: "sha256:t", FiberMax: 4, WBudgetBytes: 10 << 20}
+			st := &store{deltas: map[string]published{}}
+			a, ra := newMobileAgent(t, "A", st, ga)
+			b, _ := newMobileAgent(t, "B", st, gb)
+			sp := slowPublish{mobileRuntime: ra, enter: make(chan struct{}), wait: make(chan struct{})}
+			a.Runtime = sp
+			ra.deltaW = 1 << 20
+			var once sync.Once
+			publish := func() { once.Do(func() { close(sp.wait) }) }
+			t.Cleanup(publish)
+			ctx := context.Background()
+			first, code, err := a.Clone(ctx, core.CloneRequest{GrantJWT: []byte("ga"), Session: "S", Deadline: time.Second})
+			if err != nil || code != core.OK {
+				t.Fatalf("clone S = %d %v", code, err)
+			}
+			parked := make(chan struct{})
+			go func() {
+				defer close(parked)
+				if _, code, err := a.Park(ctx, first.FiberID, true); err != nil || code != core.OK {
+					t.Errorf("park = %d %v", code, err)
+				}
+			}()
+			<-sp.enter // the ledger says parked, the publish has not happened
+			cloned := make(chan result, 1)
+			go func() {
+				r, code, err := a.Clone(ctx, core.CloneRequest{GrantJWT: []byte("ga"), Session: tc.session, Deadline: time.Second})
+				cloned <- result{r, code, err}
+			}()
+			select {
+			case r := <-cloned:
+				if tc.wantWait {
+					t.Fatalf("clone of %s = %v %d %v before the park published", tc.session, r.r.Kind, r.code, r.err)
+				}
+				cloned <- r
+			case <-time.After(100 * time.Millisecond):
+				if !tc.wantWait {
+					t.Fatalf("clone of %s is held by the park of S", tc.session)
+				}
+			}
+			publish()
+			<-parked
+			r := <-cloned
+			if r.err != nil || r.code != core.OK || r.r.Kind != tc.wantKind {
+				t.Fatalf("clone of %s = %v %d %v, want %v", tc.session, r.r.Kind, r.code, r.err, tc.wantKind)
+			}
+			if st.stored("acme/sha256:t/S") != tc.wantStored {
+				t.Fatalf("S published after the park and the clone = %v, want %v", !tc.wantStored, tc.wantStored)
+			}
+			onB, code, err := b.Clone(ctx, core.CloneRequest{GrantJWT: []byte("gb"), Session: "S", Deadline: time.Second})
+			if err != nil || code != core.OK || onB.Kind != tc.wantOnB {
+				t.Fatalf("B's clone of S = %v %d %v, want %v", onB.Kind, code, err, tc.wantOnB)
+			}
+		})
+	}
+}

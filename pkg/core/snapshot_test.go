@@ -26,12 +26,14 @@ type listingRuntime struct {
 	// onRelease, when set, runs inside Release, as what happens on the
 	// home while the runtime works.
 	onRelease func(id string)
+	dropped   []string // every grant whose template the agent dropped
 }
 
 func (l *listingRuntime) List(context.Context) ([]core.FiberHandle, error) {
 	return l.running, l.listErr
 }
-func (l *listingRuntime) HasDelta(ref string) bool { return l.deltas[ref] }
+func (l *listingRuntime) DropTemplate(grantUID string) { l.dropped = append(l.dropped, grantUID) }
+func (l *listingRuntime) HasDelta(ref string) bool     { return l.deltas[ref] }
 func (l *listingRuntime) Release(_ context.Context, id string, _ bool) error {
 	l.released = append(l.released, id)
 	if l.onRelease != nil {
