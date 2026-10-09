@@ -86,7 +86,8 @@ spec:
       - "@REGISTRY@/zygotes/counter"
       - -registry-plain-http
     resources:
-      # A restored sandbox is about 90 MiB. The limit is the kubelet's
-      # ceiling on the whole home, template and fibers.
-      limits: { memory: 6Gi }
+      # A restored sandbox holding the counter's 32 MiB heap is about 90
+      # MiB, so 50 need about 4.5 GiB. The agent keeps an eighth of the
+      # limit for itself and caps the fibers below the rest.
+      limits: { memory: 8Gi }
       requests: { memory: 256Mi }

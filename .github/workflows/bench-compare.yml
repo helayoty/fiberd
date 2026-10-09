@@ -171,7 +171,9 @@ jobs:
             echo "::endgroup::"
             echo "::group::$pod logs"
             $kc -n compare logs "$pod" --all-containers --tail=200 || true
-            $kc -n compare logs "$pod" --all-containers --previous --tail=100 2>/dev/null || true
+            # A crashed agent's fatal line comes before its goroutines.
+            $kc -n compare logs "$pod" --all-containers --previous 2>/dev/null | head -n 60 || true
+            $kc -n compare exec "$pod" -c agent -- sh -c 'cat /sys/fs/cgroup/pids.max /sys/fs/cgroup/pids.current /sys/fs/cgroup/pids.events /proc/sys/kernel/threads-max' 2>/dev/null || true
             echo "::endgroup::"
             # A runc grant Pod keeps runc's own log beside the bundle and the
             # zygote log in the grant's run directory (pkg/backend/runc). Any
