@@ -55,6 +55,8 @@ import (
 	"syscall"
 	"time"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/helayoty/fiberd/pkg/artifact"
 	"github.com/helayoty/fiberd/pkg/backend"
 	"github.com/helayoty/fiberd/pkg/core"
@@ -117,7 +119,7 @@ type Backend struct {
 	gen   uint64           // incarnations started, the suffix of every cid
 	exits chan backend.Exit
 	// reapers counts the waitWarm and waitBox goroutines, each deleting
-	// its container's state after `runsc wait` returns. Close waits for
+	// its container's state once the sandbox has exited. Close waits for
 	// them, so nothing of the backend runs once it returns.
 	reapers sync.WaitGroup
 }
@@ -125,6 +127,7 @@ type Backend struct {
 type warm struct {
 	id      string
 	cid     string // runsc container id
+	pid     int    // the sandbox process, 0 when runsc could not say
 	argv    []string
 	workDir string
 	// dir is this incarnation's own directory under <state>/templates,
@@ -142,6 +145,7 @@ type warm struct {
 type box struct {
 	id       string
 	cid      string
+	pid      int // the sandbox process, 0 when runsc could not say
 	bundle   string
 	endpoint string
 	done     chan struct{} // closed when the sandbox has exited
@@ -554,6 +558,7 @@ func (b *Backend) Warm(ctx context.Context, sp backend.WarmSpec) (backend.Warm, 
 	if _, err := b.runsc(ctx, sp.CgroupFD, "run", "--detach", "--bundle", bundle, w.cid); err != nil {
 		return backend.Warm{}, err
 	}
+	w.pid = b.pidOf(ctx, w.cid)
 	// The workload drops the marker once its init is done and blocks in
 	// its read of /proc/gvisor/checkpoint; the template image is taken
 	// there, from outside, and the original keeps running.
@@ -578,7 +583,7 @@ func (b *Backend) Warm(ctx context.Context, sp backend.WarmSpec) (backend.Warm, 
 	b.mu.Unlock()
 	b.reapers.Add(1)
 	go b.waitWarm(w)
-	return backend.Warm{ID: w.id, PID: b.pidOf(ctx, w.cid), Bytes: bytes, TotalBytes: total}, nil
+	return backend.Warm{ID: w.id, PID: w.pid, Bytes: bytes, TotalBytes: total}, nil
 }
 
 // probeFootprint restores the template image once into the given empty
@@ -677,10 +682,93 @@ func cgroupCurrent(fd int) uint64 {
 	return n
 }
 
+// reap blocks until the sandbox cid has exited, deletes its state and
+// reports how it ended. With the sandbox pid known, the wait is a pidfd
+// parked in the Go runtime's poller, which costs no process and no
+// thread per sandbox. A `runsc wait` is a process of several threads and
+// some 20 MiB in the agent's own leaf for each live fiber. Without a pid
+// the sandbox is already gone or runsc could not say, and `runsc wait`
+// sorts it out as before.
+func (b *Backend) reap(cid string, pid int) string {
+	status, ok := awaitExit(pid)
+	if !ok {
+		out, _ := b.runsc(context.Background(), -1, "wait", cid)
+		status = waitStatus(out)
+	}
+	_, _ = b.runsc(context.Background(), -1, "delete", "-force", cid)
+	return status
+}
+
+// awaitExit blocks until the process pid has exited and reports how,
+// or false when it cannot watch it. The pidfd is this process's hold on
+// that one incarnation of the pid, so a reused pid is never waited for.
+func awaitExit(pid int) (string, bool) {
+	if pid <= 0 {
+		return "", false
+	}
+	fd, err := unix.PidfdOpen(pid, 0)
+	if err != nil {
+		return "", false
+	}
+	// Non-blocking, so NewFile hands the fd to the poller, and RawConn's
+	// Read parks this goroutine there until the fd is readable, which is
+	// when the process has exited. Should the poller refuse it, poll(2)
+	// blocks a thread for this one sandbox instead.
+	_ = unix.SetNonblock(fd, true)
+	f := os.NewFile(uintptr(fd), "pidfd")
+	defer func() { _ = f.Close() }()
+	fds := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
+	exited := func(uintptr) bool {
+		n, err := unix.Poll(fds, 0)
+		return n > 0 || (err != nil && err != unix.EINTR && err != unix.EAGAIN)
+	}
+	rc, err := f.SyscallConn()
+	if err != nil || rc.Read(exited) != nil {
+		for !exited(0) {
+			_, _ = unix.Poll(fds, -1)
+		}
+	}
+	return exitStatus(pid), true
+}
+
+// exitStatus is how the exited process pid ended when this process is
+// its parent, which reaps it here. runsc reparents a detached sandbox
+// to init, so that is the agent when it is a container's init. Otherwise
+// the status is "exited", since only a parent can read one.
+func exitStatus(pid int) string {
+	var ws unix.WaitStatus
+	wpid, err := unix.Wait4(pid, &ws, unix.WNOHANG, nil)
+	for err == unix.EINTR {
+		wpid, err = unix.Wait4(pid, &ws, unix.WNOHANG, nil)
+	}
+	switch {
+	case err != nil || wpid != pid:
+		return "exited"
+	case ws.Signaled():
+		return fmt.Sprintf("signal:%d", ws.Signal())
+	default:
+		return fmt.Sprintf("exit:%d", ws.ExitStatus())
+	}
+}
+
+// waitStatus reads `runsc wait` output as "exit:N", or "signal:N" for an
+// exit status above 128, or "exit:?" when it was not readable.
+func waitStatus(out string) string {
+	var st struct {
+		ExitStatus int `json:"exitStatus"`
+	}
+	if json.Unmarshal([]byte(out), &st) != nil {
+		return "exit:?"
+	}
+	if st.ExitStatus > 128 {
+		return fmt.Sprintf("signal:%d", st.ExitStatus-128)
+	}
+	return fmt.Sprintf("exit:%d", st.ExitStatus)
+}
+
 func (b *Backend) waitWarm(w *warm) {
 	defer b.reapers.Done()
-	_, _ = b.runsc(context.Background(), -1, "wait", w.cid)
-	_, _ = b.runsc(context.Background(), -1, "delete", "-force", w.cid)
+	b.reap(w.cid, w.pid)
 	// The image and the staged copy go with the sandbox. The directory is
 	// this incarnation's own, so a successor already warmed under the
 	// same grant keeps its own.
@@ -751,6 +839,7 @@ func (b *Backend) start(ctx context.Context, images, workDir, template string, a
 		_ = os.RemoveAll(x.bundle)
 		return backend.Fiber{}, fmt.Errorf("%w (%s)", err, leafDiag(cgroupFD))
 	}
+	x.pid = b.pidOf(ctx, x.cid)
 	b.mu.Lock()
 	b.boxes[x.id] = x
 	b.mu.Unlock()
@@ -760,24 +849,13 @@ func (b *Backend) start(ctx context.Context, images, workDir, template string, a
 		_, _ = b.runsc(context.Background(), -1, "kill", x.cid, "KILL")
 		return backend.Fiber{}, fmt.Errorf("gvisor: %s did not serve: %w (%s)", fence, err, leafDiag(cgroupFD))
 	}
-	return backend.Fiber{ID: x.id, PID: b.pidOf(context.Background(), x.cid)}, nil
+	return backend.Fiber{ID: x.id, PID: x.pid}, nil
 }
 
 func (b *Backend) waitBox(x *box) {
 	defer b.reapers.Done()
-	out, _ := b.runsc(context.Background(), -1, "wait", x.cid)
-	_, _ = b.runsc(context.Background(), -1, "delete", "-force", x.cid)
+	status := b.reap(x.cid, x.pid)
 	_ = os.RemoveAll(x.bundle)
-	var st struct {
-		ExitStatus int `json:"exitStatus"`
-	}
-	status := "exit:?"
-	if json.Unmarshal([]byte(out), &st) == nil {
-		status = fmt.Sprintf("exit:%d", st.ExitStatus)
-		if st.ExitStatus > 128 {
-			status = fmt.Sprintf("signal:%d", st.ExitStatus-128)
-		}
-	}
 	b.mu.Lock()
 	known := b.boxes[x.id] == x
 	if known {

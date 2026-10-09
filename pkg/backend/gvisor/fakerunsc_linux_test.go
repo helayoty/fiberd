@@ -10,10 +10,13 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -29,14 +32,16 @@ func TestMain(m *testing.M) {
 // fakeRunsc is runsc and its sandboxes inside the test process, wired
 // into a Backend through the run seam. A sandbox behaves as the reference
 // zygote does under --gvisor: a template drops the ready marker on /host,
-// a fiber serves its endpoint there and closes it on USR1.
+// a fiber serves its endpoint there and closes it on USR1. Each has a
+// process of its own (a shell waiting on its stdin), so its pid is one
+// the backend can hold a pidfd on and the reaper takes the path it
+// takes with real runsc. The process ends as the ExitStatus knob says.
 type fakeRunsc struct {
 	mu       sync.Mutex
 	knobs    knobs
 	recorded []fakeCall
 	boxes    map[string]*fakeSandbox // running, by cid
-	nextPID  int
-	gate     *deleteGate // the next delete is held here, when set
+	gate     *deleteGate             // the next delete is held here, when set
 	// restoring counts the restores in flight, and peak the most there
 	// have been at once.
 	restoring, peak int
@@ -68,7 +73,9 @@ type knobs struct {
 	// SlowCheckpt is how long a checkpoint that ends the sandbox takes
 	// after it is gone, as a real one's image flush and cleanup do.
 	SlowCheckpt time.Duration
-	ExitStatus  int  // what `wait` reports
+	// ExitStatus is how a sandbox ends: its process exits with it, or
+	// dies by the signal it names above 128, and `wait` reports it.
+	ExitStatus  int
 	BadWaitJSON bool // `wait` prints something that is not JSON
 }
 
@@ -83,7 +90,9 @@ type fakeCall struct {
 type fakeSandbox struct {
 	cid      string
 	pid      int
-	endpoint string // the host path it serves, "" for none
+	proc     *os.Process    // the sandbox process, which the backend reaps
+	stdin    io.WriteCloser // a line on it ends the process with its status
+	endpoint string         // the host path it serves, "" for none
 	ln       net.Listener
 	done     chan struct{} // closed when the sandbox has ended
 }
@@ -97,7 +106,7 @@ type deleteGate struct {
 }
 
 func newFakeRunsc(k knobs) *fakeRunsc {
-	return &fakeRunsc{knobs: k, boxes: map[string]*fakeSandbox{}, nextPID: 40000}
+	return &fakeRunsc{knobs: k, boxes: map[string]*fakeSandbox{}}
 }
 
 func (f *fakeRunsc) setKnobs(k knobs) {
@@ -424,17 +433,34 @@ func (f *fakeRunsc) startSandbox(cid, bundle string, k knobs, out io.Writer) err
 		}
 		return errExit
 	}
-	f.nextPID++
-	x.pid = f.nextPID
+	// The sandbox process is a shell that exits with the status it is
+	// handed once a line arrives on its stdin. The backend reaps it, or
+	// nobody does when the reaper took the `runsc wait` path, so it is
+	// never waited for here.
+	cmd := exec.Command("sh", "-c", "read line; exit $0", strconv.Itoa(k.ExitStatus))
+	stdin, err := cmd.StdinPipe()
+	if err == nil {
+		err = cmd.Start()
+	}
+	if err != nil {
+		_, _ = fmt.Fprintf(out, "fake runsc: sandbox process: %v\n", err)
+		if x.ln != nil {
+			_ = x.ln.Close()
+		}
+		return errExit
+	}
+	x.proc, x.stdin, x.pid = cmd.Process, stdin, cmd.Process.Pid
 	f.boxes[cid] = x
 	return nil
 }
 
-// endSandbox ends the sandbox for cid, if it runs.
+// endSandbox ends the sandbox for cid, if it runs. Its process dies by
+// the signal ExitStatus names above 128, or exits with ExitStatus.
 func (f *fakeRunsc) endSandbox(cid string) {
 	f.mu.Lock()
 	x := f.boxes[cid]
 	delete(f.boxes, cid)
+	k := f.knobs
 	f.mu.Unlock()
 	if x == nil {
 		return
@@ -442,6 +468,12 @@ func (f *fakeRunsc) endSandbox(cid string) {
 	if x.ln != nil {
 		_ = x.ln.Close()
 	}
+	if k.ExitStatus > 128 {
+		_ = x.proc.Signal(syscall.Signal(k.ExitStatus - 128))
+	} else {
+		_, _ = io.WriteString(x.stdin, "\n")
+	}
+	_ = x.stdin.Close()
 	close(x.done)
 }
 

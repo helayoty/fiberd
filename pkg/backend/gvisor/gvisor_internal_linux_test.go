@@ -692,8 +692,6 @@ func TestWarm(t *testing.T) {
 			if _, err := os.Stat(filepath.Join(tdir, "images", imageFile)); err != nil {
 				t.Fatalf("template image not written: %v", err)
 			}
-			// The reaper's wait starts in the background.
-			waitFor(t, "the reaper's wait", func() bool { return findCall(f.calls(), "wait "+wc) != "" })
 			calls := f.calls()
 			for _, want := range []string{
 				"run --detach --bundle " + filepath.Join(tdir, "bundle") + " " + wc,
@@ -860,17 +858,19 @@ func TestProbeWithoutABundle(t *testing.T) {
 
 // TestClone checks that a fiber is a sandbox restored from the template image
 // with the fence, endpoint and payload in its environment, serving before
-// Clone returns, and its end is reported with runsc's status.
+// Clone returns, and its end is reported with the sandbox's status. With
+// the sandbox pid unknown (noPID), the status is what `runsc wait` says.
 func TestClone(t *testing.T) {
 	cases := []struct {
 		name       string
 		knobs      knobs
 		payload    []byte
+		noPID      bool
 		wantStatus string
 	}{
 		{name: "exit 0", wantStatus: "exit:0"},
 		{name: "payload and a signal", payload: []byte{1, 2, 3}, knobs: knobs{ExitStatus: 137}, wantStatus: "signal:9"},
-		{name: "wait says nothing readable", knobs: knobs{BadWaitJSON: true}, wantStatus: "exit:?"},
+		{name: "wait says nothing readable", knobs: knobs{BadWaitJSON: true, Fail: map[string]bool{"state": true}}, noPID: true, wantStatus: "exit:?"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -883,7 +883,13 @@ func TestClone(t *testing.T) {
 				t.Fatalf("Clone: %v", err)
 			}
 			fc := boxCID(t, b, "g/1-1")
-			if pid := f.pidOf(fc); pid == 0 || fb.ID != "g/1-1" || fb.PID != pid {
+			pid := f.pidOf(fc)
+			if tc.noPID {
+				pid = 0
+			} else if pid == 0 {
+				t.Fatal("the fiber sandbox recorded no pid")
+			}
+			if fb.ID != "g/1-1" || fb.PID != pid {
 				t.Fatalf("Clone = %+v, want g/1-1 with the sandbox pid %d", fb, pid)
 			}
 			if !dialable(ep) {
@@ -1367,6 +1373,46 @@ func TestReapersFinishBeforeTeardown(t *testing.T) {
 	}
 }
 
+// TestReaperNeedsNoProcess checks that a sandbox with a known pid is
+// waited for without a `runsc wait` process, since the reaper holds a
+// pidfd, and that its death is still reported once, with the status of
+// the sandbox process itself because the backend is its parent here.
+// Only a sandbox whose pid runsc could not say is waited for by `runsc
+// wait`.
+func TestReaperNeedsNoProcess(t *testing.T) {
+	cases := []struct {
+		name       string
+		knobs      knobs
+		wantWait   bool // a `runsc wait` ran for the fiber
+		wantStatus string
+	}{
+		{name: "exit", knobs: knobs{ExitStatus: 3}, wantStatus: "exit:3"},
+		{name: "signal", knobs: knobs{ExitStatus: 143}, wantStatus: "signal:15"},
+		{name: "pid unknown", knobs: knobs{ExitStatus: 3, Fail: map[string]bool{"state": true}}, wantWait: true, wantStatus: "exit:3"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b, f, _, _ := cloned(t, tc.knobs)
+			fc := boxCID(t, b, "g/1-1")
+			if err := b.Kill("g/1-1"); err != nil {
+				t.Fatalf("Kill: %v", err)
+			}
+			if e := waitExit(t, b); e != (backend.Exit{FiberID: "g/1-1", Status: tc.wantStatus}) {
+				t.Fatalf("exit = %+v, want status %s", e, tc.wantStatus)
+			}
+			waitFor(t, "the reaper's delete", func() bool { return findCall(f.calls(), "delete -force "+fc) != "" })
+			if got := findCall(f.calls(), "wait "+fc) != ""; got != tc.wantWait {
+				t.Fatalf("a `runsc wait` ran for the fiber: %v, want %v, among\n%s", got, tc.wantWait, strings.Join(f.calls(), "\n"))
+			}
+			select {
+			case e := <-b.Exits():
+				t.Fatalf("the fiber's death was reported again: %+v", e)
+			default:
+			}
+		})
+	}
+}
+
 // TestPidOf checks the sandbox pid from `runsc state`, or 0 when runsc
 // cannot say.
 func TestPidOf(t *testing.T) {
@@ -1503,8 +1549,8 @@ func TestSweep(t *testing.T) {
 }
 
 // TestCIDReuse checks that a reaper's late delete cannot touch a successor
-// under the same grant or fence. The reaper deletes after `runsc wait`
-// returns, which can be long after the host warmed or cloned again. The
+// under the same grant or fence. The reaper deletes once the sandbox has
+// exited, which can be long after the host warmed or cloned again. The
 // successor has a cid of its own. The gate holds the delete until the
 // successor is up.
 func TestCIDReuse(t *testing.T) {
