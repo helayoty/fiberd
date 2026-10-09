@@ -2,7 +2,7 @@
 
 This page says what bounds a [fiber](glossary.md#fiber)'s CPU and memory and how to size a [home](glossary.md#home). It is for operators. Read [architecture.md](architecture.md) first. The [cgroup](glossary.md#cgroup) formulas, hierarchy and out-of-memory (OOM) handling are in [design/resources.md](design/resources.md), and the pressure ladder in [design/core.md](design/core.md).
 
-![Inherited resource limits with two alternative backend layouts: proc and runc use process leaves under the grant cgroup, sharing unchanged template pages while consuming unequal private W. Hyperlight sandboxes share a grant helper process and report W through the helper rather than per-fiber process cgroups. W budgets are ceilings, not reservations.](./images/resource-hierarchy.svg)
+![Inherited resource limits with two alternative backend layouts: proc and runc use process leaves under the grant cgroup, sharing unchanged template pages while consuming unequal private W. Hyperlight sandboxes share a grant helper process and report W through the helper rather than per-fiber process cgroups. W budgets are ceilings, not reservations. The fiberd/ subtree is capped below the home's limits, keeping an eighth for the agent.](./images/resource-hierarchy.svg)
 
 ## The home is the outer bound
 
