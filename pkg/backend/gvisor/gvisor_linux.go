@@ -49,6 +49,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -90,6 +91,10 @@ type Options struct {
 	// (default /var/lib/fiberd/gvisor). Not a tmpfs: images are memory
 	// otherwise.
 	StateDir string
+	// MaxRestores bounds the `runsc restore` processes that run at once
+	// (default, the CPUs this process may use). Restores are CPU-bound,
+	// so unbounded ones all finish together at the end of a burst.
+	MaxRestores int
 }
 
 // Backend implements backend.Backend, Platformer, DeadlineAdvisor,
@@ -102,6 +107,9 @@ type Backend struct {
 
 	// run starts every runsc process. New sets it to execRunsc.
 	run runFunc
+
+	// restores holds one token per restore that may run at once.
+	restores chan struct{}
 
 	mu    sync.Mutex
 	warms map[string]*warm // warm id
@@ -152,7 +160,13 @@ func newBackend(o Options, run runFunc) *Backend {
 	if o.StateDir == "" {
 		o.StateDir = "/var/lib/fiberd/gvisor"
 	}
-	b := &Backend{opt: o, run: run, warms: map[string]*warm{}, boxes: map[string]*box{}, exits: make(chan backend.Exit, 1024)}
+	if o.MaxRestores <= 0 {
+		// GOMAXPROCS honours a cgroup CPU quota, which a home in a Pod
+		// runs under; NumCPU would count the node's.
+		o.MaxRestores = max(1, runtime.GOMAXPROCS(0))
+	}
+	b := &Backend{opt: o, run: run, warms: map[string]*warm{}, boxes: map[string]*box{}, exits: make(chan backend.Exit, 1024),
+		restores: make(chan struct{}, o.MaxRestores)}
 	if b.run == nil {
 		b.run = b.execRunsc
 	}
@@ -261,13 +275,23 @@ func (b *Backend) runsc(ctx context.Context, cgroupFD int, args ...string) (stri
 			// one ("signal: killed" is not a miss the agent can name).
 			return string(out), fmt.Errorf("gvisor: runsc %s: %w", args[0], ctx.Err())
 		}
-		tail := strings.TrimSpace(string(out))
-		if len(tail) > 400 {
-			tail = "..." + tail[len(tail)-400:]
-		}
-		return string(out), fmt.Errorf("gvisor: runsc %s: %w: %s", args[0], err, tail)
+		return string(out), fmt.Errorf("gvisor: runsc %s: %w: %s", args[0], err, clip(string(out)))
 	}
 	return string(out), nil
+}
+
+// clipHead and clipTail bound what a failed runsc command's error keeps.
+// runsc's own error is at the end, and a crashed Sentry names its cause
+// at the start, before pages of goroutines.
+const clipHead, clipTail = 400, 400
+
+// clip is out trimmed to its head and its tail.
+func clip(out string) string {
+	out = strings.TrimSpace(out)
+	if len(out) <= clipHead+clipTail {
+		return out
+	}
+	return out[:clipHead] + " ... " + out[len(out)-clipTail:]
 }
 
 // execRunsc is run's default: the runsc process, with its stdout and
@@ -712,8 +736,17 @@ func (b *Backend) start(ctx context.Context, images, workDir, template string, a
 		return backend.Fiber{}, err
 	}
 	_ = os.Remove(endpoint)
+	// A restore slot, waited for under the Clone deadline.
+	select {
+	case b.restores <- struct{}{}:
+	case <-ctx.Done():
+		_ = os.RemoveAll(x.bundle)
+		return backend.Fiber{}, fmt.Errorf("gvisor: %s waited for a restore slot: %w", fence, ctx.Err())
+	}
 	// The image is read, not cached, in the fiber's leaf.
-	if _, err := b.runsc(ctx, cgroupFD, "restore", "--detach", "--image-path", images, "--bundle", x.bundle, directIO, x.cid); err != nil {
+	_, err := b.runsc(ctx, cgroupFD, "restore", "--detach", "--image-path", images, "--bundle", x.bundle, directIO, x.cid)
+	<-b.restores
+	if err != nil {
 		// No sandbox, so no reaper to take the bundle.
 		_ = os.RemoveAll(x.bundle)
 		return backend.Fiber{}, fmt.Errorf("%w (%s)", err, leafDiag(cgroupFD))

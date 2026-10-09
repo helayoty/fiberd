@@ -37,6 +37,16 @@ type fakeRunsc struct {
 	boxes    map[string]*fakeSandbox // running, by cid
 	nextPID  int
 	gate     *deleteGate // the next delete is held here, when set
+	// restoring counts the restores in flight, and peak the most there
+	// have been at once.
+	restoring, peak int
+}
+
+// peakRestores is the most restores the fake has had in flight at once.
+func (f *fakeRunsc) peakRestores() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.peak
 }
 
 const (
@@ -172,6 +182,10 @@ func (f *fakeRunsc) endAll() {
 // errExit is what a failed runsc process reports.
 var errExit = errors.New("exit status 1")
 
+// longOutput is what a failing command prints under LongOutput: more
+// than an error keeps, with the cause on its first line.
+var longOutput = "panic: the cause\n" + strings.Repeat("goroutine\n", 200)
+
 // run is one runsc invocation, the global --flags first in args.
 func (f *fakeRunsc) run(ctx context.Context, cgroupFD int, args []string, out io.Writer) error {
 	f.mu.Lock()
@@ -180,7 +194,9 @@ func (f *fakeRunsc) run(ctx context.Context, cgroupFD int, args []string, out io
 	f.mu.Unlock()
 	fail := func(what string) error {
 		if k.LongOutput {
-			_, _ = io.WriteString(out, strings.Repeat("x", 600))
+			// As a crashed Sentry prints: the cause first, then pages of
+			// goroutines.
+			_, _ = io.WriteString(out, longOutput)
 		}
 		_, _ = fmt.Fprintf(out, "fake runsc: %s failed\n", what)
 		return errExit
@@ -259,6 +275,15 @@ func (f *fakeRunsc) run(ctx context.Context, cgroupFD int, args []string, out io
 		return nil
 	case "run", "restore":
 		if cmd == "restore" {
+			f.mu.Lock()
+			f.restoring++
+			f.peak = max(f.peak, f.restoring)
+			f.mu.Unlock()
+			defer func() {
+				f.mu.Lock()
+				f.restoring--
+				f.mu.Unlock()
+			}()
 			if _, err := os.Stat(filepath.Join(flag("--image-path"), imageFile)); err != nil {
 				_, _ = fmt.Fprintf(out, "fake runsc: no image at %s\n", flag("--image-path"))
 				return errExit

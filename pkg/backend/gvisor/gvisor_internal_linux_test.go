@@ -14,7 +14,9 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -28,12 +30,18 @@ import (
 // starts is ended when the test is.
 func newFake(t *testing.T, k knobs) (*Backend, *fakeRunsc) {
 	t.Helper()
+	return newFakeMax(t, k, 0)
+}
+
+// newFakeMax is newFake with the restore bound set (0 for the default).
+func newFakeMax(t *testing.T, k knobs, maxRestores int) (*Backend, *fakeRunsc) {
+	t.Helper()
 	f := newFakeRunsc(k)
 	rootfs := filepath.Join(t.TempDir(), "rootfs")
 	if err := os.Mkdir(rootfs, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	b := newBackend(Options{Runsc: "runsc", Rootfs: rootfs, StateDir: filepath.Join(t.TempDir(), "state")}, f.run)
+	b := newBackend(Options{Runsc: "runsc", Rootfs: rootfs, StateDir: filepath.Join(t.TempDir(), "state"), MaxRestores: maxRestores}, f.run)
 	if b.Tier() != core.TierSnapshot {
 		t.Fatalf("Tier = %s (%v), want FIBER_SNAPSHOT over the fake", b.Tier(), b.ProbeErr())
 	}
@@ -273,8 +281,10 @@ func TestRunsc(t *testing.T) {
 	}{
 		{name: "success", args: []string{"--version"}, wantOut: "runsc version " + fakeVersion},
 		{name: "failure keeps the tail", args: []string{"state", "nothing"}, wantText: `runsc state: exit status 1: fake runsc: container "nothing" does not exist`},
-		{name: "a long tail is cut", knobs: knobs{Fail: map[string]bool{"state": true}, LongOutput: true}, args: []string{"state", "x"},
-			wantText: "exit status 1: ..." + tail400(strings.Repeat("x", 600)+"fake runsc: state failed")},
+		// A crash's cause is on its first line and runsc's own error on
+		// its last, so a long output keeps both ends and loses the middle.
+		{name: "a long output keeps its head and its tail", knobs: knobs{Fail: map[string]bool{"state": true}, LongOutput: true}, args: []string{"state", "x"},
+			wantText: "exit status 1: " + clipped(longOutput+"fake runsc: state failed")},
 		{name: "detached output through a file", args: []string{"state", "--detach", "x"}, wantText: `container "x" does not exist`, wantOut: `container "x" does not exist`},
 		{name: "detached without a state directory", stateDir: "missing", args: []string{"state", "--detach", "x"}, wantErr: os.ErrNotExist},
 		{name: "deadline ends the command", knobs: knobs{SlowRestore: 3 * time.Second}, timeout: 100 * time.Millisecond,
@@ -332,8 +342,16 @@ func TestRunsc(t *testing.T) {
 	}
 }
 
-// tail400 is the last 400 bytes of s, as a runsc error keeps them.
-func tail400(s string) string { return s[len(s)-400:] }
+// clipped is s as a runsc error keeps it: its first clipHead bytes, then
+// its last clipTail, with the cause ("panic: the cause") in the head and
+// runsc's own error in the tail.
+func clipped(s string) string {
+	out := s[:clipHead] + " ... " + s[len(s)-clipTail:]
+	if !strings.HasPrefix(out, "panic: the cause") || !strings.HasSuffix(out, "state failed") {
+		panic("clipped: the fixture does not hold the cause and the error")
+	}
+	return out
+}
 
 // TestWriteBundle checks the OCI spec every sandbox is created or restored
 // with. The run directory is /host, and the self-checkpoint annotations
@@ -973,6 +991,84 @@ func TestCloneRefusals(t *testing.T) {
 					ents, _ := os.ReadDir(bundles)
 					return len(ents) == 0
 				})
+			}
+		})
+	}
+}
+
+// TestRestoreBound checks that at most Options.MaxRestores `runsc
+// restore` processes run at once, that the default is the CPUs this
+// process may use, and that a clone whose deadline passes while it waits
+// for a slot misses as one whose restore ran too long does.
+func TestRestoreBound(t *testing.T) {
+	cases := []struct {
+		name     string
+		max      int // 0 for the default
+		clones   int
+		slow     time.Duration // how long each restore holds its slot
+		first    time.Duration // the first clone's deadline
+		deadline time.Duration // every other clone's deadline
+		wantPeak int           // 0 for the default bound
+		wantMiss int           // clones that miss their deadline
+		wantText string        // in every miss
+	}{
+		{name: "one at a time", max: 1, clones: 3, slow: 30 * time.Millisecond, first: 2 * time.Second, deadline: 2 * time.Second, wantPeak: 1},
+		{name: "two at a time", max: 2, clones: 5, slow: 30 * time.Millisecond, first: 2 * time.Second, deadline: 2 * time.Second, wantPeak: 2},
+		{name: "the bound is the knob, not the fake", max: 5, clones: 5, slow: 200 * time.Millisecond, first: 2 * time.Second, deadline: 2 * time.Second, wantPeak: 5},
+		{name: "the default is the CPUs", clones: 1, first: 2 * time.Second, deadline: 2 * time.Second},
+		{name: "the deadline covers the wait for a slot", max: 1, clones: 2, slow: 300 * time.Millisecond, first: 2 * time.Second, deadline: 100 * time.Millisecond,
+			wantPeak: 1, wantMiss: 1, wantText: "waited for a restore slot"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b, f := newFakeMax(t, knobs{SlowRestore: tc.slow}, tc.max)
+			wantBound := tc.max
+			if wantBound == 0 {
+				wantBound = max(1, runtime.GOMAXPROCS(0))
+			}
+			if cap(b.restores) != wantBound {
+				t.Fatalf("restore bound = %d, want %d", cap(b.restores), wantBound)
+			}
+			workDir := filepath.Join(t.TempDir(), "g")
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			w, err := b.Warm(ctx, backend.WarmSpec{GrantUID: "g", Template: backend.Template{Argv: []string{"/bin/refzygote", "--gvisor"}}, CgroupFD: -1, ProbeCgroupFD: -1, WorkDir: workDir})
+			if err != nil {
+				t.Fatalf("Warm: %v", err)
+			}
+			errs := make([]error, tc.clones)
+			var wg sync.WaitGroup
+			for i := range tc.clones {
+				deadline := tc.deadline
+				if i == 0 {
+					deadline = tc.first
+				}
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					_, errs[i] = b.Clone(ctx, w.ID, backend.FiberSpec{Fence: fmt.Sprintf("g/1-%d", i), Endpoint: filepath.Join(workDir, fmt.Sprintf("ep%d.sock", i)), CgroupFD: -1, Deadline: deadline})
+				}()
+				if i == 0 {
+					// The first clone holds a slot before any other asks.
+					waitFor(t, "the first restore to start", func() bool { return f.peakRestores() >= 1 })
+				}
+			}
+			wg.Wait()
+			misses := 0
+			for _, err := range errs {
+				if err == nil {
+					continue
+				}
+				if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), tc.wantText) {
+					t.Fatalf("Clone = %v, want a deadline miss saying %q", err, tc.wantText)
+				}
+				misses++
+			}
+			if misses != tc.wantMiss {
+				t.Fatalf("%d clones missed, want %d: %v", misses, tc.wantMiss, errs)
+			}
+			if tc.wantPeak > 0 && f.peakRestores() != tc.wantPeak {
+				t.Fatalf("peak restores in flight = %d, want %d", f.peakRestores(), tc.wantPeak)
 			}
 		})
 	}
