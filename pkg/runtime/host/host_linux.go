@@ -198,6 +198,7 @@ func New(cfg Config) (*Runtime, error) {
 	if err := root.Ensure("memory", "pids"); err != nil {
 		return nil, err
 	}
+	reserveAgent(root)
 	for _, d := range []string{cfg.RunDir, cfg.DeltaDir, cfg.TemplateCache} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			return nil, err
@@ -631,14 +632,58 @@ func (r *Runtime) delegateProcs(grantUID string, d cgroup.Dir) error {
 // would count and starve.
 func (r *Runtime) limitsTasks() bool { return !r.IsolatesTenants() }
 
-// pidsPressure names a failed birth as the grant's own pressure when its
-// cgroup refused a fork since before was read. The caller is then shed,
-// not sent to another home.
-func pidsPressure(gcg cgroup.Dir, before uint64, grantUID string, err error) error {
-	if after, _ := gcg.PidsMaxHits(); after > before {
-		return fmt.Errorf("%w: grant %s is at pids.max: %w", core.ErrPressure, grantUID, err)
+// pidsHits counts the forks refused at pids.max by the grant's cgroup
+// and by the subtree root, whose cap (reserveAgent) every grant shares.
+func (r *Runtime) pidsHits(gcg cgroup.Dir) uint64 {
+	g, _ := gcg.PidsMaxHits()
+	s, _ := r.root.PidsMaxHits()
+	return g + s
+}
+
+// pidsPressure names a failed birth as the home's own pressure when the
+// grant's cgroup or the subtree root refused a fork since before was
+// read (pidsHits). The caller is then shed, not sent to another home.
+func (r *Runtime) pidsPressure(gcg cgroup.Dir, before uint64, grantUID string, err error) error {
+	if r.pidsHits(gcg) > before {
+		return fmt.Errorf("%w: grant %s or its home is at pids.max: %w", core.ErrPressure, grantUID, err)
 	}
 	return err
+}
+
+// The agent's share of the home's limits: an eighth, at least this much,
+// at most half.
+const (
+	agentMinBytes = 64 << 20
+	agentMinTasks = 64
+)
+
+// reserve is the agent's share of a limit.
+func reserve(limit, floor uint64) uint64 {
+	return min(max(limit/8, floor), limit/2)
+}
+
+// reserveAgent caps the fibers' subtree a reserve below the home's own
+// memory and task limits, which the agent shares with it. Fibers that
+// fill a shared limit would stop the agent creating a thread, a Go fatal
+// error that ends every fiber. memory.high sits an eighth lower so the
+// ladder sees pressure first. A home with no visible limit is left alone.
+func reserveAgent(root cgroup.Dir) {
+	if c := root.Ceiling("memory.max"); c > 0 {
+		top := c - reserve(c, agentMinBytes)
+		if err := root.SetCeiling(top-top/8, top); err != nil {
+			log.Printf("host: cap the subtree's memory: %v", err)
+		} else {
+			log.Printf("host: subtree memory.max=%dMiB, %dMiB kept for the agent under the home's %dMiB", top>>20, (c-top)>>20, c>>20)
+		}
+	}
+	if c := root.Ceiling("pids.max"); c > 0 {
+		top := c - reserve(c, agentMinTasks)
+		if err := root.SetPidsMax(top); err != nil {
+			log.Printf("host: cap the subtree's tasks: %v", err)
+		} else {
+			log.Printf("host: subtree pids.max=%d, %d kept for the agent under the home's %d", top, c-top, c)
+		}
+	}
 }
 
 // protectTemplates keeps every warm template's pages out of reclaim.
@@ -1247,13 +1292,13 @@ func (r *Runtime) Clone(ctx context.Context, spec core.CloneSpec) (core.FiberHan
 	r.mu.Lock()
 	r.fibers[f.id] = f
 	r.mu.Unlock()
-	refused, _ := z.cg.PidsMaxHits()
+	refused := r.pidsHits(z.cg)
 	fb, err := r.be.Clone(ctx, z.id, backend.FiberSpec{
 		Fence: f.id, Endpoint: bind, CgroupFD: int(lfd.Fd()), Deadline: spec.Deadline,
 		Payload: spec.Payload, OwnPIDNS: true, Handoff: fiberEnd,
 	})
 	if err != nil {
-		err = pidsPressure(z.cg, refused, spec.Grant.UID, err)
+		err = r.pidsPressure(z.cg, refused, spec.Grant.UID, err)
 		r.mu.Lock()
 		if r.fibers[f.id] == f {
 			delete(r.fibers, f.id)
@@ -1628,11 +1673,11 @@ func (r *Runtime) resume(ctx context.Context, spec core.CloneSpec) (core.FiberHa
 	r.mu.Lock()
 	r.fibers[f.id] = f
 	r.mu.Unlock()
-	refused, _ := gcg.PidsMaxHits()
+	refused := r.pidsHits(gcg)
 	fb, err := r.be.Resume(ctx, backend.ResumeSpec{Dir: dir, Fence: f.id, Endpoint: bind, CgroupFD: int(lfd.Fd()), Deadline: spec.Deadline,
 		WarmID: spec.Grant.UID, WorkDir: workDir, Handoff: fiberEnd})
 	if err != nil {
-		err = pidsPressure(gcg, refused, spec.Grant.UID, err)
+		err = r.pidsPressure(gcg, refused, spec.Grant.UID, err)
 		r.mu.Lock()
 		if r.fibers[f.id] == f {
 			delete(r.fibers, f.id)

@@ -27,6 +27,7 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/protobuf/types/known/emptypb"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	grantv1 "github.com/helayoty/fiberd/api/grant/v1"
 	"github.com/helayoty/fiberd/pkg/core"
@@ -43,7 +44,7 @@ type opts struct {
 	fibers                                                   int
 	ceiling, step                                            uint64
 	overcommit                                               float64
-	round, timeout                                           time.Duration
+	round, timeout, deadline                                 time.Duration
 }
 
 func main() {
@@ -61,6 +62,7 @@ func main() {
 	flag.StringVar(&o.cgRoot, "cgroup-root", envOr("FIBERD_CGROUP_ROOT", "/sys/fs/cgroup/fiberd"), "home's cgroup root")
 	flag.StringVar(&o.rootEvents, "container-events", "/sys/fs/cgroup/memory.events", "container-level memory.events (OOM counter)")
 	flag.DurationVar(&o.timeout, "timeout", 90*time.Second, "give up after")
+	flag.DurationVar(&o.deadline, "clone-deadline", 0, "deadline each clone carries, for homes whose restores are slow (0: the home's default)")
 	flag.StringVar(&o.tlsCA, "tls-ca", "", "PEM CA bundle the home's certificate chains to (empty dials plaintext)")
 	flag.StringVar(&o.tlsCert, "tls-cert", "", "PEM client certificate presented to the home")
 	flag.StringVar(&o.tlsKey, "tls-key", "", "PEM private key of -tls-cert")
@@ -163,7 +165,11 @@ func run(o opts) int {
 
 	var fs []*fib
 	for i := 0; i < o.fibers; i++ {
-		r, err := api.Clone(ctx, &grantv1.CloneRequest{GrantJwt: tok, Session: fmt.Sprintf("s%d", i)})
+		req := &grantv1.CloneRequest{GrantJwt: tok, Session: fmt.Sprintf("s%d", i)}
+		if o.deadline > 0 {
+			req.Deadline = timestamppb.New(time.Now().Add(o.deadline))
+		}
+		r, err := api.Clone(ctx, req)
 		if err != nil {
 			return fatal("clone s%d: %v", i, err)
 		}

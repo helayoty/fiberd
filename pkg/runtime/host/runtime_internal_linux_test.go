@@ -1408,25 +1408,96 @@ func TestPidsPressure(t *testing.T) {
 	cause := errors.New("fork: resource temporarily unavailable")
 	cases := []struct {
 		name   string
-		events string // pids.events content, "" for no pids controller
+		events string // the grant's pids.events content, "" for no pids controller
+		root   string // the subtree root's
 		before uint64
 		want   error
 	}{
 		{name: "hits rose since before", events: "max 3\n", before: 1, want: core.ErrPressure},
 		{name: "no new hits", events: "max 3\n", before: 3, want: cause},
 		{name: "no pids controller", before: 0, want: cause},
+		{name: "the subtree root refused the fork", events: "max 0\n", root: "max 1\n", before: 0, want: core.ErrPressure},
+		{name: "the root's old hits do not count", events: "max 0\n", root: "max 2\n", before: 2, want: cause},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			d := cgroup.Dir{Path: t.TempDir()}
-			if tc.events != "" {
-				if err := os.WriteFile(filepath.Join(d.Path, "pids.events"), []byte(tc.events), 0o644); err != nil {
+			r := &Runtime{root: cgroup.Dir{Path: t.TempDir()}}
+			for dir, events := range map[cgroup.Dir]string{d: tc.events, r.root: tc.root} {
+				if events == "" {
+					continue
+				}
+				if err := os.WriteFile(filepath.Join(dir.Path, "pids.events"), []byte(events), 0o644); err != nil {
 					t.Fatal(err)
 				}
 			}
-			err := pidsPressure(d, tc.before, "g1", cause)
+			err := r.pidsPressure(d, tc.before, "g1", cause)
 			if !errors.Is(err, tc.want) || !errors.Is(err, cause) {
 				t.Fatalf("pidsPressure = %v, want %v wrapping %v", err, tc.want, cause)
+			}
+		})
+	}
+}
+
+// TestNewReservesTheAgent checks that New caps the subtree below the
+// limits it finds above its root, keeping an eighth (at least 64 MiB or
+// 64 tasks, at most half) for the agent, and leaves a root with nothing
+// above it alone. A fake root makes the limits plain files. The root's
+// own pids.max is there from the start, as the kernel shows it once the
+// parent delegated the controller (without it no task cap is written,
+// as on a Slurm step).
+func TestNewReservesTheAgent(t *testing.T) {
+	cases := []struct {
+		name  string
+		above map[string]string // files above the root, path relative to the home
+		root  string            // the runtime's root, relative to the home
+		want  map[string]string // the root's files after New
+		none  []string          // files New must not write
+	}{
+		{name: "an eighth below the home's limits", above: map[string]string{"memory.max": "1073741824", "pids.max": "1000"}, root: "fiberd",
+			want: map[string]string{"memory.max": "939524096", "memory.high": "822083584", "pids.max": "875"}},
+		{name: "at least 64 MiB and 64 tasks", above: map[string]string{"memory.max": "268435456", "pids.max": "128"}, root: "fiberd",
+			want: map[string]string{"memory.max": "201326592", "memory.high": "176160768", "pids.max": "64"}},
+		{name: "at most half of a small limit", above: map[string]string{"memory.max": "67108864", "pids.max": "32"}, root: "fiberd",
+			want: map[string]string{"memory.max": "33554432", "memory.high": "29360128", "pids.max": "16"}},
+		{name: "the smallest limit above wins", above: map[string]string{"memory.max": "536870912", "pids.max": "500", "mid/memory.max": "max", "mid/pids.max": "2000"}, root: "mid/fiberd",
+			want: map[string]string{"memory.max": "469762048", "memory.high": "411041792", "pids.max": "436"}},
+		{name: "no limit above", above: map[string]string{"memory.max": "max", "pids.max": "max"}, root: "fiberd",
+			want: map[string]string{"pids.max": "max"}, none: []string{"memory.max", "memory.high"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			tc.above[filepath.Join(tc.root, "pids.max")] = "max"
+			for name, v := range tc.above {
+				p := filepath.Join(home, name)
+				if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(p, []byte(v+"\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			dirs := t.TempDir()
+			r, err := New(Config{Backend: newFakeBackend(core.TierWarm), CgroupRoot: filepath.Join(home, tc.root),
+				RunDir: filepath.Join(dirs, "run"), DeltaDir: filepath.Join(dirs, "deltas"), TemplateCache: filepath.Join(dirs, "cache")})
+			if err != nil {
+				t.Fatal(err)
+			}
+			r.Close()
+			for name, v := range tc.want {
+				b, err := os.ReadFile(filepath.Join(home, tc.root, name))
+				if err != nil {
+					t.Fatalf("%s: %v", name, err)
+				}
+				if got := strings.TrimSpace(string(b)); got != v {
+					t.Fatalf("%s = %q, want %q", name, got, v)
+				}
+			}
+			for _, name := range tc.none {
+				if _, err := os.Stat(filepath.Join(home, tc.root, name)); err == nil {
+					t.Fatalf("%s written although nothing above limits the root", name)
+				}
 			}
 		})
 	}

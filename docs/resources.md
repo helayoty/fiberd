@@ -6,7 +6,7 @@ This page says what bounds a [fiber](glossary.md#fiber)'s CPU and memory and how
 
 ## The home is the outer bound
 
-The environment that owns the home puts the [agent](glossary.md#agent) in a cgroup with limits, such as a Pod's container limits or a Slurm step. fiberd carves its own cgroups beneath it, so every limit it sets is bounded by the home's. The agent, the [warm](glossary.md#warm) [template](glossary.md#template), [backend](glossary.md#backend) helpers and every fiber share that one allocation.
+The environment that owns the home puts the [agent](glossary.md#agent) in a cgroup with limits, such as a Pod's container limits or a Slurm step. fiberd carves its own cgroups beneath it, so every limit it sets is bounded by the home's. The agent, the [warm](glossary.md#warm) [template](glossary.md#template), [backend](glossary.md#backend) helpers and every fiber share that one allocation. The runtime keeps a slice of it for the agent, so fibers cannot starve the process that serves them ([design/resources.md](design/resources.md)).
 
 ## CPU is shared
 

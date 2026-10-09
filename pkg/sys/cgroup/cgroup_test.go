@@ -250,6 +250,42 @@ func TestSetCeiling(t *testing.T) {
 	}
 }
 
+// TestCeiling reads the nearest limit above a directory: the smallest
+// numeric value on the way up, stopping where the file ends, and 0 when
+// every ancestor says max.
+func TestCeiling(t *testing.T) {
+	cases := []struct {
+		name  string
+		files map[string]string // path relative to the mount: content
+		dir   string            // the directory asked, relative to the mount
+		want  uint64
+	}{
+		{name: "the parent's limit", files: map[string]string{"memory.max": "max", "box/memory.max": "1000"}, dir: "box/fiberd", want: 1000},
+		{name: "the smallest limit above", files: map[string]string{"memory.max": "500", "box/memory.max": "1000"}, dir: "box/fiberd", want: 500},
+		{name: "max all the way up", files: map[string]string{"memory.max": "max", "box/memory.max": "max"}, dir: "box/fiberd", want: 0},
+		{name: "the walk stops where the file ends", files: map[string]string{"memory.max": "500", "box/pids.max": "7"}, dir: "box/fiberd", want: 0},
+		{name: "a limit on the mount's own root, as a private namespace shows", files: map[string]string{"memory.max": "4096"}, dir: "fiberd", want: 4096},
+		{name: "nothing above", files: nil, dir: "fiberd", want: 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mount := t.TempDir()
+			for name, v := range tc.files {
+				p := filepath.Join(mount, name)
+				if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(p, []byte(v+"\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got := cgroup.Root(filepath.Join(mount, tc.dir)).Ceiling("memory.max"); got != tc.want {
+				t.Fatalf("Ceiling = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestSetMemoryMin checks that the protection is written, or its refusal
 // named.
 func TestSetMemoryMin(t *testing.T) {

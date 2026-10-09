@@ -11,8 +11,11 @@
 # demand 320 MiB, twice the ceiling. If the ladder works, the grant is
 # throttled at 160 MiB, PSI rises, fibers are parked largest-W first, and
 # nothing is OOM-killed: 64 + 40 + ~176 stays under 384. If it does not,
-# demand reaches 64 + 40 + 320 = 424 MiB and the container's memory.max
-# kills something. The storm program checks the container's OOM counter.
+# demand reaches 64 + 40 + 320 = 424 MiB and a memory.max kills something.
+# The runtime caps its own subtree (zygote and fibers) at 320 MiB with
+# memory.high 280 MiB, keeping 64 MiB of the container for the agent, so
+# that kill lands in the subtree, and the container's hierarchical
+# memory.events still counts it. The storm program checks that counter.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 

@@ -95,6 +95,30 @@ func (d Dir) SetCeiling(high, max uint64) error {
 	return nil
 }
 
+// Ceiling is the nearest limit above d: the smallest numeric value of
+// the control file name (memory.max, pids.max) on d's ancestors, read
+// upward until a directory without the file, which is the end of the
+// delegated tree or the mount itself. A private cgroup namespace shows
+// the container's own limit on the mount's root. 0 when every ancestor
+// says max, as a bare host's root does.
+func (d Dir) Ceiling(name string) uint64 {
+	var best uint64
+	for p := filepath.Dir(d.Path); p != "/" && p != "."; p = filepath.Dir(p) {
+		s, err := Dir{Path: p}.read(name)
+		if err != nil {
+			break
+		}
+		v, err := strconv.ParseUint(s, 10, 64)
+		if err != nil {
+			continue // "max"
+		}
+		if best == 0 || v < best {
+			best = v
+		}
+	}
+	return best
+}
+
 // SetMemoryMin protects b bytes of the group from reclaim. The kernel
 // caps it at the parent's effective memory.min, so a protection only
 // holds when every ancestor up to the delegation root carries one too.
