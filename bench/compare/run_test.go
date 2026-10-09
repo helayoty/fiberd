@@ -33,20 +33,21 @@ func (c *clock) advance(d time.Duration) {
 	c.t = c.t.Add(d)
 }
 
-// fake is an adapter that counts calls and fails where told. Prepare
-// and Park take prepCost and parkCost of clock time. Release and
+// fake is an adapter that counts calls and fails where told. Prepare,
+// Park and Refill take prepCost, parkCost and refillCost of clock time. Release and
 // Cleanup refuse a cancelled context, as a real API client would.
 type fake struct {
 	mu                 sync.Mutex
 	clock              *clock
 	activate, released int
 	prepared, parked   int
-	cleaned            int
+	refilled, cleaned  int
 	failActivate       bool
 	failPrepare        bool
 	park               bool
 	density            int64
 	prepCost, parkCost time.Duration
+	refillCost         time.Duration
 	// cancel, when set, is called on the first Activate, like a SIGINT
 	// in the middle of a burst.
 	cancel context.CancelFunc
@@ -62,6 +63,14 @@ func (f *fake) Prepare(_ context.Context, _ string) error {
 		return errors.New("rmi: no crictl")
 	}
 	f.clock.advance(f.prepCost)
+	return nil
+}
+
+func (f *fake) Refill(context.Context) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.refilled++
+	f.clock.advance(f.refillCost)
 	return nil
 }
 
@@ -212,6 +221,23 @@ func TestRunner(t *testing.T) {
 			}},
 		{name: "density holds n instances and reads them, as hold lines", fake: &fake{density: 1 << 20}, runs: 1, bursts: []int{1}, density: 2,
 			wantActivation: 2, wantHold: 4, wantReleased: 6, wantDensity: 2 << 20},
+		{name: "the pool refills before every burst, resume and density step, untimed",
+			fake: &fake{park: true, density: 1 << 20, refillCost: 100 * time.Millisecond}, runs: 1, bursts: []int{1, 2}, resume: true, density: 1,
+			wantActivation: 6, wantHold: 4, wantReleased: 10, wantDensity: 1 << 20,
+			check: func(t *testing.T, recs []Record, f *fake) {
+				// Two runs of two bursts, a resume and a density step each.
+				if f.refilled != 8 {
+					t.Errorf("refilled %d times, want 8", f.refilled)
+				}
+				for _, r := range recs {
+					if (r.Kind == "activation" || r.Kind == "resume") && r.TFirstByteMs >= 100 {
+						t.Errorf("%s %s took %.0fms: the refill was timed", r.Kind, r.ID, r.TFirstByteMs)
+					}
+					if r.Kind == "burst" && r.WallMs >= 100 {
+						t.Errorf("burst of %d took %.0fms: the refill was timed", r.Burst, r.WallMs)
+					}
+				}
+			}},
 		{name: "a cancelled run stops, releases what it holds and cleans up", fake: &fake{}, runs: 2, bursts: []int{2}, cancel: true,
 			wantErr: context.Canceled, wantActivation: 2, wantReleased: 2},
 	}

@@ -203,6 +203,16 @@ func (r *Runner) prepare(ctx context.Context, id string) error {
 	return nil
 }
 
+// refill waits, untimed, for what the last step drained to stand again.
+func (r *Runner) refill(ctx context.Context) error {
+	if f, ok := r.Adapter.(Refiller); ok {
+		if err := f.Refill(ctx); err != nil {
+			return fmt.Errorf("refill: %w", err)
+		}
+	}
+	return nil
+}
+
 // one is a single activation to first byte, recorded under kind. prep
 // is what the pre-step answered, which fails the activation before its
 // clock starts. The handle comes back for the release, nil when
@@ -252,9 +262,13 @@ func (r *Runner) outlive(ctx context.Context) (context.Context, context.CancelFu
 }
 
 // burst activates n instances at once, waits for all, then releases
-// them all. Nothing runs between bursts. Every pre-step ends before the
-// first clock starts, so none runs inside another activation's window.
+// them all. Nothing runs between bursts. The refill and every pre-step
+// end before the first clock starts, so none runs inside an
+// activation's window.
 func (r *Runner) burst(ctx context.Context, run, n int) error {
+	if err := r.refill(ctx); err != nil {
+		return err
+	}
 	ids := make([]string, n)
 	prep := make([]error, n)
 	var wg sync.WaitGroup
@@ -305,6 +319,9 @@ func (r *Runner) release(ctx context.Context, h Handle) error {
 // resume activates one instance, parks it untimed, then times its
 // resume to first byte.
 func (r *Runner) resume(ctx context.Context, run int) error {
+	if err := r.refill(ctx); err != nil {
+		return err
+	}
 	id := fmt.Sprintf("r%d-resume", run)
 	h := r.one(ctx, "hold", run, 0, id, r.prepare(ctx, id))
 	if h == nil {
@@ -343,6 +360,9 @@ func (r *Runner) resume(ctx context.Context, run int) error {
 // density holds Density idle instances for Idle, then reads what they
 // are charged and what the system keeps standing.
 func (r *Runner) density(ctx context.Context, run int) error {
+	if err := r.refill(ctx); err != nil {
+		return err
+	}
 	hs := make([]*Handle, r.Density)
 	var wg sync.WaitGroup
 	for i := range r.Density {

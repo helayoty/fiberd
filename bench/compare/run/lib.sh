@@ -76,11 +76,15 @@ control_plane_flags() {
   echo "-apiserver-metrics https://kubernetes.default.svc/metrics -scheduler-metrics https://$(node_ip):10259/metrics -audit-log /host/audit/audit.log"
 }
 
+# PHASE_SYSTEMS are the systems this phase ran in the client Pod.
+PHASE_SYSTEMS=()
+
 # run_in_client runs one compare invocation in the client Pod, writing
 # /out/<system>.jsonl there.
 run_in_client() { # run_in_client <system> <class> <args...>
   local system=$1 class=$2; shift 2
   echo "== $system"
+  PHASE_SYSTEMS+=("$system")
   wait_quiet_host
   # shellcheck disable=SC2046,SC2016  # the flag strings are lists, $0 and $@ expand in the Pod
   client_exec sh -c 'rm -f "/out/$0.rc"; compare "$@"; rc=$?; echo "$rc" >"/out/$0.rc"; exit "$rc"' "$system" \
@@ -93,11 +97,15 @@ run_in_client() { # run_in_client <system> <class> <args...>
   [ "$rc" = 0 ] || { echo "$system: compare did not finish (exit ${rc:-unknown}), the exec stream broke" >&2; return 1; }
 }
 
-# collect copies the client's results into $STATE/<phase> and prints the
-# table.
+# collect copies the results of this phase's systems into $STATE/<phase>
+# and prints the table. The client's /out keeps every phase's files, so
+# only the ones this phase wrote are taken.
 collect() { # collect <phase>
+  local s
   mkdir -p "$STATE/$1"
-  "${KC[@]}" -n "$NS" cp "$CLIENT:/out" "$STATE/$1" >/dev/null
+  for s in "${PHASE_SYSTEMS[@]}"; do
+    "${KC[@]}" -n "$NS" cp "$CLIENT:/out/$s.jsonl" "$STATE/$1/$s.jsonl" >/dev/null
+  done
   (cd "$ROOT/bench/compare" && "$GO" run ./cmd/summarize "$STATE/$1"/*.jsonl | tee "$STATE/$1/summary.txt")
 }
 

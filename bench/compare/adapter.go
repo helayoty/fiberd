@@ -77,6 +77,13 @@ type Preparer interface {
 	Prepare(ctx context.Context, id string) error
 }
 
+// Refiller is an adapter whose standing capacity a burst drains, such
+// as a warm pool. The runner calls Refill before each burst, resume and
+// density step, untimed, so each step starts from a full pool.
+type Refiller interface {
+	Refill(ctx context.Context) error
+}
+
 // Cleaner is an adapter that leaves something standing after its runs,
 // such as a warm pool and its template, and takes it down. The runner
 // calls Cleanup once after the last run, untimed.

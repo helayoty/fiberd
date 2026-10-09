@@ -45,7 +45,7 @@ type Options struct {
 	CPU, Memory  string
 	CgroupRoot   string
 	Poll         time.Duration
-	// Wait bounds the pool fill in Setup.
+	// Wait bounds each pool fill, in Setup and before every step.
 	Wait time.Duration
 }
 
@@ -149,6 +149,10 @@ func (a *Adapter) Setup(ctx context.Context) error {
 	}
 	return a.full(ctx)
 }
+
+// Refill waits for the pool to be full again after the last step's
+// claims drained it, so no burst starts on an empty pool.
+func (a *Adapter) Refill(ctx context.Context) error { return a.full(ctx) }
 
 // full waits for the pool to have every replica ready.
 func (a *Adapter) full(ctx context.Context) error {

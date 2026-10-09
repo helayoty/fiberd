@@ -2,7 +2,10 @@ package agentsandbox
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"os"
@@ -10,6 +13,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -317,4 +321,127 @@ func TestCleanup(t *testing.T) {
 			}
 		})
 	}
+}
+
+// pool is a fake agent-sandbox controller on the kubetest server. Each
+// claim takes a ready sandbox, and the pool replaces it only refill
+// later, as a real pool starts a new Pod. short lists the bursts whose
+// first claim found the pool less than full.
+type pool struct {
+	srv      *kubetest.Server
+	kube     *kube.Client
+	refill   time.Duration
+	replicas int
+	mu       sync.Mutex
+	ready    int
+	seen     map[string]bool
+	short    []string
+}
+
+// set writes the ready count to the pool's status, under p.mu.
+func (p *pool) set() {
+	p.srv.Update(poolPath, func(obj map[string]any) { obj["status"] = map[string]any{"readyReplicas": p.ready} })
+}
+
+func (p *pool) run(ctx context.Context) {
+	for ctx.Err() == nil {
+		p.mu.Lock()
+		p.set()
+		p.mu.Unlock()
+		var list struct {
+			Items []struct {
+				Metadata kube.ObjectMeta `json:"metadata"`
+				Status   map[string]any  `json:"status"`
+			} `json:"items"`
+		}
+		_ = p.kube.Get(ctx, ext+"ns/sandboxclaims", &list)
+		for _, c := range list.Items {
+			if c.Status != nil {
+				continue
+			}
+			p.mu.Lock()
+			// A claim is named after its run, burst and index, so the
+			// name without the index names the burst.
+			burst := c.Metadata.Name[:strings.LastIndex(c.Metadata.Name, "-")]
+			if !p.seen[burst] {
+				p.seen[burst] = true
+				if p.ready < p.replicas {
+					p.short = append(p.short, fmt.Sprintf("%s found %d of %d ready", burst, p.ready, p.replicas))
+				}
+			}
+			if p.ready > 0 {
+				p.ready--
+				p.set()
+				p.srv.Update(ext+"ns/sandboxclaims/"+c.Metadata.Name, func(obj map[string]any) {
+					obj["status"] = map[string]any{"sandbox": map[string]any{"name": "sb-" + c.Metadata.Name, "podIPs": []any{"127.0.0.1"}}}
+				})
+				time.AfterFunc(p.refill, func() {
+					p.mu.Lock()
+					defer p.mu.Unlock()
+					p.ready++
+					p.set()
+				})
+			}
+			p.mu.Unlock()
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestBurstsStartOnAFullPool(t *testing.T) {
+	cases := []struct {
+		name     string
+		replicas int
+		bursts   []int
+	}{
+		{name: "pool of 1, bursts of 1", replicas: 1, bursts: []int{1}},
+		{name: "pool of 2, bursts of 2 then 1", replicas: 2, bursts: []int{2, 1}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := kubetest.New()
+			defer srv.Close()
+			a := newAdapter(t, srv, tc.replicas, "")
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			p := &pool{srv: srv, kube: a.o.Kube, refill: 300 * time.Millisecond, replicas: tc.replicas, ready: tc.replicas, seen: map[string]bool{}}
+			go p.run(ctx)
+			var out bytes.Buffer
+			r := &compare.Runner{Adapter: a, System: "s", Class: "c", Runs: 2, Bursts: tc.bursts, Poll: time.Millisecond, Out: &out}
+			if err := r.Run(ctx); err != nil {
+				t.Fatal(err)
+			}
+			p.mu.Lock()
+			short := p.short
+			p.mu.Unlock()
+			if len(short) > 0 {
+				t.Errorf("bursts started on a pool that was not full: %v", short)
+			}
+			n := 0
+			for _, line := range bytes.Split(bytes.TrimSpace(out.Bytes()), []byte("\n")) {
+				var rec compare.Record
+				if err := json.Unmarshal(line, &rec); err != nil {
+					t.Fatal(err)
+				}
+				if rec.Kind != "activation" {
+					continue
+				}
+				n++
+				if rec.Error != "" {
+					t.Errorf("activation %s: %s", rec.ID, rec.Error)
+				}
+			}
+			if want := 3 * sum(tc.bursts); n != want {
+				t.Errorf("activations %d, want %d", n, want)
+			}
+		})
+	}
+}
+
+func sum(xs []int) int {
+	n := 0
+	for _, x := range xs {
+		n += x
+	}
+	return n
 }
