@@ -251,17 +251,36 @@ func TestDensity(t *testing.T) {
 	cases := []struct {
 		name    string
 		handles []compare.Handle
-		want    int64
+		// refilling: counter-b's Pod has no cgroup yet and the pool is
+		// not full until it has, as right after a density burst.
+		refilling bool
+		want      int64
 	}{
 		{name: "standing is the pool's unclaimed sandboxes only", want: 1<<20 + 2<<20},
+		{name: "standing waits for a refilling pool to be full", refilling: true, want: 1<<20 + 2<<20},
 		{name: "handles are charged their own sandboxes", handles: []compare.Handle{{ID: "claim-x", Meta: map[string]string{"sandbox": "counter-c"}}}, want: 3 << 20},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			srv := kubetest.New()
 			defer srv.Close()
-			a := newAdapter(t, srv, 1, "")
+			a := newAdapter(t, srv, 2, "")
 			a.o.CgroupRoot = seedSandboxes(t, srv)
+			pool := a.Pool()
+			pool["status"] = map[string]any{"readyReplicas": 2}
+			if tc.refilling {
+				pool["status"] = map[string]any{"readyReplicas": 1}
+				b, held := filepath.Join(a.o.CgroupRoot, "kubepods", "poduid-counter-b"), filepath.Join(t.TempDir(), "b")
+				if err := os.Rename(b, held); err != nil {
+					t.Fatal(err)
+				}
+				go func() {
+					time.Sleep(100 * time.Millisecond)
+					_ = os.Rename(held, b)
+					srv.Update(poolPath, func(obj map[string]any) { obj["status"] = map[string]any{"readyReplicas": 2} })
+				}()
+			}
+			srv.Put(poolPath, pool)
 			got, err := a.Density(context.Background(), tc.handles)
 			if err != nil {
 				t.Fatal(err)

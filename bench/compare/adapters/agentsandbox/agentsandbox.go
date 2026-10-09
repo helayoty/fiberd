@@ -147,6 +147,11 @@ func (a *Adapter) Setup(ctx context.Context) error {
 	if err := a.apply(ctx, ext+ns+"/sandboxwarmpools", a.Pool()); err != nil {
 		return err
 	}
+	return a.full(ctx)
+}
+
+// full waits for the pool to have every replica ready.
+func (a *Adapter) full(ctx context.Context) error {
 	deadline := time.Now().Add(a.o.Wait)
 	for {
 		var pool struct {
@@ -154,7 +159,7 @@ func (a *Adapter) Setup(ctx context.Context) error {
 				ReadyReplicas int `json:"readyReplicas"`
 			} `json:"status"`
 		}
-		if err := a.o.Kube.Get(ctx, ext+ns+"/sandboxwarmpools/"+a.o.Name, &pool); err != nil {
+		if err := a.o.Kube.Get(ctx, ext+a.o.Namespace+"/sandboxwarmpools/"+a.o.Name, &pool); err != nil {
 			return err
 		}
 		if pool.Status.ReadyReplicas >= a.o.Replicas {
@@ -297,6 +302,11 @@ func (a *Adapter) Density(ctx context.Context, hs []compare.Handle) (int64, erro
 	}
 	var names []string
 	if len(hs) == 0 {
+		// What the pool keeps standing is a full pool. A refill still
+		// starting has no cgroup to read yet.
+		if err := a.full(ctx); err != nil {
+			return 0, err
+		}
 		var err error
 		if names, err = a.standing(ctx); err != nil {
 			return 0, err
