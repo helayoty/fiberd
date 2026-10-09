@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"syscall"
 )
 
@@ -294,10 +295,35 @@ func ReadDeltaInfo(dir string) (DeltaInfo, error) {
 
 var ErrParentMismatch = errors.New("criu: delta was taken over a checkpoint this home does not hold")
 
+// staged is a set of temporary files written beside the images they will
+// replace. commit renames each over its image, in order. discard removes
+// them. Nothing is fsynced here. The host syncs the whole directory after
+// the delta is complete, before it ends the fiber.
+type staged []string
+
+func (s staged) discard() {
+	for _, tmp := range s {
+		_ = os.Remove(tmp)
+	}
+}
+
+func (s staged) commit() error {
+	for _, tmp := range s {
+		if err := os.Rename(tmp, strings.TrimSuffix(tmp, ".tmp")); err != nil {
+			s.discard()
+			return err
+		}
+	}
+	return nil
+}
+
 // ComputeDelta rewrites the checkpoint in dir as a delta over the parent:
 // every page whose bytes equal the parent's page at the same address is
 // dropped from the pages file and marked PE_PARENT in the pagemap. Runs
-// are split and re-merged so the pagemap stays compact. Streams.
+// are split and re-merged so the pagemap stays compact. Streams. All or
+// nothing: every result is written to a temporary file first, and only
+// when all of them succeeded are they renamed over the images, delta.json
+// last. A failure leaves the full checkpoint as it was.
 func ComputeDelta(dir string, parent *Parent) (DeltaInfo, error) {
 	maps, err := FindPagemaps(dir)
 	if err != nil || len(maps) == 0 {
@@ -305,20 +331,25 @@ func ComputeDelta(dir string, parent *Parent) (DeltaInfo, error) {
 	}
 	info := DeltaInfo{PageSize: PageSize, ParentSHA256: parent.sha}
 	page := make([]byte, PageSize)
+	var tmps staged
 	for _, m := range maps {
 		pm, err := ReadPagemap(m)
 		if err != nil {
+			tmps.discard()
 			return DeltaInfo{}, err
 		}
 		in, err := os.Open(pm.PagesFile())
 		if err != nil {
+			tmps.discard()
 			return DeltaInfo{}, err
 		}
 		rd := bufio.NewReaderSize(in, 1<<20)
 		tmp := pm.PagesFile() + ".tmp"
+		tmps = append(tmps, tmp)
 		out, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
 		if err != nil {
 			_ = in.Close()
+			tmps.discard()
 			return DeltaInfo{}, err
 		}
 		wr := bufio.NewWriterSize(out, 1<<20)
@@ -326,7 +357,7 @@ func ComputeDelta(dir string, parent *Parent) (DeltaInfo, error) {
 		fail := func(err error) (DeltaInfo, error) {
 			_ = in.Close()
 			_ = out.Close()
-			_ = os.Remove(tmp)
+			tmps.discard()
 			return DeltaInfo{}, err
 		}
 		for _, e := range pm.Entries {
@@ -363,11 +394,11 @@ func ComputeDelta(dir string, parent *Parent) (DeltaInfo, error) {
 		if err := out.Close(); err != nil {
 			return fail(err)
 		}
-		if err := os.Rename(tmp, pm.PagesFile()); err != nil {
-			return fail(err)
-		}
 		pm.Entries = entries
+		pm.Path += ".tmp"
+		tmps = append(tmps, pm.Path)
 		if err := writePagemap(pm); err != nil {
+			tmps.discard()
 			return DeltaInfo{}, err
 		}
 		info.Files = append(info.Files, filepath.Base(m))
@@ -375,13 +406,25 @@ func ComputeDelta(dir string, parent *Parent) (DeltaInfo, error) {
 	sort.Strings(info.Files)
 	b, err := json.MarshalIndent(info, "", "  ")
 	if err != nil {
+		tmps.discard()
 		return DeltaInfo{}, err
 	}
-	return info, os.WriteFile(filepath.Join(dir, deltaFile), b, 0o600)
+	deltaTmp := filepath.Join(dir, deltaFile+".tmp")
+	tmps = append(tmps, deltaTmp)
+	if err := os.WriteFile(deltaTmp, b, 0o600); err != nil {
+		tmps.discard()
+		return DeltaInfo{}, err
+	}
+	if err := tmps.commit(); err != nil {
+		return DeltaInfo{}, err
+	}
+	return info, nil
 }
 
 // MergeDelta turns a delta directory back into a full checkpoint using the
-// parent, which must hash to the delta's recorded parent. Streams.
+// parent, which must hash to the delta's recorded parent. Streams. It
+// rewrites the only copy of a parked session, so it is all or nothing the
+// same way: a failure leaves the delta as it was, still restorable.
 func MergeDelta(dir string, parent *Parent) error {
 	info, err := ReadDeltaInfo(dir)
 	if err != nil {
@@ -391,27 +434,32 @@ func MergeDelta(dir string, parent *Parent) error {
 		return fmt.Errorf("%w: delta parent %s, offered %s", ErrParentMismatch, short(info.ParentSHA256), short(parent.sha))
 	}
 	page := make([]byte, PageSize)
+	var tmps staged
 	for _, name := range info.Files {
 		pm, err := ReadPagemap(filepath.Join(dir, name))
 		if err != nil {
+			tmps.discard()
 			return err
 		}
 		in, err := os.Open(pm.PagesFile())
 		if err != nil {
+			tmps.discard()
 			return err
 		}
 		rd := bufio.NewReaderSize(in, 1<<20)
 		tmp := pm.PagesFile() + ".tmp"
+		tmps = append(tmps, tmp)
 		out, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
 		if err != nil {
 			_ = in.Close()
+			tmps.discard()
 			return err
 		}
 		wr := bufio.NewWriterSize(out, 1<<20)
 		fail := func(err error) error {
 			_ = in.Close()
 			_ = out.Close()
-			_ = os.Remove(tmp)
+			tmps.discard()
 			return err
 		}
 		for i := range pm.Entries {
@@ -448,12 +496,15 @@ func MergeDelta(dir string, parent *Parent) error {
 		if err := out.Close(); err != nil {
 			return fail(err)
 		}
-		if err := os.Rename(tmp, pm.PagesFile()); err != nil {
-			return fail(err)
-		}
+		pm.Path += ".tmp"
+		tmps = append(tmps, pm.Path)
 		if err := writePagemap(pm); err != nil {
+			tmps.discard()
 			return err
 		}
+	}
+	if err := tmps.commit(); err != nil {
+		return err
 	}
 	return os.Remove(filepath.Join(dir, deltaFile))
 }

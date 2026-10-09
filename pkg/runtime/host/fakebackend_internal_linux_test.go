@@ -228,6 +228,10 @@ func (b *fakeBackend) Park(_ context.Context, fiberID string, spec backend.ParkS
 			return err
 		}
 		for n, c := range files {
+			// A name with a slash is a nested file, as a sandbox's blobs are.
+			if err := os.MkdirAll(filepath.Dir(filepath.Join(spec.Dir, n)), 0o755); err != nil {
+				return err
+			}
 			if err := os.WriteFile(filepath.Join(spec.Dir, n), []byte(c), 0o644); err != nil {
 				return err
 			}

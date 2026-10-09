@@ -1295,9 +1295,10 @@ func (r *Runtime) deltaDir(f core.Fence) string {
 }
 
 // Park checkpoints the fiber into its delta directory and ends its running
-// incarnation. sync: the fiber keeps running until the images are durable
-// (fsync), then is killed; otherwise the checkpoint ends it. Returns the
-// delta directory as the ref.
+// incarnation. sync: the fiber keeps running until the delta, its manifest
+// and every file under the directory are durable (fsync), then it is
+// killed. Otherwise the checkpoint ends it. Returns the delta directory as
+// the ref.
 func (r *Runtime) Park(ctx context.Context, fiberID string, sync bool) (string, error) {
 	if r.tier < core.TierCheckpoint {
 		return "", fmt.Errorf("host: park needs %s (backend %s offers %s)", core.TierCheckpoint, r.be.Name(), r.tier)
@@ -1338,29 +1339,21 @@ func (r *Runtime) Park(ctx context.Context, fiberID string, sync bool) (string, 
 			log.Printf("host: evict device slice of %s: %v", f.id, err)
 		}
 	}
-	if err := r.be.Park(ctx, f.id, backend.ParkSpec{Dir: dir, Sync: sync}); err != nil {
+	// giveBack undoes a park whose fiber still runs, keeping the failed
+	// images and dump log aside for diagnosis.
+	giveBack := func(err error) (string, error) {
 		r.unpark(f)
-		// Keep the failed dump's log for diagnosis; it is small.
 		_ = os.RemoveAll(dir + ".failed")
 		_ = os.Rename(dir, dir+".failed")
 		return "", err
 	}
-	if sync {
-		// The fiber runs until the images are durable. A failure here
-		// leaves it running, so it is a running fiber again.
-		if err := syncDir(dir); err != nil {
-			r.unpark(f)
-			_ = os.RemoveAll(dir + ".failed")
-			_ = os.Rename(dir, dir+".failed")
-			return "", err
-		}
-		_ = r.be.Kill(f.id)
-		_ = f.cg.Kill()
+	if err := r.be.Park(ctx, f.id, backend.ParkSpec{Dir: dir, Sync: sync}); err != nil {
+		return giveBack(err)
 	}
-	// From here the fiber is gone or going, and the delta is all that is
-	// left. Whatever fails below, the ref goes back with the error, so the
-	// ledger parks the session instead of counting a dead fiber that
-	// nothing could park or release.
+	// A sync park's fiber runs until the delta is durable, so a failure
+	// gives it back. An async park's fiber is gone, so the ref goes back
+	// with any error, and the ledger parks the session rather than count a
+	// dead fiber.
 	m := manifest{Fence: f.id, GrantUID: f.grantUID, Birth: f.birth, Endpoint: ep, Handoff: f.handoff != nil, Backend: r.be.Name(),
 		ParkedAt: time.Now().UTC().Format(time.RFC3339Nano)}
 	if f.relay != nil {
@@ -1392,7 +1385,19 @@ func (r *Runtime) Park(ctx context.Context, fiberID string, sync bool) (string, 
 		}
 	}
 	if err := writeJSON(filepath.Join(dir, "manifest.json"), m); err != nil {
-		return dir, fmt.Errorf("host: %s parked to %s, but its manifest: %w", fiberID, dir, err)
+		err = fmt.Errorf("host: %s parked to %s, but its manifest: %w", fiberID, dir, err)
+		if sync {
+			return giveBack(err)
+		}
+		return dir, err
+	}
+	if sync {
+		// Everything is written. Make it durable, then end the fiber.
+		if err := syncDir(dir); err != nil {
+			return giveBack(err)
+		}
+		_ = r.be.Kill(f.id)
+		_ = f.cg.Kill()
 	}
 	// The exit is on its way or already handled, so wait for cleanup. The
 	// park is complete either way, and a wait that ends early is logged,
@@ -1849,33 +1854,46 @@ func removeSoon(d cgroup.Dir) error {
 	return err
 }
 
-// syncDir fsyncs every file in dir and the directory itself: the delta is
-// durable before the running incarnation is ended.
+// fsync is what syncDir calls on every file and directory. A seam for tests.
+var fsync = func(f *os.File) error { return f.Sync() }
+
+// syncDir fsyncs every file under dir at any depth, then every directory,
+// children before parents. It runs once the delta and its manifest are
+// written, so the whole checkpoint is durable before the running
+// incarnation is ended.
 func syncDir(dir string) error {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return err
-	}
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		fh, err := os.Open(filepath.Join(dir, e.Name()))
+	var dirs []string
+	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		err = fh.Sync()
-		_ = fh.Close()
-		if err != nil {
-			return err
+		if d.IsDir() {
+			dirs = append(dirs, path)
+			return nil
 		}
-	}
-	dh, err := os.Open(dir)
+		return syncPath(path)
+	})
 	if err != nil {
 		return err
 	}
-	defer func() { _ = dh.Close() }()
-	return dh.Sync()
+	// The walk lists a directory before what is under it, so the reverse
+	// order syncs every directory after its subdirectories.
+	for i := len(dirs) - 1; i >= 0; i-- {
+		if err := syncPath(dirs[i]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func syncPath(path string) error {
+	fh, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	err = fsync(fh)
+	_ = fh.Close()
+	return err
 }
 
 // List reports every fiber leaf with live processes under the root,

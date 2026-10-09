@@ -1590,11 +1590,22 @@ func TestFileHelpers(t *testing.T) {
 				t.Fatalf("treeBytes of a missing dir = %d", got)
 			}
 		}},
-		{name: "syncDir fsyncs files, skips directories, fails on what it cannot open", run: func(t *testing.T, dir string) {
+		{name: "syncDir fsyncs nested files, then directories children first, fails on what it cannot open", run: func(t *testing.T, dir string) {
 			write(t, dir, map[string]string{"a": "123"})
 			write(t, filepath.Join(dir, "sub"), map[string]string{"c": "6789"})
+			var order []string
+			orig := fsync
+			fsync = func(f *os.File) error {
+				rel, _ := filepath.Rel(dir, f.Name())
+				order = append(order, rel)
+				return f.Sync()
+			}
+			t.Cleanup(func() { fsync = orig })
 			if err := syncDir(dir); err != nil {
 				t.Fatal(err)
+			}
+			if want := []string{"a", "sub/c", "sub", "."}; strings.Join(order, " ") != strings.Join(want, " ") {
+				t.Fatalf("fsync order = %q, want %q", order, want)
 			}
 			if err := syncDir(filepath.Join(dir, "none")); !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("syncDir of a missing dir = %v", err)

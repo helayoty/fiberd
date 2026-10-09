@@ -4,7 +4,7 @@ A [backend](../../docs/glossary.md#backend) whose mechanism is not reachable fro
 
 ![Runtime/helper sequence: PARKED acknowledges snapshot writing, the host fsyncs before KILL, and Park returns after manifest writing and exit cleanup. A later RESUME restores state under a new fence.](../../docs/images/hyperlight-helper-protocol.svg)
 
-The diagram shows what the host does, not a complete durability guarantee. The host syncs top-level files and their directory before teardown, but the manifest is written afterward without another sync, and nested snapshot files are not synced.
+A sync park fsyncs every file under the snapshot directory, nested ones and the manifest included, before KILL.
 
 Every message is one line. Fields are separated by single spaces, and no field contains a space. Paths are absolute host paths. One operation per fence is outstanding at a time.
 
@@ -14,7 +14,7 @@ Every message is one line. Fields are separated by single spaces, and no field c
 | --- | --- |
 | `READY <helper> <hyperlight> <hypervisor> <cpu>` | The template is warm. The guest is loaded, its init ran, and the warm snapshot is taken. The four facts are what its snapshots depend on (the helper's version, the hyperlight_host crate, the hypervisor in use, the CPU vendor), and fiberd records them as the platform of every park |
 | `CLONED <fence>` | The fiber serves on the endpoint it was given |
-| `PARKED <fence> <bytes>` | Snapshot creation completed in the directory it was given, and `bytes` is what it costs to move. Host-side sync is separate, with the durability limits described above |
+| `PARKED <fence> <bytes>` | Snapshot creation completed in the directory it was given, and `bytes` is what it costs to move. Host-side sync is separate and covers the whole directory |
 | `ERROR <fence> <text...>` | The operation on that fence failed. The text may contain spaces |
 | `EXITED <fence> exit:<n>\|signal:<name>\|oom` | The fiber is gone. Sent for every end, asked for or not |
 | `W <fence> <bytes>` | The fiber's working set changed. `bytes` is what it dirtied since the warm snapshot |

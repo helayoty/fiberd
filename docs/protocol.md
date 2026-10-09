@@ -90,7 +90,7 @@ The diagram follows action selection and successful completion. [Outcomes](#outc
 
 `Park(ParkRequest) returns (Empty)` checkpoints the identified running fiber and frees its running slot. A named session keeps the resulting [delta](glossary.md#delta) and can later RESUME. An anonymous fiber has no name through which its delta can be requested.
 
-`sync=true` asks the runtime to complete its synchronous durability path before replying. The exact storage guarantee depends on the configured runtime and artifact store.
+`sync=true` makes the runtime fsync the delta and its manifest before the reply, and the fiber keeps running until that is done.
 
 Do not Park an anonymous fiber when retained checkpoint files or a reserved TCP port would be unacceptable. The public API has no session handle with which to resume or discard that anonymous parked state.
 

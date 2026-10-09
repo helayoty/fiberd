@@ -4,10 +4,14 @@ package host
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
+	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1034,6 +1038,200 @@ func TestParkReportsDeathMeanwhile(t *testing.T) {
 				t.Fatalf("exit = %+v, want the death under the park", e)
 			}
 			noExit(t, f.r) // once
+		})
+	}
+}
+
+// fsyncLog stands in for fsync under one delta directory. It keeps each
+// file's size and content hash at its last fsync, the whole tree as the
+// last directory fsync saw it, and the directories in the order they were
+// fsynced. One named path can be made to fail.
+type fsyncLog struct {
+	mu     sync.Mutex
+	dir    string
+	files  map[string]string
+	tree   map[string]string
+	dirs   []string
+	failAt string
+	// atKill is the tree and the fsynced files as they were when the
+	// backend was first told to kill the fiber.
+	atKill [2]map[string]string
+}
+
+// treeHashes is every regular file under dir, by relative path, with its
+// size and content hash.
+func treeHashes(dir string) (map[string]string, error) {
+	out := map[string]string{}
+	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		rel, _ := filepath.Rel(dir, path)
+		out[rel] = fmt.Sprintf("%d:%x", len(b), sha256.Sum256(b))
+		return nil
+	})
+	return out, err
+}
+
+func (l *fsyncLog) fsync(f *os.File) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	rel, _ := filepath.Rel(l.dir, f.Name())
+	if rel == l.failAt {
+		return errors.New("fake: fsync failed")
+	}
+	if st, err := f.Stat(); err != nil || st.IsDir() {
+		if err != nil {
+			return err
+		}
+		l.dirs = append(l.dirs, rel)
+		tree, err := treeHashes(l.dir)
+		l.tree = tree
+		return err
+	}
+	b, err := os.ReadFile(f.Name())
+	if err != nil {
+		return err
+	}
+	l.files[rel] = fmt.Sprintf("%d:%x", len(b), sha256.Sum256(b))
+	return nil
+}
+
+// kill records the directory as it is when the fiber is being killed.
+func (l *fsyncLog) kill() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.atKill[0] != nil {
+		return
+	}
+	tree, _ := treeHashes(l.dir)
+	l.atKill = [2]map[string]string{tree, maps.Clone(l.files)}
+}
+
+// durable fails unless the tree as it is now is what the last directory
+// fsync saw, and every file in it was fsynced with the content it has.
+func (l *fsyncLog) durable(t *testing.T) {
+	t.Helper()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now, err := treeHashes(l.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !maps.Equal(now, l.tree) {
+		t.Fatalf("the directory changed after its last fsync: now %v, fsynced %v", now, l.tree)
+	}
+	for rel, h := range now {
+		if l.files[rel] != h {
+			t.Fatalf("%s was not fsynced after its last write (fsynced %q, now %q)", rel, l.files[rel], h)
+		}
+	}
+}
+
+// killWatch is a codec backend that tells the log when it kills.
+type killWatch struct {
+	*codecBackend
+	log *fsyncLog
+}
+
+func (k *killWatch) Kill(fiberID string) error {
+	k.log.kill()
+	return k.codecBackend.Kill(fiberID)
+}
+
+// TestParkDurability checks a sync park's promise: the fiber keeps running
+// until the delta, its manifest and every file under the directory, nested
+// ones included, are fsynced, and only then is it killed. An fsync that
+// fails gives the fiber back.
+func TestParkDurability(t *testing.T) {
+	g := core.Grant{UID: "g1", TemplateDigest: "sha256:tmpl", FiberMax: 2, WBudgetBytes: 64 * mib}
+	nested := map[string]string{"pages-1.img": "dirty pages", "dump.log": "ok\n", "blobs/sha256/abc": "a layer", "blobs/index.json": "{}"}
+	cases := []struct {
+		name string
+		// files is what the backend dumps, nil for its default.
+		files  map[string]string
+		failAt string
+		check  func(t *testing.T, f *parkFixture, l *fsyncLog, ref string, err error)
+	}{
+		{name: "every file is fsynced after its last write, the delta and manifest included",
+			check: func(t *testing.T, f *parkFixture, l *fsyncLog, ref string, err error) {
+				if err != nil {
+					t.Fatal(err)
+				}
+				l.durable(t)
+				for _, name := range []string{"manifest.json", fakeDeltaFile, "pages-1.img"} {
+					if _, ok := l.files[name]; !ok {
+						t.Fatalf("%s was never fsynced (fsynced %v)", name, l.files)
+					}
+				}
+			}},
+		{name: "the fiber is killed only after everything is durable",
+			check: func(t *testing.T, f *parkFixture, l *fsyncLog, ref string, err error) {
+				if err != nil {
+					t.Fatal(err)
+				}
+				if strings.Join(f.fake().killedIDs(), ",") != "g1/1/1" {
+					t.Fatalf("killed %v", f.fake().killedIDs())
+				}
+				now, err := treeHashes(ref)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if tree := l.atKill[0]; !maps.Equal(now, tree) {
+					t.Fatalf("the directory changed after the kill: at the kill %v, now %v", tree, now)
+				}
+				for rel, h := range now {
+					if l.atKill[1][rel] != h {
+						t.Fatalf("%s was not fsynced before the kill (fsynced %q, now %q)", rel, l.atKill[1][rel], h)
+					}
+				}
+			}},
+		{name: "nested files and directories are fsynced, children before parents", files: nested,
+			check: func(t *testing.T, f *parkFixture, l *fsyncLog, ref string, err error) {
+				if err != nil {
+					t.Fatal(err)
+				}
+				l.durable(t)
+				if _, ok := l.files["blobs/sha256/abc"]; !ok {
+					t.Fatalf("the nested blob was never fsynced (fsynced %v)", l.files)
+				}
+				if want := []string{"blobs/sha256", "blobs", "."}; strings.Join(l.dirs, " ") != strings.Join(want, " ") {
+					t.Fatalf("directories fsynced %q, want %q", l.dirs, want)
+				}
+			}},
+		{name: "an fsync that fails leaves the fiber running", failAt: "manifest.json",
+			check: func(t *testing.T, f *parkFixture, l *fsyncLog, ref string, err error) {
+				if err == nil || !strings.Contains(err.Error(), "fsync failed") || ref != "" {
+					t.Fatalf("Park = %q, %v, want the fsync failure and no ref", ref, err)
+				}
+				if released, parked := f.fiberFlags(t, "g1/1/1"); released || parked {
+					t.Fatal("the fiber must be a running fiber again")
+				}
+				if len(f.fake().killedIDs()) != 0 {
+					t.Fatal("the fiber was killed although its images are not durable")
+				}
+				if exists(l.dir) || !exists(l.dir+".failed") {
+					t.Fatal("the failed images must be set aside")
+				}
+				noExit(t, f.r)
+			}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cb := newCodecBackend(core.TierCheckpoint)
+			cb.parkFiles = tc.files
+			l := &fsyncLog{files: map[string]string{}, failAt: tc.failAt}
+			f := newParkFixture(t, &killWatch{cb, l}, g, nil)
+			l.dir = f.r.deltaDir(f.fence)
+			orig := fsync
+			fsync = l.fsync
+			t.Cleanup(func() { fsync = orig })
+			ref, err := f.r.Park(context.Background(), f.h.ID, true)
+			tc.check(t, f, l, ref, err)
 		})
 	}
 }

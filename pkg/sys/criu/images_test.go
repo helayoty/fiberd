@@ -463,7 +463,7 @@ func TestComputeDelta(t *testing.T) {
 			wantErr: "shorter than its pagemap"},
 		{name: "delta.json cannot be written", children: []checkpoint{{pid: 5, entries: []criu.PagemapEntry{present(va(1), 1)}, pages: [][]byte{page('a')}}},
 			setup:  func(t *testing.T, dir string) { mustMkdir(t, filepath.Join(dir, "delta.json")) },
-			wantIs: syscall.EISDIR},
+			wantIs: syscall.EISDIR, orIs: syscall.EEXIST},
 		{name: "disk full when the kept pages are flushed", linux: true,
 			children: []checkpoint{{pid: 5, entries: []criu.PagemapEntry{present(va(1), 1)}, pages: [][]byte{page('q')}}},
 			setup:    func(t *testing.T, dir string) { linkFull(t, filepath.Join(dir, "pages-5.img.tmp")) },
@@ -476,9 +476,10 @@ func TestComputeDelta(t *testing.T) {
 			mustWrite(t, filepath.Join(dir, "pagemap-5.img"), pagemapImage(5, []criu.PagemapEntry{lazy(va(1), 1)}))
 			mustMkdir(t, filepath.Join(dir, "pages-5.img"))
 		}, wantIs: syscall.EISDIR, orIs: syscall.EEXIST},
-		{name: "pagemap that cannot be rewritten", linux: true, setup: func(t *testing.T, dir string) {
-			sealedFile(t, filepath.Join(dir, "pagemap-5.img"), pagemapImage(5, []criu.PagemapEntry{present(va(1), 1)}))
+		{name: "temporary pagemap that cannot be written", linux: true, setup: func(t *testing.T, dir string) {
+			mustWrite(t, filepath.Join(dir, "pagemap-5.img"), pagemapImage(5, []criu.PagemapEntry{present(va(1), 1)}))
 			mustWrite(t, filepath.Join(dir, "pages-5.img"), page('a'))
+			sealedFile(t, filepath.Join(dir, "pagemap-5.img.tmp"), nil)
 		}, wantIs: syscall.EPERM},
 	}
 	parent := loadZygote(t)
@@ -508,7 +509,7 @@ func TestComputeDelta(t *testing.T) {
 				t.Fatal(err)
 			}
 			if err != nil {
-				if left, _ := filepath.Glob(filepath.Join(dir, "pages-*.img.tmp")); len(left) > 0 && !strings.Contains(tc.name, "blocked") {
+				if left, _ := filepath.Glob(filepath.Join(dir, "*.tmp")); len(left) > 0 && !strings.Contains(tc.name, "blocked") {
 					t.Fatalf("temporary files left behind: %q", left)
 				}
 				return
@@ -620,9 +621,9 @@ func TestMergeDelta(t *testing.T) {
 			delta(t, dir, p.SHA256(), []string{"pagemap-5.img"}, []criu.PagemapEntry{lazy(va(1), 1)}, nil)
 			mustMkdir(t, filepath.Join(dir, "pages-5.img"))
 		}, wantIs: syscall.EISDIR, orIs: syscall.EEXIST},
-		{name: "pagemap that cannot be rewritten", linux: true, setup: func(t *testing.T, dir string, p *criu.Parent) {
-			delta(t, dir, p.SHA256(), []string{"pagemap-5.img"}, nil, []byte{})
-			sealedFile(t, filepath.Join(dir, "pagemap-5.img"), pagemapImage(5, []criu.PagemapEntry{lazy(va(1), 1)}))
+		{name: "temporary pagemap that cannot be written", linux: true, setup: func(t *testing.T, dir string, p *criu.Parent) {
+			delta(t, dir, p.SHA256(), []string{"pagemap-5.img"}, []criu.PagemapEntry{lazy(va(1), 1)}, []byte{})
+			sealedFile(t, filepath.Join(dir, "pagemap-5.img.tmp"), nil)
 		}, wantIs: syscall.EPERM},
 	}
 	parent := loadZygote(t)
@@ -644,7 +645,7 @@ func TestMergeDelta(t *testing.T) {
 				t.Fatalf("MergeDelta = %v, must not say %q", err, tc.wantNot)
 			}
 			if tc.wantIs != nil || tc.wantErr != "" {
-				if left, _ := filepath.Glob(filepath.Join(dir, "pages-*.img.tmp")); len(left) > 0 && !strings.Contains(tc.name, "blocked") {
+				if left, _ := filepath.Glob(filepath.Join(dir, "*.tmp")); len(left) > 0 && !strings.Contains(tc.name, "blocked") {
 					t.Fatalf("temporary files left behind: %q", left)
 				}
 				return
@@ -664,6 +665,112 @@ func TestMergeDelta(t *testing.T) {
 			}
 			if got, err := os.ReadFile(child.pagesFile(dir)); err != nil || !bytes.Equal(got, tc.wantPages) {
 				t.Fatalf("pages after the merge differ from the original (%d bytes, %v)", len(got), err)
+			}
+		})
+	}
+}
+
+// TestDeltaAllOrNothing checks that a delta computed or merged over several
+// tasks either lands whole or leaves every image as it was: a failure at
+// the second task must not have rewritten the first. A parked session has
+// no other copy.
+func TestDeltaAllOrNothing(t *testing.T) {
+	first := checkpoint{pid: 5, entries: []criu.PagemapEntry{present(va(1), 2)}, pages: [][]byte{page('a'), page('x')}}
+	second := checkpoint{pid: 6, entries: []criu.PagemapEntry{present(va(2), 2)}, pages: [][]byte{page('b'), page('y')}}
+	// imagesOf is the bytes of a task's pagemap and pages file.
+	imagesOf := func(t *testing.T, dir string, c checkpoint) [2][]byte {
+		t.Helper()
+		pm, err := os.ReadFile(c.pagemap(dir))
+		if err != nil {
+			t.Fatal(err)
+		}
+		pages, err := os.ReadFile(c.pagesFile(dir))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return [2][]byte{pm, pages}
+	}
+	cases := []struct {
+		name string
+		// op is run after the children are written and setup ran.
+		setup func(t *testing.T, dir string, parent *criu.Parent)
+		op    func(dir string, parent *criu.Parent) error
+		// wantDelta is whether delta.json must be there afterwards.
+		wantDelta bool
+		wantErr   string
+		// wantEntries is each task's pagemap after a success. The pages
+		// come back byte for byte, the runs split where they differed
+		// from the parent.
+		wantEntries [2][]criu.PagemapEntry
+	}{
+		{name: "compute fails at the second task: the first is untouched, no delta.json",
+			setup: func(t *testing.T, dir string, _ *criu.Parent) {
+				mustWrite(t, second.pagesFile(dir), page('b')) // shorter than its pagemap
+			},
+			op:      func(dir string, p *criu.Parent) error { _, err := criu.ComputeDelta(dir, p); return err },
+			wantErr: "pages-6.img shorter than its pagemap"},
+		{name: "merge fails at the second task: the first stays a delta, delta.json stays",
+			setup: func(t *testing.T, dir string, p *criu.Parent) {
+				if _, err := criu.ComputeDelta(dir, p); err != nil {
+					t.Fatal(err)
+				}
+				mustWrite(t, second.pagesFile(dir), nil) // the kept page is gone
+			},
+			op:        criu.MergeDelta,
+			wantDelta: true, wantErr: "pages-6.img shorter than its pagemap"},
+		{name: "compute then merge over two tasks restores both",
+			op: func(dir string, p *criu.Parent) error {
+				if _, err := criu.ComputeDelta(dir, p); err != nil {
+					return err
+				}
+				return criu.MergeDelta(dir, p)
+			},
+			wantEntries: [2][]criu.PagemapEntry{{present(va(1), 1), present(va(2), 1)}, {present(va(2), 1), present(va(3), 1)}}},
+	}
+	parent := loadZygote(t)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			first.write(t, dir)
+			second.write(t, dir)
+			if tc.setup != nil {
+				tc.setup(t, dir, parent)
+			}
+			before := [2][2][]byte{imagesOf(t, dir, first), imagesOf(t, dir, second)}
+			err := tc.op(dir, parent)
+			if tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)) {
+				t.Fatalf("op = %v, want an error containing %q", err, tc.wantErr)
+			}
+			if tc.wantErr == "" && err != nil {
+				t.Fatal(err)
+			}
+			if criu.HasDelta(dir) != tc.wantDelta {
+				t.Fatalf("delta.json there = %v, want %v", !tc.wantDelta, tc.wantDelta)
+			}
+			if left, _ := filepath.Glob(filepath.Join(dir, "*.tmp")); len(left) > 0 {
+				t.Fatalf("temporary files left behind: %q", left)
+			}
+			after := [2][2][]byte{imagesOf(t, dir, first), imagesOf(t, dir, second)}
+			for i, c := range []checkpoint{first, second} {
+				if tc.wantErr != "" {
+					// A failure leaves every image as it was, the first
+					// task's included.
+					if !bytes.Equal(before[i][0], after[i][0]) || !bytes.Equal(before[i][1], after[i][1]) {
+						t.Fatalf("task %d's images changed: pagemap %d -> %d bytes, pages %d -> %d bytes",
+							c.pid, len(before[i][0]), len(after[i][0]), len(before[i][1]), len(after[i][1]))
+					}
+					continue
+				}
+				if !bytes.Equal(before[i][1], after[i][1]) {
+					t.Fatalf("task %d's pages after the round trip differ from the original", c.pid)
+				}
+				pm, err := criu.ReadPagemap(c.pagemap(dir))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !slices.Equal(pm.Entries, tc.wantEntries[i]) {
+					t.Fatalf("task %d's entries = %+v, want %+v", c.pid, pm.Entries, tc.wantEntries[i])
+				}
 			}
 		})
 	}
