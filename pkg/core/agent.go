@@ -181,10 +181,14 @@ type Agent struct {
 	changed   []chan struct{}
 
 	// pending holds exits that arrived before the fiber was committed to
-	// the ledger (a child can die before Clone returns). Clone drains it
-	// right after commit so the slot is never leaked.
+	// the ledger (a child can die before Clone returns). OnExit's lookup
+	// and the commit both run under pendingMu, so no exit is lost between.
 	pendingMu sync.Mutex
 	pending   map[string]FiberExit
+	// exitLookedUp, when set, is called by OnExit once it has looked the
+	// fiber up, with whether the ledger knew it. Tests use it to order an
+	// exit against a commit.
+	exitLookedUp func(fiberID string, known bool)
 
 	// held are snapshot grants boot could not verify because the verifier
 	// was unavailable, with their parked sessions. They are not admitted,
@@ -332,9 +336,13 @@ func (a *Agent) Clone(ctx context.Context, req CloneRequest) (CloneResponse, Sta
 	if err := a.audit(ctx, g.Policy.Durability, AuditRecord{Event: act.String(), Fence: fence, Session: req.Session, FiberID: h.ID}); err != nil {
 		if rerr := a.Runtime.Release(ctx, h.ID, false); rerr != nil {
 			log.Printf("clone: roll back %s: %v", h.ID, rerr)
-			if !commit(Session{Name: req.Session, GrantUID: g.UID, State: StateRunning, Fence: fence, Handle: h, DeltaRef: spec.Ref}) {
+			committed, ex, died := a.commitHeld(commit, Session{Name: req.Session, GrantUID: g.UID, State: StateRunning, Fence: fence, Handle: h, DeltaRef: spec.Ref})
+			if !committed {
 				log.Printf("clone: %s may still run under a revoked grant or epoch and could not be released", h.ID)
+			} else if died {
+				a.OnExit(ctx, ex)
 			}
+			return CloneResponse{}, Internal, err
 		}
 		a.pendingMu.Lock()
 		delete(a.pending, h.ID)
@@ -346,8 +354,10 @@ func (a *Agent) Clone(ctx context.Context, req CloneRequest) (CloneResponse, Sta
 	// moved while the runtime worked. The sweep missed this fiber, so it is
 	// released here with the miss a sweep implies. A resumed session stays
 	// parked with its delta. A committed resume keeps that delta's ref,
-	// so the next park or a discarding release can drop it.
-	if !commit(Session{Name: req.Session, GrantUID: g.UID, State: StateRunning, Fence: fence, Handle: h, DeltaRef: spec.Ref}) {
+	// so the next park or a discarding release can drop it. An exit held
+	// for the fiber (OOM at birth) is settled below.
+	committed, ex, died := a.commitHeld(commit, Session{Name: req.Session, GrantUID: g.UID, State: StateRunning, Fence: fence, Handle: h, DeltaRef: spec.Ref})
+	if !committed {
 		code, cerr := a.swept(g, fence)
 		if rerr := a.Runtime.Release(ctx, h.ID, false); rerr != nil {
 			// Not committed either, since there is no grant entry or epoch
@@ -355,9 +365,6 @@ func (a *Agent) Clone(ctx context.Context, req CloneRequest) (CloneResponse, Sta
 			// it.
 			log.Printf("clone: %s born under a revoked grant or epoch could not be released: %v", h.ID, rerr)
 		}
-		a.pendingMu.Lock()
-		delete(a.pending, h.ID)
-		a.pendingMu.Unlock()
 		_ = a.audit(ctx, BestEffort, AuditRecord{Event: "release", Fence: fence, Session: req.Session, FiberID: h.ID, Detail: cerr.Error()})
 		return CloneResponse{}, code, cerr
 	}
@@ -372,17 +379,20 @@ func (a *Agent) Clone(ctx context.Context, req CloneRequest) (CloneResponse, Sta
 		a.persist() // the session runs now, so boot must not resume it
 	}
 	a.notify()
-
-	// The fiber may already have died (for example OOM at birth) before
-	// the commit above made it known; settle that now rather than leak.
-	a.pendingMu.Lock()
-	ex, died := a.pending[h.ID]
-	delete(a.pending, h.ID)
-	a.pendingMu.Unlock()
 	if died {
 		a.OnExit(ctx, ex)
 	}
 	return a.routed(CloneResponse{FiberID: h.ID, Endpoint: h.Endpoint, Fence: fence, Kind: act}), OK, nil
+}
+
+// commitHeld commits a fiber and takes any exit held for it, under pendingMu.
+func (a *Agent) commitHeld(commit func(Session) bool, s Session) (committed bool, ex FiberExit, died bool) {
+	a.pendingMu.Lock()
+	defer a.pendingMu.Unlock()
+	committed = commit(s)
+	ex, died = a.pending[s.Handle.ID]
+	delete(a.pending, s.Handle.ID)
+	return committed, ex, died
 }
 
 // routed adds what a caller needs to reach a handoff fiber.
@@ -910,14 +920,19 @@ func (a *Agent) Run(ctx context.Context) {
 // a Clone that commits replays an exit held for it. An exit for a fiber
 // not yet committed is held until its Clone commits.
 func (a *Agent) OnExit(ctx context.Context, ex FiberExit) {
+	a.pendingMu.Lock()
 	fence, session, deltaRef, ok := a.Ledger.OnFiberExit(ex.FiberID)
 	if !ok {
-		a.pendingMu.Lock()
 		if a.pending == nil {
 			a.pending = make(map[string]FiberExit)
 		}
 		a.pending[ex.FiberID] = ex
-		a.pendingMu.Unlock()
+	}
+	a.pendingMu.Unlock()
+	if a.exitLookedUp != nil {
+		a.exitLookedUp(ex.FiberID, ok)
+	}
+	if !ok {
 		return
 	}
 	// A resumed delta is consumed. The fiber it became is gone, so the

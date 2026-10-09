@@ -46,7 +46,7 @@ The commit is the step where the ledger records the new fiber as running. It kee
 - **Reserve before runtime.** The slot is reserved when the fence is minted. The runtime works for milliseconds before commit, and a late reservation would let a burst overshoot `fibers.max`. A Clone that never commits returns its slot.
 - **Audit before commit.** A [sync](audit.md) record is durable before the caller is acked, and a failed record releases the new fiber. The order of every call is in [protocol.md](../protocol.md#outcomes).
 - **Commit refuses a changed grant or epoch.** Commit holds the ledger lock and checks that the admitted grant is still the entry it reserved under, and that the epoch has not moved. A revocation followed by a re-admission still counts as a change. Revocation and the epoch bump take the same lock, so each one either sees the new fiber or makes its commit fail. A fiber whose commit fails is [released](../glossary.md#release).
-- **Early exits.** A fiber that dies before its Clone commits has its exit held and settled right after commit, so no slot leaks.
+- **Early exits.** A fiber that dies before its Clone commits has its exit held and settled at commit, under one lock, so no exit is missed and no slot leaks.
 
 **Epochs and restart.**
 

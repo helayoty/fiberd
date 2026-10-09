@@ -475,6 +475,99 @@ func TestCloneRacesSweep(t *testing.T) {
 	}
 }
 
+// TestExitRacesCommit delivers a fiber's exit while its Clone is between
+// the runtime call and the commit. The exit looks the fiber up and finds
+// it unknown, the Clone commits, and only then does the exit go on. The
+// exit must still end the fiber. Before the fix the lookup and the hold
+// were under different locks, so the commit found nothing held, the hold
+// landed after it, and the dead fiber stayed counted with no record.
+func TestExitRacesCommit(t *testing.T) {
+	g := core.Grant{UID: "g1", Tenant: "acme", Audience: "node-a", FiberMax: 1, LeaseExpiry: time.Now().Add(time.Hour)}
+	ctx := context.Background()
+	cases := []struct {
+		name    string
+		session string
+		reason  string
+	}{
+		{name: "anonymous fiber", reason: "oom"},
+		{name: "named session", session: "S", reason: "exit"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a := newAgent(t, "up", core.TierCheckpoint, g)
+			rt := newBlockingRuntime()
+			a.Runtime = rt
+			audit := &auditLog{}
+			a.Audit = audit
+			lookedUp := make(chan struct{})
+			goOn := make(chan struct{})
+			core.SetExitLookedUp(a, func(_ string, known bool) {
+				if known {
+					return // the replay from the commit, which may run it
+				}
+				lookedUp <- struct{}{}
+				<-goOn
+			})
+			type result struct {
+				code core.StatusCode
+				err  error
+			}
+			done := make(chan result, 1)
+			go func() {
+				_, code, err := a.Clone(ctx, core.CloneRequest{GrantJWT: []byte("g1"), Session: tc.session, Deadline: 5 * time.Second})
+				done <- result{code, err}
+			}()
+			var id string
+			select {
+			case id = <-rt.started:
+			case <-time.After(2 * time.Second):
+				t.Fatal("the clone never reached the runtime")
+			}
+			// The exit arrives on its own goroutine, as Run delivers it, and
+			// is held once it has found the fiber unknown.
+			exited := make(chan struct{})
+			go func() {
+				a.OnExit(ctx, core.FiberExit{FiberID: id, Reason: tc.reason})
+				close(exited)
+			}()
+			select {
+			case <-lookedUp:
+			case <-time.After(2 * time.Second):
+				t.Fatal("the exit never looked the fiber up")
+			}
+			close(rt.proceed)
+			select {
+			case r := <-done:
+				if r.code != core.OK || r.err != nil {
+					t.Fatalf("clone = %d %v, want OK", r.code, r.err)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("the clone never returned")
+			}
+			close(goOn)
+			select {
+			case <-exited:
+			case <-time.After(2 * time.Second):
+				t.Fatal("the exit never returned")
+			}
+			if _, ok := a.Ledger.Fiber(id); ok {
+				t.Fatalf("fiber %s is still known after its exit", id)
+			}
+			if st, _ := coretest.GrantStatus(a.Ledger, "g1"); st.Running != 0 {
+				t.Fatalf("running = %d after the exit, want 0", st.Running)
+			}
+			if tc.session != "" {
+				if _, _, known := a.Ledger.SessionState("g1", tc.session); known {
+					t.Fatalf("session %s is still known after its fiber exited", tc.session)
+				}
+			}
+			if recs := audit.events(tc.reason); len(recs) != 1 || recs[0].FiberID != id {
+				t.Fatalf("%s records = %+v, want one for %s", tc.reason, recs, id)
+			}
+		})
+	}
+}
+
 // TestCloneIdempotentAndResume runs one session name through its life. A
 // repeated clone attaches to the same fiber, a parked session resumes
 // under the next fence, and a released name is free for a fresh create.
