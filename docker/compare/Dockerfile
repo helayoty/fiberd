@@ -37,6 +37,9 @@ RUN set -eu; mkdir -p /out; flags=""; \
     gcc $cflags -pie -Wl,-z,relro,-z,now -o /out/counter $src; \
     gcc $cflags -static-pie -Wl,-z,relro,-z,now -o /out/counter-static $src; \
     { /out/counter-static --help 2>&1 || true; } | grep -q usage; \
+    /out/counter-static --heap-mb 16 --plain --port 18099 & p=$!; sleep 1; \
+    rss=$(awk '/VmRSS/ {print $2}' /proc/$p/status); kill $p; \
+    [ "$rss" -ge 16384 ] || { echo "counter keeps $rss kB, not its 16 MiB heap" >&2; exit 1; }; \
     (cd bench/compare && go build -ldflags "-s -w -buildid=" -o /out/ ./cmd/...)
 # crictl lets the cold Pod case drop the image from the node through the
 # containerd socket the client Pod mounts.

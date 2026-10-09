@@ -56,11 +56,14 @@ static void reseed_rngs(void) {
 
 /* The expensive init, paid once: a heap touched page by page and some
  * CPU, standing in for a JIT or a graph build. */
+static char *volatile kept_heap; /* kept, so the compiler cannot drop it */
+
 static void heavy_init(size_t mb) {
     size_t n = mb << 20;
-    char *heap = malloc(n);
+    volatile char *heap = malloc(n);
     if (!heap) { perror("counter: malloc"); exit(1); }
     for (size_t i = 0; i < n; i += 4096) heap[i] = (char)(i >> 12);
+    kept_heap = (char *)heap;
     volatile unsigned x = 1;
     for (long i = 0; i < 20L * 1000 * 1000; i++) x = x * 1664525u + 1013904223u;
     (void)x;
