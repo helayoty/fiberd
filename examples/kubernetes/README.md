@@ -1,6 +1,6 @@
 # fiberd on Kubernetes
 
-This example runs fiberd on a cluster. A controller turns each CapacityGrant resource into a signed [grant](../../docs/glossary.md#grant) and a grant Pod whose PID 1 is the fiberd [agent](../../docs/glossary.md#agent). It is for anyone who wants to run fiberd on a Kubernetes cluster. It is its own Go module and is not imported by fiberd.
+This example runs fiberd on a cluster. A controller turns each CapacityGrant resource into a signed [grant](../../docs/glossary.md#grant) and a grant Pod that runs the fiberd [agent](../../docs/glossary.md#agent). It is for anyone who wants to run fiberd on a Kubernetes cluster. It is its own Go module and is not imported by fiberd.
 
 ![Controller setup is separate from local serving: a CapacityGrant resource produces one Pod and an owned grant Secret; projection and warm-up precede the custom readiness gate, while repeated Clone and direct fiber traffic stay off the controller path.](../../docs/images/example-kubernetes.svg)
 

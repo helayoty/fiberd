@@ -4,7 +4,7 @@ This page is the operator's how-to for the Kubernetes example in `examples/kuber
 
 ## Components
 
-A `CapacityGrant` custom resource describes signed [fiber](glossary.md#fiber) capacity and the Pod that holds it. The `grant-issuer` Deployment runs `grant-controller`, which is the [issuer](glossary.md#issuer) here and takes the place of the standalone `grant-issuer` command. Each grant Pod runs `fiberd-k8s` as PID 1 of its only container, and no Pod is created per fiber.
+A `CapacityGrant` custom resource describes signed [fiber](glossary.md#fiber) capacity and the Pod that holds it. The `grant-issuer` Deployment runs `grant-controller`, which is the [issuer](glossary.md#issuer) here and takes the place of the standalone `grant-issuer` command. Each grant Pod runs `fiberd-k8s` in its only container, and no Pod is created per fiber.
 
 ## Image
 

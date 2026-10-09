@@ -11,7 +11,7 @@ A cluster schedules Pods, not [fibers](../glossary.md#fiber). fiberd needs a pla
 ```mermaid
 flowchart LR
   CG[CapacityGrant] --> C[grant-controller]
-  C -->|create| P[grant Pod<br/>fiberd-k8s as PID 1]
+  C -->|create| P[grant Pod<br/>tini, then fiberd-k8s]
   C -->|mint, renew at half-life| S[grant Secret]
   S -->|projected *.jwt| P
   P -->|zygote-ready gate, podIP| C
@@ -20,7 +20,7 @@ flowchart LR
 
 **Controller.** The grant-controller is the [issuer](../glossary.md#issuer). It polls every CapacityGrant every 2 seconds and makes one grant Pod and one grant Secret, both owned by the resource. Its EdDSA signing key lives in a Secret it creates on first start. It serves discovery and the JSON Web Key Set (JWKS) on its Service. Each grant carries the resource's uid and the Pod's name as audience. The lease defaults to 10 minutes. Once less than half of it is left, the controller mints the same grant with a longer lease into the same Secret. A spec it cannot serve, such as `UNTRUSTED` on proc, gets a status message and no Pod ([CapacityGrant fields](../operating-kubernetes.md#capacitygrant-fields)).
 
-**Grant Pod.** The [agent](../glossary.md#agent) is PID 1. `-node-id $(FIBERD_NODE_ID)` makes the Pod's name its node id. Kubernetes fills `FIBERD_NODE_ID` from `metadata.name`, so the node id and the grant's audience match. A proc Pod drops every capability and adds back only the ones proc needs ([capabilities](sys.md)). Its seccomp profile is Unconfined, because [CRIU](../glossary.md#criu) cannot dump from under a filter. Pods for the other [backends](../glossary.md#backend) run privileged unless `spec.pod.privileged` says otherwise. State and run directories are `emptyDir` volumes.
+**Grant Pod.** The [agent](../glossary.md#agent) runs under `tini`, which is PID 1 and reaps the orphans a sandbox leaves. `-node-id $(FIBERD_NODE_ID)` makes the Pod's name its node id. Kubernetes fills `FIBERD_NODE_ID` from `metadata.name`, so the node id and the grant's audience match. A proc Pod drops every capability and adds back only the ones proc needs ([capabilities](sys.md)). Its seccomp profile is Unconfined, because [CRIU](../glossary.md#criu) cannot dump from under a filter. Pods for the other [backends](../glossary.md#backend) run privileged unless `spec.pod.privileged` says otherwise. State and run directories are `emptyDir` volumes.
 
 The example Pod runs `-insecure-plaintext`. Production serves mutual TLS (mTLS) instead, which binds each grant to the caller's certificate ([grant verification](grant.md)).
 

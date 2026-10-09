@@ -42,58 +42,58 @@ SLO without a controlled production-like test.
 
 How fast a new instance of the same workload answers, from fiberd and from what a cluster uses today. The design and fairness rules are in [compare.md](design/compare.md). Kubernetes, Pods and agent-sandbox are the baselines fiberd runs beside, not rivals.
 
-- **Run.** [bench-compare 37897548197](https://github.com/helayoty/fiberd/actions/runs/37897548197), commit `4363ab3`, 2026-10-09. GitHub ubuntu-24.04 runner, AMD EPYC 7763, 4 vCPU, 15 GiB, kernel 6.17. kind v0.30 (Kubernetes 1.34, containerd 2.1.3), runsc 20260817.0, Firecracker v1.17.0 with guest kernel 6.1.155.
+- **Run.** [bench-compare 37967792284](https://github.com/helayoty/fiberd/actions/runs/37967792284), commit `621bb72`, 2026-10-09. GitHub ubuntu-24.04 runner, AMD EPYC 9V74, 4 vCPU, 15 GiB, kernel 6.17. kind v0.30 (Kubernetes 1.34, containerd 2.1.3), runsc 20260817.0, Firecracker v1.17.0 with guest kernel 6.1.155.
 - **Workload.** A static HTTP counter holding a 32 MiB heap. Every instance gets a 64 MiB limit.
-- **Method.** Client clock from the activation request to the first 200. Median over 3 timed runs of each run's p50, cold run discarded. Bursts of 1, 10 and 50 at once. The host load before and after each row is in the raw records.
+- **Method.** Client clock from the activation request to the first 200. Median over 3 timed runs of each run's p50, cold run discarded. Bursts of 1, 10 and 50 at once. Every activation in this run succeeded. The host load before and after each row is in the raw records.
 
 **Shared kernel, in kind** (ms, p50)
 
 | Burst | fiberd proc | fiberd runc | Pod, image cached | Pod, cold pull | agent-sandbox, pool 1 | agent-sandbox, pool 10 |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | 2.7 | 2.8 | 1,410 | 1,502 | 31 | 28 |
-| 10 | 11 | 11 | 4,426 | 3,278 | 2,163 | 159 |
-| 50 | 36 | 39 | 11,501 | 9,477 | 11,441 | 9,746 |
+| 1 | 2.8 | 3.0 | 1,055 | 1,596 | 25 | 37 |
+| 10 | 7.6 | 10 | 3,357 | 3,064 | 2,221 | 212 |
+| 50 | 27 | 44 | 10,331 | 9,434 | 9,921 | 9,802 |
 
 **Sandboxed with gVisor, in kind** (ms, p50)
 
 | Burst | fiberd gVisor | Pod on gVisor | agent-sandbox, pool 1 | agent-sandbox, pool 10 |
 | ---: | ---: | ---: | ---: | ---: |
-| 1 | 114 | 2,621 | 147 | 75 |
-| 10 | 684 | 4,179 | 4,247 | 203 |
-| 50 | 1,501, 63 of 150 shed | 20,490 | 20,822 | 19,740 |
+| 1 | 117 | 2,776 | 92 | 116 |
+| 10 | 765 | 4,204 | 4,212 | 123 |
+| 50 | 2,784 | 21,374 | 20,900 | 18,348 |
 
 **MicroVMs, on the host with KVM** (ms, p50)
 
 | Burst | fiberd Hyperlight | Firecracker, snapshot from file |
 | ---: | ---: | ---: |
-| 1 | 4.2 | 64 |
-| 10 | 9.7 | 330 |
-| 50 | 43 | 1,692 |
+| 1 | 5.1 | 68 |
+| 10 | 10 | 342 |
+| 50 | 42 | 1,708 |
 
-**Without Kubernetes**, fiberd alone in a container over loopback: proc 2.0, 4.9 and 21 ms at bursts of 1, 10 and 50, runc 1.8, 6.3 and 23 ms, and gVisor 101, 531 and 2,243 ms.
+**Without Kubernetes**, fiberd alone in a container over loopback: proc 2.0, 6.0 and 22 ms at bursts of 1, 10 and 50, runc 1.9, 6.3 and 25 ms, and gVisor 109, 569 and 2,305 ms.
 
 **Resume, idle memory and control-plane work**
 
 | System | Resume after park, ms | Idle memory per instance | API objects per run, in kind |
 | --- | ---: | ---: | ---: |
-| fiberd proc, alone | 54 | 0.0 MiB, 1.8 MiB with the template | 0 |
-| fiberd runc, alone | 50 | 0.0 MiB, 1.8 MiB with the template | 0 |
-| Pod, image cached | none | 32.6 MiB | 324 |
-| agent-sandbox runc, pool 1 | 1,394 | 32.6 MiB | 666 |
-| fiberd gVisor, alone | 105 | 87.8 MiB | 0 |
-| Pod on gVisor | none | 62.9 MiB | 324 |
-| agent-sandbox gVisor, pool 1 | 5,909 | 61.5 MiB | 649 |
-| fiberd Hyperlight | 4.4 | 0.0 MiB, 9.1 MiB with the template | no cluster |
-| Firecracker | 64 | 21.3 MiB | no cluster |
+| fiberd proc, alone | 60 | 0.0 MiB, 1.8 MiB with the template | 0 |
+| fiberd runc, alone | 55 | 0.0 MiB, 1.8 MiB with the template | 0 |
+| Pod, image cached | none | 32.6 MiB | 327 |
+| agent-sandbox runc, pool 1 | 1,102 | 32.6 MiB | 561 |
+| fiberd gVisor, alone | 109 | 89.9 MiB | 0 |
+| Pod on gVisor | none | 62.9 MiB | 315 |
+| agent-sandbox gVisor, pool 1 | one of four timed out | 61.5 MiB | 592 |
+| fiberd Hyperlight | 4.6 | 0.0 MiB, 9.0 MiB with the template | no cluster |
+| Firecracker | 72 | 21.3 MiB | no cluster |
 
 Idle memory is what each instance adds, read from its cgroup after 30 seconds idle. A proc or runc fiber shares its template's heap copy-on-write, so it adds almost nothing.
 
 **Read with care.**
 
-- **gVisor in kind at 50.** 63 of the 150 timed clones were shed, and the p50 is over the ones that started. This run's client labelled every shed as an unreachable control plane, so the home's reason is not recorded. The client now reports it.
-- **gVisor costs memory.** A restored sandbox holds about 88 MiB, more than a Pod on gVisor (63 MiB). A pool of pre-made sandboxes also beats on-demand restore while it lasts (203 ms against 684 ms at 10).
+- **gVisor costs memory.** A restored sandbox holds about 90 MiB, more than a Pod on gVisor (63 MiB), and a pool of pre-made sandboxes beats on-demand restore while it lasts (123 ms against 765 ms at 10).
 - **Cold Pods at 50.** The kubelet pulls at most 5 images a second by default, so part of the cold Pod tail (p99 24 s) is pull throttling.
-- **One runner, one run.** An earlier run on a newer EPYC was about a third faster for every system. Compare rows within this run only.
+- **One runner, one run.** Runners differ: on an older EPYC, Pods were about a quarter slower and fiberd about the same. Compare rows within this run only.
+- **agent-sandbox with a pool of 10** has no idle memory figure here. Its pool refilled too slowly to read in one run.
 
 ## Run A: backend lifecycle comparison
 
