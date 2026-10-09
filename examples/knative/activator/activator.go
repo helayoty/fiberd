@@ -10,8 +10,8 @@
 //
 // Misses are Knative's own fallbacks: DEFERRED_FALLBACK is "scale a Pod
 // the ordinary way" (reported to the caller here as 503 with the home
-// the session lives on, since this example has no Pods); SHED is
-// "control plane unreachable, retry later" (503 with Retry-After).
+// the session lives on, since this example has no Pods); SHED is "retry
+// here later" (503 with Retry-After).
 package activator
 
 import (

@@ -189,8 +189,8 @@ func TestText(t *testing.T) {
 		got  string
 		want string
 	}{
-		{name: "shed says when to retry", got: (&consumer.Shed{RetryAfter: 2 * time.Second}).Error(),
-			want: "shed: control plane unreachable, retry after 2s"},
+		{name: "shed says why and when to retry", got: (&consumer.Shed{RetryAfter: 2 * time.Second, Reason: "grant g is at pids.max"}).Error(),
+			want: "shed: grant g is at pids.max, retry after 2s"},
 		{name: "deferred says why", got: (&consumer.Deferred{Reason: "grant full"}).Error(), want: "deferred: grant full"},
 		{name: "deferred names where the session lives", got: (&consumer.Deferred{Reason: "too large", PreferredHome: "home-b"}).Error(),
 			want: "deferred: too large (session lives on home-b)"},

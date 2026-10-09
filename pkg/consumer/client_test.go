@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -149,7 +150,8 @@ func TestMissesAreTyped(t *testing.T) {
 		{name: "a full grant with the lane down is *Shed with retry 2s", tier: core.TierCheckpoint, full: true, laneDown: true,
 			want: func(err error) bool {
 				var shed *consumer.Shed
-				return errors.As(err, &shed) && shed.RetryAfter == 2*time.Second
+				// The home's reason, not one the client assumes.
+				return errors.As(err, &shed) && shed.RetryAfter == 2*time.Second && strings.Contains(shed.Reason, "fibers.max")
 			}},
 		{name: "min_tier above the home is *TierGap, not a miss", tier: core.TierWarm, minTier: core.TierCheckpoint,
 			want: func(err error) bool {

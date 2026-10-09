@@ -77,17 +77,19 @@ type Fence struct {
 
 func (f Fence) String() string { return fmt.Sprintf("%s/%d/%d", f.GrantUID, f.Epoch, f.Seq) }
 
-// Shed is the miss with the control plane unreachable: the home refuses
-// to mint and says when to ask again. The consumer waits and retries;
-// it does not fall back, because the fallback path needs the same
-// control plane.
+// Shed is the miss that says to retry here later: the control plane is
+// unreachable, or the home is under pressure (memory, tasks, the thrash
+// budget). Reason is the home's own. The consumer waits and retries; it
+// does not fall back, because the fallback path needs the same control
+// plane or adds load where there is already too much.
 type Shed struct {
 	RetryAfter time.Duration
 	Issuer     string
+	Reason     string
 }
 
 func (e *Shed) Error() string {
-	return fmt.Sprintf("shed: control plane unreachable, retry after %s", e.RetryAfter)
+	return fmt.Sprintf("shed: %s, retry after %s", e.Reason, e.RetryAfter)
 }
 
 // Deferred is the miss with the control plane healthy: the home cannot
@@ -223,7 +225,7 @@ func classify(err error) error {
 	if miss, ok := rpc.MissFromError(err); ok {
 		switch miss.GetCode() {
 		case grantv1.MissCode_SHED:
-			return &Shed{RetryAfter: time.Duration(miss.GetRetryAfterS()) * time.Second, Issuer: miss.GetIssuer()}
+			return &Shed{RetryAfter: time.Duration(miss.GetRetryAfterS()) * time.Second, Issuer: miss.GetIssuer(), Reason: status.Convert(err).Message()}
 		case grantv1.MissCode_DEFERRED_FALLBACK:
 			return &Deferred{Issuer: miss.GetIssuer(), PreferredHome: miss.GetPreferredHome(), Reason: status.Convert(err).Message()}
 		}
