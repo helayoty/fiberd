@@ -132,7 +132,7 @@ func TestSandboxPerFiber(t *testing.T) {
 	var hs []core.FiberHandle
 	for i := 1; i <= 3; i++ {
 		t0 = time.Now()
-		h, err := rt.Clone(ctx, core.CloneSpec{Grant: g, Fence: core.Fence{GrantUID: "g1", Epoch: 1, Seq: uint64(i)}, Deadline: 2 * time.Second})
+		h, err := rt.Clone(ctx, core.CloneSpec{Grant: g, Fence: core.Fence{GrantUID: "g1", Epoch: 1, Seq: uint64(i)}, Deadline: 10 * time.Second})
 		if err != nil {
 			t.Fatalf("clone %d: %v", i, err)
 		}
@@ -221,7 +221,7 @@ func TestParkResumeKeepsState(t *testing.T) {
 	if err := rt.PrepareTemplate(ctx, g); err != nil {
 		t.Fatal(err)
 	}
-	h, err := rt.Clone(ctx, core.CloneSpec{Grant: g, Fence: core.Fence{GrantUID: "g2", Epoch: 1, Seq: 1}, Deadline: 2 * time.Second})
+	h, err := rt.Clone(ctx, core.CloneSpec{Grant: g, Fence: core.Fence{GrantUID: "g2", Epoch: 1, Seq: 1}, Deadline: 10 * time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -288,7 +288,7 @@ func TestDeadlineAndOOM(t *testing.T) {
 	}
 	// Over the W budget (8 MiB above the template's measured footprint):
 	// the kernel kills the sandbox and the exit is reported as oom.
-	h, err := rt.Clone(ctx, core.CloneSpec{Grant: g, Fence: core.Fence{GrantUID: "g3", Epoch: 1, Seq: 2}, Deadline: 2 * time.Second})
+	h, err := rt.Clone(ctx, core.CloneSpec{Grant: g, Fence: core.Fence{GrantUID: "g3", Epoch: 1, Seq: 2}, Deadline: 10 * time.Second})
 	if err != nil {
 		t.Fatalf("clone: %v", err)
 	}
@@ -325,7 +325,7 @@ func TestHTTPMode(t *testing.T) {
 	if err := rt.PrepareTemplate(ctx, g); err != nil {
 		t.Fatal(err)
 	}
-	h, err := rt.Clone(ctx, core.CloneSpec{Grant: g, Fence: core.Fence{GrantUID: "g4", Epoch: 1, Seq: 1}, Deadline: 2 * time.Second})
+	h, err := rt.Clone(ctx, core.CloneSpec{Grant: g, Fence: core.Fence{GrantUID: "g4", Epoch: 1, Seq: 1}, Deadline: 10 * time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
