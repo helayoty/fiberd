@@ -123,6 +123,20 @@ jobs:
         run: cd bench/compare && go test -race -count=1 ./...
       - name: run the comparison
         run: make compare-phase4
+      # Every run records the task limits from the runner down to the grant
+      # Pod, so a cap the agent cannot see shows up before it bites.
+      - name: task limits
+        if: always() && inputs.groups != 'microvm'
+        run: |
+          node=compare-control-plane
+          pid=$(docker inspect -f '{{.State.Pid}}' "$node" 2>/dev/null) || exit 0
+          d=/sys/fs/cgroup$(cut -d: -f3 "/proc/$pid/cgroup")
+          while [ -f "$d/pids.max" ]; do echo "runner $d pids.max=$(cat "$d/pids.max") current=$(cat "$d/pids.current")"; d=$(dirname "$d"); done
+          echo "runner threads-max=$(cat /proc/sys/kernel/threads-max)"
+          docker exec "$node" systemctl show -p DefaultTasksMax || true
+          # shellcheck disable=SC2016  # expands in the Pod
+          kubectl --context kind-compare -n compare exec compare-gvisor-grant -c agent -- \
+            sh -c 'echo "grant pids.max=$(cat /sys/fs/cgroup/pids.max) current=$(cat /sys/fs/cgroup/pids.current)"' || true
       - name: median table
         if: always()
         run: |

@@ -104,6 +104,13 @@ EOF
     mkdir -p /etc/systemd/journald.conf.d
     printf "[Journal]\nRateLimitIntervalSec=0\nRateLimitBurst=0\n" > /etc/systemd/journald.conf.d/compare.conf
     systemctl restart systemd-journald; }'
+  # systemd gives every container 15% of threads-max in tasks by default,
+  # and 50 restored gVisor sandboxes need more. The limit stays explicit,
+  # so a fiberd home can see it and keep its reserve below it.
+  docker exec "$NODE" sh -c 'test -f /etc/systemd/system.conf.d/compare.conf || {
+    mkdir -p /etc/systemd/system.conf.d
+    printf "[Manager]\nDefaultTasksMax=16384\n" > /etc/systemd/system.conf.d/compare.conf
+    systemctl daemon-reexec; }'
   # The registry, as kind's local-registry recipe wires it.
   docker exec "$NODE" sh -c "mkdir -p /etc/containerd/certs.d/localhost:$REG_PORT && printf '[host.\"http://$REG_NAME:5000\"]\n' > /etc/containerd/certs.d/localhost:$REG_PORT/hosts.toml"
   "${KC[@]}" apply -f - <<EOF
