@@ -154,7 +154,10 @@ func TestParkEvictsAndResumeRenegotiates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	talk(t, h.Endpoint, "reserve 3145728")
+	// Checked, so an engine no fiber can reach fails here, not after the resume.
+	if got := talk(t, h.Endpoint, "reserve 3145728"); got != "ok" {
+		t.Fatalf("reserve before park = %q", got)
+	}
 	talk(t, h.Endpoint, "incr")
 	ref, err := rt.Park(ctx, h.ID, true)
 	if err != nil {

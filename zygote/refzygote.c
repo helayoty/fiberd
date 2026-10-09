@@ -191,6 +191,7 @@ static unsigned long long dev_cap, dev_used;
 static struct { char fence[128]; unsigned long long bytes; } dev_slices[4096];
 static int ndev;
 static char engine_path[256];
+static int engine_fd = -1; /* bound in engine_start, served by engine_thread */
 
 /* dev_set replaces a fiber's slice (0 drops it) and reports both the
  * slice and the whole device to the agent. Called with dev_mu held. */
@@ -227,8 +228,7 @@ static void on_control(const char *line) {
  * or "stat"; the reply is one line. */
 static void *engine_thread(void *arg) {
     (void)arg;
-    int s = listen_endpoint(engine_path);
-    if (s < 0) { fprintf(stderr, "refzygote: engine listen %s: %s\n", engine_path, strerror(errno)); return NULL; }
+    int s = engine_fd;
     /* The agent learns of the device once the channel is up. */
     while (fz_report("DEVICE - %llu %llu", dev_used, dev_cap) < 0) usleep(5000);
     for (;;) {
@@ -255,6 +255,10 @@ static void engine_start(size_t mb) {
     char cwd[192];
     if (!getcwd(cwd, sizeof cwd)) { perror("refzygote: getcwd"); exit(2); }
     snprintf(engine_path, sizeof engine_path, "%s/engine.sock", cwd);
+    /* Bound before fz_serve remounts the run directory. A bind racing
+     * that remount lands where no fiber can reach it. */
+    engine_fd = listen_endpoint(engine_path);
+    if (engine_fd < 0) { fprintf(stderr, "refzygote: engine listen %s: %s\n", engine_path, strerror(errno)); exit(2); }
     fz_set_engine(engine_path);
     fz_set_control(on_control);
     pthread_t t;

@@ -239,7 +239,8 @@ int fz_accept(void);
  * fz_report sends one line to the agent from any thread (a DEVICE
  * report). It fails with -1 before fz_serve has the channel, and always
  * in a fiber, which has no channel to the agent. fz_set_control installs
- * the handler for lines such as EVICT. */
+ * the handler for lines such as EVICT. Bind a unix endpoint under the
+ * run directory before fz_serve, which remounts that directory. */
 void fz_set_engine(const char *endpoint);
 int fz_report(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 void fz_set_control(fz_on_control handler);
