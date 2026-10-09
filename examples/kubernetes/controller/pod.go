@@ -247,7 +247,8 @@ func BuildPod(cg *CapacityGrant, issuerURL string, lease time.Duration) *Pod {
 			Containers: []Container{{
 				Name:    "agent",
 				Image:   ps.Image,
-				Command: []string{"fiberd-k8s"},
+				// tini, as PID 1, reaps the orphans a sandbox leaves.
+				Command: []string{"tini", "--", "fiberd-k8s"},
 				Args:    args,
 				Env: []EnvVar{
 					{Name: "FIBERD_NODE_ID", ValueFrom: fieldRef("metadata.name")},

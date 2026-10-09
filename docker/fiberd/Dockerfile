@@ -56,9 +56,9 @@ LABEL org.opencontainers.image.source="https://github.com/helayoty/fiberd" \
       org.opencontainers.image.description="The fiberd agent with criu and the zygote library" \
       org.opencontainers.image.licenses="Apache-2.0"
 ARG DEBIAN_FRONTEND=noninteractive
-# The libraries criu links against, and nothing else.
+# The libraries criu links against, and tini.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      libbsd0 libmd0 libnet1 libnl-3-200 libprotobuf-c1 libuuid1 ca-certificates \
+      libbsd0 libmd0 libnet1 libnl-3-200 libprotobuf-c1 libuuid1 ca-certificates tini \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build --chmod=0755 /usr/local/sbin/criu /usr/local/sbin/criu
 COPY --from=build --chmod=0755 /out/bin/fiberd /usr/local/bin/fiberd
@@ -69,4 +69,5 @@ COPY --from=build /out/doc /usr/share/doc/fiberd
 # No USER on purpose. fiberd creates namespaces and cgroups and runs criu,
 # so it starts as root and drops the capabilities it does not need
 # (pkg/sys/caps).
-ENTRYPOINT ["/usr/local/bin/fiberd"]
+# tini is PID 1 and reaps the orphans a fiber or sandbox leaves.
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/fiberd"]

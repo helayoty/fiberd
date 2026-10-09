@@ -208,6 +208,9 @@ case "${1:-}" in
   gvisor) gvisor ;;
   runc-logs) runc_logs "${2:-conform-runc-grant}" ;;
   run)
+    # A cluster left from an earlier run keeps Pods of the old images, so
+    # every run starts from a fresh one.
+    down 2>/dev/null || true
     up; image; deploy; conform; storm; gvisor
     ;;
   *) echo "usage: $0 run|up|down|image|deploy|conform|storm|gvisor|runc-logs [pod]|restart|lane up|down|audit <event> <fence>|engine-kill <uid>|scope-lost" >&2; exit 2 ;;

@@ -93,7 +93,7 @@ ARG DEBIAN_FRONTEND=noninteractive
 # grant Pod's probes do not need them, since they run `fiberd-k8s -healthz`.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       libbsd0 libmd0 libnet1 libnl-3-200 libprotobuf-c1 libuuid1 libssl3 \
-      runc curl ca-certificates procps \
+      runc curl ca-certificates procps tini \
     && rm -rf /var/lib/apt/lists/* \
     && runc --version
 COPY --from=build --chmod=0755 /usr/local/sbin/criu /usr/local/sbin/criu
@@ -111,4 +111,6 @@ COPY --from=build /out/rootfs /usr/share/fiberd/gvisor-rootfs
 # Deployment runs it as non-root with a read-only root filesystem
 # (examples/kubernetes/kind/manifests/20-issuer.yaml).
 # No HEALTHCHECK, because the kubelet probes the Pod.
-ENTRYPOINT ["/usr/local/bin/fiberd-k8s"]
+# tini is PID 1 and reaps the orphans a sandbox leaves, such as runsc's
+# sentry and gofer, which would otherwise count against the Pod's tasks.
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/fiberd-k8s"]

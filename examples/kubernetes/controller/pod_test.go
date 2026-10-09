@@ -110,7 +110,7 @@ func TestBuildPod(t *testing.T) {
 				t.Fatalf("containers = %+v", p.Spec.Containers)
 			}
 			c := p.Spec.Containers[0]
-			if c.Name != "agent" || c.Image != tc.pod.Image || !reflect.DeepEqual(c.Command, []string{"fiberd-k8s"}) {
+			if c.Name != "agent" || c.Image != tc.pod.Image || !reflect.DeepEqual(c.Command, []string{"tini", "--", "fiberd-k8s"}) {
 				t.Fatalf("container = %s %s %v", c.Name, c.Image, c.Command)
 			}
 			if !reflect.DeepEqual(c.Args, tc.args) {
