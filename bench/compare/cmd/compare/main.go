@@ -103,7 +103,7 @@ func main() {
 	fs.StringVar(&o.netns, "netns", "", "firecracker: netns.sh")
 	fs.StringVar(&o.uffd, "uffd-handler", "", "firecracker: UFFD page-fault handler binary (the labelled variant)")
 	fs.IntVar(&o.vcpu, "vcpu", 1, "firecracker: vCPUs")
-	fs.IntVar(&o.memMiB, "mem-mib", 64, "firecracker: guest memory")
+	fs.IntVar(&o.memMiB, "mem-mib", 128, "firecracker: guest memory, the workload's 64 MiB plus the guest kernel")
 
 	fs.StringVar(&o.apiserverMetrics, "apiserver-metrics", "", "control plane: API server /metrics URL")
 	fs.StringVar(&o.schedulerMetrics, "scheduler-metrics", "", "control plane: scheduler /metrics URL")

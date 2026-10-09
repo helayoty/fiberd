@@ -48,12 +48,47 @@ type fake struct {
 	density            int64
 	prepCost, parkCost time.Duration
 	refillCost         time.Duration
+	setupHangs         bool // Setup waits until its context ends
 	// cancel, when set, is called on the first Activate, like a SIGINT
 	// in the middle of a burst.
 	cancel context.CancelFunc
 }
 
-func (f *fake) Setup(context.Context) error { return nil }
+func (f *fake) Setup(ctx context.Context) error {
+	if f.setupHangs {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	return nil
+}
+
+func TestSetupTimeout(t *testing.T) {
+	cases := []struct {
+		name    string
+		hangs   bool
+		wantErr error
+	}{
+		{name: "a system that never comes up fails the run", hangs: true, wantErr: context.DeadlineExceeded},
+		{name: "a system that comes up runs"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fake{clock: &clock{t: time.Unix(0, 0)}, setupHangs: tc.hangs}
+			r := &Runner{Adapter: f, System: "s", Class: "c", Runs: 1, Bursts: []int{1}, Poll: time.Millisecond,
+				SetupTimeout: 50 * time.Millisecond, Out: &bytes.Buffer{}, Load: func() string { return "1 2 3" }, Now: f.clock.Now}
+			done := make(chan error, 1)
+			go func() { done <- r.Run(context.Background()) }()
+			select {
+			case err := <-done:
+				if !errors.Is(err, tc.wantErr) {
+					t.Fatalf("Run = %v, want %v", err, tc.wantErr)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("Run hung in Setup")
+			}
+		})
+	}
+}
 
 func (f *fake) Prepare(_ context.Context, _ string) error {
 	f.mu.Lock()

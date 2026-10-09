@@ -123,7 +123,7 @@ func New(o Options) (*Adapter, error) {
 		o.VCPU = 1
 	}
 	if o.MemMiB <= 0 {
-		o.MemMiB = 64
+		o.MemMiB = 128 // the workload's 64 MiB plus the guest kernel
 	}
 	if o.GuestIP == "" {
 		o.GuestIP = "172.16.0.2"

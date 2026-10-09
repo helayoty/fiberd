@@ -76,6 +76,9 @@ type Runner struct {
 	Poll time.Duration
 	// Timeout bounds one activation to ready.
 	Timeout time.Duration
+	// SetupTimeout bounds Setup (default 10 minutes), so a system that
+	// never comes up fails the run instead of hanging it.
+	SetupTimeout time.Duration
 	// Resume measures park and resume on one instance per run when set.
 	Resume bool
 	// Density holds N idle instances for Idle before reading their cost.
@@ -151,7 +154,14 @@ func (r *Runner) Run(ctx context.Context) (err error) {
 		bursts = []int{1}
 	}
 	t := r.now()
-	if err := r.Adapter.Setup(ctx); err != nil {
+	st := r.SetupTimeout
+	if st <= 0 {
+		st = 10 * time.Minute
+	}
+	sctx, cancel := context.WithTimeout(ctx, st)
+	err = r.Adapter.Setup(sctx)
+	cancel()
+	if err != nil {
 		return fmt.Errorf("setup: %w", err)
 	}
 	r.emit(Record{Kind: "setup", SetupMs: ms(r.now().Sub(t))})
