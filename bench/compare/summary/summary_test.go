@@ -194,3 +194,64 @@ func TestRead(t *testing.T) {
 		})
 	}
 }
+
+func TestPrintAligns(t *testing.T) {
+	deltas := map[string]float64{"apiserver_objects": 577, "apiserver_writes": 2483, "audit_events": 2862, "scheduler_attempts": 0}
+	cases := []struct {
+		name  string
+		rows  []Row
+		sides []Side
+		cells [][]string // each printed line's cells, header first, as the table shows them
+	}{
+		{name: "a long class, three-number loads, deltas and a note",
+			rows: []Row{{Class: "shared-kernel", System: "agentsandbox-runc-pool1", Burst: 50, Runs: 3, P50: 1011.58, P99: 1300.2, Wall: 1500, Samples: 150, Errors: 0, Attempts: 12, PollMs: 1}},
+			sides: []Side{
+				{Class: "shared-kernel", System: "agentsandbox-runc-pool10", SetupMs: 1018, LoadFirst: "3.87 8.39 7.30", LoadLast: "8.40 9.14 7.82", Deltas: deltas, DensityErr: "no cgroup under /host/sys/fs/cgroup for dbffee01"},
+				{Class: "shared-kernel", System: "fiberd-proc", SetupMs: 51, LoadFirst: "3.65 8.44 6.40", LoadLast: "4.08 8.45 6.41", ResumeMs: 33.03, Deltas: deltas, DensityN: 20, Marginal: 1 << 19, Amortized: 1 << 19},
+			},
+			cells: [][]string{
+				{"class", "system", "burst", "runs", "p50 ms", "p99 ms", "wall ms", "samples", "errors", "probes"},
+				{"shared-kernel", "agentsandbox-runc-pool1", "50", "3", "1011.58", "1300.20", "1500.0", "150", "0", "12@1ms"},
+				{"class", "system", "setup ms", "load first", "load last", "resume ms", "density n", "marginal", "amortized", "apiserver_objects", "apiserver_writes", "audit_events", "scheduler_attempts", "note"},
+				{"shared-kernel", "agentsandbox-runc-pool10", "1018", "3.87 8.39 7.30", "8.40 9.14 7.82", "0.00", "-", "-", "-", "577", "2483", "2862", "0", "density: no cgroup"},
+				{"shared-kernel", "fiberd-proc", "51", "3.65 8.44 6.40", "4.08 8.45 6.41", "33.03", "20", "0.5MiB", "0.5MiB", "577", "2483", "2862", "0"},
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var out bytes.Buffer
+			Print(&out, tc.rows, tc.sides)
+			var lines []string
+			for _, l := range strings.Split(out.String(), "\n") {
+				if strings.TrimSpace(l) != "" {
+					lines = append(lines, l)
+				}
+			}
+			if len(lines) != len(tc.cells) {
+				t.Fatalf("%d lines, want %d:\n%s", len(lines), len(tc.cells), out.String())
+			}
+			// Every cell of a table starts where its header does.
+			var starts []int
+			for i, cells := range tc.cells {
+				pos, at := make([]int, len(cells)), 0
+				for k, c := range cells {
+					j := strings.Index(lines[i][at:], c)
+					if j < 0 {
+						t.Fatalf("line %d has no %q after column %d:\n%s", i, c, at, out.String())
+					}
+					pos[k], at = at+j, at+j+len(c)
+				}
+				if cells[0] == "class" {
+					starts = pos
+					continue
+				}
+				for k := range pos {
+					if pos[k] != starts[k] {
+						t.Fatalf("line %d: %q starts at %d, its header at %d:\n%s", i, cells[k], pos[k], starts[k], out.String())
+					}
+				}
+			}
+		})
+	}
+}

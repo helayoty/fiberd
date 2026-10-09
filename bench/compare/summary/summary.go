@@ -12,6 +12,7 @@ import (
 	"io"
 	"sort"
 	"strings"
+	"text/tabwriter"
 
 	"github.com/helayoty/fiberd/bench/compare"
 )
@@ -262,40 +263,75 @@ func Median(xs []float64) float64 {
 	return (s[n/2-1] + s[n/2]) / 2
 }
 
-// Print writes the tables as text.
-func Print(w io.Writer, rows []Row, sides []Side) {
-	_, _ = fmt.Fprintf(w, "%-10s %-28s %5s %4s %10s %10s %10s %7s %4s %7s\n", "class", "system", "burst", "runs", "p50 ms", "p99 ms", "wall ms", "samples", "err", "probes")
+// Cells lays the two tables out as rows of cells, headers first, for
+// Print and for a Markdown table. Each control-plane counter is a column
+// of its own, in name order.
+func Cells(rows []Row, sides []Side) (latency, side [][]string) {
+	latency = [][]string{{"class", "system", "burst", "runs", "p50 ms", "p99 ms", "wall ms", "samples", "errors", "probes"}}
 	for _, r := range rows {
-		probes := fmt.Sprintf("%.0f@%gms", r.Attempts, r.PollMs)
 		if r.Samples == 0 {
-			_, _ = fmt.Fprintf(w, "%-10s %-28s %5d %4d %10s %10s %10s %7d %4d %7s\n", r.Class, r.System, r.Burst, r.Runs, "-", "-", "-", 0, r.Errors, "-")
+			latency = append(latency, []string{r.Class, r.System, fmt.Sprint(r.Burst), fmt.Sprint(r.Runs), "-", "-", "-", "0", fmt.Sprint(r.Errors), "-"})
 			continue
 		}
-		_, _ = fmt.Fprintf(w, "%-10s %-28s %5d %4d %10.2f %10.2f %10.1f %7d %4d %7s\n", r.Class, r.System, r.Burst, r.Runs, r.P50, r.P99, r.Wall, r.Samples, r.Errors, probes)
+		latency = append(latency, []string{r.Class, r.System, fmt.Sprint(r.Burst), fmt.Sprint(r.Runs),
+			fmt.Sprintf("%.2f", r.P50), fmt.Sprintf("%.2f", r.P99), fmt.Sprintf("%.1f", r.Wall), fmt.Sprint(r.Samples),
+			fmt.Sprint(r.Errors), fmt.Sprintf("%.0f@%gms", r.Attempts, r.PollMs)})
 	}
-	_, _ = fmt.Fprintln(w)
-	_, _ = fmt.Fprintf(w, "%-10s %-28s %10s %-11s %-11s %10s %s\n", "class", "system", "setup ms", "load first", "load last", "resume ms", "density per idle instance, deltas per run")
-	for _, s := range sides {
-		res := fmt.Sprintf("%.2f", s.ResumeMs)
-		if s.ResumeErr != "" {
+	var names []string
+	seen := map[string]bool{}
+	for _, sd := range sides {
+		for n := range sd.Deltas {
+			if !seen[n] {
+				seen[n] = true
+				names = append(names, n)
+			}
+		}
+	}
+	sort.Strings(names)
+	head := []string{"class", "system", "setup ms", "load first", "load last", "resume ms", "density n", "marginal", "amortized"}
+	side = [][]string{append(append(head, names...), "note")}
+	for _, sd := range sides {
+		res, n, marg, amort := fmt.Sprintf("%.2f", sd.ResumeMs), "-", "-", "-"
+		if sd.ResumeErr != "" {
 			res = "n/a"
 		}
-		extra := ""
-		if s.DensityN > 0 {
-			extra = fmt.Sprintf("n=%d marginal=%s amortized=%s", s.DensityN, mib(s.Marginal), mib(s.Amortized))
-		} else if s.DensityErr != "" {
-			extra = "density: " + s.DensityErr
+		if sd.DensityN > 0 {
+			n, marg, amort = fmt.Sprint(sd.DensityN), mib(sd.Marginal), mib(sd.Amortized)
 		}
-		names := make([]string, 0, len(s.Deltas))
-		for n := range s.Deltas {
-			names = append(names, n)
+		row := []string{sd.Class, sd.System, fmt.Sprintf("%.0f", sd.SetupMs), sd.LoadFirst, sd.LoadLast, res, n, marg, amort}
+		for _, name := range names {
+			v, ok := sd.Deltas[name]
+			if !ok {
+				row = append(row, "-")
+				continue
+			}
+			row = append(row, fmt.Sprintf("%g", v))
 		}
-		sort.Strings(names)
-		for _, n := range names {
-			extra += fmt.Sprintf(" %s=%g", n, s.Deltas[n])
+		var notes []string
+		if sd.ResumeErr != "" {
+			notes = append(notes, "resume: "+sd.ResumeErr)
 		}
-		_, _ = fmt.Fprintf(w, "%-10s %-28s %10.0f %-11s %-11s %10s %s\n", s.Class, s.System, s.SetupMs, s.LoadFirst, s.LoadLast, res, strings.TrimSpace(extra))
+		if sd.DensityErr != "" {
+			notes = append(notes, "density: "+sd.DensityErr)
+		}
+		side = append(side, append(row, strings.Join(notes, "; ")))
 	}
+	return latency, side
+}
+
+// Print writes the tables as aligned text.
+func Print(w io.Writer, rows []Row, sides []Side) {
+	latency, side := Cells(rows, sides)
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	for i, t := range [][][]string{latency, side} {
+		if i > 0 {
+			_, _ = fmt.Fprintln(tw)
+		}
+		for _, row := range t {
+			_, _ = fmt.Fprintln(tw, strings.Join(row, "\t"))
+		}
+	}
+	_ = tw.Flush()
 }
 
 func mib(b int64) string { return fmt.Sprintf("%.1fMiB", float64(b)/(1<<20)) }
