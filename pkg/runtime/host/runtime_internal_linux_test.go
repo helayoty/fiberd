@@ -544,7 +544,7 @@ func TestPrepareTemplate(t *testing.T) {
 }
 
 // tcpPolicy serves fibers on 127.0.0.1 with two ports.
-var tcpPolicy = endpoint.Policy{Family: endpoint.Inet4, Host: "127.0.0.1", PortMin: 40000, PortMax: 40001}
+var tcpPolicy = endpoint.Policy{Family: endpoint.Inet4, Host: "127.0.0.1", PortMin: 20000, PortMax: 20001}
 
 // TestClone checks that a fiber is born into a leaf of its own with the
 // endpoint the policy chooses, and every failure leaves nothing behind.
@@ -710,18 +710,18 @@ func TestClone(t *testing.T) {
 			mod:   func(c *Config) { c.Endpoints = tcpPolicy },
 			grant: g, prepare: true, spec: core.CloneSpec{Grant: g, Fence: fence},
 			check: func(t *testing.T, r *Runtime, be backend.Backend, h core.FiberHandle) {
-				if h.Endpoint != "tcp://127.0.0.1:40000" {
+				if h.Endpoint != "tcp://127.0.0.1:20000" {
 					t.Fatalf("first endpoint = %s", h.Endpoint)
 				}
-				if ff := be.(*sandboxBackend).fiber(h.ID); ff.spec.Endpoint != "tcp://127.0.0.1:40000" {
+				if ff := be.(*sandboxBackend).fiber(h.ID); ff.spec.Endpoint != "tcp://127.0.0.1:20000" {
 					t.Fatalf("the backend was told to serve on %s", ff.spec.Endpoint)
 				}
 				h2, err := r.Clone(context.Background(), core.CloneSpec{Grant: g, Fence: core.Fence{GrantUID: "g1", Epoch: 1, Seq: 2}})
-				if err != nil || h2.Endpoint != "tcp://127.0.0.1:40001" {
+				if err != nil || h2.Endpoint != "tcp://127.0.0.1:20001" {
 					t.Fatalf("second clone = %+v %v", h2, err)
 				}
 				if _, err := r.Clone(context.Background(), core.CloneSpec{Grant: g, Fence: core.Fence{GrantUID: "g1", Epoch: 1, Seq: 3}}); err == nil ||
-					!strings.Contains(err.Error(), "no free endpoint port in 40000-40001") {
+					!strings.Contains(err.Error(), "no free endpoint port in 20000-20001") {
 					t.Fatalf("third clone = %v, want the range exhausted", err)
 				}
 				if r.root.Child("g1").Child("f-1-3").Exists() {
@@ -1568,10 +1568,10 @@ func TestPorts(t *testing.T) {
 			if _, err := r.allocPort("a", 0); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := r.allocPort("b", 40000); err == nil || !strings.Contains(err.Error(), "held by a") {
+			if _, err := r.allocPort("b", 20000); err == nil || !strings.Contains(err.Error(), "held by a") {
 				t.Fatalf("allocPort = %v", err)
 			}
-			if p, err := r.allocPort("a", 40000); err != nil || p != 40000 {
+			if p, err := r.allocPort("a", 20000); err != nil || p != 20000 {
 				t.Fatalf("re-reserving one's own port = %d %v", p, err)
 			}
 		}},
@@ -1579,12 +1579,12 @@ func TestPorts(t *testing.T) {
 			if _, err := r.allocPort("a", 0); err != nil {
 				t.Fatal(err)
 			}
-			r.freePort(40000, "b")
+			r.freePort(20000, "b")
 			r.freePort(0, "a")
-			if p, err := r.allocPort("c", 0); err != nil || p != 40001 {
-				t.Fatalf("allocPort = %d %v, want 40001 while a holds 40000", p, err)
+			if p, err := r.allocPort("c", 0); err != nil || p != 20001 {
+				t.Fatalf("allocPort = %d %v, want 20001 while a holds 20000", p, err)
 			}
-			r.freePort(40000, "a")
+			r.freePort(20000, "a")
 			if _, err := r.allocPort("d", 0); err != nil {
 				t.Fatalf("allocPort after a free = %v", err)
 			}

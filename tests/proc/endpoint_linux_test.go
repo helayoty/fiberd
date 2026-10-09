@@ -53,7 +53,7 @@ func TestTCPEndpoints(t *testing.T) {
 	}{{fiberendpoint.Inet4, "127.0.0.1"}, {fiberendpoint.Inet6, "::1"}}
 	for _, c := range cases {
 		t.Run(string(c.fam), func(t *testing.T) {
-			lo, hi := 41000, 41003
+			lo, hi := 21000, 21003
 			rt := tcpRuntime(t, c.fam, c.host, lo, hi)
 			ctx := context.Background()
 			g := core.Grant{UID: "ep-" + string(c.fam), TemplateDigest: "sha256:ref", FiberMax: 8, WBudgetBytes: 32 << 20}

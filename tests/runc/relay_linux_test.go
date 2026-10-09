@@ -59,7 +59,7 @@ func TestRelayedTCPEndpoints(t *testing.T) {
 			} else {
 				_ = l.Close()
 			}
-			lo, hi := 43000, 43003
+			lo, hi := 23000, 23003
 			rt := newRuntimeWith(t, "/bin/refzygote --heap-mb 32 --http", func(cfg *host.Config) {
 				cfg.Endpoints = fiberendpoint.Policy{Family: c.fam, Host: c.host, PortMin: lo, PortMax: hi}
 			})

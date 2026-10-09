@@ -468,28 +468,28 @@ func TestResume(t *testing.T) {
 		{name: "a tcp delta keeps its port across park and resume", be: func() backend.Backend { return newSandboxBackend(core.TierSnapshot) }, grant: g,
 			mod: func(c *Config) { c.Endpoints = tcpPolicy }, ref: parkFirst,
 			check: func(t *testing.T, f *parkFixture, ref string, h core.FiberHandle) {
-				if h.Endpoint != "tcp://127.0.0.1:40000" {
+				if h.Endpoint != "tcp://127.0.0.1:20000" {
 					t.Fatalf("resumed endpoint = %s", h.Endpoint)
 				}
 				f.r.mu.Lock()
-				holder := f.r.ports[40000]
+				holder := f.r.ports[20000]
 				f.r.mu.Unlock()
 				if holder != "g1/2/1" {
-					t.Fatalf("port 40000 held by %q, want the new fence", holder)
+					t.Fatalf("port 20000 held by %q, want the new fence", holder)
 				}
 				// Published under the birth fence's name, the one the fiber knows.
 				fenceFn := filepath.Join(f.r.cfg.RunDir, "g1", "1-1.fence")
 				if b, err := os.ReadFile(fenceFn); err != nil || string(b) != "g1/2/1\n" {
 					t.Fatalf("fence file = %q %v", b, err)
 				}
-				if ff := f.be.(*sandboxBackend).fiber("g1/2/1"); ff.resume.Endpoint != "tcp://127.0.0.1:40000" {
+				if ff := f.be.(*sandboxBackend).fiber("g1/2/1"); ff.resume.Endpoint != "tcp://127.0.0.1:20000" {
 					t.Fatalf("the backend was told to serve on %s", ff.resume.Endpoint)
 				}
 				// Another delta parked on the same port, while the resumed
 				// fiber holds it, cannot come back here.
 				dir := filepath.Join(f.r.cfg.DeltaDir, "g1", "other")
 				write(t, dir, map[string]string{"pages-1.img": "pages"})
-				if err := writeJSON(filepath.Join(dir, "manifest.json"), manifest{Fence: "g1/1/9", Backend: "fake", Endpoint: "tcp://127.0.0.1:40000"}); err != nil {
+				if err := writeJSON(filepath.Join(dir, "manifest.json"), manifest{Fence: "g1/1/9", Backend: "fake", Endpoint: "tcp://127.0.0.1:20000"}); err != nil {
 					t.Fatal(err)
 				}
 				_, err := f.r.Clone(context.Background(), core.CloneSpec{Grant: g, Source: core.SourceDelta, Ref: dir, Fence: core.Fence{GrantUID: "g1", Epoch: 3, Seq: 1}})
@@ -643,10 +643,10 @@ func TestReleaseDiscard(t *testing.T) {
 				t.Fatal(err)
 			}
 			f.r.mu.Lock()
-			holder := f.r.ports[40000]
+			holder := f.r.ports[20000]
 			f.r.mu.Unlock()
 			if holder != f.h.ID {
-				t.Fatalf("after the park port 40000 is held by %q, want the parked fiber", holder)
+				t.Fatalf("after the park port 20000 is held by %q, want the parked fiber", holder)
 			}
 			if err := f.r.Release(ctx, f.h.ID, tc.discard); err != nil {
 				t.Fatal(err)
@@ -895,7 +895,7 @@ func TestResumeRefusesHeldSocket(t *testing.T) {
 		t.Helper()
 		m := manifest{Fence: fence, GrantUID: "g1", Backend: "fake", Endpoint: "unix:///elsewhere/run/g1/" + name}
 		if relayed {
-			m.Endpoint, m.Relay = "tcp://10.0.0.9:40000", "/elsewhere/run/g1/"+name
+			m.Endpoint, m.Relay = "tcp://10.0.0.9:20000", "/elsewhere/run/g1/"+name
 		}
 		dir := filepath.Join(f.r.cfg.DeltaDir, "g1", "foreign-"+name)
 		write(t, dir, map[string]string{"pages-1.img": "pages"})

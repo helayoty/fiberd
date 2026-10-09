@@ -16,8 +16,8 @@ func TestDiscardDelta(t *testing.T) {
 		fence   string // the manifest's fence, "" for no manifest
 		wantErr bool
 		gone    bool // the ref's directory no longer exists
-		// portsLeft is how many of the two held ports (g1/1/1 on 40000,
-		// g1/1/2 on 40001) are still held afterwards.
+		// portsLeft is how many of the two held ports (g1/1/1 on 20000,
+		// g1/1/2 on 20001) are still held afterwards.
 		portsLeft int
 	}{
 		{name: "a claimed copy in the delta store is removed",
@@ -42,10 +42,10 @@ func TestDiscardDelta(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			r := &Runtime{cfg: Config{DeltaDir: deltas}, ports: map[int]string{40000: "g1/1/1", 40001: "g1/1/2"}}
+			r := &Runtime{cfg: Config{DeltaDir: deltas}, ports: map[int]string{20000: "g1/1/1", 20001: "g1/1/2"}}
 			ref := tc.ref(deltas, outside)
 			if tc.fence != "" {
-				if err := writeJSON(filepath.Join(ref, "manifest.json"), manifest{Fence: tc.fence, GrantUID: "g1", Endpoint: "tcp://127.0.0.1:40000"}); err != nil {
+				if err := writeJSON(filepath.Join(ref, "manifest.json"), manifest{Fence: tc.fence, GrantUID: "g1", Endpoint: "tcp://127.0.0.1:20000"}); err != nil {
 					t.Fatal(err)
 				}
 			}

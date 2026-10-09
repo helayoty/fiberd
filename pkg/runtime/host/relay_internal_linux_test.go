@@ -96,7 +96,7 @@ func TestRelayedEndpoints(t *testing.T) {
 			be: func() backend.Backend { return relayBackend(core.TierSnapshot) },
 			check: func(t *testing.T, r *Runtime, be *sandboxBackend, h core.FiberHandle) {
 				sock := filepath.Join(r.cfg.RunDir, "g1", "1-1.sock")
-				if h.Endpoint != "tcp://127.0.0.1:40000" {
+				if h.Endpoint != "tcp://127.0.0.1:20000" {
 					t.Fatalf("endpoint = %s, want the relayed port", h.Endpoint)
 				}
 				if ff := be.fiber(h.ID); ff.spec.Endpoint != sock {
@@ -133,7 +133,7 @@ func TestRelayedEndpoints(t *testing.T) {
 		{name: "an inet6 home relays on the IPv6 loopback",
 			be: func() backend.Backend { return relayBackend(core.TierSnapshot) },
 			mod: func(c *Config) {
-				c.Endpoints = endpoint.Policy{Family: endpoint.Inet6, Host: "::1", PortMin: 40000, PortMax: 40001}
+				c.Endpoints = endpoint.Policy{Family: endpoint.Inet6, Host: "::1", PortMin: 20000, PortMax: 20001}
 			},
 			before: func(t *testing.T, _ *Runtime) func() {
 				l, err := net.Listen("tcp6", "[::1]:0")
@@ -144,7 +144,7 @@ func TestRelayedEndpoints(t *testing.T) {
 				return nil
 			},
 			check: func(t *testing.T, _ *Runtime, _ *sandboxBackend, h core.FiberHandle) {
-				if h.Endpoint != "tcp://[::1]:40000" {
+				if h.Endpoint != "tcp://[::1]:20000" {
 					t.Fatalf("endpoint = %s", h.Endpoint)
 				}
 				if got := mustSay(t, h.Endpoint, "ping"); got != "g1/1/1:ping" {
@@ -158,7 +158,7 @@ func TestRelayedEndpoints(t *testing.T) {
 				return sb
 			}, errText: "restore failed",
 			check: func(t *testing.T, r *Runtime, _ *sandboxBackend, _ core.FiberHandle) {
-				refusesDial(t, "tcp://127.0.0.1:40000")
+				refusesDial(t, "tcp://127.0.0.1:20000")
 				if heldPorts(r) != 0 || r.root.Child("g1").Child("f-1-1").Exists() {
 					t.Fatalf("%d ports held, leaf exists %v", heldPorts(r), r.root.Child("g1").Child("f-1-1").Exists())
 				}
@@ -166,9 +166,9 @@ func TestRelayedEndpoints(t *testing.T) {
 		{name: "a port the agent cannot bind fails the clone and leaves nothing; freed, the next clone takes it",
 			be: func() backend.Backend { return relayBackend(core.TierSnapshot) },
 			before: func(t *testing.T, _ *Runtime) func() {
-				l, err := net.Listen("tcp4", "127.0.0.1:40000")
+				l, err := net.Listen("tcp4", "127.0.0.1:20000")
 				if err != nil {
-					t.Skipf("port 40000 busy: %v", err)
+					t.Skipf("port 20000 busy: %v", err)
 				}
 				return func() { _ = l.Close() }
 			}, errText: "relay for",
@@ -266,10 +266,10 @@ func TestRelayedResume(t *testing.T) {
 			check: func(t *testing.T, f *parkFixture, ref string, h core.FiberHandle) {
 				sock := filepath.Join(f.r.cfg.RunDir, "g1", "1-1.sock")
 				m := readManifest(t, ref)
-				if m.Endpoint != "tcp://127.0.0.1:40000" || m.Relay != sock {
+				if m.Endpoint != "tcp://127.0.0.1:20000" || m.Relay != sock {
 					t.Fatalf("manifest = %+v, want the tcp endpoint and the relay socket %s", m, sock)
 				}
-				if h.ID != "g1/2/1" || h.Endpoint != "tcp://127.0.0.1:40000" {
+				if h.ID != "g1/2/1" || h.Endpoint != "tcp://127.0.0.1:20000" {
 					t.Fatalf("resumed handle = %+v, want the parked port", h)
 				}
 				sb := f.be.(*sandboxBackend)
@@ -286,10 +286,10 @@ func TestRelayedResume(t *testing.T) {
 					t.Fatalf("fence file = %q %v", b, err)
 				}
 				f.r.mu.Lock()
-				holder := f.r.ports[40000]
+				holder := f.r.ports[20000]
 				f.r.mu.Unlock()
 				if holder != "g1/2/1" {
-					t.Fatalf("port 40000 held by %q", holder)
+					t.Fatalf("port 20000 held by %q", holder)
 				}
 				if err := f.r.Release(context.Background(), h.ID, true); err != nil {
 					t.Fatal(err)
@@ -302,13 +302,13 @@ func TestRelayedResume(t *testing.T) {
 		{name: "a parked port another fiber holds: the resume takes a free one",
 			be: func() backend.Backend { return relayBackend(core.TierSnapshot) },
 			ref: func(t *testing.T, f *parkFixture) string {
-				// The fixture's fiber runs on 40000. This delta was parked
-				// on 40000 elsewhere.
-				return byHand(t, f, manifest{Fence: "g1/1/9", Backend: "fake", Endpoint: "tcp://10.0.0.9:40000",
+				// The fixture's fiber runs on 20000. This delta was parked
+				// on 20000 elsewhere.
+				return byHand(t, f, manifest{Fence: "g1/1/9", Backend: "fake", Endpoint: "tcp://10.0.0.9:20000",
 					Relay: "/elsewhere/run/g1/1-9.sock"})
 			},
 			check: func(t *testing.T, f *parkFixture, _ string, h core.FiberHandle) {
-				if h.Endpoint != "tcp://127.0.0.1:40001" {
+				if h.Endpoint != "tcp://127.0.0.1:20001" {
 					t.Fatalf("resumed on %s, want the free port on this home's address", h.Endpoint)
 				}
 				sock := filepath.Join(f.r.cfg.RunDir, "g1", "1-9.sock")
@@ -325,7 +325,7 @@ func TestRelayedResume(t *testing.T) {
 		{name: "a relayed delta on a home whose backend binds tcp itself",
 			be: func() backend.Backend { return newSandboxBackend(core.TierSnapshot) },
 			ref: func(t *testing.T, f *parkFixture) string {
-				return byHand(t, f, manifest{Fence: "g1/1/9", Backend: "fake", Endpoint: "tcp://127.0.0.1:40001", Relay: "/x/1-9.sock"})
+				return byHand(t, f, manifest{Fence: "g1/1/9", Backend: "fake", Endpoint: "tcp://127.0.0.1:20001", Relay: "/x/1-9.sock"})
 			}, errText: "parked behind a relay",
 			check: func(t *testing.T, f *parkFixture, _ string, _ core.FiberHandle) {
 				if f.r.root.Child("g1").Child("f-2-1").Exists() || heldPorts(f.r) != 1 {
@@ -335,7 +335,7 @@ func TestRelayedResume(t *testing.T) {
 		{name: "a delta that bound tcp itself on a relaying home",
 			be: func() backend.Backend { return relayBackend(core.TierSnapshot) },
 			ref: func(t *testing.T, f *parkFixture) string {
-				return byHand(t, f, manifest{Fence: "g1/1/9", Backend: "fake", Endpoint: "tcp://127.0.0.1:40001"})
+				return byHand(t, f, manifest{Fence: "g1/1/9", Backend: "fake", Endpoint: "tcp://127.0.0.1:20001"})
 			}, errText: "needs a relay",
 			check: func(t *testing.T, f *parkFixture, _ string, _ core.FiberHandle) {
 				if f.r.root.Child("g1").Child("f-2-1").Exists() || heldPorts(f.r) != 1 {
@@ -393,10 +393,10 @@ func TestRelayedParkRefusesCallers(t *testing.T) {
 			}
 			refusesDial(t, f.h.Endpoint)
 			f.r.mu.Lock()
-			holder := f.r.ports[40000]
+			holder := f.r.ports[20000]
 			f.r.mu.Unlock()
 			if holder != f.h.ID {
-				t.Fatalf("after the park port 40000 is held by %q, want the parked fiber", holder)
+				t.Fatalf("after the park port 20000 is held by %q, want the parked fiber", holder)
 			}
 		})
 	}
@@ -464,10 +464,10 @@ func TestReleaseKeepsPortUntilExit(t *testing.T) {
 				t.Fatalf("Release = %v, want the wait for the exit to time out", err)
 			}
 			f.r.mu.Lock()
-			holder := f.r.ports[40000]
+			holder := f.r.ports[20000]
 			f.r.mu.Unlock()
 			if holder != f.h.ID {
-				t.Fatalf("port 40000 held by %q while the fiber's relay still binds it, want %s", holder, f.h.ID)
+				t.Fatalf("port 20000 held by %q while the fiber's relay still binds it, want %s", holder, f.h.ID)
 			}
 			if got := mustSay(t, f.h.Endpoint, "ping"); got != "g1/1/1:ping" {
 				t.Fatalf("ping = %q", got)
