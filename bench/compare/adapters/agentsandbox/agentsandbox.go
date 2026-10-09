@@ -100,7 +100,9 @@ func (a *Adapter) Template() map[string]any {
 	return map[string]any{
 		"apiVersion": "extensions.agents.x-k8s.io/v1beta1", "kind": "SandboxTemplate",
 		"metadata": map[string]any{"name": a.o.Name, "namespace": a.o.Namespace},
-		"spec":     map[string]any{"podTemplate": map[string]any{"spec": spec}},
+		// The default, Managed, adds a NetworkPolicy that keeps the client
+		// from reaching the sandbox.
+		"spec": map[string]any{"podTemplate": map[string]any{"spec": spec}, "networkPolicyManagement": "Unmanaged"},
 	}
 }
 

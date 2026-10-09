@@ -74,7 +74,11 @@ func TestTemplateResources(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			spec := a.Template()["spec"].(map[string]any)["podTemplate"].(map[string]any)["spec"].(map[string]any)
+			tmpl := a.Template()["spec"].(map[string]any)
+			if got := tmpl["networkPolicyManagement"]; got != "Unmanaged" {
+				t.Errorf("networkPolicyManagement %v, want Unmanaged so the client can reach the sandbox", got)
+			}
+			spec := tmpl["podTemplate"].(map[string]any)["spec"].(map[string]any)
 			res := spec["containers"].([]any)[0].(map[string]any)["resources"].(map[string]any)
 			if got := res["limits"]; !reflect.DeepEqual(got, tc.wantLimits) {
 				t.Errorf("limits %v, want %v", got, tc.wantLimits)

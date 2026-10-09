@@ -48,7 +48,7 @@ Pods, claims and Firecracker return an address before the instance listens, so t
 **Fairness.**
 
 - Every instance gets the same 64 MiB limit. For fiberd it is the grant's [W](../glossary.md#w-working-set) budget. Pods and claims also get a 250m CPU limit but reserve only 10m, since a fiber reserves nothing per instance and a burst of 50 must fit the node. A Firecracker guest gets 1 vCPU.
-- fiberd keeps one [warm](../glossary.md#warm) template and no pre-made fibers. So agent-sandbox runs with a pool of 1 as the like-for-like, and with a pool of N that a burst never empties. Pool memory is charged in density. A pool is deleted after its own runs, so it never stands during another system's.
+- fiberd keeps one [warm](../glossary.md#warm) template and no pre-made fibers. So agent-sandbox runs with a pool of 1 as the like-for-like, and with a pool of N that a burst never empties. Pool memory is charged in density. Sandboxes run without agent-sandbox's default NetworkPolicy, which blocks the client. A pool is deleted after its own runs, so it never stands during another system's.
 - The client sits beside the system. On kind it is a Pod pinned to the node, since Pod IPs are not routable from a Mac.
 - Image pulls, template warm, pool fill, snapshots and grant placement are setup. Setup is timed once and reported apart. Removing the image before a cold Pod is not timed, and a burst removes it for all its Pods before the first clock starts.
 - Each run does bursts of 1, 10 and 50 and releases everything in between. Every number is the median of 3 timed runs after a discarded cold run.
