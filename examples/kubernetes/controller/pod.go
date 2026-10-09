@@ -245,8 +245,8 @@ func BuildPod(cg *CapacityGrant, issuerURL string, lease time.Duration) *Pod {
 				{Name: "run", EmptyDir: &EmptyDirVolume{}},
 			},
 			Containers: []Container{{
-				Name:    "agent",
-				Image:   ps.Image,
+				Name:  "agent",
+				Image: ps.Image,
 				// tini, as PID 1, reaps the orphans a sandbox leaves.
 				Command: []string{"tini", "--", "fiberd-k8s"},
 				Args:    args,
