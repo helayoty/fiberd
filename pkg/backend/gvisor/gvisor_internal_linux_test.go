@@ -1945,9 +1945,16 @@ func TestPoolBind(t *testing.T) {
 				if findCall(f.calls(), "kill "+p.ID+" KILL") == "" || f.alive(p.ID) {
 					t.Fatal("the sandbox was not killed after the failed hand-out")
 				}
-				// The fiber's from Bind on, so its end is the fiber's.
-				if e := waitExit(t, b); e.FiberID != "g/1-1" || e.PooledID != "" {
-					t.Fatalf("exit = %+v, want the fiber g/1-1", e)
+				// The sandbox kept its pooled id, so its end is never
+				// mistaken for a fiber's born under the fence meanwhile.
+				if e := waitExit(t, b); e.PooledID != p.ID || e.FiberID != "" {
+					t.Fatalf("exit = %+v, want the pooled sandbox %s", e, p.ID)
+				}
+				b.mu.Lock()
+				pooled, known := len(b.pooled), b.boxes["g/1-1"] != nil
+				b.mu.Unlock()
+				if pooled != 0 || known {
+					t.Fatalf("after the failed Bind %d pooled and the fence registered %v", pooled, known)
 				}
 				return
 			}

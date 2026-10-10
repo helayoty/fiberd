@@ -16,11 +16,12 @@ flowchart TB
   G --> Z["zygote/: the warm template, memory.min"]
   G --> F1["f-epoch-seq: one fiber, memory.max = L"]
   G --> F2["f-epoch-seq: another fiber"]
+  G --> P["pool/p-n: a pooled sandbox, memory.max = L"]
 ```
 
 - **Delegation.** The agent moves its own processes into an `agent` leaf and carves `fiberd/` beside it ([sys.md](sys.md)).
 - **The subtree cap.** The agent's leaf and `fiberd/` share the home's limit, so fibers that filled it would fail the agent's next charge. A thread the agent cannot create is a Go fatal error, and every fiber dies with it. The runtime therefore reads the smallest `memory.max` and `pids.max` above its root and caps `fiberd/` a reserve below each. The reserve is an eighth of the limit, at least 64 MiB or 64 tasks, at most half. `memory.high` on the subtree sits an eighth under its `memory.max`, so the ladder sees the pressure before the kernel kills a leaf. A root with nothing above it (a bare host) gets no cap.
-- **The fiber leaf.** Each fiber gets `memory.max = L`, with `memory.oom.group=1` and swap closed, and on fork [backends](../glossary.md#backend) `pids.max` 256. On proc and runc, L is the grant's [W](../glossary.md#w-working-set) budget. A sandbox backend's fiber also carries a fixed footprint T, measured from the [warm](../glossary.md#warm) [template](../glossary.md#template), so its L is W budget + T + T/2 + 32 MiB. The extra room covers the sandbox's own variance, and the host enforces the W budget itself by sampling (see [runtime-host.md](runtime-host.md)).
+- **The fiber leaf.** Each fiber gets `memory.max = L`, with `memory.oom.group=1` and swap closed, and on fork [backends](../glossary.md#backend) `pids.max` 256. On proc and runc, L is the grant's [W](../glossary.md#w-working-set) budget. A sandbox backend's fiber also carries a fixed footprint T, measured from the [warm](../glossary.md#warm) [template](../glossary.md#template), so its L is W budget + T + T/2 + 32 MiB. The extra room covers the sandbox's own variance, and the host enforces the W budget itself by sampling (see [runtime-host.md](runtime-host.md)). A pooled sandbox waits in `pool/p-<n>` with the same limits and keeps that leaf as a fiber.
 - **The grant ceiling.** With a positive `fibers.max` and W budget, the grant's cgroup gets these limits.
 
 ```text

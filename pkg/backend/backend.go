@@ -179,7 +179,8 @@ type Pooled struct {
 // holds the channel it dials. Bind writes the identity, with fresh
 // entropy, on that channel and waits for the ack and the endpoint, so
 // a Clone served from the pool skips the restore. Discard kills one.
-// A pooled sandbox that dies before Bind is reported as Exit{PooledID}.
+// A pooled sandbox that dies before Bind, or whose Bind fails, is
+// reported as Exit{PooledID}.
 // Pool answers ErrNoPool for a warm instance whose template never
 // dials the channel.
 type Pooler interface {

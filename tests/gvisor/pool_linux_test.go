@@ -6,13 +6,16 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/helayoty/fiberd/pkg/backend"
 	gvisorbackend "github.com/helayoty/fiberd/pkg/backend/gvisor"
 	"github.com/helayoty/fiberd/pkg/core"
+	"github.com/helayoty/fiberd/pkg/runtime/host"
 )
 
 // TestPooledHandOut drives the backend's pool with real runsc. Sandboxes
@@ -103,6 +106,94 @@ func TestPooledHandOut(t *testing.T) {
 			}
 			if got := talk(t, "unix://"+ep, "fence"); got != "pool/1-9" {
 				t.Fatalf("fence = %q", got)
+			}
+		})
+	}
+}
+
+// runscList lists the sandboxes alive in the backend's runsc root.
+func runscList(t *testing.T, state string) []string {
+	t.Helper()
+	out, err := exec.Command("runsc", "--root="+filepath.Join(state, "root"), "list", "-quiet").CombinedOutput()
+	if err != nil {
+		t.Fatalf("runsc list: %v: %s", err, out)
+	}
+	return strings.Fields(string(out))
+}
+
+// TestPooledRevocation checks that nothing of a grant's pool survives
+// the grant going through the host: no pool leaf and no sandbox, whether
+// the template is dropped or a new life sweeps the old one's.
+func TestPooledRevocation(t *testing.T) {
+	cases := []struct {
+		name string
+		// revoke ends the grant on rt, whose cgroups and state are named name.
+		revoke func(t *testing.T, rt *host.Runtime, name string)
+	}{
+		{name: "yield or remove drops the template", revoke: func(t *testing.T, rt *host.Runtime, _ string) {
+			rt.DropTemplate("g1")
+		}},
+		{name: "a restart sweeps the previous life", revoke: func(t *testing.T, _ *host.Runtime, name string) {
+			state := filepath.Join(work, name)
+			r2, err := host.New(host.Config{
+				Backend:    gvisorbackend.New(gvisorbackend.Options{Rootfs: rootfs, StateDir: state}),
+				Templates:  map[string]string{"default": "/bin/refzygote --heap-mb 32 --gvisor"},
+				CgroupRoot: filepath.Join(cgRoot, name),
+				RunDir:     filepath.Join("/tmp", "fz-"+name),
+				DeltaDir:   filepath.Join(state, "deltas"),
+			})
+			if err != nil {
+				t.Fatalf("New over the old root: %v", err)
+			}
+			t.Cleanup(r2.Close)
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rt := newRuntimeWith(t, "/bin/refzygote --heap-mb 32 --gvisor").(*host.Runtime)
+			life := name
+			state := filepath.Join(work, life)
+			ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+			defer cancel()
+			g := core.Grant{UID: "g1", TemplateDigest: "sha256:ref", FiberMax: 4, WBudgetBytes: 64 << 20}
+			if err := rt.PrepareTemplate(ctx, g); err != nil {
+				t.Fatalf("prepare: %v", err)
+			}
+			for i := 0; i < 2; i++ {
+				if err := rt.Fill(ctx, g, 20*time.Second); err != nil {
+					t.Fatalf("Fill %d: %v", i, err)
+				}
+			}
+			h, err := rt.Clone(ctx, core.CloneSpec{Grant: g, Fence: core.Fence{GrantUID: "g1", Epoch: 1, Seq: 1}, Deadline: 10 * time.Second})
+			if err != nil || !h.Pooled {
+				t.Fatalf("Clone = %+v %v, want a pooled fiber", h, err)
+			}
+			if got := talk(t, h.Endpoint, "fence"); got != h.ID {
+				t.Fatalf("fence = %q, want %q", got, h.ID)
+			}
+			pool := filepath.Join(cgRoot, life, "g1", "pool")
+			if leaves, _ := filepath.Glob(filepath.Join(pool, "p-*")); len(leaves) != 2 || rt.Pooled("g1") != 1 {
+				t.Fatalf("pool leaves %v, pooled %d, want two leaves and one waiting", leaves, rt.Pooled("g1"))
+			}
+			if err := rt.Release(ctx, h.ID, false); err != nil {
+				t.Fatalf("Release: %v", err)
+			}
+			tc.revoke(t, rt, life)
+			if leaves, _ := filepath.Glob(filepath.Join(pool, "p-*")); len(leaves) != 0 {
+				t.Fatalf("pool leaves %v after the revocation, want none", leaves)
+			}
+			// The reaper deletes each sandbox once it has exited, and the
+			// old life hears of its pooled sandbox's end the same way.
+			deadline := time.Now().Add(10 * time.Second)
+			for {
+				alive := runscList(t, state)
+				if len(alive) == 0 && rt.Pooled("g1") == 0 {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatalf("after the revocation: sandboxes alive %v, pooled %d", alive, rt.Pooled("g1"))
+				}
+				time.Sleep(50 * time.Millisecond)
 			}
 		})
 	}

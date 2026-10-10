@@ -197,6 +197,10 @@ type box struct {
 	// which is in neither and reports no exit. Both are read and written
 	// under b.mu.
 	pooled, probe bool
+	// binding marks a pooled sandbox whose hand-out is running. It keeps
+	// its pooled id until the hand-out succeeds, so a failed one ends
+	// under that id.
+	binding bool
 	// token is what the restore's spec carries, and claim is where the
 	// connection that sends it is delivered. conn is that connection,
 	// held from the claim until the identity is acked, under b.mu.
@@ -1326,8 +1330,8 @@ func (b *Backend) Pool(ctx context.Context, warmID string, sp backend.PoolSpec) 
 }
 
 // Bind hands a pooled sandbox the fiber's identity and waits for it to
-// serve. The sandbox is the fiber from here on, whatever happens, and a
-// hand-out that fails kills it.
+// serve. The sandbox keeps its pooled id until then, so a failed
+// hand-out never reports an end under a fence.
 func (b *Backend) Bind(ctx context.Context, pooledID string, sp backend.FiberSpec) (backend.Fiber, error) {
 	if sp.Deadline > 0 {
 		var cancel context.CancelFunc
@@ -1337,11 +1341,11 @@ func (b *Backend) Bind(ctx context.Context, pooledID string, sp backend.FiberSpe
 	b.mu.Lock()
 	x := b.pooled[pooledID]
 	var conn net.Conn
-	if x != nil {
-		delete(b.pooled, pooledID)
-		x.pooled = false
-		x.id, x.endpoint, conn = sp.Fence, sp.Endpoint, x.conn
-		b.boxes[x.id] = x
+	if x != nil && !x.binding {
+		x.binding = true
+		x.endpoint, conn = sp.Endpoint, x.conn
+	} else {
+		x = nil
 	}
 	b.mu.Unlock()
 	if x == nil {
@@ -1353,11 +1357,23 @@ func (b *Backend) Bind(ctx context.Context, pooledID string, sp backend.FiberSpe
 		return backend.Fiber{}, err
 	}
 	_ = os.Remove(sp.Endpoint)
-	fiber, err := b.bind(ctx, x, conn, "clone", sp.Fence, inside, sp.Payload)
-	if err != nil {
+	if _, err := b.bind(ctx, x, conn, "clone", sp.Fence, inside, sp.Payload); err != nil {
 		return backend.Fiber{}, fmt.Errorf("%w (%s)", err, leafDiag(sp.CgroupFD))
 	}
-	return fiber, nil
+	// The sandbox is the fiber from here on, unless the reaper took it
+	// first, in which case its end went out under the pooled id.
+	b.mu.Lock()
+	alive := b.pooled[pooledID] == x
+	if alive {
+		delete(b.pooled, pooledID)
+		x.pooled, x.id = false, sp.Fence
+		b.boxes[sp.Fence] = x
+	}
+	b.mu.Unlock()
+	if !alive {
+		return backend.Fiber{}, fmt.Errorf("gvisor: %s died during its hand-out", pooledID)
+	}
+	return backend.Fiber{ID: sp.Fence, PID: x.pid}, nil
 }
 
 // Discard kills a pooled sandbox. Its end is reported as Exit{PooledID}.

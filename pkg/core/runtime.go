@@ -73,6 +73,7 @@ type CloneSpec struct {
 type FiberHandle struct {
 	ID       string
 	Endpoint string // host:port or unix socket path
+	Pooled   bool   // born from a sandbox restored ahead of the clone
 }
 
 // HandoffRouter is implemented by runtimes that route callers'
