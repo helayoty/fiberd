@@ -234,6 +234,35 @@ const fz_identity_t *fz_handoff_identity(void);
  * closed the channel and the fiber is being released. */
 int fz_accept(void);
 
+/* gVisor templates. Nothing forks on gVisor. Every fiber is a sandbox
+ * restored from the template's checkpoint. After its checkpoint read
+ * answers "restore", the template calls fz_gvisor_identity, which hands
+ * the spec's one-shot FIBERD_TOKEN to the agent at
+ * /fiberd/agent/pool.sock and blocks for the identity. It then reseeds,
+ * binds the endpoint and calls fz_gvisor_ack, which zeroes the seed.
+ *
+ *   sandbox -> agent   't' <token> NUL
+ *   agent   -> sandbox 'i' <generation> NUL <kind> NUL <fence> NUL <endpoint> NUL <payload-hex|-> NUL
+ *                      <key PEM|-> NUL <cert PEM|-> NUL <caller|-> NUL <seed-hex> NUL
+ *   sandbox -> agent   'a' <fence> NUL
+ */
+typedef struct {
+    const char *kind;             /* "clone" (from the template image) or "resume" (from a park) */
+    const char *fence;
+    const char *endpoint;         /* the unix socket path to serve, under /host */
+    const unsigned char *payload; /* opaque data delivered at birth */
+    size_t payload_len;
+    const unsigned char *seed;    /* 32 bytes of fresh entropy from the host */
+    size_t seed_len;
+} fz_gvisor_identity_t;
+
+/* Blocks for this sandbox's identity, valid until the next call.
+ * -1 with errno set on failure, and the template then exits with 122. */
+int fz_gvisor_identity(fz_gvisor_identity_t *id);
+
+/* Tells the agent the endpoint is bound, and closes the channel. */
+int fz_gvisor_ack(void);
+
 /* Engine support. fz_set_engine names the engine's IPC endpoint, which
  * every fiber finds as FIBERD_ENGINE in its scrubbed environment.
  * fz_report sends one line to the agent from any thread (a DEVICE

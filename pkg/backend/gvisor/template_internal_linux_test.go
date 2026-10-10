@@ -199,7 +199,7 @@ func TestResumeTemplateMount(t *testing.T) {
 		{name: "baked template on both", parkRegistry: false, homeRegistry: false},
 		{name: "park with a template, home without", parkRegistry: true, homeRegistry: false, wantText: "does not have here"},
 		{name: "park without a template, home with", parkRegistry: false, homeRegistry: true, wantText: "binds here"},
-		{name: "park with a template, home not warm", parkRegistry: true, noWarm: true, wantText: "does not have here"},
+		{name: "park with a template, home not warm", parkRegistry: true, noWarm: true, wantText: "to resume under"},
 	}
 	executable := []byte("#!/bin/sh\nexec sleep 600\n")
 	for _, tc := range cases {

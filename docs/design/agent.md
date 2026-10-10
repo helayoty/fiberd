@@ -51,6 +51,7 @@ The state layout keeps what fibers must never read under one hidden directory.
   templates/            the pulled template cache, hidden from fibers
   deltas/               parked deltas, also hidden from fibers
   runc/, gvisor/        backend state, with each grant's staged template copy
+                        and, on gVisor, each warm instance's pool socket
 ```
 
 The private directory is hidden rather than protected by file modes, and so are the [template](../glossary.md#template) cache and the deltas. A proc fiber warmed from a registry template still sees its own executable, bound back read-only inside the cache's cover, because [CRIU](../glossary.md#criu) needs the path to resolve. The full list of what fibers cannot see is in [runtime-host.md](runtime-host.md).

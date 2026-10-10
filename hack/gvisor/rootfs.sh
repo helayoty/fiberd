@@ -9,7 +9,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 OUT=${1:?rootfs directory}
-mkdir -p "$OUT"/{bin,proc,dev,tmp,host}
+mkdir -p "$OUT"/{bin,proc,dev,tmp,host,fiberd/agent}
 # The binary must be free of pointer authentication on aarch64: a process
 # restored from a checkpoint keeps stale PAC keys and traps on a CPU with
 # FEAT_FPAC. The dev image is Debian bookworm, whose libc has none, and the

@@ -18,6 +18,7 @@
 #include <sys/signalfd.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/un.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -1723,4 +1724,119 @@ int fz_serve(int ctl_fd, fz_on_fiber on_fiber) {
         for (int i = 0; i < MAX_PASSED; i++)
             if (passed[i] >= 0) close(passed[i]);
     }
+}
+
+/* ---- gVisor ------------------------------------------------------------ */
+
+#define GVISOR_SPEC_ENV "/proc/gvisor/spec_environ"
+#define GVISOR_POOL_SOCKET "/fiberd/agent/pool.sock"
+#define GVISOR_TOKEN_MAX 64
+#define GVISOR_RECORD_MAX 65536
+#define GVISOR_SEED 32
+
+static char gv_record[GVISOR_RECORD_MAX];
+static unsigned char gv_payload[GVISOR_RECORD_MAX / 2];
+static unsigned char gv_seed[GVISOR_SEED];
+static char gv_fence[FENCE_MAX];
+static char *gv_seed_hex; /* the seed's field in gv_record, zeroed at the ack with gv_seed */
+/* The token this process last claimed with. The spec environment can
+ * still show the previous restore's for a moment after a restore
+ * returns, and a restored copy keeps this memory, so a token already
+ * used is waited out. */
+static char gv_last_token[GVISOR_TOKEN_MAX + 1];
+static int gv_channel = -1;
+
+/* spec_token copies FIBERD_TOKEN out of the spec environment, KEY=VALUE
+ * entries separated by NUL or newline. 0 when it is not there. */
+static int spec_token(char *out, size_t n) {
+    static char buf[65536];
+    int fd = open(GVISOR_SPEC_ENV, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return 0;
+    ssize_t got = 0, r;
+    while ((r = read(fd, buf + got, sizeof buf - 1 - got)) > 0) got += r;
+    close(fd);
+    if (got <= 0) return 0;
+    buf[got] = 0;
+    for (ssize_t i = 0; i < got; i++) if (buf[i] == '\n') buf[i] = 0;
+    for (char *p = buf; p < buf + got; p += strlen(p) + 1) {
+        if (strncmp(p, "FIBERD_TOKEN=", 13) != 0) continue;
+        size_t len = strlen(p + 13);
+        if (len == 0 || len >= n) return 0;
+        memcpy(out, p + 13, len + 1);
+        return 1;
+    }
+    return 0;
+}
+
+int fz_gvisor_identity(fz_gvisor_identity_t *id) {
+    if (gv_channel >= 0) { close(gv_channel); gv_channel = -1; }
+    char token[GVISOR_TOKEN_MAX + 1];
+    int fresh = 0;
+    for (int i = 0; i < 3000 && !fresh; i++) {
+        fresh = spec_token(token, sizeof token) && strcmp(token, gv_last_token) != 0;
+        if (!fresh) usleep(1000);
+    }
+    if (!fresh) { errno = ENOENT; return -1; }
+    memcpy(gv_last_token, token, sizeof token);
+    int fd = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
+    if (fd < 0) return -1;
+    struct sockaddr_un a = { .sun_family = AF_UNIX, .sun_path = GVISOR_POOL_SOCKET };
+    int rc = -1;
+    for (int i = 0; i < 2000 && rc < 0; i++) {
+        rc = connect(fd, (struct sockaddr *)&a, sizeof a);
+        if (rc < 0 && errno != ECONNREFUSED && errno != ENOENT) break;
+        if (rc < 0) usleep(1000);
+    }
+    if (rc < 0) { int e = errno; close(fd); errno = e; return -1; }
+    char claim[GVISOR_TOKEN_MAX + 2];
+    size_t cn = 1 + strlen(token) + 1;
+    claim[0] = 't';
+    memcpy(claim + 1, token, strlen(token) + 1);
+    if (write(fd, claim, cn) != (ssize_t)cn) { int e = errno; close(fd); errno = e; return -1; }
+    struct iovec iov = { .iov_base = gv_record, .iov_len = sizeof gv_record };
+    struct msghdr mh = { .msg_iov = &iov, .msg_iovlen = 1 };
+    ssize_t r;
+    do r = recvmsg(fd, &mh, 0); while (r < 0 && errno == EINTR);
+    if (r < 0) { int e = errno; close(fd); errno = e; return -1; }
+    if (r == 0 || (mh.msg_flags & MSG_TRUNC)) { close(fd); errno = r == 0 ? ECONNRESET : EMSGSIZE; return -1; }
+    /* 'i' then nine NUL-ended fields. */
+    const char *fields[9];
+    char *p = gv_record + 1, *end = gv_record + r;
+    if (r < 2 || gv_record[0] != 'i' || end[-1] != 0) { close(fd); errno = EPROTO; return -1; }
+    for (int i = 0; i < 9; i++) {
+        if (p >= end) { close(fd); errno = EPROTO; return -1; }
+        fields[i] = p;
+        p += strlen(p) + 1;
+    }
+    if (p != end || !*fields[2] || strlen(fields[2]) >= sizeof gv_fence || !*fields[3]) { close(fd); errno = EPROTO; return -1; }
+    size_t plen = 0;
+    if (strcmp(fields[4], "-") != 0) plen = unhex(fields[4], gv_payload, sizeof gv_payload);
+    if (unhex(fields[8], gv_seed, sizeof gv_seed) != GVISOR_SEED) { close(fd); errno = EPROTO; return -1; }
+    memcpy(gv_fence, fields[2], strlen(fields[2]) + 1);
+    gv_seed_hex = (char *)fields[8];
+    gv_channel = fd;
+    id->kind = fields[1];
+    id->fence = gv_fence;
+    id->endpoint = fields[3];
+    id->payload = gv_payload;
+    id->payload_len = plen;
+    id->seed = gv_seed;
+    id->seed_len = GVISOR_SEED;
+    return 0;
+}
+
+int fz_gvisor_ack(void) {
+    if (gv_channel < 0) { errno = EBADF; return -1; }
+    char ack[FENCE_MAX + 2];
+    size_t n = strlen(gv_fence);
+    ack[0] = 'a';
+    memcpy(ack + 1, gv_fence, n + 1);
+    ssize_t w = write(gv_channel, ack, n + 2);
+    int e = errno;
+    close(gv_channel);
+    gv_channel = -1;
+    memset(gv_seed, 0, sizeof gv_seed);
+    memset(gv_seed_hex, 0, strlen(gv_seed_hex));
+    if (w != (ssize_t)(n + 2)) { errno = e; return -1; }
+    return 0;
 }

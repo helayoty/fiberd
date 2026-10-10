@@ -138,9 +138,12 @@ func TestRegistryTemplate(t *testing.T) {
 			}
 		}},
 		{"the sandbox sees the executable alone", func(t *testing.T) {
+			// Beside the agent directory, which holds the pool socket and
+			// nothing else.
 			cases := []struct{ dir, want string }{
 				{"/fiberd/template", "zygote"},
-				{"/fiberd", "template"},
+				{"/fiberd", "agent template"},
+				{"/fiberd/agent", "pool.sock"},
 			}
 			for _, tc := range cases {
 				if got := probe(t, stateA, "ls", tc.dir); got != tc.want {

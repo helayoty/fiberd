@@ -25,6 +25,10 @@ import (
 // ErrUnsupported: this backend cannot run on this platform.
 var ErrUnsupported = errors.New("backend: not supported on this platform")
 
+// ErrNoPool is Pool's answer for a warm instance whose template does not
+// bind its identity late, so no sandbox of it can wait in a pool.
+var ErrNoPool = errors.New("backend: the template does not bind late, no pool")
+
 // Template is a resolved template the host hands to Warm: either a bare
 // command line, or an artifact directory with its checkpoint images.
 type Template struct {
@@ -147,12 +151,41 @@ type Handoffer interface {
 	Handoff() bool
 }
 
-// Exit reports the end of a fiber (FiberID set) or of a warm instance
-// (WarmID set, FiberID empty: its fibers are gone with it).
+// Exit reports the end of a fiber (FiberID set), of a pooled sandbox
+// that was never bound (PooledID set) or of a warm instance (WarmID set,
+// the others empty: its fibers are gone with it).
 type Exit struct {
-	FiberID string
-	WarmID  string
-	Status  string // "exit:N" or "signal:NAME"; free text otherwise
+	FiberID  string
+	PooledID string
+	WarmID   string
+	Status   string // "exit:N" or "signal:NAME"; free text otherwise
+}
+
+// PoolSpec asks for one sandbox restored ahead of its identity.
+type PoolSpec struct {
+	CgroupFD int // the leaf it is born in, which the fiber keeps; -1 when the host has none
+	Deadline time.Duration
+}
+
+// Pooled is a sandbox waiting in the pool, running the template with no
+// fence, endpoint or payload until Bind hands it one.
+type Pooled struct {
+	ID  string
+	PID int
+}
+
+// Pooler is implemented by backends that can restore a sandbox before
+// its fiber exists and hand it an identity later. Pool restores one and
+// holds the channel it dials. Bind writes the identity, with fresh
+// entropy, on that channel and waits for the ack and the endpoint, so
+// a Clone served from the pool skips the restore. Discard kills one.
+// A pooled sandbox that dies before Bind is reported as Exit{PooledID}.
+// Pool answers ErrNoPool for a warm instance whose template never
+// dials the channel.
+type Pooler interface {
+	Pool(ctx context.Context, warmID string, spec PoolSpec) (Pooled, error)
+	Bind(ctx context.Context, pooledID string, spec FiberSpec) (Fiber, error)
+	Discard(pooledID string)
 }
 
 // Backend is what a sandbox mechanism implements.

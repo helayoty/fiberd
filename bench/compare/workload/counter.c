@@ -12,8 +12,8 @@
  *                           endpoint it is given (proc, runc).
  *   --gvisor                the init of a gVisor sandbox: warm, then the
  *                           self-checkpoint loop refzygote uses, serving
- *                           the endpoint named by the restore-time
- *                           environment until SIGUSR1 (fiberd gVisor).
+ *                           the endpoint the agent hands it on its
+ *                           channel until SIGUSR1 (fiberd gVisor).
  *
  * The framing is HTTP/1.1 by default. GET /readyz answers ok, POST /incr
  * the counter after one increment, GET /count the counter. --framing
@@ -48,10 +48,13 @@ static int gvisor_mode;
 
 /* Every copy of the warm process starts with its RNG state: a forked
  * fiber and every sandbox restored from the self-checkpoint alike. Each
- * new incarnation reseeds libc before it serves, as refzygote does. */
-static void reseed_rngs(void) {
+ * new incarnation reseeds libc before it serves, as refzygote does, from
+ * the kernel and from the host's seed when it brings one. */
+static void reseed_rngs(const unsigned char *host, size_t hn) {
     unsigned seed[2] = { 0, 0 };
-    if (getrandom(seed, sizeof seed, 0) == (ssize_t)sizeof seed) { srandom(seed[0]); srand(seed[1]); }
+    if (getrandom(seed, sizeof seed, 0) != (ssize_t)sizeof seed) return;
+    for (size_t i = 0; i < hn; i++) seed[i % 2] = seed[i % 2] * 31u + host[i];
+    srandom(seed[0]); srand(seed[1]);
 }
 
 /* The expensive init, paid once: a heap touched page by page and some
@@ -200,7 +203,7 @@ static int plain_main(int port) {
 /* ---- zygote mode -------------------------------------------------------- */
 
 static int on_fiber(const fz_fiber_t *f) {
-    reseed_rngs();
+    reseed_rngs(NULL, 0);
     int s = listen_endpoint(f->endpoint);
     if (s < 0) { fprintf(stderr, "counter %s: listen %s: %s\n", f->fence, f->endpoint, strerror(errno)); return 4; }
     fz_fiber_ready();
@@ -210,22 +213,6 @@ static int on_fiber(const fz_fiber_t *f) {
 }
 
 /* ---- gVisor mode, as refzygote does it ---------------------------------- */
-
-static char *spec_env(const char *name) {
-    static char buf[65536];
-    int fd = open("/proc/gvisor/spec_environ", O_RDONLY);
-    if (fd < 0) return NULL;
-    ssize_t n = 0, r;
-    while ((r = read(fd, buf + n, sizeof buf - 1 - n)) > 0) n += r;
-    close(fd);
-    if (n <= 0) return NULL;
-    buf[n] = 0;
-    for (ssize_t i = 0; i < n; i++) if (buf[i] == '\n') buf[i] = 0;
-    size_t kl = strlen(name);
-    for (char *p = buf; p < buf + n; p += strlen(p) + 1)
-        if (strncmp(p, name, kl) == 0 && p[kl] == '=') return strdup(p + kl + 1);
-    return NULL;
-}
 
 /* Blocks until the next checkpoint of this sandbox completes. 1 when
  * running in a sandbox restored from it, 0 when resumed in place. */
@@ -247,26 +234,19 @@ static int gvisor_main(void) {
     if (m < 0) { perror("counter: /host/warm.ready"); return 6; }
     close(m);
     unsigned long counter = 0;
-    char last[256] = "none";
     for (;;) {
         if (!wait_checkpoint()) continue;
-        reseed_rngs(); /* a sandbox restored from the image, see refzygote */
-        char *fence = NULL, *ep = NULL;
-        for (int i = 0; i < 3000; i++) {
-            free(fence); free(ep);
-            fence = spec_env("FIBERD_FENCE"); ep = spec_env("FIBERD_ENDPOINT");
-            if (fence && ep && strcmp(fence, "none") != 0 && strcmp(fence, last) != 0) break;
-            usleep(1000);
-        }
-        if (fence && ep && strcmp(fence, "none") != 0) {
-            snprintf(last, sizeof last, "%s", fence);
-            int s = listen_endpoint(ep);
-            if (s < 0) { fprintf(stderr, "counter %s: bind %s: %s\n", fence, ep, strerror(errno)); return 4; }
-            serve_loop(s, &counter);
-            close(s);
-            unlink(ep);
-        }
-        free(fence); free(ep);
+        /* A sandbox restored from the image. Its identity and a fresh
+         * seed come on the agent's channel, see refzygote. */
+        fz_gvisor_identity_t id;
+        if (fz_gvisor_identity(&id) < 0) { fprintf(stderr, "counter: restored without an identity: %s\n", strerror(errno)); return 122; }
+        reseed_rngs(id.seed, id.seed_len);
+        int s = listen_endpoint(id.endpoint);
+        if (s < 0) { fprintf(stderr, "counter %s: bind %s: %s\n", id.fence, id.endpoint, strerror(errno)); return 4; }
+        (void)fz_gvisor_ack();
+        serve_loop(s, &counter);
+        close(s);
+        unlink(id.endpoint);
     }
 }
 
