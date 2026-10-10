@@ -53,8 +53,9 @@ func (a Action) String() string {
 // thing a control plane ever sees; never individual fibers.
 type Status struct {
 	GrantUID   string
-	Running    int
+	Running    int // fibers only, never pooled sandboxes
 	Parked     int
+	Pooled     int // sandboxes restored ahead of a clone, inside fibers.max
 	WUsedBytes uint64
 	Latest     Fence // the most recently minted fence for the grant
 }
@@ -95,6 +96,7 @@ type grantEntry struct {
 	grant   Grant
 	nextSeq uint64
 	live    int // running fibers, reserved at resolveHeld, freed at park/release/exit
+	pooled  int // sandboxes waiting in the runtime's pool, as it last reported
 }
 
 // fiberRef lets park/release/exit resolve a fiber ID back to the grant
@@ -344,6 +346,36 @@ func (l *Ledger) resolveHeld(hold *sessionHold, grantUID, session string, tier T
 	return ActCreate, mint(), "", commit, unlock, nil
 }
 
+// SetPooled records how many sandboxes wait in the grant's pool, and
+// reports whether that changed.
+func (l *Ledger) SetPooled(grantUID string, n int) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	e, ok := l.grants[grantUID]
+	if !ok || e.pooled == n {
+		return false
+	}
+	e.pooled = n
+	return true
+}
+
+// PoolRoom is how many more sandboxes the grant's pool may take: up to
+// fibers.warm, and never past fibers.max together with the running
+// fibers.
+func (l *Ledger) PoolRoom(grantUID string) int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	e, ok := l.grants[grantUID]
+	if !ok {
+		return 0
+	}
+	room := e.grant.FiberWarm - e.pooled
+	if e.grant.FiberMax > 0 {
+		room = min(room, e.grant.FiberMax-e.live-e.pooled)
+	}
+	return max(room, 0)
+}
+
 // SessionState reports a named session's state, if the ledger knows it.
 func (l *Ledger) SessionState(grantUID, session string) (SessionState, string, bool) {
 	l.mu.Lock()
@@ -511,7 +543,7 @@ func (l *Ledger) Statuses() []Status {
 	slot := make(map[string]int, len(l.grants))
 	for uid, e := range l.grants {
 		slot[uid] = len(out)
-		out = append(out, Status{GrantUID: uid, Running: e.live,
+		out = append(out, Status{GrantUID: uid, Running: e.live, Pooled: e.pooled,
 			Latest: Fence{GrantUID: uid, Epoch: l.epoch, Seq: e.nextSeq}})
 	}
 	for _, ref := range l.fibers {

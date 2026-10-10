@@ -184,10 +184,10 @@ func (c *Client) Release(ctx context.Context, fiberID string, discard bool) erro
 
 // Status is one grant's line of the Watch stream.
 type Status struct {
-	GrantUID        string
-	Running, Parked uint32
-	WUsedBytes      uint64
-	Latest          Fence
+	GrantUID                string
+	Running, Parked, Pooled uint32
+	WUsedBytes              uint64
+	Latest                  Fence
 }
 
 // Watch streams status until ctx ends or the stream breaks; fn is called
@@ -205,7 +205,7 @@ func (c *Client) Watch(ctx context.Context, fn func(Status)) error {
 			}
 			return err
 		}
-		s := Status{GrantUID: st.GetGrantUid(), Running: st.GetRunning(), Parked: st.GetParked(), WUsedBytes: st.GetWUsedBytes()}
+		s := Status{GrantUID: st.GetGrantUid(), Running: st.GetRunning(), Parked: st.GetParked(), Pooled: st.GetPooled(), WUsedBytes: st.GetWUsedBytes()}
 		if l := st.GetLatest(); l != nil {
 			s.Latest = Fence{GrantUID: l.GetGrantUid(), Epoch: l.GetEpoch(), Seq: l.GetSeq()}
 		}

@@ -37,7 +37,7 @@ Verification does not reject a token merely because `exp` is in the past. Lease 
 - `template_digest` fixes the pre-admitted OCI template or artifact.
 - `tenant` names who the grant belongs to at the issuer, such as a Kubernetes namespace or a Slurm account. It is one path segment of letters, digits, `.`, `_` and `-`, at most 253 characters, starting with a letter or digit. A grant with any other value is refused as unauthenticated. A named [session](glossary.md#session) is filed under its tenant ([artifact.md](design/artifact.md)), so a grant without a tenant runs anonymous fibers only. A named `Clone` or `Park` under it fails with `FailedPrecondition`.
 - `fibers.max` limits concurrent running fibers for the grant. Zero means no protocol-level count limit, while the enclosing resource boundary still applies.
-- `fibers.warm` is carried through conversion but is not consumed by the runtime. It does not reserve or pre-create a [warm](glossary.md#warm) fiber pool.
+- `fibers.warm` is how many sandboxes a gVisor home keeps restored ahead of the grant's clones, inside `fibers.max`.
 - `w_budget_bytes` is the per-fiber [W](glossary.md#w-working-set) ceiling. Zero means unlimited at this layer. Enforcement is described in [resources.md](resources.md).
 - `min_tier` is the lowest [tier](glossary.md#tier) the grant accepts. From lowest to highest the tiers are `FIBER_BASIC`, `FIBER_WARM`, `FIBER_CHECKPOINT`, `FIBER_SNAPSHOT` and `FIBER_FABRIC`. `FIBER_FABRIC` is reserved, and no home offers it. A home's tier comes from its [backend](design/backends.md).
 - `lease_expiry` is the time after which the home stops holding the grant.
@@ -113,10 +113,11 @@ Calling Park or Release with an unknown or old-epoch fiber ID returns `NotFound`
 - `grant_uid`.
 - The number of running fibers.
 - The number of parked sessions.
+- The number of pooled sandboxes.
 - Aggregate measured `w_used_bytes` for running fibers.
 - The latest fence value for the grant.
 
-The stream does not advertise clone rate, desired replicas, warm-pool size, CPU usage or autoscaling decisions. Over mTLS it reports only the caller's own grants.
+The stream does not advertise clone rate, desired replicas, CPU usage or autoscaling decisions. Over mTLS it reports only the caller's own grants.
 
 Snapshot batches are flattened into individual `Status` messages. There is no batch-complete marker or grant-deletion tombstone, and a transition from one grant to zero emits no record. Consumers cannot use Watch alone as an authoritative set-reconciliation protocol.
 

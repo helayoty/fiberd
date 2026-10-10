@@ -610,6 +610,7 @@ func RunContext(ctx context.Context, c *Config, newHome HomeFactory) error {
 		}
 		ctl := &core.PressureController{
 			Ledger: led, Source: src, Interval: c.PressureEvery,
+			Drain:   ag.DrainPool,
 			Park:    func(ctx context.Context, id string) error { _, _, err := ag.Park(ctx, id, false); return err },
 			Release: func(ctx context.Context, id string) error { _, err := ag.Release(ctx, id, false); return err },
 			Yield:   func(ctx context.Context, uid string) { ag.Yield(ctx, uid, "pressure") },

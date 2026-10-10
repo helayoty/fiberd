@@ -169,12 +169,12 @@ func TestFillRefused(t *testing.T) {
 		errText string
 		check   func(t *testing.T, r *Runtime, be backend.Backend)
 	}{
-		{name: "a backend without a pool", be: func() backend.Backend { return newFakeBackend(core.TierWarm) }, prepare: true, wantErr: backend.ErrNoPool},
+		{name: "a backend without a pool", be: func() backend.Backend { return newFakeBackend(core.TierWarm) }, prepare: true, wantErr: core.ErrNoPool},
 		{name: "a template that does not bind late", be: func() backend.Backend {
 			b := newPoolBackend(core.TierWarm)
 			b.noPool = true
 			return b
-		}, prepare: true, wantErr: backend.ErrNoPool,
+		}, prepare: true, wantErr: core.ErrNoPool,
 			check: func(t *testing.T, r *Runtime, _ backend.Backend) {
 				if !r.warmOf("g1").noPool {
 					t.Fatal("the warm instance was not marked as having no pool")

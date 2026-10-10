@@ -74,6 +74,9 @@ type Runtime struct {
 	// a local fiber's. The holder keeps the name until its end.
 	socks map[string]string
 	exits chan core.FiberExit
+	// poolExits names the grant of every pooled sandbox that dies before
+	// its hand-out.
+	poolExits chan string
 	// identities maps a grant uid to the handoff identity its fibers get.
 	identities map[string]handoffIdentity
 
@@ -261,8 +264,9 @@ func New(cfg Config) (*Runtime, error) {
 		cfg: cfg, be: cfg.Backend, root: root, tier: tier, host: host, hide: hide, ownRootfs: ownRootfs,
 		relay: relay, relaySlots: make(chan struct{}, relayMaxTotal),
 		warms: map[string]*warm{}, fibers: map[string]*fiber{}, ports: map[int]string{}, socks: map[string]string{},
-		exits:   make(chan core.FiberExit, 1024),
-		parents: map[string]backend.Parent{},
+		exits:     make(chan core.FiberExit, 1024),
+		poolExits: make(chan string, 64),
+		parents:   map[string]backend.Parent{},
 	}
 	r.sweepPools()
 	go r.pump()

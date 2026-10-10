@@ -61,7 +61,7 @@ The grant Pod keeps its state, the [epoch](glossary.md#epoch) included, in `/var
 | --- | --- |
 | `spec.template` | The template digest. `spec.pod.args` must make it resolvable with `-template` |
 | `spec.fibers.max` | Live fibers at once. Set a positive value, since zero means unlimited |
-| `spec.fibers.warm` | Signed, but no home acts on it, so leave it 0 ([grant fields](protocol.md#grant-fields)) |
+| `spec.fibers.warm` | Sandboxes a gVisor home keeps restored ahead of clones, inside `spec.fibers.max` ([grant fields](protocol.md#grant-fields)) |
 | `spec.wBudget` | The [W](glossary.md#w-working-set) ceiling per fiber. Set it, since zero means unlimited |
 | `spec.minTier` | The lowest [tier](glossary.md#tier) the grant accepts. Defaults to `FIBER_BASIC` |
 | `spec.isolation` | `UNTRUSTED` (default) is served only by gVisor or Hyperlight. `TRUSTED` by any runtime. The controller refuses `UNTRUSTED` on proc or runc, the default runtime included, and creates nothing |

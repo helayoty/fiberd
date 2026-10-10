@@ -172,6 +172,7 @@ func StatusToProto(st core.Status) *grantv1.Status {
 		GrantUid:   st.GrantUID,
 		Running:    uint32(st.Running),
 		Parked:     uint32(st.Parked),
+		Pooled:     uint32(st.Pooled),
 		WUsedBytes: st.WUsedBytes,
 		Latest:     fenceToProto(st.Latest),
 	}

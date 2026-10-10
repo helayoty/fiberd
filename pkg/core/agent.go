@@ -196,6 +196,12 @@ type Agent struct {
 	// again or a later boot finds it expired.
 	heldMu sync.Mutex
 	held   map[string]*heldGrant
+
+	// pools is the refill loop's state per grant, and refill is what
+	// wakes the loop. Both are only used when Runtime is a Pooler.
+	poolMu sync.Mutex
+	pools  map[string]*poolState
+	refill chan struct{}
 }
 
 // Clone is the warm path. Every hop below is home-local memory or disk.
@@ -298,12 +304,7 @@ func (a *Agent) Clone(ctx context.Context, req CloneRequest) (CloneResponse, Sta
 	// 5. Runtime: the one fork or restore call, under a hard deadline.
 	deadline := req.Deadline
 	if deadline <= 0 {
-		create, resume := DefaultCreateDeadline, DefaultResumeDeadline
-		if adv, ok := a.Runtime.(DeadlineAdvisor); ok {
-			if c, r := adv.DefaultDeadlines(); c > 0 && r > 0 {
-				create, resume = c, r
-			}
-		}
+		create, resume := a.deadlines()
 		deadline = create
 		if act == ActResume {
 			deadline = resume
@@ -327,13 +328,18 @@ func (a *Agent) Clone(ctx context.Context, req CloneRequest) (CloneResponse, Sta
 		}
 		return CloneResponse{}, DeferredFallback, err
 	}
+	detail := ""
+	if h.Pooled {
+		detail = "pooled"
+		a.handedOut(g.UID)
+	}
 
 	// 6. Audit before commit and ack, so under Sync the record is durable
 	// first. A failed record rolls the birth back. The fiber is released
 	// uncommitted, its slot returns and a resumed session stays parked. If
 	// the release itself fails, the fiber is committed anyway so a process
 	// that may still run stays counted.
-	if err := a.audit(ctx, g.Policy.Durability, AuditRecord{Event: act.String(), Fence: fence, Session: req.Session, FiberID: h.ID}); err != nil {
+	if err := a.audit(ctx, g.Policy.Durability, AuditRecord{Event: act.String(), Fence: fence, Session: req.Session, FiberID: h.ID, Detail: detail}); err != nil {
 		if rerr := a.Runtime.Release(ctx, h.ID, false); rerr != nil {
 			log.Printf("clone: roll back %s: %v", h.ID, rerr)
 			committed, ex, died := a.commitHeld(commit, Session{Name: req.Session, GrantUID: g.UID, State: StateRunning, Fence: fence, Handle: h, DeltaRef: spec.Ref})
@@ -383,6 +389,18 @@ func (a *Agent) Clone(ctx context.Context, req CloneRequest) (CloneResponse, Sta
 		a.OnExit(ctx, ex)
 	}
 	return a.routed(CloneResponse{FiberID: h.ID, Endpoint: h.Endpoint, Fence: fence, Kind: act}), OK, nil
+}
+
+// deadlines are what a Clone without its own deadline gets, and what a
+// pool fill gets.
+func (a *Agent) deadlines() (create, resume time.Duration) {
+	create, resume = DefaultCreateDeadline, DefaultResumeDeadline
+	if adv, ok := a.Runtime.(DeadlineAdvisor); ok {
+		if c, r := adv.DefaultDeadlines(); c > 0 && r > 0 {
+			create, resume = c, r
+		}
+	}
+	return create, resume
 }
 
 // commitHeld commits a fiber and takes any exit held for it, under pendingMu.
@@ -589,6 +607,7 @@ func (a *Agent) Admit(ctx context.Context, g Grant) (StatusCode, error) {
 	}
 	a.Ledger.AdmitGrant(g)
 	a.restoreHeld(g.UID)
+	a.kickRefill()
 	detail := g.TemplateDigest
 	if fabric.Kind != "" {
 		detail += fmt.Sprintf(" fabric=%s devices=%d %s", fabric.Kind, len(fabric.Devices), fabric.Detail)
@@ -616,6 +635,7 @@ func (a *Agent) releaseFabric(grantUID string) {
 func (a *Agent) Revoke(grantUID string) {
 	a.Ledger.RevokeGrant(grantUID)
 	a.releaseFabric(grantUID)
+	a.forgetPool(grantUID)
 }
 
 // Remove is the home taking a grant away (GrantRemoved on its lane). The
@@ -910,7 +930,8 @@ func (a *Agent) Yield(ctx context.Context, grantUID string, reason string) {
 }
 
 // Run drives the background loops until ctx ends: fiber exits from the
-// runtime, and the W sampler that feeds the ledger and the budget.
+// runtime, the W sampler that feeds the ledger and the budget, and on a
+// Pooler the refill loop.
 func (a *Agent) Run(ctx context.Context) {
 	interval := a.StatusInterval
 	if interval <= 0 {
@@ -921,6 +942,21 @@ func (a *Agent) Run(ctx context.Context) {
 	sweep := time.NewTicker(sweepEvery)
 	defer sweep.Stop()
 	exits := a.Runtime.Exits()
+	var pooledExits <-chan string
+	var kicks chan struct{}
+	retry := time.NewTimer(time.Hour)
+	retry.Stop()
+	defer retry.Stop()
+	refill := func() {
+		if at := a.refillPass(ctx); !at.IsZero() {
+			retry.Reset(time.Until(at))
+		}
+	}
+	if p := a.pooler(); p != nil {
+		pooledExits = p.PooledExits()
+		kicks = a.refillKicks()
+		refill()
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -931,8 +967,22 @@ func (a *Agent) Run(ctx context.Context) {
 				continue
 			}
 			a.OnExit(ctx, ex)
+		case uid, ok := <-pooledExits:
+			if !ok {
+				pooledExits = nil
+				continue
+			}
+			a.pooledDied(uid)
+			refill()
+		case <-kicks:
+			refill()
+		case <-retry.C:
+			refill()
 		case <-tick.C:
 			a.sample(ctx)
+			if kicks != nil {
+				refill()
+			}
 		case <-sweep.C:
 			if n := a.Sweep(ctx); n > 0 {
 				log.Printf("reaper: %d grant(s) yielded on lease expiry", n)

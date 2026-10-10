@@ -27,6 +27,7 @@ flowchart TD
 ```
 
 - **Records.** The spool is `audit.jsonl` in the [agent](../glossary.md#agent)'s private state directory, one JSON line per transition. Each record carries a sequence number, the event, the [fence](../glossary.md#fence), the [session](../glossary.md#session) and fiber, and the home's [scope](../glossary.md#scope) claims ([home.md](home.md)).
+- **Pooled births.** A `create` from the pool carries the detail `pooled`. Fills and discards are not audited, since a pooled sandbox is not a fiber.
 - **Chain.** Each record holds the SHA-256 hash of itself and of the record before it. Editing, removing or reordering a record breaks the chain.
 - **Checkpoints.** Every 256 records, and when the agent stops, the spool appends a checkpoint. It is an Ed25519 signature over the previous record's sequence number and hash, made with `-audit-key` or a generated key ([agent.md](agent.md)).
 - **Gaps.** A failed write is reported, and its sequence number joins a lost range. The next record written first is a gap naming that range. A torn last line, from a crash mid-write, gets a gap when the spool is next opened.

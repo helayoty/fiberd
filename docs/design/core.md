@@ -64,7 +64,9 @@ The commit is the step where the ledger records the new fiber as running. It kee
 
 ![The highest PSI or device-occupancy reading picks a rung. Below 10 percent shedding clears. From 10 to 25 percent new clones are shed. At 25 percent or more, the largest-W running fiber is parked if named, otherwise released. Three evaluations in a row at that level with nothing reclaimed yield the grant. The watermarks are per-grant defaults, and ATTACH is exempt.](../images/pressure-ladder.svg)
 
-**Pressure ladder.** The input is [PSI](../glossary.md#psi) "some avg10" on the grant's [cgroup](../glossary.md#cgroup), or the [engine](../glossary.md#engine)'s device occupancy, whichever is higher. The [shed](../glossary.md#shed-and-deferred) and park watermarks come from the grant's policy. A failed park falls back to release, and every rung is an agent verb, so it writes its audit record.
+**Pressure ladder.** The input is [PSI](../glossary.md#psi) "some avg10" on the grant's [cgroup](../glossary.md#cgroup), or the [engine](../glossary.md#engine)'s device occupancy, whichever is higher. The [shed](../glossary.md#shed-and-deferred) and park watermarks come from the grant's policy. At the park watermark a pooled sandbox is discarded before any fiber, since it holds no state. A failed park falls back to release. Each park, release and yield is an agent verb, so it writes its audit record.
+
+**Warm pool.** On gVisor the core keeps `fibers.warm` sandboxes restored ahead of a grant's clones, inside `fibers.max`. It fills one at a time per grant, through the thrash budget, never while the grant sheds, and backs off after a failure. An epoch bump keeps the pool, since a pooled sandbox gets its fence at hand-out.
 
 **Miss selection.** The lane's health picks the miss for capacity this home does not hold, as [outcomes](../protocol.md#outcomes) maps it.
 

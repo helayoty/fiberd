@@ -38,12 +38,12 @@ func (r *Runtime) pooler() backend.Pooler {
 }
 
 // Fill restores one sandbox ahead of its fiber. It answers
-// backend.ErrNoPool, ErrNotPrepared, or core.ErrPressure when the grant
-// has no room for another fiber.
+// core.ErrNoPool, ErrNotPrepared, or core.ErrPressure when the grant has
+// no room for another fiber.
 func (r *Runtime) Fill(ctx context.Context, g core.Grant, deadline time.Duration) error {
 	pb := r.pooler()
 	if pb == nil {
-		return backend.ErrNoPool
+		return fmt.Errorf("%w: the %s backend", core.ErrNoPool, r.cfg.Backend.Name())
 	}
 	r.mu.Lock()
 	z := r.warms[g.UID]
@@ -53,7 +53,7 @@ func (r *Runtime) Fill(ctx context.Context, g core.Grant, deadline time.Duration
 		return fmt.Errorf("%w: %s", ErrNotPrepared, g.UID)
 	}
 	if noPool {
-		return backend.ErrNoPool
+		return fmt.Errorf("%w: %s", core.ErrNoPool, g.UID)
 	}
 	if err := r.poolRoom(z); err != nil {
 		return err
@@ -82,6 +82,7 @@ func (r *Runtime) Fill(ctx context.Context, g core.Grant, deadline time.Duration
 			r.mu.Lock()
 			z.noPool = true
 			r.mu.Unlock()
+			err = fmt.Errorf("%w: %w", core.ErrNoPool, err)
 		}
 		_ = leaf.Kill()
 		removeDead(leaf)
@@ -142,6 +143,10 @@ func (r *Runtime) Drain(grantUID string, n int) int {
 	r.discard(ps)
 	return len(ps)
 }
+
+// PooledExits names the grant each time a pooled sandbox dies before
+// its hand-out, so the core backs its refill off.
+func (r *Runtime) PooledExits() <-chan string { return r.poolExits }
 
 // Pooled is how many sandboxes wait in the grant's pool.
 func (r *Runtime) Pooled(grantUID string) int {
@@ -222,6 +227,10 @@ func (r *Runtime) pooledGone(id, status string) {
 	}
 	_ = removeSoon(p.cg)
 	log.Printf("host: pooled %s of grant %s died before hand-out: %s", id, grant, status)
+	select {
+	case r.poolExits <- grant:
+	default: // the core's next tick sees the count anyway
+	}
 }
 
 // sweepPools kills and removes the pool leaves a previous life left,

@@ -74,6 +74,7 @@ var ErrPressure = errors.New("pressure: grant is shedding new clones")
 // arrives with the GPU work). Cheapest reaction first:
 //
 //	shed    refuse new clones for the grant (Clone consults Shedding)
+//	drain   discard one pooled sandbox, which holds no state
 //	park    checkpoint the running named session with the largest W
 //	release kill the anonymous fiber with the largest W
 //	yield   nothing left to reclaim and pressure persists: take the grant
@@ -84,9 +85,12 @@ type PressureController struct {
 	Ledger   *Ledger
 	Source   PressureSource
 	Interval time.Duration
-	Park     func(ctx context.Context, fiberID string) error
-	Release  func(ctx context.Context, fiberID string) error
-	Yield    func(ctx context.Context, grantUID string)
+	// Drain, when set, discards up to n of the grant's pooled sandboxes
+	// and returns how many went. It is tried before any fiber is parked.
+	Drain   func(grantUID string, n int) int
+	Park    func(ctx context.Context, fiberID string) error
+	Release func(ctx context.Context, fiberID string) error
+	Yield   func(ctx context.Context, grantUID string)
 
 	mu       sync.Mutex
 	shedding map[string]bool
@@ -189,11 +193,15 @@ func (c *PressureController) evaluate(ctx context.Context, g Grant, psi float64)
 	}
 }
 
-// reclaim performs one park-or-release step, largest W first. Named
-// sessions are parked (their state is worth keeping); if the runtime
-// cannot park, they are released like anonymous fibers. Returns whether a
-// victim was found.
+// reclaim performs one drain, park or release step, largest W first. A
+// pooled sandbox goes first, since it holds no state. Named sessions are parked (their state is worth
+// keeping); if the runtime cannot park, they are released like anonymous
+// fibers. Returns whether a victim was found.
 func (c *PressureController) reclaim(ctx context.Context, grantUID string) bool {
+	if c.Drain != nil && c.Drain(grantUID, 1) > 0 {
+		log.Printf("pressure: discarded a pooled sandbox of grant %s", grantUID)
+		return true
+	}
 	fibers := c.Ledger.FibersOf(grantUID)
 	if len(fibers) == 0 {
 		return false

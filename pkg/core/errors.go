@@ -53,6 +53,9 @@ var (
 	// It is a FailedPrecondition, like a tier gap. Anonymous fibers are
 	// unaffected.
 	ErrNoTenant = errors.New("agent: named session needs a grant with a tenant")
+	// ErrNoPool is a Pooler's answer for a grant whose template cannot be
+	// restored ahead of its fibers. The refill loop remembers it.
+	ErrNoPool = errors.New("pool: the grant's template cannot pool")
 )
 
 // Audit errors.
