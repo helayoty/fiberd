@@ -3,6 +3,7 @@ package core_test
 import (
 	"context"
 	"errors"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -15,10 +16,13 @@ import (
 // refill loop fills through it.
 type fakePool struct {
 	fakeRuntime
-	mu      sync.Mutex
-	pooled  map[string]int
-	fills   []time.Time
+	mu     sync.Mutex
+	pooled map[string]int
+	fills  []time.Time
+	// filled is the grant and deadline of each fill, in order.
+	filled  []fillCall
 	fillErr error
+	yields  int           // fills, from the first, that yield to a clone
 	gate    chan struct{} // when set, Fill waits on it
 	drained int
 	exits   chan string
@@ -32,10 +36,21 @@ func newFakePool(tier core.Tier) *fakePool {
 	}
 }
 
-func (p *fakePool) Fill(ctx context.Context, g core.Grant, _ time.Duration) error {
+// fillCall is one Fill as the fake saw it.
+type fillCall struct {
+	uid      string
+	deadline time.Duration
+}
+
+func (p *fakePool) Fill(ctx context.Context, g core.Grant, deadline time.Duration) error {
 	p.mu.Lock()
 	p.fills = append(p.fills, time.Now())
+	p.filled = append(p.filled, fillCall{g.UID, deadline})
 	gate, err := p.gate, p.fillErr
+	if p.yields > 0 {
+		p.yields--
+		err = core.ErrYielded
+	}
 	p.mu.Unlock()
 	if gate != nil {
 		select {
@@ -107,6 +122,12 @@ func (p *fakePool) fillTimes() []time.Time {
 }
 
 func (p *fakePool) fillCount() int { return len(p.fillTimes()) }
+
+func (p *fakePool) fillCalls() []fillCall {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]fillCall(nil), p.filled...)
+}
 
 // runAgent drives Run on a fast tick until the returned stop is called.
 func runAgent(t *testing.T, a *core.Agent) (stop func()) {
@@ -418,6 +439,89 @@ func TestEpochBumpKeepsPool(t *testing.T) {
 			if st, _ := coretest.GrantStatus(a.Ledger, "g1"); st.Pooled != tc.pooled-1 || st.Running != 1 {
 				t.Fatalf("status = %+v, want pooled %d running 1", st, tc.pooled-1)
 			}
+		})
+	}
+}
+
+// TestRefillOneAtATime checks that the refill loop restores one sandbox
+// ahead at a time for the whole home, that the grants take turns, that
+// a fill gets four create deadlines, and that a fill which yielded to a
+// clone is held before it is tried again.
+func TestRefillOneAtATime(t *testing.T) {
+	cases := []struct {
+		name   string
+		grants []core.Grant
+		gate   bool
+		yields int
+		check  func(t *testing.T, p *fakePool)
+	}{
+		{name: "one fill in flight across grants", gate: true,
+			grants: []core.Grant{{UID: "g1", FiberMax: 1, FiberWarm: 1}, {UID: "g2", FiberMax: 1, FiberWarm: 1}},
+			check: func(t *testing.T, p *fakePool) {
+				waitUntil(t, 5*time.Second, "a fill", func() bool { return p.fillCount() >= 1 })
+				if n := settled(p, 200*time.Millisecond); n != 1 {
+					t.Fatalf("fills = %d while one waits, want 1", n)
+				}
+				close(p.gate)
+				waitUntil(t, 5*time.Second, "both pooled", func() bool { return p.Pooled("g1") == 1 && p.Pooled("g2") == 1 })
+				if n := settled(p, 200*time.Millisecond); n != 2 {
+					t.Fatalf("fills = %d, want 2", n)
+				}
+			}},
+		{name: "a fill gets four create deadlines",
+			grants: []core.Grant{{UID: "g1", FiberMax: 1, FiberWarm: 1}},
+			check: func(t *testing.T, p *fakePool) {
+				waitUntil(t, 5*time.Second, "one pooled", func() bool { return p.Pooled("g1") == 1 })
+				if d := p.fillCalls()[0].deadline; d != 4*time.Second {
+					t.Fatalf("fill deadline = %s, want 4s (four times the create deadline)", d)
+				}
+			}},
+		{name: "the grants take turns",
+			grants: []core.Grant{{UID: "g1", FiberMax: 2, FiberWarm: 2}, {UID: "g2", FiberMax: 2, FiberWarm: 2}},
+			check: func(t *testing.T, p *fakePool) {
+				waitUntil(t, 5*time.Second, "both pools full", func() bool { return p.Pooled("g1") == 2 && p.Pooled("g2") == 2 })
+				var order []string
+				for _, c := range p.fillCalls() {
+					order = append(order, c.uid)
+				}
+				if want := []string{"g1", "g2", "g1", "g2"}; !slices.Equal(order, want) {
+					t.Fatalf("fill order = %v, want %v", order, want)
+				}
+			}},
+		{name: "a yielded fill is held, then tried again", yields: 1,
+			grants: []core.Grant{{UID: "g1", FiberMax: 1, FiberWarm: 1}},
+			check: func(t *testing.T, p *fakePool) {
+				waitUntil(t, 5*time.Second, "one pooled", func() bool { return p.Pooled("g1") == 1 })
+				ts := p.fillTimes()
+				if len(ts) != 2 {
+					t.Fatalf("fills = %d, want 2", len(ts))
+				}
+				if gap := ts[1].Sub(ts[0]); gap < 100*time.Millisecond {
+					t.Fatalf("tried again %s after the yield, want 100ms or more", gap)
+				}
+			}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			for i := range tc.grants {
+				tc.grants[i].Tenant, tc.grants[i].Audience, tc.grants[i].LeaseExpiry = "acme", "node-a", time.Now().Add(time.Hour)
+			}
+			a := newAgent(t, "up", core.TierSnapshot, tc.grants...)
+			p := newFakePool(core.TierSnapshot)
+			p.yields = tc.yields
+			if tc.gate {
+				p.gate = make(chan struct{})
+			}
+			a.Runtime = p
+			ctx := context.Background()
+			for _, g := range tc.grants {
+				if code, err := a.Admit(ctx, g); err != nil || code != core.OK {
+					t.Fatalf("admit %s = %d %v", g.UID, code, err)
+				}
+			}
+			stop := runAgent(t, a)
+			defer stop()
+			tc.check(t, p)
 		})
 	}
 }

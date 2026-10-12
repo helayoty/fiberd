@@ -69,7 +69,8 @@ metadata:
   namespace: compare
 spec:
   template: "@DIGEST_GVISOR@"
-  fibers: { max: 64, warm: 1 }
+  # No pool of its own: the pooled row's grant asks for one at run time.
+  fibers: { max: 64, warm: 0 }
   wBudget: 64Mi
   minTier: FIBER_SNAPSHOT
   isolation: UNTRUSTED

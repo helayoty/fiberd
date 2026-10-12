@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Phase 3: the sandboxed class in kind, on the cluster phase 1 deployed.
 # Pod under the gvisor RuntimeClass, agent-sandbox under gvisor with
-# pools of 1 and N, and fiberd gVisor through the agent's TCP relay (the
-# gvisor grant's fibers are served on the Pod IP, one relay hop each).
+# pools of 1 and N, and fiberd gVisor on demand and with a pool of 2
+# through the agent's TCP relay (the gvisor grant's fibers are served on
+# the Pod IP, one relay hop each).
 set -euo pipefail
 # shellcheck source=lib.sh
 . "$(dirname "$0")/lib.sh"
@@ -19,7 +20,8 @@ ADAPTER=pod run_in_client pod-gvisor sandboxed $pod_flags
 ADAPTER=agentsandbox run_in_client agentsandbox-gvisor-pool1 sandboxed $pod_flags -replicas 1 -resume
 # shellcheck disable=SC2086
 ADAPTER=agentsandbox run_in_client "agentsandbox-gvisor-pool$POOL_N" sandboxed $pod_flags -replicas "$POOL_N"
-ADAPTER=fiberd run_in_client fiberd-gvisor sandboxed -issuer-key /tmp/issuer-key.json -issuer "$ISSUER_URL" -resume \
-  -target "$(grant_ip compare-gvisor):8484" -node-id compare-gvisor-grant -isolation UNTRUSTED -want-scheme tcp \
-  -template "$gvisor"
+fiberd_flags=(-issuer-key /tmp/issuer-key.json -issuer "$ISSUER_URL" -resume -target "$(grant_ip compare-gvisor):8484"
+  -node-id compare-gvisor-grant -isolation UNTRUSTED -want-scheme tcp -template "$gvisor")
+ADAPTER=fiberd run_in_client fiberd-gvisor sandboxed "${fiberd_flags[@]}"
+ADAPTER=fiberd run_in_client fiberd-gvisor-pool2 sandboxed "${fiberd_flags[@]}" -fiber-warm 2
 collect phase3

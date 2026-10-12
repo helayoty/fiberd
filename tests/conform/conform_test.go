@@ -24,6 +24,7 @@ var (
 	targetTier = flag.String("target-tier", "FIBER_CHECKPOINT", "tier the target advertises")
 	nodeID     = flag.String("node-id", "", "audience for minted grants: the target's node id (required)")
 	template   = flag.String("template", "sha256:conform", "template digest for minted grants")
+	fiberWarm  = flag.Int("fiber-warm", 0, "fibers.warm for minted grants: above zero the home pools sandboxes and the Pool case checks a clone is served from them")
 	isolation  = flag.String("isolation", "UNTRUSTED", "isolation for minted grants: TRUSTED for a target on proc or runc")
 	mint       = flag.String("mint", "insecure-json", "how to mint grants: jwt (sign with -issuer-key as -issuer) or insecure-json")
 	issuerKey  = flag.String("issuer-key", "", "private JWK for -mint=jwt (from grant-issuer keygen)")
@@ -66,7 +67,7 @@ func TestConformance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	d := Driver{Target: *target, TargetTier: tier, NodeID: *nodeID, Template: *template, Isolation: iso, Timeout: *caseTO}
+	d := Driver{Target: *target, TargetTier: tier, NodeID: *nodeID, Template: *template, FiberWarm: *fiberWarm, Isolation: iso, Timeout: *caseTO}
 	if d.TLS, err = tlsconf.Client(*tlsCA, *tlsCert, *tlsKey); err != nil {
 		t.Fatal(err)
 	}

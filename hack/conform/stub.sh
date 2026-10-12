@@ -24,6 +24,7 @@ RUNTIME=${CONFORM_RUNTIME:-stub}          # stub | proc (proc: Linux, inside hac
 NODE=${CONFORM_NODE:-conform-node}
 STATE=${CONFORM_STATE:-bin/conform-state}
 SIGNED=${CONFORM_SIGNED:-0}
+WARM=${CONFORM_WARM:-0}   # fibers.warm of every minted grant
 LOG=$STATE/fiberd.log
 ISSUER_URL="http://$ISSUER_ADDR"
 GVISOR_ROOTFS=${CONFORM_GVISOR_ROOTFS:-/var/lib/fiberd/gvisor-rootfs}
@@ -154,9 +155,14 @@ case "${1:-}" in
       trap stop EXIT
     fi
     start
-    bin/grant-conform -test.v -target "$ADDR" -target-tier "$TIER" -node-id "$NODE" -isolation "$ISOLATION" "${mint[@]}" \
+    bin/grant-conform -test.v -target "$ADDR" -target-tier "$TIER" -node-id "$NODE" -isolation "$ISOLATION" -fiber-warm "$WARM" "${mint[@]}" \
       -restart-cmd "$0 restart" -cp-health-cmd "$0 lane \$1" -audit-file "$STATE/private/audit.jsonl" \
       -scope-cmd "$0 scope-lost" ${ENGINE_HOOK[@]+"${ENGINE_HOOK[@]}"} "${@:2}"
+    if [ "$WARM" -gt 0 ]; then
+      pooled=$(grep -c '"detail":"pooled"' "$STATE/private/audit.jsonl" || true)
+      echo "pool: $pooled clones served from the pool (fibers.warm=$WARM)"
+      [ "$pooled" -gt 0 ] || { echo "pool: fibers.warm=$WARM but no clone was served from the pool" >&2; exit 1; }
+    fi
     ;;
   *) echo "usage: $0 run|start|stop|restart|lane up|down" >&2; exit 2 ;;
 esac

@@ -198,10 +198,14 @@ type Agent struct {
 	held   map[string]*heldGrant
 
 	// pools is the refill loop's state per grant, and refill is what
-	// wakes the loop. Both are only used when Runtime is a Pooler.
-	poolMu sync.Mutex
-	pools  map[string]*poolState
-	refill chan struct{}
+	// wakes the loop. One fill runs at a time, filling marks it, and
+	// lastFill is the grant it was for, so the grants take turns. All
+	// are only used when Runtime is a Pooler.
+	poolMu   sync.Mutex
+	pools    map[string]*poolState
+	refill   chan struct{}
+	filling  bool
+	lastFill string
 }
 
 // Clone is the warm path. Every hop below is home-local memory or disk.

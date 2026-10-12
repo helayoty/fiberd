@@ -47,7 +47,7 @@ type opts struct {
 	// fiberd.
 	target, issuerKey, issuerURL, nodeID, digest, isolation, framing, wantScheme string
 	wBudget                                                                      uint64
-	fiberMax                                                                     int
+	fiberMax, fiberWarm                                                          int
 
 	// firecracker.
 	fcBin, kernel, rootfs, snapshotDir, workDir, netns, uffd string
@@ -92,6 +92,7 @@ func main() {
 	fs.StringVar(&o.isolation, "isolation", "TRUSTED", "fiberd: TRUSTED or UNTRUSTED")
 	fs.Uint64Var(&o.wBudget, "w-budget", 64<<20, "fiberd: per-fiber working set ceiling in bytes")
 	fs.IntVar(&o.fiberMax, "fiber-max", 0, "fiberd: fibers.max (0 = unlimited)")
+	fs.IntVar(&o.fiberWarm, "fiber-warm", 0, "fiberd: fibers.warm, the restored sandboxes the home pools, refilled untimed before every step")
 	fs.StringVar(&o.framing, "framing", "http", "fiberd: http or line (Hyperlight speaks line only)")
 	fs.StringVar(&o.wantScheme, "want-scheme", "", "fiberd: refuse endpoints of another scheme (tcp gates the gVisor row on the relay)")
 
@@ -193,7 +194,7 @@ func build(ctx context.Context, o opts) (compare.Adapter, error) {
 			CgroupRoot: o.cgroupRoot, Poll: o.poll})
 	case "fiberd":
 		return fiberd.New(ctx, fiberd.Options{Target: o.target, IssuerKey: o.issuerKey, IssuerURL: o.issuerURL, NodeID: o.nodeID,
-			TemplateDigest: o.digest, Isolation: o.isolation, WBudget: o.wBudget, FiberMax: o.fiberMax,
+			TemplateDigest: o.digest, Isolation: o.isolation, WBudget: o.wBudget, FiberMax: o.fiberMax, FiberWarm: o.fiberWarm,
 			Framing: compare.Framing(o.framing), WantScheme: o.wantScheme, CgroupRoot: o.cgroupRoot, Poll: o.poll})
 	case "firecracker":
 		return firecracker.New(firecracker.Options{Binary: o.fcBin, Kernel: o.kernel, Rootfs: o.rootfs, SnapshotDir: o.snapshotDir,

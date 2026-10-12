@@ -66,7 +66,7 @@ The commit is the step where the ledger records the new fiber as running. It kee
 
 **Pressure ladder.** The input is [PSI](../glossary.md#psi) "some avg10" on the grant's [cgroup](../glossary.md#cgroup), or the [engine](../glossary.md#engine)'s device occupancy, whichever is higher. The [shed](../glossary.md#shed-and-deferred) and park watermarks come from the grant's policy. At the park watermark a pooled sandbox is discarded before any fiber, since it holds no state. A failed park falls back to release. Each park, release and yield is an agent verb, so it writes its audit record.
 
-**Warm pool.** On gVisor the core keeps `fibers.warm` sandboxes restored ahead of a grant's clones, inside `fibers.max`. It fills one at a time per grant, through the thrash budget, never while the grant sheds, and backs off after a failure. An epoch bump keeps the pool, since a pooled sandbox gets its fence at hand-out.
+**Warm pool.** On gVisor the core keeps `fibers.warm` sandboxes restored ahead of a grant's clones, inside `fibers.max`. It fills one sandbox at a time for the whole home, the grants taking turns, through the thrash budget and never while the grant sheds. An epoch bump keeps the pool, since a pooled sandbox gets its fence at hand-out.
 
 **Miss selection.** The lane's health picks the miss for capacity this home does not hold, as [outcomes](../protocol.md#outcomes) maps it.
 

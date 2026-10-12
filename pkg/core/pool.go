@@ -22,14 +22,17 @@ type Pooler interface {
 const (
 	refillBackoffMin = 100 * time.Millisecond
 	refillBackoffMax = 30 * time.Second
+	// fillDeadlineFactor is how many create deadlines a fill gets. No
+	// caller waits on a fill, and a short deadline on a busy home only
+	// makes it fail and try again.
+	fillDeadlineFactor = 4
 )
 
 // poolState is the refill loop's view of one grant.
 type poolState struct {
-	inflight bool
-	backoff  time.Duration // the next wait after a failure, 0 after a success
-	until    time.Time     // no fill before this
-	noPool   bool          // the template cannot pool, so no fill is tried again
+	backoff time.Duration // the next wait after a failure, 0 after a success
+	until   time.Time     // no fill before this
+	noPool  bool          // the template cannot pool, so no fill is tried again
 }
 
 // delay holds the next fill for the next step of the backoff.
@@ -131,7 +134,9 @@ func (a *Agent) DrainPool(grantUID string, n int) int {
 	return went
 }
 
-// refillPass tops every grant's pool up and returns when the earliest
+// refillPass starts one fill when none runs, for the first grant with
+// room after the last one filled, so the grants take turns and the home
+// restores one sandbox ahead at a time. It returns when the earliest
 // held grant may be tried again, zero when none is held.
 func (a *Agent) refillPass(ctx context.Context) time.Time {
 	p := a.pooler()
@@ -139,7 +144,21 @@ func (a *Agent) refillPass(ctx context.Context) time.Time {
 		return time.Time{}
 	}
 	var next time.Time
-	for _, st := range a.Ledger.Statuses() {
+	sts := a.Ledger.Statuses()
+	// Statuses are sorted by uid, so the turn after the last filled grant
+	// starts at the first uid above it.
+	a.poolMu.Lock()
+	last := a.lastFill
+	a.poolMu.Unlock()
+	start := 0
+	for i, st := range sts {
+		if st.GrantUID > last {
+			start = i
+			break
+		}
+	}
+	for i := range sts {
+		st := sts[(start+i)%len(sts)]
 		g, ok := a.Ledger.Grant(st.GrantUID)
 		if !ok || g.FiberWarm <= 0 {
 			continue
@@ -150,7 +169,7 @@ func (a *Agent) refillPass(ctx context.Context) time.Time {
 		}
 		a.poolMu.Lock()
 		ps := a.poolState(g.UID)
-		if ps.inflight || ps.noPool {
+		if ps.noPool || a.filling {
 			a.poolMu.Unlock()
 			continue
 		}
@@ -176,7 +195,7 @@ func (a *Agent) refillPass(ctx context.Context) time.Time {
 				continue
 			}
 		}
-		ps.inflight = true
+		a.filling, a.lastFill = true, g.UID
 		a.poolMu.Unlock()
 		go a.fill(ctx, p, g)
 	}
@@ -186,19 +205,23 @@ func (a *Agent) refillPass(ctx context.Context) time.Time {
 // fill restores one sandbox for the grant and settles the loop's state.
 func (a *Agent) fill(ctx context.Context, p Pooler, g Grant) {
 	create, _ := a.deadlines()
-	fctx, cancel := context.WithTimeout(ctx, create)
-	err := p.Fill(fctx, g, create)
+	deadline := fillDeadlineFactor * create
+	fctx, cancel := context.WithTimeout(ctx, deadline)
+	err := p.Fill(fctx, g, deadline)
 	cancel()
 	a.poolMu.Lock()
+	a.filling = false
 	// A revoked grant's state is gone, and a fill that outlived it settles nothing.
 	if ps := a.pools[g.UID]; ps != nil {
-		ps.inflight = false
 		switch {
 		case err == nil:
 			ps.backoff = 0
 		case errors.Is(err, ErrNoPool):
 			ps.noPool = true
 			log.Printf("pool: grant %s is not refilled: %v", g.UID, err)
+		case errors.Is(err, ErrYielded):
+			ps.delay()
+			log.Printf("pool: fill for grant %s yielded to a clone, next in %s", g.UID, ps.backoff)
 		default:
 			ps.delay()
 			log.Printf("pool: fill for grant %s failed, next in %s: %v", g.UID, ps.backoff, err)

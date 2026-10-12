@@ -134,8 +134,15 @@ type Backend struct {
 	// run starts every runsc process. New sets it to execRunsc.
 	run runFunc
 
-	// restores holds one token per restore that may run at once.
+	// restores holds one token per restore that may run at once. A clone
+	// takes one as it comes. A pool restore takes one only while no clone
+	// waits or runs, one pool restore at a time, and a clone that arrives
+	// meanwhile cuts it short, so a pool never costs a clone its deadline.
 	restores chan struct{}
+	gateMu   sync.Mutex
+	clones   int                // clone restores waiting for a slot or running
+	fill     context.CancelFunc // cuts the running pool restore short, nil when none runs
+	quiet    chan struct{}      // closed, and replaced, when a pool restore may try again
 
 	mu     sync.Mutex
 	warms  map[string]*warm // warm id
@@ -229,7 +236,7 @@ func newBackend(o Options, run runFunc) *Backend {
 		o.MaxRestores = max(1, runtime.GOMAXPROCS(0))
 	}
 	b := &Backend{opt: o, run: run, warms: map[string]*warm{}, boxes: map[string]*box{}, pooled: map[string]*box{}, exits: make(chan backend.Exit, 1024),
-		restores: make(chan struct{}, o.MaxRestores)}
+		restores: make(chan struct{}, o.MaxRestores), quiet: make(chan struct{})}
 	if b.run == nil {
 		b.run = b.execRunsc
 	}
@@ -525,6 +532,19 @@ func (b *Backend) sweep() {
 			}
 		}
 	}
+}
+
+// sandboxPID reads the pid runsc wrote to pidFile, so no `runsc state`
+// sits on a birth's path.
+func (b *Backend) sandboxPID(ctx context.Context, cid, pidFile string) int {
+	data, err := os.ReadFile(pidFile)
+	if err == nil {
+		var pid int
+		if _, err := fmt.Sscan(string(data), &pid); err == nil && pid > 0 {
+			return pid
+		}
+	}
+	return b.pidOf(ctx, cid)
 }
 
 // pidOf reads the sandbox process pid from `runsc state`.
@@ -1065,9 +1085,77 @@ func (b *Backend) forgetToken(w *warm, x *box) {
 	}
 }
 
+// enterClone takes a restore slot for a clone, a probe or a resume,
+// cutting short a pool restore that holds one.
+func (b *Backend) enterClone(ctx context.Context) error {
+	b.gateMu.Lock()
+	b.clones++
+	if b.fill != nil {
+		b.fill()
+	}
+	b.gateMu.Unlock()
+	select {
+	case b.restores <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		b.leaveClone(false)
+		return ctx.Err()
+	}
+}
+
+// leaveClone gives the clone's slot back, when it held one, and lets a
+// pool restore try again once no clone is left.
+func (b *Backend) leaveClone(held bool) {
+	if held {
+		<-b.restores
+	}
+	b.gateMu.Lock()
+	b.clones--
+	if b.clones == 0 {
+		close(b.quiet)
+		b.quiet = make(chan struct{})
+	}
+	b.gateMu.Unlock()
+}
+
+// enterFill takes a restore slot for a pool restore only while no clone
+// waits or runs, under a context a later clone cancels.
+func (b *Backend) enterFill(ctx context.Context) (context.Context, error) {
+	for {
+		b.gateMu.Lock()
+		if b.clones == 0 && b.fill == nil {
+			// Every slot is free, since only clones and this hold them.
+			b.restores <- struct{}{}
+			fctx, cancel := context.WithCancel(ctx)
+			b.fill = cancel
+			b.gateMu.Unlock()
+			return fctx, nil
+		}
+		quiet := b.quiet
+		b.gateMu.Unlock()
+		select {
+		case <-quiet:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+}
+
+// leaveFill gives the pool restore's slot back.
+func (b *Backend) leaveFill() {
+	<-b.restores
+	b.gateMu.Lock()
+	b.fill()
+	b.fill = nil
+	close(b.quiet)
+	b.quiet = make(chan struct{})
+	b.gateMu.Unlock()
+}
+
 // restore brings images up as the sandbox x in cgroupFD, with a fresh
 // token in its environment, and registers a reaper. A failed restore
-// leaves no sandbox and no bundle.
+// leaves no sandbox and no bundle. A pool restore cut short for a clone
+// fails with backend.ErrYielded.
 func (b *Backend) restore(ctx context.Context, w *warm, x *box, images string, argv, env []string, cgroupFD int) error {
 	if err := b.mintToken(w, x); err != nil {
 		return err
@@ -1083,23 +1171,43 @@ func (b *Backend) restore(ctx context.Context, w *warm, x *box, images string, a
 		return err
 	}
 	// A restore slot, waited for under the deadline.
-	select {
-	case b.restores <- struct{}{}:
-	case <-ctx.Done():
+	rctx, leave := ctx, func() { b.leaveClone(true) }
+	var err error
+	if x.pooled {
+		rctx, err = b.enterFill(ctx)
+		leave = b.leaveFill
+	} else {
+		err = b.enterClone(ctx)
+	}
+	if err != nil {
 		b.forgetToken(w, x)
 		_ = os.RemoveAll(x.bundle)
-		return fmt.Errorf("gvisor: %s waited for a restore slot: %w", x.id, ctx.Err())
+		return fmt.Errorf("gvisor: %s waited for a restore slot: %w", x.id, err)
 	}
 	// The image is read, not cached, in the sandbox's leaf.
-	_, err := b.runsc(ctx, cgroupFD, "restore", "--detach", "--image-path", images, "--bundle", x.bundle, directIO, x.cid)
-	<-b.restores
+	pidFile := filepath.Join(x.bundle, "pid")
+	_, err = b.runsc(rctx, cgroupFD, "restore", "--detach", "--pid-file", pidFile, "--image-path", images, "--bundle", x.bundle, directIO, x.cid)
+	cut := rctx.Err() != nil
+	leave()
 	if err != nil {
 		// No sandbox, so no reaper to take the bundle.
 		b.forgetToken(w, x)
 		_ = os.RemoveAll(x.bundle)
+		if cut {
+			// runsc was killed midway and may have left a half-restored
+			// sandbox behind, which its leaf's kill ends and this forgets.
+			b.reapers.Add(1)
+			go func() {
+				defer b.reapers.Done()
+				_, _ = b.runsc(context.Background(), -1, "delete", "-force", x.cid)
+			}()
+			if ctx.Err() == nil {
+				return fmt.Errorf("%w: %s", backend.ErrYielded, x.id)
+			}
+		}
 		return fmt.Errorf("%w (%s)", err, leafDiag(cgroupFD))
 	}
-	x.pid = b.pidOf(ctx, x.cid)
+	x.pid = b.sandboxPID(ctx, x.cid, pidFile)
 	b.mu.Lock()
 	switch {
 	case x.probe:

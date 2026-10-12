@@ -110,6 +110,7 @@ for rt in "$@"; do
       template=$(push_counter gvisor "--heap-mb 32 --gvisor")
       start_home gvisor -gvisor-rootfs "$ROOTFS" -registry "$REG/zygotes/counter" -registry-plain-http
       measure fiberd-gvisor sandboxed gvisor -isolation UNTRUSTED -template "$template"
+      measure fiberd-gvisor-pool2 sandboxed gvisor -isolation UNTRUSTED -template "$template" -fiber-warm 2
       stop_home ;;
     hyperlight)
       [ -x bin/hyperlight-helper ] || { echo "bin/hyperlight-helper missing: make hyperlight-helper" >&2; exit 1; }

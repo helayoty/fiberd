@@ -61,8 +61,8 @@ conform-signed: ## same, over real signed grants: grant-issuer serve + -verifier
 conform-proc: ## C1-C10 against the fork runtime with real cgroups, inside the Linux dev container
 	hack/dev/run.sh env CONFORM_RUNTIME=proc CONFORM_SIGNED=1 CONFORM_STATE=$(CONFORM_DIR)/conform-state-proc hack/conform/stub.sh run
 
-conform-gvisor: ## C1-C10 against the gvisor backend (a runsc sandbox per fiber), inside the Linux dev container
-	hack/dev/run.sh env CONFORM_RUNTIME=gvisor CONFORM_SIGNED=1 CONFORM_STATE=$(CONFORM_DIR)/conform-state-gvisor hack/conform/stub.sh run
+conform-gvisor: ## C1-C10 against the gvisor backend (a runsc sandbox per fiber), with a pool of 2 per grant, inside the Linux dev container
+	hack/dev/run.sh env CONFORM_RUNTIME=gvisor CONFORM_SIGNED=1 CONFORM_WARM=2 CONFORM_STATE=$(CONFORM_DIR)/conform-state-gvisor hack/conform/stub.sh run
 
 conform-runc: ## C1-C10 against the runc backend (the zygote as an OCI container's init), inside the Linux dev container
 	hack/dev/run.sh env CONFORM_RUNTIME=runc CONFORM_SIGNED=1 CONFORM_STATE=$(CONFORM_DIR)/conform-state-runc hack/conform/stub.sh run

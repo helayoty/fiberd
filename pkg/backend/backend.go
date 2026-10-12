@@ -29,6 +29,9 @@ var ErrUnsupported = errors.New("backend: not supported on this platform")
 // bind its identity late, so no sandbox of it can wait in a pool.
 var ErrNoPool = errors.New("backend: the template does not bind late, no pool")
 
+// ErrYielded is Pool's answer when a clone cut its restore short.
+var ErrYielded = errors.New("backend: the pool restore yielded to a clone")
+
 // Template is a resolved template the host hands to Warm: either a bare
 // command line, or an artifact directory with its checkpoint images.
 type Template struct {
@@ -182,7 +185,7 @@ type Pooled struct {
 // A pooled sandbox that dies before Bind, or whose Bind fails, is
 // reported as Exit{PooledID}.
 // Pool answers ErrNoPool for a warm instance whose template never
-// dials the channel.
+// dials the channel, and ErrYielded when a clone cut it short.
 type Pooler interface {
 	Pool(ctx context.Context, warmID string, spec PoolSpec) (Pooled, error)
 	Bind(ctx context.Context, pooledID string, spec FiberSpec) (Fiber, error)

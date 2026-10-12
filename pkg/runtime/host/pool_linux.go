@@ -38,8 +38,9 @@ func (r *Runtime) pooler() backend.Pooler {
 }
 
 // Fill restores one sandbox ahead of its fiber. It answers
-// core.ErrNoPool, ErrNotPrepared, or core.ErrPressure when the grant has
-// no room for another fiber.
+// core.ErrNoPool, ErrNotPrepared, core.ErrPressure when the grant has
+// no room for another fiber, or core.ErrYielded when a clone's restore
+// took its place.
 func (r *Runtime) Fill(ctx context.Context, g core.Grant, deadline time.Duration) error {
 	pb := r.pooler()
 	if pb == nil {
@@ -83,6 +84,8 @@ func (r *Runtime) Fill(ctx context.Context, g core.Grant, deadline time.Duration
 			z.noPool = true
 			r.mu.Unlock()
 			err = fmt.Errorf("%w: %w", core.ErrNoPool, err)
+		} else if errors.Is(err, backend.ErrYielded) {
+			err = fmt.Errorf("%w: %w", core.ErrYielded, err)
 		}
 		_ = leaf.Kill()
 		removeDead(leaf)

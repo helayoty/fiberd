@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -34,6 +35,20 @@ type home struct {
 	parked   map[string]bool // session
 	released []string
 	clones   []string
+	watch    []*grantv1.Status // what Watch sends, then it idles
+}
+
+func (h *home) Watch(_ *emptypb.Empty, s grantv1.Fibers_WatchServer) error {
+	h.mu.Lock()
+	lines := h.watch
+	h.mu.Unlock()
+	for _, st := range lines {
+		if err := s.Send(st); err != nil {
+			return err
+		}
+	}
+	<-s.Context().Done()
+	return nil
 }
 
 func (h *home) Clone(_ context.Context, req *grantv1.CloneRequest) (*grantv1.CloneResponse, error) {
@@ -207,6 +222,7 @@ func TestGrant(t *testing.T) {
 		{name: "defaults", opt: Options{NodeID: "n", WBudget: 64 << 20, Isolation: "TRUSTED"}, wantIso: "TRUSTED"},
 		{name: "untrusted for the sandboxed class", opt: Options{NodeID: "n", Isolation: "UNTRUSTED"}, wantIso: "UNTRUSTED"},
 		{name: "bad isolation", opt: Options{NodeID: "n", Isolation: "sorta"}, wantErr: true},
+		{name: "fibers.warm for the pooled row", opt: Options{NodeID: "n", Isolation: "UNTRUSTED", FiberWarm: 2}, wantIso: "UNTRUSTED"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -218,8 +234,111 @@ func TestGrant(t *testing.T) {
 			if err != nil {
 				return
 			}
-			if g.Policy.Isolation.String() != tc.wantIso || g.Audience != "n" || g.TemplateDigest != "sha256:compare" || g.WBudgetBytes != tc.opt.WBudget {
+			if g.Policy.Isolation.String() != tc.wantIso || g.Audience != "n" || g.TemplateDigest != "sha256:compare" || g.WBudgetBytes != tc.opt.WBudget || g.FiberWarm != tc.opt.FiberWarm {
 				t.Errorf("grant %+v", g)
+			}
+		})
+	}
+}
+
+func TestRefill(t *testing.T) {
+	cases := []struct {
+		name    string
+		warm    int
+		pooled  []uint32 // the grant's pooled counts, in Watch order
+		wantErr string
+	}{
+		{name: "no fibers.warm waits for nothing", warm: 0},
+		{name: "full once the count reaches warm", warm: 2, pooled: []uint32{0, 1, 2}},
+		{name: "a pool that never fills times out", warm: 2, pooled: []uint32{1}, wantErr: "has 1 of 2 pooled"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := &home{parked: map[string]bool{}}
+			a, err := New(context.Background(), Options{Client: serve(t, h), FiberWarm: tc.warm, RefillWait: 300 * time.Millisecond,
+				Mint: func() (string, error) { return "jwt", nil }})
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Another grant's full pool must not count.
+			h.watch = []*grantv1.Status{{GrantUid: "other", Pooled: 9}}
+			for _, n := range tc.pooled {
+				h.watch = append(h.watch, &grantv1.Status{GrantUid: a.uid, Pooled: n})
+			}
+			err = a.Refill(context.Background())
+			if tc.wantErr == "" && err != nil {
+				t.Fatal(err)
+			}
+			if tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)) {
+				t.Fatalf("err %v, want %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestDensity(t *testing.T) {
+	handle := func(fence string) compare.Handle { return compare.Handle{Meta: map[string]string{"fence": fence}} }
+	cases := []struct {
+		name     string
+		warm     int
+		cgroups  map[string]int64 // memory.current under the grant dir
+		hs       []compare.Handle
+		standing int64
+		bytes    int64
+	}{
+		{
+			name:     "no pool: the zygote stands, the fibers' leaves are charged",
+			cgroups:  map[string]int64{"": 1000, "zygote": 100, "f-1-2": 10, "f-1-3": 20},
+			hs:       []compare.Handle{handle("g/1/2"), handle("g/1/3")},
+			standing: 100, bytes: 30,
+		},
+		{
+			// p-3 went to the second fiber. p-10 sorts after p-3, so the
+			// order is numeric, not by name.
+			name:     "pool: the newest leaves stand idle, the oldest went to fibers",
+			warm:     2,
+			cgroups:  map[string]int64{"": 1000, "zygote": 100, "f-1-2": 10, "pool": 700, "pool/p-3": 200, "pool/p-10": 300, "pool/p-11": 400},
+			hs:       []compare.Handle{handle("g/1/2"), handle("g/1/3")},
+			standing: 800, bytes: 210,
+		},
+		{
+			name:     "no fiber leaves at all, as hyperlight: the subtree beyond the zygote",
+			cgroups:  map[string]int64{"": 1000, "zygote": 100},
+			hs:       []compare.Handle{handle("g/1/2")},
+			standing: 100, bytes: 900,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := &home{parked: map[string]bool{}}
+			root := t.TempDir()
+			a, err := New(context.Background(), Options{Client: serve(t, h), FiberWarm: tc.warm, CgroupRoot: root,
+				Mint: func() (string, error) { return "jwt", nil }})
+			if err != nil {
+				t.Fatal(err)
+			}
+			h.watch = []*grantv1.Status{{GrantUid: a.uid, Pooled: uint32(tc.warm)}}
+			for dir, n := range tc.cgroups {
+				d := filepath.Join(root, a.uid, dir)
+				if err := os.MkdirAll(d, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(d, "memory.current"), []byte(fmt.Sprintf("%d\n", n)), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			standing, err := a.Density(ctx, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			bytes, err := a.Density(ctx, tc.hs)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if standing != tc.standing || bytes != tc.bytes {
+				t.Errorf("standing %d bytes %d, want %d and %d", standing, bytes, tc.standing, tc.bytes)
 			}
 		})
 	}

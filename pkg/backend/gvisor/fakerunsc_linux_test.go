@@ -78,6 +78,9 @@ type knobs struct {
 	NoAck      bool   // binds the endpoint and never acks
 	BadAck     bool   // acks with another fence
 	PoolSocket string // dials this socket instead of its own agent mount's
+	// NoPidFile makes a run or restore ignore --pid-file, as an older
+	// runsc might.
+	NoPidFile bool
 	// SlowRestore is how long a restore takes before the sandbox is up.
 	// The context ending cuts it short, as it kills a real runsc.
 	SlowRestore time.Duration
@@ -336,7 +339,15 @@ func (f *fakeRunsc) run(ctx context.Context, cgroupFD int, args []string, out io
 				}
 			}
 		}
-		return f.startSandbox(cid, flag("--bundle"), k, out)
+		if err := f.startSandbox(cid, flag("--bundle"), k, out); err != nil {
+			return err
+		}
+		if pf := flag("--pid-file"); pf != "" && !k.NoPidFile {
+			if err := os.WriteFile(pf, []byte(fmt.Sprintf("%d\n", f.pidOf(cid))), 0o644); err != nil {
+				return fail("pid file")
+			}
+		}
+		return nil
 	case "checkpoint":
 		img := flag("--image-path")
 		if err := os.MkdirAll(img, 0o755); err != nil {

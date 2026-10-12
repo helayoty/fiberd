@@ -56,6 +56,10 @@ var (
 	// ErrNoPool is a Pooler's answer for a grant whose template cannot be
 	// restored ahead of its fibers. The refill loop remembers it.
 	ErrNoPool = errors.New("pool: the grant's template cannot pool")
+	// ErrYielded is a Pooler's answer for a fill it gave up because a
+	// clone asked for the runtime meanwhile. The refill loop holds the
+	// grant's next fill as it does after a failure.
+	ErrYielded = errors.New("pool: the fill yielded to a clone")
 )
 
 // Audit errors.

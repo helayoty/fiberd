@@ -869,7 +869,7 @@ func TestProbeFootprint(t *testing.T) {
 			calls := f.calls()
 			tdir := filepath.Join(b.opt.StateDir, "templates", warmCID(t, b, "g"))
 			probe := warmCID(t, b, "g") + "-probe"
-			restore := "restore --detach --image-path " + filepath.Join(tdir, "images") + " --bundle " + filepath.Join(tdir, "probe-bundle") + " --direct " + probe
+			restore := "restore --detach --pid-file " + filepath.Join(tdir, "probe-bundle", "pid") + " --image-path " + filepath.Join(tdir, "images") + " --bundle " + filepath.Join(tdir, "probe-bundle") + " --direct " + probe
 			if findCall(calls, restore) == "" {
 				t.Fatalf("no probe restore among\n%s", strings.Join(calls, "\n"))
 			}
@@ -938,7 +938,7 @@ func TestClone(t *testing.T) {
 	}{
 		{name: "exit 0", wantStatus: "exit:0"},
 		{name: "payload and a signal", payload: []byte{1, 2, 3}, knobs: knobs{ExitStatus: 137}, wantStatus: "signal:9"},
-		{name: "wait says nothing readable", knobs: knobs{BadWaitJSON: true, Fail: map[string]bool{"state": true}}, noPID: true, wantStatus: "exit:?"},
+		{name: "wait says nothing readable", knobs: knobs{BadWaitJSON: true, NoPidFile: true, Fail: map[string]bool{"state": true}}, noPID: true, wantStatus: "exit:?"},
 		{name: "template that polls the spec environment", payload: []byte{1, 2, 3}, knobs: knobs{NoToken: true}, spec: true, wantStatus: "exit:0"},
 	}
 	for _, tc := range cases {
@@ -984,7 +984,7 @@ func TestClone(t *testing.T) {
 			}
 			tdir := filepath.Join(b.opt.StateDir, "templates", warmCID(t, b, "g"))
 			calls := f.calls()
-			if findCall(calls, "restore --detach --image-path "+filepath.Join(tdir, "images")+" --bundle "+bundle+" --direct "+fc) == "" {
+			if findCall(calls, "restore --detach --pid-file "+filepath.Join(bundle, "pid")+" --image-path "+filepath.Join(tdir, "images")+" --bundle "+bundle+" --direct "+fc) == "" {
 				t.Fatalf("no restore among\n%s", strings.Join(calls, "\n"))
 			}
 			if err := b.Kill("nobody"); err != nil {
@@ -1280,7 +1280,7 @@ func TestParkAndResume(t *testing.T) {
 			if pid := f.pidOf(fc2); pid == 0 || fb.ID != "g/2-1" || fb.PID != pid || !dialable(ep) {
 				t.Fatalf("Resume = %+v (pid %d), want g/2-1 serving on %s", fb, pid, ep)
 			}
-			if findCall(f.calls(), "restore --detach --image-path "+dir+" --bundle "+b.bundleDir(fc2)+" --direct "+fc2) == "" {
+			if findCall(f.calls(), "restore --detach --pid-file "+filepath.Join(b.bundleDir(fc2), "pid")+" --image-path "+dir+" --bundle "+b.bundleDir(fc2)+" --direct "+fc2) == "" {
 				t.Fatal("the resume did not restore the park image")
 			}
 			cfgJSON, err := os.ReadFile(filepath.Join(b.bundleDir(fc2), "config.json"))
@@ -1496,7 +1496,7 @@ func TestReaperNeedsNoProcess(t *testing.T) {
 	}{
 		{name: "exit", knobs: knobs{ExitStatus: 3}, wantStatus: "exit:3"},
 		{name: "signal", knobs: knobs{ExitStatus: 143}, wantStatus: "signal:15"},
-		{name: "pid unknown", knobs: knobs{ExitStatus: 3, Fail: map[string]bool{"state": true}}, wantWait: true, wantStatus: "exit:3"},
+		{name: "pid unknown", knobs: knobs{ExitStatus: 3, NoPidFile: true, Fail: map[string]bool{"state": true}}, wantWait: true, wantStatus: "exit:3"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2096,6 +2096,168 @@ func TestPoolFlood(t *testing.T) {
 			}
 			b.Discard(p.ID)
 			waitExit(t, b)
+		})
+	}
+}
+
+// TestFillsYieldToClones checks that a pool restore never costs a clone
+// its deadline: a clone takes a slot as it comes, a pool restore starts
+// only while no clone waits or runs, one at a time, and the clone that
+// arrives while one runs cuts it short.
+func TestFillsYieldToClones(t *testing.T) {
+	cases := []struct {
+		name string
+		max  int
+		slow time.Duration // how long each restore holds its slot
+		run  func(t *testing.T, b *Backend, f *fakeRunsc, w backend.Warm, workDir string)
+	}{
+		{name: "a running fill is cut short when a clone asks", max: 1, slow: 300 * time.Millisecond,
+			run: func(t *testing.T, b *Backend, f *fakeRunsc, w backend.Warm, workDir string) {
+				const slow = 300 * time.Millisecond
+				ctx := context.Background()
+				var wg sync.WaitGroup
+				var perr error
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					_, perr = b.Pool(ctx, w.ID, backend.PoolSpec{CgroupFD: -1, Deadline: 2 * time.Second})
+				}()
+				// The probe's restore is the first, the fill's the second.
+				waitFor(t, "the fill's restore to start", func() bool { return restoresStarted(f.calls()) >= 2 })
+				// The clone's own restore takes slow, so queueing behind the
+				// fill's would take twice that.
+				t0 := time.Now()
+				_, err := b.Clone(ctx, w.ID, backend.FiberSpec{Fence: "g/1-1", Endpoint: filepath.Join(workDir, "ep.sock"), CgroupFD: -1, Deadline: 2 * time.Second})
+				if err != nil {
+					t.Fatalf("Clone behind a fill = %v, want it served at once", err)
+				}
+				if took := time.Since(t0); took >= 2*slow {
+					t.Fatalf("Clone took %s, so it queued behind the fill's whole restore", took)
+				}
+				wg.Wait()
+				if !errors.Is(perr, backend.ErrYielded) {
+					t.Fatalf("Pool = %v, want ErrYielded", perr)
+				}
+				if f.peakRestores() != 1 {
+					t.Fatalf("peak restores in flight = %d, want 1", f.peakRestores())
+				}
+			}},
+		{name: "a fill waits while a clone restores", max: 2, slow: 100 * time.Millisecond,
+			run: func(t *testing.T, b *Backend, f *fakeRunsc, w backend.Warm, workDir string) {
+				ctx := context.Background()
+				var wg sync.WaitGroup
+				var cerr error
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					_, cerr = b.Clone(ctx, w.ID, backend.FiberSpec{Fence: "g/1-1", Endpoint: filepath.Join(workDir, "ep.sock"), CgroupFD: -1, Deadline: 2 * time.Second})
+				}()
+				waitFor(t, "the clone's restore to start", func() bool { return restoresStarted(f.calls()) >= 2 })
+				if _, err := b.Pool(ctx, w.ID, backend.PoolSpec{CgroupFD: -1, Deadline: 2 * time.Second}); err != nil {
+					t.Fatalf("Pool: %v", err)
+				}
+				wg.Wait()
+				if cerr != nil {
+					t.Fatalf("Clone: %v", cerr)
+				}
+				if f.peakRestores() != 1 {
+					t.Fatalf("peak restores in flight = %d, want 1: the fill ran beside the clone", f.peakRestores())
+				}
+			}},
+		{name: "a fill waits behind a clone waiting for a slot", max: 1, slow: 100 * time.Millisecond,
+			run: func(t *testing.T, b *Backend, f *fakeRunsc, w backend.Warm, workDir string) {
+				ctx := context.Background()
+				var wg sync.WaitGroup
+				errs := make([]error, 2)
+				for i := range 2 {
+					wg.Add(1)
+					go func() {
+						defer wg.Done()
+						_, errs[i] = b.Clone(ctx, w.ID, backend.FiberSpec{Fence: fmt.Sprintf("g/1-%d", i), Endpoint: filepath.Join(workDir, fmt.Sprintf("ep%d.sock", i)), CgroupFD: -1, Deadline: 2 * time.Second})
+					}()
+					if i == 0 {
+						waitFor(t, "the first clone's restore to start", func() bool { return restoresStarted(f.calls()) >= 2 })
+					}
+				}
+				// The second clone has queued for the slot well within this.
+				time.Sleep(30 * time.Millisecond)
+				if _, err := b.Pool(ctx, w.ID, backend.PoolSpec{CgroupFD: -1, Deadline: 2 * time.Second}); err != nil {
+					t.Fatalf("Pool: %v", err)
+				}
+				wg.Wait()
+				for i, err := range errs {
+					if err != nil {
+						t.Fatalf("Clone %d: %v", i, err)
+					}
+				}
+				if last := lastRestored(f.calls()); !strings.HasPrefix(last, "p-") {
+					t.Fatalf("last restore was %s, want the pool's after both clones", last)
+				}
+			}},
+		{name: "fills run one at a time", max: 3, slow: 50 * time.Millisecond,
+			run: func(t *testing.T, b *Backend, f *fakeRunsc, w backend.Warm, workDir string) {
+				ctx := context.Background()
+				var wg sync.WaitGroup
+				errs := make([]error, 2)
+				for i := range 2 {
+					wg.Add(1)
+					go func() {
+						defer wg.Done()
+						_, errs[i] = b.Pool(ctx, w.ID, backend.PoolSpec{CgroupFD: -1, Deadline: 2 * time.Second})
+					}()
+				}
+				wg.Wait()
+				for i, err := range errs {
+					if err != nil {
+						t.Fatalf("Pool %d: %v", i, err)
+					}
+				}
+				if f.peakRestores() != 1 {
+					t.Fatalf("peak restores in flight = %d, want 1", f.peakRestores())
+				}
+			}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b, f := newFakeMax(t, knobs{SlowRestore: tc.slow}, tc.max)
+			workDir := filepath.Join(t.TempDir(), "g")
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			w, err := b.Warm(ctx, backend.WarmSpec{GrantUID: "g", Template: backend.Template{Argv: []string{"/bin/refzygote", "--gvisor"}}, CgroupFD: -1, ProbeCgroupFD: -1, WorkDir: workDir})
+			if err != nil {
+				t.Fatalf("Warm: %v", err)
+			}
+			tc.run(t, b, f, w, workDir)
+		})
+	}
+}
+
+// TestRestorePidFile checks that a restore learns its sandbox's pid from
+// the file runsc writes, so no `runsc state` process sits on a birth's
+// path, and asks `runsc state` only when the file is not there.
+func TestRestorePidFile(t *testing.T) {
+	cases := []struct {
+		name      string
+		knobs     knobs
+		wantState bool // a `state` call for the fiber's sandbox
+	}{
+		{name: "the pid comes from the file"},
+		{name: "a missing file falls back to state", knobs: knobs{NoPidFile: true}, wantState: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b, f, _, fb := cloned(t, tc.knobs)
+			fc := boxCID(t, b, fb.ID)
+			if want := f.pidOf(fc); fb.PID == 0 || fb.PID != want {
+				t.Fatalf("Fiber.PID = %d, want the sandbox's %d", fb.PID, want)
+			}
+			calls := f.calls()
+			if r := findCall(calls, "restore --detach", fc); !strings.Contains(r, "--pid-file "+filepath.Join(b.bundleDir(fc), "pid")) {
+				t.Fatalf("restore = %q, want --pid-file under the bundle", r)
+			}
+			if got := findCall(calls, "state "+fc) != ""; got != tc.wantState {
+				t.Fatalf("a state call for the fiber = %v, want %v", got, tc.wantState)
+			}
 		})
 	}
 }
