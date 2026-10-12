@@ -98,16 +98,16 @@ Idle memory is what each instance adds, read from its cgroup after 30 seconds id
 
 A pool of restored sandboxes (`fibers.warm`) should serve a gVisor clone far faster than an on-demand restore. The CI head-to-head rows for `fiberd-gvisor-pool2` are pending a bench-compare workflow run.
 
-- **Run.** 2026-10-10. Apple M3 (Mac15,3), Docker Desktop 29.1.3 with 3 CPUs and 5.8 GiB, Linux 6.12.54-linuxkit arm64, runsc release-20260817.0. A kind cluster shared the VM.
-- **Method.** A standalone gVisor home with `refzygote --heap-mb 16 --gvisor --http`. The bench client times Clone to the first HTTP 200 over 100 single clones and 10 bursts of 10 per run, and refills the pool untimed before each burst. The variants ran interleaved after one discarded warm-up round. Each run started with the host load under 4. The table is the median of the per-run p50 and p99, over 3 runs for on-demand and 2 for the pool.
+- **Run.** 2026-10-12. Apple M3 (Mac15,3), Docker Desktop 29.1.3 with 4 CPUs and 5.8 GiB, Linux 6.12.54-linuxkit arm64, runsc release-20260817.0.
+- **Method.** A standalone gVisor home with `refzygote --heap-mb 16 --gvisor --http`. The bench client times Clone to the first HTTP 200 over 100 single clones and 10 bursts of 10 per run, and refills the pool untimed before each burst. The variants ran interleaved after one discarded warm-up round. Each run started with the Docker VM's 1-minute load under 2. The table is the median of the per-run p50 and p99 over 3 runs.
 
-| Clone to first answer, ms, p50 (p99) | Burst 1 | Burst 10 |
-| --- | ---: | ---: |
-| On demand | 80 (101) | 313 (578) |
-| Pool of 2 | 2.6 (8.2) | 252 (571) |
-| Pool of 10 | 2.6 (6.0) | 7.6 (12) |
+| Clone to first answer, ms | Burst 1 p50 | Burst 1 p99 | Burst 10 p50 | Burst 10 p99 |
+| --- | ---: | ---: | ---: | ---: |
+| On demand | 52 | 73 | 170 | 316 |
+| Pool of 2 | 1.7 | 6.3 | 103 | 322 |
+| Pool of 10 | 1.8 | 5.0 | 3.7 | 7.1 |
 
-A pooled clone answers in under 3 ms against about 80 ms on demand. A burst larger than the pool falls back to on-demand restores. Each idle pooled sandbox holds 39.5 MiB of grant memory, read as the grant's `memory.current` with the pool full minus the same without a pool.
+A pooled clone answers in under 2 ms against about 52 ms on demand. A burst larger than the pool falls back to on-demand restores. Each idle pooled sandbox holds 54.3 MiB of grant memory, read as the grant's `memory.current` with the pool full minus the same without a pool. About 15 MiB of that is transparent huge pages backing the Sentry's heap, and with THP off for the sandboxes it holds 38.9 MiB.
 
 ```bash
 # In the dev container, per variant: a gVisor home, then the client.
