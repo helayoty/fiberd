@@ -1768,6 +1768,33 @@ static int spec_token(char *out, size_t n) {
     return 0;
 }
 
+/* gv_parse_identity splits the 'i' record in rec into id. -1 with errno
+ * EPROTO when it is malformed, and id is left untouched. */
+static int gv_parse_identity(char *rec, size_t n, fz_gvisor_identity_t *id) {
+    const char *fields[9];
+    char *p = rec + 1, *end = rec + n;
+    if (n < 2 || rec[0] != 'i' || end[-1] != 0) { errno = EPROTO; return -1; }
+    for (int i = 0; i < 9; i++) {
+        if (p >= end) { errno = EPROTO; return -1; }
+        fields[i] = p;
+        p += strlen(p) + 1;
+    }
+    if (p != end || !*fields[2] || strlen(fields[2]) >= sizeof gv_fence || !*fields[3]) { errno = EPROTO; return -1; }
+    size_t plen = 0;
+    if (strcmp(fields[4], "-") != 0) plen = unhex(fields[4], gv_payload, sizeof gv_payload);
+    if (unhex(fields[8], gv_seed, sizeof gv_seed) != GVISOR_SEED) { errno = EPROTO; return -1; }
+    memcpy(gv_fence, fields[2], strlen(fields[2]) + 1);
+    gv_seed_hex = (char *)fields[8];
+    id->kind = fields[1];
+    id->fence = gv_fence;
+    id->endpoint = fields[3];
+    id->payload = gv_payload;
+    id->payload_len = plen;
+    id->seed = gv_seed;
+    id->seed_len = GVISOR_SEED;
+    return 0;
+}
+
 int fz_gvisor_identity(fz_gvisor_identity_t *id) {
     if (gv_channel >= 0) { close(gv_channel); gv_channel = -1; }
     char token[GVISOR_TOKEN_MAX + 1];
@@ -1799,29 +1826,8 @@ int fz_gvisor_identity(fz_gvisor_identity_t *id) {
     do r = recvmsg(fd, &mh, 0); while (r < 0 && errno == EINTR);
     if (r < 0) { int e = errno; close(fd); errno = e; return -1; }
     if (r == 0 || (mh.msg_flags & MSG_TRUNC)) { close(fd); errno = r == 0 ? ECONNRESET : EMSGSIZE; return -1; }
-    /* 'i' then nine NUL-ended fields. */
-    const char *fields[9];
-    char *p = gv_record + 1, *end = gv_record + r;
-    if (r < 2 || gv_record[0] != 'i' || end[-1] != 0) { close(fd); errno = EPROTO; return -1; }
-    for (int i = 0; i < 9; i++) {
-        if (p >= end) { close(fd); errno = EPROTO; return -1; }
-        fields[i] = p;
-        p += strlen(p) + 1;
-    }
-    if (p != end || !*fields[2] || strlen(fields[2]) >= sizeof gv_fence || !*fields[3]) { close(fd); errno = EPROTO; return -1; }
-    size_t plen = 0;
-    if (strcmp(fields[4], "-") != 0) plen = unhex(fields[4], gv_payload, sizeof gv_payload);
-    if (unhex(fields[8], gv_seed, sizeof gv_seed) != GVISOR_SEED) { close(fd); errno = EPROTO; return -1; }
-    memcpy(gv_fence, fields[2], strlen(fields[2]) + 1);
-    gv_seed_hex = (char *)fields[8];
+    if (gv_parse_identity(gv_record, (size_t)r, id) < 0) { close(fd); errno = EPROTO; return -1; }
     gv_channel = fd;
-    id->kind = fields[1];
-    id->fence = gv_fence;
-    id->endpoint = fields[3];
-    id->payload = gv_payload;
-    id->payload_len = plen;
-    id->seed = gv_seed;
-    id->seed_len = GVISOR_SEED;
     return 0;
 }
 

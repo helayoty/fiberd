@@ -69,7 +69,7 @@ sequenceDiagram
 
 **arm64.** Build the whole program with `-mbranch-protection=none`. A restored process keeps stale pointer-authentication keys, so a return address signed before the checkpoint fails to authenticate.
 
-**Hardening.** Every build uses `-D_FORTIFY_SOURCE=3 -fstack-protector-strong -fstack-clash-protection -fPIE -Wformat=2 -Werror=format-security` with `-pie -Wl,-z,relro,-z,now`, and `make fuzz` runs six libFuzzer harnesses over the library's parsers and the reference workload under ASan and UBSan.
+**Hardening.** Every build uses `-D_FORTIFY_SOURCE=3 -fstack-protector-strong -fstack-clash-protection -fPIE -Wformat=2 -Werror=format-security` with `-pie -Wl,-z,relro,-z,now`, and `make fuzz` runs seven libFuzzer harnesses over the library's parsers and the reference workload under ASan and UBSan.
 
 ## Security notes and known gaps
 

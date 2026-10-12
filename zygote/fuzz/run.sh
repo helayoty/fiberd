@@ -19,7 +19,7 @@ FUZZTIME=${FUZZTIME:-120}
 CFLAGS="-g -O1 -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer \
   -U_FORTIFY_SOURCE -Wall -Wextra -pthread"
 
-all=(fuzz_recv_line fuzz_identity fuzz_procfiles fuzz_rundir fuzz_control fuzz_refzygote)
+all=(fuzz_recv_line fuzz_identity fuzz_gvrecord fuzz_procfiles fuzz_rundir fuzz_control fuzz_refzygote)
 mode=run
 if [ "${1:-}" = build ]; then mode=build; shift; fi
 harnesses=("$@")
