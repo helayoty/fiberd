@@ -32,7 +32,7 @@ var testPool = IDPool{Start: 1 << 20, Slots: 4}
 
 // identityPool maps every id onto itself, so a copy made for its one
 // range chowns every file to the owner it already has, which needs no
-// privilege. The shift onto a mapped range is tests/runc TestRootfsCopy.
+// privilege. The shift onto a mapped range is tests/integration/runc TestRootfsCopy.
 var identityPool = IDPool{Start: 0, Slots: 1}
 
 // fakeRunc stands in for the runc binary behind launcher.run. It records
@@ -225,7 +225,7 @@ func templateMountOf(t *testing.T, cfg ociConfig) string {
 // namespaces, mappings, mounts, read-only and masked paths, the process
 // as root in its namespace logging under /host, and the template bind
 // when the grant has a staged copy. What Command makes around it (the
-// rootfs copy, the run directory, the log's owner) is tests/runc
+// rootfs copy, the run directory, the log's owner) is tests/integration/runc
 // TestCommandPreparesTheBundle.
 func TestBundleConfig(t *testing.T) {
 	cases := []struct {
@@ -329,7 +329,7 @@ func TestBundleConfig(t *testing.T) {
 
 // TestCommandRefusals checks what Command refuses before it copies
 // anything, and that every refusal gives the grant's hold back. What it
-// prepares when nothing refuses is tests/runc TestCommandPreparesTheBundle.
+// prepares when nothing refuses is tests/integration/runc TestCommandPreparesTheBundle.
 func TestCommandRefusals(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -609,7 +609,7 @@ func TestPID(t *testing.T) {
 
 // TestRelease checks that the container is ended, its bundle and staged
 // template go, and the zygote's hold is given back. The rootfs copy that
-// goes with the last hold is tests/runc TestReleaseKeepsRestoredCopy.
+// goes with the last hold is tests/integration/runc TestReleaseKeepsRestoredCopy.
 func TestRelease(t *testing.T) {
 	cases := []struct {
 		name string
@@ -721,7 +721,7 @@ func TestDumpExtra(t *testing.T) {
 // TestTemplateBind checks that a checkpoint taken with a template bind is
 // restored with this home's own verified copy, the one its warm instance
 // staged, and is refused by name without one. The rest of RestoreExtra,
-// the hold and what the mapped root may read, is tests/runc
+// the hold and what the mapped root may read, is tests/integration/runc
 // TestReleaseKeepsRestoredCopy and TestResumedFiberHoldsRange.
 func TestTemplateBind(t *testing.T) {
 	cases := []struct {
@@ -974,7 +974,7 @@ func TestHoldDrop(t *testing.T) {
 
 // TestCopyTree checks what the copy keeps, skips and refuses. Owners are
 // kept as they are under the identity range, and what the shift onto a
-// mapped range does to them is tests/runc TestRootfsCopy.
+// mapped range does to them is tests/integration/runc TestRootfsCopy.
 func TestCopyTree(t *testing.T) {
 	rng := identityPool.Range("g1")
 	cases := []struct {
@@ -1091,7 +1091,7 @@ func TestCopyTree(t *testing.T) {
 
 // TestRestoreExtraRefusals checks that a restore refused before it
 // prepares anything gives the fiber's hold back and leaves no copy. What
-// a restore prepares is tests/runc TestReleaseKeepsRestoredCopy.
+// a restore prepares is tests/integration/runc TestReleaseKeepsRestoredCopy.
 func TestRestoreExtraRefusals(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -1161,7 +1161,7 @@ func TestSysMountPoint(t *testing.T) {
 }
 
 // TestPrepareWorkDir checks what stops the run directory from being
-// prepared for the mapped root. What it is prepared as is tests/runc
+// prepared for the mapped root. What it is prepared as is tests/integration/runc
 // TestWarmOwnership.
 func TestPrepareWorkDir(t *testing.T) {
 	cases := []struct {
@@ -1188,7 +1188,7 @@ func TestPrepareWorkDir(t *testing.T) {
 // TestShareImages checks what stops the images from being shared with the
 // restored tree. A directory nobody may chown and a file where the
 // directory should be each fail, whoever runs the test. What sharing does
-// is tests/runc TestReleaseKeepsRestoredCopy, whose restored tree reads
+// is tests/integration/runc TestReleaseKeepsRestoredCopy, whose restored tree reads
 // its images as the mapped root.
 func TestShareImages(t *testing.T) {
 	cases := []struct {

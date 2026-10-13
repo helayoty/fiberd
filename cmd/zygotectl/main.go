@@ -26,19 +26,21 @@ import (
 var version string
 
 func main() {
-	os.Exit(run(context.Background(), os.Args[1:], os.Stdout, os.Stderr))
+	os.Exit(run(context.Background(), artifact.Platform{}, os.Args[1:], os.Stdout, os.Stderr))
 }
 
 // run dispatches a subcommand. It returns exit code 0 on success or -h,
-// 2 for a usage error, and 1 when the subcommand fails.
-func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+// 2 for a usage error, and 1 when the subcommand fails. host is what
+// build records and inspect judges against. Its empty facts are
+// detected when a subcommand needs them, so a test names all three.
+func run(ctx context.Context, host artifact.Platform, args []string, stdout, stderr io.Writer) int {
 	return cli.Run(args, "usage: zygotectl build|push|pull|inspect [flags], or -version; -h on a subcommand for its flags", map[string]cli.Command{
 		"-version":  printVersion(stdout),
 		"--version": printVersion(stdout),
-		"build":     func(a []string) error { return build(ctx, a, stdout, stderr) },
+		"build":     func(a []string) error { return build(ctx, host, a, stdout, stderr) },
 		"push":      func(a []string) error { return push(ctx, a, stdout, stderr) },
 		"pull":      func(a []string) error { return pull(ctx, a, stdout, stderr) },
-		"inspect":   func(a []string) error { return inspect(a, stdout, stderr) },
+		"inspect":   func(a []string) error { return inspect(host, a, stdout, stderr) },
 	}, stderr)
 }
 
@@ -49,7 +51,7 @@ func printVersion(stdout io.Writer) cli.Command {
 	}
 }
 
-func build(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+func build(ctx context.Context, host artifact.Platform, args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("build", flag.ContinueOnError)
 	zygote := fs.String("zygote", "", "zygote executable (linked with libfiberzygote)")
 	argv := fs.String("args", "", "arguments the home passes to the zygote")
@@ -64,7 +66,7 @@ func build(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	}
 	digest, err := artifact.Build(ctx, artifact.BuildOptions{
 		Zygote: *zygote, Args: strings.Fields(*argv), Out: *out, SkipImages: *skip,
-		CRIU: criu.Options{Bin: *criuBin},
+		CRIU: criu.Options{Bin: *criuBin}, Platform: host,
 	})
 	if err != nil {
 		return err
@@ -110,7 +112,7 @@ func pull(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	return printJSON(stdout, cfg)
 }
 
-func inspect(args []string, stdout, stderr io.Writer) error {
+func inspect(host artifact.Platform, args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("inspect", flag.ContinueOnError)
 	dir := fs.String("dir", "", "artifact directory")
 	level := fs.String("parity", "strict", "parity level to judge the artifact against this host with (strict, off, kernel=series,...)")
@@ -136,8 +138,9 @@ func inspect(args []string, stdout, stderr io.Writer) error {
 	if !cfg.HasImages {
 		want.Kernel, want.Libc = "", ""
 	}
+	host = host.Complete()
 	verdict := "ok"
-	if err := parity.Check(artifact.Host(), want); err != nil {
+	if err := parity.Check(host, want); err != nil {
 		verdict = err.Error()
 	}
 	return printJSON(stdout, struct {
@@ -146,7 +149,7 @@ func inspect(args []string, stdout, stderr io.Writer) error {
 		Host   artifact.Platform `json:"host"`
 		Parity string            `json:"parity"`
 		Usable string            `json:"usable_here"`
-	}{cfg.Digest, cfg, artifact.Host(), parity.String(), verdict})
+	}{cfg.Digest, cfg, host, parity.String(), verdict})
 }
 
 func printJSON(w io.Writer, v any) error {

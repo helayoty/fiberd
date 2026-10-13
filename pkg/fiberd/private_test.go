@@ -12,7 +12,7 @@ import (
 // directory of mode 0700, and nothing a fiber may have left at that name
 // is written through. Files under -state are never moved. The mode is
 // tightened through a chmod the test watches, and a file system that
-// refuses it (tests/sys TestFiberdEnsurePrivateReadOnly mounts one) is
+// refuses it (tests/integration/sys TestFiberdEnsurePrivateReadOnly mounts one) is
 // a chmod that answers EROFS.
 func TestEnsurePrivate(t *testing.T) {
 	cases := []struct {

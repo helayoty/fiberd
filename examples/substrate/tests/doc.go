@@ -1,3 +1,5 @@
+//go:build linux && integration
+
 // Package substratetest holds the Substrate example's integration tests.
 // The actor lifecycle runs the whole worker in process over the real
 // gVisor and proc backends, and the ateom-fiberd binary runs as a

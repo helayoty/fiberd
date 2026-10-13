@@ -1021,7 +1021,7 @@ func unwritable(t *testing.T, d cgroup.Dir, name string) {
 
 // inTheWay leaves a file where the runtime would make the cgroup name
 // under d, so the kernel cannot make it. The kernel's own refusal of
-// one leaf more is tests/host TestLeafRefused.
+// one leaf more is tests/integration/host TestLeafRefused.
 func inTheWay(t *testing.T, d cgroup.Dir, name string) {
 	t.Helper()
 	plainOnly(t)
@@ -1042,12 +1042,17 @@ func fileOwner(t *testing.T, path string) uint32 {
 
 // testConfig is a runtime configuration over be with every path under
 // the test's temp dir and a fresh cgroup subtree.
+// testPlatform is the host every test runtime believes it runs on. It
+// names all three facts, so New detects nothing (the libc comes from
+// ldd).
+var testPlatform = artifact.Platform{Arch: "riscv64", Kernel: "6.1.0-test", Libc: "(gnu libc) 2.36"}
+
 func testConfig(t *testing.T, be backend.Backend) Config {
 	t.Helper()
 	root := t.TempDir()
 	return Config{Backend: be, Templates: map[string]string{"default": "/bin/true --template"},
 		CgroupRoot: testCgroupRoot(t), RunDir: filepath.Join(root, "run"), DeltaDir: filepath.Join(root, "deltas"),
-		TemplateCache: filepath.Join(root, "cache")}
+		TemplateCache: filepath.Join(root, "cache"), Platform: testPlatform}
 }
 
 // newTestRuntime opens a runtime over be, closed when the test ends.

@@ -680,6 +680,9 @@ func TestRunRefuses(t *testing.T) {
 		// real.
 		wantLinux string
 		wantIs    error
+		// linux marks a case that rests on Linux kernel semantics and
+		// is skipped elsewhere.
+		linux bool
 	}{
 		{name: "no transport", args: []string{"-insecure-plaintext=false"}, wantIs: tlsconf.ErrNoTransport},
 		{name: "TLS files missing", args: []string{"-insecure-plaintext=false", "-tls-cert", missing, "-tls-key", missing, "-client-ca", missing},
@@ -732,7 +735,10 @@ func TestRunRefuses(t *testing.T) {
 			setup: func(t *testing.T, _ string) []string { return []string{"-handoff-listen", busy(t)} }},
 		{name: "bad handoff advertise", args: append([]string{"-handoff-listen", "127.0.0.1:0", "-handoff-advertise", "no-port"}, proc...),
 			want: "-handoff-advertise"},
-		{name: "a relative -grants-dir with no working directory", args: proc, want: "getwd",
+		// Linux's getcwd fails once the working directory is removed.
+		// Darwin still names the removed directory, so the relative
+		// path resolves there and the refusal cannot be reached.
+		{name: "a relative -grants-dir with no working directory", args: proc, want: "getwd", linux: true,
 			setup: func(t *testing.T, _ string) []string {
 				gone := t.TempDir()
 				t.Chdir(gone)
@@ -768,6 +774,9 @@ func TestRunRefuses(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.linux && runtime.GOOS != "linux" {
+				t.Skip("the case rests on Linux getcwd semantics")
+			}
 			state := stateDir(t)
 			args := tc.args
 			if tc.setup != nil {

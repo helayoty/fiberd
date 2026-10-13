@@ -1,3 +1,5 @@
+//go:build linux && integration
+
 // Package slurmtest holds the Slurm example's integration tests. They
 // run the fiberd-slurm binary and the job script as processes, probe the
 // job through a real shell command and let the home's default SIGTERM

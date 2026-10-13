@@ -1,6 +1,6 @@
 # Operating fiberd on Kubernetes
 
-This page is the operator's how-to for the Kubernetes example in `examples/kubernetes`, for anyone running a [grant](glossary.md#grant) Pod on a cluster. Read the [quickstart](quickstart.md) first. How the controller, the grant Pod and the [home](glossary.md#home) work inside, and their known gaps, is in [design/kubernetes.md](design/kubernetes.md). The example implements the [home](design/home.md) interface and passes the conformance suite in `tests/conform`. It is not a production-grade Kubernetes controller.
+This page is the operator's how-to for the Kubernetes example in `examples/kubernetes`, for anyone running a [grant](glossary.md#grant) Pod on a cluster. Read the [quickstart](quickstart.md) first. How the controller, the grant Pod and the [home](glossary.md#home) work inside, and their known gaps, is in [design/kubernetes.md](design/kubernetes.md). The example implements the [home](design/home.md) interface and passes the conformance suite in `tests/e2e/conform`. It is not a production-grade Kubernetes controller.
 
 ## Components
 

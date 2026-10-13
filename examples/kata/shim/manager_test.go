@@ -2,14 +2,16 @@ package shim_test
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -26,62 +28,58 @@ import (
 	fshim "github.com/helayoty/fiberd/examples/kata/shim"
 )
 
-// childEnv makes this test binary act as the shim daemon Manager.Start
-// spawns. Start passes its environment on, so a test sets it with
-// t.Setenv.
-const childEnv = "FIBERD_KATA_TEST_SHIM_CHILD"
-
-// childReport is what the spawned shim saw. It writes it to child.json in
-// its working directory.
-type childReport struct {
-	Args       []string `json:"args"`
-	Dir        string   `json:"dir"`
-	GOMAXPROCS string   `json:"gomaxprocs"`
-	Socket     string   `json:"socket"` // the listener handed over as fd 3
-	Err        string   `json:"err"`
+// daemon is what Manager.Start handed over to run as the shim daemon.
+// A fake start reads it off the command in this process, where the
+// real one would exec this binary (examples/kata/tests runs that).
+type daemon struct {
+	Exe        string
+	Args       []string
+	Dir        string
+	GOMAXPROCS string
+	Setpgid    bool
+	Socket     string // the listener handed over as fd 3
+	Err        string
 }
 
-func TestMain(m *testing.M) {
-	if os.Getenv(childEnv) != "" {
-		os.Exit(fakeShimDaemon())
+// fakeStart stands in for the daemon's exec. It records what each start
+// was given and answers with fail when set.
+type fakeStart struct {
+	fail error
+	mu   sync.Mutex
+	runs []daemon
+}
+
+func (f *fakeStart) start(cmd *exec.Cmd) error {
+	if f.fail != nil {
+		return f.fail
 	}
-	os.Exit(m.Run())
-}
-
-func fakeShimDaemon() int {
-	rep := childReport{Args: os.Args[1:], GOMAXPROCS: os.Getenv("GOMAXPROCS")}
-	rep.Dir, _ = os.Getwd()
-	if l, err := net.FileListener(os.NewFile(3, "socket")); err == nil {
-		rep.Socket = l.Addr().String()
+	d := daemon{Exe: cmd.Path, Args: cmd.Args[1:], Dir: cmd.Dir}
+	for _, kv := range cmd.Env {
+		if v, ok := strings.CutPrefix(kv, "GOMAXPROCS="); ok {
+			d.GOMAXPROCS = v
+		}
+	}
+	if cmd.SysProcAttr != nil {
+		d.Setpgid = cmd.SysProcAttr.Setpgid
+	}
+	if len(cmd.ExtraFiles) != 1 {
+		d.Err = fmt.Sprintf("%d extra files, want the socket as fd 3", len(cmd.ExtraFiles))
+	} else if l, err := net.FileListener(cmd.ExtraFiles[0]); err == nil {
+		d.Socket = l.Addr().String()
+		_ = l.Close()
 	} else {
-		rep.Err = err.Error()
+		d.Err = err.Error()
 	}
-	b, _ := json.Marshal(rep)
-	// Write then rename, so the test never reads half a report.
-	if os.WriteFile("child.json.tmp", b, 0o600) != nil || os.Rename("child.json.tmp", "child.json") != nil {
-		return 1
-	}
-	return 0
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.runs = append(f.runs, d)
+	return nil
 }
 
-// waitChild polls for the spawned shim's report.
-func waitChild(t *testing.T, dir string) childReport {
-	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		raw, err := os.ReadFile(filepath.Join(dir, "child.json"))
-		if err == nil {
-			var rep childReport
-			if err := json.Unmarshal(raw, &rep); err != nil {
-				t.Fatal(err)
-			}
-			return rep
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("the shim daemon was not spawned")
-		}
-		time.Sleep(10 * time.Millisecond) // polling a file the child writes, not synchronising
-	}
+func (f *fakeStart) started() []daemon {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.runs)
 }
 
 // needSocketRoot skips unless this process may make shim sockets where
@@ -150,6 +148,7 @@ func TestManagerStart(t *testing.T) {
 		existing    string // what is at the socket path first, "live", "stale" or "dir"
 		group       string // the id the address derives from, or empty for the container's
 		spawn       bool
+		startErr    error // what starting the daemon fails with
 		errIs       func(error) bool
 		errHas      string
 	}{
@@ -169,6 +168,9 @@ func TestManagerStart(t *testing.T) {
 		{name: "a socket path that cannot be cleared is an error",
 			annotations: map[string]string{criSandboxID: "sb-4"}, group: "sb-4", existing: "dir",
 			errIs: func(err error) bool { return errors.Is(err, syscall.ENOTEMPTY) }, errHas: "remove stale shim socket"},
+		{name: "a daemon that does not start is the error, and its socket is removed",
+			annotations: map[string]string{criSandboxID: "sb-5"}, group: "sb-5", startErr: errors.New("exec: no such file"),
+			errIs: func(err error) bool { return err != nil }, errHas: "exec: no such file"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -194,7 +196,8 @@ func TestManagerStart(t *testing.T) {
 				dir = bundle(t, tc.annotations)
 			}
 			t.Chdir(dir)
-			t.Setenv(childEnv, "1")
+			fake := &fakeStart{fail: tc.startErr}
+			t.Cleanup(fshim.SetStart(fake.start))
 			group := tc.group
 			if group == "" {
 				group = id
@@ -230,6 +233,9 @@ func TestManagerStart(t *testing.T) {
 				if !tc.errIs(err) || !strings.Contains(err.Error(), tc.errHas) {
 					t.Fatalf("start = %v, want an error naming %q", err, tc.errHas)
 				}
+				if _, err := os.Lstat(path); tc.startErr != nil && !errors.Is(err, fs.ErrNotExist) {
+					t.Fatalf("the socket of a daemon that did not start is still there: %v", err)
+				}
 				return
 			}
 			want := shim.BootstrapParams{Version: 3, Address: address, Protocol: "ttrpc"}
@@ -245,19 +251,27 @@ func TestManagerStart(t *testing.T) {
 				}
 				_ = conn.Close()
 			}
+			runs := fake.started()
 			if !tc.spawn {
+				if len(runs) != 0 {
+					t.Fatalf("a daemon was started: %+v", runs)
+				}
 				return
 			}
-			rep := waitChild(t, dir)
+			if len(runs) != 1 {
+				t.Fatalf("%d daemons started, want one", len(runs))
+			}
+			d := runs[0]
 			wantArgs := []string{"-namespace", "k8s.io", "-id", id, "-address", opts.Address}
 			if tc.debug {
 				wantArgs = append(wantArgs, "-debug")
 			}
 			realDir, _ := filepath.EvalSymlinks(dir)
-			gotDir, _ := filepath.EvalSymlinks(rep.Dir)
-			if !slices.Equal(rep.Args, wantArgs) || gotDir != realDir || rep.GOMAXPROCS != "2" || rep.Socket != path {
-				t.Fatalf("the shim daemon saw %+v, want args %v in %s with GOMAXPROCS=2 and the socket %s",
-					rep, wantArgs, realDir, path)
+			gotDir, _ := filepath.EvalSymlinks(d.Dir)
+			if !filepath.IsAbs(d.Exe) || !slices.Equal(d.Args, wantArgs) || gotDir != realDir || d.GOMAXPROCS != "2" ||
+				!d.Setpgid || d.Socket != path || d.Err != "" {
+				t.Fatalf("the shim daemon was given %+v, want args %v in %s with GOMAXPROCS=2, its own process group and the socket %s",
+					d, wantArgs, realDir, path)
 			}
 		})
 	}

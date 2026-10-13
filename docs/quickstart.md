@@ -88,7 +88,7 @@ A template is your program linked with libfiberzygote. [zygote/README.md](../zyg
 
 ## Conformance
 
-The conformance suite in `tests/conform` checks these.
+The conformance suite in `tests/e2e/conform` checks these.
 
 - Idempotent [clones](glossary.md#clone).
 - Monotonic [fences](glossary.md#fence).

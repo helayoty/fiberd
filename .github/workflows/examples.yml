@@ -1,0 +1,111 @@
+name: examples
+
+# The examples end to end: Kubernetes in kind, the Kata-shaped shim,
+# Knative over Hyperlight (KVM) and Slurm in Docker.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # The release workflow runs the whole suite on the commit it releases.
+  # On push and pull_request the ref is empty, so checkout uses its default.
+  workflow_call:
+    inputs:
+      ref:
+        description: "Commit to test"
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  conform-kind:
+    name: example - Kubernetes integration in kind (grant-controller, grant Pod, C1-C10, overcommit storm)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa # v1.15.1
+        with:
+          version: v0.29.0
+          cluster_name: fiberd
+          config: examples/kubernetes/kind/kind.yaml
+      - run: make conform-kind
+      - name: cluster state on failure
+        if: failure()
+        run: |
+          kubectl --context kind-fiberd get pods -A -o wide
+          kubectl --context kind-fiberd -n tenant-a get cg -o yaml
+          kubectl --context kind-fiberd -n fiberd-system logs deploy/grant-issuer --tail=100 || true
+          kubectl --context kind-fiberd -n tenant-a logs conform-grant --tail=200 || true
+          kubectl --context kind-fiberd -n tenant-a logs conform-grant --previous --tail=100 || true
+          kubectl --context kind-fiberd -n tenant-a logs storm-grant --tail=100 || true
+          kubectl --context kind-fiberd -n tenant-a logs conform-runc-grant --tail=100 || true
+          KIND_CLUSTER=fiberd examples/kubernetes/kind/conform.sh runc-logs conform-runc-grant || true
+
+  example-kata:
+    name: example - Kata-shaped containerd shim in kind (Pod containers are fibers)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa # v1.15.1
+        with:
+          version: v0.29.0
+          cluster_name: fiberd
+          config: examples/kubernetes/kind/kind.yaml
+      - run: make example-kata
+      - name: cluster state on failure
+        if: failure()
+        run: |
+          kubectl --context kind-fiberd get pods -A -o wide
+          kubectl --context kind-fiberd -n tenant-a describe pod kata-1 kata-2 || true
+          docker exec fiberd-control-plane journalctl -u containerd --no-pager -n 100 || true
+          kubectl --context kind-fiberd -n tenant-a logs conform-grant --tail=100 || true
+          kubectl --context kind-fiberd -n tenant-a logs conform-runc-grant --tail=100 || true
+          KIND_CLUSTER=fiberd examples/kubernetes/kind/conform.sh runc-logs conform-runc-grant || true
+
+  example-knative:
+    name: example - Knative scale-from-zero over Hyperlight (KVM)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+      - name: enable KVM for this runner
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+      - run: make hyperlight-helper
+      - run: make example-knative
+      - run: make example-knative-kvm
+      - name: logs on failure
+        if: failure()
+        run: sudo tail -n 50 bin/knative-state/*.log || true
+
+  conform-slurm:
+    name: example - Slurm integration in Docker (allocation, C1-C10, overcommit storm)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - run: make conform-slurm
+      - name: cluster state on failure
+        if: failure()
+        run: |
+          docker exec fiberd-slurm sh -c 'squeue; sinfo; tail -50 /var/log/slurm/slurmd.log; tail -50 /var/log/fiberd-conform.out; tail -50 /var/log/fiberd-storm.out' || true

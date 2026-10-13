@@ -1,5 +1,9 @@
 name: ci
 
+# Lint, proto, unit tests and the image build. The integration suites,
+# conformance, the examples and fuzzing are workflows of their own
+# (integration.yml, conformance.yml, examples.yml, fuzz.yml) with the
+# same triggers, and the release calls all five.
 on:
   push:
     branches: [main]
@@ -34,7 +38,7 @@ jobs:
       - run: make proto-check
 
   lint:
-    name: go vet + golangci-lint (depguard keeps pkg/core home-invariant)
+    name: go vet + golangci-lint (depguard keeps pkg/core home-invariant, forbidigo keeps unit tests process-free)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -48,34 +52,6 @@ jobs:
             hack/tools/go.sum
             examples/kubernetes/go.sum
       - run: make lint
-
-  fuzz:
-    name: fuzz the zygote's parsers (libFuzzer) and the handoff SNI parser (go test -fuzz)
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ inputs.ref }}
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: go.mod
-      - name: install clang with libFuzzer
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends clang libclang-rt-dev
-      # 60 seconds per harness. A crash fails the job and leaves its input
-      # under bin/fuzz/crashes/ (the Go fuzzer writes to testdata/fuzz/).
-      - run: make fuzz FUZZTIME=60
-      - name: keep the crashing inputs
-        if: failure()
-        continue-on-error: true
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: fuzz-crashes
-          path: |
-            bin/fuzz/crashes/
-            bin/fuzz/*.log
-            pkg/handoff/testdata/fuzz/
-          if-no-files-found: ignore
 
   image:
     name: build the fiberd image the release publishes (linux/amd64, not pushed)
@@ -98,7 +74,7 @@ jobs:
       - run: docker run --rm fiberd:ci -version
 
   unit:
-    name: unit tests (${{ matrix.os }})
+    name: unit tests (${{ matrix.os }}, non-root, coverage printed)
     strategy:
       matrix:
         os: [ubuntu-24.04, macos-15]
@@ -111,206 +87,5 @@ jobs:
         with:
           go-version-file: go.mod
       - run: make build
-      - run: make test
-
-  conform-stub:
-    name: conformance C1-C10 against the stub runtime
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ inputs.ref }}
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: go.mod
-      - run: make conform-stub
-      - run: make conform-signed
-
-  linux-env:
-    name: Linux dev container (cgroup v2, PSI, criu) + tests inside it
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ inputs.ref }}
-      - run: make linux-check
-      - run: make linux-test
-
-  conform-proc:
-    name: conformance C1-C10 against the proc backend (cgroups, CRIU)
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ inputs.ref }}
-      - run: make conform-proc
-
-  conform-gvisor:
-    name: conformance C1-C10 against the gvisor backend (a runsc sandbox per fiber)
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ inputs.ref }}
-      - run: make linux-gvisor-check
-      - run: make conform-gvisor
-      - name: make the state readable for the upload (written as root inside the container)
-        if: failure()
-        run: sudo chmod -R a+rX bin/conform-state-gvisor 2>/dev/null || true
-      - name: keep fiberd's logs and audit trail
-        if: failure()
-        continue-on-error: true
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: conform-gvisor-state
-          path: |
-            bin/conform-state-gvisor/**/*.log
-            bin/conform-state-gvisor/private/audit.jsonl
-          if-no-files-found: ignore
-
-  conform-runc:
-    name: conformance C1-C10 against the runc backend (the zygote as a container's init)
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ inputs.ref }}
-      - run: make conform-runc
-
-  conform-hyperlight-fake:
-    name: conformance C1-C10 against the hyperlight backend over the fake helper (no hypervisor)
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ inputs.ref }}
-      - run: make conform-hyperlight-fake
-
-  conform-hyperlight:
-    name: conformance C1-C10 against the hyperlight backend with the Rust helper (KVM)
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ inputs.ref }}
-      - name: enable KVM for this runner
-        run: |
-          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
-          sudo udevadm control --reload-rules
-          sudo udevadm trigger --name-match=kvm
-          ls -l /dev/kvm
-      - run: make hyperlight-helper
-      - run: make linux-hyperlight-check
-      - run: make conform-hyperlight
-      - name: make the state readable for the upload (written as root inside the container)
-        if: always()
-        run: sudo chmod -R a+rX bin/conform-state-hyperlight-kvm 2>/dev/null || true
-      - name: keep the helper's logs and park images
-        if: always()
-        continue-on-error: true
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: conform-hyperlight-state
-          path: |
-            bin/conform-state-hyperlight-kvm/**/*.log
-            bin/conform-state-hyperlight-kvm/deltas
-          if-no-files-found: ignore
-
-  overcommit:
-    name: 2x overcommit storm parks before any OOM kill
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ inputs.ref }}
-      - run: make overcommit
-
-  conform-kind:
-    name: example - Kubernetes integration in kind (grant-controller, grant Pod, C1-C10, overcommit storm)
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ inputs.ref }}
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: go.mod
-      - uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa # v1.15.1
-        with:
-          version: v0.29.0
-          cluster_name: fiberd
-          config: examples/kubernetes/kind/kind.yaml
-      - run: make conform-kind
-      - name: cluster state on failure
-        if: failure()
-        run: |
-          kubectl --context kind-fiberd get pods -A -o wide
-          kubectl --context kind-fiberd -n tenant-a get cg -o yaml
-          kubectl --context kind-fiberd -n fiberd-system logs deploy/grant-issuer --tail=100 || true
-          kubectl --context kind-fiberd -n tenant-a logs conform-grant --tail=200 || true
-          kubectl --context kind-fiberd -n tenant-a logs conform-grant --previous --tail=100 || true
-          kubectl --context kind-fiberd -n tenant-a logs storm-grant --tail=100 || true
-          kubectl --context kind-fiberd -n tenant-a logs conform-runc-grant --tail=100 || true
-          KIND_CLUSTER=fiberd examples/kubernetes/kind/conform.sh runc-logs conform-runc-grant || true
-
-  example-kata:
-    name: example - Kata-shaped containerd shim in kind (Pod containers are fibers)
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ inputs.ref }}
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: go.mod
-      - uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa # v1.15.1
-        with:
-          version: v0.29.0
-          cluster_name: fiberd
-          config: examples/kubernetes/kind/kind.yaml
-      - run: make example-kata
-      - name: cluster state on failure
-        if: failure()
-        run: |
-          kubectl --context kind-fiberd get pods -A -o wide
-          kubectl --context kind-fiberd -n tenant-a describe pod kata-1 kata-2 || true
-          docker exec fiberd-control-plane journalctl -u containerd --no-pager -n 100 || true
-          kubectl --context kind-fiberd -n tenant-a logs conform-grant --tail=100 || true
-          kubectl --context kind-fiberd -n tenant-a logs conform-runc-grant --tail=100 || true
-          KIND_CLUSTER=fiberd examples/kubernetes/kind/conform.sh runc-logs conform-runc-grant || true
-
-  example-knative:
-    name: example - Knative scale-from-zero over Hyperlight (KVM)
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ inputs.ref }}
-      - name: enable KVM for this runner
-        run: |
-          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
-          sudo udevadm control --reload-rules
-          sudo udevadm trigger --name-match=kvm
-          ls -l /dev/kvm
-      - run: make hyperlight-helper
-      - run: make example-knative
-      - run: make example-knative-kvm
-      - name: logs on failure
-        if: failure()
-        run: sudo tail -n 50 bin/knative-state/*.log || true
-
-  conform-slurm:
-    name: example - Slurm integration in Docker (allocation, C1-C10, overcommit storm)
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ inputs.ref }}
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: go.mod
-      - run: make conform-slurm
-      - name: cluster state on failure
-        if: failure()
-        run: |
-          docker exec fiberd-slurm sh -c 'squeue; sinfo; tail -50 /var/log/slurm/slurmd.log; tail -50 /var/log/fiberd-conform.out; tail -50 /var/log/fiberd-storm.out' || true
+      # Coverage is printed per package for the log only. Nothing fails on it.
+      - run: make test TESTFLAGS=-cover

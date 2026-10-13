@@ -140,7 +140,7 @@ case "${1:-}" in
     # bin/ is shared between the macOS host and the Linux container; go
     # refuses to overwrite a test binary built for the other OS.
     rm -f bin/grant-conform
-    go test -c -o bin/grant-conform ./tests/conform
+    go test -c -tags integration -o bin/grant-conform ./tests/e2e/conform
     if [ "$RUNTIME" = proc ]; then make -s zygote; fi
     if [ "$RUNTIME" = gvisor ] || [ "$RUNTIME" = runc ]; then hack/gvisor/rootfs.sh "$GVISOR_ROOTFS" >/dev/null; fi
     if [ "$RUNTIME" = hyperlight ] && [ -z "${CONFORM_HL_HELPER:-}" ]; then

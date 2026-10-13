@@ -26,7 +26,7 @@ ENV CGO_ENABLED=0 GOFLAGS=-trimpath
 RUN set -eu; mkdir -p /out; \
     ldflags="-s -w -buildid="; \
     go build -ldflags "$ldflags" -o /out/ ./cmd/grant-issuer ./hack/storm ./hack/fibctl; \
-    go test -c -ldflags "$ldflags" -o /out/grant-conform ./tests/conform; \
+    go test -c -tags integration -ldflags "$ldflags" -o /out/grant-conform ./tests/e2e/conform; \
     (cd examples/slurm && go build -tags fiberd_testhooks -ldflags "$ldflags" -o /out/ ./cmd/...); \
     flags=""; if [ "$(uname -m)" = aarch64 ]; then flags="-mbranch-protection=none"; fi; \
     gcc -D_FORTIFY_SOURCE=3 -O2 -fstack-protector-strong -fstack-clash-protection -fPIE -Wformat=2 -Werror=format-security \

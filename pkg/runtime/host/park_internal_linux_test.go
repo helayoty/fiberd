@@ -665,7 +665,7 @@ func TestReleaseDiscard(t *testing.T) {
 // as an orphan. Its leaf goes, and so do the files it served on. A resumed
 // fiber keeps the socket name of its park, which only the fence file beside
 // it ties to the current fence. Other fibers' files stay. The kill of a
-// task still in the leaf is tests/host TestOrphanKilledInLeaf.
+// task still in the leaf is tests/integration/host TestOrphanKilledInLeaf.
 func TestReleaseOrphan(t *testing.T) {
 	g := core.Grant{UID: "g1", TemplateDigest: "sha256:tmpl", WBudgetBytes: 64 * mib}
 	next := core.Fence{GrantUID: "g1", Epoch: 2, Seq: 1}

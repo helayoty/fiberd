@@ -103,6 +103,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
           printf 'image tags: %s\n' "${tags[*]}"
 
+  # The five workflows that gate a merge gate the release the same way.
   ci:
     name: ci
     needs: validate-tag
@@ -110,9 +111,37 @@ jobs:
     with:
       ref: ${{ needs.validate-tag.outputs.sha }}
 
+  integration:
+    name: integration
+    needs: validate-tag
+    uses: ./.github/workflows/integration.yml
+    with:
+      ref: ${{ needs.validate-tag.outputs.sha }}
+
+  conformance:
+    name: conformance
+    needs: validate-tag
+    uses: ./.github/workflows/conformance.yml
+    with:
+      ref: ${{ needs.validate-tag.outputs.sha }}
+
+  examples:
+    name: examples
+    needs: validate-tag
+    uses: ./.github/workflows/examples.yml
+    with:
+      ref: ${{ needs.validate-tag.outputs.sha }}
+
+  fuzz:
+    name: fuzz
+    needs: validate-tag
+    uses: ./.github/workflows/fuzz.yml
+    with:
+      ref: ${{ needs.validate-tag.outputs.sha }}
+
   build-assets:
     name: build release archives
-    needs: [validate-tag, ci]
+    needs: [validate-tag, ci, integration, conformance, examples, fuzz]
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
@@ -227,7 +256,7 @@ jobs:
 
   build-image:
     name: build image ${{ matrix.platform }}
-    needs: [validate-tag, ci]
+    needs: [validate-tag, ci, integration, conformance, examples, fuzz]
     # Each platform builds on a native runner. Emulating arm64 under QEMU
     # makes the image's CRIU build many times slower.
     runs-on: ${{ matrix.runner }}
@@ -453,7 +482,7 @@ jobs:
 
   cleanup:
     name: clean up a failed or cancelled release
-    needs: [validate-tag, ci, build-assets, build-image, release-draft, publish-image, publish-release]
+    needs: [validate-tag, ci, integration, conformance, examples, fuzz, build-assets, build-image, release-draft, publish-image, publish-release]
     if: >-
       always() && needs.validate-tag.result == 'success' &&
       (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled'))

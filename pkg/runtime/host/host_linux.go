@@ -77,6 +77,10 @@ type Runtime struct {
 	// poolExits names the grant of every pooled sandbox that dies before
 	// its hand-out.
 	poolExits chan string
+	// stop is closed by Close, so the W executioner ends with the
+	// runtime instead of outliving it.
+	stop     chan struct{}
+	stopOnce sync.Once
 	// identities maps a grant uid to the handoff identity its fibers get.
 	identities map[string]handoffIdentity
 
@@ -212,23 +216,21 @@ func New(cfg Config) (*Runtime, error) {
 			return nil, err
 		}
 	}
-	host := artifact.Host()
+	// What this home believes about its host. The configuration's facts
+	// win, then the backend's, and what neither names is detected.
+	host := artifact.Platform{Arch: cfg.Platform.Arch, Kernel: cfg.Platform.Kernel, Libc: cfg.Platform.Libc}
 	ownRootfs := false
 	if p, ok := cfg.Backend.(backend.Platformer); ok {
 		// The backend knows what its checkpoints depend on.
 		bp := p.Platform()
 		for dst, v := range map[*string]string{&host.Arch: bp.Arch, &host.Kernel: bp.Kernel, &host.Libc: bp.Libc} {
-			if v != "" {
+			if *dst == "" {
 				*dst = v
 			}
 		}
 		ownRootfs = bp.Libc != ""
 	}
-	for dst, override := range map[*string]string{&host.Arch: cfg.Platform.Arch, &host.Kernel: cfg.Platform.Kernel, &host.Libc: cfg.Platform.Libc} {
-		if override != "" {
-			*dst = override
-		}
-	}
+	host = host.Complete()
 	host.Backend = cfg.Backend.Name()
 	if host.Backend == "proc" {
 		// CRIU reopens a cached template executable by its path. runc
@@ -267,6 +269,7 @@ func New(cfg Config) (*Runtime, error) {
 		warms: map[string]*warm{}, fibers: map[string]*fiber{}, ports: map[int]string{}, socks: map[string]string{},
 		exits:     make(chan core.FiberExit, 1024),
 		poolExits: make(chan string, 64),
+		stop:      make(chan struct{}),
 		parents:   map[string]backend.Parent{},
 	}
 	r.sweepPools()
@@ -353,8 +356,14 @@ func (d devicePressure) Pressure(grantUID string) (float64, error) {
 // budget itself is held here: W is sampled, and a fiber over its budget
 // is killed and reported as oom, exactly as the kernel would for a fork.
 func (r *Runtime) enforceW() {
+	tick := time.NewTicker(25 * time.Millisecond)
+	defer tick.Stop()
 	for {
-		time.Sleep(25 * time.Millisecond)
+		select {
+		case <-r.stop:
+			return
+		case <-tick.C:
+		}
 		r.mu.Lock()
 		fs := make([]*fiber, 0, len(r.fibers))
 		for _, f := range r.fibers {
@@ -2118,6 +2127,7 @@ func (r *Runtime) Exits() <-chan core.FiberExit { return r.exits }
 // Close drains every pool, ends every warm instance and its fibers, and
 // fiberd's relays.
 func (r *Runtime) Close() {
+	r.stopOnce.Do(func() { close(r.stop) })
 	r.mu.Lock()
 	var ps []*pooled
 	for _, z := range r.warms {

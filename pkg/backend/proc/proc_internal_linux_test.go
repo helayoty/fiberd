@@ -674,7 +674,7 @@ func TestSocketpair(t *testing.T) {
 // TestCheckpointWarm checks that the zygote is dumped running, with its
 // control socket external when its inode can be read, plus whatever the
 // launcher's container needs. The mounts of a zygote in a mount namespace
-// of its own are named at tests/proc TestCheckpointWarmExternalSocket.
+// of its own are named at tests/integration/proc TestCheckpointWarmExternalSocket.
 func TestCheckpointWarm(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -821,7 +821,7 @@ func TestCloneTranslatesTheHostPID(t *testing.T) {
 // it has one, and that a dump failing on a client from outside the
 // container is retried. What cannot be dumped is refused before criu
 // runs. A fiber with a mount namespace of its own has its mounts named at
-// tests/proc TestParkNamesOwnMounts.
+// tests/integration/proc TestParkNamesOwnMounts.
 func TestPark(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -1014,7 +1014,7 @@ func writeMounts(t *testing.T, dir string) {
 // directory, with its handoff channel replaced, and its end reported as
 // the fiber's exit. A launcher is told of the tree it prepared for, and
 // when it is gone. A checkpoint with a mount namespace binds the restore
-// root, which is tests/proc TestResumeBindsRunDir, and what refuses the
+// root, which is tests/integration/proc TestResumeBindsRunDir, and what refuses the
 // bind before any mount is refused here.
 func TestResume(t *testing.T) {
 	cases := []struct {
@@ -1398,7 +1398,7 @@ func TestMountinfo(t *testing.T) {
 
 // TestMountRootRefusals checks what the restore root refuses before it
 // mounts anything, and that a directory it made for a refused mount goes
-// again. A trusted path is mounted at tests/proc TestRootBindShared.
+// again. A trusted path is mounted at tests/integration/proc TestRootBindShared.
 func TestMountRootRefusals(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -1457,7 +1457,7 @@ func TestMountRootRefusals(t *testing.T) {
 // reference: a backend that never bound has nothing to give up, one whose
 // bind is in the table but not mounted logs the failed unmount, and a
 // refused mount is not held. Two backends sharing one real bind are
-// tests/proc TestRootBindShared.
+// tests/integration/proc TestRootBindShared.
 func TestRootBindRefs(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -1529,7 +1529,7 @@ func sha256Hex(t *testing.T, path string) string {
 // verified through the descriptor it is exec'd from: the bytes are hashed
 // against what the host verified and a mismatch is refused. That an exec
 // through the descriptor runs those bytes after the path was swapped is
-// tests/proc TestExecThroughVerifiedFD.
+// tests/integration/proc TestExecThroughVerifiedFD.
 func TestOpenVerified(t *testing.T) {
 	cases := []struct {
 		name    string

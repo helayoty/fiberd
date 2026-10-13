@@ -130,16 +130,14 @@ This run compared gVisor, proc, and runc during the same minute.
 **Recorded command**
 
 ```bash
-FIBERD_BENCH=1 go test -run TestStormNumbers ./tests/{proc,runc,gvisor}
+FIBERD_BENCH=1 go test -tags integration -v -run TestStormNumbers ./tests/bench/storm
 ```
 
 Add `-v` to display the measurements from a new successful run.
 
 **Harness**
 
-- [`tests/proc/bench_linux_test.go`](../tests/proc/bench_linux_test.go)
-- [`tests/runc/bench_linux_test.go`](../tests/runc/bench_linux_test.go)
-- [`tests/gvisor/bench_linux_test.go`](../tests/gvisor/bench_linux_test.go)
+- [`tests/bench/storm`](../tests/bench/storm), one subtest per backend (proc, runc, gvisor)
 
 | Measurement | gVisor | proc | runc |
 | --- | ---: | ---: | ---: |
@@ -155,7 +153,7 @@ The burst sizes differ because each gVisor sandbox has a much larger fixed footp
 
 ## Run B: fork and copy-on-write mechanism
 
-These numbers came from a standalone C microbenchmark that isolated `fork()` and copy-on-write behavior. It did not use fiberd itself, the protocol, the ledger, cgroups, or CRIU. That benchmark has since been removed. [`tests/proc/bench_linux_test.go`](../tests/proc/bench_linux_test.go) now measures the same shapes through the real proc runtime (Run A).
+These numbers came from a standalone C microbenchmark that isolated `fork()` and copy-on-write behavior. It did not use fiberd itself, the protocol, the ledger, cgroups, or CRIU. That benchmark has since been removed. [`tests/bench/storm`](../tests/bench/storm) now measures the same shapes through the real proc runtime (Run A).
 
 **Environment**
 
@@ -176,7 +174,7 @@ The warm run initialized a 128 MiB parent, started 50 children concurrently, and
 
 The broad PSS range reflects repeated development runs rather than one archived output file. Read these numbers as a check of the mechanism, not as a fiberd end-to-end latency claim.
 
-To measure these shapes today, run `make bench`. It runs `TestStormNumbers` from [`tests/proc/bench_linux_test.go`](../tests/proc/bench_linux_test.go) in the development container. Its results are not comparable with this table. They include fiberd, the control socket and cgroups, and the zygote heap is 32 MiB. There is no cold run.
+To measure these shapes today, run `make bench`. It runs `TestStormNumbers` from [`tests/bench/storm`](../tests/bench/storm) in the development container. Its results are not comparable with this table. They include fiberd, the control socket and cgroups, and the zygote heap is 32 MiB. There is no cold run.
 
 ## Run C: Knative-shaped activator
 
@@ -230,7 +228,7 @@ them without an object store.
 **Command**
 
 ```bash
-make linux-test
+make integration-tests
 ```
 
 | Operation | Historical result |
@@ -266,7 +264,7 @@ make bench-e2e
 
 **Harness**
 
-- [`tests/proc/e2e_bench_linux_test.go`](../tests/proc/e2e_bench_linux_test.go)
+- [`tests/bench/clone`](../tests/bench/clone)
 - Every stage is timed where it runs and matched to the fiber it creates.
 - Host is the host runtime's work around the backend. That covers the cgroup leaf and its limits, the run directory, and the endpoint.
 - Zygote is the backend round trip from `CLONE` to `CLONED`, including any wait behind other clones.
@@ -307,16 +305,16 @@ The benchmark tests are disabled by default. Run them manually because they requ
 
 ```bash
 make linux-check
-FIBERD_BENCH=1 make linux-test
+make bench
 ```
 
 For a focused run inside the development container:
 
 ```bash
 make linux-shell
-FIBERD_BENCH=1 go test -v -run TestStormNumbers ./tests/proc
-FIBERD_BENCH=1 go test -v -run TestStormNumbers ./tests/runc
-FIBERD_BENCH=1 go test -v -run TestStormNumbers ./tests/gvisor
+FIBERD_BENCH=1 go test -tags integration -v -run TestStormNumbers/proc ./tests/bench/storm
+FIBERD_BENCH=1 go test -tags integration -v -run TestStormNumbers/runc ./tests/bench/storm
+FIBERD_BENCH=1 go test -tags integration -v -run TestStormNumbers/gvisor ./tests/bench/storm
 ```
 
 The end-to-end Clone breakdown has its own target. It mounts a Docker volume for the audit spool and snapshot so that fsync reaches a disk.

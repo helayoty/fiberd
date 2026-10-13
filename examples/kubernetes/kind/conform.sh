@@ -146,7 +146,7 @@ scope_lost() { admin -X POST http://x/scope-lost >/dev/null; }
 conform() {
   rm -rf "$STATE"; mkdir -p "$STATE"
   rm -f bin/grant-conform
-  go test -c -o bin/grant-conform ./tests/conform
+  go test -c -tags integration -o bin/grant-conform ./tests/e2e/conform
   "${KC[@]}" -n fiberd-system get secret grant-issuer-key -o jsonpath='{.data.key\.json}' | base64 -d >"$STATE/issuer-key.json"
   bin/grant-conform -test.v -target "$TARGET" -target-tier FIBER_CHECKPOINT -node-id "$POD" -isolation TRUSTED \
     -mint jwt -issuer-key "$STATE/issuer-key.json" -issuer "$ISSUER_URL" \

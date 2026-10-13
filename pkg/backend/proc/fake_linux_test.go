@@ -188,6 +188,10 @@ func (z *fakeZygote) waitRecv(t *testing.T, want string) []string {
 // serve speaks the line protocol the way libfiberzygote does
 // (zygote/libfiberzygote.c), answering CLONE as the script names. Every
 // line it reads is recorded, so a test can assert what the backend sent.
+// The setup lines are read up to PREPARE before any answer, as
+// read_setup does, so a script that ends on its answer never closes the
+// socket while the backend is still writing them. Only quit reads
+// nothing, as a zygote that died before it served.
 //
 //	early     CLONED and EXITED in one write, as fz_serve does when a fiber
 //	          reports ready and exits within one poll iteration
@@ -214,9 +218,14 @@ func (z *fakeZygote) serve() {
 		}
 	}
 	say := func(s string) { _, _ = z.ctl.Write([]byte(s)) }
-	switch z.script {
-	case "quit":
+	if z.script == "quit" {
 		return
+	}
+	setup, ok := z.readSetup()
+	if !ok {
+		return
+	}
+	switch z.script {
 	case "unprepared":
 		say("ERROR ? the zygote could not cover a HIDE path (/var/lib/fiberd/templates: Permission denied)\n")
 		return
@@ -226,9 +235,14 @@ func (z *fakeZygote) serve() {
 	default:
 		say("READY\n")
 	}
-	if z.script == "device" {
+	switch z.script {
+	case "device":
 		// A short DEVICE line carries nothing and is ignored.
 		say("DEVICE - 100 1000\nDEVICE short\n")
+	case "refuse":
+		for _, line := range setup {
+			say("ERROR ? " + strings.Fields(line)[0] + " refused: by the script\n")
+		}
 	}
 	for {
 		line, nfds, err := recvLine(z.ctl)
@@ -291,6 +305,24 @@ func (z *fakeZygote) serve() {
 			say(cloned + "DEVICE " + fence + " 42 0\n")
 		default:
 			return
+		}
+	}
+}
+
+// readSetup reads and records the setup lines up to PREPARE and returns
+// them, or false once the backend closed the socket first.
+func (z *fakeZygote) readSetup() ([]string, bool) {
+	var setup []string
+	for {
+		line, _, err := recvLine(z.ctl)
+		if err != nil {
+			return nil, false
+		}
+		line = strings.TrimSuffix(line, "\n")
+		z.record(line)
+		setup = append(setup, line)
+		if strings.HasPrefix(line, "PREPARE ") {
+			return setup, true
 		}
 	}
 }
@@ -646,7 +678,9 @@ func (l *fakeLauncher) Command(spec backend.WarmSpec, argv []string, ctl, logf *
 	if l.commandErr != nil {
 		return nil, l.commandErr
 	}
-	cmd := exec.Command(argv[0], argv[1:]...)
+	// A literal, not exec.Command: nothing here is started, the spawn
+	// seam only reads the command.
+	cmd := &exec.Cmd{Path: argv[0], Args: argv}
 	cmd.Dir = spec.WorkDir
 	cmd.Stdout, cmd.Stderr = logf, logf
 	cmd.ExtraFiles = []*os.File{ctl}

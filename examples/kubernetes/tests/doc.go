@@ -1,3 +1,5 @@
+//go:build linux && integration
+
 // Package kubernetestest holds the Kubernetes example's integration
 // tests. They mount real filesystems to show the home making a Pod's
 // read-only cgroupfs writable, so they need root and CAP_SYS_ADMIN, as

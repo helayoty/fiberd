@@ -259,7 +259,7 @@ func TestFillRefused(t *testing.T) {
 // TestBootSweepsPool checks that a new life removes the pool leaves of
 // the previous one before it serves, and that List never reports them.
 // A pool leaf still holding its sandbox, which the sweep must kill
-// first, is tests/host TestBootSweepsPool.
+// first, is tests/integration/host TestBootSweepsPool.
 func TestBootSweepsPool(t *testing.T) {
 	cases := []struct {
 		name string

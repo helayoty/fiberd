@@ -71,7 +71,7 @@ RUN set -eu; mkdir -p /out; \
     ldflags="-s -w -buildid="; \
     go build -ldflags "$ldflags" -o /out/ ./hack/storm ./hack/fibctl ./hack/sessioncheck; \
     hack/gvisor/rootfs.sh /out/rootfs >/dev/null; \
-    go test -c -ldflags "$ldflags" -o /out/grant-conform ./tests/conform; \
+    go test -c -tags integration -ldflags "$ldflags" -o /out/grant-conform ./tests/e2e/conform; \
     (cd examples/kubernetes && go build -tags fiberd_testhooks -ldflags "$ldflags" -o /out/ ./cmd/...); \
     flags=""; if [ "$(uname -m)" = aarch64 ]; then flags="-mbranch-protection=none"; fi; \
     gcc -D_FORTIFY_SOURCE=3 -O2 -fstack-protector-strong -fstack-clash-protection -fPIE -Wformat=2 -Werror=format-security \

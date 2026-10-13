@@ -9,11 +9,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
 	"testing"
 	"time"
+
+	"go.uber.org/goleak"
 
 	"github.com/helayoty/fiberd/pkg/artifact"
 	"github.com/helayoty/fiberd/pkg/backend"
@@ -149,17 +152,21 @@ func TestNewRelay(t *testing.T) {
 	}
 }
 
-// TestNewPlatform checks that what the home believes about its host is
-// detected, then overridden by the backend's facts, then by the
-// configuration. The backend's name always overrides. A proc home
-// records its template cache path. Paths are made absolute and
-// created.
+// TestNewPlatform checks what the home believes about its host. The
+// configuration's facts win, then the backend's, and what neither names
+// is detected. The backend's name always overrides. A proc home records
+// its template cache path. Paths are made absolute and created.
 func TestNewPlatform(t *testing.T) {
-	detected := artifact.Host()
 	named := func(name string) *fakeBackend {
 		b := newFakeBackend(core.TierWarm)
 		b.name = name
 		return b
+	}
+	withPlatform := func(p artifact.Platform) backend.Backend {
+		return &struct {
+			*fakeBackend
+			platformMixin
+		}{newFakeBackend(core.TierWarm), platformMixin{p}}
 	}
 	cases := []struct {
 		name string
@@ -170,32 +177,34 @@ func TestNewPlatform(t *testing.T) {
 		// templates means want.Templates is the home's template cache.
 		templates bool
 	}{
-		{name: "detected, named after the backend", be: newFakeBackend(core.TierWarm),
-			want: artifact.Platform{Arch: detected.Arch, Kernel: detected.Kernel, Libc: detected.Libc, Backend: "fake"}},
-		{name: "the backend's facts replace the host's", be: &struct {
-			*fakeBackend
-			platformMixin
-		}{newFakeBackend(core.TierWarm), platformMixin{artifact.Platform{Kernel: "runsc-20260101", Libc: "none"}}},
-			want: artifact.Platform{Arch: detected.Arch, Kernel: "runsc-20260101", Libc: "none", Backend: "fake"}},
-		{name: "the configuration overrides both", be: &struct {
-			*fakeBackend
-			platformMixin
-		}{newFakeBackend(core.TierWarm), platformMixin{artifact.Platform{Kernel: "runsc-20260101"}}},
-			mod:  func(c *Config) { c.Platform = artifact.Platform{Arch: "riscv64", Kernel: "6.1.0-test"} },
-			want: artifact.Platform{Arch: "riscv64", Kernel: "6.1.0-test", Libc: detected.Libc, Backend: "fake"}},
+		{name: "the configuration's facts, named after the backend", be: newFakeBackend(core.TierWarm),
+			want: artifact.Platform{Arch: testPlatform.Arch, Kernel: testPlatform.Kernel, Libc: testPlatform.Libc, Backend: "fake"}},
+		{name: "the backend's facts fill what the configuration leaves empty",
+			be:   withPlatform(artifact.Platform{Kernel: "runsc-20260101", Libc: "none"}),
+			mod:  func(c *Config) { c.Platform = artifact.Platform{Arch: "amd64"} },
+			want: artifact.Platform{Arch: "amd64", Kernel: "runsc-20260101", Libc: "none", Backend: "fake"}},
+		{name: "the configuration overrides the backend", be: withPlatform(artifact.Platform{Kernel: "runsc-20260101", Libc: "none"}),
+			want: artifact.Platform{Arch: testPlatform.Arch, Kernel: testPlatform.Kernel, Libc: testPlatform.Libc, Backend: "fake"}},
+		{name: "what neither names is detected", be: withPlatform(artifact.Platform{Libc: "none"}),
+			mod:  func(c *Config) { c.Platform = artifact.Platform{Kernel: "6.1.0-test"} },
+			want: artifact.Platform{Arch: runtime.GOARCH, Kernel: "6.1.0-test", Libc: "none", Backend: "fake"}},
+		{name: "the configuration's backend and templates are not what the home records",
+			be:   newFakeBackend(core.TierWarm),
+			mod:  func(c *Config) { c.Platform.Backend, c.Platform.Templates = "proc", "/elsewhere" },
+			want: artifact.Platform{Arch: testPlatform.Arch, Kernel: testPlatform.Kernel, Libc: testPlatform.Libc, Backend: "fake"}},
 		{name: "relative paths become absolute and extra directories are hidden", be: newFakeBackend(core.TierWarm),
 			mod: func(c *Config) {
 				c.RunDir, c.DeltaDir, c.TemplateCache, c.PrivateDir = "rel/run", "rel/deltas", "rel/cache", "rel/private"
 				c.FiberHide = []string{"/srv/secrets", "relative/skipped"}
 			},
-			want: artifact.Platform{Arch: detected.Arch, Kernel: detected.Kernel, Libc: detected.Libc, Backend: "fake"},
+			want: artifact.Platform{Arch: testPlatform.Arch, Kernel: testPlatform.Kernel, Libc: testPlatform.Libc, Backend: "fake"},
 			hide: []string{"/srv/secrets"}},
 		{name: "a proc home records its template cache path", be: named("proc"), templates: true,
-			want: artifact.Platform{Arch: detected.Arch, Kernel: detected.Kernel, Libc: detected.Libc, Backend: "proc"}},
+			want: artifact.Platform{Arch: testPlatform.Arch, Kernel: testPlatform.Kernel, Libc: testPlatform.Libc, Backend: "proc"}},
 		{name: "a runc home does not, since it binds a copy of its own", be: named("runc"),
-			want: artifact.Platform{Arch: detected.Arch, Kernel: detected.Kernel, Libc: detected.Libc, Backend: "runc"}},
+			want: artifact.Platform{Arch: testPlatform.Arch, Kernel: testPlatform.Kernel, Libc: testPlatform.Libc, Backend: "runc"}},
 		{name: "a gvisor home does not", be: named("gvisor"),
-			want: artifact.Platform{Arch: detected.Arch, Kernel: detected.Kernel, Libc: detected.Libc, Backend: "gvisor"}},
+			want: artifact.Platform{Arch: testPlatform.Arch, Kernel: testPlatform.Kernel, Libc: testPlatform.Libc, Backend: "gvisor"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -415,7 +424,7 @@ func TestPrepareTemplate(t *testing.T) {
 				}
 			}},
 		// The mapped root is the test's own uid, the one owner a chown
-		// without privilege may name. tests/host TestDelegateProcs hands
+		// without privilege may name. tests/integration/host TestDelegateProcs hands
 		// the file to a foreign uid.
 		{name: "an id mapper: the grant's cgroup.procs is handed to the mapped root", be: func() backend.Backend {
 			return &struct {
@@ -797,7 +806,7 @@ func TestClone(t *testing.T) {
 					t.Fatal("a refused fiber was routed")
 				}
 			}},
-		// The kernel's refusal of one leaf more is tests/host TestLeafRefused.
+		// The kernel's refusal of one leaf more is tests/integration/host TestLeafRefused.
 		{name: "a leaf that cannot be made", be: func() backend.Backend { return newFakeBackend(core.TierWarm) },
 			grant: g, prepare: true, spec: core.CloneSpec{Grant: g, Fence: fence},
 			before:  func(t *testing.T, r *Runtime) { inTheWay(t, r.root.Child("g1"), "f-1-1") },
@@ -887,7 +896,7 @@ func TestFiberEnds(t *testing.T) {
 			}
 			waitFor(t, "the leaf to go", func() bool { return !r.root.Child("g1").Child("f-1-1").Exists() })
 		}},
-		// The kernel's own kill at memory.max is tests/host TestLeafCeilings.
+		// The kernel's own kill at memory.max is tests/integration/host TestLeafCeilings.
 		{name: "killed by the kernel for exceeding its budget: reported as oom", run: func(t *testing.T, r *Runtime, be *fakeBackend, h core.FiberHandle) {
 			cgSet(t, r.root.Child("g1").Child("f-1-1"), "memory.events", "low 0\nhigh 0\nmax 1\noom 1\noom_kill 1")
 			be.die(h.ID, "signal:SIGKILL")
@@ -940,7 +949,7 @@ func TestFiberEnds(t *testing.T) {
 				t.Fatal(err)
 			}
 		}},
-		// The kill of a live task in the orphan's leaf is tests/host
+		// The kill of a live task in the orphan's leaf is tests/integration/host
 		// TestOrphanKilledInLeaf. Here its task is gone by the release.
 		{name: "releasing an orphan of a previous fiberd kills its leaf and removes its files", run: func(t *testing.T, r *Runtime, _ *fakeBackend, _ core.FiberHandle) {
 			orphan := core.Fence{GrantUID: "g1", Epoch: 5, Seq: 5}
@@ -1053,7 +1062,7 @@ func TestEnforceW(t *testing.T) {
 
 // TestWBytes checks where a fiber's working set is read from, by backend
 // kind, over a leaf charged a known amount. A live task's count is
-// tests/host TestWBytesOfLiveTask.
+// tests/integration/host TestWBytesOfLiveTask.
 func TestWBytes(t *testing.T) {
 	overhead := func(warm backend.Warm, footprint uint64) backend.Backend {
 		b := newFakeBackend(core.TierWarm)
@@ -1331,7 +1340,7 @@ func TestParentStore(t *testing.T) {
 				}
 			}
 		}},
-		// A move across file systems is tests/host TestParentStoreMovesAcrossFilesystems.
+		// A move across file systems is tests/integration/host TestParentStoreMovesAcrossFilesystems.
 		{name: "a checkpoint that cannot be moved into the store", run: func(t *testing.T, r *Runtime, cb *codecBackend) {
 			src := filepath.Join(t.TempDir(), "zygote-images")
 			if err := writeParentDir(src, "x"); err != nil {
@@ -1549,7 +1558,7 @@ func TestNewReservesFiberd(t *testing.T) {
 // TestDelegateProcs checks that only an id-mapping backend's grant gets
 // cgroup.procs chowned, and only when the mapper and the file allow. The
 // mapped root here is the test's own uid, the one owner a chown without
-// privilege may name. tests/host TestDelegateProcs names a foreign one.
+// privilege may name. tests/integration/host TestDelegateProcs names a foreign one.
 func TestDelegateProcs(t *testing.T) {
 	own := uint32(os.Geteuid())
 	cases := []struct {
@@ -1808,6 +1817,45 @@ func TestDropTemplate(t *testing.T) {
 			if err != nil || h.ID != "g1/1/2" || be.warmed() != wantUnwarmed+1 {
 				t.Fatalf("clone after the drop = %+v %v, warmed %d times, want a fiber under a fresh warm", h, err, be.warmed())
 			}
+		})
+	}
+}
+
+// TestCloseStopsEnforceW checks that the W executioner, which New starts
+// for a backend whose fibers carry an overhead, report W or hold a
+// device, ends with the runtime. Before the stop channel it slept in a
+// loop for ever, so every closed runtime left a goroutine behind.
+func TestCloseStopsEnforceW(t *testing.T) {
+	cases := []struct {
+		name string
+		be   func() backend.Backend
+	}{
+		{name: "a backend with a fixed overhead", be: func() backend.Backend {
+			return &struct {
+				*fakeBackend
+				overheadMixin
+			}{newFakeBackend(core.TierWarm), overheadMixin{}}
+		}},
+		{name: "a backend that reports W", be: func() backend.Backend {
+			return &struct {
+				*fakeBackend
+				*wReporterMixin
+			}{newFakeBackend(core.TierWarm), &wReporterMixin{}}
+		}},
+		{name: "a backend that reports device use", be: func() backend.Backend {
+			return &struct {
+				*fakeBackend
+				*deviceMixin
+			}{newFakeBackend(core.TierWarm), &deviceMixin{}}
+		}},
+		{name: "a backend without an executioner", be: func() backend.Backend { return newFakeBackend(core.TierWarm) }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newTestRuntime(t, tc.be(), nil)
+			r.Close()
+			r.Close() // a second Close is harmless
+			goleak.VerifyNone(t)
 		})
 	}
 }

@@ -38,7 +38,7 @@ const (
 // only with SysPtrace, and raises its own open-file limit (SysResource).
 var Proc = []int{SetPCAP, NetAdmin, SysChroot, SysPtrace, SysAdmin, SysResource, SysTime}
 
-// Runc is what the runc runtime needs, measured by running tests/runc
+// Runc is what the runc runtime needs, measured by running tests/integration/runc
 // and the conformance suite under setpriv with each candidate left out.
 // The grant's container runs in a user namespace, so its root is an
 // unprivileged host uid and fiberd crosses that line in a few places.

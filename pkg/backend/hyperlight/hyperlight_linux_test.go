@@ -20,9 +20,10 @@ import (
 )
 
 // homePlatform is what pkg/runtime/host records at open. It is the host's
-// own facts, with the backend's non-empty ones in their place.
+// own facts, with the backend's non-empty ones in their place. The host's
+// are fixed here, since detecting them runs ldd.
 func homePlatform(be backend.Backend) artifact.Platform {
-	host := artifact.Host()
+	host := artifact.Platform{Arch: "amd64", Kernel: "6.1.0-test", Libc: "(gnu libc) 2.36"}
 	bp := be.(backend.Platformer).Platform()
 	for dst, v := range map[*string]string{&host.Arch: bp.Arch, &host.Kernel: bp.Kernel, &host.Libc: bp.Libc} {
 		if v != "" {
@@ -155,7 +156,7 @@ func TestWarmHoldsHelperToItsFacts(t *testing.T) {
 
 // TestWarm checks what the helper is started with, and every way it fails
 // to come up. What only a real process shows, the cgroup it is born in
-// and that it is reaped, is tests/hyperlight TestHelperStartsInCgroup.
+// and that it is reaped, is tests/integration/hyperlight TestHelperStartsInCgroup.
 func TestWarm(t *testing.T) {
 	cases := []struct {
 		name    string

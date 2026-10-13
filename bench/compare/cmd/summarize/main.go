@@ -32,22 +32,33 @@ var phases = map[string]string{
 }
 
 func main() {
-	md := flag.Bool("markdown", false, "print a Markdown table")
-	flag.Parse()
+	if err := run(os.Args[1:], os.Stdout, os.Stderr); err != nil {
+		_, _ = fmt.Fprintln(os.Stderr, "summarize:", err)
+		os.Exit(1)
+	}
+}
+
+// run prints the tables for the files named in args, so a test reads
+// what a phase script prints without running the binary.
+func run(args []string, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("summarize", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	md := fs.Bool("markdown", false, "print a Markdown table")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
 	// Group the files by directory, in the order they came.
 	var dirs []string
 	recs := map[string][]compare.Record{}
-	for _, path := range flag.Args() {
+	for _, path := range fs.Args() {
 		f, err := os.Open(path)
 		if err != nil {
-			_, _ = fmt.Fprintln(os.Stderr, "summarize:", err)
-			os.Exit(1)
+			return err
 		}
 		rs, err := summary.Read(f)
 		_ = f.Close()
 		if err != nil {
-			_, _ = fmt.Fprintf(os.Stderr, "summarize: %s: %v\n", path, err)
-			os.Exit(1)
+			return fmt.Errorf("%s: %w", path, err)
 		}
 		dir := filepath.Dir(path)
 		if _, ok := recs[dir]; !ok {
@@ -61,17 +72,18 @@ func main() {
 			name = dir
 		}
 		if i > 0 {
-			fmt.Println()
+			_, _ = fmt.Fprintln(stdout)
 		}
 		rows, sides := summary.Table(recs[dir])
 		if *md {
-			fmt.Printf("### %s\n\n", name)
-			markdown(os.Stdout, rows, sides)
+			_, _ = fmt.Fprintf(stdout, "### %s\n\n", name)
+			markdown(stdout, rows, sides)
 			continue
 		}
-		fmt.Printf("== %s\n", name)
-		summary.Print(os.Stdout, rows, sides)
+		_, _ = fmt.Fprintf(stdout, "== %s\n", name)
+		summary.Print(stdout, rows, sides)
 	}
+	return nil
 }
 
 func markdown(w io.Writer, rows []summary.Row, sides []summary.Side) {
