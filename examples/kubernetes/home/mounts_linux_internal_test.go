@@ -3,8 +3,10 @@
 package home
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -13,132 +15,155 @@ import (
 	"github.com/helayoty/fiberd/examples/kubernetes/kube/kubetest"
 )
 
-// mountTmpfs mounts a fresh tmpfs at dir until the test ends.
-func mountTmpfs(t *testing.T, dir string) {
-	t.Helper()
-	if err := syscall.Mount("tmpfs", dir, "tmpfs", 0, ""); err != nil {
-		t.Skipf("cannot mount here (needs root and CAP_SYS_ADMIN): %v", err)
-	}
-	t.Cleanup(func() { _ = syscall.Unmount(dir, syscall.MNT_DETACH) })
+// fakeMounter is a mount table in memory. Paths in ro answer EROFS until
+// a remount of them succeeds. Every mount is recorded as "bind <path>" or
+// "remount <path>", and fail names the ones that are refused.
+type fakeMounter struct {
+	ro    map[string]bool
+	fail  map[string]error
+	calls []string
 }
 
-// readOnlyMount makes the mount at dir read-only for this mount only, the
-// way a runtime mounts /proc/sys and the cgroupfs into a Pod.
-func readOnlyMount(t *testing.T, dir string) {
-	t.Helper()
-	if err := syscall.Mount("", dir, "", syscall.MS_REMOUNT|syscall.MS_BIND|syscall.MS_RDONLY, ""); err != nil {
-		t.Fatal(err)
+func (m *fakeMounter) Access(path string, _ uint32) error {
+	if m.ro[path] {
+		return syscall.EROFS
 	}
+	return nil
+}
+
+func (m *fakeMounter) Mount(_, target, _ string, flags uintptr, _ string) error {
+	key := "bind " + target
+	if flags&syscall.MS_REMOUNT != 0 {
+		key = "remount " + target
+	}
+	m.calls = append(m.calls, key)
+	if err := m.fail[key]; err != nil {
+		return err
+	}
+	if flags&syscall.MS_REMOUNT != 0 {
+		m.ro[target] = false
+	}
+	return nil
+}
+
+// useMounter puts m behind the package for the test's duration.
+func useMounter(t *testing.T, m *fakeMounter) {
+	t.Helper()
+	old := mounts
+	mounts = m
+	t.Cleanup(func() { mounts = old })
 }
 
 // TestWritableMounts checks that fiberd makes its read-only cgroupfs
-// and criu's sysctls writable, and what it does when it cannot.
+// and criu's sysctls writable, and what it does when it cannot. The
+// cgroupfs is /cg and the sysctls are /a and /b.
 func TestWritableMounts(t *testing.T) {
 	cases := []struct {
-		name string
-		// prep returns the cgroupfs to pass and the sysctl files to use.
-		prep     func(t *testing.T, dir string) (cgroupfs string, sysctls []string)
+		name     string
+		ro       []string
+		fail     map[string]error
+		calls    []string
 		wantErr  string
 		writable []string // paths that must be writable afterwards
+		readOnly []string // paths that must still be read-only
 	}{
-		{name: "a writable cgroupfs is left as it is",
-			prep:     func(_ *testing.T, dir string) (string, []string) { return dir, nil },
-			writable: []string{""}},
+		{name: "everything writable is left as it is",
+			writable: []string{"/cg", "/a", "/b"}},
 		{name: "a read-only cgroupfs is remounted read-write",
-			prep: func(t *testing.T, dir string) (string, []string) {
-				mountTmpfs(t, dir)
-				readOnlyMount(t, dir)
-				return dir, nil
-			},
-			writable: []string{""}},
-		{name: "a read-only cgroupfs that is not a mount point cannot be remounted, which is an error",
-			prep: func(t *testing.T, dir string) (string, []string) {
-				mountTmpfs(t, dir)
-				if err := os.Mkdir(filepath.Join(dir, "sub"), 0o755); err != nil {
-					t.Fatal(err)
-				}
-				readOnlyMount(t, dir)
-				return filepath.Join(dir, "sub"), nil
-			},
-			wantErr: "remount " + "%s/sub read-write"},
+			ro: []string{"/cg"}, calls: []string{"remount /cg"}, writable: []string{"/cg"}},
+		{name: "a cgroupfs that cannot be remounted is an error",
+			ro: []string{"/cg"}, fail: map[string]error{"remount /cg": syscall.EPERM}, calls: []string{"remount /cg"},
+			wantErr: "remount /cg read-write", readOnly: []string{"/cg"}},
 		{name: "a read-only sysctl is bound over itself read-write; a writable one is left",
-			prep: func(t *testing.T, dir string) (string, []string) {
-				mountTmpfs(t, dir)
-				for _, f := range []string{"ns_last_pid", "other"} {
-					if err := os.WriteFile(filepath.Join(dir, f), []byte("1"), 0o644); err != nil {
-						t.Fatal(err)
-					}
-				}
-				ro := filepath.Join(dir, "ro")
-				if err := os.Mkdir(ro, 0o755); err != nil {
-					t.Fatal(err)
-				}
-				if err := syscall.Mount(dir, ro, "", syscall.MS_BIND, ""); err != nil {
-					t.Fatal(err)
-				}
-				t.Cleanup(func() { _ = syscall.Unmount(ro, syscall.MNT_DETACH) })
-				readOnlyMount(t, ro)
-				t.Cleanup(func() { _ = syscall.Unmount(filepath.Join(ro, "ns_last_pid"), syscall.MNT_DETACH) })
-				return t.TempDir(), []string{filepath.Join(ro, "ns_last_pid"), filepath.Join(dir, "other")}
-			},
-			writable: []string{"ro/ns_last_pid", "other"}},
+			ro: []string{"/a"}, calls: []string{"bind /a", "remount /a"}, writable: []string{"/a", "/b"}},
+		{name: "a sysctl that cannot be bound is a warning, and the next one is still made writable",
+			ro: []string{"/a", "/b"}, fail: map[string]error{"bind /a": syscall.EPERM},
+			calls: []string{"bind /a", "bind /b", "remount /b"}, readOnly: []string{"/a"}, writable: []string{"/b"}},
+		{name: "a sysctl that cannot be remounted is a warning",
+			ro: []string{"/a"}, fail: map[string]error{"remount /a": syscall.EPERM},
+			calls: []string{"bind /a", "remount /a"}, readOnly: []string{"/a"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			dir := t.TempDir()
-			cgroupfs, sysctls := tc.prep(t, dir)
-			old := criuSysctls
-			criuSysctls = sysctls
-			t.Cleanup(func() { criuSysctls = old })
-			err := writableMounts(cgroupfs)
-			if tc.wantErr != "" {
-				want := strings.ReplaceAll(tc.wantErr, "%s", dir)
-				if err == nil || !strings.Contains(err.Error(), want) {
-					t.Fatalf("writableMounts = %v, want %q", err, want)
-				}
-				return
+			m := &fakeMounter{ro: map[string]bool{}, fail: tc.fail}
+			for _, p := range tc.ro {
+				m.ro[p] = true
 			}
-			if err != nil {
+			useMounter(t, m)
+			old := criuSysctls
+			criuSysctls = []string{"/a", "/b"}
+			t.Cleanup(func() { criuSysctls = old })
+			err := writableMounts("/cg")
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) || !errors.Is(err, syscall.EPERM) {
+					t.Fatalf("writableMounts = %v, want %q wrapping EPERM", err, tc.wantErr)
+				}
+			} else if err != nil {
 				t.Fatal(err)
 			}
+			if !slices.Equal(m.calls, tc.calls) {
+				t.Fatalf("mounts = %q, want %q", m.calls, tc.calls)
+			}
 			for _, p := range tc.writable {
-				path := cgroupfs
-				if p != "" {
-					path = filepath.Join(dir, p)
+				if readOnly(p) {
+					t.Fatalf("%s is still read-only", p)
 				}
-				if readOnly(path) {
-					t.Fatalf("%s is still read-only", path)
+			}
+			for _, p := range tc.readOnly {
+				if !readOnly(p) {
+					t.Fatalf("%s became writable although its mount failed", p)
 				}
 			}
 		})
 	}
 }
 
-// TestNewFailsOnAReadOnlyCgroup checks that New refuses to start when the
-// cgroupfs stays read-only, since nothing could be bounded under it.
+// TestNewFailsOnAReadOnlyCgroup checks that New makes a read-only
+// cgroupfs writable before it delegates under it, and refuses to start
+// when it cannot, since nothing could be bounded there.
 func TestNewFailsOnAReadOnlyCgroup(t *testing.T) {
 	cases := []struct {
 		name    string
+		fail    map[string]error
 		wantErr string
 	}{
-		{name: "a cgroupfs that cannot be made writable", wantErr: "k8s: remount "},
+		{name: "a read-only cgroupfs is made writable first"},
+		{name: "a cgroupfs that cannot be made writable", fail: map[string]error{"remount": syscall.EPERM}, wantErr: "k8s: remount "},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
-			mountTmpfs(t, dir)
-			sub := filepath.Join(dir, "cgroup")
-			if err := os.Mkdir(sub, 0o755); err != nil {
+			cg := filepath.Join(dir, "cgroup")
+			if err := os.Mkdir(cg, 0o755); err != nil {
 				t.Fatal(err)
 			}
-			readOnlyMount(t, dir)
+			if err := os.WriteFile(filepath.Join(cg, "cgroup.subtree_control"), []byte("memory pids\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			m := &fakeMounter{ro: map[string]bool{cg: true}, fail: map[string]error{}}
+			for k, err := range tc.fail {
+				m.fail[k+" "+cg] = err
+			}
+			useMounter(t, m)
+			old := criuSysctls
+			criuSysctls = nil
+			t.Cleanup(func() { criuSysctls = old })
 			srv := kubetest.New()
 			t.Cleanup(srv.Close)
 			srv.Put("/api/v1/namespaces/ns/pods/p", map[string]any{})
-			_, err := New(Config{Client: &kube.Client{Base: srv.URL()}, Namespace: "ns", PodName: "p",
-				CgroupRoot: sub, TokenFile: filepath.Join(dir, "no-token")})
-			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-				t.Fatalf("New = %v, want %q", err, tc.wantErr)
+			h, err := New(Config{Client: &kube.Client{Base: srv.URL()}, Namespace: "ns", PodName: "p",
+				CgroupRoot: cg, TokenFile: filepath.Join(dir, "no-token")})
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("New = %v, want %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := h.CgroupRoot(); got != filepath.Join(cg, "grants") || !slices.Equal(m.calls, []string{"remount " + cg}) {
+				t.Fatalf("cgroup root = %q after mounts %q, want the grants subtree after one remount", got, m.calls)
 			}
 		})
 	}

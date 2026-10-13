@@ -12,13 +12,10 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -28,341 +25,50 @@ import (
 	"github.com/helayoty/fiberd/pkg/sys/criu"
 )
 
-// criuKnobs script the fake criu. They set what `check` and `dump` exit
-// with, and how `restore` behaves. "yes" writes the pid file and waits for
-// the release file, "no" fails at once, and "hang" never writes one.
-type criuKnobs struct {
-	checkExit   int
-	dumpExit    int
-	restore     string
-	restoreExit int
-}
-
-// fakeCRIU writes a criu that records every invocation to <dir>/criu.log
-// and behaves as the knobs say. The restore it starts stays alive, as the
-// restored tree's parent would, until <dir>/release exists.
-func fakeCRIU(t *testing.T, k criuKnobs) (bin, dir string) {
-	t.Helper()
-	dir = t.TempDir()
-	if k.restore == "" {
-		k.restore = "yes"
-	}
-	script := fmt.Sprintf(`#!/bin/sh
-echo "$@" >> %[1]q
-case "$1" in
-check) exit %[2]d ;;
-dump) exit %[3]d ;;
-restore)
-  pidfile=""; prev=""
-  for a in "$@"; do if [ "$prev" = "--pidfile" ]; then pidfile=$a; fi; prev=$a; done
-  case %[4]q in
-  no) exit 1 ;;
-  hang) while :; do sleep 0.01; done ;;
-  esac
-  echo $$ > "$pidfile"
-  while [ ! -e %[5]q ]; do sleep 0.01; done
-  exit %[6]d ;;
-esac
-exit 0
-`, filepath.Join(dir, "criu.log"), k.checkExit, k.dumpExit, k.restore, filepath.Join(dir, "release"), k.restoreExit)
-	bin = filepath.Join(dir, "criu")
-	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	return bin, dir
-}
-
-// criuCalls is every recorded criu invocation, one per line.
-func criuCalls(t *testing.T, dir string) []string {
-	t.Helper()
-	b, err := os.ReadFile(filepath.Join(dir, "criu.log"))
-	if err != nil {
-		return nil
-	}
-	return strings.Split(strings.TrimSpace(string(b)), "\n")
-}
-
-// release lets the fake criu's restore end.
-func release(t *testing.T, dir string) {
-	t.Helper()
-	if err := os.WriteFile(filepath.Join(dir, "release"), nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
-}
-
-// waitFor polls cond until it holds or the deadline passes.
-func waitFor(t *testing.T, what string, cond func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for !cond() {
-		if time.Now().After(deadline) {
-			t.Fatalf("timed out waiting for %s", what)
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-}
-
-// recvLines is what the fake zygote in workDir has read so far.
-func recvLines(workDir string) []string {
-	b, err := os.ReadFile(filepath.Join(workDir, recvLog))
-	if err != nil {
-		return nil
-	}
-	return strings.Split(strings.TrimSuffix(string(b), "\n"), "\n")
-}
-
-// waitRecv waits until the fake zygote has read a line containing want
-// and returns everything it read.
-func waitRecv(t *testing.T, workDir, want string) []string {
-	t.Helper()
-	var lines []string
-	waitFor(t, "the zygote to read "+want, func() bool {
-		lines = recvLines(workDir)
-		for _, l := range lines {
-			if strings.Contains(l, want) {
-				return true
-			}
-		}
-		return false
-	})
-	return lines
-}
-
-// waitExit takes the next exit the backend reports.
-func waitExit(t *testing.T, b *Backend) backend.Exit {
-	t.Helper()
-	select {
-	case e := <-b.Exits():
-		return e
-	case <-time.After(5 * time.Second):
-		t.Fatal("no exit reported")
-		return backend.Exit{}
-	}
-}
-
-// noExit asserts nothing is reported within a short while.
-func noExit(t *testing.T, b *Backend) {
-	t.Helper()
-	select {
-	case e := <-b.Exits():
-		t.Fatalf("unexpected exit %+v", e)
-	case <-time.After(100 * time.Millisecond):
-	}
-}
-
-// fakeArgv is the test binary as a scripted zygote.
-func fakeArgv(t *testing.T, script string, pid int) []string {
-	t.Helper()
-	exe, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	return []string{exe, fakeZygoteArg, script, strconv.Itoa(pid)}
-}
-
-// hold starts the test binary doing nothing, with the clone flags and
-// extra files given, and ends it when the test does.
-func hold(t *testing.T, flags uintptr, extra ...*os.File) *exec.Cmd {
-	t.Helper()
-	exe, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	cmd := exec.Command(exe, holdArg)
-	cmd.ExtraFiles = extra
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if flags != 0 {
-		cmd.SysProcAttr = &syscall.SysProcAttr{Cloneflags: flags}
-	}
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		_ = stdin.Close()
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-	})
-	return cmd
-}
-
-func requireRoot(t *testing.T) {
-	t.Helper()
-	if os.Geteuid() != 0 {
-		t.Skip("needs root (namespaces, mounts)")
-	}
-}
-
-// cgroupLeaf makes a cgroup under the delegated root and opens it. It
-// skips where there is none. The cleanup waits for the leaf to empty,
-// then removes it.
-func cgroupLeaf(t *testing.T) int {
-	t.Helper()
-	root := os.Getenv("FIBERD_CGROUP_ROOT")
-	if root == "" {
-		root = "/sys/fs/cgroup/fiberd"
-	}
-	if f, err := os.OpenFile(filepath.Join(root, "cgroup.subtree_control"), os.O_WRONLY, 0); err != nil {
-		t.Skipf("no delegated cgroup at %s", root)
-	} else {
-		_ = f.Close()
-	}
-	dir := filepath.Join(root, fmt.Sprintf("proc-unit-%d-%d", os.Getpid(), time.Now().UnixNano()))
-	if err := os.Mkdir(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	fd, err := syscall.Open(dir, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_CLOEXEC, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		_ = syscall.Close(fd)
-		// A killed process leaves the leaf populated until its last
-		// thread is gone, a moment after cgroup.procs stops listing it.
-		waitFor(t, "the emptied leaf to be removable", func() bool { return os.Remove(dir) == nil })
-	})
-	return fd
-}
-
-// fakeLauncher starts the scripted zygote the way a launcher would and
-// records what the backend tells it.
-type fakeLauncher struct {
-	commandErr, channelErr, pidErr, restoreExtraErr, restoredErr error
-	ownPair                                                      bool // Channel moves the conversation onto a pair of its own
-	endpointRoot                                                 string
-
-	mu       sync.Mutex
-	calls    []string
-	own      *os.File // the host's end of the launcher's own pair
-	ownChild *os.File // the zygote's, closed here once it has started
-}
-
-func (l *fakeLauncher) record(s string) {
-	l.mu.Lock()
-	l.calls = append(l.calls, s)
-	l.mu.Unlock()
-}
-
-func (l *fakeLauncher) recorded() []string {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return append([]string(nil), l.calls...)
-}
-
-func (l *fakeLauncher) Name() string { return "fake" }
-
-func (l *fakeLauncher) Command(spec backend.WarmSpec, argv []string, ctl, logf *os.File) (*exec.Cmd, error) {
-	l.record("command")
-	if l.commandErr != nil {
-		return nil, l.commandErr
-	}
-	cmd := exec.Command(argv[0], argv[1:]...)
-	cmd.Dir = spec.WorkDir
-	cmd.Stdout, cmd.Stderr = logf, logf
-	cmd.ExtraFiles = []*os.File{ctl}
-	if l.ownPair {
-		fds, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_STREAM|syscall.SOCK_CLOEXEC, 0)
-		if err != nil {
-			return nil, err
-		}
-		l.own = os.NewFile(uintptr(fds[0]), "own-ctl")
-		l.ownChild = os.NewFile(uintptr(fds[1]), "own-ctl-child")
-		cmd.ExtraFiles = []*os.File{l.ownChild}
-	}
-	return cmd, nil
-}
-
-func (l *fakeLauncher) Channel(_ context.Context, _ backend.WarmSpec, _ *exec.Cmd, boot *net.UnixConn) (*net.UnixConn, error) {
-	l.record("channel")
-	if l.channelErr != nil {
-		return nil, l.channelErr
-	}
-	if !l.ownPair {
-		return boot, nil
-	}
-	_ = l.ownChild.Close() // the started zygote holds its own copy
-	c, err := net.FileConn(l.own)
-	_ = l.own.Close()
-	if err != nil {
-		return nil, err
-	}
-	return c.(*net.UnixConn), nil
-}
-
-func (l *fakeLauncher) Socketpair(_ backend.WarmSpec, pid int, typ int) ([2]int, error) {
-	l.record("socketpair:" + strconv.Itoa(pid))
-	return syscall.Socketpair(syscall.AF_UNIX, typ|syscall.SOCK_CLOEXEC, 0)
-}
-
-func (l *fakeLauncher) PID(_ context.Context, _ backend.WarmSpec, cmd *exec.Cmd) (int, error) {
-	l.record("pid")
-	if l.pidErr != nil {
-		return 0, l.pidErr
-	}
-	return cmd.Process.Pid, nil
-}
-
-func (l *fakeLauncher) Restored(_ backend.WarmSpec, pid int) error {
-	l.record("restored:" + strconv.Itoa(pid))
-	return l.restoredErr
-}
-func (l *fakeLauncher) RestoredGone(backend.WarmSpec) { l.record("restoredGone") }
-func (l *fakeLauncher) Release(backend.WarmSpec)      { l.record("release") }
-func (l *fakeLauncher) Endpoint(_ backend.WarmSpec, p string) string {
-	return filepath.Join(l.endpointRoot, filepath.Base(p))
-}
-func (l *fakeLauncher) DumpExtra(backend.WarmSpec, string) ([]string, error) {
-	return []string{"--dump-extra"}, nil
-}
-func (l *fakeLauncher) RestoreExtra(_ backend.WarmSpec, dir string) ([]string, error) {
-	l.record("restoreExtra:" + dir)
-	if l.restoreExtraErr != nil {
-		return nil, l.restoreExtraErr
-	}
-	return []string{"--restore-extra"}, nil
-}
-
 // TestBackendFacts checks what the backend says about itself, with and without
 // criu and with a launcher naming it.
 func TestBackendFacts(t *testing.T) {
 	cases := []struct {
-		name      string
-		checkExit int
-		launcher  Launcher
-		wantName  string
-		wantTier  core.Tier
+		name     string
+		checkErr error
+		launcher Launcher
+		wantName string
+		wantTier core.Tier
 	}{
 		{name: "criu passes", wantName: "proc", wantTier: core.TierCheckpoint},
-		{name: "criu check fails", checkExit: 1, wantName: "proc", wantTier: core.TierWarm},
+		{name: "criu check fails", checkErr: errors.New("exit status 1"), wantName: "proc", wantTier: core.TierWarm},
 		{name: "a launcher names the backend", launcher: &fakeLauncher{}, wantName: "fake", wantTier: core.TierCheckpoint},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			bin, _ := fakeCRIU(t, criuKnobs{checkExit: tc.checkExit})
-			b := New(Options{CRIU: bin, Launcher: tc.launcher, RootBind: filepath.Join(t.TempDir(), "root")})
-			t.Cleanup(b.Close)
+			f := newFakes(t)
+			f.criu.checkErr = tc.checkErr
+			b := f.open(t, Options{Launcher: tc.launcher})
 			if b.Name() != tc.wantName || b.Tier() != tc.wantTier {
 				t.Fatalf("Name=%s Tier=%s, want %s %s", b.Name(), b.Tier(), tc.wantName, tc.wantTier)
 			}
-			if got := b.(backend.Handoffer).Handoff(); !got {
+			if !b.Handoff() {
 				t.Fatal("Handoff() = false, want true")
 			}
-			if got := strings.Join(b.(*Backend).EndpointSchemes(), ","); got != "unix,tcp" {
+			if got := strings.Join(b.EndpointSchemes(), ","); got != "unix,tcp" {
 				t.Fatalf("EndpointSchemes = %s, want unix,tcp", got)
+			}
+			if got := f.criu.last(t); got != "check --no-default-config" {
+				t.Fatalf("criu was asked %q, want check", got)
 			}
 		})
 	}
 }
 
 // TestWarmRefusals checks every way Warm fails before the zygote serves.
-// Nothing is left registered, and the launcher is released.
+// Nothing is left registered, the launcher is released, and a zygote that
+// was started is killed and reaped.
 func TestWarmRefusals(t *testing.T) {
 	cases := []struct {
 		name     string
 		script   string
 		argv     []string // overrides the scripted zygote
+		startErr error
 		workDir  func(t *testing.T) string
 		hide     []string
 		timeout  time.Duration
@@ -385,7 +91,7 @@ func TestWarmRefusals(t *testing.T) {
 			}
 			return d
 		}, wantText: "is a directory"},
-		{name: "command does not exist", argv: []string{"/nonexistent/zygote"}, wantText: "start zygote"},
+		{name: "command does not start", script: "never", startErr: os.ErrNotExist, wantErr: os.ErrNotExist, wantText: "start zygote"},
 		{name: "greets with something other than READY", script: "notready", wantErr: ErrZygote, wantText: `expected READY, got "HELLO"`},
 		// The zygote could not build the mount namespace its fibers copy
 		// and said so instead of READY. The old backend only knew READY
@@ -394,7 +100,7 @@ func TestWarmRefusals(t *testing.T) {
 		{name: "could not prepare its mount namespace", script: "unprepared", wantErr: ErrZygote,
 			wantText: "could not prepare the mount namespace its fibers need: the zygote could not cover a HIDE path (/var/lib/fiberd/templates: Permission denied)"},
 		{name: "exits before READY", script: "quit", wantText: "did not become ready"},
-		{name: "never says READY", script: "silent", timeout: 100 * time.Millisecond, wantErr: context.DeadlineExceeded},
+		{name: "never says READY", script: "silent", timeout: 50 * time.Millisecond, wantErr: context.DeadlineExceeded},
 		{name: "a relative hide path", script: "never", hide: []string{"relative/dir"}, wantText: "cannot hide"},
 		{name: "a run directory with whitespace", script: "never", workDir: func(t *testing.T) string {
 			return filepath.Join(t.TempDir(), "with space", "g")
@@ -406,16 +112,16 @@ func TestWarmRefusals(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			bin, _ := fakeCRIU(t, criuKnobs{})
+			f := newFakes(t)
+			f.spawn.startErr = tc.startErr
 			var launcher Launcher
 			if tc.launcher != nil {
 				launcher = tc.launcher
 			}
-			b := NewBackend(Options{CRIU: bin, Launcher: launcher, RootBind: filepath.Join(t.TempDir(), "root")})
-			t.Cleanup(b.Close)
+			b := f.open(t, Options{Launcher: launcher})
 			argv := tc.argv
 			if argv == nil {
-				argv = fakeArgv(t, tc.script, impossiblePID(t))
+				argv = fakeArgv(tc.script, impossiblePID(t))
 			}
 			workDir := t.TempDir()
 			if tc.workDir != nil {
@@ -451,40 +157,13 @@ func TestWarmRefusals(t *testing.T) {
 			}
 			// The zygote it killed is reaped too, not left a zombie of
 			// this process for every warm that failed.
-			waitFor(t, "no zombie children", func() bool { return len(zombieChildren(t)) == 0 })
+			for _, z := range f.spawn.started() {
+				if !z.killed.Load() || !z.waited.Load() {
+					t.Fatalf("zygote %d: killed %v waited %v, want both", z.pid, z.killed.Load(), z.waited.Load())
+				}
+			}
 		})
 	}
-}
-
-// zombieChildren lists this process's children that have exited and
-// not been waited for.
-func zombieChildren(t *testing.T) []int {
-	t.Helper()
-	ents, err := os.ReadDir("/proc")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var zombies []int
-	for _, e := range ents {
-		pid, err := strconv.Atoi(e.Name())
-		if err != nil {
-			continue
-		}
-		stat, err := os.ReadFile(filepath.Join("/proc", e.Name(), "stat"))
-		if err != nil {
-			continue
-		}
-		// "<pid> (<comm>) <state> <ppid> ...", and comm may hold anything.
-		rest := string(stat)
-		if i := strings.LastIndex(rest, ")"); i >= 0 {
-			rest = rest[i+1:]
-		}
-		f := strings.Fields(rest)
-		if len(f) >= 2 && f[0] == "Z" && f[1] == strconv.Itoa(os.Getpid()) {
-			zombies = append(zombies, pid)
-		}
-	}
-	return zombies
 }
 
 // TestWarmTellsTheZygoteItsPaths checks that a zygote the backend starts is
@@ -508,31 +187,36 @@ func TestWarmTellsTheZygoteItsPaths(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			bin, _ := fakeCRIU(t, criuKnobs{})
+			f := newFakes(t)
 			rootBind := filepath.Join(t.TempDir(), "root")
 			var launcher Launcher
 			if tc.launcher != nil {
+				tc.launcher.pid = impossiblePID(t) + 7
 				launcher = tc.launcher
 			}
-			b := NewBackend(Options{CRIU: bin, Launcher: launcher, RootBind: rootBind})
-			t.Cleanup(b.Close)
+			b := f.open(t, Options{Launcher: launcher, RootBind: rootBind})
 			workDir := filepath.Join(t.TempDir(), "g")
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			w, err := b.Warm(ctx, backend.WarmSpec{GrantUID: "g", Template: backend.Template{Argv: fakeArgv(t, "never", impossiblePID(t))}, CgroupFD: -1, ProbeCgroupFD: -1, WorkDir: workDir, Hide: tc.hide, Devices: tc.devices})
+			w, err := b.Warm(ctx, backend.WarmSpec{GrantUID: "g", Template: backend.Template{Argv: fakeArgv("never", impossiblePID(t))}, CgroupFD: -1, ProbeCgroupFD: -1, WorkDir: workDir, Hide: tc.hide, Devices: tc.devices})
 			if err != nil {
 				t.Fatalf("Warm: %v", err)
 			}
+			zy := f.spawn.started()[0]
 			b.mu.Lock()
 			z := b.zygotes[w.ID]
 			b.mu.Unlock()
-			if z == nil || w.ID != "g" || w.PID != z.cmd.Process.Pid || z.pid != w.PID {
-				t.Fatalf("Warm = %+v, zygote %+v, want id g and the process pid", w, z)
+			wantPID := zy.pid
+			if tc.launcher != nil {
+				wantPID = tc.launcher.pid
+			}
+			if z == nil || w.ID != "g" || w.PID != wantPID || z.pid != w.PID {
+				t.Fatalf("Warm = %+v, zygote %+v, want id g and pid %d", w, z, wantPID)
 			}
 			if tc.launcher != nil {
 				// No paths, since its fibers share the container's
 				// namespace, and no CLONE has been sent.
-				if got := waitRecv(t, workDir, "PREPARE"); strings.Join(got, "\n") != "PREPARE none" {
+				if got := zy.waitRecv(t, "PREPARE"); strings.Join(got, "\n") != "PREPARE none" {
 					t.Fatalf("a launcher's zygote read %q, want PREPARE none alone", got)
 				}
 				if calls := tc.launcher.recorded(); strings.Join(calls, ",") != "command,channel,pid" {
@@ -548,7 +232,7 @@ func TestWarmTellsTheZygoteItsPaths(t *testing.T) {
 				want = append(want, "HIDE "+filepath.Clean(h))
 			}
 			want = append(want, "DROP "+rootBind, "RUNDIR "+filepath.Dir(workDir)+" "+workDir, "PREPARE mntns")
-			got := waitRecv(t, workDir, "PREPARE")
+			got := zy.waitRecv(t, "PREPARE")
 			if strings.Join(got, "\n") != strings.Join(want, "\n") {
 				t.Fatalf("the zygote read\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 			}
@@ -556,49 +240,63 @@ func TestWarmTellsTheZygoteItsPaths(t *testing.T) {
 	}
 }
 
-// TestWarmInCgroup checks that the zygote is born in the cgroup the host
-// hands over.
-func TestWarmInCgroup(t *testing.T) {
+// TestWarmCommand checks the command the zygote is started with: its run
+// directory as cwd, a fixed environment with the mount namespace switch,
+// a session of its own, stdio on the zygote log and never this process's,
+// and the cgroup the host hands over.
+func TestWarmCommand(t *testing.T) {
 	cases := []struct {
-		name string
-	}{{name: "zygote lands in the leaf"}}
+		name    string
+		cgroup  bool
+		devices []string
+	}{
+		{name: "no cgroup"},
+		{name: "born in the host's cgroup", cgroup: true},
+		{name: "the device channel in the environment", devices: []string{"/dev/nvidia0"}},
+	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			fd := cgroupLeaf(t)
-			bin, _ := fakeCRIU(t, criuKnobs{})
-			b := NewBackend(Options{CRIU: bin, RootBind: filepath.Join(t.TempDir(), "root")})
-			t.Cleanup(b.Close)
+			f := newFakes(t)
+			b := f.open(t, Options{})
+			workDir := filepath.Join(t.TempDir(), "g")
+			cgroupFD := -1
+			if tc.cgroup {
+				cgroupFD = fakeCgroup(t)
+			}
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			w, err := b.Warm(ctx, backend.WarmSpec{GrantUID: "g", Template: backend.Template{Argv: fakeArgv(t, "never", impossiblePID(t))}, CgroupFD: fd, ProbeCgroupFD: -1, WorkDir: t.TempDir()})
-			if err != nil {
+			if _, err := b.Warm(ctx, backend.WarmSpec{GrantUID: "g", Template: backend.Template{Argv: fakeArgv("never", impossiblePID(t))}, CgroupFD: cgroupFD, ProbeCgroupFD: -1, WorkDir: workDir, Devices: tc.devices}); err != nil {
 				t.Fatalf("Warm: %v", err)
 			}
-			procs, err := os.ReadFile(fmt.Sprintf("/proc/self/fd/%d/cgroup.procs", fd))
-			if err != nil {
-				t.Fatal(err)
+			cmd := f.spawn.started()[0].cmd
+			if cmd.Dir != workDir {
+				t.Errorf("cwd = %q, want the run directory %q", cmd.Dir, workDir)
 			}
-			if strings.TrimSpace(string(procs)) != strconv.Itoa(w.PID) {
-				t.Fatalf("cgroup.procs = %q, want just the zygote %d", procs, w.PID)
+			wantEnv := []string{"PATH=/usr/bin:/bin", ownMntnsEnv}
+			if len(tc.devices) > 0 {
+				wantEnv = append(wantEnv, "FIBERD_DEVICES="+strings.Join(tc.devices, ","))
+			}
+			if strings.Join(cmd.Env, " ") != strings.Join(wantEnv, " ") {
+				t.Errorf("env = %v, want %v", cmd.Env, wantEnv)
+			}
+			if cmd.SysProcAttr == nil || !cmd.SysProcAttr.Setsid {
+				t.Error("the zygote is not a session leader")
+			}
+			if got := cmd.SysProcAttr.UseCgroupFD; got != tc.cgroup || (tc.cgroup && cmd.SysProcAttr.CgroupFD != cgroupFD) {
+				t.Errorf("cgroup fd %d used %v, want %d used %v", cmd.SysProcAttr.CgroupFD, got, cgroupFD, tc.cgroup)
+			}
+			out, ok := cmd.Stdout.(*os.File)
+			if !ok || out.Name() != filepath.Join(workDir, "zygote.log") || cmd.Stderr != cmd.Stdout {
+				t.Errorf("stdio = %v %v, want the zygote log", cmd.Stdout, cmd.Stderr)
+			}
+			if in, ok := cmd.Stdin.(*os.File); !ok || in.Name() != os.DevNull {
+				t.Errorf("stdin = %v, want %s", cmd.Stdin, os.DevNull)
+			}
+			if len(cmd.ExtraFiles) != 1 {
+				t.Errorf("extra files = %v, want the control socket alone", cmd.ExtraFiles)
 			}
 		})
 	}
-}
-
-// warmed is a backend with one scripted zygote up for grant g.
-func warmed(t *testing.T, script string, pid int, launcher Launcher) (*Backend, backend.Warm, string) {
-	t.Helper()
-	bin, _ := fakeCRIU(t, criuKnobs{})
-	b := NewBackend(Options{CRIU: bin, Launcher: launcher, RootBind: filepath.Join(t.TempDir(), "root")})
-	t.Cleanup(b.Close)
-	workDir := filepath.Join(t.TempDir(), "g")
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	w, err := b.Warm(ctx, backend.WarmSpec{GrantUID: "g", Template: backend.Template{Argv: fakeArgv(t, script, pid)}, CgroupFD: -1, ProbeCgroupFD: -1, WorkDir: workDir})
-	if err != nil {
-		t.Fatalf("Warm: %v", err)
-	}
-	return b, w, workDir
 }
 
 // TestCloneLine checks that the CLONE line carries the fence, the endpoint as
@@ -626,11 +324,13 @@ func TestCloneLine(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			f := newFakes(t)
 			var launcher Launcher
 			if tc.launcher != nil {
 				launcher = tc.launcher
 			}
-			b, w, workDir := warmed(t, "never", impossiblePID(t), launcher)
+			b := f.open(t, Options{Launcher: launcher})
+			w, zy, workDir := f.warm(t, b, "never", impossiblePID(t))
 			spec := tc.spec
 			spec.Fence = "g/1-1"
 			if spec.Endpoint == "" {
@@ -655,7 +355,7 @@ func TestCloneLine(t *testing.T) {
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			f, err := b.Clone(ctx, w.ID, spec)
+			fb, err := b.Clone(ctx, w.ID, spec)
 			if err != nil {
 				t.Fatalf("Clone: %v", err)
 			}
@@ -663,10 +363,10 @@ func TestCloneLine(t *testing.T) {
 			if tc.launcher != nil {
 				wantPID = 0 // never a host pid without a cgroup to translate it in
 			}
-			if f.ID != "g/1-1" || f.PID != wantPID {
-				t.Fatalf("Clone = %+v, want g/1-1 pid %d", f, wantPID)
+			if fb.ID != "g/1-1" || fb.PID != wantPID {
+				t.Fatalf("Clone = %+v, want g/1-1 pid %d", fb, wantPID)
 			}
-			lines := waitRecv(t, workDir, "CLONE ")
+			lines := zy.waitRecv(t, "CLONE ")
 			var cloneLine string
 			fdsLine := ""
 			for i, l := range lines {
@@ -694,7 +394,7 @@ func TestCloneLine(t *testing.T) {
 
 // TestCloneReplies checks that every answer a zygote can give to CLONE, and
 // the zygote dying instead, are errors the caller can name. The grant's warm
-// instance is reported gone when the zygote is.
+// instance is reported gone when the zygote is, and nothing else is.
 func TestCloneReplies(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -716,29 +416,34 @@ func TestCloneReplies(t *testing.T) {
 			var logs bytes.Buffer
 			log.SetOutput(&logs)
 			t.Cleanup(func() { log.SetOutput(os.Stderr) })
+			f := newFakes(t)
+			b := f.open(t, Options{})
 			pid := impossiblePID(t)
-			b, w, workDir := warmed(t, tc.script, pid, nil)
+			w, _, workDir := f.warm(t, b, tc.script, pid)
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			f, err := b.Clone(ctx, w.ID, backend.FiberSpec{Fence: "g/1-1", Endpoint: filepath.Join(workDir, "ep.sock"), CgroupFD: -1, Deadline: time.Second})
+			fb, err := b.Clone(ctx, w.ID, backend.FiberSpec{Fence: "g/1-1", Endpoint: filepath.Join(workDir, "ep.sock"), CgroupFD: -1, Deadline: time.Second})
 			if !errors.Is(err, tc.wantErr) {
 				t.Fatalf("Clone = %v, want errors.Is %v", err, tc.wantErr)
 			}
 			if err != nil && !strings.Contains(err.Error(), tc.wantText) {
 				t.Fatalf("Clone = %v, want it to mention %q", err, tc.wantText)
 			}
-			if err == nil && (f.ID != "g/1-1" || f.PID != pid) {
-				t.Fatalf("Clone = %+v, want g/1-1 pid %d", f, pid)
+			if err == nil && (fb.ID != "g/1-1" || fb.PID != pid) {
+				t.Fatalf("Clone = %+v, want g/1-1 pid %d", fb, pid)
 			}
 			if tc.wantGone {
 				if e := waitExit(t, b); e != (backend.Exit{WarmID: "g", Status: "zygote exited"}) {
 					t.Fatalf("exit = %+v, want the warm instance gone", e)
 				}
-			} else {
-				noExit(t, b)
+			} else if n := len(b.exits); n != 0 {
+				// The reader answered the clone after the lines before
+				// it, none of which ends a fiber.
+				t.Fatalf("%d exits reported, want none", n)
 			}
-			if tc.wantLog != "" {
-				waitFor(t, "the log line", func() bool { return strings.Contains(logs.String(), tc.wantLog) })
+			// The refusal was logged before the reply that ended Clone.
+			if tc.wantLog != "" && !strings.Contains(logs.String(), tc.wantLog) {
+				t.Fatalf("log = %q, want %q", logs.String(), tc.wantLog)
 			}
 			b.mu.Lock()
 			nf, z := len(b.fibers), b.zygotes[w.ID]
@@ -801,23 +506,6 @@ func TestCloneWithoutAZygoteToAnswer(t *testing.T) {
 	}
 }
 
-// pairConn is one end of a unix stream pair whose other end nobody reads.
-func pairConn(t *testing.T) *net.UnixConn {
-	t.Helper()
-	fds, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_STREAM|syscall.SOCK_CLOEXEC, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	f := os.NewFile(uintptr(fds[0]), "pair")
-	c, err := net.FileConn(f)
-	_ = f.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = c.Close(); _ = syscall.Close(fds[1]) })
-	return c.(*net.UnixConn)
-}
-
 // TestDeviceReports checks that an engine's DEVICE lines are the warm
 // instance's usage and capacity and each fiber's slice, which EVICT asks it
 // to drop. Without an engine there is nothing to report or evict.
@@ -832,8 +520,9 @@ func TestDeviceReports(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			pid := impossiblePID(t)
-			b, w, workDir := warmed(t, tc.script, pid, nil)
+			f := newFakes(t)
+			b := f.open(t, Options{})
+			w, zy, workDir := f.warm(t, b, tc.script, impossiblePID(t))
 			if _, _, ok := b.WarmDevice("nobody"); ok {
 				t.Fatal("WarmDevice of an unknown instance reported something")
 			}
@@ -868,7 +557,7 @@ func TestDeviceReports(t *testing.T) {
 			if err := b.EvictDevice("g/1-1"); err != nil {
 				t.Fatalf("EvictDevice: %v", err)
 			}
-			waitRecv(t, workDir, "EVICT g/1-1")
+			zy.waitRecv(t, "EVICT g/1-1")
 			waitFor(t, "the slice to go", func() bool {
 				n, ok := b.FiberDevice("g/1-1")
 				return ok && n == 0
@@ -907,23 +596,26 @@ func TestUnwarm(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			b, w, _ := warmed(t, "never", impossiblePID(t), nil)
-			b.mu.Lock()
-			z := b.zygotes[w.ID]
-			b.mu.Unlock()
+			f := newFakes(t)
+			b := f.open(t, Options{})
+			w, zy, _ := f.warm(t, b, "never", impossiblePID(t))
 			id := w.ID
 			if !tc.known {
 				id = "nobody"
 			}
 			b.Unwarm(id)
 			if !tc.known {
-				noExit(t, b)
+				if zy.killed.Load() || len(b.exits) != 0 {
+					t.Fatal("an unknown id killed the zygote or reported an exit")
+				}
 				return
 			}
 			if e := waitExit(t, b); e != (backend.Exit{WarmID: "g", Status: "zygote exited"}) {
 				t.Fatalf("exit = %+v, want the warm instance gone", e)
 			}
-			waitFor(t, "the zygote to die", func() bool { return errors.Is(syscall.Kill(z.pid, 0), syscall.ESRCH) })
+			if !zy.killed.Load() {
+				t.Fatal("the zygote was not killed")
+			}
 			b.mu.Lock()
 			n := len(b.zygotes)
 			b.mu.Unlock()
@@ -949,11 +641,14 @@ func TestSocketpair(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			f := newFakes(t)
 			var launcher Launcher
 			if tc.launcher != nil {
+				tc.launcher.pid = impossiblePID(t) + 9
 				launcher = tc.launcher
 			}
-			b, w, _ := warmed(t, "never", impossiblePID(t), launcher)
+			b := f.open(t, Options{Launcher: launcher})
+			w, _, _ := f.warm(t, b, "never", impossiblePID(t))
 			fds, err := b.Socketpair(tc.warmID, syscall.SOCK_SEQPACKET)
 			if tc.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
@@ -976,27 +671,36 @@ func TestSocketpair(t *testing.T) {
 	}
 }
 
-// TestCheckpointWarm checks that the zygote is dumped running, with its control
-// socket external, plus whatever the launcher's container needs.
+// TestCheckpointWarm checks that the zygote is dumped running, with its
+// control socket external when its inode can be read, plus whatever the
+// launcher's container needs. The mounts of a zygote in a mount namespace
+// of its own are named at tests/integration/proc TestCheckpointWarmExternalSocket.
 func TestCheckpointWarm(t *testing.T) {
 	cases := []struct {
 		name     string
 		launcher *fakeLauncher
 		warmID   string
+		noSocket bool // fd 3 cannot be read under /proc
 		wantErr  string
 	}{
 		{name: "plain zygote", warmID: "g"},
 		{name: "launcher adds its arguments", launcher: &fakeLauncher{}, warmID: "g"},
+		{name: "control socket unreadable", warmID: "g", noSocket: true},
 		{name: "unknown instance", warmID: "nobody", wantErr: `no warm instance "nobody"`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			f := newFakes(t)
 			var launcher Launcher
 			if tc.launcher != nil {
+				tc.launcher.pid = impossiblePID(t) + 9
 				launcher = tc.launcher
 			}
-			b, w, _ := warmed(t, "never", impossiblePID(t), launcher)
-			criuDir := filepath.Dir(b.opt.CRIU)
+			b := f.open(t, Options{Launcher: launcher})
+			w, _, _ := f.warm(t, b, "never", impossiblePID(t))
+			if !tc.noSocket {
+				f.socket(t, w.PID, 3, "60373")
+			}
 			dir := t.TempDir()
 			err := b.CheckpointWarm(context.Background(), tc.warmID, dir)
 			if tc.wantErr != "" {
@@ -1008,16 +712,14 @@ func TestCheckpointWarm(t *testing.T) {
 			if err != nil {
 				t.Fatalf("CheckpointWarm: %v", err)
 			}
-			ino, err := criu.SocketInode(w.PID, 3)
-			if err != nil {
-				t.Fatal(err)
-			}
-			calls := criuCalls(t, criuDir)
-			dump := calls[len(calls)-1]
-			for _, want := range []string{"dump ", " -t " + strconv.Itoa(w.PID) + " ", " -D " + dir + " ", "--leave-running", "--external unix[" + ino + "]"} {
+			dump := f.criu.last(t)
+			for _, want := range []string{"dump ", " -t " + strconv.Itoa(w.PID) + " ", " -D " + dir + " ", "--leave-running"} {
 				if !strings.Contains(dump, want) {
 					t.Fatalf("criu dump %q lacks %q", dump, want)
 				}
+			}
+			if strings.Contains(dump, "--external unix[60373]") == tc.noSocket {
+				t.Fatalf("criu dump %q: control socket external = %v", dump, !tc.noSocket)
 			}
 			if strings.Contains(dump, "--dump-extra") != (tc.launcher != nil) {
 				t.Fatalf("criu dump %q: launcher arguments present = %v", dump, tc.launcher != nil)
@@ -1026,117 +728,108 @@ func TestCheckpointWarm(t *testing.T) {
 	}
 }
 
-// fakeCgroup is a directory whose cgroup.procs lists the pids given, for
-// hostPID to read through an fd.
-func fakeCgroup(t *testing.T, pids ...int) int {
-	t.Helper()
-	dir := t.TempDir()
-	var sb strings.Builder
-	for _, p := range pids {
-		sb.WriteString(strconv.Itoa(p) + "\n")
-	}
-	if err := os.WriteFile(filepath.Join(dir, "cgroup.procs"), []byte(sb.String()), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	d, err := os.Open(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = d.Close() })
-	return int(d.Fd())
-}
-
-// TestHostPIDTranslation checks pid translation with a launcher. The
+// TestHostPIDFromProcfs checks pid translation with a launcher. The
 // zygote's pid is a number in its own namespace. The host's pid is the
 // process in the fiber's leaf whose NSpid shows that number one level
-// down. Processes gone from the leaf or without that level are skipped.
-func TestHostPIDTranslation(t *testing.T) {
-	requireRoot(t)
-	child := hold(t, syscall.CLONE_NEWPID)
+// down. Processes gone from the leaf or without that level are skipped,
+// and without a cgroup to look in there is no host pid, never the
+// container's number.
+func TestHostPIDFromProcfs(t *testing.T) {
 	cases := []struct {
 		name     string
-		procs    func() []int
-		reported int
-		want     func() int
+		launcher Launcher
+		leaf     func(t *testing.T, f *fakes, host, zpid int) int // the cgroup fd
+		reported func(zpid int) int
+		want     func(host int) int
 	}{
-		{name: "the init of its namespace", procs: func() []int { return []int{impossiblePID(t), os.Getpid(), child.Process.Pid} }, reported: 1, want: func() int { return child.Process.Pid }},
-		{name: "a number nobody has", procs: func() []int { return []int{child.Process.Pid} }, reported: 2, want: func() int { return 0 }},
-		{name: "an empty leaf", procs: func() []int { return nil }, reported: 1, want: func() int { return 0 }},
+		{name: "no launcher keeps the reported pid", leaf: func(*testing.T, *fakes, int, int) int { return -1 },
+			reported: func(zpid int) int { return zpid }, want: func(int) int { return 0 }},
+		{name: "launcher without a cgroup", launcher: nopLauncher{}, leaf: func(*testing.T, *fakes, int, int) int { return -1 },
+			reported: func(zpid int) int { return zpid }, want: func(int) int { return 0 }},
+		{name: "launcher with a closed fd", launcher: nopLauncher{}, leaf: func(*testing.T, *fakes, int, int) int { return 1 << 20 },
+			reported: func(zpid int) int { return zpid }, want: func(int) int { return 0 }},
+		{name: "the init of its namespace", launcher: nopLauncher{}, leaf: func(t *testing.T, f *fakes, host, zpid int) int {
+			f.status(t, host-1) // a process in the leaf with no namespace below the host's
+			f.status(t, host, zpid)
+			return fakeCgroup(t, host+5, host-1, host) // the first is gone from /proc
+		}, reported: func(zpid int) int { return zpid }, want: func(host int) int { return host }},
+		{name: "a number nobody has", launcher: nopLauncher{}, leaf: func(t *testing.T, f *fakes, host, zpid int) int {
+			f.status(t, host, zpid)
+			return fakeCgroup(t, host)
+		}, reported: func(zpid int) int { return zpid + 1 }, want: func(int) int { return 0 }},
+		{name: "an empty leaf", launcher: nopLauncher{}, leaf: func(t *testing.T, _ *fakes, _, _ int) int { return fakeCgroup(t) },
+			reported: func(zpid int) int { return zpid }, want: func(int) int { return 0 }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			b := &Backend{opt: Options{Launcher: &fakeLauncher{}}}
-			if got := b.hostPID(fakeCgroup(t, tc.procs()...), tc.reported); got != tc.want() {
-				t.Fatalf("hostPID = %d, want %d", got, tc.want())
+			f := newFakes(t)
+			host, zpid := impossiblePID(t)+10, impossiblePID(t)+20
+			b := &Backend{opt: Options{Launcher: tc.launcher, procRoot: f.proc}}
+			fd := tc.leaf(t, f, host, zpid)
+			reported := tc.reported(zpid)
+			want := tc.want(host)
+			if tc.launcher == nil {
+				want = reported
+			}
+			if got := b.hostPID(fd, reported); got != want {
+				t.Fatalf("hostPID(%d, %d) = %d, want %d", fd, reported, got, want)
 			}
 		})
 	}
 }
 
-// TestKillSignalsTheTranslatedPID checks that a launcher's fiber is signalled
-// under the host pid Clone found for it, never the number the zygote
-// reported.
-func TestKillSignalsTheTranslatedPID(t *testing.T) {
-	requireRoot(t)
+// TestCloneTranslatesTheHostPID checks that a launcher's fiber is known
+// under the host pid Clone found for it in the caller's leaf, never the
+// number the zygote reported, and that Kill signals that pid. The pids
+// here are ones no process has, so the signal reaches nobody.
+func TestCloneTranslatesTheHostPID(t *testing.T) {
 	cases := []struct {
 		name string
-	}{{name: "kill reaches the fiber's host process"}}
+	}{{name: "kill goes to the translated pid"}}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			child := hold(t, syscall.CLONE_NEWPID)
-			b, w, workDir := warmed(t, "never", 1, &fakeLauncher{endpointRoot: "/inside"})
+			f := newFakes(t)
+			host, zpid := impossiblePID(t)+10, impossiblePID(t)+20
+			f.status(t, host, zpid)
+			l := &fakeLauncher{endpointRoot: "/inside", pid: impossiblePID(t) + 9}
+			b := f.open(t, Options{Launcher: l})
+			w, _, workDir := f.warm(t, b, "never", zpid)
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			f, err := b.Clone(ctx, w.ID, backend.FiberSpec{Fence: "g/1-1", Endpoint: filepath.Join(workDir, "ep.sock"), CgroupFD: fakeCgroup(t, child.Process.Pid), Deadline: time.Second})
+			fb, err := b.Clone(ctx, w.ID, backend.FiberSpec{Fence: "g/1-1", Endpoint: filepath.Join(workDir, "ep.sock"), CgroupFD: fakeCgroup(t, host), Deadline: time.Second})
 			if err != nil {
 				t.Fatalf("Clone: %v", err)
 			}
-			if f.PID != child.Process.Pid {
-				t.Fatalf("Clone pid = %d, want the host's %d for the namespace's 1", f.PID, child.Process.Pid)
+			if fb.PID != host {
+				t.Fatalf("Clone pid = %d, want the host's %d for the namespace's %d", fb.PID, host, zpid)
 			}
-			if err := b.Kill("g/1-1"); err != nil {
-				t.Fatalf("Kill: %v", err)
+			b.mu.Lock()
+			fib := b.fibers["g/1-1"]
+			b.mu.Unlock()
+			if fib == nil || fib.pid != host || fib.zpid != zpid {
+				t.Fatalf("fiber = %+v, want pid %d zpid %d", fib, host, zpid)
 			}
-			err = child.Wait()
-			var ee *exec.ExitError
-			if !errors.As(err, &ee) || ee.Sys().(syscall.WaitStatus).Signal() != syscall.SIGKILL {
-				t.Fatalf("the child ended with %v, want SIGKILL", err)
+			if err := b.Kill("g/1-1"); !errors.Is(err, syscall.ESRCH) {
+				t.Fatalf("Kill = %v, want ESRCH for the translated pid nobody has", err)
 			}
 		})
 	}
 }
 
-// mountPointOf picks a mount point of pid's namespace other than /.
-func mountPointOf(t *testing.T, pid int) string {
-	t.Helper()
-	ents, err := readMountinfoOf(fmt.Sprintf("/proc/%d/mountinfo", pid))
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, e := range ents {
-		if e.point != "/" {
-			return e.point
-		}
-	}
-	t.Fatal("no mount point to pick")
-	return ""
-}
-
-// TestPark checks that a fiber is dumped with its own mount namespace's
-// mounts named (and its run directory bind recorded), its handoff channel
-// external, running on with Sync, through the launcher's arguments when it
-// has one. What cannot be dumped is refused before criu runs.
+// TestPark checks that a fiber is dumped with its handoff channel
+// external, running on with Sync, through the launcher's arguments when
+// it has one, and that a dump failing on a client from outside the
+// container is retried. What cannot be dumped is refused before criu
+// runs. A fiber with a mount namespace of its own has its mounts named at
+// tests/integration/proc TestParkNamesOwnMounts.
 func TestPark(t *testing.T) {
-	requireRoot(t)
 	cases := []struct {
 		name      string
-		knobs     criuKnobs
+		criu      criuKnobs
 		launcher  bool
 		zygote    bool // the launcher's zygote is registered
-		flags     uintptr
-		runDir    string // "mount" picks one of the fiber's mounts
-		handoff   bool   // the fiber serves handoff
-		channel   bool   // and holds its channel at fd 4
+		handoff   bool // the fiber serves handoff
+		channel   bool // and holds its channel at fd 4
 		sync      bool
 		fiber     bool   // register the fiber at all
 		dirIs     string // a directory already at this name in the image directory, or "file" for the image directory's parent
@@ -1144,55 +837,36 @@ func TestPark(t *testing.T) {
 		wantArgs  []string
 		wantFiles []string
 		noFiles   []string
+		wantDumps int
 	}{
-		{name: "shares the host's mount namespace", fiber: true, wantArgs: []string{"dump", "--ext-unix-sk"}, noFiles: []string{runDirFile, criu.MountsFile}},
-		{name: "own mount namespace with the run directory bound", fiber: true, flags: syscall.CLONE_NEWNS, runDir: "mount",
-			wantArgs: []string{"--external mnt[]", "mnt[RUNDIR]:rundir"}, wantFiles: []string{runDirFile, criu.MountsFile}},
-		{name: "own mount namespace, run directory not mounted", fiber: true, flags: syscall.CLONE_NEWNS, runDir: "/nowhere/g",
-			wantArgs: []string{"--external mnt[]"}, wantFiles: []string{criu.MountsFile}, noFiles: []string{runDirFile}},
-		{name: "handoff channel is external", fiber: true, handoff: true, channel: true, wantArgs: []string{"--external unix[INO]"}, wantFiles: []string{handoffFile}},
+		{name: "shares the host's mount namespace", fiber: true, wantArgs: []string{"dump", "--ext-unix-sk"}, noFiles: []string{runDirFile, criu.MountsFile}, wantDumps: 1},
+		{name: "handoff channel is external", fiber: true, handoff: true, channel: true, wantArgs: []string{"--external unix[4711]"}, wantFiles: []string{handoffFile}, wantDumps: 1},
 		{name: "handoff fiber without a channel", fiber: true, handoff: true, wantErr: "handoff channel of f"},
-		{name: "sync keeps it running", fiber: true, sync: true, wantArgs: []string{"--leave-running"}},
-		{name: "criu fails", fiber: true, knobs: criuKnobs{dumpExit: 1}, wantErr: "criu dump"},
-		{name: "launcher names the container's mounts", fiber: true, launcher: true, zygote: true, wantArgs: []string{"--dump-extra"}},
+		{name: "sync keeps it running", fiber: true, sync: true, wantArgs: []string{"--leave-running"}, wantDumps: 1},
+		{name: "criu fails", fiber: true, criu: criuKnobs{dumpErr: errors.New("exit status 1")}, wantErr: "criu dump"},
+		{name: "launcher names the container's mounts", fiber: true, launcher: true, zygote: true, wantArgs: []string{"--dump-extra"}, wantDumps: 1},
+		{name: "a client from outside the container is retried", fiber: true, launcher: true, zygote: true, wantDumps: 2,
+			criu: criuKnobs{dumpErr: errors.New("Error (criu/sk-unix.c:351): unix: Unix socket 60373 not found"), dumpErrOnce: true}},
 		{name: "unknown fiber", wantErr: `unknown fiber "f"`},
-		{name: "criu unavailable", fiber: true, knobs: criuKnobs{checkExit: 1}, wantErr: "park needs FIBER_CHECKPOINT"},
-		{name: "run directory record cannot be written", fiber: true, flags: syscall.CLONE_NEWNS, runDir: "mount", dirIs: runDirFile, wantErr: "is a directory"},
+		{name: "criu unavailable", fiber: true, criu: criuKnobs{checkErr: errors.New("exit status 1")}, wantErr: "park needs FIBER_CHECKPOINT"},
 		{name: "handoff record cannot be written", fiber: true, handoff: true, channel: true, dirIs: handoffFile, wantErr: "is a directory"},
 		{name: "image directory under a file", fiber: true, handoff: true, channel: true, dirIs: "file", wantErr: "not a directory"},
-		{name: "mounts cannot be recorded", fiber: true, flags: syscall.CLONE_NEWNS, dirIs: "file", wantErr: "mounts of f"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			bin, criuDir := fakeCRIU(t, tc.knobs)
+			f := newFakes(t)
+			f.criu.criuKnobs = tc.criu
 			var launcher Launcher
 			if tc.launcher {
 				launcher = &fakeLauncher{}
 			}
-			b := NewBackend(Options{CRIU: bin, Launcher: launcher, RootBind: filepath.Join(t.TempDir(), "root")})
-			t.Cleanup(b.Close)
-			var extra []*os.File
+			b := f.open(t, Options{Launcher: launcher})
+			pid := impossiblePID(t) + 30
 			if tc.channel {
-				fds, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_SEQPACKET|syscall.SOCK_CLOEXEC, 0)
-				if err != nil {
-					t.Fatal(err)
-				}
-				devnull, err := os.Open(os.DevNull)
-				if err != nil {
-					t.Fatal(err)
-				}
-				channel := os.NewFile(uintptr(fds[0]), "handoff")
-				defer func() { _ = devnull.Close(); _ = channel.Close(); _ = syscall.Close(fds[1]) }()
-				extra = []*os.File{devnull, channel} // fd 3, fd 4
-			}
-			child := hold(t, tc.flags, extra...)
-			pid := child.Process.Pid
-			runDir := tc.runDir
-			if runDir == "mount" {
-				runDir = mountPointOf(t, pid)
+				f.socket(t, pid, handoffFD, "4711")
 			}
 			if tc.fiber {
-				b.fibers["f"] = &fiber{id: "f", pid: pid, warmID: "g", runDir: runDir, handoff: tc.handoff}
+				b.fibers["f"] = &fiber{id: "f", pid: pid, warmID: "g", handoff: tc.handoff}
 			}
 			if tc.zygote {
 				// A zygote by record only, for the launcher's arguments.
@@ -1227,19 +901,20 @@ func TestPark(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Park: %v", err)
 			}
-			calls := criuCalls(t, criuDir)
-			dump := calls[len(calls)-1]
+			dumps := 0
+			for _, c := range f.criu.recorded() {
+				if strings.HasPrefix(c, "dump ") {
+					dumps++
+				}
+			}
+			if dumps != tc.wantDumps {
+				t.Fatalf("%d dumps, want %d", dumps, tc.wantDumps)
+			}
+			dump := f.criu.last(t)
 			if !strings.Contains(dump, " -t "+strconv.Itoa(pid)+" ") || !strings.Contains(dump, " -D "+dir+" ") {
 				t.Fatalf("criu dump %q names neither pid %d nor %s", dump, pid, dir)
 			}
-			ino := ""
-			if tc.channel {
-				if ino, err = criu.SocketInode(pid, handoffFD); err != nil {
-					t.Fatal(err)
-				}
-			}
 			for _, want := range tc.wantArgs {
-				want = strings.NewReplacer("RUNDIR", runDir, "INO", ino).Replace(want)
 				if !strings.Contains(dump, want) {
 					t.Fatalf("criu dump %q lacks %q", dump, want)
 				}
@@ -1247,27 +922,19 @@ func TestPark(t *testing.T) {
 			if !tc.sync && strings.Contains(dump, "--leave-running") {
 				t.Fatalf("criu dump %q leaves the tree running without Sync", dump)
 			}
-			for _, f := range tc.wantFiles {
-				data, err := os.ReadFile(filepath.Join(dir, f))
+			for _, name := range tc.wantFiles {
+				data, err := os.ReadFile(filepath.Join(dir, name))
 				if err != nil {
-					t.Fatalf("%s not written: %v", f, err)
+					t.Fatalf("%s not written: %v", name, err)
 				}
-				switch f {
-				case runDirFile:
-					var rec runDirRecord
-					if json.Unmarshal(data, &rec) != nil || rec.MountPoint != runDir {
-						t.Fatalf("%s = %s, want mountpoint %s", f, data, runDir)
-					}
-				case handoffFile:
-					var rec handoffRecord
-					if json.Unmarshal(data, &rec) != nil || rec.Inode != ino {
-						t.Fatalf("%s = %s, want inode %s", f, data, ino)
-					}
+				var rec handoffRecord
+				if json.Unmarshal(data, &rec) != nil || rec.Inode != "4711" {
+					t.Fatalf("%s = %s, want inode 4711", name, data)
 				}
 			}
-			for _, f := range tc.noFiles {
-				if _, err := os.Stat(filepath.Join(dir, f)); err == nil {
-					t.Fatalf("%s written, want none", f)
+			for _, name := range tc.noFiles {
+				if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
+					t.Fatalf("%s written, want none", name)
 				}
 			}
 		})
@@ -1344,14 +1011,15 @@ func writeMounts(t *testing.T, dir string) {
 }
 
 // TestResume checks that a checkpoint is restored under the resuming grant's
-// directory, with the restore root bound when it has a mount namespace,
-// its handoff channel replaced, and its end reported as the fiber's exit.
-// A launcher is told of the tree it prepared for, and when it is gone.
+// directory, with its handoff channel replaced, and its end reported as
+// the fiber's exit. A launcher is told of the tree it prepared for, and
+// when it is gone. A checkpoint with a mount namespace binds the restore
+// root, which is tests/integration/proc TestResumeBindsRunDir, and what refuses the
+// bind before any mount is refused here.
 func TestResume(t *testing.T) {
-	requireRoot(t)
 	cases := []struct {
 		name      string
-		knobs     criuKnobs
+		criu      criuKnobs
 		launcher  *fakeLauncher
 		setup     func(t *testing.T, dir, rootBind string)
 		spec      backend.ResumeSpec
@@ -1362,27 +1030,23 @@ func TestResume(t *testing.T) {
 		wantArgs  []string
 		wantExit  string
 		wantCalls string
-		wantRoot  bool
 	}{
-		{name: "plain checkpoint", wantArgs: []string{"restore ", "--pidfile"}, wantExit: "exit:0"},
-		{name: "mount namespace binds the restore root and run directory", setup: func(t *testing.T, dir, _ string) {
+		{name: "plain checkpoint", wantArgs: []string{"restore ", "--pidfile", "files=0 cgroup=-1"}, wantExit: "exit:0"},
+		{name: "restore root is a symlink", setup: func(t *testing.T, dir, rootBind string) {
 			writeMounts(t, dir)
-			if err := os.WriteFile(filepath.Join(dir, runDirFile), []byte(`{"mountpoint":"/tmp/fz-a/g"}`), 0o600); err != nil {
+			if err := os.MkdirAll(filepath.Dir(rootBind), 0o700); err != nil {
 				t.Fatal(err)
 			}
-		}, wantArgs: []string{"--root ROOT --external mnt[]", "--external mnt[rundir]:WORK"}, wantExit: "exit:0", wantRoot: true},
-		{name: "mount namespace with a malformed run directory record", setup: func(t *testing.T, dir, _ string) {
-			writeMounts(t, dir)
-			if err := os.WriteFile(filepath.Join(dir, runDirFile), []byte(`nonsense`), 0o600); err != nil {
-				t.Fatal(err)
-			}
-		}, wantText: "malformed", wantRoot: true},
-		{name: "restore root refused", setup: func(t *testing.T, dir, rootBind string) {
-			writeMounts(t, dir)
 			if err := os.Symlink("/", rootBind); err != nil {
 				t.Fatal(err)
 			}
 		}, wantText: "restore root"},
+		{name: "restore root under a file", setup: func(t *testing.T, dir, rootBind string) {
+			writeMounts(t, dir)
+			if err := os.WriteFile(filepath.Dir(rootBind), nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}, wantText: "not a directory"},
 		{name: "malformed mounts record", setup: func(t *testing.T, dir, _ string) {
 			if err := os.WriteFile(filepath.Join(dir, criu.MountsFile), []byte(`nonsense`), 0o600); err != nil {
 				t.Fatal(err)
@@ -1392,34 +1056,34 @@ func TestResume(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(dir, handoffFile), []byte(`{"inode":"777"}`), 0o600); err != nil {
 				t.Fatal(err)
 			}
-		}, handoff: true, wantArgs: []string{"--inherit-fd fd[3]:socket:[777]"}, wantExit: "exit:0"},
+		}, handoff: true, wantArgs: []string{"--inherit-fd fd[3]:socket:[777]", "files=1"}, wantExit: "exit:0"},
 		{name: "handoff checkpoint without a channel", setup: func(t *testing.T, dir, _ string) {
 			if err := os.WriteFile(filepath.Join(dir, handoffFile), []byte(`{"inode":"777"}`), 0o600); err != nil {
 				t.Fatal(err)
 			}
 		}, wantText: "needs a channel"},
-		{name: "restore fails", knobs: criuKnobs{restore: "no"}, wantText: "criu restore failed"},
-		{name: "restore misses the deadline", knobs: criuKnobs{restore: "hang"}, spec: backend.ResumeSpec{Deadline: 200 * time.Millisecond}, wantErr: context.DeadlineExceeded},
-		{name: "the tree exits with an error", knobs: criuKnobs{restoreExit: 3}, wantExit: "exit:exit status 3"},
+		{name: "restore fails", criu: criuKnobs{restore: "no"}, wantText: "criu restore failed"},
+		{name: "restore misses the deadline", criu: criuKnobs{restore: "hang"}, spec: backend.ResumeSpec{Deadline: 50 * time.Millisecond}, wantErr: context.DeadlineExceeded},
+		{name: "the tree exits with an error", criu: criuKnobs{restoreErr: errors.New("exit status 3")}, wantExit: "exit:exit status 3"},
 		{name: "the tree is killed", kill: true, wantExit: "exit:signal: killed"},
-		{name: "criu unavailable", knobs: criuKnobs{checkExit: 1}, wantText: "resume needs FIBER_CHECKPOINT"},
+		{name: "criu unavailable", criu: criuKnobs{checkErr: errors.New("exit status 1")}, wantText: "resume needs FIBER_CHECKPOINT"},
 		{name: "launcher restores in its container", launcher: &fakeLauncher{}, wantArgs: []string{"--restore-extra"}, wantExit: "exit:0",
 			wantCalls: "restoreExtra:DIR,restored:PID,restoredGone"},
 		{name: "launcher restore without a run directory takes the endpoint's", launcher: &fakeLauncher{restoredErr: errors.New("mounts")}, spec: backend.ResumeSpec{WorkDir: "-"},
 			wantArgs: []string{"--restore-extra"}, wantExit: "exit:0", wantCalls: "restoreExtra:DIR,restored:PID,restoredGone"},
 		{name: "launcher cannot prepare the restore", launcher: &fakeLauncher{restoreExtraErr: errors.New("no rootfs")}, wantText: "no rootfs", wantCalls: "restoreExtra:DIR"},
-		{name: "launcher prepared, restore fails", launcher: &fakeLauncher{}, knobs: criuKnobs{restore: "no"}, wantText: "criu restore failed", wantCalls: "restoreExtra:DIR,restoredGone"},
+		{name: "launcher prepared, restore fails", launcher: &fakeLauncher{}, criu: criuKnobs{restore: "no"}, wantText: "criu restore failed", wantCalls: "restoreExtra:DIR,restoredGone"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			bin, criuDir := fakeCRIU(t, tc.knobs)
+			f := newFakes(t)
+			f.criu.criuKnobs = tc.criu
 			var launcher Launcher
 			if tc.launcher != nil {
 				launcher = tc.launcher
 			}
-			rootBind := filepath.Join(t.TempDir(), "root")
-			b := NewBackend(Options{CRIU: bin, Launcher: launcher, RootBind: rootBind})
-			t.Cleanup(b.Close)
+			rootBind := filepath.Join(t.TempDir(), "parent", "root")
+			b := f.open(t, Options{Launcher: launcher, RootBind: rootBind})
 			dir := t.TempDir()
 			if tc.setup != nil {
 				tc.setup(t, dir, rootBind)
@@ -1442,32 +1106,39 @@ func TestResume(t *testing.T) {
 				spec.Handoff = os.NewFile(uintptr(fds[0]), "handoff")
 				defer func() { _ = spec.Handoff.Close(); _ = syscall.Close(fds[1]) }()
 			}
-			f, err := b.Resume(context.Background(), spec)
+			fb, err := b.Resume(context.Background(), spec)
 			if tc.wantErr != nil || tc.wantText != "" {
 				if err == nil || (tc.wantErr != nil && !errors.Is(err, tc.wantErr)) || !strings.Contains(err.Error(), tc.wantText) {
 					t.Fatalf("Resume = %v, want %q (errors.Is %v)", err, tc.wantText, tc.wantErr)
+				}
+				if b.rootHeld {
+					t.Fatal("a refused resume holds the restore root")
 				}
 			} else if err != nil {
 				t.Fatalf("Resume: %v", err)
 			}
 			if err == nil {
-				if f.ID != "g/2-1" || f.PID <= 0 {
-					t.Fatalf("Resume = %+v, want g/2-1 with criu's pid", f)
+				if fb.ID != "g/2-1" || fb.PID != f.criu.restorePID {
+					t.Fatalf("Resume = %+v, want g/2-1 with the restored pid %d", fb, f.criu.restorePID)
 				}
-				calls := criuCalls(t, criuDir)
-				restore := calls[len(calls)-1]
+				restore := f.criu.last(t)
 				for _, want := range tc.wantArgs {
 					want = strings.NewReplacer("ROOT", rootBind, "WORK", workDir).Replace(want)
 					if !strings.Contains(restore, want) {
 						t.Fatalf("criu restore %q lacks %q", restore, want)
 					}
 				}
+				p := f.criu.restored()[0]
 				if tc.kill {
-					if err := b.Kill("g/2-1"); err != nil {
-						t.Fatalf("Kill: %v", err)
+					// Kill signals the restored root, a pid nobody has
+					// here, so the kernel ending the tree is played by
+					// the fake.
+					if err := b.Kill("g/2-1"); !errors.Is(err, syscall.ESRCH) {
+						t.Fatalf("Kill = %v, want ESRCH for the restored pid", err)
 					}
+					_ = p.Kill()
 				} else {
-					release(t, criuDir)
+					p.release(tc.criu.restoreErr)
 				}
 				if e := waitExit(t, b); e != (backend.Exit{FiberID: "g/2-1", Status: tc.wantExit}) {
 					t.Fatalf("exit = %+v, want %s", e, tc.wantExit)
@@ -1479,17 +1150,8 @@ func TestResume(t *testing.T) {
 					t.Fatalf("%d fibers left after the exit, want none", n)
 				}
 			}
-			if tc.wantRoot {
-				if !mountedAt(os.Getpid(), rootBind) {
-					t.Fatalf("restore root %s not mounted", rootBind)
-				}
-				b.Close()
-				if mountedAt(os.Getpid(), rootBind) {
-					t.Fatalf("restore root %s still mounted after Close", rootBind)
-				}
-			}
 			if tc.launcher != nil {
-				want := strings.NewReplacer("DIR", dir, "PID", strconv.Itoa(f.PID)).Replace(tc.wantCalls)
+				want := strings.NewReplacer("DIR", dir, "PID", strconv.Itoa(fb.PID)).Replace(tc.wantCalls)
 				waitFor(t, "launcher calls "+want, func() bool { return strings.Join(tc.launcher.recorded(), ",") == want })
 			}
 		})
@@ -1734,42 +1396,15 @@ func TestMountinfo(t *testing.T) {
 	})
 }
 
-// isMounted reports whether this namespace has a mount at point.
-func isMounted(point string) bool { return mountedAt(os.Getpid(), point) }
-
-// unmountLater detaches a bind the test made if it is still there.
-func unmountLater(t *testing.T, point string) {
-	t.Helper()
-	t.Cleanup(func() {
-		for isMounted(point) {
-			if err := syscall.Unmount(point, syscall.MNT_DETACH); err != nil {
-				t.Errorf("unmount %s: %v", point, err)
-				return
-			}
-		}
-		_ = os.Remove(point)
-		_ = os.Remove(holderFile(point))
-	})
-}
-
-// TestMountRoot checks that the restore root is a private bind of / at a leaf
-// this process made and checked. A path it cannot trust is refused, and a
-// directory it made for a refused mount goes again.
-func TestMountRoot(t *testing.T) {
-	requireRoot(t)
+// TestMountRootRefusals checks what the restore root refuses before it
+// mounts anything, and that a directory it made for a refused mount goes
+// again. A trusted path is mounted at tests/integration/proc TestRootBindShared.
+func TestMountRootRefusals(t *testing.T) {
 	cases := []struct {
 		name    string
 		dir     func(t *testing.T, base string) string
 		wantErr string
 	}{
-		{name: "fresh leaf", dir: func(_ *testing.T, base string) string { return filepath.Join(base, "root") }},
-		{name: "existing empty directory", dir: func(t *testing.T, base string) string {
-			d := filepath.Join(base, "root")
-			if err := os.Mkdir(d, 0o700); err != nil {
-				t.Fatal(err)
-			}
-			return d
-		}},
 		{name: "relative path", dir: func(*testing.T, string) string { return "relative/root" }, wantErr: "absolute"},
 		{name: "name too long", dir: func(_ *testing.T, base string) string { return filepath.Join(base, strings.Repeat("r", 300)) }, wantErr: "file name too long"},
 		{name: "parent is a file", dir: func(t *testing.T, base string) string {
@@ -1793,35 +1428,11 @@ func TestMountRoot(t *testing.T) {
 			}
 			return d
 		}, wantErr: "not a directory"},
-		{name: "someone else's directory", dir: func(t *testing.T, base string) string {
-			d := filepath.Join(base, "root")
-			if err := os.Mkdir(d, 0o700); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.Chown(d, 1000, 1000); err != nil {
-				t.Fatal(err)
-			}
-			return d
-		}, wantErr: "owned by uid 1000"},
-		{name: "already a mount point", dir: func(t *testing.T, base string) string {
-			d := filepath.Join(base, "root")
-			if err := os.Mkdir(d, 0o700); err != nil {
-				t.Fatal(err)
-			}
-			if err := syscall.Mount(base, d, "", syscall.MS_BIND, ""); err != nil {
-				t.Fatal(err)
-			}
-			unmountLater(t, d)
-			return d
-		}, wantErr: "already a mount point"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			base := t.TempDir()
 			dir := tc.dir(t, base)
-			if filepath.IsAbs(dir) {
-				unmountLater(t, dir)
-			}
 			existed := false
 			if _, err := os.Lstat(dir); err == nil {
 				existed = true
@@ -1829,69 +1440,31 @@ func TestMountRoot(t *testing.T) {
 			rootMu.Lock()
 			err := mountRoot(dir)
 			rootMu.Unlock()
-			if tc.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-					t.Fatalf("mountRoot = %v, want %q", err, tc.wantErr)
-				}
-				if _, serr := os.Lstat(dir); !existed && serr == nil {
-					t.Fatal("a directory made for the refused mount was left behind")
-				}
-				return
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("mountRoot = %v, want %q", err, tc.wantErr)
 			}
-			if err != nil {
-				t.Fatalf("mountRoot: %v", err)
+			if _, serr := os.Lstat(dir); !existed && serr == nil {
+				t.Fatal("a directory made for the refused mount was left behind")
 			}
-			if !isMounted(dir) {
-				t.Fatalf("%s is not a mount point", dir)
-			}
-			// A bind of / shows the root's entries, and the holder file
-			// names this process.
-			if _, err := os.Stat(filepath.Join(dir, "proc")); err != nil {
-				t.Fatalf("the bind does not show /: %v", err)
-			}
-			if !heldByLiveProcess(holderFile(dir), 0) {
-				t.Fatal("the holder file does not name this live process")
-			}
-			ents, err := readMountinfo()
-			if err != nil {
-				t.Fatal(err)
-			}
-			for _, e := range ents {
-				if e.point == dir && strings.Contains(strings.Join(e.opts, " "), "shared:") {
-					t.Fatalf("the restore root is shared: %v", e.opts)
-				}
+			if filepath.IsAbs(dir) && mountedAt(os.Getpid(), dir) {
+				t.Fatalf("%s was mounted", dir)
 			}
 		})
 	}
 }
 
-// TestRootBindShared checks that backends naming the same restore root share
-// one bind, which the last to close unmounts. A backend without one has
-// nothing to give up.
-func TestRootBindShared(t *testing.T) {
-	requireRoot(t)
+// TestRootBindRefs checks the bookkeeping of the restore root's
+// reference: a backend that never bound has nothing to give up, one whose
+// bind is in the table but not mounted logs the failed unmount, and a
+// refused mount is not held. Two backends sharing one real bind are
+// tests/integration/proc TestRootBindShared.
+func TestRootBindRefs(t *testing.T) {
 	cases := []struct {
 		name  string
-		setup func(t *testing.T, dir string, a, b *Backend)
+		setup func(t *testing.T, dir string, a *Backend)
 	}{
-		{name: "two backends, the last one unmounts", setup: func(t *testing.T, dir string, a, b *Backend) {
-			if err := a.bindRoot(); err != nil {
-				t.Fatal(err)
-			}
-			if err := b.bindRoot(); err != nil {
-				t.Fatal(err)
-			}
-			if err := a.bindRoot(); err != nil { // holding twice is holding once
-				t.Fatal(err)
-			}
-			a.unbindRoot()
-			if !isMounted(dir) {
-				t.Fatal("the first close unmounted a bind the second backend holds")
-			}
-			b.unbindRoot()
-		}},
-		{name: "never bound", setup: func(_ *testing.T, _ string, a, _ *Backend) { a.unbindRoot() }},
-		{name: "in the table but not mounted", setup: func(t *testing.T, dir string, a, _ *Backend) {
+		{name: "never bound", setup: func(_ *testing.T, _ string, a *Backend) { a.unbindRoot() }},
+		{name: "in the table but not mounted", setup: func(t *testing.T, dir string, a *Backend) {
 			var logs bytes.Buffer
 			log.SetOutput(&logs)
 			t.Cleanup(func() { log.SetOutput(os.Stderr) })
@@ -1904,14 +1477,14 @@ func TestRootBindShared(t *testing.T) {
 				t.Fatalf("log = %q, want the failed unmount", logs.String())
 			}
 		}},
-		{name: "held but not in the table", setup: func(_ *testing.T, _ string, a, _ *Backend) {
+		{name: "held but not in the table", setup: func(_ *testing.T, _ string, a *Backend) {
 			a.rootHeld = true
 			a.unbindRoot()
 			if a.rootHeld {
 				t.Fatal("still held")
 			}
 		}},
-		{name: "mount refused", setup: func(t *testing.T, dir string, a, _ *Backend) {
+		{name: "mount refused", setup: func(t *testing.T, dir string, a *Backend) {
 			if err := os.Symlink("/", dir); err != nil {
 				t.Fatal(err)
 			}
@@ -1926,119 +1499,16 @@ func TestRootBindShared(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := filepath.Join(t.TempDir(), "root")
-			unmountLater(t, dir)
 			a := &Backend{opt: Options{RootBind: dir}}
-			b := &Backend{opt: Options{RootBind: dir}}
-			tc.setup(t, dir, a, b)
-			if isMounted(dir) {
-				t.Fatalf("%s still mounted", dir)
+			tc.setup(t, dir, a)
+			if mountedAt(os.Getpid(), dir) {
+				t.Fatalf("%s is mounted", dir)
 			}
 			rootMu.Lock()
 			_, held := rootBinds[dir]
 			rootMu.Unlock()
 			if held {
 				t.Fatal("the bind is still in the table")
-			}
-		})
-	}
-}
-
-// bindSlash binds / at point for a test and records the holder given.
-func bindSlash(t *testing.T, point, holder string) {
-	t.Helper()
-	if err := os.MkdirAll(point, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := syscall.Mount("/", point, "", syscall.MS_BIND, ""); err != nil {
-		t.Fatal(err)
-	}
-	unmountLater(t, point)
-	if holder != "" {
-		if err := os.WriteFile(holderFile(point), []byte(holder), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-}
-
-// TestReapStaleRoots checks that binds of / a dead run left at this
-// configuration's path, and at dead pids' default paths beside it, are
-// unmounted. Binds a live process records, binds a backend here holds, binds
-// that are not of /, and binds elsewhere stay.
-func TestReapStaleRoots(t *testing.T) {
-	requireRoot(t)
-	cases := []struct {
-		name     string
-		siblings bool
-		setup    func(t *testing.T, base, dir string) (stay, reaped []string)
-	}{
-		{name: "own path and a dead sibling go, the rest stays", siblings: true, setup: func(t *testing.T, base, dir string) ([]string, []string) {
-			dead := filepath.Join(base, rootName+strconv.Itoa(impossiblePID(t)))
-			live := filepath.Join(base, rootName+strconv.Itoa(os.Getpid()))
-			other := filepath.Join(base, "unrelated")
-			notSlash := filepath.Join(base, rootName+strconv.Itoa(impossiblePID(t)-1))
-			bindSlash(t, dir, "")
-			bindSlash(t, dead, "")
-			bindSlash(t, live, "")
-			bindSlash(t, other, "")
-			if err := os.MkdirAll(notSlash, 0o700); err != nil {
-				t.Fatal(err)
-			}
-			if err := syscall.Mount(base, notSlash, "", syscall.MS_BIND, ""); err != nil {
-				t.Fatal(err)
-			}
-			unmountLater(t, notSlash)
-			return []string{live, other, notSlash}, []string{dir, dead}
-		}},
-		{name: "a live holder keeps its bind", setup: func(t *testing.T, _, dir string) ([]string, []string) {
-			bindSlash(t, dir, "1\n")
-			return []string{dir}, nil
-		}},
-		{name: "a dead holder's bind goes", setup: func(t *testing.T, _, dir string) ([]string, []string) {
-			bindSlash(t, dir, strconv.Itoa(impossiblePID(t)))
-			return nil, []string{dir}
-		}},
-		{name: "a bind a backend here holds stays", setup: func(t *testing.T, _, dir string) ([]string, []string) {
-			bindSlash(t, dir, "")
-			rootMu.Lock()
-			rootBinds[dir] = &rootBind{refs: 1}
-			rootMu.Unlock()
-			t.Cleanup(func() {
-				rootMu.Lock()
-				delete(rootBinds, dir)
-				rootMu.Unlock()
-			})
-			return []string{dir}, nil
-		}},
-		{name: "stacked binds come off one per pass", setup: func(t *testing.T, _, dir string) ([]string, []string) {
-			bindSlash(t, dir, "")
-			bindSlash(t, dir, "")
-			return nil, []string{dir}
-		}},
-		{name: "siblings not asked for stay", setup: func(t *testing.T, base, _ string) ([]string, []string) {
-			dead := filepath.Join(base, rootName+strconv.Itoa(impossiblePID(t)))
-			bindSlash(t, dead, "")
-			return []string{dead}, nil
-		}},
-		{name: "nothing to do", setup: func(*testing.T, string, string) ([]string, []string) { return nil, nil }},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			base := t.TempDir()
-			dir := filepath.Join(base, "root")
-			stay, gone := tc.setup(t, base, dir)
-			reapStaleRoots(dir, tc.siblings)
-			for _, p := range stay {
-				if !isMounted(p) {
-					t.Errorf("%s was unmounted, want it kept", p)
-				}
-			}
-			for _, p := range gone {
-				if isMounted(p) {
-					t.Errorf("%s is still mounted, want it reaped", p)
-				}
-				if _, err := os.Lstat(p); err == nil {
-					t.Errorf("%s still exists, want it removed", p)
-				}
 			}
 		})
 	}
@@ -2057,9 +1527,9 @@ func sha256Hex(t *testing.T, path string) string {
 
 // TestOpenVerified checks that a registry template's executable is
 // verified through the descriptor it is exec'd from: the bytes are hashed
-// against what the host verified, a mismatch is refused, and an exec
-// through the descriptor runs those bytes even after the path was
-// swapped, for a script as for a binary.
+// against what the host verified and a mismatch is refused. That an exec
+// through the descriptor runs those bytes after the path was swapped is
+// tests/integration/proc TestExecThroughVerifiedFD.
 func TestOpenVerified(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -2090,26 +1560,14 @@ func TestOpenVerified(t *testing.T) {
 				t.Fatalf("openVerified: %v", err)
 			}
 			defer func() { _ = f.Close() }()
-			// The path now leads elsewhere; the descriptor still runs what
-			// was verified. As in Warm, the descriptor is passed as fd 4,
-			// after a stand-in for the control socket at fd 3.
-			if err := os.WriteFile(path+".new", []byte("#!/bin/sh\necho swapped\n"), 0o755); err != nil {
+			// The descriptor is open on the verified bytes, whatever the
+			// path leads to by now.
+			if err := os.Rename(path, path+".moved"); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.Rename(path+".new", path); err != nil {
-				t.Fatal(err)
-			}
-			devnull, err := os.Open(os.DevNull)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer func() { _ = devnull.Close() }()
-			cmd := exec.Command(path)
-			cmd.ExtraFiles = []*os.File{devnull, f}
-			cmd.Path = exeFDPath
-			out, err := cmd.Output()
-			if err != nil || strings.TrimSpace(string(out)) != "verified" {
-				t.Fatalf("exec through the descriptor = %q %v, want the verified bytes", out, err)
+			data, err := os.ReadFile(fmt.Sprintf("/proc/self/fd/%d", f.Fd()))
+			if err != nil || string(data) != "#!/bin/sh\necho verified\n" {
+				t.Fatalf("the descriptor reads %q (%v), want the verified bytes", data, err)
 			}
 		})
 	}
@@ -2117,8 +1575,9 @@ func TestOpenVerified(t *testing.T) {
 
 // TestWarmVerifiesRegistryTemplate checks that Warm refuses a registry
 // template (one with a verified hash) whose executable no longer hashes
-// to it, before anything starts, and runs one that does. A launcher's
-// template is the launcher's to verify (runc stages its own copy).
+// to it, before anything starts, and execs one that does through the
+// verified descriptor as the zygote's fd 4. A launcher's template is the
+// launcher's to verify (runc stages its own copy).
 func TestWarmVerifiesRegistryTemplate(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -2132,18 +1591,22 @@ func TestWarmVerifiesRegistryTemplate(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			bin, _ := fakeCRIU(t, criuKnobs{})
+			f := newFakes(t)
 			var launcher Launcher
 			if tc.launcher != nil {
+				tc.launcher.pid = impossiblePID(t) + 9
 				launcher = tc.launcher
 			}
-			b := NewBackend(Options{CRIU: bin, Launcher: launcher, RootBind: filepath.Join(t.TempDir(), "root")})
-			t.Cleanup(b.Close)
-			argv := fakeArgv(t, "never", impossiblePID(t))
-			tpl := backend.Template{Argv: argv, Dir: filepath.Dir(argv[0]), Digest: "sha256:test", ZygoteSHA256: tc.sha(argv[0])}
+			b := f.open(t, Options{Launcher: launcher})
+			exe := filepath.Join(t.TempDir(), "zygote")
+			if err := os.WriteFile(exe, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			argv := append([]string{exe}, fakeArgv("never", impossiblePID(t))[1:]...)
+			tpl := backend.Template{Argv: argv, Dir: filepath.Dir(exe), Digest: "sha256:test", ZygoteSHA256: tc.sha(exe)}
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			w, err := b.Warm(ctx, backend.WarmSpec{GrantUID: "g", Template: tpl, CgroupFD: -1, ProbeCgroupFD: -1, WorkDir: t.TempDir()})
+			_, err := b.Warm(ctx, backend.WarmSpec{GrantUID: "g", Template: tpl, CgroupFD: -1, ProbeCgroupFD: -1, WorkDir: t.TempDir()})
 			if tc.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 					t.Fatalf("Warm = %v, want %q", err, tc.wantErr)
@@ -2151,22 +1614,29 @@ func TestWarmVerifiesRegistryTemplate(t *testing.T) {
 				b.mu.Lock()
 				n := len(b.zygotes)
 				b.mu.Unlock()
-				if n != 0 {
-					t.Fatalf("%d zygotes registered after a refused template, want none", n)
+				if n != 0 || len(f.spawn.started()) != 0 {
+					t.Fatalf("%d zygotes registered and %d started after a refused template, want none", n, len(f.spawn.started()))
 				}
 				return
 			}
 			if err != nil {
 				t.Fatalf("Warm: %v", err)
 			}
+			zy := f.spawn.started()[0]
+			cmd := zy.cmd
 			if tc.launcher != nil {
+				if cmd.Path == exeFDPath || len(cmd.ExtraFiles) != 1 {
+					t.Fatalf("a launcher's command was given the verified descriptor: %s %v", cmd.Path, cmd.ExtraFiles)
+				}
 				return
 			}
-			// The zygote runs the file at the path, exec'd through the
-			// verified descriptor, and the path is what /proc names.
-			exe, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", w.PID))
-			if err != nil || exe != argv[0] {
-				t.Fatalf("zygote exe = %q (%v), want %q", exe, err, argv[0])
+			// The exec goes through the descriptor at fd 4, which holds
+			// the bytes that were hashed, while argv still names the path.
+			if cmd.Path != exeFDPath || cmd.Args[0] != exe || len(cmd.ExtraFiles) != 2 {
+				t.Fatalf("command = %s %v with %d extra files, want %s through fd 4", cmd.Path, cmd.Args, len(cmd.ExtraFiles), exeFDPath)
+			}
+			if zy.exeSHA != tpl.ZygoteSHA256 {
+				t.Fatalf("fd 4 held bytes hashing to %s, want the verified %s", zy.exeSHA, tpl.ZygoteSHA256)
 			}
 		})
 	}
@@ -2186,6 +1656,44 @@ func TestHostSocket(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := hostSocket(tc.err); got != tc.want {
 				t.Fatalf("hostSocket = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestSocketInode checks the read of a socket's inode under /proc.
+func TestSocketInode(t *testing.T) {
+	cases := []struct {
+		name    string
+		link    string // "" for no entry
+		want    string
+		wantErr string
+	}{
+		{name: "a socket", link: "socket:[60373]", want: "60373"},
+		{name: "a file", link: "/dev/null", wantErr: "not a socket"},
+		{name: "no such descriptor", wantErr: "no such file"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFakes(t)
+			if tc.link != "" {
+				dir := filepath.Join(f.proc, "7", "fd")
+				if err := os.MkdirAll(dir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(tc.link, filepath.Join(dir, "3")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			got, err := socketInode(f.proc, 7, 3)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("socketInode = %q %v, want %q", got, err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil || got != tc.want {
+				t.Fatalf("socketInode = %q %v, want %q", got, err, tc.want)
 			}
 		})
 	}

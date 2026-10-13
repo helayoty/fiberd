@@ -36,10 +36,10 @@ type Platform struct {
 	Templates string `json:"templates,omitempty"`
 }
 
-// Host is the platform this process runs on.
+// Host is the platform this process runs on. It runs ldd on Linux, so a
+// caller that already knows its facts completes a Platform instead.
 func Host() Platform {
-	arch, kernel, libc := HostInfo()
-	return Platform{Arch: arch, Kernel: kernel, Libc: libc}
+	return Platform{}.Complete()
 }
 
 // Platform returns the build host recorded in an artifact config.

@@ -21,6 +21,26 @@ type Options struct {
 	// own (the runc backend's /sys bind). It must exec criu in place,
 	// so the pid stays criu's.
 	Wrap []string
+	// Commander runs criu. Nil runs the binary Bin names, so a test can
+	// stand in for criu without a process.
+	Commander Commander
+}
+
+// Commander is how the package runs criu. Output runs a check or a dump
+// to its end and returns what it printed. Start begins a restore with
+// files as criu's descriptors 3 and up, inside the cgroup cgroupFD
+// names when it is not negative, and returns the running process.
+type Commander interface {
+	Output(ctx context.Context, args []string) ([]byte, error)
+	Start(args []string, files []*os.File, cgroupFD int) (Process, error)
+}
+
+// Process is a started criu. Wait returns its exit error, nil for a
+// clean exit.
+type Process interface {
+	Pid() int
+	Kill() error
+	Wait() error
 }
 
 func (o Options) bin() string {
@@ -30,9 +50,46 @@ func (o Options) bin() string {
 	return "criu"
 }
 
+func (o Options) commander() Commander {
+	if o.Commander != nil {
+		return o.Commander
+	}
+	return execCommander{opt: o}
+}
+
+// restoreArgv is the command line of a restore, through Wrap when set.
+func (o Options) restoreArgv(args []string) []string {
+	return append(append(append([]string{}, o.Wrap...), o.bin()), args...)
+}
+
+// execCommander runs the real binary.
+type execCommander struct{ opt Options }
+
+func (e execCommander) Output(ctx context.Context, args []string) ([]byte, error) {
+	return exec.CommandContext(ctx, e.opt.bin(), args...).CombinedOutput()
+}
+
+func (e execCommander) Start(args []string, files []*os.File, cgroupFD int) (Process, error) {
+	argv := e.opt.restoreArgv(args)
+	cmd := exec.Command(argv[0], argv[1:]...)
+	cmd.ExtraFiles = files
+	cmd.SysProcAttr = sysProcAttr(cgroupFD)
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	return cmdProcess{cmd}, nil
+}
+
+// cmdProcess is a started exec.Cmd as a Process.
+type cmdProcess struct{ cmd *exec.Cmd }
+
+func (p cmdProcess) Pid() int    { return p.cmd.Process.Pid }
+func (p cmdProcess) Kill() error { return p.cmd.Process.Kill() }
+func (p cmdProcess) Wait() error { return p.cmd.Wait() }
+
 // Available reports whether criu is installed and `criu check` passes.
 func (o Options) Available(ctx context.Context) error {
-	out, err := exec.CommandContext(ctx, o.bin(), "check", "--no-default-config").CombinedOutput()
+	out, err := o.commander().Output(ctx, []string{"check", "--no-default-config"})
 	if err != nil {
 		return fmt.Errorf("criu check: %w: %s", err, strings.TrimSpace(string(out)))
 	}
@@ -57,7 +114,7 @@ func (o Options) DumpWith(ctx context.Context, pid int, dir string, leaveRunning
 		args = append(args, "--leave-running")
 	}
 	args = append(args, extra...)
-	out, err := exec.CommandContext(ctx, o.bin(), args...).CombinedOutput()
+	out, err := o.commander().Output(ctx, args)
 	if err != nil {
 		return fmt.Errorf("criu dump pid %d: %w: %s%s", pid, err, strings.TrimSpace(string(out)), logTail(filepath.Join(dir, "dump.log")))
 	}
@@ -67,9 +124,9 @@ func (o Options) DumpWith(ctx context.Context, pid int, dir string, leaveRunning
 // Restored is a running `criu restore`: it stays alive as the restored
 // tree's parent, so Wait returns when the tree exits.
 type Restored struct {
-	Cmd  *exec.Cmd
-	PID  int // the restored root task
-	done chan error
+	Process Process
+	PID     int // the restored root task
+	done    chan error
 }
 
 // Wait blocks until the restored tree (and criu) exit.

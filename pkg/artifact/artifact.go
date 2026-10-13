@@ -23,7 +23,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"time"
 
@@ -348,14 +347,6 @@ func repository(ref string, plainHTTP bool) (*remote.Repository, string, error) 
 	return repo, target, nil
 }
 
-// HostInfo fills the parity fields for the running host.
-func HostInfo() (arch, kernel, libc string) {
-	arch = runtime.GOARCH
-	kernel = unameRelease()
-	libc = libcVersion()
-	return
-}
-
 func fileSHA256(path string) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -431,9 +422,14 @@ func untar(src, dst string) error {
 		if err != nil {
 			return err
 		}
-		name := filepath.Base(hdr.Name) // flat archive; never trust paths
 		if hdr.Typeflag != tar.TypeReg {
 			continue
+		}
+		// tarDir writes plain names, so a name with a directory part or
+		// one that leaves dst fails the unpack instead of being mapped.
+		name := hdr.Name
+		if name == "." || name != filepath.Base(name) || !filepath.IsLocal(name) {
+			return fmt.Errorf("%w: %q", ErrEntryName, hdr.Name)
 		}
 		out, err := os.OpenFile(filepath.Join(dst, name), os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
 		if err != nil {

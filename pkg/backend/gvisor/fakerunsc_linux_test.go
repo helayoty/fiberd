@@ -10,12 +10,10 @@ import (
 	"io"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 
@@ -34,10 +32,10 @@ func TestMain(m *testing.M) {
 // a restored sandbox dials the pool socket with the token its spec
 // carries and serves the endpoint the identity record names (or, under
 // NoToken, the endpoint its spec names, the old way), and closes it on
-// USR1. Each has a process of its own (a shell waiting on its stdin), so
-// its pid is one the backend can hold a pidfd on and the reaper takes the
-// path it takes with real runsc. The process ends as the ExitStatus knob
-// says, or with 122 when its channel closes before the record.
+// USR1. Each has a pid of its own, which no process carries, and ends as
+// the ExitStatus knob says, or with 122 when its channel closes before
+// the record. The backend's reaper learns of the end through the await
+// seam, where real runsc gives it a pidfd to wait on.
 type fakeRunsc struct {
 	mu       sync.Mutex
 	knobs    knobs
@@ -48,6 +46,7 @@ type fakeRunsc struct {
 	// restoring counts the restores in flight, and peak the most there
 	// have been at once.
 	restoring, peak int
+	nextPID         int // the last sandbox pid given out
 }
 
 // peakRestores is the most restores the fake has had in flight at once.
@@ -104,9 +103,8 @@ type fakeCall struct {
 type fakeSandbox struct {
 	cid      string
 	pid      int
-	proc     *os.Process    // the sandbox process, which the backend reaps
-	stdin    io.WriteCloser // a line on it ends the process with its status
-	endpoint string         // the host path it serves, "" for none
+	status   int    // how it ended, a signal above 128, set before done closes
+	endpoint string // the host path it serves, "" for none
 	ln       net.Listener
 	done     chan struct{} // closed when the sandbox has ended
 	// What the sandbox saw on the channel: the token its spec carried
@@ -124,7 +122,7 @@ type deleteGate struct {
 }
 
 func newFakeRunsc(k knobs) *fakeRunsc {
-	return &fakeRunsc{knobs: k, boxes: map[string]*fakeSandbox{}, ended: map[string]*fakeSandbox{}}
+	return &fakeRunsc{knobs: k, boxes: map[string]*fakeSandbox{}, ended: map[string]*fakeSandbox{}, nextPID: 100_000}
 }
 
 func (f *fakeRunsc) setKnobs(k knobs) {
@@ -470,22 +468,10 @@ func (f *fakeRunsc) startSandbox(cid, bundle string, k knobs, out io.Writer) err
 		}
 		return errExit
 	}
-	// The sandbox process is a shell that exits with the status it is
-	// handed on its stdin. The backend reaps it, or nobody does when the
-	// reaper took the `runsc wait` path, so it is never waited for here.
-	cmd := exec.Command("sh", "-c", "read line; exit $line")
-	stdin, err := cmd.StdinPipe()
-	if err == nil {
-		err = cmd.Start()
-	}
-	if err != nil {
-		_, _ = fmt.Fprintf(out, "fake runsc: sandbox process: %v\n", err)
-		if x.ln != nil {
-			_ = x.ln.Close()
-		}
-		return errExit
-	}
-	x.proc, x.stdin, x.pid = cmd.Process, stdin, cmd.Process.Pid
+	// A pid of the fake's own, never reused, so the reaper's await can
+	// tell one sandbox from the next as a pidfd would.
+	f.nextPID++
+	x.pid = f.nextPID
 	f.boxes[cid] = x
 	if dial {
 		sock := filepath.Join(channel, poolSocket)
@@ -597,13 +583,32 @@ func (f *fakeRunsc) endWith(cid string, status int) {
 	if ln != nil {
 		_ = ln.Close()
 	}
-	if status > 128 {
-		_ = x.proc.Signal(syscall.Signal(status - 128))
-	} else {
-		_, _ = fmt.Fprintf(x.stdin, "%d\n", status)
-	}
-	_ = x.stdin.Close()
+	x.status = status
 	close(x.done)
+}
+
+// awaitExit is the backend's await seam over the fake: it blocks until
+// the sandbox with pid has ended and reports how, as the parent of a real
+// sandbox would read it, or false for a pid it never gave out.
+func (f *fakeRunsc) awaitExit(pid int) (string, bool) {
+	f.mu.Lock()
+	var x *fakeSandbox
+	for _, boxes := range []map[string]*fakeSandbox{f.boxes, f.ended} {
+		for _, y := range boxes {
+			if y.pid == pid {
+				x = y
+			}
+		}
+	}
+	f.mu.Unlock()
+	if x == nil {
+		return "", false
+	}
+	<-x.done
+	if x.status > 128 {
+		return fmt.Sprintf("signal:%d", x.status-128), true
+	}
+	return fmt.Sprintf("exit:%d", x.status), true
 }
 
 // closeEndpoint is what the workload does on USR1: it stops serving and

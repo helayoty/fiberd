@@ -11,12 +11,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
-	"os/signal"
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 
@@ -35,19 +32,6 @@ import (
 	ateletpb "github.com/helayoty/fiberd/examples/substrate/proto/atelet"
 	ateompb "github.com/helayoty/fiberd/examples/substrate/proto/ateom"
 )
-
-// TestMain keeps a SIGTERM aimed at a stopping fiberd from ending the test
-// binary. While a handler is registered, Go never applies the default action.
-func TestMain(m *testing.M) {
-	sig := make(chan os.Signal, 16)
-	signal.Notify(sig, syscall.SIGTERM)
-	go func() {
-		for range sig {
-			// fiberd under test handles its own stop.
-		}
-	}()
-	os.Exit(m.Run())
-}
 
 func TestEnv(t *testing.T) {
 	cases := []struct {
@@ -361,12 +345,10 @@ func newWorker(t *testing.T) worker {
 	return w
 }
 
-// stopFiberd stops, with SIGTERM, a fiberd a failed run left behind, and
-// waits until its port closes.
-func stopFiberd(t *testing.T, addr string) {
-	if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
-		t.Fatal(err)
-	}
+// awaitStopped waits until the port of a fiberd a failed run left behind
+// closes, which run's context ending brings about.
+func awaitStopped(t *testing.T, addr string) {
+	t.Helper()
 	for deadline := time.Now().Add(20 * time.Second); ; time.Sleep(20 * time.Millisecond) {
 		c, err := net.DialTimeout("tcp", addr, time.Second)
 		if err != nil {
@@ -374,7 +356,7 @@ func stopFiberd(t *testing.T, addr string) {
 		}
 		_ = c.Close()
 		if time.Now().After(deadline) {
-			t.Fatal("fiberd kept running after SIGTERM")
+			t.Fatal("fiberd kept running after run returned")
 		}
 	}
 }
@@ -442,9 +424,12 @@ func TestRunRefuses(t *testing.T) {
 			if tc.base != nil {
 				base = tc.base(t, w)
 			}
-			err := run(pod, w.ingress, tc.cred, "", ingress.DefaultAllowedClientID, w.ready, herder.Paths{Base: base})
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			err := run(ctx, pod, w.ingress, tc.cred, "", ingress.DefaultAllowedClientID, w.ready, herder.Paths{Base: base})
 			if tc.fiberdUp {
-				stopFiberd(t, w.fiberd)
+				// run cancels what it started on its way out.
+				awaitStopped(t, w.fiberd)
 			}
 			if err == nil || !strings.Contains(err.Error(), tc.err) {
 				t.Fatalf("run = %v, want an error with %q", err, tc.err)
@@ -511,8 +496,9 @@ func serveAtelet(t *testing.T, paths herder.Paths) *fakeAtelet {
 }
 
 // TestRunServesAWorker runs a whole worker as Substrate starts it and
-// drives it as atelet, the kubelet and the router do, then stops it with
-// SIGTERM. Steps run in order on the one worker.
+// drives it as atelet, the kubelet and the router do, then stops it by
+// ending its context, as main does on SIGTERM. Steps run in order on the
+// one worker.
 func TestRunServesAWorker(t *testing.T) {
 	logs := &logTail{}
 	log.SetOutput(logs)
@@ -526,9 +512,11 @@ func TestRunServesAWorker(t *testing.T) {
 	}
 	t.Setenv("ATEOM_FIBERD_CAPACITY_DIR", limits)
 	support := serveAtelet(t, herder.Paths{Base: w.base})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		done <- run("p-1", w.ingress, "", "", ingress.DefaultAllowedClientID, w.ready, herder.Paths{Base: w.base})
+		done <- run(ctx, "p-1", w.ingress, "", "", ingress.DefaultAllowedClientID, w.ready, herder.Paths{Base: w.base})
 	}()
 	sock := herder.Paths{Base: w.base}.SocketPath("p-1")
 	for deadline := time.Now().Add(30 * time.Second); !strings.Contains(logs.String(), "serving atelet at "+sock); time.Sleep(20 * time.Millisecond) {
@@ -551,7 +539,6 @@ func TestRunServesAWorker(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = conn.Close() })
 	atelet := ateompb.NewAteomClient(conn)
-	ctx := context.Background()
 	readyz := "http://" + w.ready + "/readyz"
 
 	steps := []struct {
@@ -612,17 +599,15 @@ func TestRunServesAWorker(t *testing.T) {
 				}
 			}
 		}},
-		{"SIGTERM drains and stops the worker cleanly", func(t *testing.T) {
-			if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
-				t.Fatal(err)
-			}
+		{"the context ending drains and stops the worker cleanly", func(t *testing.T) {
+			cancel()
 			select {
 			case err := <-done:
 				if err != nil {
-					t.Fatalf("run = %v, want nil on SIGTERM", err)
+					t.Fatalf("run = %v, want nil when its context ends", err)
 				}
 			case <-time.After(30 * time.Second):
-				t.Fatal("the worker kept running after SIGTERM")
+				t.Fatal("the worker kept running after its context ended")
 			}
 			if _, err := os.Stat(sock); !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("atelet's socket left behind: %v", err)
@@ -666,67 +651,25 @@ func TestRunLogsListenFailures(t *testing.T) {
 				}
 				t.Cleanup(func() { _ = l.Close() })
 			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
 			done := make(chan error, 1)
 			go func() {
-				done <- run("p-1", listen, "", "", ingress.DefaultAllowedClientID, w.ready, herder.Paths{Base: w.base})
+				done <- run(ctx, "p-1", listen, "", "", ingress.DefaultAllowedClientID, w.ready, herder.Paths{Base: w.base})
 			}()
 			for deadline := time.Now().Add(30 * time.Second); !strings.Contains(logs.String(), "serving atelet") || !strings.Contains(logs.String(), tc.logged); time.Sleep(20 * time.Millisecond) {
 				if time.Now().After(deadline) {
 					t.Fatalf("want the worker serving atelet and %q logged\n%s", tc.logged, logs)
 				}
 			}
-			if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
-				t.Fatal(err)
-			}
+			cancel()
 			select {
 			case err := <-done:
 				if err != nil {
-					t.Fatalf("run = %v, want nil on SIGTERM", err)
+					t.Fatalf("run = %v, want nil when its context ends", err)
 				}
 			case <-time.After(30 * time.Second):
-				t.Fatal("the worker kept running after SIGTERM")
-			}
-		})
-	}
-}
-
-// TestMainExit runs main in a child process and checks its exit status.
-// It is 0 for -h, 2 for a bad command line and 1 for any other failure.
-func TestMainExit(t *testing.T) {
-	if args, ok := os.LookupEnv("ATEOM_FIBERD_TEST_ARGS"); ok {
-		os.Args = append([]string{"ateom-fiberd"}, strings.Fields(args)...)
-		main()
-		os.Exit(0)
-	}
-	cases := []struct {
-		name   string
-		args   string
-		env    []string
-		code   int
-		stderr string
-	}{
-		{name: "-h exits 0", args: "-h", code: 0, stderr: "-pod-uid"},
-		{name: "a bad flag exits 2", args: "-nope", code: 2, stderr: "flag provided but not defined: -nope"},
-		{name: "no pod uid exits 1", env: []string{"POD_UID="}, code: 1, stderr: "-pod-uid (or POD_UID) is required"},
-		{name: "a run that fails exits 1", args: "-pod-uid p-1", env: []string{"ATEOM_FIBERD_ISOLATION=SOMEWHAT"}, code: 1,
-			stderr: "ateom-fiberd: ATEOM_FIBERD_ISOLATION"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			cmd := exec.Command(os.Args[0], "-test.run=^TestMainExit$")
-			cmd.Env = append(append(os.Environ(), "ATEOM_FIBERD_TEST_ARGS="+tc.args), tc.env...)
-			var stderr bytes.Buffer
-			cmd.Stderr = &stderr
-			err := cmd.Run()
-			code := 0
-			var exit *exec.ExitError
-			if errors.As(err, &exit) {
-				code = exit.ExitCode()
-			} else if err != nil {
-				t.Fatal(err)
-			}
-			if code != tc.code || !strings.Contains(stderr.String(), tc.stderr) {
-				t.Fatalf("exit %d with %q, want %d with %q", code, stderr.String(), tc.code, tc.stderr)
+				t.Fatal("the worker kept running after its context ended")
 			}
 		})
 	}

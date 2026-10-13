@@ -51,7 +51,7 @@ func stateDir(t *testing.T) string {
 }
 
 // newConfig parses args the way a binary does, after a base that starts
-// a plaintext stub agent on loopback ":0" ports. Later flags win.
+// a plaintext stub fiberd on loopback ":0" ports. Later flags win.
 func newConfig(t *testing.T, state string, args ...string) *fiberd.Config {
 	t.Helper()
 	fs := flag.NewFlagSet("fiberd", flag.ContinueOnError)
@@ -93,10 +93,10 @@ func launch(t *testing.T, ctx context.Context, c *fiberd.Config, newHome fiberd.
 	ctx, cancel := context.WithCancel(ctx)
 	r := &running{c: c, cancel: cancel, done: make(chan error, 1)}
 	ready := make(chan struct{})
-	fiberd.SetReady(c, func(g, h, ho net.Addr) {
+	c.Ready = func(g, h, ho net.Addr) {
 		r.grpc, r.http, r.handoff = g, h, ho
 		close(ready)
-	})
+	}
 	go func() { r.done <- fiberd.RunContext(ctx, c, newHome) }()
 	select {
 	case <-ready:
@@ -528,7 +528,7 @@ func TestRunStopsWhenAskedBeforeServing(t *testing.T) {
 	c := newConfig(t, stateDir(t))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	fiberd.SetReady(c, func(net.Addr, net.Addr, net.Addr) {
+	c.Ready = func(net.Addr, net.Addr, net.Addr) {
 		// Ask to stop, and hold Run back until the shutdown has closed
 		// the admin socket, so the gRPC server is stopped before it
 		// serves.
@@ -542,7 +542,7 @@ func TestRunStopsWhenAskedBeforeServing(t *testing.T) {
 			_ = conn.Close()
 			time.Sleep(5 * time.Millisecond)
 		}
-	})
+	}
 	done := make(chan error, 1)
 	go func() { done <- fiberd.RunContext(ctx, c, fiberd.Standalone) }()
 	select {
@@ -570,7 +570,7 @@ func TestRunStopsOnSignal(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			c := newConfig(t, stateDir(t))
 			ready := make(chan struct{})
-			fiberd.SetReady(c, func(net.Addr, net.Addr, net.Addr) { close(ready) })
+			c.Ready = func(net.Addr, net.Addr, net.Addr) { close(ready) }
 			done := make(chan error, 1)
 			go func() { done <- fiberd.Run(c, fiberd.Standalone) }()
 			select {
@@ -666,7 +666,10 @@ func TestRunRefuses(t *testing.T) {
 		}
 	}
 	missing := "/nonexistent/fiberd-test"
-	proc := []string{"-runtime", "proc", "-template", "default=/bin/true"}
+	// noTool is a bare name no PATH holds, so a backend's probe of it
+	// fails at the lookup and starts nothing.
+	noTool := "fiberd-test-no-such-tool"
+	proc := []string{"-runtime", "proc", "-template", "default=/bin/true", "-criu", noTool}
 	cases := []struct {
 		name  string
 		args  []string
@@ -677,6 +680,9 @@ func TestRunRefuses(t *testing.T) {
 		// real.
 		wantLinux string
 		wantIs    error
+		// linux marks a case that rests on Linux kernel semantics and
+		// is skipped elsewhere.
+		linux bool
 	}{
 		{name: "no transport", args: []string{"-insecure-plaintext=false"}, wantIs: tlsconf.ErrNoTransport},
 		{name: "TLS files missing", args: []string{"-insecure-plaintext=false", "-tls-cert", missing, "-tls-key", missing, "-client-ca", missing},
@@ -713,10 +719,10 @@ func TestRunRefuses(t *testing.T) {
 		{name: "gvisor without a rootfs", args: []string{"-runtime", "gvisor", "-template", "default=/z"}, want: "-runtime=gvisor needs -gvisor-rootfs"},
 		// Confinement fails closed: a backend whose tools are missing
 		// offers no tier, and fiberd does not start over it.
-		{name: "gvisor whose runsc is missing", args: []string{"-runtime", "gvisor", "-template", "default=/z", "-gvisor-rootfs", "/r", "-runsc", missing},
-			want: "gvisor runtime: ", wantLinux: "gvisor runtime: host: backend gvisor offers no tier: runsc " + missing + " unavailable"},
-		{name: "hyperlight whose helper is missing", args: []string{"-runtime", "hyperlight", "-template", "default=/g", "-hyperlight-helper", missing},
-			want: "hyperlight runtime: ", wantLinux: "hyperlight runtime: host: backend hyperlight offers no tier: helper " + missing + " unusable"},
+		{name: "gvisor whose runsc is missing", args: []string{"-runtime", "gvisor", "-template", "default=/z", "-gvisor-rootfs", "/r", "-runsc", noTool},
+			want: "gvisor runtime: ", wantLinux: "gvisor runtime: host: backend gvisor offers no tier: runsc " + noTool + " unavailable"},
+		{name: "hyperlight whose helper is missing", args: []string{"-runtime", "hyperlight", "-template", "default=/g", "-hyperlight-helper", noTool},
+			want: "hyperlight runtime: ", wantLinux: "hyperlight runtime: host: backend hyperlight offers no tier: helper " + noTool + " unusable"},
 		{name: "bad parity", args: append([]string{"-parity", "kernel=sometimes"}, proc...), want: "parity"},
 		{name: "unknown endpoint family", args: append([]string{"-endpoint-family", "pigeon"}, proc...), want: `endpoint family "pigeon"`},
 		{name: "endpoint host of the wrong family", args: append([]string{"-endpoint-family", "inet4", "-endpoint-host", "::1"}, proc...),
@@ -729,6 +735,18 @@ func TestRunRefuses(t *testing.T) {
 			setup: func(t *testing.T, _ string) []string { return []string{"-handoff-listen", busy(t)} }},
 		{name: "bad handoff advertise", args: append([]string{"-handoff-listen", "127.0.0.1:0", "-handoff-advertise", "no-port"}, proc...),
 			want: "-handoff-advertise"},
+		// Linux's getcwd fails once the working directory is removed.
+		// Darwin still names the removed directory, so the relative
+		// path resolves there and the refusal cannot be reached.
+		{name: "a relative -grants-dir with no working directory", args: proc, want: "getwd", linux: true,
+			setup: func(t *testing.T, _ string) []string {
+				gone := t.TempDir()
+				t.Chdir(gone)
+				if err := os.Remove(gone); err != nil {
+					t.Fatal(err)
+				}
+				return []string{"-grants-dir", "grants"}
+			}},
 		{name: "host runtime cannot start", want: "proc runtime: ",
 			setup: func(t *testing.T, state string) []string {
 				f := filepath.Join(state, "file")
@@ -756,6 +774,9 @@ func TestRunRefuses(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.linux && runtime.GOOS != "linux" {
+				t.Skip("the case rests on Linux getcwd semantics")
+			}
 			state := stateDir(t)
 			args := tc.args
 			if tc.setup != nil {

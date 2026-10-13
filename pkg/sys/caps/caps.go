@@ -38,7 +38,7 @@ const (
 // only with SysPtrace, and raises its own open-file limit (SysResource).
 var Proc = []int{SetPCAP, NetAdmin, SysChroot, SysPtrace, SysAdmin, SysResource, SysTime}
 
-// Runc is what the runc runtime needs, measured by running tests/runc
+// Runc is what the runc runtime needs, measured by running tests/integration/runc
 // and the conformance suite under setpriv with each candidate left out.
 // The grant's container runs in a user namespace, so its root is an
 // unprivileged host uid and fiberd crosses that line in a few places.
@@ -115,13 +115,27 @@ func outside(mask uint64, keep []int) []int {
 	return out
 }
 
-// keepMask is keep as a capability mask.
-func keepMask(keep []int) uint64 {
+// maskOf is a capability list as a mask.
+func maskOf(caps []int) uint64 {
 	var m uint64
-	for _, c := range keep {
+	for _, c := range caps {
 		if c >= 0 && c < 64 {
 			m |= 1 << uint(c)
 		}
 	}
 	return m
+}
+
+// extraFrom lists, ascending, the capabilities outside keep in the
+// bounding set, or in the inheritable or ambient set the status text
+// reports. The last two matter because a binary with inheritable file
+// capabilities, or an ambient set, carries them through exec whatever
+// the bounding set says about everything else. A status that cannot be
+// read counts as empty sets.
+func extraFrom(bounding []int, status string, keep []int) []int {
+	held := maskOf(bounding)
+	if inh, amb, err := statusCaps(status); err == nil {
+		held |= inh | amb
+	}
+	return outside(held, keep)
 }

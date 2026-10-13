@@ -95,17 +95,28 @@ func (m Manager) Start(ctx context.Context, id string, opts shim.StartOpts) (shi
 	cmd.Env = append(os.Environ(), "GOMAXPROCS=2")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.ExtraFiles = []*os.File{f}
-	if err := cmd.Start(); err != nil {
+	if err := start(cmd); err != nil {
 		_ = f.Close()
 		_ = socket.Close()
 		_ = shim.RemoveSocket(address)
 		return params, err
 	}
-	go func() { _ = cmd.Wait() }()
 	_ = f.Close()
-	_ = shim.AdjustOOMScore(cmd.Process.Pid)
 	params.Address = address
 	return params, nil
+}
+
+// start runs the shim daemon cmd describes and reaps it when it ends. It
+// is a variable so the unit tests can run the daemon in this process.
+var start = startDaemon
+
+func startDaemon(cmd *exec.Cmd) error {
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	go func() { _ = cmd.Wait() }()
+	_ = shim.AdjustOOMScore(cmd.Process.Pid)
+	return nil
 }
 
 // Stop is called for a container whose shim is gone: the fiber it held

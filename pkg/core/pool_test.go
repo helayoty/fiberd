@@ -26,6 +26,54 @@ type fakePool struct {
 	gate    chan struct{} // when set, Fill waits on it
 	drained int
 	exits   chan string
+	// overtake, when set, makes the first fill end while a refill pass
+	// is between grants.
+	overtake *overtake
+}
+
+// overtake stages a fill that ends while a refill pass is between
+// grants. The pass asks for each grant's count right before it decides
+// on that grant, so the fake holds the first fill until the pass asks
+// for the fill's own grant, lets the fill end, and answers only once
+// the ended fill has settled the loop's state and asked for the count
+// itself.
+type overtake struct {
+	uid     string        // the held fill's grant
+	phase   int           // 0 before the fill, 1 held, 2 released, 3 settled
+	release chan struct{} // closed when the pass asks for uid's count
+	done    chan struct{} // closed when the ended fill asks for it
+}
+
+func newOvertake() *overtake {
+	return &overtake{release: make(chan struct{}), done: make(chan struct{})}
+}
+
+// hold is called by Fill under p.mu and returns what the fill waits on,
+// nil when this fill is not the staged one.
+func (o *overtake) hold(uid string) <-chan struct{} {
+	if o == nil || o.phase != 0 {
+		return nil
+	}
+	o.uid, o.phase = uid, 1
+	return o.release
+}
+
+// asked is called by Pooled under p.mu and reports whether the caller
+// must wait for done before it answers.
+func (o *overtake) asked(uid string) bool {
+	if o == nil || o.uid != uid {
+		return false
+	}
+	switch o.phase {
+	case 1:
+		o.phase = 2
+		close(o.release)
+		return true
+	case 2:
+		o.phase = 3
+		close(o.done)
+	}
+	return false
 }
 
 func newFakePool(tier core.Tier) *fakePool {
@@ -46,7 +94,14 @@ func (p *fakePool) Fill(ctx context.Context, g core.Grant, deadline time.Duratio
 	p.mu.Lock()
 	p.fills = append(p.fills, time.Now())
 	p.filled = append(p.filled, fillCall{g.UID, deadline})
-	gate, err := p.gate, p.fillErr
+	var gate <-chan struct{}
+	if p.gate != nil {
+		gate = p.gate
+	}
+	if held := p.overtake.hold(g.UID); held != nil {
+		gate = held
+	}
+	err := p.fillErr
 	if p.yields > 0 {
 		p.yields--
 		err = core.ErrYielded
@@ -81,8 +136,13 @@ func (p *fakePool) Drain(uid string, n int) int {
 
 func (p *fakePool) Pooled(uid string) int {
 	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.pooled[uid]
+	n, wait := p.pooled[uid], p.overtake.asked(uid)
+	p.mu.Unlock()
+	if !wait {
+		return n
+	}
+	<-p.overtake.done
+	return p.Pooled(uid)
 }
 
 func (p *fakePool) PooledExits() <-chan string { return p.exits }
@@ -449,11 +509,12 @@ func TestEpochBumpKeepsPool(t *testing.T) {
 // clone is held before it is tried again.
 func TestRefillOneAtATime(t *testing.T) {
 	cases := []struct {
-		name   string
-		grants []core.Grant
-		gate   bool
-		yields int
-		check  func(t *testing.T, p *fakePool)
+		name     string
+		grants   []core.Grant
+		gate     bool
+		overtake bool
+		yields   int
+		check    func(t *testing.T, p *fakePool)
 	}{
 		{name: "one fill in flight across grants", gate: true,
 			grants: []core.Grant{{UID: "g1", FiberMax: 1, FiberWarm: 1}, {UID: "g2", FiberMax: 1, FiberWarm: 1}},
@@ -488,6 +549,25 @@ func TestRefillOneAtATime(t *testing.T) {
 					t.Fatalf("fill order = %v, want %v", order, want)
 				}
 			}},
+		{name: "a fill that ends while a pass is between grants: the grant passed over still gets its turn", overtake: true,
+			grants: []core.Grant{{UID: "g1", FiberMax: 2, FiberWarm: 2}, {UID: "g2", FiberMax: 2, FiberWarm: 2}},
+			check: func(t *testing.T, p *fakePool) {
+				// The pool counts are not read before the staged fill has
+				// ended, so only the refill pass releases it.
+				select {
+				case <-p.overtake.done:
+				case <-time.After(5 * time.Second):
+					t.Fatal("the held fill never ended")
+				}
+				waitUntil(t, 5*time.Second, "both pools full", func() bool { return p.Pooled("g1") == 2 && p.Pooled("g2") == 2 })
+				var order []string
+				for _, c := range p.fillCalls() {
+					order = append(order, c.uid)
+				}
+				if want := []string{"g1", "g2", "g1", "g2"}; !slices.Equal(order, want) {
+					t.Fatalf("fill order = %v, want %v", order, want)
+				}
+			}},
 		{name: "a yielded fill is held, then tried again", yields: 1,
 			grants: []core.Grant{{UID: "g1", FiberMax: 1, FiberWarm: 1}},
 			check: func(t *testing.T, p *fakePool) {
@@ -511,6 +591,9 @@ func TestRefillOneAtATime(t *testing.T) {
 			p.yields = tc.yields
 			if tc.gate {
 				p.gate = make(chan struct{})
+			}
+			if tc.overtake {
+				p.overtake = newOvertake()
 			}
 			a.Runtime = p
 			ctx := context.Background()

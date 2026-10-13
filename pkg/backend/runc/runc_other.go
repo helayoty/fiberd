@@ -9,6 +9,7 @@ import (
 
 	"github.com/helayoty/fiberd/pkg/backend"
 	"github.com/helayoty/fiberd/pkg/core"
+	"github.com/helayoty/fiberd/pkg/sys/criu"
 )
 
 // Options configure the runc backend.
@@ -17,6 +18,7 @@ type Options struct {
 	Rootfs     string
 	StateDir   string
 	CRIU       string
+	Commander  criu.Commander
 	Pool       IDPool
 	SubIDFiles []string
 }

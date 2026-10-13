@@ -45,5 +45,5 @@ Before any of this, `helper --version` prints the same four facts on one line an
 
 ## Implementations
 
-- `hack/hyperlight/fakehelper` (Go). Sandboxes are goroutines serving the reference workload's line protocol, and state is a JSON file. It exists so the backend, the host runtime and the conformance suite run without a hypervisor.
+- `hack/hyperlight/fakehelper` (Go). Sandboxes are goroutines serving the reference workload's line protocol, and state is a JSON file. It exists so the backend, the host runtime and the conformance suite run without a hypervisor, and its library (`hack/hyperlight/fakehelper/helper`) serves the same protocol in process for the unit tests.
 - `hack/hyperlight/helper` (Rust, `hyperlight_host`). Sandboxes are Hyperlight micro-VMs restored from the warm snapshot. `PARK` is `Snapshot::save` (an OCI image layout), and `RESUME` builds a sandbox from it. Needs KVM, MSHV or Windows Hypervisor Platform.

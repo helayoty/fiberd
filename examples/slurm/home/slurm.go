@@ -67,12 +67,29 @@ type Config struct {
 	// the probe and liveness comes from a timer, as on a standalone host
 	// without an issuer.
 	Probe []string
+	// RunProbe runs Probe and returns its combined output. The default
+	// execs it. Tests answer in process.
+	RunProbe func(ctx context.Context, argv []string) ([]byte, error)
 	// OnJobEnd runs after the scope-loss hook when the job reached a
 	// terminal state: the allocation is over, so is fiberd. Default:
 	// SIGTERM to this process, which fiberd takes as a graceful stop
 	// (slurmstepd kills the step's own cgroups, not the ones fiberd made
 	// beneath them, so fiberd must leave on its own).
 	OnJobEnd func()
+}
+
+// defaultOnJobEnd is OnJobEnd when the config leaves it open. A variable,
+// so a unit test can see it chosen without signalling itself.
+var defaultOnJobEnd = func() { _ = syscall.Kill(os.Getpid(), syscall.SIGTERM) }
+
+// runProbe is RunProbe when the config leaves it open. It execs the
+// command with stdout and stderr together, as the log wants them.
+func runProbe(ctx context.Context, argv []string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	var out bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &out
+	err := cmd.Run()
+	return out.Bytes(), err
 }
 
 // Job is what the allocation says about itself.
@@ -119,8 +136,11 @@ func New(cfg Config) (*Home, error) {
 	if cfg.Probe == nil {
 		cfg.Probe = []string{"scontrol", "show", "job", "-o", job.ID}
 	}
+	if cfg.RunProbe == nil {
+		cfg.RunProbe = runProbe
+	}
 	if cfg.OnJobEnd == nil {
-		cfg.OnJobEnd = func() { _ = syscall.Kill(os.Getpid(), syscall.SIGTERM) }
+		cfg.OnJobEnd = defaultOnJobEnd
 	}
 	h := &Home{cfg: cfg, job: job, health: core.NewSourceHealth(cfg.StaleTTL, time.Now())}
 	h.devices = cfg.Devices
@@ -339,16 +359,14 @@ func (h *Home) poll(ctx context.Context) {
 	}
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, h.cfg.Probe[0], h.cfg.Probe[1:]...)
-	var out bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &out, &out
-	if err := cmd.Run(); err != nil {
-		log.Printf("slurm: probe: %v: %s", err, strings.TrimSpace(out.String()))
+	out, err := h.cfg.RunProbe(ctx, h.cfg.Probe)
+	if err != nil {
+		log.Printf("slurm: probe: %v: %s", err, strings.TrimSpace(string(out)))
 		return
 	}
-	m := jobState.FindStringSubmatch(out.String())
+	m := jobState.FindStringSubmatch(string(out))
 	if m == nil {
-		log.Printf("slurm: probe: no JobState in %q", strings.TrimSpace(out.String()))
+		log.Printf("slurm: probe: no JobState in %q", strings.TrimSpace(string(out)))
 		return
 	}
 	switch state := m[1]; state {

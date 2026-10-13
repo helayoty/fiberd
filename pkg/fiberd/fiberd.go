@@ -1,4 +1,4 @@
-// Package agent is the grant agent as a library: the flags, the wiring
+// Package fiberd is fiberd as a library: the flags, the wiring
 // of verifier, runtime, ledger, pressure ladder, admin socket and RPC
 // server, and the fixed startup order (epoch++ -> reconcile -> open
 // RPC). cmd/fiberd is this package plus the standalone home; an
@@ -100,15 +100,15 @@ type Config struct {
 	PressureEvery          time.Duration
 	// Devices is the parsed -devices list.
 	Devices []string
+	// Ready, when set, is told the bound addresses once every listener
+	// is open. A binary or a test that listens on ":0" learns its ports
+	// from it. http and handoff are nil when off.
+	Ready func(grpc, http, handoff net.Addr)
 
 	devices string
 	// hooks holds the test-only admin controls. It is empty unless the
 	// binary is built with the fiberd_testhooks tag.
 	hooks testHooks
-	// ready, when set, is told the bound addresses once every listener is
-	// open. Tests use it to find ":0" ports. http and handoff are nil when
-	// off.
-	ready func(grpc, http, handoff net.Addr)
 	// auditHealth, when set, replaces the spool's Poisoned on /healthz.
 	// Tests use it, since a real fsync cannot be made to fail.
 	auditHealth func() error
@@ -215,9 +215,9 @@ func (c *Config) NarrowCaps() error {
 	for _, n := range keep {
 		names = append(names, caps.Names[n])
 	}
-	log.Printf("agent: re-executing with only %s in the capability bounding set (-all-caps keeps them all)", strings.Join(names, ", "))
+	log.Printf("fiberd: re-executing with only %s in the capability bounding set (-all-caps keeps them all)", strings.Join(names, ", "))
 	if err := capsNarrow(keep); err != nil {
-		return fmt.Errorf("agent: narrow capabilities for -runtime=%s: %w (grant CAP_SETPCAP, or pass -all-caps to keep every capability)", c.RuntimeName, err)
+		return fmt.Errorf("fiberd: narrow capabilities for -runtime=%s: %w (grant CAP_SETPCAP, or pass -all-caps to keep every capability)", c.RuntimeName, err)
 	}
 	return nil
 }
@@ -367,7 +367,7 @@ func Run(c *Config, newHome HomeFactory) error { return RunContext(context.Backg
 // process's lifetime, and a test, stop fiberd through ctx.
 func RunContext(ctx context.Context, c *Config, newHome HomeFactory) error {
 	// Transport comes before anything starts, so a misconfigured TLS setup
-	// never leaves a half-started agent behind.
+	// never leaves a half-started fiberd behind.
 	serverTLS, err := tlsconf.Server(c.TLSCert, c.TLSKey, c.ClientCA, c.InsecurePlaintext)
 	if err != nil {
 		return err
@@ -533,7 +533,7 @@ func RunContext(ctx context.Context, c *Config, newHome HomeFactory) error {
 	}
 	log.Printf("fiberd epoch=%d node=%s home=%s (all prior fences invalid)", ep.Current(), c.NodeID, h.Name())
 
-	// 2. Ledger, audit spool, agent.
+	// 2. Ledger, audit spool, core.
 	led := core.NewLedger(ep.Current())
 	cp, err := c.loadAuditKey()
 	if err != nil {
@@ -693,7 +693,7 @@ func RunContext(ctx context.Context, c *Config, newHome HomeFactory) error {
 		gs.GracefulStop()
 	}()
 	log.Printf("fiberd warm path on %s tier=%s admin=%s (no control plane needed beyond this point)", gl.Addr(), rt.Tier(), adminSock)
-	if c.ready != nil {
+	if c.Ready != nil {
 		var ha, ho net.Addr
 		if hl != nil {
 			ha = hl.Addr()
@@ -701,7 +701,7 @@ func RunContext(ctx context.Context, c *Config, newHome HomeFactory) error {
 		if handoffLn != nil {
 			ho = handoffLn.Addr()
 		}
-		c.ready(gl.Addr(), ha, ho)
+		c.Ready(gl.Addr(), ha, ho)
 	}
 	// A stop that lands before Serve starts makes it return
 	// ErrServerStopped. That is a clean stop too. Serve returns once

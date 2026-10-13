@@ -71,20 +71,33 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	err := run(ctx, os.Args[1:], os.Stderr, nil)
 	stop()
-	var usage usageError
-	switch {
-	case errors.Is(err, flag.ErrHelp):
-	case errors.As(err, &usage):
-		os.Exit(2) // the flag package has printed the error and the usage
-	case err != nil:
-		log.Fatal(err)
+	code := exitCode(err)
+	if code == 1 {
+		log.Print(err)
 	}
+	os.Exit(code)
 }
 
 // usageError is a bad command line, already reported with the usage.
 type usageError struct{ error }
 
 func (e usageError) Unwrap() error { return e.error }
+
+// exitCode is the process's exit status for what run got back. It is 0
+// for a clean stop and -h, 2 for a bad command line, which the flag
+// package has already reported with the usage, and 1 for any other
+// failure.
+func exitCode(err error) int {
+	var usage usageError
+	switch {
+	case err == nil, errors.Is(err, flag.ErrHelp):
+		return 0
+	case errors.As(err, &usage):
+		return 2
+	default:
+		return 1
+	}
+}
 
 // run parses args (usage and flag errors go to out), serves until ctx
 // ends, and returns nil once it has stopped cleanly. ready, when set, is

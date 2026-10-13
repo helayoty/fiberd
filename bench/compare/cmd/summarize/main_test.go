@@ -1,25 +1,15 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/helayoty/fiberd/bench/compare"
 )
-
-// TestMain runs the command itself when the test re-executes its own
-// binary, so the tests read exactly what a phase script prints.
-func TestMain(m *testing.M) {
-	if os.Getenv("SUMMARIZE_MAIN") == "1" {
-		main()
-		os.Exit(0)
-	}
-	os.Exit(m.Run())
-}
 
 // phaseRecords writes a cold run and three timed runs of one burst of 1
 // for system into dir/system.jsonl.
@@ -58,14 +48,12 @@ func TestPhasesAreNotMerged(t *testing.T) {
 			if tc.markdown {
 				args = append([]string{"-markdown"}, args...)
 			}
-			cmd := exec.Command(os.Args[0], args...)
-			cmd.Env = append(os.Environ(), "SUMMARIZE_MAIN=1")
-			out, err := cmd.CombinedOutput()
-			if err != nil {
-				t.Fatalf("%v: %s", err, out)
+			var out, stderr bytes.Buffer
+			if err := run(args, &out, &stderr); err != nil {
+				t.Fatalf("%v: %s", err, stderr.String())
 			}
 			var headings, samples []string
-			for _, line := range strings.Split(string(out), "\n") {
+			for _, line := range strings.Split(out.String(), "\n") {
 				if h, ok := strings.CutPrefix(line, tc.heading); ok {
 					headings = append(headings, h)
 				}
@@ -77,11 +65,42 @@ func TestPhasesAreNotMerged(t *testing.T) {
 			}
 			want := []string{"phase 1, kind shared-kernel", "phase 2, standalone"}
 			if strings.Join(headings, ";") != strings.Join(want, ";") {
-				t.Errorf("headings %q, want %q\n%s", headings, want, out)
+				t.Errorf("headings %q, want %q\n%s", headings, want, out.String())
 			}
 			// One row per phase, three timed runs of one activation each.
 			if strings.Join(samples, ",") != "3,3" {
-				t.Errorf("fiberd-proc samples %v, want 3 in each phase\n%s", samples, out)
+				t.Errorf("fiberd-proc samples %v, want 3 in each phase\n%s", samples, out.String())
+			}
+		})
+	}
+}
+
+// TestRunRefuses covers what run reports instead of printing a table.
+func TestRunRefuses(t *testing.T) {
+	cases := []struct {
+		name string
+		args func(root string) []string
+		want string
+	}{
+		{name: "a file that is not there", args: func(root string) []string { return []string{filepath.Join(root, "nope.jsonl")} }, want: "no such file"},
+		{name: "a file that is not records", args: func(root string) []string {
+			path := filepath.Join(root, "bad.jsonl")
+			if err := os.WriteFile(path, []byte("not json\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			return []string{path}
+		}, want: "bad.jsonl"},
+		{name: "a flag it does not know", args: func(string) []string { return []string{"-bogus"} }, want: "flag provided but not defined"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var out, stderr bytes.Buffer
+			err := run(tc.args(t.TempDir()), &out, &stderr)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("run = %v, want an error naming %q", err, tc.want)
+			}
+			if out.Len() != 0 {
+				t.Fatalf("printed %q on failure", out.String())
 			}
 		})
 	}

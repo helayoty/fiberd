@@ -30,21 +30,51 @@ import (
 
 func main() {
 	var c fiberd.Config
-	c.Bind(flag.CommandLine)
-	grantArg := flag.String("grant", os.Getenv("FIBERD_GRANT"), "the grant for this allocation: a JWT, or @<file>; verified before fiberd starts and staged in -grants-dir (default $FIBERD_GRANT)")
-	probe := flag.String("slurm-probe", "", "command reporting the job's state as JobState=<STATE> (default: scontrol show job -o $SLURM_JOB_ID; `none` = a timer)")
-	flag.Parse()
-	c.Finish()
-	if err := run(&c, *grantArg, *probe, os.Getenv, ""); err != nil {
-		log.Fatal(err)
+	fs := flag.NewFlagSet("fiberd-slurm", flag.ContinueOnError)
+	c.Bind(fs)
+	grantArg := fs.String("grant", os.Getenv("FIBERD_GRANT"), "the grant for this allocation: a JWT, or @<file>; verified before fiberd starts and staged in -grants-dir (default $FIBERD_GRANT)")
+	probe := fs.String("slurm-probe", "", "command reporting the job's state as JobState=<STATE> (default: scontrol show job -o $SLURM_JOB_ID; `none` = a timer)")
+	err := fs.Parse(os.Args[1:])
+	if err != nil {
+		err = usageError{err}
+	} else {
+		c.Finish()
+		err = run(context.Background(), &c, *grantArg, *probe, os.Getenv, home.Config{})
+	}
+	code := exitCode(err)
+	if code == 1 {
+		log.Print(err)
+	}
+	os.Exit(code)
+}
+
+// usageError is a bad command line, already reported with the usage.
+type usageError struct{ error }
+
+func (e usageError) Unwrap() error { return e.error }
+
+// exitCode is the process's exit status for what main got back. It is 0
+// for success and -h, 2 for a bad command line and 1 for any other
+// failure.
+func exitCode(err error) int {
+	var usage usageError
+	switch {
+	case err == nil, errors.Is(err, flag.ErrHelp):
+		return 0
+	case errors.As(err, &usage):
+		return 2
+	default:
+		return 1
 	}
 }
 
-// run is fiberd under a Slurm allocation. env reads the job's
-// environment. cgroupMount is the cgroup v2 mount the home delegates the
-// job step's cgroup under. Empty means the home's default, /sys/fs/cgroup.
-// Tests point it at a fake mount, so they never touch the host's cgroups.
-func run(c *fiberd.Config, grantArg, probe string, env func(string) string, cgroupMount string) error {
+// run is fiberd under a Slurm allocation until ctx ends or the job does.
+// env reads the job's environment. base carries what a test overrides in
+// the home, which is the cgroup v2 mount the job step's cgroup is
+// delegated under, the probe runner and what happens when the job ends.
+// main passes the zero value, so the home's defaults apply and no test
+// touches the host's cgroups.
+func run(ctx context.Context, c *fiberd.Config, grantArg, probe string, env func(string) string, base home.Config) error {
 	job, err := home.ReadJob(env)
 	if err != nil {
 		return err
@@ -58,7 +88,7 @@ func run(c *fiberd.Config, grantArg, probe string, env func(string) string, cgro
 		}
 	}
 	p := probeCommand(probe)
-	return fiberd.Run(c, func(c *fiberd.Config, _ *grant.Cache) (fhome.Home, error) {
+	return fiberd.RunContext(ctx, c, func(c *fiberd.Config, _ *grant.Cache) (fhome.Home, error) {
 		fam, err := c.Family()
 		if err != nil {
 			return nil, err
@@ -67,10 +97,10 @@ func run(c *fiberd.Config, grantArg, probe string, env func(string) string, cgro
 		if err != nil {
 			return nil, err
 		}
-		return home.New(home.Config{
-			Env: env, GrantsDir: c.GrantsDir, StaleTTL: c.StaleTTL, CgroupMount: cgroupMount, Devices: c.Devices,
-			Family: fam, Host: c.EndpointHost, ListenPort: port, Probe: p,
-		})
+		cfg := base
+		cfg.Env, cfg.GrantsDir, cfg.StaleTTL, cfg.Devices = env, c.GrantsDir, c.StaleTTL, c.Devices
+		cfg.Family, cfg.Host, cfg.ListenPort, cfg.Probe = fam, c.EndpointHost, port, p
+		return home.New(cfg)
 	})
 }
 

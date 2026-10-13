@@ -85,8 +85,9 @@ type Config struct {
 	Parity artifact.Parity
 	// Platform overrides what this home believes about its own host, for
 	// tests and for hosts whose uname is not what the checkpoints will
-	// run under. Zero fields are detected; Backend is always the
-	// backend's name.
+	// run under. Zero fields are filled by the backend, then detected
+	// (ldd for the libc), so a Platform naming all three runs nothing.
+	// Backend is always the backend's name.
 	Platform artifact.Platform
 	// Ceiling computes the grant's block ceiling in bytes from the grant
 	// and the warm template's resident size; 0 means no ceiling. The

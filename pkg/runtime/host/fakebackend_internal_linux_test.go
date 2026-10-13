@@ -12,7 +12,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -106,6 +105,8 @@ func (b *fakeBackend) Name() string    { return b.name }
 func (b *fakeBackend) Tier() core.Tier { return b.tier }
 
 func (b *fakeBackend) Warm(_ context.Context, spec backend.WarmSpec) (backend.Warm, error) {
+	enter(spec.CgroupFD)
+	enter(spec.ProbeCgroupFD)
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.warmCalls++
@@ -151,6 +152,7 @@ func takeHandoff(f *os.File) (fd int, identity []byte) {
 }
 
 func (b *fakeBackend) Clone(_ context.Context, warmID string, spec backend.FiberSpec) (backend.Fiber, error) {
+	enter(spec.CgroupFD)
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.cloneErr != nil {
@@ -263,6 +265,7 @@ func (b *fakeBackend) Park(_ context.Context, fiberID string, spec backend.ParkS
 }
 
 func (b *fakeBackend) Resume(_ context.Context, spec backend.ResumeSpec) (backend.Fiber, error) {
+	enter(spec.CgroupFD)
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.resumeErr != nil {
@@ -496,6 +499,7 @@ func newPoolMixin(fb *fakeBackend) *poolMixin {
 }
 
 func (m *poolMixin) Pool(_ context.Context, warmID string, spec backend.PoolSpec) (backend.Pooled, error) {
+	enter(spec.CgroupFD)
 	if gate := m.poolGate; gate != nil {
 		<-gate
 	}
@@ -831,17 +835,48 @@ func newPoolBackend(tier core.Tier) *poolBackend {
 
 // Test plumbing.
 
+// plainTree is whether the runtime runs over a plain directory standing
+// in for its cgroup subtree, the default. FIBERD_CGROUP_ROOT names a
+// real delegated subtree instead, for a root run in the dev container.
+var plainTree = os.Getenv("FIBERD_CGROUP_ROOT") == ""
+
+func init() {
+	if plainTree {
+		rmdir = plainRmdir
+	}
+}
+
+// plainRmdir removes a cgroup of the plain tree. The kernel drops an
+// empty cgroup whatever control files it shows, so the files go first.
+// A child cgroup keeps it, as the kernel would.
+func plainRmdir(d cgroup.Dir) error {
+	entries, err := os.ReadDir(d.Path)
+	if err != nil {
+		return d.Remove()
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			_ = os.Remove(filepath.Join(d.Path, e.Name()))
+		}
+	}
+	return d.Remove()
+}
+
 var cgroupSeq atomic.Int64
 
-// testCgroupRoot is a fresh delegated subtree for one runtime, removed
-// with everything under it when the test ends. Tests needing one skip
-// where the home's cgroup root is not writable.
+// testCgroupRoot is a fresh cgroup subtree for one runtime. On the
+// plain tree it is a directory under the test's temp dir showing the
+// controllers a delegated root offers. On a real tree it is a child of
+// FIBERD_CGROUP_ROOT, removed with everything under it when the test
+// ends, and the test skips where that root is not writable.
 func testCgroupRoot(t *testing.T) string {
 	t.Helper()
-	root := os.Getenv("FIBERD_CGROUP_ROOT")
-	if root == "" {
-		root = "/sys/fs/cgroup/fiberd"
+	if plainTree {
+		dir := filepath.Join(t.TempDir(), "cg")
+		seedCgroup(t, cgroup.Root(dir), map[string]string{"cgroup.controllers": "memory pids\n"})
+		return dir
 	}
+	root := os.Getenv("FIBERD_CGROUP_ROOT")
 	f, err := os.OpenFile(filepath.Join(root, "cgroup.subtree_control"), os.O_WRONLY, 0)
 	if err != nil {
 		t.Skipf("cgroup root %s not writable: %v", root, err)
@@ -870,14 +905,154 @@ func removeCgroupTree(d cgroup.Dir) {
 	}
 }
 
+// seedCgroup makes d with the given files, on the plain tree the files
+// the kernel would show before the runtime touches d. On a real tree it
+// only makes d, which then has every file.
+func seedCgroup(t *testing.T, d cgroup.Dir, files map[string]string) {
+	t.Helper()
+	if err := os.MkdirAll(d.Path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if !plainTree {
+		return
+	}
+	for name, v := range files {
+		if err := os.WriteFile(filepath.Join(d.Path, name), []byte(v), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// delegated seeds d as a cgroup made under a root that delegated the
+// pids controller, which shows pids.max and cgroup.procs from the start.
+// A test calls it before the runtime makes d, for the task limits and
+// the cgroup.procs hand-over the runtime writes on the way.
+func delegated(t *testing.T, d cgroup.Dir) {
+	t.Helper()
+	seedCgroup(t, d, map[string]string{"pids.max": "max\n", "cgroup.procs": ""})
+}
+
+// delegatedUnder is delegated for cgroups named relative to root, from
+// a Config modifier that has no test to fail.
+func delegatedUnder(root string, names ...string) {
+	for _, n := range names {
+		d := cgroup.Root(root).Child(n)
+		if err := os.MkdirAll(d.Path, 0o755); err != nil {
+			panic(err)
+		}
+		if !plainTree {
+			continue
+		}
+		for name, v := range map[string]string{"pids.max": "max\n", "cgroup.procs": ""} {
+			if err := os.WriteFile(filepath.Join(d.Path, name), []byte(v), 0o644); err != nil {
+				panic(err)
+			}
+		}
+	}
+}
+
+// liveFiles is what a cgroup shows once a task runs in it, as far as the
+// runtime reads. Nothing is charged, no task is listed, no event yet.
+var liveFiles = map[string]string{
+	"cgroup.procs":    "",
+	"memory.current":  "0\n",
+	"memory.stat":     "anon 0\nshmem 0\n",
+	"memory.events":   "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\n",
+	"pids.events":     "max 0\n",
+	"memory.pressure": "some avg10=0.00 avg60=0.00 avg300=0.00 total=0\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+}
+
+// enter is what the fake does with a cgroup descriptor it is handed.
+// On the plain tree it writes the files a live cgroup shows, which the
+// kernel keeps for a real one. Files already there are kept.
+func enter(fd int) {
+	if !plainTree || fd < 0 {
+		return
+	}
+	path, err := os.Readlink(fmt.Sprintf("/proc/self/fd/%d", fd))
+	if err != nil {
+		return
+	}
+	for name, v := range liveFiles {
+		p := filepath.Join(path, name)
+		if _, err := os.Lstat(p); err == nil {
+			continue
+		}
+		_ = os.WriteFile(p, []byte(v), 0o644)
+	}
+}
+
+// plainOnly skips a test on a real tree, whose kernel-owned files no
+// test can write.
+func plainOnly(t *testing.T) {
+	t.Helper()
+	if !plainTree {
+		t.Skip("the kernel owns this file on a real cgroup tree")
+	}
+}
+
+// cgSet writes one file of a cgroup, a value the kernel would show.
+func cgSet(t *testing.T, d cgroup.Dir, name, v string) {
+	t.Helper()
+	plainOnly(t)
+	if err := os.WriteFile(filepath.Join(d.Path, name), []byte(v+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// charge is what the leaf's tasks have made private, its memory.current.
+func charge(t *testing.T, d cgroup.Dir, n uint64) {
+	t.Helper()
+	cgSet(t, d, "memory.current", strconv.FormatUint(n, 10))
+}
+
+// unwritable makes name under d a directory, so the runtime's write of
+// that control file fails, as the kernel refuses some values.
+func unwritable(t *testing.T, d cgroup.Dir, name string) {
+	t.Helper()
+	plainOnly(t)
+	if err := os.MkdirAll(d.Path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(d.Path, name), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// inTheWay leaves a file where the runtime would make the cgroup name
+// under d, so the kernel cannot make it. The kernel's own refusal of
+// one leaf more is tests/integration/host TestLeafRefused.
+func inTheWay(t *testing.T, d cgroup.Dir, name string) {
+	t.Helper()
+	plainOnly(t)
+	if err := os.WriteFile(filepath.Join(d.Path, name), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// fileOwner is the uid owning path.
+func fileOwner(t *testing.T, path string) uint32 {
+	t.Helper()
+	st, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return st.Sys().(*syscall.Stat_t).Uid
+}
+
 // testConfig is a runtime configuration over be with every path under
 // the test's temp dir and a fresh cgroup subtree.
+// testPlatform is the host every test runtime believes it runs on. It
+// names all three facts, so New detects nothing (the libc comes from
+// ldd).
+var testPlatform = artifact.Platform{Arch: "riscv64", Kernel: "6.1.0-test", Libc: "(gnu libc) 2.36"}
+
 func testConfig(t *testing.T, be backend.Backend) Config {
 	t.Helper()
 	root := t.TempDir()
 	return Config{Backend: be, Templates: map[string]string{"default": "/bin/true --template"},
 		CgroupRoot: testCgroupRoot(t), RunDir: filepath.Join(root, "run"), DeltaDir: filepath.Join(root, "deltas"),
-		TemplateCache: filepath.Join(root, "cache")}
+		TemplateCache: filepath.Join(root, "cache"), Platform: testPlatform}
 }
 
 // newTestRuntime opens a runtime over be, closed when the test ends.
@@ -937,7 +1112,27 @@ func cgFile(t *testing.T, d cgroup.Dir, name string) string {
 	if err != nil {
 		t.Fatalf("read %s: %v", filepath.Join(d.Path, name), err)
 	}
-	return string(b[:len(b)-1]) // trailing newline
+	return strings.TrimSpace(string(b))
+}
+
+// cgOr reads one file of a cgroup. On the plain tree a file the runtime
+// never wrote is absent, and reads as the kernel's default absent.
+func cgOr(t *testing.T, d cgroup.Dir, name, absent string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(d.Path, name))
+	if errors.Is(err, os.ErrNotExist) && plainTree {
+		return absent
+	}
+	if err != nil {
+		t.Fatalf("read %s: %v", filepath.Join(d.Path, name), err)
+	}
+	return strings.TrimSpace(string(b))
+}
+
+// limit reads one limit of a cgroup, "max" when the runtime never set it.
+func limit(t *testing.T, d cgroup.Dir, name string) string {
+	t.Helper()
+	return cgOr(t, d, name, "max")
 }
 
 func cgUint(t *testing.T, d cgroup.Dir, name string) uint64 {
@@ -947,48 +1142,6 @@ func cgUint(t *testing.T, d cgroup.Dir, name string) uint64 {
 		t.Fatalf("%s/%s: %v", d.Path, name, err)
 	}
 	return n
-}
-
-// startSleeper runs a process of the test's own inside leaf, so the leaf
-// has a live task charged to it. The shell moves itself into the leaf
-// before it execs, so what the task maps is the leaf's. It is killed and
-// reaped when the test ends.
-func startSleeper(t *testing.T, leaf cgroup.Dir) int {
-	t.Helper()
-	return startInLeaf(t, leaf, "exec sleep 300")
-}
-
-// startInLeaf runs a shell command of the test's own inside leaf.
-func startInLeaf(t *testing.T, leaf cgroup.Dir, command string) int {
-	t.Helper()
-	cmd := exec.Command("sh", "-c", "echo $$ > "+filepath.Join(leaf.Path, "cgroup.procs")+" && "+command)
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start task: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-	})
-	waitFor(t, "the task to enter "+leaf.Path, func() bool {
-		pids, _ := leaf.Procs()
-		for _, p := range pids {
-			if p == cmd.Process.Pid {
-				return true
-			}
-		}
-		return false
-	})
-	return cmd.Process.Pid
-}
-
-// fileOwner is the uid owning path.
-func fileOwner(t *testing.T, path string) uint32 {
-	t.Helper()
-	st, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return st.Sys().(*syscall.Stat_t).Uid
 }
 
 func exists(path string) bool {
@@ -1023,26 +1176,3 @@ var (
 	_ backend.Pooler           = (*poolBackend)(nil)
 	_ backend.Overheader       = (*poolBackend)(nil)
 )
-
-// refuseLeaves caps d at the descendants it has now, so the kernel refuses
-// the next leaf with EAGAIN. Every cgroup v2 kernel enforces this, unlike a
-// tiny memory.max, which only some kernels refuse a child under.
-func refuseLeaves(t *testing.T, d cgroup.Dir) {
-	t.Helper()
-	b, err := os.ReadFile(filepath.Join(d.Path, "cgroup.stat"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	n := ""
-	for _, line := range strings.Split(string(b), "\n") {
-		if v, ok := strings.CutPrefix(line, "nr_descendants "); ok {
-			n = v
-		}
-	}
-	if n == "" {
-		t.Fatal("no nr_descendants in cgroup.stat")
-	}
-	if err := os.WriteFile(filepath.Join(d.Path, "cgroup.max.descendants"), []byte(n), 0o644); err != nil {
-		t.Fatal(err)
-	}
-}

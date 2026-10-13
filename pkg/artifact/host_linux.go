@@ -4,7 +4,6 @@ package artifact
 
 import (
 	"os/exec"
-	"strings"
 	"syscall"
 )
 
@@ -23,16 +22,7 @@ func unameRelease() string {
 	return string(b)
 }
 
-// libcVersion asks the dynamic loader; glibc prints "ldd (GNU libc) 2.36".
+// libcVersion asks the dynamic loader.
 func libcVersion() string {
-	out, err := exec.Command("ldd", "--version").Output()
-	if err != nil {
-		return "unknown"
-	}
-	first := strings.SplitN(string(out), "\n", 2)[0]
-	fields := strings.Fields(first)
-	if len(fields) == 0 {
-		return "unknown"
-	}
-	return strings.ToLower(strings.Join(fields[1:], " "))
+	return parseLdd(exec.Command("ldd", "--version").Output())
 }

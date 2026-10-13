@@ -81,7 +81,7 @@ The [quickstart](docs/quickstart.md) walks through each call. To write your own 
 
 ## Contributing
 
-CI runs the unit tests on linux/amd64 and macOS as a non-root user, so privileged tests skip there. The Linux suites run as root in a container. Run `make test` and `make lint` before sending a change.
+CI runs the unit tests (`make test`) on linux/amd64 and macOS as a non-root user. The integration suites under `tests/` and each example's `tests/` build only with `-tags integration` and run as root in the dev container (`make integration-tests`). Run `make test` and `make lint` before sending a change.
 
 ## License
 

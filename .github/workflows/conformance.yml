@@ -1,0 +1,104 @@
+name: conformance
+
+# The conformance suite (tests/e2e/conform, C1-C10) against every backend,
+# and the overcommit storm.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # The release workflow runs the whole suite on the commit it releases.
+  # Every job checks out the commit the run started from, so a caller
+  # cannot hand it another ref.
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  conform-stub:
+    name: conformance C1-C10 against the stub runtime
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - run: make conform-stub
+      - run: make conform-signed
+
+  conform-proc:
+    name: conformance C1-C10 against the proc backend (cgroups, CRIU)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: make conform-proc
+
+  conform-gvisor:
+    name: conformance C1-C10 against the gvisor backend (a runsc sandbox per fiber)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: make linux-gvisor-check
+      - run: make conform-gvisor
+      - name: make the state readable for the upload (written as root inside the container)
+        if: failure()
+        run: sudo chmod -R a+rX bin/conform-state-gvisor 2>/dev/null || true
+      - name: keep fiberd's logs and audit trail
+        if: failure()
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: conform-gvisor-state
+          path: |
+            bin/conform-state-gvisor/**/*.log
+            bin/conform-state-gvisor/private/audit.jsonl
+          if-no-files-found: ignore
+
+  conform-runc:
+    name: conformance C1-C10 against the runc backend (the zygote as a container's init)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: make conform-runc
+
+  conform-hyperlight-fake:
+    name: conformance C1-C10 against the hyperlight backend over the fake helper (no hypervisor)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: make conform-hyperlight-fake
+
+  conform-hyperlight:
+    name: conformance C1-C10 against the hyperlight backend with the Rust helper (KVM)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: enable KVM for this runner
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+      - run: make hyperlight-helper
+      - run: make linux-hyperlight-check
+      - run: make conform-hyperlight
+      - name: make the state readable for the upload (written as root inside the container)
+        if: always()
+        run: sudo chmod -R a+rX bin/conform-state-hyperlight-kvm 2>/dev/null || true
+      - name: keep the helper's logs and park images
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: conform-hyperlight-state
+          path: |
+            bin/conform-state-hyperlight-kvm/**/*.log
+            bin/conform-state-hyperlight-kvm/deltas
+          if-no-files-found: ignore
+
+  overcommit:
+    name: 2x overcommit storm parks before any OOM kill
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: make overcommit

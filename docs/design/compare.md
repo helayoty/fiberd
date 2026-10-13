@@ -64,7 +64,7 @@ Runs can also [park](../glossary.md#park) an instance untimed and then time its 
 
 - The homes serve plaintext. The client mints its own grants from the issuer's private key, which is copied into the client Pod.
 - The client Pod is privileged, to read the node's cgroups and remove images through containerd. The Firecracker adapter runs as root to make network namespaces.
-- The kind scheduler listens on every node address and skips authorization for `/metrics`, so the client can read its counters.
+- The kind scheduler listens on every node address and skips authorization for `/metrics`. The client reads that page through the API server's Pod proxy, so it verifies the API server's certificate against the cluster CA and never the scheduler's self-signed one.
 - Control-plane deltas include the cluster's background traffic.
 - Sustained closed-loop throughput is not measured. Only bursts are.
 - Shared runners are noisy and nested. Their numbers compare only within their own run.

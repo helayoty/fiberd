@@ -72,11 +72,17 @@ func DumpMounts(pid int, dir string) ([]string, error) {
 	if !OwnMountNS(pid) {
 		return nil, nil
 	}
-	info, err := os.ReadFile(fmt.Sprintf("/proc/%d/mountinfo", pid))
+	return dumpMountsIn(fmt.Sprintf("/proc/%d", pid), dir)
+}
+
+// dumpMountsIn reads the tree's mount table and root from its /proc
+// directory, so a test can stand one in.
+func dumpMountsIn(procDir, dir string) ([]string, error) {
+	info, err := os.ReadFile(filepath.Join(procDir, "mountinfo"))
 	if err != nil {
 		return nil, err
 	}
-	root := fmt.Sprintf("/proc/%d/root", pid)
+	root := filepath.Join(procDir, "root")
 	var files []fileMount
 	args := []string{"--external", "mnt[]"}
 	for _, mp := range MountPoints(string(info)) {

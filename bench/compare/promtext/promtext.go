@@ -8,7 +8,6 @@ package promtext
 import (
 	"bufio"
 	"context"
-	"crypto/tls"
 	"fmt"
 	"io"
 	"net/http"
@@ -119,13 +118,12 @@ func (s *Sampler) Delta(ctx context.Context) (map[string]float64, error) {
 	return out, nil
 }
 
-// Fetch is an HTTP GET of a metrics page. Insecure TLS, because the
-// scheduler's serving certificate is kind's own.
+// Fetch is an HTTP GET of a metrics page. The client verifies the server
+// as any HTTPS client does, with the cluster CA when it is the API
+// server's. A nil client is http.DefaultClient.
 func Fetch(client *http.Client, url, token string) func(ctx context.Context) (string, error) {
 	if client == nil {
-		tr := http.DefaultTransport.(*http.Transport).Clone()
-		tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec // kind's self-signed scheduler endpoint
-		client = &http.Client{Transport: tr}
+		client = http.DefaultClient
 	}
 	return func(ctx context.Context) (string, error) {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)

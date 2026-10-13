@@ -77,6 +77,10 @@ type Runtime struct {
 	// poolExits names the grant of every pooled sandbox that dies before
 	// its hand-out.
 	poolExits chan string
+	// stop is closed by Close, so the W executioner ends with the
+	// runtime instead of outliving it.
+	stop     chan struct{}
+	stopOnce sync.Once
 	// identities maps a grant uid to the handoff identity its fibers get.
 	identities map[string]handoffIdentity
 
@@ -212,23 +216,21 @@ func New(cfg Config) (*Runtime, error) {
 			return nil, err
 		}
 	}
-	host := artifact.Host()
+	// What this home believes about its host. The configuration's facts
+	// win, then the backend's, and what neither names is detected.
+	host := artifact.Platform{Arch: cfg.Platform.Arch, Kernel: cfg.Platform.Kernel, Libc: cfg.Platform.Libc}
 	ownRootfs := false
 	if p, ok := cfg.Backend.(backend.Platformer); ok {
 		// The backend knows what its checkpoints depend on.
 		bp := p.Platform()
 		for dst, v := range map[*string]string{&host.Arch: bp.Arch, &host.Kernel: bp.Kernel, &host.Libc: bp.Libc} {
-			if v != "" {
+			if *dst == "" {
 				*dst = v
 			}
 		}
 		ownRootfs = bp.Libc != ""
 	}
-	for dst, override := range map[*string]string{&host.Arch: cfg.Platform.Arch, &host.Kernel: cfg.Platform.Kernel, &host.Libc: cfg.Platform.Libc} {
-		if override != "" {
-			*dst = override
-		}
-	}
+	host = host.Complete()
 	host.Backend = cfg.Backend.Name()
 	if host.Backend == "proc" {
 		// CRIU reopens a cached template executable by its path. runc
@@ -267,6 +269,7 @@ func New(cfg Config) (*Runtime, error) {
 		warms: map[string]*warm{}, fibers: map[string]*fiber{}, ports: map[int]string{}, socks: map[string]string{},
 		exits:     make(chan core.FiberExit, 1024),
 		poolExits: make(chan string, 64),
+		stop:      make(chan struct{}),
 		parents:   map[string]backend.Parent{},
 	}
 	r.sweepPools()
@@ -353,8 +356,14 @@ func (d devicePressure) Pressure(grantUID string) (float64, error) {
 // budget itself is held here: W is sampled, and a fiber over its budget
 // is killed and reported as oom, exactly as the kernel would for a fork.
 func (r *Runtime) enforceW() {
+	tick := time.NewTicker(25 * time.Millisecond)
+	defer tick.Stop()
 	for {
-		time.Sleep(25 * time.Millisecond)
+		select {
+		case <-r.stop:
+			return
+		case <-tick.C:
+		}
 		r.mu.Lock()
 		fs := make([]*fiber, 0, len(r.fibers))
 		for _, f := range r.fibers {
@@ -620,12 +629,12 @@ func (r *Runtime) leaf(parent cgroup.Dir, g core.Grant, name string) (cgroup.Dir
 	}
 	if r.limitsTasks() {
 		if err := leaf.SetPidsMax(fiberPidsMax); err != nil {
-			_ = leaf.Remove()
+			_ = rmdir(leaf)
 			return leaf, err
 		}
 	}
 	if err := r.delegateProcs(g.UID, leaf); err != nil {
-		_ = leaf.Remove()
+		_ = rmdir(leaf)
 		return leaf, err
 	}
 	return leaf, nil
@@ -1301,7 +1310,7 @@ func (r *Runtime) start(ctx context.Context, z *warm, spec core.CloneSpec, p *po
 		if p != nil {
 			r.returnPooled(z, p)
 		} else {
-			_ = leaf.Remove()
+			_ = rmdir(leaf)
 		}
 	}
 	lfd, err := leaf.Open()
@@ -1398,7 +1407,7 @@ func (r *Runtime) start(ctx context.Context, z *warm, spec core.CloneSpec, p *po
 			_ = leaf.Kill()
 			removeDead(leaf)
 		} else {
-			_ = leaf.Remove()
+			_ = rmdir(leaf)
 		}
 		return core.FiberHandle{}, err
 	}
@@ -1621,7 +1630,7 @@ func (r *Runtime) resume(ctx context.Context, spec core.CloneSpec) (core.FiberHa
 	}
 	lfd, err := leaf.Open()
 	if err != nil {
-		_ = leaf.Remove()
+		_ = rmdir(leaf)
 		return core.FiberHandle{}, err
 	}
 	defer func() { _ = lfd.Close() }()
@@ -1638,27 +1647,27 @@ func (r *Runtime) resume(ctx context.Context, spec core.CloneSpec) (core.FiberHa
 		// recorded here for HandoffRoute, and the new channel carries
 		// only connections.
 		if err := r.prepareIdentity(spec.Grant.UID, spec.Grant.CallerThumbprint); err != nil {
-			_ = leaf.Remove()
+			_ = rmdir(leaf)
 			return core.FiberHandle{}, err
 		}
 		if hostEnd, fiberEnd, err = r.handoffPair(spec.Grant.UID); err != nil {
-			_ = leaf.Remove()
+			_ = rmdir(leaf)
 			return core.FiberHandle{}, err
 		}
 		defer func() { _ = fiberEnd.Close() }()
 	} else {
 		if parked, err = endpoint.Parse(m.Endpoint); err != nil {
-			_ = leaf.Remove()
+			_ = rmdir(leaf)
 			return core.FiberHandle{}, fmt.Errorf("host: delta %s: %w", dir, err)
 		}
 		if parked.Scheme != r.cfg.Endpoints.Family.Scheme() {
-			_ = leaf.Remove()
+			_ = rmdir(leaf)
 			return core.FiberHandle{}, fmt.Errorf("host: delta %s was parked on a %s endpoint, this home serves %s", dir, parked.Scheme, r.cfg.Endpoints.Family.Scheme())
 		}
 		if parked.Scheme == "tcp" && (m.Relay != "") != r.relay {
 			// The same backend relays or not, so only a hand-edited
 			// manifest gets here.
-			_ = leaf.Remove()
+			_ = rmdir(leaf)
 			if m.Relay != "" {
 				return core.FiberHandle{}, fmt.Errorf("host: delta %s was parked behind a relay, this home's backend %s binds tcp itself", dir, r.be.Name())
 			}
@@ -1697,7 +1706,7 @@ func (r *Runtime) resume(ctx context.Context, spec core.CloneSpec) (core.FiberHa
 			port, err = r.allocPort(spec.Fence.String(), 0)
 		}
 		if err != nil {
-			_ = leaf.Remove()
+			_ = rmdir(leaf)
 			return core.FiberHandle{}, err
 		}
 		if m.Relay != "" {
@@ -1716,7 +1725,7 @@ func (r *Runtime) resume(ctx context.Context, spec core.CloneSpec) (core.FiberHa
 	}
 	if err != nil {
 		r.freePort(port, spec.Fence.String())
-		_ = leaf.Remove()
+		_ = rmdir(leaf)
 		return core.FiberHandle{}, fmt.Errorf("host: delta %s: %w", dir, err)
 	}
 	// The parked name was minted by whichever home parked the fiber, so
@@ -1727,7 +1736,7 @@ func (r *Runtime) resume(ctx context.Context, spec core.CloneSpec) (core.FiberHa
 		sock = bind
 		if err := r.claimSocket(sock, spec.Fence.String()); err != nil {
 			r.freePort(port, spec.Fence.String())
-			_ = leaf.Remove()
+			_ = rmdir(leaf)
 			return core.FiberHandle{}, err
 		}
 		_ = os.Remove(sock)
@@ -1748,7 +1757,7 @@ func (r *Runtime) resume(ctx context.Context, spec core.CloneSpec) (core.FiberHa
 			r.freeSocket(sock, spec.Fence.String())
 			r.freePort(port, spec.Fence.String())
 			_ = os.Remove(fenceFn)
-			_ = leaf.Remove()
+			_ = rmdir(leaf)
 			return core.FiberHandle{}, err
 		}
 	}
@@ -1777,7 +1786,7 @@ func (r *Runtime) resume(ctx context.Context, spec core.CloneSpec) (core.FiberHa
 			_ = hostEnd.Close()
 		}
 		_ = leaf.Kill()
-		_ = leaf.Remove()
+		_ = rmdir(leaf)
 		// Nothing serves on the socket a failed restore may have bound,
 		// and no fiber is left to read the fence file.
 		if sock != "" {
@@ -1887,7 +1896,7 @@ func (r *Runtime) killOrphan(ctx context.Context, fence core.Fence) error {
 			_ = os.Remove(sock)
 		}
 	}
-	return leaf.Remove()
+	return rmdir(leaf)
 }
 
 // fenceFiles finds the fence files in the grant's run directory that
@@ -1999,12 +2008,18 @@ func treeBytes(dir string) uint64 {
 	return n
 }
 
+// rmdir removes a cgroup the runtime is done with. The kernel drops an
+// empty cgroup whatever control files it shows, where a plain directory
+// standing in for one holds the files the runtime wrote, so this is a
+// seam for tests, like fsync.
+var rmdir = cgroup.Dir.Remove
+
 // removeSoon removes a cgroup whose tasks were just killed and may still
 // be tearing down, retrying briefly.
 func removeSoon(d cgroup.Dir) error {
 	var err error
 	for i := 0; i < 20; i++ {
-		if err = d.Remove(); err == nil {
+		if err = rmdir(d); err == nil {
 			return nil
 		}
 		time.Sleep(5 * time.Millisecond)
@@ -2112,6 +2127,7 @@ func (r *Runtime) Exits() <-chan core.FiberExit { return r.exits }
 // Close drains every pool, ends every warm instance and its fibers, and
 // fiberd's relays.
 func (r *Runtime) Close() {
+	r.stopOnce.Do(func() { close(r.stop) })
 	r.mu.Lock()
 	var ps []*pooled
 	for _, z := range r.warms {

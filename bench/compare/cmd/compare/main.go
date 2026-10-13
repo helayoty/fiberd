@@ -143,7 +143,11 @@ func run(o opts) error {
 	r := &compare.Runner{Adapter: ad, System: o.system, Class: o.class, Runs: o.runs, Bursts: bursts,
 		Poll: o.poll, Timeout: o.timeout, Resume: o.resume, Density: o.density, Idle: o.idle, Out: out, Log: os.Stderr}
 	if o.apiserverMetrics != "" || o.schedulerMetrics != "" || o.auditLog != "" {
-		r.ControlPlane = sampler(o)
+		s, err := sampler(o)
+		if err != nil {
+			return err
+		}
+		r.ControlPlane = s
 	}
 	return r.Run(ctx)
 }
@@ -204,7 +208,13 @@ func build(ctx context.Context, o opts) (compare.Adapter, error) {
 }
 
 // sampler wires the control-plane counters docs/design/compare.md lists.
-func sampler(o opts) *promtext.Sampler {
+// Both metrics pages are read through the API server, the scheduler's
+// over its Pod proxy, with the client kubeClient builds and its CA.
+func sampler(o opts) (*promtext.Sampler, error) {
+	kc, err := kubeClient(o)
+	if err != nil {
+		return nil, err
+	}
 	token := ""
 	tf := o.tokenFile
 	if tf == "" {
@@ -215,17 +225,17 @@ func sampler(o opts) *promtext.Sampler {
 	}
 	s := &promtext.Sampler{}
 	if o.apiserverMetrics != "" {
-		f := promtext.Fetch(nil, o.apiserverMetrics, token)
+		f := promtext.Fetch(kc.HTTP, o.apiserverMetrics, token)
 		s.Sources = append(s.Sources,
 			promtext.Metric("apiserver_writes", f, "apiserver_request_total", promtext.Writes),
 			promtext.Metric("apiserver_objects", f, "apiserver_storage_objects", nil))
 	}
 	if o.schedulerMetrics != "" {
-		f := promtext.Fetch(nil, o.schedulerMetrics, token)
+		f := promtext.Fetch(kc.HTTP, o.schedulerMetrics, token)
 		s.Sources = append(s.Sources, promtext.Metric("scheduler_attempts", f, "scheduler_schedule_attempts_total", nil))
 	}
 	if o.auditLog != "" {
 		s.Sources = append(s.Sources, promtext.AuditLines("audit_events", o.auditLog))
 	}
-	return s
+	return s, nil
 }

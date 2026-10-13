@@ -9,11 +9,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
 	"testing"
 	"time"
+
+	"go.uber.org/goleak"
 
 	"github.com/helayoty/fiberd/pkg/artifact"
 	"github.com/helayoty/fiberd/pkg/backend"
@@ -28,14 +31,6 @@ const mib = 1 << 20
 // handoffRouter is a router that listens nowhere. Tests hand fibers
 // connections through Deliver.
 
-// needRoot skips a test that needs root. The launcher chowns into mapped
-// id ranges and enters namespaces, so these run in the dev container.
-func needRoot(t *testing.T) {
-	t.Helper()
-	if os.Geteuid() != 0 {
-		t.Skip("needs root (run it with hack/dev/run.sh)")
-	}
-}
 func handoffRouter() *handoff.Router { return &handoff.Router{Advertise: "tcp://10.0.0.1:443"} }
 
 var handoffKey = bytes.Repeat([]byte{9}, 32)
@@ -157,17 +152,21 @@ func TestNewRelay(t *testing.T) {
 	}
 }
 
-// TestNewPlatform checks that what the home believes about its host is
-// detected, then overridden by the backend's facts, then by the
-// configuration. The backend's name always overrides. A proc home
-// records its template cache path. Paths are made absolute and
-// created.
+// TestNewPlatform checks what the home believes about its host. The
+// configuration's facts win, then the backend's, and what neither names
+// is detected. The backend's name always overrides. A proc home records
+// its template cache path. Paths are made absolute and created.
 func TestNewPlatform(t *testing.T) {
-	detected := artifact.Host()
 	named := func(name string) *fakeBackend {
 		b := newFakeBackend(core.TierWarm)
 		b.name = name
 		return b
+	}
+	withPlatform := func(p artifact.Platform) backend.Backend {
+		return &struct {
+			*fakeBackend
+			platformMixin
+		}{newFakeBackend(core.TierWarm), platformMixin{p}}
 	}
 	cases := []struct {
 		name string
@@ -178,32 +177,34 @@ func TestNewPlatform(t *testing.T) {
 		// templates means want.Templates is the home's template cache.
 		templates bool
 	}{
-		{name: "detected, named after the backend", be: newFakeBackend(core.TierWarm),
-			want: artifact.Platform{Arch: detected.Arch, Kernel: detected.Kernel, Libc: detected.Libc, Backend: "fake"}},
-		{name: "the backend's facts replace the host's", be: &struct {
-			*fakeBackend
-			platformMixin
-		}{newFakeBackend(core.TierWarm), platformMixin{artifact.Platform{Kernel: "runsc-20260101", Libc: "none"}}},
-			want: artifact.Platform{Arch: detected.Arch, Kernel: "runsc-20260101", Libc: "none", Backend: "fake"}},
-		{name: "the configuration overrides both", be: &struct {
-			*fakeBackend
-			platformMixin
-		}{newFakeBackend(core.TierWarm), platformMixin{artifact.Platform{Kernel: "runsc-20260101"}}},
-			mod:  func(c *Config) { c.Platform = artifact.Platform{Arch: "riscv64", Kernel: "6.1.0-test"} },
-			want: artifact.Platform{Arch: "riscv64", Kernel: "6.1.0-test", Libc: detected.Libc, Backend: "fake"}},
+		{name: "the configuration's facts, named after the backend", be: newFakeBackend(core.TierWarm),
+			want: artifact.Platform{Arch: testPlatform.Arch, Kernel: testPlatform.Kernel, Libc: testPlatform.Libc, Backend: "fake"}},
+		{name: "the backend's facts fill what the configuration leaves empty",
+			be:   withPlatform(artifact.Platform{Kernel: "runsc-20260101", Libc: "none"}),
+			mod:  func(c *Config) { c.Platform = artifact.Platform{Arch: "amd64"} },
+			want: artifact.Platform{Arch: "amd64", Kernel: "runsc-20260101", Libc: "none", Backend: "fake"}},
+		{name: "the configuration overrides the backend", be: withPlatform(artifact.Platform{Kernel: "runsc-20260101", Libc: "none"}),
+			want: artifact.Platform{Arch: testPlatform.Arch, Kernel: testPlatform.Kernel, Libc: testPlatform.Libc, Backend: "fake"}},
+		{name: "what neither names is detected", be: withPlatform(artifact.Platform{Libc: "none"}),
+			mod:  func(c *Config) { c.Platform = artifact.Platform{Kernel: "6.1.0-test"} },
+			want: artifact.Platform{Arch: runtime.GOARCH, Kernel: "6.1.0-test", Libc: "none", Backend: "fake"}},
+		{name: "the configuration's backend and templates are not what the home records",
+			be:   newFakeBackend(core.TierWarm),
+			mod:  func(c *Config) { c.Platform.Backend, c.Platform.Templates = "proc", "/elsewhere" },
+			want: artifact.Platform{Arch: testPlatform.Arch, Kernel: testPlatform.Kernel, Libc: testPlatform.Libc, Backend: "fake"}},
 		{name: "relative paths become absolute and extra directories are hidden", be: newFakeBackend(core.TierWarm),
 			mod: func(c *Config) {
 				c.RunDir, c.DeltaDir, c.TemplateCache, c.PrivateDir = "rel/run", "rel/deltas", "rel/cache", "rel/private"
 				c.FiberHide = []string{"/srv/secrets", "relative/skipped"}
 			},
-			want: artifact.Platform{Arch: detected.Arch, Kernel: detected.Kernel, Libc: detected.Libc, Backend: "fake"},
+			want: artifact.Platform{Arch: testPlatform.Arch, Kernel: testPlatform.Kernel, Libc: testPlatform.Libc, Backend: "fake"},
 			hide: []string{"/srv/secrets"}},
 		{name: "a proc home records its template cache path", be: named("proc"), templates: true,
-			want: artifact.Platform{Arch: detected.Arch, Kernel: detected.Kernel, Libc: detected.Libc, Backend: "proc"}},
+			want: artifact.Platform{Arch: testPlatform.Arch, Kernel: testPlatform.Kernel, Libc: testPlatform.Libc, Backend: "proc"}},
 		{name: "a runc home does not, since it binds a copy of its own", be: named("runc"),
-			want: artifact.Platform{Arch: detected.Arch, Kernel: detected.Kernel, Libc: detected.Libc, Backend: "runc"}},
+			want: artifact.Platform{Arch: testPlatform.Arch, Kernel: testPlatform.Kernel, Libc: testPlatform.Libc, Backend: "runc"}},
 		{name: "a gvisor home does not", be: named("gvisor"),
-			want: artifact.Platform{Arch: detected.Arch, Kernel: detected.Kernel, Libc: detected.Libc, Backend: "gvisor"}},
+			want: artifact.Platform{Arch: testPlatform.Arch, Kernel: testPlatform.Kernel, Libc: testPlatform.Libc, Backend: "gvisor"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -315,6 +316,7 @@ func TestPrepareTemplate(t *testing.T) {
 		check func(t *testing.T, r *Runtime, be backend.Backend)
 	}{
 		{name: "a sized grant: cgroups, task limits, ceiling, one warm instance", be: func() backend.Backend { return newFakeBackend(core.TierWarm) }, grant: sized,
+			before: func(t *testing.T, r *Runtime) { delegated(t, r.root.Child("g1")) },
 			check: func(t *testing.T, r *Runtime, be backend.Backend) {
 				fb := be.(*fakeBackend)
 				spec, ok := fb.warmSpec("g1")
@@ -353,8 +355,8 @@ func TestPrepareTemplate(t *testing.T) {
 			grant: core.Grant{UID: "g1", TemplateDigest: "sha256:tmpl"},
 			check: func(t *testing.T, r *Runtime, _ backend.Backend) {
 				gcg := r.root.Child("g1")
-				if cgFile(t, gcg, "pids.max") != "max" || cgFile(t, gcg, "memory.high") != "max" {
-					t.Fatalf("pids.max %s memory.high %s, want both unlimited", cgFile(t, gcg, "pids.max"), cgFile(t, gcg, "memory.high"))
+				if limit(t, gcg, "pids.max") != "max" || limit(t, gcg, "memory.high") != "max" {
+					t.Fatalf("pids.max %s memory.high %s, want both unlimited", limit(t, gcg, "pids.max"), limit(t, gcg, "memory.high"))
 				}
 			}},
 		{name: "a configured ceiling", be: func() backend.Backend { return newFakeBackend(core.TierWarm) }, grant: sized,
@@ -366,7 +368,14 @@ func TestPrepareTemplate(t *testing.T) {
 				}
 			}},
 		{name: "a ceiling that cannot be set is logged, not fatal", be: func() backend.Backend { return newFakeBackend(core.TierWarm) }, grant: sized,
-			mod: func(c *Config) { c.Ceiling = func(core.Grant, uint64) uint64 { return 1 } },
+			before: func(t *testing.T, r *Runtime) { unwritable(t, r.root.Child("g1"), "memory.high") },
+			check: func(t *testing.T, r *Runtime, _ backend.Backend) {
+				if r.warmOf("g1") == nil {
+					t.Fatal("the template must still be warm")
+				}
+			}},
+		{name: "a template whose pages cannot be protected is logged, not fatal", be: func() backend.Backend { return newFakeBackend(core.TierWarm) }, grant: sized,
+			before: func(t *testing.T, r *Runtime) { unwritable(t, r.root.Child("g1"), "memory.min") },
 			check: func(t *testing.T, r *Runtime, _ backend.Backend) {
 				if r.warmOf("g1") == nil {
 					t.Fatal("the template must still be warm")
@@ -414,19 +423,37 @@ func TestPrepareTemplate(t *testing.T) {
 					t.Fatal("a refused grant got a cgroup or a warm instance")
 				}
 			}},
-		{name: "an id mapper: the grant's root may write cgroup.procs and nothing else", be: func() backend.Backend {
+		// The mapped root is the test's own uid, the one owner a chown
+		// without privilege may name. tests/integration/host TestDelegateProcs hands
+		// the file to a foreign uid.
+		{name: "an id mapper: the grant's cgroup.procs is handed to the mapped root", be: func() backend.Backend {
 			return &struct {
 				*fakeBackend
 				idMapperMixin
-			}{newFakeBackend(core.TierWarm), idMapperMixin{uid: 65534}}
+			}{newFakeBackend(core.TierWarm), idMapperMixin{uid: uint32(os.Geteuid())}}
 		}, grant: sized,
+			before: func(t *testing.T, r *Runtime) { delegated(t, r.root.Child("g1")) },
 			check: func(t *testing.T, r *Runtime, _ backend.Backend) {
 				gcg := r.root.Child("g1")
-				if got := fileOwner(t, filepath.Join(gcg.Path, "cgroup.procs")); got != 65534 {
-					t.Fatalf("cgroup.procs owner = %d, want 65534", got)
+				if got := fileOwner(t, filepath.Join(gcg.Path, "cgroup.procs")); got != uint32(os.Geteuid()) {
+					t.Fatalf("cgroup.procs owner = %d, want %d", got, os.Geteuid())
 				}
-				if got := fileOwner(t, filepath.Join(gcg.Path, "memory.max")); got != 0 {
-					t.Fatalf("memory.max owner = %d, want root", got)
+			}},
+		{name: "an id mapper over a grant cgroup without cgroup.procs cannot delegate", be: func() backend.Backend {
+			return &struct {
+				*fakeBackend
+				idMapperMixin
+			}{newFakeBackend(core.TierWarm), idMapperMixin{uid: uint32(os.Geteuid())}}
+		}, grant: sized,
+			before: func(t *testing.T, r *Runtime) {
+				if !plainTree {
+					t.Skip("a real cgroup always has cgroup.procs")
+				}
+			},
+			errText: "delegate cgroup.procs",
+			check: func(t *testing.T, r *Runtime, be backend.Backend) {
+				if be.(interface{ warmed() int }).warmed() != 0 {
+					t.Fatal("a grant whose cgroup could not be delegated was warmed")
 				}
 			}},
 		{name: "a checkpointing backend: the warm instance is self-checkpointed into the parent store", be: func() backend.Backend { return newCodecBackend(core.TierCheckpoint) }, grant: sized,
@@ -486,7 +513,7 @@ func TestPrepareTemplate(t *testing.T) {
 					t.Fatalf("overhead = %d", got)
 				}
 				gcg := r.root.Child("g1")
-				if cgFile(t, gcg, "pids.max") != "max" {
+				if limit(t, gcg, "pids.max") != "max" {
 					t.Fatal("a sandbox's tenants got a task limit")
 				}
 				if got := cgUint(t, gcg, "memory.high"); got != DefaultCeiling(core.Grant{FiberMax: 2, WBudgetBytes: r.leafMax(sized)}, 0) {
@@ -559,19 +586,21 @@ func TestClone(t *testing.T) {
 		mod     func(*Config)
 		grant   core.Grant
 		prepare bool
-		// before runs after PrepareTemplate, before Clone.
-		before  func(t *testing.T, r *Runtime)
-		spec    core.CloneSpec
-		wantErr error
-		errText string
-		check   func(t *testing.T, r *Runtime, be backend.Backend, h core.FiberHandle)
+		// seed runs before PrepareTemplate, before runs after it and
+		// before Clone.
+		seed, before func(t *testing.T, r *Runtime)
+		spec         core.CloneSpec
+		wantErr      error
+		errText      string
+		check        func(t *testing.T, r *Runtime, be backend.Backend, h core.FiberHandle)
 	}{
 		{name: "a fiber in its own leaf on a unix endpoint", be: func() backend.Backend {
 			b := newFakeBackend(core.TierWarm)
 			b.endpointFile = true
 			return b
 		}, grant: g, prepare: true,
-			spec: core.CloneSpec{Grant: g, Fence: fence, Deadline: 2 * time.Second, Payload: []byte("hello")},
+			before: func(t *testing.T, r *Runtime) { delegated(t, r.root.Child("g1").Child("f-1-1")) },
+			spec:   core.CloneSpec{Grant: g, Fence: fence, Deadline: 2 * time.Second, Payload: []byte("hello")},
 			check: func(t *testing.T, r *Runtime, be backend.Backend, h core.FiberHandle) {
 				sock := filepath.Join(r.cfg.RunDir, "g1", "1-1.sock")
 				if h.ID != "g1/1/1" || h.Endpoint != "unix://"+sock {
@@ -638,8 +667,8 @@ func TestClone(t *testing.T) {
 			spec: core.CloneSpec{Grant: core.Grant{UID: "g1", TemplateDigest: "sha256:tmpl"}, Fence: fence},
 			check: func(t *testing.T, r *Runtime, _ backend.Backend, _ core.FiberHandle) {
 				leaf := r.root.Child("g1").Child("f-1-1")
-				if cgFile(t, leaf, "memory.max") != "max" {
-					t.Fatalf("memory.max = %s", cgFile(t, leaf, "memory.max"))
+				if limit(t, leaf, "memory.max") != "max" {
+					t.Fatalf("memory.max = %s", limit(t, leaf, "memory.max"))
 				}
 			}},
 		{name: "a handoff fiber: identity queued on its channel, routed through the router", be: func() backend.Backend { return newSandboxBackend(core.TierSnapshot) },
@@ -744,7 +773,7 @@ func TestClone(t *testing.T) {
 				if got := cgUint(t, leaf, "memory.max"); got != (64+20+10+32)*mib {
 					t.Fatalf("memory.max = %d", got)
 				}
-				if cgFile(t, leaf, "pids.max") != "max" {
+				if limit(t, leaf, "pids.max") != "max" {
 					t.Fatal("a sandbox fiber got a task limit")
 				}
 			}},
@@ -777,9 +806,10 @@ func TestClone(t *testing.T) {
 					t.Fatal("a refused fiber was routed")
 				}
 			}},
-		{name: "a grant cgroup that refuses another leaf", be: func() backend.Backend { return newFakeBackend(core.TierWarm) },
+		// The kernel's refusal of one leaf more is tests/integration/host TestLeafRefused.
+		{name: "a leaf that cannot be made", be: func() backend.Backend { return newFakeBackend(core.TierWarm) },
 			grant: g, prepare: true, spec: core.CloneSpec{Grant: g, Fence: fence},
-			before:  func(t *testing.T, r *Runtime) { refuseLeaves(t, r.root.Child("g1")) },
+			before:  func(t *testing.T, r *Runtime) { inTheWay(t, r.root.Child("g1"), "f-1-1") },
 			errText: "f-1-1",
 			check: func(t *testing.T, r *Runtime, _ backend.Backend, _ core.FiberHandle) {
 				if r.root.Child("g1").Child("f-1-1").Exists() || len(r.fibers) != 0 {
@@ -790,8 +820,9 @@ func TestClone(t *testing.T) {
 			return &struct {
 				*fakeBackend
 				*idMapperMixin
-			}{newFakeBackend(core.TierWarm), &idMapperMixin{uid: 65534}}
+			}{newFakeBackend(core.TierWarm), &idMapperMixin{uid: uint32(os.Geteuid())}}
 		}, grant: g, prepare: true,
+			seed: func(t *testing.T, r *Runtime) { delegated(t, r.root.Child("g1")) },
 			before: func(t *testing.T, r *Runtime) {
 				r.be.(interface{ mapper() *idMapperMixin }).mapper().err = errors.New("fake: range revoked")
 			},
@@ -807,6 +838,9 @@ func TestClone(t *testing.T) {
 			be := tc.be()
 			r := newTestRuntime(t, be, tc.mod)
 			ctx := context.Background()
+			if tc.seed != nil {
+				tc.seed(t, r)
+			}
 			if tc.prepare {
 				if err := r.PrepareTemplate(ctx, tc.grant); err != nil {
 					t.Fatalf("PrepareTemplate: %v", err)
@@ -862,12 +896,9 @@ func TestFiberEnds(t *testing.T) {
 			}
 			waitFor(t, "the leaf to go", func() bool { return !r.root.Child("g1").Child("f-1-1").Exists() })
 		}},
+		// The kernel's own kill at memory.max is tests/integration/host TestLeafCeilings.
 		{name: "killed by the kernel for exceeding its budget: reported as oom", run: func(t *testing.T, r *Runtime, be *fakeBackend, h core.FiberHandle) {
-			// A task of the test's own in the leaf allocates past the leaf's
-			// memory.max, and the kernel's group OOM takes the leaf.
-			leaf := r.root.Child("g1").Child("f-1-1")
-			startInLeaf(t, leaf, "exec dd if=/dev/zero of=/dev/null bs=256M count=1")
-			waitFor(t, "the kernel to kill the leaf", func() bool { n, _ := leaf.OOMKills(); return n > 0 })
+			cgSet(t, r.root.Child("g1").Child("f-1-1"), "memory.events", "low 0\nhigh 0\nmax 1\noom 1\noom_kill 1")
 			be.die(h.ID, "signal:SIGKILL")
 			if e := waitExit(t, r); e.Reason != "oom" || !strings.HasPrefix(e.Detail, "signal:SIGKILL oom_kill=") {
 				t.Fatalf("exit = %+v, want oom with the kill count", e)
@@ -918,13 +949,15 @@ func TestFiberEnds(t *testing.T) {
 				t.Fatal(err)
 			}
 		}},
+		// The kill of a live task in the orphan's leaf is tests/integration/host
+		// TestOrphanKilledInLeaf. Here its task is gone by the release.
 		{name: "releasing an orphan of a previous fiberd kills its leaf and removes its files", run: func(t *testing.T, r *Runtime, _ *fakeBackend, _ core.FiberHandle) {
 			orphan := core.Fence{GrantUID: "g1", Epoch: 5, Seq: 5}
 			leaf := r.root.Child("g1").Child(leafName(orphan))
 			if err := leaf.Create(0, false); err != nil {
 				t.Fatal(err)
 			}
-			startSleeper(t, leaf)
+			cgSet(t, leaf, "cgroup.procs", "4242")
 			sock := r.unixPath(orphan)
 			for _, f := range []string{sock, sock + ".fence"} {
 				if err := os.WriteFile(f, nil, 0o600); err != nil {
@@ -936,6 +969,7 @@ func TestFiberEnds(t *testing.T) {
 			if err != nil || len(list) != 1 || list[0].ID != orphan.String() {
 				t.Fatalf("List = %+v %v, want the orphan alone", list, err)
 			}
+			cgSet(t, leaf, "cgroup.procs", "")
 			if err := r.Release(context.Background(), orphan.String(), false); err != nil {
 				t.Fatal(err)
 			}
@@ -1026,51 +1060,41 @@ func TestEnforceW(t *testing.T) {
 	}
 }
 
-// TestWBytes checks where a fiber's working set is read from, by backend kind.
+// TestWBytes checks where a fiber's working set is read from, by backend
+// kind, over a leaf charged a known amount. A live task's count is
+// tests/integration/host TestWBytesOfLiveTask.
 func TestWBytes(t *testing.T) {
+	overhead := func(warm backend.Warm, footprint uint64) backend.Backend {
+		b := newFakeBackend(core.TierWarm)
+		b.warm, b.footprint = warm, footprint
+		return &struct {
+			*fakeBackend
+			overheadMixin
+		}{b, overheadMixin{}}
+	}
 	cases := []struct {
 		name string
 		be   backend.Backend
-		// task puts a process of the test's own in the leaf.
-		task bool
-		// positive is whether W must be above zero. Otherwise it must be 0.
-		positive bool
-		wantErr  string
+		// charged is the leaf's memory.current, 0 for an untouched leaf.
+		charged uint64
+		// stat is the leaf's memory.stat, "" for the live default.
+		stat    string
+		want    uint64
+		wantErr string
 	}{
-		{name: "a fork backend reads the leaf's memory.current", be: newFakeBackend(core.TierWarm), task: true, positive: true},
+		{name: "a fork backend reads the leaf's memory.current", be: newFakeBackend(core.TierWarm), charged: 5 * mib, want: 5 * mib},
 		{name: "an empty leaf charges nothing", be: newFakeBackend(core.TierWarm)},
-		{name: "a sandbox's fixed footprint is subtracted from the leaf's count", be: &struct {
-			*fakeBackend
-			overheadMixin
-		}{func() *fakeBackend {
-			b := newFakeBackend(core.TierWarm)
-			b.warm = backend.Warm{Bytes: 1 << 40}
-			return b
-		}(), overheadMixin{}}, task: true},
+		{name: "a sandbox's fixed footprint is subtracted from the leaf's count", be: overhead(backend.Warm{Bytes: 1 << 40}, 0), charged: 5 * mib},
 		// The CI flake of C6 on amd64. The template's probe read 8 MiB more
 		// than this fiber's own restore settled at, so 4 MiB dirtied over a
 		// 1 MiB budget read as nothing.
-		{name: "a sandbox's own count before the hand-out beats the template's probe", be: &struct {
-			*fakeBackend
-			overheadMixin
-		}{func() *fakeBackend {
-			b := newFakeBackend(core.TierWarm)
-			b.warm = backend.Warm{Bytes: 1 << 40}
-			b.footprint = 1
-			return b
-		}(), overheadMixin{}}, task: true, positive: true},
-		{name: "a sandbox's own count above the leaf's reads 0", be: &struct {
-			*fakeBackend
-			overheadMixin
-		}{func() *fakeBackend {
-			b := newFakeBackend(core.TierWarm)
-			b.footprint = 1 << 40
-			return b
-		}(), overheadMixin{}}, task: true},
+		{name: "a sandbox's own count before the hand-out beats the template's probe", be: overhead(backend.Warm{Bytes: 1 << 40}, 1),
+			charged: 5 * mib, want: 5*mib - 1},
+		{name: "a sandbox's own count above the leaf's reads 0", be: overhead(backend.Warm{}, 1<<40), charged: 5 * mib},
 		{name: "a metered backend reads one memory.stat counter", be: &struct {
 			*fakeBackend
 			wMeterMixin
-		}{newFakeBackend(core.TierWarm), wMeterMixin{"anon"}}},
+		}{newFakeBackend(core.TierWarm), wMeterMixin{"anon"}}, charged: 5 * mib, stat: "anon 3\nshmem 9", want: 3},
 		{name: "a counter the kernel lacks is an error", be: &struct {
 			*fakeBackend
 			wMeterMixin
@@ -1078,7 +1102,7 @@ func TestWBytes(t *testing.T) {
 		{name: "a reporting backend's unknown fiber counts nothing", be: &struct {
 			*fakeBackend
 			*wReporterMixin
-		}{newFakeBackend(core.TierWarm), &wReporterMixin{}}},
+		}{newFakeBackend(core.TierWarm), &wReporterMixin{}}, charged: 5 * mib},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1092,8 +1116,12 @@ func TestWBytes(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if tc.task {
-				startSleeper(t, r.root.Child("g1").Child("f-1-1"))
+			leaf := r.root.Child("g1").Child("f-1-1")
+			if tc.charged > 0 {
+				charge(t, leaf, tc.charged)
+			}
+			if tc.stat != "" {
+				cgSet(t, leaf, "memory.stat", tc.stat)
 			}
 			st, err := r.Stats(ctx, h.ID)
 			if tc.wantErr != "" {
@@ -1102,23 +1130,29 @@ func TestWBytes(t *testing.T) {
 				}
 				return
 			}
-			if err != nil || (st.WUsedBytes > 0) != tc.positive {
-				t.Fatalf("Stats = %+v %v, want W above zero %v", st, err, tc.positive)
+			if err != nil || st.WUsedBytes != tc.want {
+				t.Fatalf("Stats = %+v %v, want W %d", st, err, tc.want)
 			}
 		})
 	}
 }
 
-// TestPressure checks PSI of the grant's cgroup, and an error for a grant with
-// none.
+// TestPressure checks PSI of the grant's cgroup, "some avg10", and an
+// error for a grant with none.
 func TestPressure(t *testing.T) {
 	cases := []struct {
 		name    string
 		grant   string
 		prepare bool
+		psi     string // the grant cgroup's memory.pressure
+		want    float64
 		wantErr bool
 	}{
-		{name: "a prepared grant reads its cgroup's PSI", grant: "g1", prepare: true},
+		{name: "a prepared grant reads its cgroup's PSI", grant: "g1", prepare: true,
+			psi:  "some avg10=12.50 avg60=3.00 avg300=1.00 total=99\nfull avg10=4.00 avg60=0.00 avg300=0.00 total=9",
+			want: 12.5},
+		{name: "a grant under no pressure", grant: "g1", prepare: true,
+			psi: "some avg10=0.00 avg60=0.00 avg300=0.00 total=0\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0"},
 		{name: "an unknown grant has no cgroup", grant: "g9", wantErr: true},
 	}
 	for _, tc := range cases {
@@ -1128,10 +1162,11 @@ func TestPressure(t *testing.T) {
 				if err := r.PrepareTemplate(context.Background(), core.Grant{UID: tc.grant, TemplateDigest: "sha256:tmpl"}); err != nil {
 					t.Fatal(err)
 				}
+				cgSet(t, r.root.Child(tc.grant), "memory.pressure", tc.psi)
 			}
 			p, err := r.Pressure(tc.grant)
-			if (err != nil) != tc.wantErr || (!tc.wantErr && p != 0) {
-				t.Fatalf("Pressure = %v %v, want error %v", p, err, tc.wantErr)
+			if (err != nil) != tc.wantErr || p != tc.want {
+				t.Fatalf("Pressure = %v %v, want %v, error %v", p, err, tc.want, tc.wantErr)
 			}
 		})
 	}
@@ -1167,8 +1202,8 @@ func TestListAndPrune(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			startSleeper(t, stale.Child(leafName(live)))
-			startSleeper(t, stale.Child("f-garbage"))
+			cgSet(t, stale.Child(leafName(live)), "cgroup.procs", "4242")
+			cgSet(t, stale.Child("f-garbage"), "cgroup.procs", "4243")
 			list, err := r.List(ctx)
 			if err != nil || len(list) != 1 || list[0].ID != live.String() || list[0].Endpoint != tc.endpoint(r, live) {
 				t.Fatalf("List = %+v %v, want only %s", list, err, live)
@@ -1305,20 +1340,17 @@ func TestParentStore(t *testing.T) {
 				}
 			}
 		}},
-		{name: "a checkpoint on another file system cannot be moved into the store", run: func(t *testing.T, r *Runtime, cb *codecBackend) {
-			if st, err := os.Stat("/dev/shm"); err != nil || !st.IsDir() {
-				t.Skip("no /dev/shm to move from")
-			}
-			src, err := os.MkdirTemp("/dev/shm", "host-test-")
-			if err != nil {
-				t.Skipf("cannot write /dev/shm: %v", err)
-			}
-			t.Cleanup(func() { _ = os.RemoveAll(src) })
+		// A move across file systems is tests/integration/host TestParentStoreMovesAcrossFilesystems.
+		{name: "a checkpoint that cannot be moved into the store", run: func(t *testing.T, r *Runtime, cb *codecBackend) {
+			src := filepath.Join(t.TempDir(), "zygote-images")
 			if err := writeParentDir(src, "x"); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := r.registerParent(src, true); !errors.Is(err, syscall.EXDEV) {
-				t.Fatalf("registerParent = %v, want a cross-device error", err)
+			// A store under the checkpoint itself, since no directory can be
+			// renamed into its own subtree.
+			r.cfg.TemplateCache = src
+			if _, err := r.registerParent(src, true); !errors.Is(err, syscall.EINVAL) {
+				t.Fatalf("registerParent = %v, want the rename refused", err)
 			}
 			if loaded := cb.loadedParents(); len(loaded) != 1 || loaded[0].closed.Load() != 1 || len(r.parents) != 0 {
 				t.Fatal("the parent loaded from the source must be closed and not kept")
@@ -1524,9 +1556,11 @@ func TestNewReservesFiberd(t *testing.T) {
 }
 
 // TestDelegateProcs checks that only an id-mapping backend's grant gets
-// cgroup.procs chowned, and only when the mapper and the file allow.
+// cgroup.procs chowned, and only when the mapper and the file allow. The
+// mapped root here is the test's own uid, the one owner a chown without
+// privilege may name. tests/integration/host TestDelegateProcs names a foreign one.
 func TestDelegateProcs(t *testing.T) {
-	needRoot(t)
+	own := uint32(os.Geteuid())
 	cases := []struct {
 		name    string
 		be      backend.Backend
@@ -1534,7 +1568,7 @@ func TestDelegateProcs(t *testing.T) {
 		wantUID uint32
 		wantErr string
 	}{
-		{name: "no id mapper: nothing to delegate", be: newFakeBackend(core.TierWarm)},
+		{name: "no id mapper: nothing to delegate", be: newFakeBackend(core.TierWarm), wantUID: own},
 		{name: "the mapper refuses", be: &struct {
 			*fakeBackend
 			idMapperMixin
@@ -1542,11 +1576,11 @@ func TestDelegateProcs(t *testing.T) {
 		{name: "cgroup.procs is handed to the mapped root", be: &struct {
 			*fakeBackend
 			idMapperMixin
-		}{newFakeBackend(core.TierWarm), idMapperMixin{uid: 100000}}, wantUID: 100000},
+		}{newFakeBackend(core.TierWarm), idMapperMixin{uid: own}}, wantUID: own},
 		{name: "a cgroup that does not exist", be: &struct {
 			*fakeBackend
 			idMapperMixin
-		}{newFakeBackend(core.TierWarm), idMapperMixin{uid: 100000}}, missing: true, wantErr: "delegate cgroup.procs"},
+		}{newFakeBackend(core.TierWarm), idMapperMixin{uid: own}}, missing: true, wantErr: "delegate cgroup.procs"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1766,7 +1800,7 @@ func TestDropTemplate(t *testing.T) {
 			if r.warmOf("g1") != nil {
 				t.Fatal("the dropped warm instance is still known")
 			}
-			if got := cgFile(t, r.root, "memory.min"); got != "0" {
+			if got := cgOr(t, r.root, "memory.min", "0"); got != "0" {
 				t.Fatalf("root memory.min after the drop = %s, want 0", got)
 			}
 			if tc.warm {
@@ -1783,6 +1817,45 @@ func TestDropTemplate(t *testing.T) {
 			if err != nil || h.ID != "g1/1/2" || be.warmed() != wantUnwarmed+1 {
 				t.Fatalf("clone after the drop = %+v %v, warmed %d times, want a fiber under a fresh warm", h, err, be.warmed())
 			}
+		})
+	}
+}
+
+// TestCloseStopsEnforceW checks that the W executioner, which New starts
+// for a backend whose fibers carry an overhead, report W or hold a
+// device, ends with the runtime. Before the stop channel it slept in a
+// loop for ever, so every closed runtime left a goroutine behind.
+func TestCloseStopsEnforceW(t *testing.T) {
+	cases := []struct {
+		name string
+		be   func() backend.Backend
+	}{
+		{name: "a backend with a fixed overhead", be: func() backend.Backend {
+			return &struct {
+				*fakeBackend
+				overheadMixin
+			}{newFakeBackend(core.TierWarm), overheadMixin{}}
+		}},
+		{name: "a backend that reports W", be: func() backend.Backend {
+			return &struct {
+				*fakeBackend
+				*wReporterMixin
+			}{newFakeBackend(core.TierWarm), &wReporterMixin{}}
+		}},
+		{name: "a backend that reports device use", be: func() backend.Backend {
+			return &struct {
+				*fakeBackend
+				*deviceMixin
+			}{newFakeBackend(core.TierWarm), &deviceMixin{}}
+		}},
+		{name: "a backend without an executioner", be: func() backend.Backend { return newFakeBackend(core.TierWarm) }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newTestRuntime(t, tc.be(), nil)
+			r.Close()
+			r.Close() // a second Close is harmless
+			goleak.VerifyNone(t)
 		})
 	}
 }

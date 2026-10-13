@@ -65,15 +65,15 @@ template_digest() { # template_digest <http|line|gvisor>
 # client_exec runs a command in the client Pod.
 client_exec() { "${KC[@]}" -n "$NS" exec "$CLIENT" -- "$@"; }
 
-# node_ip is the kind node's address, where the scheduler serves metrics.
-node_ip() { "${KC[@]}" get node "$CLUSTER-control-plane" -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}'; }
-
 # grant_ip is a grant Pod's IP, the home the fiberd adapter dials.
 grant_ip() { "${KC[@]}" -n "$NS" get pod "$1-grant" -o jsonpath='{.status.podIP}'; }
 
-# control_plane_flags are the counters sampled around every run.
+# control_plane_flags are the counters sampled around every run. The
+# scheduler's page is read through the API server's Pod proxy, so the
+# client verifies one certificate, the API server's, against the cluster
+# CA. The scheduler's own is self-signed.
 control_plane_flags() {
-  echo "-apiserver-metrics https://kubernetes.default.svc/metrics -scheduler-metrics https://$(node_ip):10259/metrics -audit-log /host/audit/audit.log"
+  echo "-apiserver-metrics https://kubernetes.default.svc/metrics -scheduler-metrics https://kubernetes.default.svc/api/v1/namespaces/kube-system/pods/https:kube-scheduler-$CLUSTER-control-plane:10259/proxy/metrics -audit-log /host/audit/audit.log"
 }
 
 # PHASE_SYSTEMS are the systems this phase ran in the client Pod.

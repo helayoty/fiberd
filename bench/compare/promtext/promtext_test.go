@@ -2,10 +2,51 @@ package promtext
 
 import (
 	"context"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+// Fetch verifies the server's certificate as any HTTPS client does. The
+// test server's own client trusts it, the default client does not, and
+// the bearer token rides along.
+func TestFetch(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer tok" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		_, _ = io.WriteString(w, page)
+	}))
+	defer srv.Close()
+	cases := []struct {
+		name    string
+		client  *http.Client
+		token   string
+		wantErr bool
+	}{
+		{name: "a trusted certificate is read", client: srv.Client(), token: "tok"},
+		{name: "an unknown certificate is refused", client: nil, token: "tok", wantErr: true},
+		{name: "a bad status is an error", client: srv.Client(), token: "", wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := Fetch(tc.client, srv.URL+"/metrics", tc.token)(context.Background())
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("want an error")
+				}
+				return
+			}
+			if err != nil || got != page {
+				t.Fatalf("got %q, %v, want the page", got, err)
+			}
+		})
+	}
+}
 
 const page = `# HELP apiserver_request_total Counter of apiserver requests
 # TYPE apiserver_request_total counter

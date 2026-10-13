@@ -24,7 +24,7 @@ flowchart TD
   D -->|yes| N["drop the rest from the bounding set, mask inheritable, clear ambient, re-exec"] --> R
 ```
 
-**caps.** A process started as root gets exactly its bounding set, and one that execs a file with inheritable file capabilities gets what the inheritable and ambient sets allow. `Narrow` drops everything outside the keep set from the bounding set on one locked thread, masks the inheritable set to the keep set, empties the ambient set and re-executes `/proc/self/exe`, so the new process starts with those sets on every thread. Nothing is ever added. The keep sets were measured, proc by `hack/test/caps.sh` and runc by running `tests/runc` and the conformance suite under `setpriv` with each candidate left out.
+**caps.** A process started as root gets exactly its bounding set, and one that execs a file with inheritable file capabilities gets what the inheritable and ambient sets allow. `Narrow` drops everything outside the keep set from the bounding set on one locked thread, masks the inheritable set to the keep set, empties the ambient set and re-executes `/proc/self/exe`, so the new process starts with those sets on every thread. Nothing is ever added. The keep sets were measured, proc by `hack/test/caps.sh` and runc by running `tests/integration/runc` and the conformance suite under `setpriv` with each candidate left out.
 
 | Runtime | Keeps | Why |
 | --- | --- | --- |

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -12,8 +13,21 @@ import (
 	"github.com/helayoty/fiberd/pkg/artifact"
 )
 
+// fakePlatform is what fakeHost reports as this host.
+var fakePlatform = artifact.Platform{Arch: runtime.GOARCH, Kernel: "6.1.0-test", Libc: "(gnu libc) 2.36"}
+
+// fakeHost stands in for the host facts Build and Host record, since the
+// real ones run ldd on Linux.
+func fakeHost(t *testing.T) {
+	t.Helper()
+	t.Cleanup(artifact.SetHostInfo(func() (string, string, string) {
+		return fakePlatform.Arch, fakePlatform.Kernel, fakePlatform.Libc
+	}))
+}
+
 // TestBuildRefuses covers what Build checks before it runs anything.
 func TestBuildRefuses(t *testing.T) {
+	fakeHost(t)
 	cases := []struct {
 		name string
 		// opts builds the options from a directory the case may use.

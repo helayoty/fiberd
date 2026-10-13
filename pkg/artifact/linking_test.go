@@ -36,6 +36,7 @@ func fakeELF(t *testing.T, progs ...elf.ProgType) []byte {
 // TestLinking checks that only an ELF without a program interpreter is
 // static, and that Build records the answer in the config.
 func TestLinking(t *testing.T) {
+	fakeHost(t)
 	cases := []struct {
 		name    string
 		content func(t *testing.T) []byte // nil for no file at all

@@ -9,7 +9,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -18,10 +17,14 @@ import (
 	"github.com/helayoty/fiberd/pkg/artifact"
 )
 
+// here is the host the command is told it runs on. Naming all three
+// facts keeps the real detection, which runs ldd, out of the tests.
+var here = artifact.Platform{Arch: "riscv64", Kernel: "6.1.0-test", Libc: "(gnu libc) 2.36"}
+
 // call runs the command with args and returns its exit code and output.
 func call(args ...string) (int, string, string) {
 	var stdout, stderr bytes.Buffer
-	code := run(context.Background(), args, &stdout, &stderr)
+	code := run(context.Background(), here, args, &stdout, &stderr)
 	return code, stdout.String(), stderr.String()
 }
 
@@ -119,15 +122,16 @@ func TestBuildPushPullInspect(t *testing.T) {
 						Arch      string   `json:"arch"`
 						HasImages bool     `json:"has_images"`
 					} `json:"config"`
-					Parity string `json:"parity"`
-					Usable string `json:"usable_here"`
+					Host   artifact.Platform `json:"host"`
+					Parity string            `json:"parity"`
+					Usable string            `json:"usable_here"`
 				}
 				if err := json.Unmarshal([]byte(stdout), &got); err != nil {
 					t.Fatalf("inspect output %q: %v", stdout, err)
 				}
-				if got.Digest != digest || got.Parity != strict || got.Usable != "ok" || got.Config.Arch != runtime.GOARCH ||
-					strings.Join(got.Config.Args, " ") != "--heap-mb 32" {
-					t.Fatalf("inspect = %+v, want digest %s, %s parity, usable, args --heap-mb 32", got, digest, strict)
+				if got.Digest != digest || got.Parity != strict || got.Usable != "ok" || got.Config.Arch != here.Arch ||
+					got.Host != here || strings.Join(got.Config.Args, " ") != "--heap-mb 32" {
+					t.Fatalf("inspect = %+v, want digest %s, %s parity, usable on %s, args --heap-mb 32", got, digest, strict, here)
 				}
 			}},
 		{name: "inspect with an unknown parity level fails",
@@ -163,7 +167,7 @@ func TestBuildPushPullInspect(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				b = bytes.Replace(b, []byte(`"arch": "`+runtime.GOARCH+`"`), []byte(`"arch": "s390x"`), 1)
+				b = bytes.Replace(b, []byte(`"arch": "`+here.Arch+`"`), []byte(`"arch": "s390x"`), 1)
 				if err := os.WriteFile(path, b, 0o644); err != nil {
 					t.Fatal(err)
 				}

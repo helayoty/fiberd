@@ -21,6 +21,10 @@ type BuildOptions struct {
 	SkipImages   bool
 	CRIU         criu.Options
 	ReadyTimeout time.Duration
+	// Platform is the build host the artifact records. Empty fields are
+	// detected (ldd for the libc on Linux), so a caller that names all
+	// three runs nothing. Backend and Templates are not recorded.
+	Platform Platform
 }
 
 // Build runs the zygote the way a home does (control channel on fd 3),
@@ -47,8 +51,8 @@ func Build(ctx context.Context, o BuildOptions) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	arch, kernel, libc := HostInfo()
-	cfg := Config{Args: o.Args, Arch: arch, Kernel: kernel, Libc: libc, ZygoteSHA256: sum,
+	p := o.Platform.Complete()
+	cfg := Config{Args: o.Args, Arch: p.Arch, Kernel: p.Kernel, Libc: p.Libc, ZygoteSHA256: sum,
 		Linking: Linking(ZygotePath(o.Out)), BuiltAt: time.Now().UTC().Truncate(time.Second)}
 
 	if !o.SkipImages {

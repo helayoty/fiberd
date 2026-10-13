@@ -16,7 +16,7 @@ import (
 // fiberd with the real verifier: a signed grant is admitted and served;
 // a signed but expired grant is a capacity miss keyed on lane health (the
 // C4 rule), and an unverifiable one (stale keys, issuer gone) is SHED,
-// never Unauthenticated. The steps share one agent and run in order. Each
+// never Unauthenticated. The steps share one core and run in order. Each
 // step's before hook moves the lane, the issuer or the clock.
 func TestCoreWithJWKSVerifier(t *testing.T) {
 	k, _ := grant.GenerateKey(jose.ES256)

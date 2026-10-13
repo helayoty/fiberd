@@ -126,7 +126,7 @@ scope_lost() { admin -X POST http://x/scope-lost >/dev/null; }
 
 conform() {
   rm -f bin/grant-conform
-  go test -c -o bin/grant-conform ./tests/conform
+  go test -c -tags integration -o bin/grant-conform ./tests/e2e/conform
   bin/grant-conform -test.v -target "$TARGET" -target-tier FIBER_CHECKPOINT -node-id "$NODE" -isolation TRUSTED \
     -mint jwt -issuer-key "$STATE/issuer-key.json" -issuer "$ISSUER_URL" \
     -restart-cmd "$0 restart" -cp-health-cmd "$0 issuer-reachable \$1" -audit-cmd "$0 audit \$1 \$2" \

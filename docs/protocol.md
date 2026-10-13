@@ -1,6 +1,6 @@
 # Protocol reference
 
-This page is the wire contract of fiberd's [grant](glossary.md#grant) protocol, for anyone writing a caller or a [home](glossary.md#home). Read [architecture.md](architecture.md) first and look up terms in the [glossary](glossary.md). The protobuf schema in [`api/grant/v1/grant.proto`](../api/grant/v1/grant.proto) is the authority, and `tests/conform` is its executable contract.
+This page is the wire contract of fiberd's [grant](glossary.md#grant) protocol, for anyone writing a caller or a [home](glossary.md#home). Read [architecture.md](architecture.md) first and look up terms in the [glossary](glossary.md). The protobuf schema in [`api/grant/v1/grant.proto`](../api/grant/v1/grant.proto) is the authority, and `tests/e2e/conform` is its executable contract.
 
 The protocol answers four questions.
 

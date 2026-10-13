@@ -73,7 +73,7 @@ func (r *Runtime) Fill(ctx context.Context, g core.Grant, deadline time.Duration
 	}
 	lfd, err := leaf.Open()
 	if err != nil {
-		_ = leaf.Remove()
+		_ = rmdir(leaf)
 		return err
 	}
 	defer func() { _ = lfd.Close() }()

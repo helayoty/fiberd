@@ -84,6 +84,39 @@ type Options struct {
 	// refuses a symlink or another user's directory there, and unmounts a
 	// stale bind at the same path when it opens.
 	RootBind string
+	// Commander runs criu (criu.Options.Commander). Nil runs the binary
+	// CRIU names.
+	Commander criu.Commander
+
+	// spawn starts the zygote's command. Nil is cmd.Start, and a test
+	// sets one that serves the control socket in this process.
+	spawn func(cmd *exec.Cmd) (process, error)
+	// procRoot is where the host reads /proc. "" is /proc, and a test
+	// points it at a directory of its own.
+	procRoot string
+}
+
+// process is a started zygote command, what the backend needs of an
+// exec.Cmd once it runs.
+type process interface {
+	Pid() int
+	Kill() error
+	Wait() error
+}
+
+// cmdProcess is a started exec.Cmd as a process.
+type cmdProcess struct{ cmd *exec.Cmd }
+
+func (p cmdProcess) Pid() int    { return p.cmd.Process.Pid }
+func (p cmdProcess) Kill() error { return p.cmd.Process.Kill() }
+func (p cmdProcess) Wait() error { return p.cmd.Wait() }
+
+// startCmd is the default spawn.
+func startCmd(cmd *exec.Cmd) (process, error) {
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	return cmdProcess{cmd}, nil
 }
 
 // Launcher starts the zygote for a Backend in an environment of its own.
@@ -443,14 +476,14 @@ func unescapeMount(s string) string {
 func isOctal(c byte) bool { return c >= '0' && c <= '7' }
 
 type zygote struct {
-	id   string
-	spec backend.WarmSpec
-	cmd  *exec.Cmd
-	pid  int // the zygote process as the host sees it (cmd's, or the container init's)
-	ctl  *net.UnixConn
-	pmu  sync.Mutex
-	pend map[string]*pending // fence -> the Clone waiting for CLONED
-	gone chan struct{}
+	id      string
+	spec    backend.WarmSpec
+	process process
+	pid     int // the zygote process as the host sees it (the command's, or the container init's)
+	ctl     *net.UnixConn
+	pmu     sync.Mutex
+	pend    map[string]*pending // fence -> the Clone waiting for CLONED
+	gone    chan struct{}
 
 	// The engine's device reports (DEVICE lines), when it sends any.
 	dmu    sync.Mutex
@@ -551,7 +584,13 @@ func NewBackend(o Options) *Backend {
 		o.RootBind = filepath.Join(os.TempDir(), rootName+strconv.Itoa(os.Getpid()))
 	}
 	o.RootBind = filepath.Clean(o.RootBind)
-	b := &Backend{opt: o, criu: criu.Options{Bin: o.CRIU, Wrap: o.CRIUWrap}, tier: core.TierWarm, defaultRoot: defaultRoot,
+	if o.spawn == nil {
+		o.spawn = startCmd
+	}
+	if o.procRoot == "" {
+		o.procRoot = "/proc"
+	}
+	b := &Backend{opt: o, criu: criu.Options{Bin: o.CRIU, Wrap: o.CRIUWrap, Commander: o.Commander}, tier: core.TierWarm, defaultRoot: defaultRoot,
 		zygotes: map[string]*zygote{}, fibers: map[string]*fiber{}, byPID: map[pidKey]*fiber{},
 		exits: make(chan backend.Exit, 1024)}
 	if o.Launcher == nil {
@@ -693,7 +732,8 @@ func (b *Backend) Warm(ctx context.Context, spec backend.WarmSpec) (backend.Warm
 		cmd.SysProcAttr.UseCgroupFD = true
 		cmd.SysProcAttr.CgroupFD = spec.CgroupFD
 	}
-	if err := cmd.Start(); err != nil {
+	p, err := b.opt.spawn(cmd)
+	if err != nil {
 		_ = parentF.Close()
 		return backend.Warm{}, fmt.Errorf("%s: start zygote %v: %w", b.Name(), argv, err)
 	}
@@ -704,12 +744,12 @@ func (b *Backend) Warm(ctx context.Context, spec backend.WarmSpec) (backend.Warm
 	conn, err := net.FileConn(parentF)
 	_ = parentF.Close()
 	if err != nil {
-		endZygote(cmd)
+		endZygote(p)
 		return backend.Warm{}, err
 	}
 	uc, ok := conn.(*net.UnixConn)
 	if !ok {
-		endZygote(cmd)
+		endZygote(p)
 		return backend.Warm{}, errors.New("proc: control socket is not unix")
 	}
 	if b.opt.Launcher != nil {
@@ -717,7 +757,7 @@ func (b *Backend) Warm(ctx context.Context, spec backend.WarmSpec) (backend.Warm
 		// making. The zygote does the same on its side before READY.
 		ch, err := b.opt.Launcher.Channel(ctx, spec, cmd, uc)
 		if err != nil {
-			endZygote(cmd)
+			endZygote(p)
 			_ = uc.Close()
 			b.release(&zygote{spec: spec})
 			return backend.Warm{}, fmt.Errorf("%s: control channel for %s: %w", b.Name(), spec.GrantUID, err)
@@ -732,12 +772,12 @@ func (b *Backend) Warm(ctx context.Context, spec backend.WarmSpec) (backend.Warm
 	// READY means the view is built. A launcher's fibers get no mount
 	// namespace (see Clone), and its zygote is told only that.
 	if err := sendSetup(uc, spec.Hide, b.opt.RootBind, spec.WorkDir, b.opt.Launcher == nil); err != nil {
-		endZygote(cmd)
+		endZygote(p)
 		_ = uc.Close()
 		b.release(&zygote{spec: spec})
 		return backend.Warm{}, err
 	}
-	z := &zygote{id: spec.GrantUID, spec: spec, cmd: cmd, pid: cmd.Process.Pid, ctl: uc, pend: map[string]*pending{}, gone: make(chan struct{})}
+	z := &zygote{id: spec.GrantUID, spec: spec, process: p, pid: p.Pid(), ctl: uc, pend: map[string]*pending{}, gone: make(chan struct{})}
 
 	ready := make(chan error, 1)
 	rd := bufio.NewReaderSize(uc, 64<<10)
@@ -763,13 +803,13 @@ func (b *Backend) Warm(ctx context.Context, spec backend.WarmSpec) (backend.Warm
 	select {
 	case err := <-ready:
 		if err != nil {
-			endZygote(cmd)
+			endZygote(p)
 			_ = uc.Close()
 			b.release(z)
 			return backend.Warm{}, fmt.Errorf("%s: zygote for %s did not become ready: %w", b.Name(), spec.GrantUID, err)
 		}
 	case <-ctx.Done():
-		endZygote(cmd)
+		endZygote(p)
 		_ = uc.Close()
 		b.release(z)
 		return backend.Warm{}, ctx.Err()
@@ -777,7 +817,7 @@ func (b *Backend) Warm(ctx context.Context, spec backend.WarmSpec) (backend.Warm
 	if b.opt.Launcher != nil {
 		pid, err := b.opt.Launcher.PID(ctx, spec, cmd)
 		if err != nil {
-			endZygote(cmd)
+			endZygote(p)
 			_ = uc.Close()
 			b.release(z)
 			return backend.Warm{}, err
@@ -788,7 +828,7 @@ func (b *Backend) Warm(ctx context.Context, spec backend.WarmSpec) (backend.Warm
 	b.zygotes[z.id] = z
 	b.mu.Unlock()
 	go b.read(z, rd)
-	go func() { _ = cmd.Wait() }()
+	go func() { _ = p.Wait() }()
 	return backend.Warm{ID: z.id, PID: z.pid}, nil
 }
 
@@ -876,9 +916,9 @@ func runDirPair(workDir string) (parent, own string, err error) {
 
 // endZygote kills a zygote Warm gave up on and reaps it. Without the
 // wait every failed warm would leave a zombie of this process behind.
-func endZygote(cmd *exec.Cmd) {
-	_ = cmd.Process.Kill()
-	_ = cmd.Wait()
+func endZygote(p process) {
+	_ = p.Kill()
+	_ = p.Wait()
 }
 
 func (b *Backend) release(z *zygote) {
@@ -899,12 +939,12 @@ func (b *Backend) hostPID(cgroupFD int, reported int) int {
 	if cgroupFD < 0 {
 		return 0
 	}
-	procs, err := os.ReadFile(fmt.Sprintf("/proc/self/fd/%d/cgroup.procs", cgroupFD))
+	procs, err := readAt(cgroupFD, "cgroup.procs")
 	if err != nil {
 		return 0
 	}
 	for _, p := range strings.Fields(string(procs)) {
-		status, err := os.ReadFile("/proc/" + p + "/status")
+		status, err := os.ReadFile(filepath.Join(b.opt.procRoot, p, "status"))
 		if err != nil {
 			continue
 		}
@@ -925,6 +965,31 @@ func (b *Backend) hostPID(cgroupFD int, reported int) int {
 	return 0
 }
 
+// readAt reads the file name in the directory open at dirFD.
+func readAt(dirFD int, name string) ([]byte, error) {
+	fd, err := syscall.Openat(dirFD, name, syscall.O_RDONLY|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, err
+	}
+	f := os.NewFile(uintptr(fd), name)
+	defer func() { _ = f.Close() }()
+	return io.ReadAll(f)
+}
+
+// socketInode is the inode of the unix socket pid holds on fd, read
+// under procRoot and formatted for criu's --external unix[...].
+func socketInode(procRoot string, pid, fd int) (string, error) {
+	link, err := os.Readlink(filepath.Join(procRoot, strconv.Itoa(pid), "fd", strconv.Itoa(fd)))
+	if err != nil {
+		return "", err
+	}
+	ino, ok := strings.CutPrefix(link, "socket:[")
+	if !ok || !strings.HasSuffix(ino, "]") {
+		return "", fmt.Errorf("proc: fd %d of %d is %q, not a socket", fd, pid, link)
+	}
+	return strings.TrimSuffix(ino, "]"), nil
+}
+
 // CheckpointWarm implements backend.SelfCheckpointer: dump the zygote's
 // pages while it keeps running, treating the control socket as external.
 // A plain zygote lives in the mount namespace it prepared for its fibers,
@@ -938,7 +1003,7 @@ func (b *Backend) CheckpointWarm(ctx context.Context, warmID, dir string) error 
 		return fmt.Errorf("proc: no warm instance %q", warmID)
 	}
 	var extra []string
-	if ino, err := criu.SocketInode(z.pid, 3); err == nil {
+	if ino, err := socketInode(b.opt.procRoot, z.pid, 3); err == nil {
 		extra = []string{"--external", "unix[" + ino + "]"}
 	}
 	if b.opt.Launcher != nil {
@@ -990,7 +1055,7 @@ func (b *Backend) Unwarm(id string) {
 	b.mu.Unlock()
 	if ok {
 		_ = z.ctl.Close()
-		_ = z.cmd.Process.Kill()
+		_ = z.process.Kill()
 		b.release(z)
 	}
 }
@@ -1348,7 +1413,7 @@ func (b *Backend) Park(ctx context.Context, fiberID string, spec backend.ParkSpe
 	}
 	if f.handoff {
 		// The channel's peer is the host's end, outside the dumped tree.
-		ino, err := criu.SocketInode(pid, handoffFD)
+		ino, err := socketInode(b.opt.procRoot, pid, handoffFD)
 		if err != nil {
 			return fmt.Errorf("proc: handoff channel of %s: %w", fiberID, err)
 		}
@@ -1538,7 +1603,7 @@ func (b *Backend) Close() {
 	b.mu.Unlock()
 	for _, z := range zs {
 		_ = z.ctl.Close()
-		_ = z.cmd.Process.Kill()
+		_ = z.process.Kill()
 	}
 	b.unbindRoot()
 }

@@ -133,6 +133,11 @@ type Backend struct {
 
 	// run starts every runsc process. New sets it to execRunsc.
 	run runFunc
+	// await blocks until the sandbox process pid has exited and reports
+	// how, or false when it cannot watch it. It is awaitExit, the pidfd
+	// wait, and the fake runsc of the unit tests reports its sandboxes'
+	// exits in process through it.
+	await func(pid int) (string, bool)
 
 	// restores holds one token per restore that may run at once. A clone
 	// takes one as it comes. A pool restore takes one only while no clone
@@ -236,7 +241,7 @@ func newBackend(o Options, run runFunc) *Backend {
 		o.MaxRestores = max(1, runtime.GOMAXPROCS(0))
 	}
 	b := &Backend{opt: o, run: run, warms: map[string]*warm{}, boxes: map[string]*box{}, pooled: map[string]*box{}, exits: make(chan backend.Exit, 1024),
-		restores: make(chan struct{}, o.MaxRestores), quiet: make(chan struct{})}
+		restores: make(chan struct{}, o.MaxRestores), quiet: make(chan struct{}), await: awaitExit}
 	if b.run == nil {
 		b.run = b.execRunsc
 	}
@@ -857,7 +862,7 @@ func cgroupCurrent(fd int) uint64 {
 // the sandbox is already gone or runsc could not say, and `runsc wait`
 // sorts it out as before.
 func (b *Backend) reap(cid string, pid int) string {
-	status, ok := awaitExit(pid)
+	status, ok := b.await(pid)
 	if !ok {
 		out, _ := b.runsc(context.Background(), -1, "wait", cid)
 		status = waitStatus(out)

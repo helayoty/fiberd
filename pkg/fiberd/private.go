@@ -20,9 +20,12 @@ func (c *Config) PrivateDir() string { return filepath.Join(c.StateDir, "private
 // before anything is written through it. A symlink a fiber planted there
 // would send the keys wherever it points, and MkdirAll and Chmod both
 // follow one.
-func (c *Config) ensurePrivate() error { return ensurePrivate(c.StateDir, c.PrivateDir()) }
+func (c *Config) ensurePrivate() error { return ensurePrivate(c.StateDir, c.PrivateDir(), os.Chmod) }
 
-func ensurePrivate(stateDir, privateDir string) error {
+// chmod tightens the private directory's mode. It is a parameter so a
+// test can stand in for a file system that refuses, which only a mount
+// does.
+func ensurePrivate(stateDir, privateDir string, chmod func(string, os.FileMode) error) error {
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		return fmt.Errorf("state dir: %w", err)
 	}
@@ -40,7 +43,7 @@ func ensurePrivate(stateDir, privateDir string) error {
 	}
 	// An existing directory keeps the mode it was made with. This one
 	// must be fiberd's alone.
-	if err := os.Chmod(privateDir, 0o700); err != nil {
+	if err := chmod(privateDir, 0o700); err != nil {
 		return fmt.Errorf("private state dir: %w", err)
 	}
 	return nil

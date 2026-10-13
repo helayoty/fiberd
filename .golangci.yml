@@ -2,12 +2,17 @@ version: "2"
 
 run:
   timeout: 5m
+  # The suites under tests/ build only with this tag. Analysing them here
+  # keeps them vetted, since `go test ./...` never compiles them.
+  build-tags:
+    - integration
 
 linters:
   default: standard
   enable:
     - depguard
     - errorlint
+    - forbidigo
     - gocritic
     - misspell
     - unconvert
@@ -41,10 +46,41 @@ linters:
               desc: "pkg/core must not touch cgroups or CRIU directly"
             - pkg: "github.com/go-jose"
               desc: "JWT handling belongs in pkg/grant"
+    # Engineering rule: a unit test starts no process and changes nothing
+    # in the kernel. The exclusions below confine this to _test.go files
+    # outside tests/, where the integration suites live. Importing os/exec
+    # stays allowed, since fakes name *exec.Cmd without starting one.
+    forbidigo:
+      analyze-types: true
+      forbid:
+        - pattern: ^exec\.(Command|CommandContext)$
+          pkg: ^os/exec$
+          msg: "a unit test starts no process; move the test under tests/ or fake the seam"
+        - pattern: ^exec\.Cmd\.(Start|Run|Output|CombinedOutput)$
+          pkg: ^os/exec$
+          msg: "a unit test starts no process; move the test under tests/ or fake the seam"
+        - pattern: ^os\.(StartProcess|Executable)$
+          pkg: ^os$
+          msg: "a unit test starts no process and never re-executes itself"
+        - pattern: ^syscall\.(ForkExec|Exec|Mount|Unshare)$
+          pkg: ^syscall$
+          msg: "a unit test starts no process and changes nothing in the kernel"
+        - pattern: ^unix\.(Mount|Unshare|Setns|Capset)$
+          pkg: ^golang.org/x/sys/unix$
+          msg: "a unit test changes nothing in the kernel"
   exclusions:
     generated: lax
     paths:
       - api/
+    rules:
+      # forbidigo guards unit tests only: production code starts processes
+      # by design, and the suites under tests/ are integration.
+      - linters:
+          - forbidigo
+        path-except: _test\.go$
+      - linters:
+          - forbidigo
+        path: (^|/)tests/
 
 formatters:
   enable:

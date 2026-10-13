@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -30,6 +31,7 @@ import (
 	"github.com/helayoty/fiberd/pkg/artifact"
 	"github.com/helayoty/fiberd/pkg/backend"
 	"github.com/helayoty/fiberd/pkg/backend/proc"
+	"github.com/helayoty/fiberd/pkg/sys/criu"
 	"github.com/helayoty/fiberd/pkg/sys/netns"
 )
 
@@ -45,6 +47,9 @@ type Options struct {
 	StateDir string
 	// CRIU names the criu binary (default "criu").
 	CRIU string
+	// Commander runs criu (criu.Options.Commander). Nil runs the binary
+	// CRIU names.
+	Commander criu.Commander
 	// Pool is the host id space grants' user namespaces map into
 	// (default DefaultPool).
 	Pool IDPool
@@ -62,6 +67,10 @@ type Backend struct {
 type launcher struct {
 	opt    Options
 	claims *claims
+	// run runs the runc binary with args and returns what it printed.
+	// Nil runs the binary Runc names, and a test sets one that answers
+	// in this process.
+	run func(ctx context.Context, args []string) ([]byte, error)
 
 	// fsMu serialises taking and giving back one grant's hold on its id
 	// range together with making and removing its root filesystem copy.
@@ -126,7 +135,7 @@ func New(o Options) (backend.Backend, error) {
 	}
 	l := &launcher{opt: o, claims: newClaims(o.Pool)}
 	l.sweep()
-	return &Backend{Backend: proc.NewBackend(proc.Options{CRIU: o.CRIU, CRIUWrap: l.sysWrap(), Launcher: l}), l: l}, nil
+	return &Backend{Backend: proc.NewBackend(proc.Options{CRIU: o.CRIU, Commander: o.Commander, CRIUWrap: l.sysWrap(), Launcher: l}), l: l}, nil
 }
 
 // sweep ends the containers a previous life left in runc's state and
@@ -304,25 +313,36 @@ type templateRecord struct {
 }
 
 func (l *launcher) runc(ctx context.Context, args ...string) (string, error) {
-	out, err := exec.CommandContext(ctx, l.opt.Runc, append([]string{"--root", l.root()}, args...)...).CombinedOutput()
+	run := l.run
+	if run == nil {
+		run = l.execRunc
+	}
+	out, err := run(ctx, append([]string{"--root", l.root()}, args...))
 	if err != nil {
 		return string(out), fmt.Errorf("runc %s: %w: %s", args[0], err, strings.TrimSpace(string(out)))
 	}
 	return string(out), nil
 }
 
+// execRunc is the default run, the binary itself.
+func (l *launcher) execRunc(ctx context.Context, args []string) ([]byte, error) {
+	return exec.CommandContext(ctx, l.opt.Runc, args...).CombinedOutput()
+}
+
+// cgroupMount is where the cgroup v2 hierarchy is mounted.
+const cgroupMount = "/sys/fs/cgroup"
+
 // cgroupPath resolves an open cgroup directory fd to the path runc's
-// cgroupsPath wants, relative to the cgroup v2 mount.
-func cgroupPath(fd int) (string, error) {
+// cgroupsPath wants, relative to the hierarchy at mount.
+func cgroupPath(fd int, mount string) (string, error) {
 	p, err := os.Readlink(fmt.Sprintf("/proc/self/fd/%d", fd))
 	if err != nil {
 		return "", err
 	}
-	const root = "/sys/fs/cgroup"
-	if !strings.HasPrefix(p, root) {
-		return "", fmt.Errorf("runc: cgroup %s is not under %s", p, root)
+	if !strings.HasPrefix(p, mount) {
+		return "", fmt.Errorf("runc: cgroup %s is not under %s", p, mount)
 	}
-	rel := strings.TrimPrefix(p, root)
+	rel := strings.TrimPrefix(p, mount)
 	if rel == "" {
 		rel = "/"
 	}
@@ -414,6 +434,80 @@ func (l *launcher) Command(spec backend.WarmSpec, argv []string, ctl, logf *os.F
 	// read-only at backend.TemplateMount, and the command runs from
 	// there (backend.StageTemplate). The copy is the mapped root's to
 	// read and run (mode 0555) and nobody's to write.
+	tdir := l.templateDir(spec)
+	_ = os.RemoveAll(tdir)
+	l.setStaged(spec, "")
+	staged := ""
+	if spec.Template.Dir != "" {
+		staged = filepath.Join(tdir, "template")
+		defer func() {
+			if err != nil {
+				_ = os.RemoveAll(tdir)
+			}
+		}()
+		if argv, err = backend.StageTemplate(spec.Template, staged); err != nil {
+			return nil, fmt.Errorf("runc: %w", err)
+		}
+		l.setStaged(spec, staged)
+	}
+	// The host opened the log as root. The zygote reopens it from inside
+	// as the mapped root, which needs group write.
+	if err := logf.Chmod(0o664); err != nil {
+		return nil, fmt.Errorf("runc: chmod zygote log: %w", err)
+	}
+	if err := logf.Chown(-1, int(rng.Start)); err != nil {
+		return nil, fmt.Errorf("runc: chown zygote log: %w", err)
+	}
+	cgPath := ""
+	if spec.CgroupFD >= 0 {
+		p, err := cgroupPath(spec.CgroupFD, cgroupMount)
+		if err != nil {
+			return nil, err
+		}
+		cgPath = p
+	}
+	b := l.bundle(spec)
+	if err := os.MkdirAll(b, 0o755); err != nil {
+		return nil, err
+	}
+	data, err := json.MarshalIndent(l.bundleConfig(spec, argv, rootfs, cgPath, staged, rng), "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	if err := os.WriteFile(filepath.Join(b, "config.json"), data, 0o644); err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(l.root(), 0o700); err != nil {
+		return nil, err
+	}
+	_, _ = l.runc(context.Background(), "delete", "-f", l.cid(spec)) // a stale one from a previous life
+	// runc's own log, fresh for this run and at debug level, so a
+	// container that never comes up says which stage it died in.
+	if err := os.Remove(l.runcLog(spec)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return nil, fmt.Errorf("runc: remove old runc log: %w", err)
+	}
+	wrap := l.sysWrap()
+	cmd = exec.Command(wrap[0], append(wrap[1:], l.opt.Runc, "--root", l.root(), "--log", l.runcLog(spec), "--debug",
+		"run", "--preserve-fds", "1", "--bundle", b, l.cid(spec))...)
+	cmd.ExtraFiles = []*os.File{ctl} // fd 3 in the container's init
+	devnull, err := os.OpenFile(os.DevNull, os.O_RDONLY, 0)
+	if err != nil {
+		return nil, err
+	}
+	// runc's own stdio. The zygote reopens its stdio inside (--log), so
+	// no descriptor of a host file survives into the container.
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = devnull, logf, logf
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	log.Printf("runc: grant %s runs as host ids %d-%d", spec.GrantUID, rng.Start, uint64(rng.Start)+uint64(rng.Count)-1)
+	return cmd, nil
+}
+
+// bundleConfig is the OCI spec of the grant's container: argv as the init
+// in the rootfs copy, its run directory at /host, the /sys bind, a
+// registry template's staged copy when it has one, and the user, pid,
+// mount, network, ipc and uts namespaces mapped onto rng. It touches
+// nothing, so a test can read it as data.
+func (l *launcher) bundleConfig(spec backend.WarmSpec, argv []string, rootfs, cgPath, staged string, rng IDRange) map[string]any {
 	mounts := []map[string]any{
 		{"destination": "/proc", "type": "proc", "source": "proc"},
 		{"destination": "/dev", "type": "tmpfs", "source": "tmpfs", "options": []string{"nosuid", "strictatime", "mode=755", "size=65536k"}},
@@ -427,44 +521,11 @@ func (l *launcher) Command(spec backend.WarmSpec, argv []string, ctl, logf *os.F
 		{"destination": "/sys", "type": "bind", "source": l.sysDir(), "options": []string{"rbind", "nosuid", "noexec", "nodev", "ro"}},
 		{"destination": "/host", "type": "bind", "source": spec.WorkDir, "options": []string{"rbind", "rw"}},
 	}
-	tdir := l.templateDir(spec)
-	_ = os.RemoveAll(tdir)
-	l.setStaged(spec, "")
-	if spec.Template.Dir != "" {
-		staged := filepath.Join(tdir, "template")
-		defer func() {
-			if err != nil {
-				_ = os.RemoveAll(tdir)
-			}
-		}()
-		if argv, err = backend.StageTemplate(spec.Template, staged); err != nil {
-			return nil, fmt.Errorf("runc: %w", err)
-		}
+	if staged != "" {
 		mounts = append(mounts, map[string]any{"destination": backend.TemplateMount, "type": "bind", "source": staged, "options": backend.TemplateMountOptions})
-		l.setStaged(spec, staged)
-	}
-	// The host opened the log as root. The zygote reopens it from inside
-	// as the mapped root, which needs group write.
-	if err := logf.Chmod(0o664); err != nil {
-		return nil, fmt.Errorf("runc: chmod zygote log: %w", err)
-	}
-	if err := logf.Chown(-1, int(rng.Start)); err != nil {
-		return nil, fmt.Errorf("runc: chown zygote log: %w", err)
-	}
-	cgPath := ""
-	if spec.CgroupFD >= 0 {
-		p, err := cgroupPath(spec.CgroupFD)
-		if err != nil {
-			return nil, err
-		}
-		cgPath = p
-	}
-	b := l.bundle(spec)
-	if err := os.MkdirAll(b, 0o755); err != nil {
-		return nil, err
 	}
 	idMap := []map[string]uint32{{"containerID": 0, "hostID": rng.Start, "size": rng.Count}}
-	cfg := map[string]any{
+	return map[string]any{
 		"ociVersion": "1.0.2",
 		"process": map[string]any{
 			"terminal": false,
@@ -499,36 +560,6 @@ func (l *launcher) Command(spec backend.WarmSpec, argv []string, ctl, logf *os.F
 				"/proc/sched_debug", "/proc/scsi", "/sys/firmware", "/sys/devices/virtual/powercap"},
 		},
 	}
-	data, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		return nil, err
-	}
-	if err := os.WriteFile(filepath.Join(b, "config.json"), data, 0o644); err != nil {
-		return nil, err
-	}
-	if err := os.MkdirAll(l.root(), 0o700); err != nil {
-		return nil, err
-	}
-	_, _ = l.runc(context.Background(), "delete", "-f", l.cid(spec)) // a stale one from a previous life
-	// runc's own log, fresh for this run and at debug level, so a
-	// container that never comes up says which stage it died in.
-	if err := os.Remove(l.runcLog(spec)); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return nil, fmt.Errorf("runc: remove old runc log: %w", err)
-	}
-	wrap := l.sysWrap()
-	cmd = exec.Command(wrap[0], append(wrap[1:], l.opt.Runc, "--root", l.root(), "--log", l.runcLog(spec), "--debug",
-		"run", "--preserve-fds", "1", "--bundle", b, l.cid(spec))...)
-	cmd.ExtraFiles = []*os.File{ctl} // fd 3 in the container's init
-	devnull, err := os.OpenFile(os.DevNull, os.O_RDONLY, 0)
-	if err != nil {
-		return nil, err
-	}
-	// runc's own stdio. The zygote reopens its stdio inside (--log), so
-	// no descriptor of a host file survives into the container.
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = devnull, logf, logf
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	log.Printf("runc: grant %s runs as host ids %d-%d", spec.GrantUID, rng.Start, uint64(rng.Start)+uint64(rng.Count)-1)
-	return cmd, nil
 }
 
 // prepareWorkDir lets the mapped root create its sockets in the grant's
@@ -747,7 +778,7 @@ func copyFile(src, dst string, perm fs.FileMode) error {
 // the bootstrap socket as a REBIND message, which libfiberzygote reads
 // before READY (FIBERD_CTL_REBIND), and fiberd's end is returned.
 func (l *launcher) Channel(ctx context.Context, spec backend.WarmSpec, cmd *exec.Cmd, boot *net.UnixConn) (*net.UnixConn, error) {
-	pid, err := l.waitPID(ctx, spec, cmd)
+	pid, err := l.waitPID(ctx, spec, runGone(cmd))
 	if err != nil {
 		return nil, err
 	}
@@ -776,22 +807,22 @@ func (l *launcher) Channel(ctx context.Context, spec backend.WarmSpec, cmd *exec
 }
 
 // waitPID polls runc for the container's init until it is known, the
-// context ends or runc exits. Nobody waits on `runc run` until the
-// channel is up, so its exit is read from /proc, where it is a zombie.
-// An error about a container that never came up carries the tails of
-// runc's log and the zygote's, since `runc run` tears its state down on
-// the way out and `runc state` only says the container does not exist.
-func (l *launcher) waitPID(ctx context.Context, spec backend.WarmSpec, cmd *exec.Cmd) (int, error) {
+// context ends or `runc run` is gone, which gone reports with how it
+// ended when that is known. An error about a container that never came
+// up carries the tails of runc's log and the zygote's, since `runc run`
+// tears its state down on the way out and `runc state` only says the
+// container does not exist.
+func (l *launcher) waitPID(ctx context.Context, spec backend.WarmSpec, gone func() (string, bool)) (int, error) {
 	for {
-		pid, err := l.PID(ctx, spec, cmd)
+		pid, err := l.PID(ctx, spec, nil)
 		if err == nil {
 			return pid, nil
 		}
-		if cmd.ProcessState != nil {
-			return 0, fmt.Errorf("runc: exited before the container was up (%s): %w%s", cmd.ProcessState, err, l.logTails(spec))
-		}
-		if exited(cmd.Process.Pid) {
-			return 0, fmt.Errorf("runc: exited before the container was up: %w%s", err, l.logTails(spec))
+		if how, ok := gone(); ok {
+			if how != "" {
+				how = " (" + how + ")"
+			}
+			return 0, fmt.Errorf("runc: exited before the container was up%s: %w%s", how, err, l.logTails(spec))
 		}
 		select {
 		case <-ctx.Done():
@@ -801,11 +832,25 @@ func (l *launcher) waitPID(ctx context.Context, spec backend.WarmSpec, cmd *exec
 	}
 }
 
+// runGone reports whether the started `runc run` is gone: reaped, with
+// its exit status, or exited unreaped. Nobody waits on it until the
+// channel is up, so its exit is read from /proc, where it is a zombie.
+func runGone(cmd *exec.Cmd) func() (string, bool) {
+	return func() (string, bool) {
+		if cmd.ProcessState != nil {
+			return cmd.ProcessState.String(), true
+		}
+		return "", exited(cmd.Process.Pid)
+	}
+}
+
 // exited reports whether pid is gone or a zombie nobody has reaped yet.
-// The state is the field after the parenthesised command name in
-// /proc/<pid>/stat.
-func exited(pid int) bool {
-	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+func exited(pid int) bool { return exitedIn("/proc", pid) }
+
+// exitedIn is exited reading pid's stat under procRoot. The state is the
+// field after the parenthesised command name.
+func exitedIn(procRoot string, pid int) bool {
+	b, err := os.ReadFile(filepath.Join(procRoot, strconv.Itoa(pid), "stat"))
 	if err != nil {
 		return true
 	}

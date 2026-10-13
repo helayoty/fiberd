@@ -124,6 +124,7 @@ func TestKernelSeries(t *testing.T) {
 }
 
 func TestPlatformAnnotationsRoundTrip(t *testing.T) {
+	fakeHost(t)
 	annotated := func(p artifact.Platform) map[string]string {
 		m := map[string]string{}
 		p.Annotate(m)

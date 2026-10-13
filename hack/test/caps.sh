@@ -4,7 +4,7 @@
 #
 #   hack/dev/run.sh hack/test/caps.sh
 #
-# The tests/proc suite runs several times. First with every capability, as
+# The tests/integration/proc suite runs several times. First with every capability, as
 # the reference. Then with every candidate in the bounding set, as the
 # baseline, which must pass what the reference passes. Then once per
 # candidate with only that one left out. Last with only the ones found
@@ -40,7 +40,7 @@ for c in "${cand[@]}"; do
   grep -qx "$c" <<<"$known" || { echo "setpriv does not know $c; drop it from CAPS"; exit 1; }
 done
 
-go test -c -o "$OUT/proc.test" ./tests/proc
+go test -c -tags integration -o "$OUT/proc.test" ./tests/integration/proc
 
 # cgclean kills and removes what earlier runs left under the test cgroup
 # root, so each run starts from the same state.
@@ -63,7 +63,7 @@ run() {
   local wrap=(setpriv --bounding-set "$set" --inh-caps -all --)
   [ "$label" = full ] && wrap=()
   cgclean
-  (cd tests/proc && "${wrap[@]}" \
+  (cd tests/integration/proc && "${wrap[@]}" \
     "$OUT/proc.test" -test.v -test.count=1 -test.timeout 15m -test.run "$RUN") >"$OUT/$label.log" 2>&1 || true
   grep -oP '^--- PASS: \K\S+' "$OUT/$label.log" | sort >"$OUT/$label.pass" || true
 }

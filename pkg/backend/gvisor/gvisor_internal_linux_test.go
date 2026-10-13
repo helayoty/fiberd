@@ -49,6 +49,7 @@ func newFakeMax(t *testing.T, k knobs, maxRestores int) (*Backend, *fakeRunsc) {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(state) })
 	b := newBackend(Options{Runsc: "runsc", Rootfs: rootfs, StateDir: filepath.Join(state, "state"), MaxRestores: maxRestores}, f.run)
+	b.await = f.awaitExit
 	if b.Tier() != core.TierSnapshot {
 		t.Fatalf("Tier = %s (%v), want FIBER_SNAPSHOT over the fake", b.Tier(), b.ProbeErr())
 	}
@@ -823,7 +824,7 @@ func TestWarm(t *testing.T) {
 
 // TestProbeFootprint checks that the template image is restored once into the
 // probe cgroup as a fiber would be, measured serving from the leaf's
-// counters (a seeded directory here, a real leaf in tests/gvisor), and
+// counters (a seeded directory here, a real leaf in tests/integration/gvisor), and
 // ended, leaving nothing behind. A probe that cannot restore or serve
 // measures nothing, and one without a cgroup runs all the same, since it
 // is where late binding is detected, and measures nothing.

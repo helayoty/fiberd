@@ -52,7 +52,10 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	if err := run(o.podUID, o.listen, o.credBundle, o.trustBundle, o.clientID, o.readyAddr, o.paths); err != nil {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	err = run(ctx, o.podUID, o.listen, o.credBundle, o.trustBundle, o.clientID, o.readyAddr, o.paths)
+	stop()
+	if err != nil {
 		log.Fatalf("ateom-fiberd: %v", err)
 	}
 }
@@ -91,9 +94,11 @@ func parseArgs(fs *flag.FlagSet, args []string) (options, error) {
 		clientID: *clientID, readyAddr: *readyAddr, paths: herder.Paths{Base: *basePath}}, nil
 }
 
-func run(podUID, listen, credBundle, trustBundle, clientID, readyAddr string, paths herder.Paths) error {
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
-	defer stop()
+// run is the worker until ctx ends, which main ties to SIGTERM and
+// SIGINT, or until it fails. Everything it starts stops with ctx.
+func run(ctx context.Context, podUID, listen, credBundle, trustBundle, clientID, readyAddr string, paths herder.Paths) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 
 	// fiberd's side, from the image's environment.
 	stateDir := env("ATEOM_FIBERD_STATE", "/var/lib/fiberd")
@@ -169,7 +174,7 @@ func run(podUID, listen, credBundle, trustBundle, clientID, readyAddr string, pa
 	}
 	fiberdErr := make(chan error, 1)
 	go func() {
-		fiberdErr <- fiberd.Run(&c, func(*fiberd.Config, *grant.Cache) (fhome.Home, error) { return h, nil })
+		fiberdErr <- fiberd.RunContext(ctx, &c, func(*fiberd.Config, *grant.Cache) (fhome.Home, error) { return h, nil })
 	}()
 	if err := waitTCP(ctx, fiberdAddr, 60*time.Second, fiberdErr); err != nil {
 		return fmt.Errorf("fiberd did not come up: %w", err)
