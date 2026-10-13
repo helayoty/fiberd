@@ -80,7 +80,7 @@ type Options struct {
 	// (default fiberd-root-<pid> under the temp directory). Every later
 	// fiber unmounts it from its own namespace, because the bind would show
 	// what HIDE covers. The backend makes the leaf directory and removes it
-	// at Close, so its parent must be a place only the agent writes. It
+	// at Close, so its parent must be a place only fiberd writes. It
 	// refuses a symlink or another user's directory there, and unmounts a
 	// stale bind at the same path when it opens.
 	RootBind string
@@ -226,8 +226,8 @@ func (b *Backend) unbindRoot() {
 }
 
 // holderFile is where the process holding the restore root at dir
-// records its pid. Another agent configured with the same RootBind reads
-// it before reaping, so a live agent's bind is never pulled from under
+// records its pid. Another fiberd configured with the same RootBind reads
+// it before reaping, so a live fiberd's bind is never pulled from under
 // its fibers.
 func holderFile(dir string) string { return dir + ".pid" }
 
@@ -544,7 +544,7 @@ func New(o Options) backend.Backend { return NewBackend(o) }
 
 // NewBackend is New with the concrete type, for launchers that wrap it.
 func NewBackend(o Options) *Backend {
-	// The default names the process, so two agents on one host never
+	// The default names the process, so two fiberd processes on one host never
 	// share it and a bind a dead one left is recognisable as such.
 	defaultRoot := o.RootBind == ""
 	if defaultRoot {
@@ -674,12 +674,12 @@ func (b *Backend) Warm(ctx context.Context, spec backend.WarmSpec) (backend.Warm
 		// for its fibers before READY (see sendSetup).
 		cmd.Env = []string{"PATH=/usr/bin:/bin", ownMntnsEnv}
 		if len(spec.Devices) > 0 {
-			// The fabric channel: the one grant-specific thing an engine
+			// The device channel: the one grant-specific thing an engine
 			// needs at warm-up (a CUDA engine reads it as its visible set).
 			cmd.Env = append(cmd.Env, "FIBERD_DEVICES="+strings.Join(spec.Devices, ","))
 		}
 		// The zygote's (and so every fiber's) working directory is its own run
-		// directory, never the agent's: criu's parasite creates scratch
+		// directory, never fiberd's: criu's parasite creates scratch
 		// entries in the dumped task's cwd.
 		cmd.Dir = spec.WorkDir
 		cmd.SysProcAttr = &syscall.SysProcAttr{
@@ -1226,7 +1226,7 @@ func (b *Backend) Clone(ctx context.Context, warmID string, spec backend.FiberSp
 		payload = hex.EncodeToString(spec.Payload)
 	}
 	// A launcher's fibers already live in its container's mount
-	// namespace, which holds none of the agent's paths. They keep the
+	// namespace, which holds none of fiberd's paths. They keep the
 	// container's capabilities, because CRIU will not dump a fiber without
 	// capabilities whose /proc is not its own pid namespace's.
 	var opts []string

@@ -27,8 +27,8 @@ func fakeCgroup(t *testing.T) string {
 // sh is a probe that runs script.
 func sh(script string) []string { return []string{"/bin/sh", "-c", script} }
 
-// TestPoll checks one probe of slurmctld at a time. The lane starts
-// stale, so only a poll that counts as liveness makes it healthy.
+// TestPoll checks one probe of slurmctld at a time. The issuer starts
+// unreachable, so only a poll that counts as liveness makes it reachable.
 func TestPoll(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -41,15 +41,15 @@ func TestPoll(t *testing.T) {
 		ended   int
 	}{
 		{name: "no probe: the timer is liveness", probe: []string{}, polls: 1, healthy: true},
-		{name: "no probe while the lane is paused: it stays stale", probe: []string{}, paused: true, polls: 1},
-		{name: "a failing probe leaves the lane stale", probe: sh("echo slurmctld down; exit 3"), polls: 1},
-		{name: "an answer without JobState leaves the lane stale", probe: sh("echo JobId=4242"), polls: 1},
+		{name: "no probe while paused: the issuer stays unreachable", probe: []string{}, paused: true, polls: 1},
+		{name: "a failing probe leaves the issuer unreachable", probe: sh("echo slurmctld down; exit 3"), polls: 1},
+		{name: "an answer without JobState leaves the issuer unreachable", probe: sh("echo JobId=4242"), polls: 1},
 		{name: "RUNNING is liveness", probe: sh("echo JobId=4242 JobState=RUNNING"), polls: 1, healthy: true},
 		{name: "PENDING is liveness", probe: sh("echo JobState=PENDING"), polls: 1, healthy: true},
-		{name: "RUNNING while the lane is paused: it stays stale", probe: sh("echo JobState=RUNNING"), paused: true, polls: 1},
+		{name: "RUNNING while paused: the issuer stays unreachable", probe: sh("echo JobState=RUNNING"), paused: true, polls: 1},
 		{name: "a terminal state is scope loss once, however often it is seen", probe: sh("echo JobState=NODE_FAIL"), polls: 3,
 			reasons: []string{"job 4242 is NODE_FAIL"}, ended: 1},
-		{name: "without a scope-loss hook the agent still leaves with the job", probe: sh("echo JobState=COMPLETED"), noHook: true, polls: 2,
+		{name: "without a scope-loss hook fiberd still leaves with the job", probe: sh("echo JobState=COMPLETED"), noHook: true, polls: 2,
 			ended: 1},
 	}
 	for _, tc := range cases {
@@ -62,7 +62,7 @@ func TestPoll(t *testing.T) {
 			}
 			h.health.MarkSync(time.Now().Add(-time.Hour))
 			if tc.paused {
-				h.SetLane(false)
+				h.SetIssuerReachable(false)
 			}
 			var reasons []string
 			if !tc.noHook {
@@ -86,13 +86,13 @@ func TestPoll(t *testing.T) {
 
 // TestDefaults checks what New fills in when the config leaves it open.
 // That is the grants dir, the poll period, scontrol as the probe, and
-// SIGTERM to the agent when the job ends.
+// SIGTERM to fiberd when the job ends.
 func TestDefaults(t *testing.T) {
 	cases := []struct {
 		name string
 		run  func(t *testing.T)
 	}{
-		{"the grants dir is the job's and the lane polls every 2s", func(t *testing.T) {
+		{"the grants dir is the job's and the directory is polled every 2s", func(t *testing.T) {
 			h, err := New(Config{Env: jobEnv, CgroupMount: fakeCgroup(t), Probe: []string{}})
 			if err != nil {
 				t.Fatal(err)
@@ -123,10 +123,10 @@ func TestDefaults(t *testing.T) {
 				t.Fatalf("scontrol args = %q, want show job -o 4242", got)
 			}
 			if !h.Health().Healthy(time.Now()) {
-				t.Fatal("scontrol saying RUNNING must make the lane healthy")
+				t.Fatal("scontrol saying RUNNING must mark the issuer reachable")
 			}
 		}},
-		{"the end of the job is SIGTERM to the agent", func(t *testing.T) {
+		{"the end of the job is SIGTERM to fiberd", func(t *testing.T) {
 			sig := make(chan os.Signal, 1)
 			signal.Notify(sig, syscall.SIGTERM)
 			defer signal.Stop(sig)
@@ -138,7 +138,7 @@ func TestDefaults(t *testing.T) {
 			select {
 			case <-sig:
 			case <-time.After(10 * time.Second):
-				t.Fatal("the job ended but the agent got no SIGTERM")
+				t.Fatal("the job ended but fiberd got no SIGTERM")
 			}
 		}},
 	}

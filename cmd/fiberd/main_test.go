@@ -48,12 +48,12 @@ func adminHealthy(sock string) bool {
 }
 
 // TestRun checks fiberd's exit codes and what it says on stderr, and a full
-// start and clean stop of the standalone agent.
+// start and clean stop of the standalone fiberd.
 func TestRun(t *testing.T) {
 	cases := []struct {
 		name string
 		args []string
-		// serve marks a case that starts the agent. It is stopped once
+		// serve marks a case that starts fiberd. It is stopped once
 		// its admin socket answers.
 		serve      bool
 		wantCode   int

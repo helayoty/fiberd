@@ -16,7 +16,7 @@ Platforms often need many instances of the same workload, started on demand. The
 fiberd works with the scheduler, not instead of it. Fast starts from a warm copy are not new either. Android's zygote forks warm processes, and Firecracker and Lambda SnapStart restore snapshots. fiberd's part is making that safe to run at scale.
 
 - **Placement once, instances locally.** The scheduler places a signed block of capacity once. The home creates instances inside it with no API write or scheduler call per instance, so the scheduler sees one placement instead of one object per instance.
-- **Every instance stays checkable.** Each fiber's [fence](docs/glossary.md#fence) ties it to its grant and to the agent's [epoch](docs/glossary.md#epoch), so revocation and restarts reach every fiber. Each operation lands in a hash-chained audit log with signed checkpoints. A caller that misses gets a typed answer that says whether to back off or fall back.
+- **Every instance stays checkable.** Each fiber's [fence](docs/glossary.md#fence) ties it to its grant and to fiberd's [epoch](docs/glossary.md#epoch), so revocation and restarts reach every fiber. Each operation lands in a hash-chained audit log with signed checkpoints. A caller that misses gets a typed answer that says whether to back off or fall back.
 - **One contract, any scheduler, any isolation.** The same grant works on Kubernetes, Slurm or a bare host, and over plain processes, runc, gVisor or Hyperlight.
 - **Sessions move.** A parked session can resume on another home, verified and sealed to its tenant.
 
@@ -27,7 +27,7 @@ The fastest path, proc and runc, shares the host kernel, so it suits trusted cod
 - **[Clone](docs/glossary.md#clone)** returns a fiber for a grant, anonymous or by [session](docs/glossary.md#session) name.
 - **[Park](docs/glossary.md#park)** saves a session and frees its fiber's memory.
 - **[Release](docs/glossary.md#release)** ends a fiber.
-- **[Watch](docs/glossary.md#watch)** streams a summary of each grant.
+- **Watch** streams a summary of each grant.
 
 [protocol.md](docs/protocol.md) is the wire contract for all four.
 
@@ -73,8 +73,8 @@ The [quickstart](docs/quickstart.md) walks through each call. To write your own 
 
 ## Examples
 
-- [Kubernetes](examples/kubernetes/README.md) is a controller that turns each `CapacityGrant` custom resource into a signed grant and one Pod running the agent.
-- [Slurm](examples/slurm/README.md) runs the [agent](docs/glossary.md#agent) inside a job allocation.
+- [Kubernetes](examples/kubernetes/README.md) is a controller that turns each `CapacityGrant` custom resource into a signed grant and one Pod running fiberd.
+- [Slurm](examples/slurm/README.md) runs [fiberd](docs/glossary.md#fiberd) inside a job allocation.
 - [Knative](examples/knative/README.md) is an activator, the component that holds requests while a service scales from zero, here with fibers in Hyperlight micro-VMs.
 - [Kata-shaped shim](examples/kata/README.md) is a containerd shim, the plug-in that starts a Pod's containers. It has the shape of the Kata Containers shim without using Kata, and its containers are fibers.
 - [Agent Substrate](examples/substrate/README.md) is a worker for a platform that starts, suspends and resumes actors in worker Pods. Its actors are fibers.

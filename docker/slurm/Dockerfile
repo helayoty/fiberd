@@ -19,7 +19,7 @@ COPY . .
 # with TLS (-DFZ_TLS) so it can serve handoff grants, with ZYGOTE_CFLAGS and
 # ZYGOTE_LDFLAGS from the Makefile. On aarch64 it is built without PAC
 # branch protection (see docker/criu/Dockerfile).
-# The agent is built with the fiberd_testhooks tag, since the conformance run
+# fiberd is built with the fiberd_testhooks tag, since the conformance run
 # drives the test-only admin controls (-admin-unsafe). The release image
 # (docker/fiberd) is built without it.
 ENV CGO_ENABLED=0 GOFLAGS=-trimpath
@@ -54,7 +54,7 @@ COPY --chmod=0755 examples/slurm/docker/entrypoint.sh /usr/local/bin/slurm-entry
 COPY --chmod=0755 examples/slurm/prolog/fiberd-prolog.sh /usr/local/bin/fiberd-prolog.sh
 COPY --chmod=0755 examples/slurm/prolog/fiberd-job.sh /usr/local/bin/fiberd-job.sh
 # No USER on purpose. The entrypoint starts the Slurm daemons and carves
-# cgroups, and the agent runs criu, so all of it needs root.
+# cgroups, and fiberd runs criu, so all of it needs root.
 # examples/slurm/conform.sh runs the container --privileged. There is no
 # HEALTHCHECK because conform.sh waits on sinfo.
 ENTRYPOINT ["/usr/local/bin/slurm-entrypoint"]

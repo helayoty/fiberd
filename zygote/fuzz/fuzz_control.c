@@ -1,4 +1,4 @@
-/* fuzz_control drives fz_serve with the bytes an agent would send on the
+/* fuzz_control drives fz_serve with the bytes fiberd would send on the
  * control socket, with descriptors riding along and the REBIND handshake
  * first when asked. No fiber is born. The clone3 syscall is shimmed to
  * fail, so handle_clone parses the line and builds the child's

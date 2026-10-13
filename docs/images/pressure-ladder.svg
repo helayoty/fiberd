@@ -1,6 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="1100" viewBox="0 0 1440 1100" role="img" aria-labelledby="pressure-ladder-title pressure-ladder-desc">
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="1260" viewBox="0 0 1440 1260" role="img" aria-labelledby="pressure-ladder-title pressure-ladder-desc">
   <title id="pressure-ladder-title">Which pressure measurement triggers which reclamation?</title>
-  <desc id="pressure-ladder-desc">Each grant uses P, the maximum available memory PSI some avg10 percentage and reported device occupancy percentage. At the default park watermark of 25 percent, shed new creates and resumes and try to reclaim one running fiber, largest W first. Try Park for a named session; if Park fails or is unavailable, Release instead. Release anonymous fibers. With no victim or no successful reclaim, three consecutive evaluations at or above the park watermark yield the grant. Successful reclaim resets this counter. Below 25 but at or above the default shed watermark of 10 percent, shed only and reset the counter. Below 10, clear shedding and reset the counter. ATTACH is exempt from pressure, not from other checks. Grant policy can override watermarks; unsuccessful samples do not evaluate the ladder. Cleanup is best effort.</desc>
+  <desc id="pressure-ladder-desc">Each grant uses P, the maximum available memory PSI some avg10 percentage and reported device occupancy percentage. At the default park watermark of 25 percent, shed new creates and resumes and try to reclaim one thing. A pooled sandbox holds no state, so one is discarded first if the grant has any. Otherwise pick one running fiber, largest W first. Try Park for a named session; if Park fails or is unavailable, Release instead. Release anonymous fibers, which ends the fiber. With no victim or no successful reclaim, three consecutive evaluations at or above the park watermark yield the grant. Successful reclaim resets this counter. Below 25 but at or above the default shed watermark of 10 percent, shed only and reset the counter. Below 10, clear shedding and reset the counter. ATTACH is exempt from pressure, not from other checks. Grant policy can override watermarks; unsuccessful samples do not evaluate the ladder. Cleanup is best effort.</desc>
   <style>
     :root{--bg:#f7f9fc;--panel:#fff;--ink:#172033;--muted:#5d6b7d;--border:#b8c4d4;--blue:#3165b5;--blue-bg:#eaf1ff;--teal:#13776f;--teal-bg:#e8f7f4;--violet:#704aa1;--violet-bg:#f2edfa;--amber:#a76500;--amber-bg:#fff3d6;--green:#287a4d;--green-bg:#e8f6ed;--red:#b33b32;--red-bg:#fff0ef}
     @media(prefers-color-scheme:dark){:root{--bg:#0d1117;--panel:#161b22;--ink:#e6edf3;--muted:#a3adba;--border:#3d4652;--blue:#79a7ff;--blue-bg:#17243d;--teal:#53c7b8;--teal-bg:#102923;--violet:#c09cff;--violet-bg:#251b35;--amber:#f0b44d;--amber-bg:#30240f;--green:#63cf8e;--green-bg:#142b1e;--red:#ff8178;--red-bg:#321817}}
@@ -18,7 +18,7 @@
     <marker id="pressure-ladder-violet-arrow" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="12" markerHeight="12" markerUnits="userSpaceOnUse" orient="auto"><path d="M1 1 11 6 1 11Z" fill="var(--violet)"/></marker>
     <marker id="pressure-ladder-red-arrow" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="12" markerHeight="12" markerUnits="userSpaceOnUse" orient="auto"><path d="M1 1 11 6 1 11Z" fill="var(--red)"/></marker>
   </defs>
-  <rect class="bg" width="1440" height="1100"/>
+  <rect class="bg" width="1440" height="1260"/>
   <text class="title" x="48" y="66">Measure pressure. Reclaim the largest working set.</text>
   <text class="secondary muted" x="48" y="100">One evaluation per grant · default watermarks shown · remeasure on the next tick.</text>
   <path class="divider" d="M48 130H1392"/>
@@ -37,7 +37,7 @@
 
   <path class="decision" d="M280 334L430 395L280 456L130 395Z"/>
   <text class="heading center amber" x="280" y="402">P ≥ 25%?</text>
-  <path class="flow amber-flow" d="M430 395H815" marker-end="url(#pressure-ladder-amber-arrow)"/>
+  <path class="flow amber-flow" d="M430 395H860" marker-end="url(#pressure-ladder-amber-arrow)"/>
   <text class="label amber" x="470" y="374">yes · SHED + reclaim</text>
   <path class="flow amber-flow" d="M280 456V559" marker-end="url(#pressure-ladder-amber-arrow)"/>
   <text class="secondary amber" x="302" y="511">no</text>
@@ -59,43 +59,54 @@
   <text class="secondary muted" x="48" y="895">Grant policy can override 10% / 25%.</text>
   <text class="secondary muted" x="48" y="922">SHED refuses CREATE and RESUME.</text>
 
-  <path class="decision" d="M1000 334L1185 395L1000 456L815 395Z"/>
-  <text class="label center" x="1000" y="388">Running fiber</text>
+  <path class="decision" d="M1000 334L1140 395L1000 456L860 395Z"/>
+  <text class="label center" x="1000" y="388">Pooled sandbox</text>
   <text class="secondary center" x="1000" y="415">available?</text>
-  <path class="flow amber-flow" d="M1000 456V505" marker-end="url(#pressure-ladder-amber-arrow)"/>
-  <text class="secondary amber" x="1020" y="487">yes</text>
-  <rect class="action" x="820" y="505" width="360" height="72" rx="4"/>
-  <text class="heading amber center" x="1000" y="535">Select largest W</text>
-  <text class="secondary center" x="1000" y="561">One running fiber this tick</text>
-  <path class="flow amber-flow" d="M1000 577V606" marker-end="url(#pressure-ladder-amber-arrow)"/>
-  <path class="decision" d="M1000 606L1140 666L1000 726L860 666Z"/>
-  <text class="heading center" x="1000" y="673">Named?</text>
-  <path class="flow teal-flow" d="M860 666H800V754H888V788" marker-end="url(#pressure-ladder-teal-arrow)"/>
-  <text class="secondary teal" x="824" y="734">yes</text>
-  <path class="flow violet-flow" d="M1140 666H1245V788" marker-end="url(#pressure-ladder-violet-arrow)"/>
-  <text class="secondary violet" x="1190" y="649">no</text>
-  <rect class="park" x="775" y="788" width="226" height="98" rx="4"/>
-  <text class="heading teal center" x="888" y="827">Try PARK</text>
-  <text class="secondary center" x="888" y="858">Checkpoint named state</text>
-  <rect class="release" x="1140" y="788" width="210" height="98" rx="4"/>
-  <text class="heading violet center" x="1245" y="827">RELEASE</text>
-  <text class="secondary center" x="1245" y="858">End the incarnation</text>
-  <path class="flow violet-flow" d="M1001 844H1140" marker-end="url(#pressure-ladder-violet-arrow)"/>
-  <text class="secondary violet center" x="1070" y="822">cannot park</text>
-  <text class="secondary muted" x="778" y="917">Successful reclaim resets the counter; sample again.</text>
+  <path class="flow amber-flow" d="M1140 395H1202" marker-end="url(#pressure-ladder-amber-arrow)"/>
+  <text class="secondary amber" x="1156" y="380">yes</text>
+  <rect class="action" x="1202" y="346" width="190" height="98" rx="4"/>
+  <text class="heading amber center" x="1297" y="385">DISCARD</text>
+  <text class="secondary center" x="1297" y="416">One pooled sandbox</text>
+  <path class="flow amber-flow" d="M1000 456V494" marker-end="url(#pressure-ladder-amber-arrow)"/>
+  <text class="secondary amber" x="1020" y="481">no</text>
 
-  <path class="flow red-flow" d="M1185 395H1378V980H1290" marker-end="url(#pressure-ladder-red-arrow)"/>
-  <text class="secondary red" x="1220" y="374">no victim</text>
-  <text class="secondary red" x="1205" y="949">Still P ≥ 25%</text>
-  <path class="decision" d="M1130 930L1290 980L1130 1030L970 980Z"/>
-  <text class="heading center" x="1130" y="987">3 checks?</text>
-  <path class="flow red-flow" d="M970 980H912" marker-end="url(#pressure-ladder-red-arrow)"/>
-  <text class="secondary red" x="929" y="960">yes</text>
-  <rect class="yield" x="638" y="938" width="274" height="84" rx="4"/>
-  <text class="heading red center" x="775" y="973">YIELD grant</text>
-  <text class="secondary center" x="775" y="1004">Revoke capacity</text>
-  <path class="flow amber-flow" d="M1130 1030V1058H1220" marker-end="url(#pressure-ladder-amber-arrow)"/>
-  <text class="secondary amber" x="1148" y="1047">no</text>
-  <text class="secondary amber" x="1240" y="1064">Next tick</text>
-  <text class="secondary muted" x="48" y="1083">Failed reclaim also advances the three-check counter. Cleanup is best effort; this is not an OOM guarantee.</text>
+  <path class="decision" d="M1000 494L1185 555L1000 616L815 555Z"/>
+  <text class="label center" x="1000" y="548">Running fiber</text>
+  <text class="secondary center" x="1000" y="575">available?</text>
+  <path class="flow amber-flow" d="M1000 616V665" marker-end="url(#pressure-ladder-amber-arrow)"/>
+  <text class="secondary amber" x="1020" y="647">yes</text>
+  <rect class="action" x="820" y="665" width="360" height="72" rx="4"/>
+  <text class="heading amber center" x="1000" y="695">Select largest W</text>
+  <text class="secondary center" x="1000" y="721">One running fiber this tick</text>
+  <path class="flow amber-flow" d="M1000 737V766" marker-end="url(#pressure-ladder-amber-arrow)"/>
+  <path class="decision" d="M1000 766L1140 826L1000 886L860 826Z"/>
+  <text class="heading center" x="1000" y="833">Named?</text>
+  <path class="flow teal-flow" d="M860 826H800V914H888V948" marker-end="url(#pressure-ladder-teal-arrow)"/>
+  <text class="secondary teal" x="824" y="894">yes</text>
+  <path class="flow violet-flow" d="M1140 826H1245V948" marker-end="url(#pressure-ladder-violet-arrow)"/>
+  <text class="secondary violet" x="1190" y="809">no</text>
+  <rect class="park" x="775" y="948" width="226" height="98" rx="4"/>
+  <text class="heading teal center" x="888" y="987">Try PARK</text>
+  <text class="secondary center" x="888" y="1018">Checkpoint named state</text>
+  <rect class="release" x="1140" y="948" width="210" height="98" rx="4"/>
+  <text class="heading violet center" x="1245" y="987">RELEASE</text>
+  <text class="secondary center" x="1245" y="1018">End the fiber</text>
+  <path class="flow violet-flow" d="M1001 1004H1140" marker-end="url(#pressure-ladder-violet-arrow)"/>
+  <text class="secondary violet center" x="1070" y="982">cannot park</text>
+  <text class="secondary muted" x="778" y="1077">Successful reclaim resets the counter; sample again.</text>
+
+  <path class="flow red-flow" d="M1185 555H1378V1140H1290" marker-end="url(#pressure-ladder-red-arrow)"/>
+  <text class="secondary red" x="1220" y="534">no victim</text>
+  <text class="secondary red" x="1205" y="1109">Still P ≥ 25%</text>
+  <path class="decision" d="M1130 1090L1290 1140L1130 1190L970 1140Z"/>
+  <text class="heading center" x="1130" y="1147">3 checks?</text>
+  <path class="flow red-flow" d="M970 1140H912" marker-end="url(#pressure-ladder-red-arrow)"/>
+  <text class="secondary red" x="929" y="1120">yes</text>
+  <rect class="yield" x="638" y="1098" width="274" height="84" rx="4"/>
+  <text class="heading red center" x="775" y="1133">YIELD grant</text>
+  <text class="secondary center" x="775" y="1164">Revoke capacity</text>
+  <path class="flow amber-flow" d="M1130 1190V1218H1220" marker-end="url(#pressure-ladder-amber-arrow)"/>
+  <text class="secondary amber" x="1148" y="1207">no</text>
+  <text class="secondary amber" x="1240" y="1224">Next tick</text>
+  <text class="secondary muted" x="48" y="1243">Failed reclaim also advances the three-check counter. Cleanup is best effort; this is not an OOM guarantee.</text>
 </svg>

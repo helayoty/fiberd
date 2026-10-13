@@ -26,7 +26,7 @@ env:
   # The input on a manual run, the pushed tag otherwise.
   TAG: ${{ inputs.tag || github.ref_name }}
   # The image's description, as docker/fiberd/Dockerfile labels it.
-  DESCRIPTION: The fiberd agent with criu and the zygote library
+  DESCRIPTION: fiberd with criu and the zygote library
 
 jobs:
   validate-tag:

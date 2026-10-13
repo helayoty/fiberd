@@ -3,7 +3,7 @@
 // supervisor, atelet, drives every worker Pod's herder over one gRPC
 // service: run an actor, checkpoint it to files, restore it from files,
 // terminate it, sample its usage. This herder answers those calls with
-// fiberd's four verbs on the agent running beside it in the same Pod:
+// fiberd's four verbs on fiberd running beside it in the same Pod:
 //
 //	RunWorkload         Clone(actor uid)               a fresh session, kind CREATE
 //	CheckpointWorkload  Park(sync) + host.ExportDelta   the session leaves as files
@@ -12,7 +12,7 @@
 //	stats               Watch                           W of the actor's grant
 //
 // An actor is a session named by its uid; an ActorTemplate is a fiberd
-// template (digest "<atespace>/<name>", resolved through the agent's
+// template (digest "<atespace>/<name>", resolved through fiberd's
 // -template map) under a grant this Pod mints for itself, sized by the
 // actor's memory limit. One actor per worker, as Substrate's Worker
 // record assumes today. The herder is a consumer: it holds grants and
@@ -44,7 +44,7 @@ import (
 )
 
 // Template names an ActorTemplate; its Digest is the fiberd template
-// digest the agent resolves.
+// digest fiberd resolves.
 type Template struct{ Atespace, Name string }
 
 func (t Template) Digest() string { return t.Atespace + "/" + t.Name }
@@ -65,7 +65,7 @@ type Router interface {
 type Config struct {
 	Client *consumer.Client
 	Grants Grants
-	// Host names the delta registry the agent publishes to; ExportDelta
+	// Host names the delta registry fiberd publishes to; ExportDelta
 	// and ImportDelta work there.
 	Host   host.Config
 	Paths  Paths
@@ -121,7 +121,7 @@ func New(cfg Config) *Service {
 	return &Service{cfg: cfg, stats: map[string]consumer.Status{}}
 }
 
-// Run keeps the stats current from the agent's Watch stream until ctx ends.
+// Run keeps the stats current from fiberd's Watch stream until ctx ends.
 func (s *Service) Run(ctx context.Context) {
 	for ctx.Err() == nil {
 		err := s.cfg.Client.Watch(ctx, func(st consumer.Status) {
@@ -381,7 +381,7 @@ func (s *Service) GetActiveWorkloadStats(context.Context, *ateompb.GetActiveWork
 	return &ateompb.GetActiveWorkloadStatsResponse{Result: &ateompb.GetActiveWorkloadStatsResponse_Sample{Sample: sample}}, nil
 }
 
-// sampleLocked: the actor's W as the agent last reported it for its
+// sampleLocked: the actor's W as fiberd last reported it for its
 // grant (one actor per grant here, so the grant's W is the actor's).
 func (s *Service) sampleLocked(a *actor) (*ateompb.WorkloadStatsSample, bool) {
 	st, ok := s.stats[a.grant.UID]

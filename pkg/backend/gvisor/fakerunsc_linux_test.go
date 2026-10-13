@@ -13,7 +13,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -32,15 +31,19 @@ func TestMain(m *testing.M) {
 // fakeRunsc is runsc and its sandboxes inside the test process, wired
 // into a Backend through the run seam. A sandbox behaves as the reference
 // zygote does under --gvisor: a template drops the ready marker on /host,
-// a fiber serves its endpoint there and closes it on USR1. Each has a
-// process of its own (a shell waiting on its stdin), so its pid is one
-// the backend can hold a pidfd on and the reaper takes the path it
-// takes with real runsc. The process ends as the ExitStatus knob says.
+// a restored sandbox dials the pool socket with the token its spec
+// carries and serves the endpoint the identity record names (or, under
+// NoToken, the endpoint its spec names, the old way), and closes it on
+// USR1. Each has a process of its own (a shell waiting on its stdin), so
+// its pid is one the backend can hold a pidfd on and the reaper takes the
+// path it takes with real runsc. The process ends as the ExitStatus knob
+// says, or with 122 when its channel closes before the record.
 type fakeRunsc struct {
 	mu       sync.Mutex
 	knobs    knobs
 	recorded []fakeCall
 	boxes    map[string]*fakeSandbox // running, by cid
+	ended    map[string]*fakeSandbox // ended, by cid, for what they saw
 	gate     *deleteGate             // the next delete is held here, when set
 	// restoring counts the restores in flight, and peak the most there
 	// have been at once.
@@ -67,6 +70,17 @@ type knobs struct {
 	NoMarker   bool            // the template sandbox never drops its ready marker
 	NoServe    bool            // a fiber sandbox never serves its endpoint
 	IgnoreUSR1 bool            // a sandbox keeps its endpoint through a park request
+	// How a restored sandbox takes its identity. NoToken is a template
+	// that polls the spec environment and never dials. The others dial
+	// and misbehave on the channel.
+	NoToken    bool
+	WrongToken bool   // sends a token nobody minted
+	NoAck      bool   // binds the endpoint and never acks
+	BadAck     bool   // acks with another fence
+	PoolSocket string // dials this socket instead of its own channel mount's
+	// NoPidFile makes a run or restore ignore --pid-file, as an older
+	// runsc might.
+	NoPidFile bool
 	// SlowRestore is how long a restore takes before the sandbox is up.
 	// The context ending cuts it short, as it kills a real runsc.
 	SlowRestore time.Duration
@@ -95,6 +109,10 @@ type fakeSandbox struct {
 	endpoint string         // the host path it serves, "" for none
 	ln       net.Listener
 	done     chan struct{} // closed when the sandbox has ended
+	// What the sandbox saw on the channel: the token its spec carried
+	// and the fields of each identity record.
+	token   string
+	records [][]string
 }
 
 // deleteGate holds one `delete`: claimed closes when it is waiting, open
@@ -106,7 +124,7 @@ type deleteGate struct {
 }
 
 func newFakeRunsc(k knobs) *fakeRunsc {
-	return &fakeRunsc{knobs: k, boxes: map[string]*fakeSandbox{}}
+	return &fakeRunsc{knobs: k, boxes: map[string]*fakeSandbox{}, ended: map[string]*fakeSandbox{}}
 }
 
 func (f *fakeRunsc) setKnobs(k knobs) {
@@ -173,6 +191,21 @@ func (f *fakeRunsc) pidOf(cid string) int {
 		return x.pid
 	}
 	return 0
+}
+
+// channelOf is what the sandbox for cid saw on the channel, kept after
+// it ended.
+func (f *fakeRunsc) channelOf(cid string) (token string, records [][]string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	x := f.boxes[cid]
+	if x == nil {
+		x = f.ended[cid]
+	}
+	if x != nil {
+		return x.token, x.records
+	}
+	return "", nil
 }
 
 // endAll ends every sandbox still running, whatever the knobs said.
@@ -306,7 +339,15 @@ func (f *fakeRunsc) run(ctx context.Context, cgroupFD int, args []string, out io
 				}
 			}
 		}
-		return f.startSandbox(cid, flag("--bundle"), k, out)
+		if err := f.startSandbox(cid, flag("--bundle"), k, out); err != nil {
+			return err
+		}
+		if pf := flag("--pid-file"); pf != "" && !k.NoPidFile {
+			if err := os.WriteFile(pf, []byte(fmt.Sprintf("%d\n", f.pidOf(cid))), 0o644); err != nil {
+				return fail("pid file")
+			}
+		}
+		return nil
 	case "checkpoint":
 		img := flag("--image-path")
 		if err := os.MkdirAll(img, 0o755); err != nil {
@@ -362,7 +403,7 @@ func (f *fakeRunsc) run(ctx context.Context, cgroupFD int, args []string, out io
 		}
 		if rest[len(rest)-1] == "USR1" {
 			if !k.IgnoreUSR1 {
-				x.closeEndpoint()
+				f.closeEndpoint(x)
 			}
 			return nil
 		}
@@ -386,10 +427,13 @@ func (f *fakeRunsc) startSandbox(cid, bundle string, k knobs, out io.Writer) err
 		_, _ = fmt.Fprintf(out, "fake runsc: bundle: %v\n", err)
 		return errExit
 	}
-	host := ""
+	host, channel := "", ""
 	for _, m := range s.Mounts {
-		if m.Destination == "/host" {
+		switch m.Destination {
+		case "/host":
 			host = m.Source
+		case channelMount:
+			channel = m.Source
 		}
 	}
 	env := map[string]string{}
@@ -398,31 +442,24 @@ func (f *fakeRunsc) startSandbox(cid, bundle string, k knobs, out io.Writer) err
 			env[key] = val
 		}
 	}
-	x := &fakeSandbox{cid: cid, done: make(chan struct{})}
-	if env["FIBERD_FENCE"] == "none" {
+	x := &fakeSandbox{cid: cid, done: make(chan struct{}), token: env["FIBERD_TOKEN"]}
+	dial := false
+	switch {
+	case env["FIBERD_FENCE"] == "none":
 		if !k.NoMarker {
 			if err := os.WriteFile(filepath.Join(host, readyMarker), nil, 0o644); err != nil {
 				_, _ = fmt.Fprintf(out, "fake runsc: marker: %v\n", err)
 				return errExit
 			}
 		}
-	} else if ep := env["FIBERD_ENDPOINT"]; ep != "" && !k.NoServe {
-		x.endpoint = filepath.Join(host, strings.TrimPrefix(ep, "/host/"))
-		ln, err := net.Listen("unix", x.endpoint)
-		if err != nil {
+	case x.token != "" && !k.NoToken:
+		// Late binding: the endpoint comes with the identity record.
+		dial = true
+	case env["FIBERD_ENDPOINT"] != "" && !k.NoServe:
+		if err := f.serve(x, host, env["FIBERD_ENDPOINT"]); err != nil {
 			_, _ = fmt.Fprintf(out, "fake runsc: listen: %v\n", err)
 			return errExit
 		}
-		x.ln = ln
-		go func() {
-			for {
-				c, err := ln.Accept()
-				if err != nil {
-					return
-				}
-				_ = c.Close()
-			}
-		}()
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -434,10 +471,9 @@ func (f *fakeRunsc) startSandbox(cid, bundle string, k knobs, out io.Writer) err
 		return errExit
 	}
 	// The sandbox process is a shell that exits with the status it is
-	// handed once a line arrives on its stdin. The backend reaps it, or
-	// nobody does when the reaper took the `runsc wait` path, so it is
-	// never waited for here.
-	cmd := exec.Command("sh", "-c", "read line; exit $0", strconv.Itoa(k.ExitStatus))
+	// handed on its stdin. The backend reaps it, or nobody does when the
+	// reaper took the `runsc wait` path, so it is never waited for here.
+	cmd := exec.Command("sh", "-c", "read line; exit $line")
 	stdin, err := cmd.StdinPipe()
 	if err == nil {
 		err = cmd.Start()
@@ -451,27 +487,120 @@ func (f *fakeRunsc) startSandbox(cid, bundle string, k knobs, out io.Writer) err
 	}
 	x.proc, x.stdin, x.pid = cmd.Process, stdin, cmd.Process.Pid
 	f.boxes[cid] = x
+	if dial {
+		sock := filepath.Join(channel, poolSocket)
+		if k.PoolSocket != "" {
+			sock = k.PoolSocket
+		}
+		go f.dialPool(x, host, sock, k)
+	}
 	return nil
+}
+
+// serve binds the sandbox's endpoint, ep as the sandbox names it under
+// /host, and accepts on it until it is closed.
+func (f *fakeRunsc) serve(x *fakeSandbox, host, ep string) error {
+	endpoint := filepath.Join(host, strings.TrimPrefix(ep, "/host/"))
+	ln, err := net.Listen("unix", endpoint)
+	if err != nil {
+		return err
+	}
+	f.mu.Lock()
+	x.endpoint, x.ln = endpoint, ln
+	f.mu.Unlock()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			_ = c.Close()
+		}
+	}()
+	return nil
+}
+
+// dialPool is what a late-binding workload does once restored: dial the
+// pool socket, hand over its token and block until the identity record
+// arrives, then bind the endpoint it names and ack with its fence. A
+// channel closed before the record ends the sandbox with 122, before it
+// serves anything, as the reference workload does.
+func (f *fakeRunsc) dialPool(x *fakeSandbox, host, sock string, k knobs) {
+	token := x.token
+	if k.WrongToken {
+		token = strings.Repeat("0", 2*tokenBytes)
+	}
+	conn, err := net.Dial("unixpacket", sock)
+	if err == nil {
+		_, err = conn.Write(record(recClaim, token))
+	}
+	if err != nil {
+		f.endWith(x.cid, 122)
+		return
+	}
+	defer func() { _ = conn.Close() }()
+	buf := make([]byte, recordMax)
+	n, err := conn.Read(buf)
+	if err != nil {
+		f.endWith(x.cid, 122)
+		return
+	}
+	kind, fields, ok := parseRecord(buf[:n])
+	f.mu.Lock()
+	x.records = append(x.records, fields)
+	f.mu.Unlock()
+	if !ok || kind != recIdentity || len(fields) != identityFields {
+		f.endWith(x.cid, 122)
+		return
+	}
+	fence, ep := fields[2], fields[3]
+	if !k.NoServe {
+		if err := f.serve(x, host, ep); err != nil {
+			f.endWith(x.cid, 4)
+			return
+		}
+	}
+	if k.NoAck {
+		<-x.done
+		return
+	}
+	if k.BadAck {
+		fence += "-other"
+	}
+	_, _ = conn.Write(record(recAck, fence))
 }
 
 // endSandbox ends the sandbox for cid, if it runs. Its process dies by
 // the signal ExitStatus names above 128, or exits with ExitStatus.
 func (f *fakeRunsc) endSandbox(cid string) {
 	f.mu.Lock()
+	status := f.knobs.ExitStatus
+	f.mu.Unlock()
+	f.endWith(cid, status)
+}
+
+// endWith ends the sandbox for cid with the given status, if it runs.
+func (f *fakeRunsc) endWith(cid string, status int) {
+	f.mu.Lock()
 	x := f.boxes[cid]
 	delete(f.boxes, cid)
-	k := f.knobs
+	if x != nil {
+		f.ended[cid] = x
+	}
 	f.mu.Unlock()
 	if x == nil {
 		return
 	}
-	if x.ln != nil {
-		_ = x.ln.Close()
+	f.mu.Lock()
+	ln := x.ln
+	f.mu.Unlock()
+	if ln != nil {
+		_ = ln.Close()
 	}
-	if k.ExitStatus > 128 {
-		_ = x.proc.Signal(syscall.Signal(k.ExitStatus - 128))
+	if status > 128 {
+		_ = x.proc.Signal(syscall.Signal(status - 128))
 	} else {
-		_, _ = io.WriteString(x.stdin, "\n")
+		_, _ = fmt.Fprintf(x.stdin, "%d\n", status)
 	}
 	_ = x.stdin.Close()
 	close(x.done)
@@ -479,9 +608,12 @@ func (f *fakeRunsc) endSandbox(cid string) {
 
 // closeEndpoint is what the workload does on USR1: it stops serving and
 // removes its socket, so the host sees the endpoint gone.
-func (x *fakeSandbox) closeEndpoint() {
-	if x.ln != nil {
-		_ = x.ln.Close()
-		_ = os.Remove(x.endpoint)
+func (f *fakeRunsc) closeEndpoint(x *fakeSandbox) {
+	f.mu.Lock()
+	ln, endpoint := x.ln, x.endpoint
+	f.mu.Unlock()
+	if ln != nil {
+		_ = ln.Close()
+		_ = os.Remove(endpoint)
 	}
 }

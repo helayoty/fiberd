@@ -58,7 +58,7 @@ func (g *Gateway) Handler() http.Handler {
 	})
 	mux.HandleFunc("GET /v1/status", func(w http.ResponseWriter, r *http.Request) {
 		out := make([]json.RawMessage, 0)
-		for _, st := range g.Server.visible(r.Context(), g.Server.Agent.Ledger.Statuses()) {
+		for _, st := range g.Server.visible(r.Context(), g.Server.Core.Ledger.Statuses()) {
 			b, _ := protojson.Marshal(StatusToProto(st))
 			out = append(out, b)
 		}
@@ -133,8 +133,8 @@ func httpCode(c codes.Code) int {
 }
 
 // HealthFunc builds the standard /healthz body. It holds the epoch, the
-// advertised tier, grant-lane liveness and the audit spool's state. An
-// idle lane is not down. Only a stale one is. audit is "ok" or
+// advertised tier, whether the issuer is reachable and the audit spool's state. An
+// idle issuer is not down, only a stale one is. audit is "ok" or
 // "poisoned". The fsync error is logged when it happens and never put in
 // the body, which the gateway serves without authentication, since it
 // names the spool's path. A nil health or audit omits its key.
@@ -142,7 +142,7 @@ func HealthFunc(epoch func() uint64, health *core.SourceHealth, tier core.Tier, 
 	return func() map[string]any {
 		m := map[string]any{"epoch": epoch(), "tier": tier.String()}
 		if health != nil {
-			m["grantLaneHealthy"] = health.Healthy(time.Now())
+			m["issuerReachable"] = health.Healthy(time.Now())
 		}
 		if audit != nil {
 			m["audit"] = "ok"
@@ -155,9 +155,9 @@ func HealthFunc(epoch func() uint64, health *core.SourceHealth, tier core.Tier, 
 }
 
 // WriteHealth writes a /healthz body. The status is 503 when the audit
-// spool is poisoned, because every Sync operation fails until the agent
-// restarts. A probe that sees it restarts the home or drains it. A stale
-// grant lane stays 200, since the agent fences it and recovers on its own.
+// spool is poisoned, because every Sync operation fails until fiberd
+// restarts. A probe that sees it restarts the home or drains it. An unreachable
+// issuer stays 200, since fiberd fences it and recovers on its own.
 func WriteHealth(w http.ResponseWriter, body map[string]any) {
 	w.Header().Set("Content-Type", "application/json")
 	if a, ok := body["audit"]; ok && a != "ok" {

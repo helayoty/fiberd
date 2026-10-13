@@ -97,7 +97,7 @@ func (l *launcher) fsLock(spec backend.WarmSpec) *sync.Mutex {
 // usable id space or that overlaps a range the host has handed out in
 // /etc/subuid or /etc/subgid.
 //
-// No previous agent holds a range when the backend opens. The agent kills
+// No previous fiberd holds a range when the backend opens. fiberd kills
 // every fiber of a prior epoch at reconcile, and a stale container is
 // ended here and again when its grant is warmed. So the claims start
 // empty, and every root filesystem copy and bundle under the state
@@ -244,7 +244,7 @@ func (l *launcher) sysDir() string { return filepath.Join(l.opt.StateDir, "sys")
 // alone, so no cgroup or other mount under the host's /sys comes with
 // it, and a restore needs it for the same reason: a bind of the host's
 // /sys from inside the restored tree's namespace trips over the same
-// locks. It lives in the wrapper's namespace alone, so the agent's own
+// locks. It lives in the wrapper's namespace alone, so fiberd's own
 // mounts, which a proc fiber's namespace copies, stay as they were. The
 // container's copy of the bind carries the flags locked, so the mapped
 // root cannot lift them.
@@ -536,7 +536,7 @@ func (l *launcher) Command(spec backend.WarmSpec, argv []string, ctl, logf *os.F
 // and group write, so the zygote can bind in it but cannot change the
 // directory's mode or owner (it does not own it, and its DAC_OVERRIDE
 // does not reach an inode owned by an id outside its namespace). The
-// agent connects to the sockets the mapped root creates through its own
+// fiberd connects to the sockets the mapped root creates through its own
 // DAC_OVERRIDE.
 func prepareWorkDir(dir string, rng IDRange) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -742,10 +742,10 @@ func copyFile(src, dst string, perm fs.FileMode) error {
 
 // Channel moves the control conversation onto a pair made in the
 // container's network namespace. The bootstrap pair was made in the
-// agent's, and criu, when it checkpoints the zygote, only finds the
+// fiberd's, and criu, when it checkpoints the zygote, only finds the
 // sockets of the namespaces it dumps. The zygote's end goes to it over
 // the bootstrap socket as a REBIND message, which libfiberzygote reads
-// before READY (FIBERD_CTL_REBIND), and the agent's end is returned.
+// before READY (FIBERD_CTL_REBIND), and fiberd's end is returned.
 func (l *launcher) Channel(ctx context.Context, spec backend.WarmSpec, cmd *exec.Cmd, boot *net.UnixConn) (*net.UnixConn, error) {
 	pid, err := l.waitPID(ctx, spec, cmd)
 	if err != nil {

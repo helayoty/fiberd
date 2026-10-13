@@ -42,6 +42,9 @@ type Driver struct {
 	NodeID string
 	// Template is the template digest to put in minted grants.
 	Template string
+	// FiberWarm goes into every minted grant. Above zero, the Pool case
+	// also proves a clone is served from the home's pool.
+	FiberWarm int
 	// Isolation goes into every minted grant. A target whose runtime shares
 	// the host kernel (proc, runc) refuses the default untrusted grant, so
 	// it needs Trusted.
@@ -52,7 +55,7 @@ type Driver struct {
 	// Restart restarts the target in place (same address, same state
 	// directory) and returns when it is serving again. Nil skips C3.
 	Restart func(ctx context.Context) error
-	// SetCPHealth makes the target's grant lane healthy or stale. Nil
+	// SetCPHealth makes the target's issuer reachable or unreachable. Nil
 	// skips C4.
 	SetCPHealth func(ctx context.Context, healthy bool) error
 	// AuditHas reports whether the target's audit spool holds a record for
@@ -62,7 +65,7 @@ type Driver struct {
 	// way a crash would. Nil skips C9.
 	EngineKill func(ctx context.Context, grantUID string) error
 	// ScopeLost tells the home the scope everything was minted under is
-	// gone while it keeps running (a namespace, a fabric claim): the home
+	// gone while it keeps running (a namespace, a DRA claim): the home
 	// must turn that into fence revocation. Nil skips C10.
 	ScopeLost func(ctx context.Context) error
 	// Timeout bounds each case (default 15s); Restart gets twice that.
@@ -96,6 +99,9 @@ func Run(t *testing.T, d Driver) {
 	t.Run("C8_DeviceBudget", func(t *testing.T) { c.c8(t) })
 	t.Run("C9_EngineLoss", func(t *testing.T) { c.c9(t) })
 	t.Run("C10_ScopeRevocation", func(t *testing.T) { c.c10(t) })
+	if d.FiberWarm > 0 {
+		t.Run("Pool", func(t *testing.T) { c.pool(t) })
+	}
 }
 
 type client struct {
@@ -139,6 +145,7 @@ func (c *client) grant(t *testing.T, prefix string, mut func(g *core.Grant)) (co
 		TemplateDigest: c.d.Template,
 		Tenant:         "conform",
 		FiberMax:       2,
+		FiberWarm:      c.d.FiberWarm,
 		MinTier:        core.TierBasic,
 		LeaseExpiry:    time.Now().Add(10 * time.Minute),
 		Policy:         core.Policy{Isolation: c.d.Isolation},
@@ -613,7 +620,7 @@ func (c *client) c10(t *testing.T) {
 func (c *client) c7(t *testing.T) {
 	ctx, cancel := c.ctx(t, 1)
 	defer cancel()
-	if c.d.TargetTier >= core.TierFabric {
+	if c.d.TargetTier >= core.TierSnapshot {
 		t.Skip("target advertises the top tier; nothing is above it")
 	}
 	_, tok := c.grant(t, "c7", func(g *core.Grant) { g.MinTier = c.d.TargetTier + 1 })
@@ -632,6 +639,29 @@ func (c *client) c7(t *testing.T) {
 	r, err = c.clone(ctx, tok, "", nil)
 	if err != nil {
 		t.Fatalf("grant with min_tier == target tier refused: %v", err)
+	}
+	c.release(ctx, r.GetFiberId())
+}
+
+// Pool: once Watch reports a pooled sandbox, the next clone is served
+// from it, which the home audits as a create with the detail "pooled".
+func (c *client) pool(t *testing.T) {
+	ctx, cancel := c.ctx(t, 2)
+	defer cancel()
+	g, tok := c.grant(t, "pool", nil)
+	r, err := c.clone(ctx, tok, "", nil)
+	if err != nil {
+		t.Fatalf("admitting clone: %v", err)
+	}
+	c.release(ctx, r.GetFiberId())
+	st, err := c.waitStatus(ctx, g.UID, func(st *grantv1.Status) bool { return st.GetPooled() > 0 })
+	if err != nil {
+		t.Fatalf("fibers.warm=%d, but Watch never reported a pooled sandbox: %v", g.FiberWarm, err)
+	}
+	t.Logf("Watch: grant %s pooled=%d", g.UID, st.GetPooled())
+	r, err = c.clone(ctx, tok, "", nil)
+	if err != nil {
+		t.Fatalf("clone with a full pool: %v", err)
 	}
 	c.release(ctx, r.GetFiberId())
 }

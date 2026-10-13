@@ -38,7 +38,7 @@ func TestRemoveDenialLapse(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			a := newAgent(t, "up", core.TierCheckpoint)
+			a := newCore(t, "up", core.TierCheckpoint)
 			a.Ledger.Now = func() time.Time { return now }
 			dir := filepath.Join(t.TempDir(), "state")
 			if err := os.Mkdir(dir, 0o700); err != nil {

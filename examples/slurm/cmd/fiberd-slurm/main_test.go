@@ -28,15 +28,15 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	grantv1 "github.com/helayoty/fiberd/api/grant/v1"
-	"github.com/helayoty/fiberd/pkg/agent"
 	"github.com/helayoty/fiberd/pkg/core"
+	"github.com/helayoty/fiberd/pkg/fiberd"
 	"github.com/helayoty/fiberd/pkg/grant"
 )
 
-// config is the agent's config as main builds it, from args.
-func config(t *testing.T, args ...string) *agent.Config {
+// config is fiberd's config as main builds it, from args.
+func config(t *testing.T, args ...string) *fiberd.Config {
 	t.Helper()
-	var c agent.Config
+	var c fiberd.Config
 	fs := flag.NewFlagSet("fiberd-slurm", flag.ContinueOnError)
 	c.Bind(fs)
 	if err := fs.Parse(args); err != nil {
@@ -62,7 +62,7 @@ func fakeCgroup(t *testing.T) string {
 	return cg
 }
 
-// shortDir is a temporary directory with a short path. The agent's admin
+// shortDir is a temporary directory with a short path. fiberd's admin
 // socket lives under it, and unix socket paths are limited to about 100
 // bytes, more than the test temp dir leaves on macOS.
 func shortDir(t *testing.T) string {
@@ -96,7 +96,7 @@ func mint(t *testing.T, iss *grant.Issuer, audience string, lease time.Duration)
 }
 
 // TestStage checks that a grant is verified before it is staged, and
-// staged where the home's lane reads it.
+// staged where the home's grant directory reads it.
 func TestStage(t *testing.T) {
 	iss := issuer(t)
 	valid := mint(t, iss, "node-a", time.Hour)
@@ -207,7 +207,7 @@ func TestProbeCommand(t *testing.T) {
 	}
 }
 
-// TestRunRefuses checks what stops the agent before it serves.
+// TestRunRefuses checks what stops fiberd before it serves.
 func TestRunRefuses(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -217,16 +217,16 @@ func TestRunRefuses(t *testing.T) {
 		mount func(t *testing.T) string // nil is a fake cgroup mount
 		err   string
 		is    error
-		check func(t *testing.T, c *agent.Config)
+		check func(t *testing.T, c *fiberd.Config)
 	}{
 		{name: "outside an allocation", env: map[string]string{"SLURM_JOB_ID": ""}, err: "SLURM_JOB_ID",
-			check: func(t *testing.T, c *agent.Config) {
+			check: func(t *testing.T, c *fiberd.Config) {
 				if c.GrantsDir != "" {
 					t.Fatalf("grants dir = %q, want it left alone", c.GrantsDir)
 				}
 			}},
-		{name: "the grants dir defaults to the job's, then the agent needs a verifier", err: "-verifier is required",
-			check: func(t *testing.T, c *agent.Config) {
+		{name: "the grants dir defaults to the job's, then fiberd needs a verifier", err: "-verifier is required",
+			check: func(t *testing.T, c *fiberd.Config) {
 				if c.GrantsDir != "/run/fiberd/job-4242/grants" {
 					t.Fatalf("grants dir = %q, want the job's", c.GrantsDir)
 				}
@@ -283,14 +283,14 @@ func (l *logTail) find(re *regexp.Regexp) []string {
 	return re.FindStringSubmatch(l.buf.String())
 }
 
-// TestRunLeavesWithTheJob runs the agent in an allocation until the job
-// ends. The agent stages its grant, serves, and on the job's end bumps
+// TestRunLeavesWithTheJob runs fiberd in an allocation until the job
+// ends. fiberd stages its grant, serves, and on the job's end bumps
 // its epoch and stops on its own, without an error.
 func TestRunLeavesWithTheJob(t *testing.T) {
 	cases := []struct {
 		name  string
 		state string // the job's terminal state
-		epoch string // the epoch on disk once the agent left
+		epoch string // the epoch on disk once fiberd left
 	}{
 		{"COMPLETED", "COMPLETED", "2"},
 		{"CANCELLED", "CANCELLED", "2"},
@@ -330,7 +330,7 @@ func TestRunLeavesWithTheJob(t *testing.T) {
 				default:
 				}
 				if time.Now().After(deadline) {
-					t.Fatal("the agent never served")
+					t.Fatal("fiberd never served")
 				}
 			}
 			conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -341,14 +341,14 @@ func TestRunLeavesWithTheJob(t *testing.T) {
 			client := grantv1.NewFibersClient(conn)
 			for deadline := time.Now().Add(20 * time.Second); ; time.Sleep(10 * time.Millisecond) {
 				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-				// A deadline already past is refused by the serving agent.
+				// A deadline already past is refused by the serving fiberd.
 				_, err := client.Clone(ctx, &grantv1.CloneRequest{Deadline: timestamppb.New(time.Unix(1, 0))})
 				cancel()
 				if status.Code(err) == codes.InvalidArgument {
 					break
 				}
 				if time.Now().After(deadline) {
-					t.Fatalf("the agent does not answer: %v", err)
+					t.Fatalf("fiberd does not answer: %v", err)
 				}
 			}
 			if got, err := os.ReadFile(filepath.Join(grants, "job.jwt")); err != nil || string(got) != "staged-token\n" {
@@ -364,7 +364,7 @@ func TestRunLeavesWithTheJob(t *testing.T) {
 					t.Fatalf("run = %v, want a clean stop when the job ends", err)
 				}
 			case <-time.After(20 * time.Second):
-				t.Fatal("the job ended but the agent kept running")
+				t.Fatal("the job ended but fiberd kept running")
 			}
 			got, err := os.ReadFile(filepath.Join(state, "private", "epoch"))
 			if err != nil || strings.TrimSpace(string(got)) != tc.epoch {

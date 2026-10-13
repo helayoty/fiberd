@@ -8,6 +8,10 @@
 // Hyperlight fibers speak the line protocol only, so Framing picks what
 // the probe sends. Proc is run under both framings in one run, so the
 // framing gap is a measured delta and not an assumption.
+//
+// FiberWarm asks the home to keep that many restored sandboxes pooled
+// for the grant. The adapter then refills untimed before every step and
+// charges the idle pool to density's standing cost.
 package fiberd
 
 import (
@@ -17,6 +21,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -48,9 +53,13 @@ type Options struct {
 	// per-instance memory limit of the fairness rule.
 	WBudget  uint64
 	FiberMax int
-	Framing  compare.Framing
+	// FiberWarm is the grant's fibers.warm, the sandboxes the home pools.
+	FiberWarm int
+	// RefillWait bounds one Refill. Default 2 minutes.
+	RefillWait time.Duration
+	Framing    compare.Framing
 	// WantScheme refuses an endpoint of another scheme. "tcp" gates the
-	// gVisor row on kind on the agent's relay.
+	// gVisor row on kind on fiberd's relay.
 	WantScheme string
 	// CgroupRoot is the home's cgroup root for density. Empty disables it.
 	CgroupRoot string
@@ -81,6 +90,9 @@ func New(ctx context.Context, o Options) (*Adapter, error) {
 	}
 	if o.Framing == "" {
 		o.Framing = compare.HTTP
+	}
+	if o.RefillWait <= 0 {
+		o.RefillWait = 2 * time.Minute
 	}
 	a := &Adapter{o: o, client: o.Client}
 	a.uid = fmt.Sprintf("compare-%d", time.Now().UnixNano())
@@ -118,7 +130,7 @@ func (a *Adapter) Grant() (core.Grant, error) {
 	}
 	return core.Grant{
 		UID: a.uid, Audience: a.o.NodeID, TemplateDigest: digest, Tenant: tenant,
-		FiberMax: a.o.FiberMax, WBudgetBytes: a.o.WBudget,
+		FiberMax: a.o.FiberMax, FiberWarm: a.o.FiberWarm, WBudgetBytes: a.o.WBudget,
 		LeaseExpiry: time.Now().Add(time.Hour).Truncate(time.Second),
 		Policy:      core.Policy{Isolation: iso},
 	}, nil
@@ -155,6 +167,35 @@ func (a *Adapter) Setup(ctx context.Context) error {
 		return err
 	}
 	return a.Release(ctx, h)
+}
+
+// Refill waits until Watch reports the grant's pool full, so every step
+// starts from one. Without fibers.warm there is nothing to wait for.
+func (a *Adapter) Refill(ctx context.Context) error {
+	if a.o.FiberWarm <= 0 {
+		return nil
+	}
+	wctx, cancel := context.WithTimeout(ctx, a.o.RefillWait)
+	defer cancel()
+	var pooled uint32
+	full := false
+	err := a.client.Watch(wctx, func(s consumer.Status) {
+		if s.GrantUID != a.uid {
+			return
+		}
+		pooled = s.Pooled
+		if int(pooled) >= a.o.FiberWarm {
+			full = true
+			cancel()
+		}
+	})
+	if full {
+		return nil
+	}
+	if err == nil {
+		err = wctx.Err()
+	}
+	return fmt.Errorf("fiberd: grant %s has %d of %d pooled: %w", a.uid, pooled, a.o.FiberWarm, err)
 }
 
 // Activate is Clone. The session is named after id so Park and a later
@@ -222,11 +263,12 @@ func (a *Adapter) Resume(ctx context.Context, h compare.Handle) (compare.Handle,
 }
 
 // Density reads the grant's cgroup subtree. The fibers' leaves are
-// f-<epoch>-<seq>, the template's is zygote. With no handles it is the
-// zygote's charge, what stands between activations. A backend with no
-// per-fiber leaf (Hyperlight's helper holds every sandbox) is charged
-// as the subtree beyond the zygote.
-func (a *Adapter) Density(_ context.Context, hs []compare.Handle) (int64, error) {
+// f-<epoch>-<seq>, the template's is zygote, and pooled sandboxes are
+// pool/p-<n>, which a fiber handed one keeps. With no handles it is
+// what stands between activations, the zygote and a full pool. A
+// backend with no per-fiber leaf (Hyperlight's helper holds every
+// sandbox) is charged as the subtree beyond the zygote.
+func (a *Adapter) Density(ctx context.Context, hs []compare.Handle) (int64, error) {
 	if a.o.CgroupRoot == "" {
 		return 0, compare.ErrUnsupported
 	}
@@ -235,21 +277,74 @@ func (a *Adapter) Density(_ context.Context, hs []compare.Handle) (int64, error)
 	if err != nil {
 		return 0, err
 	}
-	if len(hs) == 0 {
+	if len(hs) == 0 && a.o.FiberWarm <= 0 {
 		return zygote, nil
 	}
-	var dirs []string
-	for _, h := range hs {
-		dirs = append(dirs, filepath.Join(grantDir, LeafName(h.Meta["fence"])))
+	if len(hs) == 0 {
+		if err := a.Refill(ctx); err != nil {
+			return 0, err
+		}
 	}
-	if sum, err := compare.SumCgroups(dirs); err == nil {
-		return sum, nil
+	pool, err := PoolLeaves(grantDir)
+	if err != nil {
+		return 0, err
+	}
+	if len(hs) == 0 {
+		// The home hands out its oldest pooled sandbox and fills one at a
+		// time, so the newest leaves are the idle ones.
+		idle, err := compare.SumCgroups(pool[max(len(pool)-a.o.FiberWarm, 0):])
+		return zygote + idle, err
+	}
+	var dirs []string
+	handed := 0
+	for _, h := range hs {
+		d := filepath.Join(grantDir, LeafName(h.Meta["fence"]))
+		if _, err := os.Stat(d); err != nil {
+			handed++
+			continue
+		}
+		dirs = append(dirs, d)
+	}
+	if handed <= len(pool) {
+		if sum, err := compare.SumCgroups(append(dirs, pool[:handed]...)); err == nil {
+			return sum, nil
+		}
 	}
 	total, err := compare.CgroupMemory(grantDir)
 	if err != nil {
 		return 0, err
 	}
 	return total - zygote, nil
+}
+
+// PoolLeaves lists the grant's pool leaves oldest first, none when it
+// has no pool.
+func PoolLeaves(grantDir string) ([]string, error) {
+	es, err := os.ReadDir(filepath.Join(grantDir, "pool"))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	type leaf struct {
+		n   int
+		dir string
+	}
+	var ls []leaf
+	for _, e := range es {
+		n, err := strconv.Atoi(strings.TrimPrefix(e.Name(), "p-"))
+		if !e.IsDir() || !strings.HasPrefix(e.Name(), "p-") || err != nil {
+			continue
+		}
+		ls = append(ls, leaf{n, filepath.Join(grantDir, "pool", e.Name())})
+	}
+	slices.SortFunc(ls, func(x, y leaf) int { return x.n - y.n })
+	out := make([]string, len(ls))
+	for i, l := range ls {
+		out[i] = l.dir
+	}
+	return out, nil
 }
 
 // LeafName is the fiber leaf for a fence "grant/epoch/seq", as

@@ -14,11 +14,11 @@ import (
 // controller sets; typed so tests can read them back.
 
 const (
-	// GrantsMount is where the projected grant lands in the agent.
+	// GrantsMount is where the projected grant lands in fiberd.
 	GrantsMount = "/var/run/fiberd/grants"
 	// GrantsFile is the key in the grant Secret and the file's name.
 	GrantsFile = "grant.jwt"
-	agentPort  = 8484
+	fiberdPort = 8484
 )
 
 type Pod struct {
@@ -133,9 +133,9 @@ type TCPSocketAction struct {
 	Port int `json:"port"`
 }
 
-// healthz is the exec probe of the agent's /healthz on its admin socket.
+// healthz is the exec probe of fiberd's /healthz on its admin socket.
 // It fails on the 503 a poisoned audit spool answers, and on a socket
-// that is not up yet. -state matches the agent's.
+// that is not up yet. -state matches fiberd's.
 var healthz = []string{"fiberd-k8s", "-state", "/var/lib/fiberd", "-healthz"}
 
 // PodName is the grant Pod's name for a CapacityGrant.
@@ -157,7 +157,7 @@ func ownerOf(cg *CapacityGrant) []kube.OwnerReference {
 		Controller: true, BlockOwnerDeletion: true}}
 }
 
-// securityContext is the agent container's security context. It is
+// securityContext is fiberd container's security context. It is
 // privileged when asked, and for every runtime but proc. That is a known
 // gap. caps.Runc measures what runc needs but is not applied here, and
 // gVisor's and Hyperlight's needs are not measured. A proc Pod gets only
@@ -174,7 +174,7 @@ func securityContext(runtime string, privileged *bool) *SecurityContext {
 		SeccompProfile: &SeccompProfile{Type: "Unconfined"}}
 }
 
-// runtimeOf is the agent's -runtime for ps. It defaults to proc.
+// runtimeOf is fiberd's -runtime for ps. It defaults to proc.
 func runtimeOf(ps PodSpec) string {
 	if ps.Runtime == "" {
 		return "proc"
@@ -199,7 +199,7 @@ func BuildPod(cg *CapacityGrant, issuerURL string, lease time.Duration) *Pod {
 	args := []string{
 		"-verifier", "jwks", "-issuer", issuerURL, "-jwks-max-stale", lease.String(),
 		"-insecure-plaintext",
-		"-listen", ":" + strconv.Itoa(agentPort),
+		"-listen", ":" + strconv.Itoa(fiberdPort),
 		"-runtime", runtime,
 		// The Pod's name, from FIBERD_NODE_ID below, which Kubernetes
 		// expands in args.
@@ -222,10 +222,10 @@ func BuildPod(cg *CapacityGrant, issuerURL string, lease time.Duration) *Pod {
 		labels[k] = v
 	}
 	labels[GrantLabel] = cg.Metadata.Name
-	// Readiness is the agent's port. Liveness is /healthz, so a poisoned
-	// audit spool restarts the agent, which is what clears it. The startup
-	// probe holds liveness off while the agent waits for its Pod IP.
-	ready := &Probe{TCPSocket: &TCPSocketAction{Port: agentPort}, PeriodSeconds: 2}
+	// Readiness is fiberd's port. Liveness is /healthz, so a poisoned
+	// audit spool restarts fiberd, which is what clears it. The startup
+	// probe holds liveness off while fiberd waits for its Pod IP.
+	ready := &Probe{TCPSocket: &TCPSocketAction{Port: fiberdPort}, PeriodSeconds: 2}
 	startup := &Probe{Exec: &ExecAction{Command: healthz}, PeriodSeconds: 2, TimeoutSeconds: 5, FailureThreshold: 60}
 	live := &Probe{Exec: &ExecAction{Command: healthz}, PeriodSeconds: 10, TimeoutSeconds: 5, FailureThreshold: 3}
 	return &Pod{
@@ -245,7 +245,7 @@ func BuildPod(cg *CapacityGrant, issuerURL string, lease time.Duration) *Pod {
 				{Name: "run", EmptyDir: &EmptyDirVolume{}},
 			},
 			Containers: []Container{{
-				Name:  "agent",
+				Name:  "fiberd",
 				Image: ps.Image,
 				// tini, as PID 1, reaps the orphans a sandbox leaves.
 				Command: []string{"tini", "--", "fiberd-k8s"},
@@ -253,7 +253,7 @@ func BuildPod(cg *CapacityGrant, issuerURL string, lease time.Duration) *Pod {
 				Env: []EnvVar{
 					{Name: "FIBERD_NODE_ID", ValueFrom: fieldRef("metadata.name")},
 				},
-				Ports:           []ContainerPort{{Name: "grpc", ContainerPort: agentPort}},
+				Ports:           []ContainerPort{{Name: "grpc", ContainerPort: fiberdPort}},
 				Resources:       ps.Resources,
 				SecurityContext: securityContext(runtime, ps.Privileged),
 				VolumeMounts: []VolumeMount{

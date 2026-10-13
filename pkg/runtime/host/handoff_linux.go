@@ -116,7 +116,7 @@ func identityMessage(id handoff.Identity, caller string) ([]byte, error) {
 // host's end of its channel before the fiber is born, so it is the first
 // thing fz_accept reads. A resumed fiber holds it in memory and gets none.
 // The key is never a file, because fibers of every grant run as the
-// agent's user and no file mode would keep grants apart.
+// fiberd's user and no file mode would keep grants apart.
 func (r *Runtime) sendIdentity(ch *os.File, grantUID string) error {
 	r.mu.Lock()
 	had, ok := r.identities[grantUID]

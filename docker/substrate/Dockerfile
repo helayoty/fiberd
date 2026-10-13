@@ -38,7 +38,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build --chmod=0755 /usr/local/bin/runsc /usr/local/bin/runsc
 COPY --from=build --chmod=0755 /out/ateom-fiberd /usr/local/bin/ateom-fiberd
-# The rootfs every sandbox runs in. The agent keeps its state (sandbox
+# The rootfs every sandbox runs in. fiberd keeps its state (sandbox
 # roots, template and park images) under /var/lib/fiberd.
 COPY --from=build /out/rootfs /var/lib/fiberd/gvisor-rootfs
 ENV ATEOM_FIBERD_RUNTIME=gvisor
@@ -55,7 +55,7 @@ ENV ATEOM_FIBERD_TEMPLATE="default=/bin/refzygote --heap-mb 16 --gvisor --http"
 # worker without them refuses to start.
 ENV ATEOM_FIBERD_DELTA_KEY=/etc/fiberd/delta-key.json
 ENV ATEOM_FIBERD_DELTA_SEAL_KEY=/etc/fiberd/delta-seal-key.json
-# No USER on purpose. The agent creates cgroups and runs runsc, which
+# No USER on purpose. fiberd creates cgroups and runs runsc, which
 # makes namespaces and mounts, for every actor. Substrate's worker spec
 # grants the capabilities its own gVisor class needs, and this worker
 # needs no more. There is no HEALTHCHECK because the WorkerPool probes

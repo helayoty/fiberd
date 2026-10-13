@@ -16,7 +16,7 @@ import (
 
 // TestHandoffKeyNeverOnDisk pins that a grant's TLS key reaches its fibers
 // over their handoff channel, never through a file. Every fiber runs as
-// the agent's user without capabilities, so any file under the run
+// fiberd's user without capabilities, so any file under the run
 // directory is readable by every grant's fibers, whatever its mode.
 func TestHandoffKeyNeverOnDisk(t *testing.T) {
 	rt := newRuntime(t)

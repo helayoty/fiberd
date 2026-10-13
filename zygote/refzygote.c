@@ -24,7 +24,7 @@
  *                                 shows whether the kernel's entropy is
  *                                 fresh in a copy, with no template
  *                                 state in between)
- *   fence           -> <fence>   (the current one: after a resume the agent
+ *   fence           -> <fence>   (the current one: after a resume fiberd
  *                                 publishes the new fence beside a unix
  *                                 endpoint, and that file wins over the
  *                                 birth fence in memory)
@@ -51,7 +51,7 @@
  *                      host controls sit under a read-only mount)
  *
  * A handoff fiber (FIBERD_HANDOFF_FD set) serves the same protocol inside
- * TLS 1.3 on the connections the agent passes it through fz_accept(),
+ * TLS 1.3 on the connections fiberd passes it through fz_accept(),
  * instead of a listener of its own. It serves the grant's identity
  * (fz_handoff_identity(), sent down the channel at birth, never a file)
  * and accepts only the client certificate whose x5t#S256 that identity
@@ -83,7 +83,7 @@
  * MiB: the GPU model in miniature. The zygote owns the device; fibers are
  * its clients over the unix socket named by FIBERD_ENGINE, holding slices
  * ("reserve <bytes>" on the fiber sets its slice; "devfree" drops it).
- * The engine reports every slice to the agent (DEVICE lines) and drops a
+ * The engine reports every slice to fiberd (DEVICE lines) and drops a
  * slice on EVICT, which is what a park does before the CPU checkpoint; a
  * resumed fiber renegotiates by reserving again. A real CUDA engine is a
  * drop-in that speaks the same lines.
@@ -95,8 +95,8 @@
  * --gvisor runs the same workload as the init process of a gVisor sandbox
  * (fiberd's gvisor backend). There is no fork: after init the process
  * triggers its own checkpoint through /proc/gvisor/checkpoint; every fiber
- * is a sandbox restored from that image, which learns its fence, endpoint
- * and payload from the restore-time environment (/proc/gvisor/spec_environ),
+ * is a sandbox restored from that image, which learns its fence, endpoint,
+ * payload and a fresh seed on fiberd's channel (fz_gvisor_identity),
  * serves on /host (the grant's run directory, bind-mounted), closes its
  * endpoint on SIGUSR1 so the sandbox can be checkpointed, and re-binds
  * under the next fence when restored again. --http applies there too.
@@ -194,7 +194,7 @@ static char engine_path[256];
 static int engine_fd = -1; /* bound in engine_start, served by engine_thread */
 
 /* dev_set replaces a fiber's slice (0 drops it) and reports both the
- * slice and the whole device to the agent. Called with dev_mu held. */
+ * slice and the whole device to fiberd. Called with dev_mu held. */
 static const char *dev_set(const char *fence, unsigned long long bytes) {
     int i;
     for (i = 0; i < ndev && strcmp(dev_slices[i].fence, fence) != 0; i++) {}
@@ -229,7 +229,7 @@ static void on_control(const char *line) {
 static void *engine_thread(void *arg) {
     (void)arg;
     int s = engine_fd;
-    /* The agent learns of the device once the channel is up. */
+    /* fiberd learns of the device once the channel is up. */
     while (fz_report("DEVICE - %llu %llu", dev_used, dev_cap) < 0) usleep(5000);
     for (;;) {
         int c = accept4(s, NULL, NULL, SOCK_CLOEXEC);
@@ -271,10 +271,10 @@ static void engine_start(size_t mb) {
 static const char *cur_endpoint; /* this fiber's endpoint, for the fence file */
 static const char *cur_fence;
 
-/* The fence this incarnation lives under: the one the agent published
+/* The fence this incarnation lives under: the one fiberd published
  * after a resume (the fence in memory is the birth fence, stale then),
  * else fallback, the fence in memory. The file sits beside the unix
- * endpoint; a fiber behind the agent's tcp relay serves a unix socket
+ * endpoint; a fiber behind fiberd's tcp relay serves a unix socket
  * too and reads the file beside it. One that binds tcp itself, or takes
  * handed-off connections, has no socket, and finds the file in its
  * working directory (its grant's run directory) under the name of its
@@ -531,7 +531,7 @@ static void conn_close(conn_t *c) {
 
 #ifdef FZ_TLS
 /* The handoff fiber's TLS server, loaded after the fork from the identity
- * the agent sent down the fiber's channel, so the key never sits in the
+ * fiberd sent down the fiber's channel, so the key never sits in the
  * zygote's memory or in a file another grant's fibers could read. */
 static SSL_CTX *tls_ctx;
 static const char *tls_caller;
@@ -605,16 +605,19 @@ static int tls_caller_ok(SSL *s) {
     return strcmp(b64, tls_caller) == 0;
 }
 
-/* tls_reseed mixes fresh kernel entropy into both of OpenSSL's DRBGs.
- * Forked fibers and fibers restored from one checkpoint start with the
- * same DRBG state, and a CRIU resume keeps the pid, so OpenSSL's own
- * fork check never notices a copy. */
-static int tls_reseed(void) {
-    unsigned char seed[32];
-    if (getrandom(seed, sizeof seed, 0) != (ssize_t)sizeof seed) return -1;
+/* tls_reseed mixes fresh kernel entropy, and the host's seed when there
+ * is one, into both of OpenSSL's DRBGs. Forked fibers and fibers
+ * restored from one checkpoint start with the same DRBG state, and a
+ * CRIU resume keeps the pid, so OpenSSL's own fork check never notices
+ * a copy. */
+static int tls_reseed(const unsigned char *host, size_t hn) {
+    unsigned char seed[64];
+    if (hn > 32) hn = 32;
+    if (getrandom(seed, 32, 0) != 32) return -1;
+    if (hn) memcpy(seed + 32, host, hn);
     EVP_RAND_CTX *drbg[2] = { RAND_get0_public(NULL), RAND_get0_private(NULL) };
     for (int i = 0; i < 2; i++)
-        if (!drbg[i] || EVP_RAND_reseed(drbg[i], 0, NULL, 0, seed, sizeof seed) != 1) return -1;
+        if (!drbg[i] || EVP_RAND_reseed(drbg[i], 0, NULL, 0, seed, 32 + hn) != 1) return -1;
     return 0;
 }
 
@@ -622,7 +625,7 @@ static int tls_reseed(void) {
  * reseed of its own (see tls_reseed). A caller that stalls the handshake
  * is dropped after 5 s. */
 static int tls_start(conn_t *c) {
-    if (tls_reseed() < 0) return -1;
+    if (tls_reseed(NULL, 0) < 0) return -1;
     struct timeval tv = { .tv_sec = 5 }, none = { 0 };
     setsockopt(c->fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
     setsockopt(c->fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
@@ -636,21 +639,29 @@ static int tls_start(conn_t *c) {
 }
 #endif
 
-/* reseed_rngs gives every generator this template owns a fresh seed from
- * the kernel. It runs once per incarnation: in the child at the fork,
- * after a restore returns (gVisor), and when a resumed fiber sees a new
- * fence (CRIU keeps the pid and the parked RNG state, so nothing else
- * marks the copy). Both libc generators are seeded, since rand() keeps
- * its own state on some libcs. OpenSSL's DRBGs are reseeded once they
- * exist, which is in a handoff fiber; tls_start does it again per
- * handshake. */
-static void reseed_rngs(void) {
+/* reseed_rngs_from gives every generator this template owns a fresh seed
+ * from the kernel, mixed with the host's seed when there is one (a
+ * gVisor incarnation gets 32 bytes on its channel). It runs once per
+ * incarnation: in the child at the fork, after a restore returns
+ * (gVisor), and when a resumed fiber sees a new fence (CRIU keeps the
+ * pid and the parked RNG state, so nothing else marks the copy). Both
+ * libc generators are seeded, since rand() keeps its own state on some
+ * libcs. OpenSSL's DRBGs are reseeded once they exist, which is in a
+ * handoff fiber; tls_start does it again per handshake. */
+static void reseed_rngs_from(const unsigned char *host, size_t hn) {
     unsigned seed[2] = { 0, 0 };
-    if (getrandom(seed, sizeof seed, 0) == (ssize_t)sizeof seed) { srandom(seed[0]); srand(seed[1]); }
+    if (getrandom(seed, sizeof seed, 0) == (ssize_t)sizeof seed) {
+        for (size_t i = 0; i < hn; i++) seed[i % 2] = seed[i % 2] * 31u + host[i];
+        srandom(seed[0]); srand(seed[1]);
+    }
 #ifdef FZ_TLS
-    if (tls_ctx) (void)tls_reseed();
+    if (tls_ctx) (void)tls_reseed(host, hn);
+#else
+    (void)host; (void)hn;
 #endif
 }
+
+static void reseed_rngs(void) { reseed_rngs_from(NULL, 0); }
 
 /* The fence this process last served under. A resumed fiber finds a new
  * one in the file beside its endpoint (live_fence) and reseeds before it
@@ -864,25 +875,6 @@ static int on_fiber(const fz_fiber_t *f) {
 static volatile sig_atomic_t park_requested;
 static void on_usr1(int s) { (void)s; park_requested = 1; }
 
-/* One value from /proc/gvisor/spec_environ (KEY=VALUE entries separated by
- * NUL or newline: the environment of the spec the sandbox was last created
- * or restored with). */
-static char *spec_env(const char *name) {
-    static char buf[65536];
-    int fd = open("/proc/gvisor/spec_environ", O_RDONLY);
-    if (fd < 0) return NULL;
-    ssize_t n = 0, r;
-    while ((r = read(fd, buf + n, sizeof buf - 1 - n)) > 0) n += r;
-    close(fd);
-    if (n <= 0) return NULL;
-    buf[n] = 0;
-    for (ssize_t i = 0; i < n; i++) if (buf[i] == '\n') buf[i] = 0;
-    size_t kl = strlen(name);
-    for (char *p = buf; p < buf + n; p += strlen(p) + 1)
-        if (strncmp(p, name, kl) == 0 && p[kl] == '=') return strdup(p + kl + 1);
-    return NULL;
-}
-
 /* Blocks until the next checkpoint of this sandbox completes. Returns 1
  * when this process is running in a sandbox restored from that image,
  * 0 when it is the original resumed in place (or the checkpoint failed).
@@ -898,15 +890,6 @@ static int wait_checkpoint(void) {
     if (n <= 0) return 0;
     buf[n] = 0;
     return strncmp(buf, "restore", 7) == 0;
-}
-
-static size_t unhex(const char *h, unsigned char *out, size_t max) {
-    size_t n = 0;
-    for (; h[0] && h[1] && n < max; h += 2) {
-        unsigned v; if (sscanf(h, "%2x", &v) != 1) break;
-        out[n++] = (unsigned char)v;
-    }
-    return n;
 }
 
 /* Serve one incarnation on ep until SIGUSR1; returns with the endpoint
@@ -926,6 +909,8 @@ static int gvisor_serve_once(const char *fence, const char *ep, const unsigned c
         fprintf(stderr, "refzygote %s: bind %s: %s\n", fence, ep, strerror(errno));
         return 4;
     }
+    /* Bound, so fiberd may connect. */
+    (void)fz_gvisor_ack();
     size_t db = (size_t)payload_num(payload, plen, "\"dirty_bytes\"");
     if (db) dirty(db);
     while (!park_requested) {
@@ -961,7 +946,6 @@ static int gvisor_main(void) {
     close(m);
     fprintf(stderr, "refzygote: warm, waiting for the template checkpoint\n");
     static unsigned long counter;
-    char last[256] = "none";
     for (;;) {
         if (!wait_checkpoint()) {
             /* "resume": the original (or a fiber parked with sync) goes
@@ -970,30 +954,20 @@ static int gvisor_main(void) {
             fprintf(stderr, "refzygote: checkpointed, resumed in place\n");
             continue;
         }
-        /* "restore": running in a freshly restored sandbox under the new
-         * spec. Every sandbox restored from one image holds the same RNG
-         * state, so reseed before anything draws from it. Its environment
-         * names the fence; give it a moment in case it is still being
-         * installed. */
-        reseed_rngs();
-        char *fence = NULL, *ep = NULL, *ph = NULL;
-        for (int i = 0; i < 3000; i++) {
-            free(fence); free(ep); free(ph);
-            fence = spec_env("FIBERD_FENCE"); ep = spec_env("FIBERD_ENDPOINT"); ph = spec_env("FIBERD_PAYLOAD");
-            if (fence && ep && strcmp(fence, "none") != 0 && strcmp(fence, last) != 0) break;
-            usleep(1000);
+        /* "restore": running in a freshly restored sandbox. Its identity
+         * comes on fiberd's channel, and a pooled sandbox waits there
+         * until it is handed one. Every sandbox restored from one image
+         * holds the same RNG state, so reseed from the seed it brings
+         * before anything draws from it. */
+        fz_gvisor_identity_t id;
+        if (fz_gvisor_identity(&id) < 0) {
+            fprintf(stderr, "refzygote: restored without an identity: %s\n", strerror(errno));
+            return 122;
         }
-        if (!fence || !ep || strcmp(fence, "none") == 0) {
-            fprintf(stderr, "refzygote: restored without a fence in the spec environment; standing by\n");
-        } else {
-            fprintf(stderr, "refzygote: incarnation %s serving on %s\n", fence, ep);
-            unsigned char payload[4096]; size_t plen = 0;
-            if (ph && strcmp(ph, "-") != 0) plen = unhex(ph, payload, sizeof payload);
-            snprintf(last, sizeof last, "%s", fence);
-            int rc = gvisor_serve_once(fence, ep, payload, plen, &counter);
-            if (rc) return rc;
-        }
-        free(fence); free(ep); free(ph);
+        reseed_rngs_from(id.seed, id.seed_len);
+        fprintf(stderr, "refzygote: incarnation %s serving on %s\n", id.fence, id.endpoint);
+        int rc = gvisor_serve_once(id.fence, id.endpoint, id.payload, id.payload_len, &counter);
+        if (rc) return rc;
     }
 }
 

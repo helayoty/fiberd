@@ -50,8 +50,6 @@ const (
 	Tier_FIBER_CHECKPOINT Tier = 3
 	// MicroVM or gVisor snapshot-restore per fiber. Multi-tenant per node.
 	Tier_FIBER_SNAPSHOT Tier = 4
-	// Reserved. Multi-node fabric tier; nothing implements it.
-	Tier_FIBER_FABRIC Tier = 5
 )
 
 // Enum value maps for Tier.
@@ -62,7 +60,6 @@ var (
 		2: "FIBER_WARM",
 		3: "FIBER_CHECKPOINT",
 		4: "FIBER_SNAPSHOT",
-		5: "FIBER_FABRIC",
 	}
 	Tier_value = map[string]int32{
 		"TIER_UNSPECIFIED": 0,
@@ -70,7 +67,6 @@ var (
 		"FIBER_WARM":       2,
 		"FIBER_CHECKPOINT": 3,
 		"FIBER_SNAPSHOT":   4,
-		"FIBER_FABRIC":     5,
 	}
 )
 
@@ -111,7 +107,7 @@ const (
 	// the OS has not flushed yet.
 	Durability_BEST_EFFORT Durability = 1
 	// Ack only once the record is durable on local disk. After a failed
-	// fsync, every SYNC operation fails until the agent restarts.
+	// fsync, every SYNC operation fails until fiberd restarts.
 	Durability_SYNC Durability = 2
 )
 
@@ -317,7 +313,7 @@ func (CloneKind) EnumDescriptor() ([]byte, []int) {
 type MissCode int32
 
 const (
-	// The control plane is unreachable or the thrash budget is exceeded.
+	// The control plane is unreachable or the clone rate limit is exceeded.
 	// Back off for retry_after_s; never queue on a dead control plane.
 	MissCode_SHED MissCode = 0
 	// Capacity is not on this home and the control plane is healthy.
@@ -714,8 +710,8 @@ func (x *CapacityGrant) GetDeviceBudget() *DeviceBudget {
 	return nil
 }
 
-// Fence identifies one incarnation of a fiber: (grant, agent epoch, seq).
-// Every credential and claim is scoped to it. An epoch bump on agent
+// Fence identifies one run of a fiber: (grant, fiberd epoch, seq).
+// Every credential and claim is scoped to it. An epoch bump on fiberd
 // restart invalidates every prior fence at once.
 type Fence struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -1121,12 +1117,15 @@ func (x *ReleaseRequest) GetDiscard() bool {
 // Status is the batched, per-grant view the home publishes. It is the
 // only thing a control plane ever sees; never individual fibers.
 type Status struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	GrantUid      string                 `protobuf:"bytes,1,opt,name=grant_uid,json=grantUid,proto3" json:"grant_uid,omitempty"`
-	Running       uint32                 `protobuf:"varint,2,opt,name=running,proto3" json:"running,omitempty"`
-	Parked        uint32                 `protobuf:"varint,3,opt,name=parked,proto3" json:"parked,omitempty"`
-	WUsedBytes    uint64                 `protobuf:"varint,4,opt,name=w_used_bytes,json=wUsedBytes,proto3" json:"w_used_bytes,omitempty"`
-	Latest        *Fence                 `protobuf:"bytes,5,opt,name=latest,proto3" json:"latest,omitempty"`
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	GrantUid   string                 `protobuf:"bytes,1,opt,name=grant_uid,json=grantUid,proto3" json:"grant_uid,omitempty"`
+	Running    uint32                 `protobuf:"varint,2,opt,name=running,proto3" json:"running,omitempty"`
+	Parked     uint32                 `protobuf:"varint,3,opt,name=parked,proto3" json:"parked,omitempty"`
+	WUsedBytes uint64                 `protobuf:"varint,4,opt,name=w_used_bytes,json=wUsedBytes,proto3" json:"w_used_bytes,omitempty"`
+	Latest     *Fence                 `protobuf:"bytes,5,opt,name=latest,proto3" json:"latest,omitempty"`
+	// pooled counts sandboxes restored ahead of a clone. They are inside
+	// fibers.max and not in running.
+	Pooled        uint32 `protobuf:"varint,6,opt,name=pooled,proto3" json:"pooled,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1196,6 +1195,13 @@ func (x *Status) GetLatest() *Fence {
 	return nil
 }
 
+func (x *Status) GetPooled() uint32 {
+	if x != nil {
+		return x.Pooled
+	}
+	return 0
+}
+
 var File_grant_v1_grant_proto protoreflect.FileDescriptor
 
 const file_grant_v1_grant_proto_rawDesc = "" +
@@ -1258,22 +1264,22 @@ const file_grant_v1_grant_proto_rawDesc = "" +
 	"\x04sync\x18\x02 \x01(\bR\x04sync\"E\n" +
 	"\x0eReleaseRequest\x12\x19\n" +
 	"\bfiber_id\x18\x01 \x01(\tR\afiberId\x12\x18\n" +
-	"\adiscard\x18\x02 \x01(\bR\adiscard\"\xa9\x01\n" +
+	"\adiscard\x18\x02 \x01(\bR\adiscard\"\xc1\x01\n" +
 	"\x06Status\x12\x1b\n" +
 	"\tgrant_uid\x18\x01 \x01(\tR\bgrantUid\x12\x18\n" +
 	"\arunning\x18\x02 \x01(\rR\arunning\x12\x16\n" +
 	"\x06parked\x18\x03 \x01(\rR\x06parked\x12 \n" +
 	"\fw_used_bytes\x18\x04 \x01(\x04R\n" +
 	"wUsedBytes\x12.\n" +
-	"\x06latest\x18\x05 \x01(\v2\x16.fiberd.grant.v1.FenceR\x06latest*y\n" +
+	"\x06latest\x18\x05 \x01(\v2\x16.fiberd.grant.v1.FenceR\x06latest\x12\x16\n" +
+	"\x06pooled\x18\x06 \x01(\rR\x06pooled*g\n" +
 	"\x04Tier\x12\x14\n" +
 	"\x10TIER_UNSPECIFIED\x10\x00\x12\x0f\n" +
 	"\vFIBER_BASIC\x10\x01\x12\x0e\n" +
 	"\n" +
 	"FIBER_WARM\x10\x02\x12\x14\n" +
 	"\x10FIBER_CHECKPOINT\x10\x03\x12\x12\n" +
-	"\x0eFIBER_SNAPSHOT\x10\x04\x12\x10\n" +
-	"\fFIBER_FABRIC\x10\x05*C\n" +
+	"\x0eFIBER_SNAPSHOT\x10\x04*C\n" +
 	"\n" +
 	"Durability\x12\x1a\n" +
 	"\x16DURABILITY_UNSPECIFIED\x10\x00\x12\x0f\n" +

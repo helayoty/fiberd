@@ -1,6 +1,6 @@
 # A Kata-shaped shim
 
-This example is a containerd shim whose containers are [fibers](../../docs/glossary.md#fiber). Where a Kata shim boots a micro-VM, `containerd-shim-fiberd-v1` [clones](../../docs/glossary.md#clone) a fiber. It is for anyone who wants Kubernetes Pods whose containers are fibers. It is a consumer of fiberd's protocol, in its own Go module, and is not imported by fiberd.
+This example is a containerd shim whose containers are [fibers](../../docs/glossary.md#fiber). Where a Kata shim boots a micro-VM, `containerd-shim-fiberd-v1` [clones](../../docs/glossary.md#clone) a fiber. It is for anyone who wants Kubernetes Pods whose containers are fibers. It is a caller of fiberd's protocol, in its own Go module, and is not imported by fiberd.
 
 ![One node-side shim bridges containerd to a separate fiberd home. Pod 1 Create clones a fiber; stopping with Park retains session data at the home; replacement Pod 2 Create resumes that session with a new fence. Fibers and parked data stay outside the application Pods.](../../docs/images/example-kata.svg)
 
@@ -13,7 +13,7 @@ It runs on the Kubernetes example's cluster, made with kind (Kubernetes in Docke
 - A second Pod on the same session resumes it with a new [fence](../../docs/glossary.md#fence).
 - Deleting that Pod [releases](../../docs/glossary.md#release) the fiber.
 
-Kubernetes and the Pod spec are unchanged beyond the `io.fiberd/*` annotations. This example runs the [agent](../../docs/glossary.md#agent) with `-insecure-plaintext`.
+Kubernetes and the Pod spec are unchanged beyond the `io.fiberd/*` annotations. This example runs [fiberd](../../docs/glossary.md#fiberd) with `-insecure-plaintext`.
 
 ## Run it
 

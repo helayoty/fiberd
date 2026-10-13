@@ -36,8 +36,8 @@ func (v boundVerifier) Verify(ctx context.Context, token []byte) (core.Grant, er
 // nil. It returns the address and the server, which the test may stop.
 func tcpHome(t *testing.T, verify core.Verifier, cfg *tls.Config) (string, *grpc.Server) {
 	t.Helper()
-	ag := &core.Agent{
-		NodeID: "node-a", Ledger: core.NewLedger(1), Budget: core.NewBudget(1000, 256<<20),
+	ag := &core.Core{
+		NodeID: "node-a", Ledger: core.NewLedger(1), RateLimit: core.NewRateLimit(1000, 256<<20),
 		Runtime: stub.New(), Verify: verify,
 		Health: core.NewSourceHealth(10*time.Second, time.Now()), StatusInterval: 20 * time.Millisecond,
 	}
@@ -48,7 +48,7 @@ func tcpHome(t *testing.T, verify core.Verifier, cfg *tls.Config) (string, *grpc
 	if cfg != nil {
 		opts = append(opts, grpc.Creds(credentials.NewTLS(cfg)))
 	}
-	gs := rpc.NewGRPCServer(&rpc.Server{Agent: ag, Issuer: "https://issuer.test"}, opts...)
+	gs := rpc.NewGRPCServer(&rpc.Server{Core: ag, Issuer: "https://issuer.test"}, opts...)
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)

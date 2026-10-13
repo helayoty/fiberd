@@ -1,7 +1,7 @@
 // Package home is fiberd's home inside a Substrate worker Pod. There is
 // no grant controller in a Substrate cluster and the worker Pod's spec is
 // Substrate's, so the home is its own issuer: it holds a key, serves
-// discovery and the key set on the loopback for the agent's verifier,
+// discovery and the key set on the loopback for fiberd's verifier,
 // and mints one grant per ActorTemplate the herder is asked to run,
 // sized by the actor's memory limit. Liveness is Substrate's node
 // supervisor answering on its socket (atelet, which is what would send
@@ -33,7 +33,7 @@ import (
 )
 
 type Config struct {
-	// Audience is the agent's node id; grants are addressed to it.
+	// Audience is fiberd's node id; grants are addressed to it.
 	Audience string
 	// IssuerURL is where Handler is served (http://127.0.0.1:<port>).
 	IssuerURL string
@@ -72,7 +72,7 @@ type Home struct {
 	issuer *grant.Issuer
 	health *core.SourceHealth
 	root   string
-	lane   chan fhome.GrantEvent
+	events chan fhome.GrantEvent
 
 	mu     sync.Mutex
 	grants map[string]minted // by template digest
@@ -136,7 +136,7 @@ func New(cfg Config) (*Home, error) {
 		issuer: &grant.Issuer{Key: cfg.Key, URL: cfg.IssuerURL, Now: cfg.Now},
 		health: core.NewSourceHealth(cfg.StaleTTL, cfg.Now()),
 		root:   root,
-		lane:   make(chan fhome.GrantEvent, 64),
+		events: make(chan fhome.GrantEvent, 64),
 		grants: map[string]minted{},
 		ready:  map[string]bool{},
 	}, nil
@@ -172,8 +172,8 @@ func GrantUID(tmpl herder.Template) string {
 }
 
 // Grant implements herder.Grants: one grant per template, minted on
-// first use and re-minted past half its lease, announced on the grant
-// lane so the agent warms the template before the first Clone.
+// first use and re-minted past half its lease, delivered to fiberd so
+// it warms the template before the first Clone.
 func (h *Home) Grant(_ context.Context, tmpl herder.Template, memoryBytes uint64) (string, core.Grant, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -198,9 +198,9 @@ func (h *Home) Grant(_ context.Context, tmpl herder.Template, memoryBytes uint64
 	g.Issuer = h.cfg.IssuerURL
 	h.grants[tmpl.Digest()] = minted{jwt: tok, g: g}
 	select {
-	case h.lane <- fhome.GrantEvent{Kind: fhome.GrantAdded, Token: []byte(tok)}:
+	case h.events <- fhome.GrantEvent{Kind: fhome.GrantAdded, Token: []byte(tok)}:
 	default:
-		log.Printf("substrate home: grant lane full; %s admits on its first Clone", g.UID)
+		log.Printf("substrate home: grant delivery full; %s admits on its first Clone", g.UID)
 	}
 	log.Printf("substrate home: minted grant %s for template %s (W budget %d)", g.UID, tmpl.Digest(), budget)
 	return tok, g, nil
@@ -225,13 +225,13 @@ func (h *Home) CgroupRoot() string         { return h.root }
 func (h *Home) AdvertisedEndpoint() string { return "" }
 func (h *Home) Scope() []core.ScopeClaim   { return append([]core.ScopeClaim(nil), h.cfg.Scope...) }
 
-// Fabric: a worker Pod offers no devices.
-func (h *Home) Fabric(context.Context, core.Grant) (core.FabricChannel, func(), error) {
-	return core.FabricChannel{}, func() {}, nil
+// Devices: a worker Pod offers no devices.
+func (h *Home) Devices(context.Context, core.Grant) (core.DeviceChannel, func(), error) {
+	return core.DeviceChannel{}, func() {}, nil
 }
 
-// Grants is the lane the herder's minted grants arrive on.
-func (h *Home) Grants(context.Context) (<-chan fhome.GrantEvent, error) { return h.lane, nil }
+// Grants delivers the herder's minted grants.
+func (h *Home) Grants(context.Context) (<-chan fhome.GrantEvent, error) { return h.events, nil }
 
 // PublishReady records the template's warmth; the Pod's readiness reads it.
 func (h *Home) PublishReady(_ context.Context, grantUID string, ready bool) error {
@@ -241,12 +241,12 @@ func (h *Home) PublishReady(_ context.Context, grantUID string, ready bool) erro
 	return nil
 }
 
-// SetLane is the test-only override (fiberd's admin socket).
-func (h *Home) SetLane(healthy bool) {
+// SetIssuerReachable is the test-only override (fiberd's admin socket).
+func (h *Home) SetIssuerReachable(reachable bool) {
 	h.mu.Lock()
-	h.paused = !healthy
+	h.paused = !reachable
 	h.mu.Unlock()
-	if healthy {
+	if reachable {
 		h.health.MarkSync(h.cfg.Now())
 	} else {
 		h.health.MarkSync(h.cfg.Now().Add(-h.cfg.StaleTTL))
@@ -263,7 +263,7 @@ func (h *Home) mark() {
 }
 
 // Run probes liveness every StaleTTL/2: the node supervisor answering
-// keeps the lane healthy; silence turns capacity misses into SHED.
+// keeps the issuer reachable, and silence turns capacity misses into SHED.
 func (h *Home) Run(ctx context.Context) {
 	every := h.cfg.StaleTTL / 2
 	t := time.NewTicker(every)

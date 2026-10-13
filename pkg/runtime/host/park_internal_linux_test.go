@@ -661,7 +661,7 @@ func TestReleaseDiscard(t *testing.T) {
 	}
 }
 
-// TestReleaseOrphan restarts the agent under a live fiber and releases it
+// TestReleaseOrphan restarts fiberd under a live fiber and releases it
 // as an orphan. Its leaf goes, and so do the files it served on. A resumed
 // fiber keeps the socket name of its park, which only the fence file beside
 // it ties to the current fence. Other fibers' files stay.
@@ -724,7 +724,7 @@ func TestReleaseOrphan(t *testing.T) {
 			write(t, run, map[string]string{"8-8.sock": ""})
 			kept := []string{"9-9.sock", "9-9.sock.fence", "8-8.sock", "8-8.sock.fence"}
 
-			// A restarted agent over the same directories knows nothing of
+			// A restarted fiberd over the same directories knows nothing of
 			// the fiber, whose leaf still holds a task.
 			cfg := f.r.cfg
 			cfg.Backend = newFakeBackend(core.TierWarm)
@@ -764,7 +764,7 @@ func TestReleaseOrphan(t *testing.T) {
 // or not, finds it beside that socket, the one path it knows. One that
 // binds tcp itself finds it under the run directory by its birth fence,
 // the one fence it holds in memory.
-// The grant's fibers write that directory too, so the agent, which runs
+// The grant's fibers write that directory too, so fiberd, which runs
 // as root, never writes through a name there. A link a fiber planted is
 // replaced, not followed, and a directory denies the fiber its file and
 // nothing else. A restore that fails leaves no fence file behind.
@@ -833,7 +833,7 @@ func TestResumeFenceFile(t *testing.T) {
 				t.Fatalf("resume = %+v, %v, want error %v", h, err, tc.resumeErr)
 			}
 			if b, _ := os.ReadFile(victim); string(b) != "untouched\n" {
-				t.Fatalf("the agent wrote through the planted link: victim reads %q", b)
+				t.Fatalf("fiberd wrote through the planted link: victim reads %q", b)
 			}
 			st, lerr := os.Lstat(fenceFn)
 			switch {
@@ -1232,6 +1232,62 @@ func TestParkDurability(t *testing.T) {
 			t.Cleanup(func() { fsync = orig })
 			ref, err := f.r.Park(context.Background(), f.h.ID, true)
 			tc.check(t, f, l, ref, err)
+		})
+	}
+}
+
+// TestResumeW checks that a park records the fiber's W and a resume
+// carries on from it. A sandbox's own count before its hand-out is its
+// footprint, and the pages it dirtied before the park are in the image it
+// is restored from, so the footprint of the resumed fiber is that count
+// less the parked W.
+func TestResumeW(t *testing.T) {
+	cases := []struct {
+		name string
+		// reported is what the backend counts in the resumed leaf before
+		// the hand-out, given the parked W.
+		reported func(parked uint64) uint64
+		// positive is whether the resumed fiber's W, with a task of the
+		// test's own in its leaf, must be above zero.
+		positive bool
+	}{
+		{name: "the count less the parked W is the footprint", reported: func(w uint64) uint64 { return w + 1 }, positive: true},
+		{name: "no count reported leaves the template's probe", reported: func(uint64) uint64 { return 0 }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fb := newFakeBackend(core.TierCheckpoint)
+			fb.warm = backend.Warm{Bytes: 1 << 40} // a probe no leaf ever reaches
+			fb.footprint = 1
+			be := &struct {
+				*fakeBackend
+				overheadMixin
+			}{fb, overheadMixin{}}
+			g := core.Grant{UID: "g1", TemplateDigest: "sha256:tmpl", FiberMax: 2}
+			f := newParkFixture(t, be, g, nil)
+			startSleeper(t, f.r.root.Child("g1").Child("f-1-1"))
+			ctx := context.Background()
+			ref, err := f.r.Park(ctx, f.h.ID, false)
+			if err != nil {
+				t.Fatalf("Park: %v", err)
+			}
+			m := readManifest(t, ref)
+			if m.WUsed == 0 {
+				t.Fatalf("manifest = %+v, want the W at park recorded", m)
+			}
+			fb.mu.Lock()
+			fb.footprint = tc.reported(m.WUsed)
+			fb.mu.Unlock()
+			next := core.Fence{GrantUID: "g1", Epoch: 2, Seq: 1}
+			h, err := f.r.Clone(ctx, core.CloneSpec{Grant: g, Source: core.SourceDelta, Ref: ref, Fence: next, Deadline: time.Second})
+			if err != nil {
+				t.Fatalf("resume: %v", err)
+			}
+			startSleeper(t, f.r.root.Child("g1").Child("f-2-1"))
+			st, err := f.r.Stats(ctx, h.ID)
+			if err != nil || (st.WUsedBytes > 0) != tc.positive {
+				t.Fatalf("Stats = %+v %v, want W above zero %v", st, err, tc.positive)
+			}
 		})
 	}
 }

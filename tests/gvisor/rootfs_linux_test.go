@@ -15,7 +15,7 @@ import (
 )
 
 // TestRootfsReadOnly: the rootfs is one host directory served to every
-// sandbox of every grant by the gofer, which runs with the agent's
+// sandbox of every grant by the gofer, which runs with fiberd's
 // credentials. A fiber is uid 0 in its sandbox, so the sandbox's root must
 // be read-only or one tenant rewrites /bin/refzygote for every later
 // sandbox. The grant's run directory at /host and the private /tmp stay

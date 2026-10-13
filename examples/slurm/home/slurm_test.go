@@ -93,10 +93,10 @@ func TestHomeFromTheAllocation(t *testing.T) {
 		want string
 	}{
 		{"the home is named slurm", h.Name, "slurm"},
-		{"the cgroup root is fiberd under the delegated root", func() string {
+		{"the cgroup root is grants under the delegated root", func() string {
 			r := h.CgroupRoot()
 			return filepath.Join(filepath.Base(filepath.Dir(r)), filepath.Base(r))
-		}, "cgroup/fiberd"},
+		}, "cgroup/grants"},
 		{"scope names the job id", scope("job_id"), "4242"},
 		{"scope names the job name", scope("job_name"), "fiberd-grant"},
 		{"scope names the user", scope("user"), "heba"},
@@ -124,9 +124,9 @@ func TestHomeFromTheAllocation(t *testing.T) {
 	}
 }
 
-// TestFabric checks that the allocation's GRES is the fabric and its CPUs
+// TestDevices checks that the allocation's GRES is the device channel and its CPUs
 // bound capacity.
-func TestFabric(t *testing.T) {
+func TestDevices(t *testing.T) {
 	noCPUsNoGRES := map[string]string{"SLURM_CPUS_ON_NODE": "", "SLURM_JOB_GRES": "", "CUDA_VISIBLE_DEVICES": ""}
 	cases := []struct {
 		name    string
@@ -143,8 +143,8 @@ func TestFabric(t *testing.T) {
 		{name: "fibers.max above the allocation's CPUs is refused", fibers: 5, err: "4 CPUs"},
 		{name: "unlimited fibers pass", fibers: 0,
 			kind: "gres", detail: "gpu:2", devices: "/dev/nvidia0,/dev/nvidia1"},
-		{name: "an allocation without a CPU count or GRES: no bound, no fabric", env: noCPUsNoGRES, fibers: 64},
-		{name: "GPUs without a GRES string are a static fabric", env: map[string]string{"SLURM_JOB_GRES": ""}, fibers: 1,
+		{name: "an allocation without a CPU count or GRES: no bound, no device channel", env: noCPUsNoGRES, fibers: 64},
+		{name: "GPUs without a GRES string are a static device channel", env: map[string]string{"SLURM_JOB_GRES": ""}, fibers: 1,
 			kind: "static", devices: "/dev/nvidia0,/dev/nvidia1"},
 		{name: "SLURM_JOB_GPUS names the GPUs when CUDA_VISIBLE_DEVICES is unset",
 			env: map[string]string{"SLURM_JOB_GRES": "", "CUDA_VISIBLE_DEVICES": "", "SLURM_JOB_GPUS": "2, 3"}, fibers: 1,
@@ -158,10 +158,10 @@ func TestFabric(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newHome(t, tc.env, []string{}, nil, func(c *home.Config) { c.Devices = tc.devs })
-			fc, release, err := h.Fabric(context.Background(), core.Grant{UID: "g", FiberMax: tc.fibers})
+			fc, release, err := h.Devices(context.Background(), core.Grant{UID: "g", FiberMax: tc.fibers})
 			if tc.err != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.err) {
-					t.Fatalf("fabric for %d fibers = %v, want a refusal with %q", tc.fibers, err, tc.err)
+					t.Fatalf("device channel for %d fibers = %v, want a refusal with %q", tc.fibers, err, tc.err)
 				}
 				return
 			}
@@ -170,7 +170,7 @@ func TestFabric(t *testing.T) {
 			}
 			release()
 			if fc.Kind != tc.kind || fc.Detail != tc.detail || strings.Join(fc.Devices, ",") != tc.devices {
-				t.Fatalf("fabric = %+v, want %s %q devices %q", fc, tc.kind, tc.detail, tc.devices)
+				t.Fatalf("device channel = %+v, want %s %q devices %q", fc, tc.kind, tc.detail, tc.devices)
 			}
 		})
 	}
@@ -257,9 +257,9 @@ func TestNewReadsTheProcessEnvironment(t *testing.T) {
 			}},
 		{name: "the GPUs come from CUDA_VISIBLE_DEVICES", env: map[string]string{"SLURM_JOB_ID": "77", "CUDA_VISIBLE_DEVICES": "3"},
 			check: func(h *home.Home) error {
-				fc, _, err := h.Fabric(context.Background(), core.Grant{UID: "g"})
+				fc, _, err := h.Devices(context.Background(), core.Grant{UID: "g"})
 				if err != nil || strings.Join(fc.Devices, ",") != "/dev/nvidia3" {
-					return fmt.Errorf("fabric = %+v, want /dev/nvidia3: %w", fc, err)
+					return fmt.Errorf("device channel = %+v, want /dev/nvidia3: %w", fc, err)
 				}
 				return nil
 			}},
@@ -267,7 +267,7 @@ func TestNewReadsTheProcessEnvironment(t *testing.T) {
 			check: func(h *home.Home) error {
 				now := time.Now()
 				if !h.Health().Healthy(now.Add(29*time.Second)) || h.Health().Healthy(now.Add(31*time.Second)) {
-					return errors.New("the lane must turn stale between 29s and 31s of silence")
+					return errors.New("the issuer must become unreachable between 29s and 31s of silence")
 				}
 				return nil
 			}},
@@ -409,7 +409,7 @@ func TestGrants(t *testing.T) {
 			case <-time.After(5 * time.Second):
 				t.Fatal("no grant event for the new file")
 			}
-			// The lane closes once the context ends.
+			// Delivery closes once the context ends.
 			cancel()
 			for {
 				select {
@@ -418,22 +418,22 @@ func TestGrants(t *testing.T) {
 						return
 					}
 				case <-time.After(5 * time.Second):
-					t.Fatal("the lane stayed open after its context ended")
+					t.Fatal("delivery stayed open after its context ended")
 				}
 			}
 		})
 	}
 }
 
-// TestProbeIsLivenessAndTerminalStateIsScopeLoss checks that the lane is
-// healthy while the job is RUNNING, and another live state changes nothing.
-// A terminal state is scope loss, reported once, and then the agent leaves
+// TestProbeIsLivenessAndTerminalStateIsScopeLoss checks that the issuer is
+// reachable while the job is RUNNING, and another live state changes nothing.
+// A terminal state is scope loss, reported once, and then fiberd leaves
 // with the job.
 func TestProbeIsLivenessAndTerminalStateIsScopeLoss(t *testing.T) {
 	cases := []struct {
 		name   string
 		state  string
-		reason string // empty means no scope loss, and the agent stays
+		reason string // empty means no scope loss, and fiberd stays
 	}{
 		{"staying RUNNING is nothing", "RUNNING", ""},
 		{"SUSPENDED is still the job's lifetime", "SUSPENDED", ""},
@@ -459,7 +459,7 @@ func TestProbeIsLivenessAndTerminalStateIsScopeLoss(t *testing.T) {
 			// Poll instead of a fixed sleep, so a slow machine does not flake.
 			for deadline := time.Now().Add(2 * time.Second); !h.Health().Healthy(time.Now()); time.Sleep(10 * time.Millisecond) {
 				if time.Now().After(deadline) {
-					t.Fatal("job RUNNING: lane must be healthy")
+					t.Fatal("job RUNNING: the issuer must be reachable")
 				}
 			}
 			mu.Lock()
@@ -492,7 +492,7 @@ func TestProbeIsLivenessAndTerminalStateIsScopeLoss(t *testing.T) {
 				if len(reasons) != 1 || reasons[0] != tc.reason {
 					t.Fatalf("reasons = %v, want exactly one for %s", reasons, tc.state)
 				}
-				// The fences are revoked first, then the agent leaves
+				// The fences are revoked first, then fiberd leaves
 				// with the job, once.
 				wantEnded = 1
 			}
@@ -503,9 +503,9 @@ func TestProbeIsLivenessAndTerminalStateIsScopeLoss(t *testing.T) {
 	}
 }
 
-// TestLaneHealth checks that the lane follows the probe and that SetLane
+// TestIssuerReachability checks that reachability follows the probe and that SetIssuerReachable
 // overrides it. The steps share one home and run in order.
-func TestLaneHealth(t *testing.T) {
+func TestIssuerReachability(t *testing.T) {
 	h := newHome(t, nil, []string{"/bin/sh", "-c", "exit 1"}, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -515,9 +515,9 @@ func TestLaneHealth(t *testing.T) {
 		act     func()
 		healthy bool
 	}{
-		{"the probe failing past the stale TTL makes the lane stale", func() { time.Sleep(250 * time.Millisecond) }, false},
-		{"SetLane(true) recovers the lane", func() { h.SetLane(true) }, true},
-		{"SetLane(false) makes the lane stale", func() { h.SetLane(false) }, false},
+		{"the probe failing past the stale TTL marks the issuer unreachable", func() { time.Sleep(250 * time.Millisecond) }, false},
+		{"SetIssuerReachable(true) marks the issuer reachable again", func() { h.SetIssuerReachable(true) }, true},
+		{"SetIssuerReachable(false) marks the issuer unreachable", func() { h.SetIssuerReachable(false) }, false},
 	}
 	for _, step := range steps {
 		ok := t.Run(step.name, func(t *testing.T) {

@@ -99,7 +99,7 @@ EOF
 }
 
 status() { # the home's ledger, through its admin socket
-  "${KC[@]}" -n "$NS" exec "$HOME_POD" -c agent -- sh -c 'grep -c "" /var/lib/fiberd/private/audit.jsonl >/dev/null; tail -3 /var/lib/fiberd/private/audit.jsonl | cut -c1-160'
+  "${KC[@]}" -n "$NS" exec "$HOME_POD" -c fiberd -- sh -c 'grep -c "" /var/lib/fiberd/private/audit.jsonl >/dev/null; tail -3 /var/lib/fiberd/private/audit.jsonl | cut -c1-160'
 }
 
 run() {
@@ -111,13 +111,13 @@ run() {
   pod kata-1 park | tee "$STATE/pod1.log"
   grep -q "fiber .* CREATE session=kata-demo" "$STATE/pod1.log" || { echo "FAIL: first Pod's container was not a fresh fiber"; exit 1; }
   "${KC[@]}" -n "$NS" delete pod kata-1 --wait=true >/dev/null
-  wait_for 30 "park recorded on the home" sh -c "${KC[*]} -n $NS exec $HOME_POD -c agent -- grep -q '\"event\":\"park\".*\"session\":\"kata-demo\"' /var/lib/fiberd/private/audit.jsonl"
+  wait_for 30 "park recorded on the home" sh -c "${KC[*]} -n $NS exec $HOME_POD -c fiberd -- grep -q '\"event\":\"park\".*\"session\":\"kata-demo\"' /var/lib/fiberd/private/audit.jsonl"
   echo "ok   deleted: the home parked session kata-demo"
   echo "--- the same session again: the container resumes where it was"
   pod kata-2 release | tee "$STATE/pod2.log"
   grep -q "fiber .* RESUME session=kata-demo" "$STATE/pod2.log" || { echo "FAIL: second Pod's container did not resume the parked session"; exit 1; }
   "${KC[@]}" -n "$NS" delete pod kata-2 --wait=true >/dev/null
-  wait_for 30 "release recorded on the home" sh -c "${KC[*]} -n $NS exec $HOME_POD -c agent -- grep -q '\"event\":\"release\".*kata-demo' /var/lib/fiberd/private/audit.jsonl"
+  wait_for 30 "release recorded on the home" sh -c "${KC[*]} -n $NS exec $HOME_POD -c fiberd -- grep -q '\"event\":\"release\".*kata-demo' /var/lib/fiberd/private/audit.jsonl"
   echo "ok   deleted: the home released session kata-demo"
   echo "PASS kata example: containers of a fiberd RuntimeClass Pod are fibers"
 }

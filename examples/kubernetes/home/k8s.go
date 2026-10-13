@@ -1,13 +1,13 @@
-// Package home is the Kubernetes home: the agent is PID 1 of a grant Pod.
+// Package home is the Kubernetes home: fiberd is PID 1 of a grant Pod.
 // It is the integration point with fiberd: everything fiberd needs from
 // an environment is the home.Home interface (pkg/home) plus the optional
-// interfaces pkg/agent looks for, and this package implements them
+// interfaces pkg/fiberd looks for, and this package implements them
 // against the Kubernetes API.
 // Grants arrive as *.jwt files the issuer controller projects into the
 // Pod; control-plane liveness is the API server answering for the Pod;
-// readiness is a Pod readiness gate the agent sets once a template is
+// readiness is a Pod readiness gate fiberd sets once a template is
 // warm; the cgroup subtree is the Pod's own, with the kubelet's ceiling on
-// it; endpoints are the Pod's IP; the fabric channel is the Pod's DRA
+// it; endpoints are the Pod's IP; the device channel is the Pod's DRA
 // claim. Scope is what the Pod is: namespace, service account, node,
 // claim. The home loses it when the namespace or the claim goes away
 // under a live Pod, or the service-account issuer rotates, and then bumps
@@ -30,14 +30,14 @@ import (
 	"github.com/helayoty/fiberd/pkg/core"
 	"github.com/helayoty/fiberd/pkg/endpoint"
 	"github.com/helayoty/fiberd/pkg/home"
-	"github.com/helayoty/fiberd/pkg/home/filelane"
+	"github.com/helayoty/fiberd/pkg/home/grantdir"
 	"github.com/helayoty/fiberd/pkg/sys/cgroup"
 
 	"github.com/helayoty/fiberd/examples/kubernetes/kube"
 )
 
 // ReadyCondition is the readiness gate the issuer puts on grant Pods and
-// the agent sets once any grant's template is warm.
+// fiberd sets once any grant's template is warm.
 const ReadyCondition = "fiberd.io/zygote-ready"
 
 type Config struct {
@@ -55,12 +55,12 @@ type Config struct {
 	// /sys/fs/cgroup); the runtime gets a `fiberd` subtree under it.
 	CgroupRoot string
 	// Devices is what the DRA driver exposed to this Pod (device paths
-	// or ids), handed to every grant's engine as its fabric channel.
+	// or ids), handed to every grant's engine as its device channel.
 	Devices []string
 	// Family picks which Pod IP callers dial (inet4 or inet6; unix means
 	// fibers are reachable from this Pod only).
 	Family endpoint.Family
-	// ListenPort is the port of the agent's gRPC listener, for the
+	// ListenPort is the port of fiberd's gRPC listener, for the
 	// advertised endpoint.
 	ListenPort string
 	// TokenFile is the projected service-account token, watched for an
@@ -93,7 +93,7 @@ type Home struct {
 	scopeLost func(ctx context.Context, reason string)
 
 	// pubMu orders PublishReady calls, so the gate's patches land in the
-	// order the agent made them. gate is the readiness condition the Pod
+	// order fiberd made them. gate is the readiness condition the Pod
 	// carries, read at start and then kept as last published.
 	pubMu sync.Mutex
 	gate  kube.Condition
@@ -276,7 +276,7 @@ func (h *Home) EndpointHost() string {
 	return ""
 }
 
-// AdvertisedEndpoint is where callers in the cluster reach this agent:
+// AdvertisedEndpoint is where callers in the cluster reach this fiberd:
 // the Pod IP of the family and the gRPC port.
 func (h *Home) AdvertisedEndpoint() string {
 	host := h.EndpointHost()
@@ -293,11 +293,11 @@ func (h *Home) Scope() []core.ScopeClaim {
 	return append([]core.ScopeClaim(nil), h.scope...)
 }
 
-// Fabric: the Pod's DRA claim, with the devices the driver exposed; a
+// Devices: the Pod's DRA claim, with the devices the driver exposed; a
 // static set when the Pod has devices but no claim; nothing otherwise.
 // The claim is the Pod's, so there is nothing to release per grant.
-func (h *Home) Fabric(context.Context, core.Grant) (core.FabricChannel, func(), error) {
-	fc := core.FabricChannel{Devices: append([]string(nil), h.cfg.Devices...)}
+func (h *Home) Devices(context.Context, core.Grant) (core.DeviceChannel, func(), error) {
+	fc := core.DeviceChannel{Devices: append([]string(nil), h.cfg.Devices...)}
 	switch {
 	case len(h.claims) > 0:
 		fc.Kind, fc.Detail = "dra", strings.Join(h.claims, ",")
@@ -309,7 +309,7 @@ func (h *Home) Fabric(context.Context, core.Grant) (core.FabricChannel, func(), 
 
 // Grants is the projected volume.
 func (h *Home) Grants(ctx context.Context) (<-chan home.GrantEvent, error) {
-	return filelane.Poll(ctx, h.cfg.GrantsDir, h.cfg.Poll)
+	return grantdir.Poll(ctx, h.cfg.GrantsDir, h.cfg.Poll)
 }
 
 // PublishReady sets the Pod's readiness gate: True while any admitted
@@ -345,24 +345,24 @@ func (h *Home) PublishReady(ctx context.Context, grantUID string, ready bool) er
 }
 
 // OnScopeLost sets what to call (once per reason) when the Pod's scope
-// goes away under it: cmd/fiberd wires Agent.BumpEpoch.
+// goes away under it: cmd/fiberd wires Core.BumpEpoch.
 func (h *Home) OnScopeLost(fn func(ctx context.Context, reason string)) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.scopeLost = fn
 }
 
-// SetLane is the test-only override behind fiberd's admin socket.
-func (h *Home) SetLane(healthy bool) {
+// SetIssuerReachable is the test-only override behind fiberd's admin socket.
+func (h *Home) SetIssuerReachable(reachable bool) {
 	h.mu.Lock()
-	h.paused = !healthy
+	h.paused = !reachable
 	h.mu.Unlock()
-	if healthy {
+	if reachable {
 		h.health.MarkSync(time.Now())
 	} else {
 		h.health.MarkSync(time.Now().Add(-h.cfg.StaleTTL))
 	}
-	log.Printf("k8s: grant lane set healthy=%v", healthy)
+	log.Printf("k8s: issuer reachable=%v (admin override)", reachable)
 }
 
 // Run polls the API server: the Pod answering is liveness; the namespace

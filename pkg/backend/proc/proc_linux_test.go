@@ -107,7 +107,7 @@ func fakeZygote(script, pid string) {
 	for {
 		line, nfds, err := recvLine(ctl)
 		if err != nil {
-			return // the agent closed the socket
+			return // fiberd closed the socket
 		}
 		_, _ = logf.WriteString(line)
 		if nfds > 0 {
@@ -151,7 +151,7 @@ func fakeZygote(script, pid string) {
 		case "error":
 			say("ERROR " + fence + " deadline exceeded before ready\n")
 		case "refuse":
-			say("ERROR " + fence + " refused: the mount namespace cannot hide what the agent asked (by the script)\n")
+			say("ERROR " + fence + " refused: the mount namespace cannot hide what fiberd asked (by the script)\n")
 		case "malformed":
 			say("CLONED " + fence + " abc\n")
 		case "short":
@@ -695,7 +695,7 @@ func TestParkNeedsTheLaunchersZygote(t *testing.T) {
 }
 
 // TestHeldByLiveProcess checks that the holder file beside a restore root says
-// whether another live agent has it. Anything else means nobody does.
+// whether another live fiberd has it. Anything else means nobody does.
 func TestHeldByLiveProcess(t *testing.T) {
 	cases := []struct {
 		name    string

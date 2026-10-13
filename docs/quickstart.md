@@ -2,7 +2,7 @@
 
 This page builds fiberd and runs the four protocol calls on this machine, then dials a real [fiber](glossary.md#fiber) on Linux. It is for anyone trying fiberd for the first time. Read the [README](../README.md) first, and [architecture.md](architecture.md) after this to understand what you saw.
 
-![The quickstart in four rows. Set up builds fiberd, starts the issuer and an agent on the in-memory runtime, and mints a grant. Session S is created, attached, parked and resumed as g1/1/2. The guide then probes refusals, stops the agent to verify its signed audit, restarts at epoch 2, and Park of g1/1/2 returns 404. On Linux, a real agent counts to 2, parks, resumes, and counts 3 with its state kept.](./images/quickstart-flow.svg)
+![The quickstart in four rows. Set up builds fiberd, starts the issuer and fiberd on the in-memory runtime, and mints a grant. Session S is created, attached, parked and resumed as g1/1/2. The guide then probes refusals, stops fiberd to verify its signed audit, restarts at epoch 2, and Park of g1/1/2 returns 404. On Linux, fiberd on the proc backend counts to 2, parks, resumes, and counts 3 with its state kept.](./images/quickstart-flow.svg)
 
 ## Build
 
@@ -14,7 +14,7 @@ make build
 
 ## Run the protocol on this machine
 
-The [agent](glossary.md#agent) speaks gRPC and, with `-http`, a JSON gateway of the same service. Without a `-runtime` flag it uses the `stub` [runtime](glossary.md#runtime), which runs no code, so it works on any OS. [Grants](glossary.md#grant) are signed tokens from `grant-issuer`, verified offline against the [issuer](glossary.md#issuer)'s published keys. `-insecure-plaintext` skips mutual TLS, for development only.
+[fiberd](glossary.md#fiberd) speaks gRPC and, with `-http`, a JSON gateway of the same service. Without a `-runtime` flag it uses the `stub` runtime ([backend](glossary.md#backend)), which runs no code, so it works on any OS. [Grants](glossary.md#grant) are signed tokens from `grant-issuer`, verified offline against the [issuer](glossary.md#issuer)'s published keys. `-insecure-plaintext` skips mutual TLS, for development only.
 
 A grant is `UNTRUSTED` unless its issuer says otherwise, and the stub runtime counts as isolating tenants because it runs no tenant code, so it admits this grant.
 
@@ -26,7 +26,7 @@ bin/fiberd -state $STATE -node-id node-a -verifier jwks -issuer http://127.0.0.1
   -insecure-plaintext -http :8485 -stale-ttl 5s &
 until curl -sf localhost:8485/healthz >/dev/null; do sleep 0.2; done
 
-# a grant for this node (-aud must equal the agent's -node-id),
+# a grant for this node (-aud must equal fiberd's -node-id),
 # 2 fibers of 1 MiB working set each, a 10 minute lease
 T=$(bin/grant-issuer mint -key $STATE/issuer.json -issuer http://127.0.0.1:8686 \
      -aud node-a -uid g1 -tenant demo -max 2 -w-budget 1Mi -min-tier FIBER_WARM -ttl 10m)
@@ -39,11 +39,11 @@ clone "{\"grantJwt\":\"$T\",\"session\":\"S\"}"   # RESUME, a new fiberId g1/1/2
 clone "{\"grantJwt\":\"$T\",\"image\":\"evil\"}"  # 400, an unknown field is refused
 clone "{\"grantJwt\":\"$T\"}"                      # anonymous CREATE g1/1/3, the grant is full (2/2)
 clone "{\"grantJwt\":\"$T\"}"                      # 503 DEFERRED_FALLBACK, full while the issuer is reachable
-kill %1; sleep 6                                   # stop the issuer, the lane goes stale after -stale-ttl
+kill %1; sleep 6                                   # stop the issuer, which counts as unreachable after -stale-ttl
 clone "{\"grantJwt\":\"$T\"}"                      # 429 SHED with Retry-After, issuer unreachable
 curl -s localhost:8485/v1/status                   # running fibers and the latest fence
 
-kill %2; wait %2                                   # stop the agent, which signs its audit spool
+kill %2; wait %2                                   # stop fiberd, which signs its audit spool
 bin/audit-verify -spool $STATE/private/audit.jsonl -trust $STATE/private/audit-key.json
 
 bin/grant-issuer serve -key $STATE/issuer.json -addr 127.0.0.1:8686 &
@@ -55,14 +55,14 @@ curl -s -X POST localhost:8485/v1/park -d '{"fiberId":"g1/1/2"}'   # 404, the re
 ```
 
 - The fiber ID is the [fence](glossary.md#fence), so each command uses the ID the call before it returned.
-- When the issuer stops answering, the home's [lane](glossary.md#lane) goes stale and misses turn from deferred to [shed](glossary.md#shed-and-deferred).
-- `audit-verify` checks the agent's local, signed record of every state change ([audit.md](design/audit.md)). The agent signs it when it stops, so the check runs after the stop.
+- When the issuer stops answering, the home reports it unreachable and misses turn from deferred to [shed](glossary.md#clone-misses).
+- `audit-verify` checks fiberd's local, signed record of every state change ([audit.md](design/audit.md)). fiberd signs it when it stops, so the check runs after the stop.
 
 [protocol.md](protocol.md) explains each reply. `-grants-dir` pre-admits `*.jwt` files dropped there, and removing one revokes the grant on this [home](glossary.md#home) ([home.md](design/home.md)).
 
 ## Dial a real fiber
 
-The fork [zygote](glossary.md#zygote), [cgroups](glossary.md#cgroup), [CRIU](glossary.md#criu) and the sandbox [backends](glossary.md#backend) need a Linux kernel. On a Mac, `hack/dev/run.sh bash` opens a shell in the Linux dev container, with this repository at `/src`. Run these steps there, since the container has every tool they use, `jq` included. They start the agent with `-runtime proc`, the proc backend, and refzygote, the reference template, serving HTTP. Their `make build zygote` replaces the Mac binaries in `bin/` with Linux ones, so run `make build` on the Mac again afterwards.
+The fork [zygote](glossary.md#zygote), [cgroups](glossary.md#cgroup), [CRIU](glossary.md#criu) and the sandbox [backends](glossary.md#backend) need a Linux kernel. On a Mac, `hack/dev/run.sh bash` opens a shell in the Linux dev container, with this repository at `/src`. Run these steps there, since the container has every tool they use, `jq` included. They start fiberd with `-runtime proc`, the proc backend, and refzygote, the reference template, serving HTTP. Their `make build zygote` replaces the Mac binaries in `bin/` with Linux ones, so run `make build` on the Mac again afterwards.
 
 ```bash
 make build zygote
@@ -88,7 +88,7 @@ A template is your program linked with libfiberzygote. [zygote/README.md](../zyg
 
 ## Conformance
 
-The [conformance suite](glossary.md#conformance-suite) checks these.
+The conformance suite in `tests/conform` checks these.
 
 - Idempotent [clones](glossary.md#clone).
 - Monotonic [fences](glossary.md#fence).

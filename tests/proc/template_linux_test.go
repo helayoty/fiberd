@@ -47,7 +47,7 @@ func pushTemplates(t *testing.T, args ...[]string) (repo string, digests []strin
 }
 
 // TestRegistryTemplateHidden pins that the template cache is hidden
-// from proc fibers, which run as the agent's uid and could otherwise
+// from proc fibers, which run as fiberd's uid and could otherwise
 // read or rewrite a cached template between the host's check and the
 // exec. A fiber sees the cache covered, with its own template's
 // executable alone bound back read-only at its path, because CRIU names
@@ -56,7 +56,7 @@ func pushTemplates(t *testing.T, args ...[]string) (repo string, digests []strin
 // keep the view and the state. The zygote's self-checkpoint, the parent
 // every delta is computed against, still works with the cache hidden.
 //
-// The same holds when the cache is reached through a symlink. The agent
+// The same holds when the cache is reached through a symlink. fiberd
 // hides the cache by the path it was configured with, while the kernel
 // names the zygote's executable resolved, and the old zygote compared
 // the two as they were. The cover then landed on the real directory
@@ -100,7 +100,7 @@ func symlinkedStateDir(t *testing.T) string {
 const narrowEnv = "FIBERD_PROCTEST_NARROW"
 
 // TestRegistryTemplateNarrowedCaps is TestRegistryTemplateHidden the way
-// a proc grant Pod runs it. The zygote has the agent's narrow capability
+// a proc grant Pod runs it. The zygote has fiberd's narrow capability
 // set, caps.Proc, which has no CAP_DAC_OVERRIDE, and the state directory
 // holding the template cache and the deltas is a mount of its own, as a
 // Pod's emptyDir is. A clone must succeed and a park must be a delta

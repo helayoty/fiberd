@@ -61,7 +61,7 @@ func names(list map[string]any) []string {
 func seedPod(s *kubetest.Server) {
 	s.Put(podPath, map[string]any{
 		"metadata": map[string]any{"labels": map[string]string{"a": "1", "b": "2"}},
-		"spec":     map[string]any{"nodeName": "n1", "containers": []map[string]any{{"name": "agent"}}},
+		"spec":     map[string]any{"nodeName": "n1", "containers": []map[string]any{{"name": "fiberd"}}},
 		"status": map[string]any{"phase": "Pending", "conditions": []map[string]any{
 			{"type": "Ready", "status": "False"}, {"type": "Other", "status": "True"}}},
 	})
@@ -179,9 +179,9 @@ func TestServer(t *testing.T) {
 			}},
 		{name: "a strategic PATCH merges list items keyed by name",
 			seed: seedPod, method: "PATCH", path: podPath, ctype: "application/strategic-merge-patch+json",
-			body: `{"spec":{"containers":[{"name":"agent","image":"i"},{"image":"keyless"}]}}`, code: 200,
+			body: `{"spec":{"containers":[{"name":"fiberd","image":"i"},{"image":"keyless"}]}}`, code: 200,
 			check: func(t *testing.T, s *kubetest.Server, _ map[string]any) {
-				want := []any{map[string]any{"name": "agent", "image": "i"}, map[string]any{"image": "keyless"}}
+				want := []any{map[string]any{"name": "fiberd", "image": "i"}, map[string]any{"image": "keyless"}}
 				if got := at(s.Get(podPath), "spec", "containers"); !reflect.DeepEqual(got, want) {
 					t.Fatalf("containers = %v, want %v", got, want)
 				}

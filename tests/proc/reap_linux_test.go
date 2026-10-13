@@ -61,7 +61,7 @@ func TestWaitBoundedNeverBlocks(t *testing.T) {
 // another child (settle_pending gives a closed readiness pipe 200ms) is
 // answered CLONED then EXITED, as it is when the loop is polling. The
 // old reap took every pending child it reaped for a birth that failed
-// and answered its CLONE with ERROR, so the agent's Clone failed for a
+// and answered its CLONE with ERROR, so fiberd's Clone failed for a
 // fiber that had run. Child b is forked first and reports after a
 // delay, child a closes its pipe at once and keeps running, and b's
 // report and exit land inside a's wait.

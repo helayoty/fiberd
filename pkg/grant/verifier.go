@@ -14,7 +14,7 @@ import (
 // key refresh: known keys verify from memory.
 //
 // Two failures are not authentication failures but reachability ones, and
-// are reported wrapped in core.ErrVerifyUnavailable so the agent answers
+// are reported wrapped in core.ErrVerifyUnavailable so fiberd answers
 // SHED (back off) instead of Unauthenticated (give up):
 //
 //   - the key set was never loaded and the issuer cannot be reached;

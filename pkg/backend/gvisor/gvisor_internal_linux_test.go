@@ -41,7 +41,14 @@ func newFakeMax(t *testing.T, k knobs, maxRestores int) (*Backend, *fakeRunsc) {
 	if err := os.Mkdir(rootfs, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	b := newBackend(Options{Runsc: "runsc", Rootfs: rootfs, StateDir: filepath.Join(t.TempDir(), "state"), MaxRestores: maxRestores}, f.run)
+	// A short state directory. The pool socket lives under it, and a unix
+	// socket path is at most 108 bytes, which a test's TempDir can pass.
+	state, err := os.MkdirTemp("", "gv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(state) })
+	b := newBackend(Options{Runsc: "runsc", Rootfs: rootfs, StateDir: filepath.Join(state, "state"), MaxRestores: maxRestores}, f.run)
 	if b.Tier() != core.TierSnapshot {
 		t.Fatalf("Tier = %s (%v), want FIBER_SNAPSHOT over the fake", b.Tier(), b.ProbeErr())
 	}
@@ -180,6 +187,62 @@ func findCall(calls []string, parts ...string) string {
 		}
 	}
 	return ""
+}
+
+// lastRestored is the cid of the last restore recorded, which is the
+// sandbox the call under test brought up, after the footprint probe's.
+func lastRestored(calls []string) string {
+	last := ""
+	for _, c := range calls {
+		if strings.Contains(c, "restore --detach") {
+			last = lastField(c)
+		}
+	}
+	return last
+}
+
+// restoresStarted counts the restores recorded, the footprint probe's
+// among them.
+func restoresStarted(calls []string) int {
+	n := 0
+	for _, c := range calls {
+		if strings.Contains(c, "restore --detach") {
+			n++
+		}
+	}
+	return n
+}
+
+// claimClosed dials the pool socket, sends what it is given (nothing for
+// "") and reports whether the backend closed the connection within the
+// bound, as it does for a claim it refuses.
+func claimClosed(t *testing.T, sock string, claim []byte, bound time.Duration) bool {
+	t.Helper()
+	c, err := net.Dial("unixpacket", sock)
+	if err != nil {
+		t.Fatalf("dial %s: %v", sock, err)
+	}
+	defer func() { _ = c.Close() }()
+	if len(claim) > 0 {
+		if _, err := c.Write(claim); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = c.SetReadDeadline(time.Now().Add(bound))
+	n, err := c.Read(make([]byte, 1))
+	return n == 0 && err != nil && !errors.Is(err, os.ErrDeadlineExceeded)
+}
+
+// poolSocketOf is the path of the warm instance's pool socket.
+func poolSocketOf(t *testing.T, b *Backend, id string) string {
+	t.Helper()
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	w := b.warms[id]
+	if w == nil {
+		t.Fatalf("no warm instance %q", id)
+	}
+	return filepath.Join(w.channel, poolSocket)
 }
 
 // TestNew checks that the tier is FIBER_SNAPSHOT only with a runsc that
@@ -354,7 +417,8 @@ func clipped(s string) string {
 }
 
 // TestWriteBundle checks the OCI spec every sandbox is created or restored
-// with. The run directory is /host, and the self-checkpoint annotations
+// with. The run directory is /host, fiberd directory is read-only at
+// /fiberd/channel in every sandbox, and the self-checkpoint annotations
 // are there only for a template with images.
 func TestWriteBundle(t *testing.T) {
 	cases := []struct {
@@ -365,7 +429,7 @@ func TestWriteBundle(t *testing.T) {
 		dir      func(t *testing.T) string
 		wantErr  bool
 	}{
-		{name: "fiber bundle", env: []string{"FIBERD_FENCE=g/1-1", "FIBERD_ENDPOINT=/host/ep.sock"}},
+		{name: "fiber bundle", env: []string{"FIBERD_TOKEN=" + strings.Repeat("ab", 16)}},
 		{name: "template with self-checkpoint", images: "/img"},
 		{name: "registry template bound read-only", template: "/state/templates/g/template"},
 		{name: "directory under a file", dir: func(t *testing.T) string {
@@ -383,7 +447,7 @@ func TestWriteBundle(t *testing.T) {
 			if tc.dir != nil {
 				dir = tc.dir(t)
 			}
-			err := b.writeBundle(dir, []string{"/bin/refzygote", "--gvisor"}, tc.env, "/run/g", tc.images, tc.template)
+			err := b.writeBundle(dir, []string{"/bin/refzygote", "--gvisor"}, tc.env, "/run/g", "/state/channel/w-g-1", tc.images, tc.template)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("writeBundle = %v, want error %v", err, tc.wantErr)
 			}
@@ -404,7 +468,7 @@ func TestWriteBundle(t *testing.T) {
 				t.Fatalf("spec = %+v", s)
 			}
 			// The rootfs is shared by every sandbox of every grant and
-			// served with the agent's credentials, so it is read-only.
+			// served with fiberd's credentials, so it is read-only.
 			if !s.Root.Readonly {
 				t.Fatalf("root = %+v, want read-only", s.Root)
 			}
@@ -412,7 +476,9 @@ func TestWriteBundle(t *testing.T) {
 			for _, m := range s.Mounts {
 				mounts = append(mounts, m.Destination+":"+m.Type+":"+m.Source+":"+strings.Join(m.Options, ","))
 			}
-			wantMounts := "/proc:proc:proc: /dev:tmpfs:tmpfs: /tmp:tmpfs:tmpfs: /host:bind:/run/g:rbind,rw"
+			// fiberd directory is read-only, after /host, in every
+			// sandbox, since a restore's mounts must match the checkpoint's.
+			wantMounts := "/proc:proc:proc: /dev:tmpfs:tmpfs: /tmp:tmpfs:tmpfs: /host:bind:/run/g:rbind,rw /fiberd/channel:bind:/state/channel/w-g-1:bind,ro,nosuid,nodev"
 			if tc.template != "" {
 				// Read-only, after /host, at the fixed path every home uses.
 				wantMounts += " /fiberd/template:bind:" + tc.template + ":bind,ro,nosuid,nodev"
@@ -759,21 +825,23 @@ func TestWarm(t *testing.T) {
 // probe cgroup as a fiber would be, measured serving from the leaf's
 // counters (a seeded directory here, a real leaf in tests/gvisor), and
 // ended, leaving nothing behind. A probe that cannot restore or serve
-// measures nothing.
+// measures nothing, and one without a cgroup runs all the same, since it
+// is where late binding is detected, and measures nothing.
 func TestProbeFootprint(t *testing.T) {
 	leaf := map[string]string{"memory.stat": "anon 4096\nshmem 8192\nfile 0\n", "memory.current": "12288\n"}
 	cases := []struct {
 		name      string
 		knobs     knobs
 		noCgroup  bool
+		noSandbox bool // the restore failed, so there was nothing to end
 		wantBytes uint64
 		wantTotal uint64
 		wantLog   string
 	}{
 		{name: "measured serving in the leaf", wantBytes: 8192, wantTotal: 12288},
 		{name: "no probe cgroup", noCgroup: true},
-		{name: "restore fails", knobs: knobs{Fail: map[string]bool{"restore": true}}, wantLog: "footprint probe: gvisor: runsc restore"},
-		{name: "never serves", knobs: knobs{NoServe: true}, wantLog: "footprint probe did not serve: context deadline exceeded"},
+		{name: "restore fails", knobs: knobs{Fail: map[string]bool{"restore": true}}, noSandbox: true, wantLog: "footprint probe: gvisor: runsc restore"},
+		{name: "never serves", knobs: knobs{NoServe: true}, wantLog: "probe did not serve: context deadline exceeded"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -799,24 +867,20 @@ func TestProbeFootprint(t *testing.T) {
 				t.Fatalf("log = %q, want %q", logs.String(), tc.wantLog)
 			}
 			calls := f.calls()
-			if tc.noCgroup {
-				if findCall(calls, "-probe") != "" {
-					t.Fatal("a probe ran without a probe cgroup")
-				}
-				return
-			}
 			tdir := filepath.Join(b.opt.StateDir, "templates", warmCID(t, b, "g"))
 			probe := warmCID(t, b, "g") + "-probe"
-			restore := "restore --detach --image-path " + filepath.Join(tdir, "images") + " --bundle " + filepath.Join(tdir, "probe-bundle") + " --direct " + probe
+			restore := "restore --detach --pid-file " + filepath.Join(tdir, "probe-bundle", "pid") + " --image-path " + filepath.Join(tdir, "images") + " --bundle " + filepath.Join(tdir, "probe-bundle") + " --direct " + probe
 			if findCall(calls, restore) == "" {
 				t.Fatalf("no probe restore among\n%s", strings.Join(calls, "\n"))
 			}
 			if got := f.cgroupOf(restore); got != fd {
 				t.Fatalf("the probe was restored in cgroup fd %d, want the probe cgroup %d", got, fd)
 			}
-			for _, want := range []string{"kill " + probe + " KILL", "wait " + probe, "delete -force " + probe} {
-				if findCall(calls, want) == "" {
-					t.Fatalf("no %q among\n%s", want, strings.Join(calls, "\n"))
+			if !tc.noSandbox {
+				for _, want := range []string{"kill " + probe + " KILL", "delete -force " + probe} {
+					if findCall(calls, want) == "" {
+						t.Fatalf("no %q among\n%s", want, strings.Join(calls, "\n"))
+					}
 				}
 			}
 			if f.alive(probe) {
@@ -844,7 +908,7 @@ func TestProbeWithoutABundle(t *testing.T) {
 			if err := os.WriteFile(tdir, nil, 0o600); err != nil {
 				t.Fatal(err)
 			}
-			w := &warm{id: "g", cid: "w-g", argv: []string{"/bin/refzygote"}, workDir: t.TempDir(), images: filepath.Join(tdir, "images")}
+			w := &warm{id: "g", cid: "w-g", argv: []string{"/bin/refzygote"}, workDir: t.TempDir(), images: filepath.Join(tdir, "images"), pending: map[string]*box{}}
 			shmem, total := b.probeFootprint(context.Background(), w, cgroupFiles(t, nil))
 			if shmem != 0 || total != 0 {
 				t.Fatalf("probeFootprint = %d/%d, want nothing", shmem, total)
@@ -857,20 +921,25 @@ func TestProbeWithoutABundle(t *testing.T) {
 }
 
 // TestClone checks that a fiber is a sandbox restored from the template image
-// with the fence, endpoint and payload in its environment, serving before
-// Clone returns, and its end is reported with the sandbox's status. With
-// the sandbox pid unknown (noPID), the status is what `runsc wait` says.
+// with a one-shot token in its environment and nothing else, handed its
+// fence, endpoint, payload and a fresh seed in one record on the channel
+// it dials, serving before Clone returns, and its end is reported with
+// the sandbox's status. A template that polls the spec environment
+// instead (spec) gets the fence, endpoint and payload there. With the
+// sandbox pid unknown (noPID), the status is what `runsc wait` says.
 func TestClone(t *testing.T) {
 	cases := []struct {
 		name       string
 		knobs      knobs
 		payload    []byte
+		spec       bool
 		noPID      bool
 		wantStatus string
 	}{
 		{name: "exit 0", wantStatus: "exit:0"},
 		{name: "payload and a signal", payload: []byte{1, 2, 3}, knobs: knobs{ExitStatus: 137}, wantStatus: "signal:9"},
-		{name: "wait says nothing readable", knobs: knobs{BadWaitJSON: true, Fail: map[string]bool{"state": true}}, noPID: true, wantStatus: "exit:?"},
+		{name: "wait says nothing readable", knobs: knobs{BadWaitJSON: true, NoPidFile: true, Fail: map[string]bool{"state": true}}, noPID: true, wantStatus: "exit:?"},
+		{name: "template that polls the spec environment", payload: []byte{1, 2, 3}, knobs: knobs{NoToken: true}, spec: true, wantStatus: "exit:0"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -900,17 +969,22 @@ func TestClone(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			for _, want := range []string{`"FIBERD_FENCE=g/1-1"`, `"FIBERD_ENDPOINT=/host/ep.sock"`} {
-				if !strings.Contains(string(cfgJSON), want) {
-					t.Fatalf("bundle lacks %s:\n%s", want, cfgJSON)
+			token, records := f.channelOf(fc)
+			if tc.spec {
+				for _, want := range []string{`"FIBERD_FENCE=g/1-1"`, `"FIBERD_ENDPOINT=/host/ep.sock"`, `"FIBERD_PAYLOAD=010203"`} {
+					if !strings.Contains(string(cfgJSON), want) {
+						t.Fatalf("bundle lacks %s:\n%s", want, cfgJSON)
+					}
 				}
-			}
-			if strings.Contains(string(cfgJSON), "FIBERD_PAYLOAD=010203") != (len(tc.payload) > 0) {
-				t.Fatalf("bundle payload: %s", cfgJSON)
+				if len(records) != 0 {
+					t.Fatalf("a template that polls the spec was handed %v on the channel", records)
+				}
+			} else {
+				checkIdentity(t, cfgJSON, token, records, "clone", "g/1-1", "/host/ep.sock", tc.payload)
 			}
 			tdir := filepath.Join(b.opt.StateDir, "templates", warmCID(t, b, "g"))
 			calls := f.calls()
-			if findCall(calls, "restore --detach --image-path "+filepath.Join(tdir, "images")+" --bundle "+bundle+" --direct "+fc) == "" {
+			if findCall(calls, "restore --detach --pid-file "+filepath.Join(bundle, "pid")+" --image-path "+filepath.Join(tdir, "images")+" --bundle "+bundle+" --direct "+fc) == "" {
 				t.Fatalf("no restore among\n%s", strings.Join(calls, "\n"))
 			}
 			if err := b.Kill("nobody"); err != nil {
@@ -936,11 +1010,14 @@ func TestClone(t *testing.T) {
 }
 
 // TestCloneRefusals checks what Clone refuses or cannot bring up, and the
-// sandbox it ends when the fiber never serves.
+// sandbox it ends when the fiber never serves, never claims its token or
+// acks with another fence. after is set once the template is warm, so
+// the probe saw a template that binds late.
 func TestCloneRefusals(t *testing.T) {
 	cases := []struct {
 		name     string
 		knobs    knobs
+		after    *knobs
 		warmID   string
 		endpoint string // relative to the run directory unless absolute
 		bundles  bool   // the state directory's bundles entry is a file
@@ -955,10 +1032,16 @@ func TestCloneRefusals(t *testing.T) {
 		{name: "restore fails", endpoint: "ep.sock", knobs: knobs{Fail: map[string]bool{"restore": true}}, wantText: "runsc restore: exit status 1: fake runsc: restore failed (no leaf)"},
 		{name: "never serves", endpoint: "ep.sock", knobs: knobs{NoServe: true}, deadline: 300 * time.Millisecond, wantErr: context.DeadlineExceeded, wantText: "g/1-1 did not serve", wantKill: true},
 		{name: "restore misses the deadline", endpoint: "ep.sock", knobs: knobs{SlowRestore: 3 * time.Second}, deadline: 100 * time.Millisecond, wantErr: context.DeadlineExceeded, wantText: "runsc restore"},
+		{name: "never sends its token", endpoint: "ep.sock", after: &knobs{NoToken: true}, deadline: 300 * time.Millisecond, wantErr: context.DeadlineExceeded, wantText: "g/1-1 sent no token", wantKill: true},
+		{name: "sends a token nobody minted", endpoint: "ep.sock", after: &knobs{WrongToken: true}, deadline: 2 * time.Second, wantText: "g/1-1 exited before sending its token", wantKill: true},
+		{name: "acks with another fence", endpoint: "ep.sock", after: &knobs{BadAck: true}, deadline: 2 * time.Second, wantText: "g/1-1: ack names", wantKill: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			b, f, w, workDir := warmed(t, tc.knobs)
+			if tc.after != nil {
+				f.setKnobs(*tc.after)
+			}
 			warmID := w.ID
 			if tc.warmID != "" {
 				warmID = tc.warmID
@@ -981,7 +1064,7 @@ func TestCloneRefusals(t *testing.T) {
 			if tc.wantKill {
 				// The reaper may have unregistered the box already, so
 				// its cid comes from the restore that started it.
-				fc := lastField(findCall(f.calls(), "restore --detach"))
+				fc := lastRestored(f.calls())
 				if findCall(f.calls(), "kill "+fc+" KILL") == "" {
 					t.Fatal("a fiber that never served was not killed")
 				}
@@ -1056,7 +1139,7 @@ func TestRestoreBound(t *testing.T) {
 				}()
 				if i == 0 {
 					// The first clone holds a slot before any other asks.
-					waitFor(t, "the first restore to start", func() bool { return f.peakRestores() >= 1 })
+					waitFor(t, "the first restore to start", func() bool { return restoresStarted(f.calls()) >= 2 })
 				}
 			}
 			wg.Wait()
@@ -1084,7 +1167,7 @@ func TestRestoreBound(t *testing.T) {
 // the state directory, never under the grant's run directory. Every
 // sandbox of the grant has that directory as /host, read and write, so
 // a bundle there could be rewritten by a sibling before runsc read it,
-// and a name there may be a link a sandbox planted for the agent to
+// and a name there may be a link a sandbox planted for fiberd to
 // write through. Here the run directory's "bundles" entry is planted
 // before the clone, as a sandbox could plant it.
 func TestBundleOutsideRunDir(t *testing.T) {
@@ -1126,7 +1209,7 @@ func TestBundleOutsideRunDir(t *testing.T) {
 				t.Fatalf("bundle under the state directory: %v", err)
 			}
 			if ents, _ := os.ReadDir(victim); len(ents) != 0 {
-				t.Fatalf("the agent wrote through the planted link: %v", ents)
+				t.Fatalf("fiberd wrote through the planted link: %v", ents)
 			}
 			if err := b.Kill("g/1-1"); err != nil {
 				t.Fatalf("Kill: %v", err)
@@ -1139,17 +1222,20 @@ func TestBundleOutsideRunDir(t *testing.T) {
 // TestParkAndResume checks that a park asks the workload to close its
 // endpoint, checkpoints the sandbox (which ends it) and keeps the bundle
 // beside the image. A resume brings the image back under a new fence and
-// endpoint.
+// endpoint, handed over on the channel as a clone's are, or in the spec
+// environment for a template that polls it.
 func TestParkAndResume(t *testing.T) {
 	cases := []struct {
 		name  string
 		knobs knobs
+		spec  bool
 	}{
 		{name: "park, then resume under a new fence"},
 		// The reaper removes the bundle as soon as the sandbox is gone,
 		// which is before a real checkpoint returns. The bundle must be
 		// beside the image all the same.
 		{name: "checkpoint outlasts the reaper's cleanup", knobs: knobs{SlowCheckpt: 300 * time.Millisecond}},
+		{name: "template that polls the spec environment", knobs: knobs{NoToken: true}, spec: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1194,12 +1280,20 @@ func TestParkAndResume(t *testing.T) {
 			if pid := f.pidOf(fc2); pid == 0 || fb.ID != "g/2-1" || fb.PID != pid || !dialable(ep) {
 				t.Fatalf("Resume = %+v (pid %d), want g/2-1 serving on %s", fb, pid, ep)
 			}
-			if findCall(f.calls(), "restore --detach --image-path "+dir+" --bundle "+b.bundleDir(fc2)+" --direct "+fc2) == "" {
+			if findCall(f.calls(), "restore --detach --pid-file "+filepath.Join(b.bundleDir(fc2), "pid")+" --image-path "+dir+" --bundle "+b.bundleDir(fc2)+" --direct "+fc2) == "" {
 				t.Fatal("the resume did not restore the park image")
 			}
 			cfgJSON, err := os.ReadFile(filepath.Join(b.bundleDir(fc2), "config.json"))
-			if err != nil || !strings.Contains(string(cfgJSON), `"/bin/refzygote"`) || !strings.Contains(string(cfgJSON), `"FIBERD_FENCE=g/2-1"`) {
+			if err != nil || !strings.Contains(string(cfgJSON), `"/bin/refzygote"`) {
 				t.Fatalf("resumed bundle = %s (%v)", cfgJSON, err)
+			}
+			token, records := f.channelOf(fc2)
+			if tc.spec {
+				if !strings.Contains(string(cfgJSON), `"FIBERD_FENCE=g/2-1"`) || len(records) != 0 {
+					t.Fatalf("resumed bundle = %s, channel records %v", cfgJSON, records)
+				}
+			} else {
+				checkIdentity(t, cfgJSON, token, records, "resume", "g/2-1", "/host/ep2.sock", nil)
 			}
 			if err := b.Kill("g/2-1"); err != nil {
 				t.Fatalf("Kill: %v", err)
@@ -1252,7 +1346,8 @@ func TestParkRefusals(t *testing.T) {
 }
 
 // TestResumeRefusals checks that a park image without its bundle, or with one
-// that cannot be read, is not resumed.
+// that cannot be read, is not resumed, and neither is one under a grant
+// with no warm instance, whose pool socket the resumed sandbox would dial.
 func TestResumeRefusals(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -1261,6 +1356,7 @@ func TestResumeRefusals(t *testing.T) {
 	}{
 		{name: "no bundle beside the image", wantText: "park image without its bundle"},
 		{name: "unreadable bundle", config: "{nonsense", wantText: "invalid character"},
+		{name: "no warm instance to resume under", config: `{"process":{"args":["/bin/refzygote"]}}`, wantText: `no warm template "g" to resume under`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1271,7 +1367,7 @@ func TestResumeRefusals(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			_, err := b.Resume(context.Background(), backend.ResumeSpec{Dir: dir, Fence: "g/2-1", Endpoint: filepath.Join(t.TempDir(), "ep.sock"), CgroupFD: -1})
+			_, err := b.Resume(context.Background(), backend.ResumeSpec{Dir: dir, Fence: "g/2-1", Endpoint: filepath.Join(t.TempDir(), "ep.sock"), CgroupFD: -1, WarmID: "g"})
 			if err == nil || !strings.Contains(err.Error(), tc.wantText) {
 				t.Fatalf("Resume = %v, want %q", err, tc.wantText)
 			}
@@ -1279,22 +1375,34 @@ func TestResumeRefusals(t *testing.T) {
 	}
 }
 
-// TestClose checks that closing kills the template and every fiber, and each is
-// reported gone.
+// TestClose checks that closing kills the template, every fiber and every
+// pooled sandbox, and each is reported gone.
 func TestClose(t *testing.T) {
 	cases := []struct {
-		name string
-	}{{name: "template and fiber"}}
+		name   string
+		pooled bool
+	}{
+		{name: "template and fiber"},
+		{name: "template, fiber and a pooled sandbox", pooled: true},
+	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			b, f, _, _ := cloned(t, knobs{})
 			cids := []string{warmCID(t, b, "g"), boxCID(t, b, "g/1-1")}
+			want := map[backend.Exit]bool{{WarmID: "g", Status: "template sandbox exited"}: true, {FiberID: "g/1-1", Status: "exit:0"}: true}
+			if tc.pooled {
+				p, err := b.Pool(context.Background(), "g", backend.PoolSpec{CgroupFD: -1, Deadline: 2 * time.Second})
+				if err != nil {
+					t.Fatalf("Pool: %v", err)
+				}
+				cids = append(cids, p.ID)
+				want[backend.Exit{PooledID: p.ID, Status: "exit:0"}] = true
+			}
 			b.Close()
 			got := map[backend.Exit]bool{}
-			for i := 0; i < 2; i++ {
+			for range want {
 				got[waitExit(t, b)] = true
 			}
-			want := map[backend.Exit]bool{{WarmID: "g", Status: "template sandbox exited"}: true, {FiberID: "g/1-1", Status: "exit:0"}: true}
 			if fmt.Sprint(got) != fmt.Sprint(want) {
 				t.Fatalf("exits = %v, want %v", got, want)
 			}
@@ -1388,7 +1496,7 @@ func TestReaperNeedsNoProcess(t *testing.T) {
 	}{
 		{name: "exit", knobs: knobs{ExitStatus: 3}, wantStatus: "exit:3"},
 		{name: "signal", knobs: knobs{ExitStatus: 143}, wantStatus: "signal:15"},
-		{name: "pid unknown", knobs: knobs{ExitStatus: 3, Fail: map[string]bool{"state": true}}, wantWait: true, wantStatus: "exit:3"},
+		{name: "pid unknown", knobs: knobs{ExitStatus: 3, NoPidFile: true, Fail: map[string]bool{"state": true}}, wantWait: true, wantStatus: "exit:3"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1503,7 +1611,7 @@ func TestSweep(t *testing.T) {
 			// A sandbox of a previous life, started outside any backend.
 			old := &Backend{opt: Options{Rootfs: "/rootfs"}}
 			bundle := filepath.Join(t.TempDir(), "bundle")
-			if err := old.writeBundle(bundle, []string{"/bin/refzygote"}, []string{"FIBERD_FENCE=none"}, t.TempDir(), "", ""); err != nil {
+			if err := old.writeBundle(bundle, []string{"/bin/refzygote"}, []string{"FIBERD_FENCE=none"}, t.TempDir(), t.TempDir(), "", ""); err != nil {
 				t.Fatal(err)
 			}
 			var out bytes.Buffer
@@ -1513,7 +1621,7 @@ func TestSweep(t *testing.T) {
 			// What the previous life left on disk: a fiber's bundle and a
 			// template's directory, and a stray file beside them.
 			state := filepath.Join(t.TempDir(), "state")
-			stale := []string{filepath.Join(state, "bundles", "f-old-9"), filepath.Join(state, "templates", "w-old-7", "images")}
+			stale := []string{filepath.Join(state, "bundles", "f-old-9"), filepath.Join(state, "templates", "w-old-7", "images"), filepath.Join(state, "channel", "w-old-7")}
 			for _, d := range stale {
 				if err := os.MkdirAll(d, 0o755); err != nil {
 					t.Fatal(err)
@@ -1525,7 +1633,7 @@ func TestSweep(t *testing.T) {
 			b := newBackend(Options{Runsc: "runsc", Rootfs: t.TempDir(), StateDir: state}, f.run)
 			t.Cleanup(b.Close)
 			left := 0
-			for _, sub := range []string{"bundles", "templates"} {
+			for _, sub := range []string{"bundles", "templates", "channel"} {
 				ents, _ := os.ReadDir(filepath.Join(state, sub))
 				left += len(ents)
 			}
@@ -1643,6 +1751,584 @@ func TestCIDReuse(t *testing.T) {
 				t.Fatalf("the successor reuses cid %s", first)
 			}
 			tc.settle(t, b, f, second)
+		})
+	}
+}
+
+// isHex reports whether s is n hex characters.
+func isHex(s string, n int) bool {
+	if len(s) != n {
+		return false
+	}
+	_, err := hex.DecodeString(s)
+	return err == nil
+}
+
+// checkIdentity checks a late-binding restore: its bundle carries the
+// token the sandbox claimed with and nothing of the fiber, and the one
+// identity record on the channel names the kind, fence, endpoint and
+// payload and carries a fresh seed of seedBytes.
+func checkIdentity(t *testing.T, cfgJSON []byte, token string, records [][]string, kind, fence, endpoint string, payload []byte) {
+	t.Helper()
+	if !isHex(token, 2*tokenBytes) || !strings.Contains(string(cfgJSON), `"FIBERD_TOKEN=`+token+`"`) {
+		t.Fatalf("bundle token %q:\n%s", token, cfgJSON)
+	}
+	for _, name := range []string{"FIBERD_FENCE", "FIBERD_ENDPOINT", "FIBERD_PAYLOAD"} {
+		if strings.Contains(string(cfgJSON), name) {
+			t.Fatalf("bundle names %s, which belongs on the channel:\n%s", name, cfgJSON)
+		}
+	}
+	if len(records) != 1 || len(records[0]) != identityFields {
+		t.Fatalf("channel records = %v, want one identity of %d fields", records, identityFields)
+	}
+	ph := "-"
+	if len(payload) > 0 {
+		ph = hex.EncodeToString(payload)
+	}
+	got := records[0]
+	want := []string{"", kind, fence, endpoint, ph, "-", "-", "-", ""}
+	for i := 1; i < identityFields-1; i++ {
+		if got[i] != want[i] {
+			t.Fatalf("identity field %d = %q, want %q (record %v)", i, got[i], want[i], got)
+		}
+	}
+	if !isHex(got[identityFields-1], 2*seedBytes) {
+		t.Fatalf("identity seed = %q, want %d hex characters", got[identityFields-1], 2*seedBytes)
+	}
+}
+
+// TestProbeDetectsLateBinding checks that the footprint probe, whose spec
+// carries a token and the probe's fence and endpoint both, tells a
+// template that dials the pool socket from one that polls the spec
+// environment, measures either serving, and that Pool refuses the
+// latter's warm instance.
+func TestProbeDetectsLateBinding(t *testing.T) {
+	leaf := map[string]string{"memory.stat": "anon 4096\nshmem 8192\nfile 0\n", "memory.current": "12288\n"}
+	cases := []struct {
+		name       string
+		knobs      knobs
+		wantNoPool bool
+	}{
+		{name: "template sends a token"},
+		{name: "template polls the spec", knobs: knobs{NoToken: true}, wantNoPool: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var logs bytes.Buffer
+			log.SetOutput(&logs)
+			t.Cleanup(func() { log.SetOutput(os.Stderr) })
+			b, f := newFake(t, tc.knobs)
+			workDir := filepath.Join(t.TempDir(), "g")
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			w, err := b.Warm(ctx, backend.WarmSpec{GrantUID: "g", Template: backend.Template{Argv: []string{"/bin/refzygote"}}, CgroupFD: -1, ProbeCgroupFD: cgroupFiles(t, leaf), WorkDir: workDir})
+			if err != nil {
+				t.Fatalf("Warm: %v", err)
+			}
+			if w.Bytes != 8192 || w.TotalBytes != 12288 {
+				t.Fatalf("Warm measured %d/%d bytes, want the probe serving", w.Bytes, w.TotalBytes)
+			}
+			b.mu.Lock()
+			noPool := b.warms["g"].noPool
+			b.mu.Unlock()
+			if noPool != tc.wantNoPool || strings.Contains(logs.String(), "has no pool") != tc.wantNoPool {
+				t.Fatalf("noPool = %v, log %q, want %v", noPool, logs.String(), tc.wantNoPool)
+			}
+			probe := warmCID(t, b, "g") + "-probe"
+			_, records := f.channelOf(probe)
+			if (len(records) == 0) != tc.wantNoPool {
+				t.Fatalf("probe channel records = %v, noPool %v", records, tc.wantNoPool)
+			}
+			p, err := b.Pool(ctx, "g", backend.PoolSpec{CgroupFD: -1, Deadline: 2 * time.Second})
+			if errors.Is(err, backend.ErrNoPool) != tc.wantNoPool {
+				t.Fatalf("Pool = %+v, %v, want ErrNoPool %v", p, err, tc.wantNoPool)
+			}
+			if err == nil {
+				b.Discard(p.ID)
+				waitExit(t, b)
+			}
+		})
+	}
+}
+
+// TestPoolBind checks a sandbox restored ahead of its fiber: Pool waits
+// for it to claim its token on the pool socket and Bind hands it the
+// identity, with a fresh seed, on that held connection, then waits for
+// the ack and the endpoint. An unknown, repeated or missing claim is
+// closed, no token under the deadline kills the sandbox, and a bad or
+// missing ack kills what is the fiber by then. after is set once the
+// template is warm, so the probe saw a template that binds late.
+func TestPoolBind(t *testing.T) {
+	cases := []struct {
+		name        string
+		after       knobs
+		deadline    time.Duration
+		wantPoolErr string
+		wantExit    string // how the sandbox of a failed Pool ended
+		wantBindErr string
+		// A connection of the test's own, made once the sandbox holds its
+		// claim: it repeats the sandbox's token, or says nothing. Either
+		// must be closed.
+		repeat, silent bool
+	}{
+		{name: "token claimed, identity handed out"},
+		{name: "unknown token", after: knobs{WrongToken: true}, wantPoolErr: "exited before sending its token", wantExit: "exit:122"},
+		{name: "repeated token is closed", repeat: true},
+		{name: "a connection that sends no token is closed", silent: true},
+		{name: "no token before the deadline", after: knobs{NoToken: true}, deadline: 300 * time.Millisecond, wantPoolErr: "sent no token: context deadline exceeded", wantExit: "exit:0"},
+		{name: "ack with the wrong fence", after: knobs{BadAck: true}, wantBindErr: "g/1-1: ack names"},
+		{name: "no ack", after: knobs{NoAck: true}, deadline: 300 * time.Millisecond, wantBindErr: "g/1-1: no ack: context deadline exceeded"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b, f, w, workDir := warmed(t, knobs{})
+			f.setKnobs(tc.after)
+			deadline := 2 * time.Second
+			if tc.deadline > 0 {
+				deadline = tc.deadline
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			p, err := b.Pool(ctx, w.ID, backend.PoolSpec{CgroupFD: -1, Deadline: deadline})
+			if tc.wantPoolErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantPoolErr) {
+					t.Fatalf("Pool = %+v, %v, want %q", p, err, tc.wantPoolErr)
+				}
+				pc := lastRestored(f.calls())
+				if findCall(f.calls(), "kill "+pc+" KILL") == "" || f.alive(pc) {
+					t.Fatal("the sandbox that never claimed its token was not killed")
+				}
+				// Its end is reported under the pooled id, as a fiber's is
+				// after a failed Clone, and the host drops what it does
+				// not know.
+				if e := waitExit(t, b); e != (backend.Exit{PooledID: pc, Status: tc.wantExit}) {
+					t.Fatalf("exit = %+v, want pooled %s with %s", e, pc, tc.wantExit)
+				}
+				b.mu.Lock()
+				n := len(b.pooled)
+				b.mu.Unlock()
+				if n != 0 {
+					t.Fatalf("%d pooled sandboxes registered after a failed Pool", n)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Pool: %v", err)
+			}
+			pid := f.pidOf(p.ID)
+			if !strings.HasPrefix(p.ID, "p-g-") || pid == 0 || p.PID != pid {
+				t.Fatalf("Pool = %+v, want a p-g- id with the sandbox pid %d", p, pid)
+			}
+			token, records := f.channelOf(p.ID)
+			if len(records) != 0 {
+				t.Fatalf("before Bind the channel carried %v", records)
+			}
+			if tc.repeat || tc.silent {
+				sock := poolSocketOf(t, b, "g")
+				var claim []byte
+				if tc.repeat {
+					claim = record(recClaim, token)
+				}
+				if !claimClosed(t, sock, claim, 2*claimWait) {
+					t.Fatal("the backend kept the connection")
+				}
+				if !f.alive(p.ID) {
+					t.Fatal("the pooled sandbox was ended by a stray claim")
+				}
+			}
+			ep := filepath.Join(workDir, "ep.sock")
+			fb, err := b.Bind(ctx, p.ID, backend.FiberSpec{Fence: "g/1-1", Endpoint: ep, CgroupFD: -1, Deadline: deadline, Payload: []byte{1, 2}})
+			if tc.wantBindErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantBindErr) {
+					t.Fatalf("Bind = %+v, %v, want %q", fb, err, tc.wantBindErr)
+				}
+				if findCall(f.calls(), "kill "+p.ID+" KILL") == "" || f.alive(p.ID) {
+					t.Fatal("the sandbox was not killed after the failed hand-out")
+				}
+				// The sandbox kept its pooled id, so its end is never
+				// mistaken for a fiber's born under the fence meanwhile.
+				if e := waitExit(t, b); e.PooledID != p.ID || e.FiberID != "" {
+					t.Fatalf("exit = %+v, want the pooled sandbox %s", e, p.ID)
+				}
+				b.mu.Lock()
+				pooled, known := len(b.pooled), b.boxes["g/1-1"] != nil
+				b.mu.Unlock()
+				if pooled != 0 || known {
+					t.Fatalf("after the failed Bind %d pooled and the fence registered %v", pooled, known)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Bind: %v", err)
+			}
+			if fb.ID != "g/1-1" || fb.PID != pid || !dialable(ep) {
+				t.Fatalf("Bind = %+v, want g/1-1 with pid %d serving on %s", fb, pid, ep)
+			}
+			cfgJSON, err := os.ReadFile(filepath.Join(b.bundleDir(p.ID), "config.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, records = f.channelOf(p.ID)
+			checkIdentity(t, cfgJSON, token, records, "clone", "g/1-1", "/host/ep.sock", []byte{1, 2})
+			b.mu.Lock()
+			pooled, known := len(b.pooled), b.boxes["g/1-1"] != nil
+			b.mu.Unlock()
+			if pooled != 0 || !known {
+				t.Fatalf("after Bind %d pooled and the fiber registered %v", pooled, known)
+			}
+			if err := b.Kill("g/1-1"); err != nil {
+				t.Fatalf("Kill: %v", err)
+			}
+			if e := waitExit(t, b); e != (backend.Exit{FiberID: "g/1-1", Status: "exit:0"}) {
+				t.Fatalf("exit = %+v", e)
+			}
+		})
+	}
+}
+
+// TestPooledEnds checks how a pooled sandbox ends before Bind: dying on
+// its own or discarded, its end is reported under its pooled id, and
+// Pool and Bind refuse what they do not know.
+func TestPooledEnds(t *testing.T) {
+	cases := []struct {
+		name string
+		end  func(t *testing.T, b *Backend, f *fakeRunsc, id string)
+		want string // the exit status, "" when no exit is expected
+	}{
+		{name: "dies before Bind", end: func(_ *testing.T, _ *Backend, f *fakeRunsc, id string) { f.endWith(id, 122) }, want: "exit:122"},
+		{name: "discarded", end: func(_ *testing.T, b *Backend, _ *fakeRunsc, id string) { b.Discard(id) }, want: "exit:0"},
+		{name: "unknown ids are refused", end: func(t *testing.T, b *Backend, _ *fakeRunsc, _ string) {
+			if _, err := b.Pool(context.Background(), "nobody", backend.PoolSpec{CgroupFD: -1}); err == nil || !strings.Contains(err.Error(), `no warm template "nobody"`) {
+				t.Fatalf("Pool of an unknown template = %v", err)
+			}
+			if _, err := b.Bind(context.Background(), "nobody", backend.FiberSpec{Fence: "g/1-1", CgroupFD: -1}); err == nil || !strings.Contains(err.Error(), `no pooled sandbox "nobody"`) {
+				t.Fatalf("Bind of an unknown sandbox = %v", err)
+			}
+			b.Discard("nobody")
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b, f, w, _ := warmed(t, knobs{})
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			p, err := b.Pool(ctx, w.ID, backend.PoolSpec{CgroupFD: -1, Deadline: 2 * time.Second})
+			if err != nil {
+				t.Fatalf("Pool: %v", err)
+			}
+			tc.end(t, b, f, p.ID)
+			if tc.want == "" {
+				if !f.alive(p.ID) {
+					t.Fatal("the pooled sandbox was ended")
+				}
+				b.Discard(p.ID)
+				waitExit(t, b)
+				return
+			}
+			if e := waitExit(t, b); e != (backend.Exit{PooledID: p.ID, Status: tc.want}) {
+				t.Fatalf("exit = %+v, want pooled %s with %s", e, p.ID, tc.want)
+			}
+			b.mu.Lock()
+			n := len(b.pooled) + len(b.boxes)
+			b.mu.Unlock()
+			if n != 0 {
+				t.Fatalf("%d sandboxes registered after the end", n)
+			}
+			if _, err := b.Bind(ctx, p.ID, backend.FiberSpec{Fence: "g/1-1", CgroupFD: -1}); err == nil {
+				t.Fatal("Bind of an ended pooled sandbox succeeded")
+			}
+		})
+	}
+}
+
+// TestPoolFlood checks the bound on unclaimed connections. Any sandbox
+// of the grant can open connections to the pool socket and say nothing.
+// At most unclaimedMax are held, each for claimWait, one more closes
+// the oldest at once, and a real claim gets through meanwhile.
+func TestPoolFlood(t *testing.T) {
+	cases := []struct {
+		name  string
+		flood int // silent connections, the last unclaimedMax of which are held
+	}{
+		{name: "twice the bound", flood: 2 * unclaimedMax},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b, _, w, _ := warmed(t, knobs{})
+			sock := poolSocketOf(t, b, "g")
+			var flood []net.Conn
+			for i := 0; i < tc.flood; i++ {
+				c, err := net.Dial("unixpacket", sock)
+				if err != nil {
+					t.Fatalf("dial %d: %v", i, err)
+				}
+				flood = append(flood, c)
+			}
+			defer func() {
+				for _, c := range flood {
+					_ = c.Close()
+				}
+			}()
+			// The held ones stay open until claimWait. The rest must be
+			// gone well before that.
+			closed := 0
+			for _, c := range flood {
+				_ = c.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+				if n, err := c.Read(make([]byte, 1)); n == 0 && err != nil && !errors.Is(err, os.ErrDeadlineExceeded) {
+					closed++
+				}
+			}
+			if closed != tc.flood-unclaimedMax {
+				t.Fatalf("%d of %d silent connections were closed at once, want the %d over the bound", closed, tc.flood, tc.flood-unclaimedMax)
+			}
+			b.mu.Lock()
+			held := len(b.warms["g"].unclaimed)
+			b.mu.Unlock()
+			if held != unclaimedMax {
+				t.Fatalf("%d unclaimed connections held, want %d", held, unclaimedMax)
+			}
+			// A sandbox restored under the flood still claims in time.
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			p, err := b.Pool(ctx, w.ID, backend.PoolSpec{CgroupFD: -1, Deadline: 2 * time.Second})
+			if err != nil {
+				t.Fatalf("Pool under a flood: %v", err)
+			}
+			b.Discard(p.ID)
+			waitExit(t, b)
+		})
+	}
+}
+
+// TestFillsYieldToClones checks that a pool restore never costs a clone
+// its deadline: a clone takes a slot as it comes, a pool restore starts
+// only while no clone waits or runs, one at a time, and the clone that
+// arrives while one runs cuts it short.
+func TestFillsYieldToClones(t *testing.T) {
+	cases := []struct {
+		name string
+		max  int
+		slow time.Duration // how long each restore holds its slot
+		run  func(t *testing.T, b *Backend, f *fakeRunsc, w backend.Warm, workDir string)
+	}{
+		{name: "a running fill is cut short when a clone asks", max: 1, slow: 300 * time.Millisecond,
+			run: func(t *testing.T, b *Backend, f *fakeRunsc, w backend.Warm, workDir string) {
+				const slow = 300 * time.Millisecond
+				ctx := context.Background()
+				var wg sync.WaitGroup
+				var perr error
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					_, perr = b.Pool(ctx, w.ID, backend.PoolSpec{CgroupFD: -1, Deadline: 2 * time.Second})
+				}()
+				// The probe's restore is the first, the fill's the second.
+				waitFor(t, "the fill's restore to start", func() bool { return restoresStarted(f.calls()) >= 2 })
+				// The clone's own restore takes slow, so queueing behind the
+				// fill's would take twice that.
+				t0 := time.Now()
+				_, err := b.Clone(ctx, w.ID, backend.FiberSpec{Fence: "g/1-1", Endpoint: filepath.Join(workDir, "ep.sock"), CgroupFD: -1, Deadline: 2 * time.Second})
+				if err != nil {
+					t.Fatalf("Clone behind a fill = %v, want it served at once", err)
+				}
+				if took := time.Since(t0); took >= 2*slow {
+					t.Fatalf("Clone took %s, so it queued behind the fill's whole restore", took)
+				}
+				wg.Wait()
+				if !errors.Is(perr, backend.ErrYielded) {
+					t.Fatalf("Pool = %v, want ErrYielded", perr)
+				}
+				if f.peakRestores() != 1 {
+					t.Fatalf("peak restores in flight = %d, want 1", f.peakRestores())
+				}
+			}},
+		{name: "a fill waits while a clone restores", max: 2, slow: 100 * time.Millisecond,
+			run: func(t *testing.T, b *Backend, f *fakeRunsc, w backend.Warm, workDir string) {
+				ctx := context.Background()
+				var wg sync.WaitGroup
+				var cerr error
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					_, cerr = b.Clone(ctx, w.ID, backend.FiberSpec{Fence: "g/1-1", Endpoint: filepath.Join(workDir, "ep.sock"), CgroupFD: -1, Deadline: 2 * time.Second})
+				}()
+				waitFor(t, "the clone's restore to start", func() bool { return restoresStarted(f.calls()) >= 2 })
+				if _, err := b.Pool(ctx, w.ID, backend.PoolSpec{CgroupFD: -1, Deadline: 2 * time.Second}); err != nil {
+					t.Fatalf("Pool: %v", err)
+				}
+				wg.Wait()
+				if cerr != nil {
+					t.Fatalf("Clone: %v", cerr)
+				}
+				if f.peakRestores() != 1 {
+					t.Fatalf("peak restores in flight = %d, want 1: the fill ran beside the clone", f.peakRestores())
+				}
+			}},
+		{name: "a fill waits behind a clone waiting for a slot", max: 1, slow: 100 * time.Millisecond,
+			run: func(t *testing.T, b *Backend, f *fakeRunsc, w backend.Warm, workDir string) {
+				ctx := context.Background()
+				var wg sync.WaitGroup
+				errs := make([]error, 2)
+				for i := range 2 {
+					wg.Add(1)
+					go func() {
+						defer wg.Done()
+						_, errs[i] = b.Clone(ctx, w.ID, backend.FiberSpec{Fence: fmt.Sprintf("g/1-%d", i), Endpoint: filepath.Join(workDir, fmt.Sprintf("ep%d.sock", i)), CgroupFD: -1, Deadline: 2 * time.Second})
+					}()
+					if i == 0 {
+						waitFor(t, "the first clone's restore to start", func() bool { return restoresStarted(f.calls()) >= 2 })
+					}
+				}
+				// The second clone has queued for the slot well within this.
+				time.Sleep(30 * time.Millisecond)
+				if _, err := b.Pool(ctx, w.ID, backend.PoolSpec{CgroupFD: -1, Deadline: 2 * time.Second}); err != nil {
+					t.Fatalf("Pool: %v", err)
+				}
+				wg.Wait()
+				for i, err := range errs {
+					if err != nil {
+						t.Fatalf("Clone %d: %v", i, err)
+					}
+				}
+				if last := lastRestored(f.calls()); !strings.HasPrefix(last, "p-") {
+					t.Fatalf("last restore was %s, want the pool's after both clones", last)
+				}
+			}},
+		{name: "fills run one at a time", max: 3, slow: 50 * time.Millisecond,
+			run: func(t *testing.T, b *Backend, f *fakeRunsc, w backend.Warm, workDir string) {
+				ctx := context.Background()
+				var wg sync.WaitGroup
+				errs := make([]error, 2)
+				for i := range 2 {
+					wg.Add(1)
+					go func() {
+						defer wg.Done()
+						_, errs[i] = b.Pool(ctx, w.ID, backend.PoolSpec{CgroupFD: -1, Deadline: 2 * time.Second})
+					}()
+				}
+				wg.Wait()
+				for i, err := range errs {
+					if err != nil {
+						t.Fatalf("Pool %d: %v", i, err)
+					}
+				}
+				if f.peakRestores() != 1 {
+					t.Fatalf("peak restores in flight = %d, want 1", f.peakRestores())
+				}
+			}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b, f := newFakeMax(t, knobs{SlowRestore: tc.slow}, tc.max)
+			workDir := filepath.Join(t.TempDir(), "g")
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			w, err := b.Warm(ctx, backend.WarmSpec{GrantUID: "g", Template: backend.Template{Argv: []string{"/bin/refzygote", "--gvisor"}}, CgroupFD: -1, ProbeCgroupFD: -1, WorkDir: workDir})
+			if err != nil {
+				t.Fatalf("Warm: %v", err)
+			}
+			tc.run(t, b, f, w, workDir)
+		})
+	}
+}
+
+// TestRestorePidFile checks that a restore learns its sandbox's pid from
+// the file runsc writes, so no `runsc state` process sits on a birth's
+// path, and asks `runsc state` only when the file is not there.
+func TestRestorePidFile(t *testing.T) {
+	cases := []struct {
+		name      string
+		knobs     knobs
+		wantState bool // a `state` call for the fiber's sandbox
+	}{
+		{name: "the pid comes from the file"},
+		{name: "a missing file falls back to state", knobs: knobs{NoPidFile: true}, wantState: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b, f, _, fb := cloned(t, tc.knobs)
+			fc := boxCID(t, b, fb.ID)
+			if want := f.pidOf(fc); fb.PID == 0 || fb.PID != want {
+				t.Fatalf("Fiber.PID = %d, want the sandbox's %d", fb.PID, want)
+			}
+			calls := f.calls()
+			if r := findCall(calls, "restore --detach", fc); !strings.Contains(r, "--pid-file "+filepath.Join(b.bundleDir(fc), "pid")) {
+				t.Fatalf("restore = %q, want --pid-file under the bundle", r)
+			}
+			if got := findCall(calls, "state "+fc) != ""; got != tc.wantState {
+				t.Fatalf("a state call for the fiber = %v, want %v", got, tc.wantState)
+			}
+		})
+	}
+}
+
+// TestFootprintBeforeHandOut checks that every birth reports what its leaf
+// counted on the W counter before the sandbox took its identity, which is
+// the sandbox's own fixed footprint. The template's probe is one restore
+// of the image and another settles MiB away from it, which on amd64 CI let
+// a fiber dirty 4 MiB over a 1 MiB budget unseen (C6). A pooled sandbox is
+// counted at its hand-out, not at its restore, and a resume counts the
+// image it brought back.
+func TestFootprintBeforeHandOut(t *testing.T) {
+	leaf := map[string]string{"memory.stat": "anon 4096\nshmem 8192\nfile 0\n", "memory.current": "12288\n"}
+	cases := []struct {
+		name     string
+		knobs    knobs
+		pooled   bool
+		resume   bool
+		noCgroup bool
+		want     uint64
+	}{
+		{name: "a clone counts its leaf once restored and claimed", want: 8192},
+		{name: "a template that polls its spec counts its leaf once restored", knobs: knobs{NoToken: true}, want: 8192},
+		{name: "a pooled sandbox counts its leaf at its hand-out", pooled: true, want: 8192},
+		{name: "a resume counts the image it brought back", resume: true, want: 8192},
+		{name: "without a cgroup nothing is counted", noCgroup: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fd := -1
+			if !tc.noCgroup {
+				fd = cgroupFiles(t, leaf)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			var fb backend.Fiber
+			var err error
+			switch {
+			case tc.pooled:
+				b, _, w, workDir := warmed(t, tc.knobs)
+				// The pool leaf counted less when the sandbox was restored
+				// into it, and the hand-out reads the leaf again.
+				pfd := cgroupFiles(t, map[string]string{"memory.stat": "shmem 4096\n"})
+				p, perr := b.Pool(ctx, w.ID, backend.PoolSpec{CgroupFD: pfd, Deadline: 2 * time.Second})
+				if perr != nil {
+					t.Fatalf("Pool: %v", perr)
+				}
+				fb, err = b.Bind(ctx, p.ID, backend.FiberSpec{Fence: "g/1-1", Endpoint: filepath.Join(workDir, "ep.sock"), CgroupFD: fd, Deadline: 2 * time.Second})
+			case tc.resume:
+				b, _, workDir, _ := cloned(t, tc.knobs)
+				fc := boxCID(t, b, "g/1-1")
+				dir := filepath.Join(t.TempDir(), "park")
+				if perr := b.Park(ctx, "g/1-1", backend.ParkSpec{Dir: dir}); perr != nil {
+					t.Fatalf("Park: %v", perr)
+				}
+				waitFor(t, "the reaper to remove the bundle", func() bool {
+					_, serr := os.Stat(b.bundleDir(fc))
+					return serr != nil
+				})
+				waitExit(t, b)
+				fb, err = b.Resume(ctx, backend.ResumeSpec{Dir: dir, Fence: "g/2-1", Endpoint: filepath.Join(workDir, "ep2.sock"), CgroupFD: fd, Deadline: 2 * time.Second, WarmID: "g", WorkDir: workDir})
+			default:
+				b, _, w, workDir := warmed(t, tc.knobs)
+				fb, err = b.Clone(ctx, w.ID, backend.FiberSpec{Fence: "g/1-1", Endpoint: filepath.Join(workDir, "ep.sock"), CgroupFD: fd, Deadline: 2 * time.Second})
+			}
+			if err != nil {
+				t.Fatalf("birth: %v", err)
+			}
+			if fb.Footprint != tc.want {
+				t.Fatalf("Footprint = %d, want %d", fb.Footprint, tc.want)
+			}
 		})
 	}
 }

@@ -6,14 +6,14 @@
 #     hack/dev/run.sh hack/test/overcommit.sh
 #
 # Layout of the numbers: the container may use 384 MiB. The zygote's heap
-# is 64 MiB, the agent and issuer take ~40 MiB. The grant's ceiling
+# is 64 MiB, fiberd and issuer take ~40 MiB. The grant's ceiling
 # (memory.high) is pinned at 160 MiB and its 8 fibers are driven to
 # demand 320 MiB, twice the ceiling. If the ladder works, the grant is
 # throttled at 160 MiB, PSI rises, fibers are parked largest-W first, and
 # nothing is OOM-killed: 64 + 40 + ~176 stays under 384. If it does not,
 # demand reaches 64 + 40 + 320 = 424 MiB and a memory.max kills something.
 # The runtime caps its own subtree (zygote and fibers) at 320 MiB with
-# memory.high 280 MiB, keeping 64 MiB of the container for the agent, so
+# memory.high 280 MiB, keeping 64 MiB of the container for fiberd, so
 # that kill lands in the subtree, and the container's hierarchical
 # memory.events still counts it. The storm program checks that counter.
 set -euo pipefail

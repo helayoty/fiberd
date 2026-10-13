@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-// SourceHealth tracks liveness of the async grant lane. Core-owned so the
+// SourceHealth tracks whether the issuer is reachable. Core-owned so the
 // staleness rule is identical under every adapter; adapters only MarkSync.
 type SourceHealth struct {
 	stale    time.Duration // unhealthy past this; default: lease TTL

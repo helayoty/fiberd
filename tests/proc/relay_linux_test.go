@@ -72,7 +72,7 @@ func TestRelayedTCPOverProc(t *testing.T) {
 		lo, hi  int
 	}{
 		{name: "direct: the zygote binds the port", lo: 44000, hi: 44003},
-		{name: "relayed: the zygote binds a unix socket, the agent the port", relayed: true, lo: 44010, hi: 44013},
+		{name: "relayed: the zygote binds a unix socket, fiberd the port", relayed: true, lo: 44010, hi: 44013},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -134,7 +134,7 @@ func TestRelayedTCPOverProc(t *testing.T) {
 // TestRelayOverheadNumbers measures what the relay adds to a request:
 // HTTP GET /count against the reference zygote in --http mode, the zygote
 // binding the tcp port itself (direct) against the same zygote on a unix
-// socket behind the agent's relay. One connection reused (keep-alive)
+// socket behind fiberd's relay. One connection reused (keep-alive)
 // and one connection per request (accept and dial on every call). Runs
 // are interleaved A/B, three of each, and the medians of the per-run
 // p50s are reported. FIBERD_BENCH=1 enables it.

@@ -57,22 +57,26 @@ type Runtime struct {
 	ownRootfs bool
 
 	// relay is set when the family is tcp and the backend serves unix
-	// sockets only: the agent listens on each fiber's port and splices
+	// sockets only: fiberd listens on each fiber's port and splices
 	// to its socket (relay.go). relaySlots is the home's cap on relayed
 	// connections, shared by every fiber's relay.
 	relay      bool
 	relaySlots chan struct{}
 
-	mu     sync.Mutex
-	warms  map[string]*warm  // grant uid
-	fibers map[string]*fiber // fiber id (fence string)
-	ports  map[int]string    // tcp endpoints: port -> fiber id holding it
+	mu      sync.Mutex
+	warms   map[string]*warm  // grant uid
+	fibers  map[string]*fiber // fiber id (fence string)
+	poolSeq uint64            // names pool leaves, p-<n>, across every grant
+	ports   map[int]string    // tcp endpoints: port -> fiber id holding it
 	// socks maps each unix socket path a live fiber serves under the run
 	// directory to that fiber. A resumed fiber binds the name it was
 	// parked with, which another home minted, so names can collide with
 	// a local fiber's. The holder keeps the name until its end.
 	socks map[string]string
 	exits chan core.FiberExit
+	// poolExits names the grant of every pooled sandbox that dies before
+	// its hand-out.
+	poolExits chan string
 	// identities maps a grant uid to the handoff identity its fibers get.
 	identities map[string]handoffIdentity
 
@@ -88,25 +92,25 @@ type Runtime struct {
 	// cache, which replace files other warms of the same digest read.
 	templateMu sync.Mutex
 
-	fabricMu sync.Mutex
-	fabrics  map[string]core.FabricChannel // grant uid -> what the home provisioned
+	devicesMu      sync.Mutex
+	deviceChannels map[string]core.DeviceChannel // grant uid -> what the home provisioned
 }
 
-// AttachFabric implements core.FabricAware: the grant's devices reach
+// AttachDevices implements core.DeviceAware: the grant's devices reach
 // its warm instance's environment at PrepareTemplate.
-func (r *Runtime) AttachFabric(grantUID string, fc core.FabricChannel) {
-	r.fabricMu.Lock()
-	defer r.fabricMu.Unlock()
-	if r.fabrics == nil {
-		r.fabrics = map[string]core.FabricChannel{}
+func (r *Runtime) AttachDevices(grantUID string, fc core.DeviceChannel) {
+	r.devicesMu.Lock()
+	defer r.devicesMu.Unlock()
+	if r.deviceChannels == nil {
+		r.deviceChannels = map[string]core.DeviceChannel{}
 	}
-	r.fabrics[grantUID] = fc
+	r.deviceChannels[grantUID] = fc
 }
 
-func (r *Runtime) fabricOf(grantUID string) core.FabricChannel {
-	r.fabricMu.Lock()
-	defer r.fabricMu.Unlock()
-	return r.fabrics[grantUID]
+func (r *Runtime) devicesOf(grantUID string) core.DeviceChannel {
+	r.devicesMu.Lock()
+	defer r.devicesMu.Unlock()
+	return r.deviceChannels[grantUID]
 }
 
 type warm struct {
@@ -124,6 +128,8 @@ type warm struct {
 	cg        cgroup.Dir // <root>/<grant>
 	zcg       cgroup.Dir // <root>/<grant>/zygote
 	minBytes  uint64     // memory.min held for the instance's pages
+	pool      []*pooled  // sandboxes restored ahead of their fibers, oldest first
+	noPool    bool       // the backend said this template cannot pool
 }
 
 type fiber struct {
@@ -139,11 +145,13 @@ type fiber struct {
 	budget   uint64 // w_budget_bytes; 0 = unlimited
 	devMax   uint64 // device_budget bytes; 0 = none
 	quota    uint64 // the grant's parked-delta bytes on this home (0 = none)
+	base     uint64 // the leaf's own count before the hand-out, subtracted from W (0 = the template's probe)
 	overWhy  string // why the host killed it, for the exit's detail
 	released bool   // Release or Park in progress: do not report the exit
 	parked   bool   // the end in progress is a park: the port stays with the delta
 	overW    bool   // killed by the host for exceeding its W budget
 	ready    bool   // the backend has answered: before that, W is a restore in flight, not the fiber's
+	pooled   bool   // handed out of the pool, in the leaf it was restored in
 	// handoff is the host's end of a handoff fiber's channel. It is nil
 	// for a fiber reached directly.
 	handoff *os.File
@@ -198,7 +206,7 @@ func New(cfg Config) (*Runtime, error) {
 	if err := root.Ensure("memory", "pids"); err != nil {
 		return nil, err
 	}
-	reserveAgent(root)
+	capGrants(root)
 	for _, d := range []string{cfg.RunDir, cfg.DeltaDir, cfg.TemplateCache} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			return nil, err
@@ -238,7 +246,7 @@ func New(cfg Config) (*Runtime, error) {
 	}
 	// Every backend serves unix sockets under the run directory. Under a
 	// tcp family, a backend that can bind the port itself (proc) is told
-	// the tcp address; any other is told the unix path and the agent
+	// the tcp address; any other is told the unix path and fiberd
 	// relays the port to it (relay.go).
 	relay := cfg.Endpoints.Family.Scheme() != "unix" && !serves(cfg.Backend, "tcp")
 	hide, skipped, err := cfg.fiberHide()
@@ -257,9 +265,11 @@ func New(cfg Config) (*Runtime, error) {
 		cfg: cfg, be: cfg.Backend, root: root, tier: tier, host: host, hide: hide, ownRootfs: ownRootfs,
 		relay: relay, relaySlots: make(chan struct{}, relayMaxTotal),
 		warms: map[string]*warm{}, fibers: map[string]*fiber{}, ports: map[int]string{}, socks: map[string]string{},
-		exits:   make(chan core.FiberExit, 1024),
-		parents: map[string]backend.Parent{},
+		exits:     make(chan core.FiberExit, 1024),
+		poolExits: make(chan string, 64),
+		parents:   map[string]backend.Parent{},
 	}
+	r.sweepPools()
 	go r.pump()
 	_, overhead := cfg.Backend.(backend.Overheader)
 	_, reports := cfg.Backend.(backend.WReporter)
@@ -296,7 +306,7 @@ func serves(be backend.Backend, scheme string) bool {
 }
 
 // Relays reports whether this home's tcp endpoints are relayed by the
-// agent to fibers' unix sockets.
+// fiberd to fibers' unix sockets.
 func (r *Runtime) Relays() bool { return r.relay }
 
 // IsolatesTenants implements core.Isolator with the backend's answer.
@@ -499,10 +509,11 @@ func (r *Runtime) DefaultDeadlines() (create, resume time.Duration) {
 }
 
 // overhead is the fixed per-fiber footprint for a grant's fibers, added
-// to every leaf's memory.max and subtracted from measured W. Only a
-// backend that is an Overheader gets it. It is the warm template's
-// resident size, measured once ready, because a sandbox restored from the
-// template pays for those pages itself.
+// to every leaf's memory.max and subtracted from the measured W of a
+// fiber whose backend did not report its own. Only a backend that is an
+// Overheader gets it. It is the warm template's resident size, measured
+// once ready, because a sandbox restored from the template pays for
+// those pages itself.
 func (r *Runtime) overhead(grantUID string) uint64 {
 	if _, ok := r.be.(backend.Overheader); !ok {
 		return 0
@@ -518,6 +529,9 @@ func (r *Runtime) overhead(grantUID string) uint64 {
 // wBytes reads a fiber's working set: what the backend reports when its
 // fibers have no leaf of their own, else the leaf's memory.current or
 // the memory.stat counter the backend names, less the fixed footprint.
+// The footprint is the leaf's own count before the hand-out when the
+// backend read one, since restores of one image settle MiB apart, and
+// the template's probe otherwise.
 func (r *Runtime) wBytes(f *fiber) (uint64, error) {
 	if rep, ok := r.be.(backend.WReporter); ok {
 		if w, known := rep.FiberW(f.id); known {
@@ -535,7 +549,11 @@ func (r *Runtime) wBytes(f *fiber) (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
-	if o := r.overhead(f.grantUID); cur > o {
+	o := f.base
+	if o == 0 {
+		o = r.overhead(f.grantUID)
+	}
+	if cur > o {
 		return cur - o, nil
 	}
 	return 0, nil
@@ -590,7 +608,13 @@ func (r *Runtime) grantCgroup(g core.Grant) (cgroup.Dir, error) {
 // fiberLeaf makes a fiber's leaf under parent, with its memory ceiling,
 // group OOM and task limit.
 func (r *Runtime) fiberLeaf(parent cgroup.Dir, g core.Grant, fence core.Fence) (cgroup.Dir, error) {
-	leaf := parent.Child(leafName(fence))
+	return r.leaf(parent, g, leafName(fence))
+}
+
+// leaf makes a leaf with a fiber's limits under parent: for a fiber, or
+// for a sandbox restored ahead of one.
+func (r *Runtime) leaf(parent cgroup.Dir, g core.Grant, name string) (cgroup.Dir, error) {
+	leaf := parent.Child(name)
 	if err := leaf.Create(r.leafMax(g), true); err != nil {
 		return leaf, err
 	}
@@ -633,7 +657,7 @@ func (r *Runtime) delegateProcs(grantUID string, d cgroup.Dir) error {
 func (r *Runtime) limitsTasks() bool { return !r.IsolatesTenants() }
 
 // pidsHits counts the forks refused at pids.max by the grant's cgroup
-// and by the subtree root, whose cap (reserveAgent) every grant shares.
+// and by the subtree root, whose cap (capGrants) every grant shares.
 func (r *Runtime) pidsHits(gcg cgroup.Dir) uint64 {
 	g, _ := gcg.PidsMaxHits()
 	s, _ := r.root.PidsMaxHits()
@@ -650,38 +674,38 @@ func (r *Runtime) pidsPressure(gcg cgroup.Dir, before uint64, grantUID string, e
 	return err
 }
 
-// The agent's share of the home's limits: an eighth, at least this much,
+// fiberd's share of the home's limits: an eighth, at least this much,
 // at most half.
 const (
-	agentMinBytes = 64 << 20
-	agentMinTasks = 64
+	reserveMinBytes = 64 << 20
+	reserveMinTasks = 64
 )
 
-// reserve is the agent's share of a limit.
+// reserve is fiberd's share of a limit.
 func reserve(limit, floor uint64) uint64 {
 	return min(max(limit/8, floor), limit/2)
 }
 
-// reserveAgent caps the fibers' subtree a reserve below the home's own
-// memory and task limits, which the agent shares with it. Fibers that
-// fill a shared limit would stop the agent creating a thread, a Go fatal
+// capGrants caps the fibers' subtree a reserve below the home's own
+// memory and task limits, which fiberd shares with it. Fibers that
+// fill a shared limit would stop fiberd creating a thread, a Go fatal
 // error that ends every fiber. memory.high sits an eighth lower so the
 // ladder sees pressure first. A home with no visible limit is left alone.
-func reserveAgent(root cgroup.Dir) {
+func capGrants(root cgroup.Dir) {
 	if c := root.Ceiling("memory.max"); c > 0 {
-		top := c - reserve(c, agentMinBytes)
+		top := c - reserve(c, reserveMinBytes)
 		if err := root.SetCeiling(top-top/8, top); err != nil {
 			log.Printf("host: cap the subtree's memory: %v", err)
 		} else {
-			log.Printf("host: subtree memory.max=%dMiB, %dMiB kept for the agent under the home's %dMiB", top>>20, (c-top)>>20, c>>20)
+			log.Printf("host: subtree memory.max=%dMiB, %dMiB kept for fiberd under the home's %dMiB", top>>20, (c-top)>>20, c>>20)
 		}
 	}
 	if c := root.Ceiling("pids.max"); c > 0 {
-		top := c - reserve(c, agentMinTasks)
+		top := c - reserve(c, reserveMinTasks)
 		if err := root.SetPidsMax(top); err != nil {
 			log.Printf("host: cap the subtree's tasks: %v", err)
 		} else {
-			log.Printf("host: subtree pids.max=%d, %d kept for the agent under the home's %d", top, c-top, c)
+			log.Printf("host: subtree pids.max=%d, %d kept for fiberd under the home's %d", top, c-top, c)
 		}
 	}
 }
@@ -757,7 +781,7 @@ func (r *Runtime) PrepareTemplate(ctx context.Context, g core.Grant) error {
 
 	workDir := filepath.Join(r.cfg.RunDir, g.UID)
 	w, err := r.be.Warm(ctx, backend.WarmSpec{GrantUID: g.UID, Template: tpl, CgroupFD: int(zfd.Fd()), WorkDir: workDir, ProbeCgroupFD: probeFD,
-		Devices: r.fabricOf(g.UID).Devices, Hide: r.hide})
+		Devices: r.devicesOf(g.UID).Devices, Hide: r.hide})
 	if err != nil {
 		return err
 	}
@@ -927,10 +951,15 @@ func (r *Runtime) Pressure(grantUID string) (float64, error) {
 
 // pump turns backend exits into fiber exits: classify (OOM if the leaf
 // recorded a kill), clean up, and report unless the fiber was released
-// on purpose. A warm instance's end takes its fibers with it.
+// on purpose. A warm instance's end takes its fibers with it. A pooled
+// sandbox's end only removes its leaf.
 func (r *Runtime) pump() {
 	for e := range r.be.Exits() {
-		if e.FiberID == "" {
+		switch {
+		case e.PooledID != "":
+			r.pooledGone(e.PooledID, e.Status)
+			continue
+		case e.FiberID == "":
 			r.warmGone(e.WarmID)
 			continue
 		}
@@ -959,6 +988,10 @@ func (r *Runtime) pump() {
 
 func (r *Runtime) warmGone(grantUID string) {
 	r.mu.Lock()
+	var ps []*pooled
+	if z := r.warms[grantUID]; z != nil {
+		ps = z.drainAll()
+	}
 	delete(r.warms, grantUID)
 	var orphans []*fiber
 	for _, f := range r.fibers {
@@ -969,6 +1002,7 @@ func (r *Runtime) warmGone(grantUID string) {
 	r.mu.Unlock()
 	r.forgetIdentity(grantUID)
 	r.protectTemplates()
+	r.discard(ps)
 	for _, f := range orphans {
 		_ = f.cg.Kill()
 		r.finish(f, "signal", "template instance exited")
@@ -976,19 +1010,22 @@ func (r *Runtime) warmGone(grantUID string) {
 	log.Printf("host: warm instance gone grant=%s", grantUID)
 }
 
-// DropTemplate implements core.TemplateDropper. The yielded grant's warm
-// instance ends and its pages lose their protection. The backend may
-// report the instance's exit afterwards, which warmGone then finds
-// already done.
+// DropTemplate implements core.TemplateDropper. The yielded grant's pool
+// drains, its warm instance ends and its pages lose their protection.
 func (r *Runtime) DropTemplate(grantUID string) {
 	r.mu.Lock()
 	z := r.warms[grantUID]
 	delete(r.warms, grantUID)
+	var ps []*pooled
+	if z != nil {
+		ps = z.drainAll()
+	}
 	r.mu.Unlock()
 	r.forgetIdentity(grantUID)
 	if z == nil {
 		return
 	}
+	r.discard(ps)
 	r.be.Unwarm(z.id)
 	for _, d := range []cgroup.Dir{z.zcg, z.cg} {
 		if err := d.SetMemoryMin(0); err != nil {
@@ -1064,7 +1101,7 @@ func (r *Runtime) fenceFile(sock string, birth core.Fence) string {
 }
 
 // publishFence writes fence to path, a name under a grant's run
-// directory. The grant's fibers write that directory too, and the agent
+// directory. The grant's fibers write that directory too, and fiberd
 // runs as root, so it never opens by that name. The file is made under
 // the run directory itself, which no fiber sees, and renamed into
 // place. A rename replaces a link a fiber planted without following it
@@ -1114,9 +1151,9 @@ func (r *Runtime) tcpURL(port int) string {
 	return endpoint.Endpoint{Scheme: "tcp", Host: r.cfg.Endpoints.Host, Port: port}.String()
 }
 
-// openRelay listens on the fiber's port in the agent's network namespace
+// openRelay listens on the fiber's port in fiberd's network namespace
 // and splices to sock, the unix path the backend serves. The listener is
-// up before the backend is asked for the fiber, so a port the agent
+// up before the backend is asked for the fiber, so a port fiberd
 // cannot bind fails the Clone before a sandbox is restored for it.
 func (r *Runtime) openRelay(port int, sock string) (*relay, error) {
 	network := "tcp4"
@@ -1205,8 +1242,8 @@ func (r *Runtime) freeSocket(path, fiberID string) {
 
 func leafName(f core.Fence) string { return fmt.Sprintf("f-%d-%d", f.Epoch, f.Seq) }
 
-// Clone births one fiber from the grant's warm instance into a fresh
-// leaf, or restores a parked delta into one.
+// Clone births one fiber from the grant's pool or warm instance, or
+// restores a parked delta.
 func (r *Runtime) Clone(ctx context.Context, spec core.CloneSpec) (core.FiberHandle, error) {
 	if spec.Source == core.SourceDelta {
 		return r.resume(ctx, spec)
@@ -1228,20 +1265,54 @@ func (r *Runtime) Clone(ctx context.Context, spec core.CloneSpec) (core.FiberHan
 			return core.FiberHandle{}, fmt.Errorf("%w: %s", ErrNotPrepared, spec.Grant.UID)
 		}
 	}
+	if p := r.takePooled(z); p != nil {
+		t0 := time.Now()
+		h, err := r.start(ctx, z, spec, p)
+		if err == nil || !p.spent {
+			return h, err
+		}
+		// The hand-out failed and the sandbox is gone. Restore on demand
+		// with the time left.
+		log.Printf("host: hand-out of %s to %s failed, restoring on demand: %v", p.id, spec.Fence, err)
+		if spec.Deadline > 0 {
+			if spec.Deadline -= time.Since(t0); spec.Deadline <= 0 {
+				return core.FiberHandle{}, err
+			}
+		}
+		if ctx.Err() != nil {
+			return core.FiberHandle{}, err
+		}
+	}
+	return r.start(ctx, z, spec, nil)
+}
 
-	leaf, err := r.fiberLeaf(z.cg, spec.Grant, spec.Fence)
-	if err != nil {
+// start births spec's fiber by binding p, or by a fresh restore when p
+// is nil. A failure before the backend is asked returns p to the pool.
+func (r *Runtime) start(ctx context.Context, z *warm, spec core.CloneSpec, p *pooled) (core.FiberHandle, error) {
+	var leaf cgroup.Dir
+	var err error
+	if p != nil {
+		leaf = p.cg
+	} else if leaf, err = r.fiberLeaf(z.cg, spec.Grant, spec.Fence); err != nil {
 		return core.FiberHandle{}, err
+	}
+	// giveUp undoes the leaf when the birth fails before the backend is asked.
+	giveUp := func() {
+		if p != nil {
+			r.returnPooled(z, p)
+		} else {
+			_ = leaf.Remove()
+		}
 	}
 	lfd, err := leaf.Open()
 	if err != nil {
-		_ = leaf.Remove()
+		giveUp()
 		return core.FiberHandle{}, err
 	}
 	defer func() { _ = lfd.Close() }()
 
 	if err := os.MkdirAll(filepath.Join(r.cfg.RunDir, spec.Grant.UID), 0o755); err != nil {
-		_ = leaf.Remove()
+		giveUp()
 		return core.FiberHandle{}, err
 	}
 	url, bind, port := "", handoffEndpoint, 0
@@ -1260,7 +1331,7 @@ func (r *Runtime) Clone(ctx context.Context, spec core.CloneSpec) (core.FiberHan
 		url, bind, port, err = r.mintEndpoint(spec.Fence)
 	}
 	if err != nil {
-		_ = leaf.Remove()
+		giveUp()
 		return core.FiberHandle{}, err
 	}
 	sock := ""
@@ -1271,7 +1342,7 @@ func (r *Runtime) Clone(ctx context.Context, spec core.CloneSpec) (core.FiberHan
 			if hostEnd != nil {
 				_ = hostEnd.Close()
 			}
-			_ = leaf.Remove()
+			giveUp()
 			return core.FiberHandle{}, err
 		}
 	}
@@ -1280,25 +1351,33 @@ func (r *Runtime) Clone(ctx context.Context, spec core.CloneSpec) (core.FiberHan
 		if rl, err = r.openRelay(port, bind); err != nil {
 			r.freeSocket(sock, spec.Fence.String())
 			r.freePort(port, spec.Fence.String())
-			_ = leaf.Remove()
+			giveUp()
 			return core.FiberHandle{}, err
 		}
 	}
 	f := &fiber{id: spec.Fence.String(), grantUID: spec.Grant.UID, cg: leaf, endpoint: url, port: port, sock: sock, birth: spec.Fence.String(),
 		budget: spec.Grant.WBudgetBytes, devMax: spec.Grant.DeviceBudget.Bytes,
-		quota: deltaQuota(spec.Grant), handoff: hostEnd, relay: rl, done: make(chan struct{})}
+		quota: deltaQuota(spec.Grant), handoff: hostEnd, relay: rl, done: make(chan struct{}), pooled: p != nil}
 	// Registered before the backend answers so an exit that races the
 	// reply is not lost.
 	r.mu.Lock()
 	r.fibers[f.id] = f
 	r.mu.Unlock()
-	refused := r.pidsHits(z.cg)
-	fb, err := r.be.Clone(ctx, z.id, backend.FiberSpec{
+	fspec := backend.FiberSpec{
 		Fence: f.id, Endpoint: bind, CgroupFD: int(lfd.Fd()), Deadline: spec.Deadline,
 		Payload: spec.Payload, OwnPIDNS: true, Handoff: fiberEnd,
-	})
+	}
+	var fb backend.Fiber
+	if p != nil {
+		p.spent = true
+		fb, err = r.pooler().Bind(ctx, p.id, fspec)
+	} else {
+		refused := r.pidsHits(z.cg)
+		if fb, err = r.be.Clone(ctx, z.id, fspec); err != nil {
+			err = r.pidsPressure(z.cg, refused, spec.Grant.UID, err)
+		}
+	}
 	if err != nil {
-		err = r.pidsPressure(z.cg, refused, spec.Grant.UID, err)
 		r.mu.Lock()
 		if r.fibers[f.id] == f {
 			delete(r.fibers, f.id)
@@ -1312,10 +1391,12 @@ func (r *Runtime) Clone(ctx context.Context, spec core.CloneSpec) (core.FiberHan
 		if hostEnd != nil {
 			_ = hostEnd.Close()
 		}
-		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
-			// The backend enforces the same deadline and kills the child.
+		if p != nil || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			// The backend kills a sandbox it could not bind or start in
+			// time, reporting a pooled one's end under its pooled id, and
+			// the leaf empties once it is gone.
 			_ = leaf.Kill()
-			go func() { time.Sleep(100 * time.Millisecond); _ = leaf.Remove() }()
+			removeDead(leaf)
 		} else {
 			_ = leaf.Remove()
 		}
@@ -1328,10 +1409,11 @@ func (r *Runtime) Clone(ctx context.Context, spec core.CloneSpec) (core.FiberHan
 	}
 	r.mu.Lock()
 	f.pid = fb.PID
+	f.base = fb.Footprint
 	f.endpoint = ep
 	f.ready = true
 	r.mu.Unlock()
-	return core.FiberHandle{ID: f.id, Endpoint: f.endpoint}, nil
+	return core.FiberHandle{ID: f.id, Endpoint: f.endpoint, Pooled: f.pooled}, nil
 }
 
 // manifest sits beside the images so a delta is self-describing.
@@ -1352,7 +1434,10 @@ type manifest struct {
 	Backend  string `json:"backend"`
 	// WBytes is what the park costs to move: the delta's bytes when the
 	// checkpoint is a delta, else the full image bytes.
-	WBytes   uint64 `json:"w_bytes"`
+	WBytes uint64 `json:"w_bytes"`
+	// WUsed is the fiber's W when it was parked, which a resume of the
+	// image continues counting from.
+	WUsed    uint64 `json:"w_used_bytes,omitempty"`
 	Delta    bool   `json:"delta"`
 	Parent   string `json:"parent_sha256,omitempty"`
 	ParkedAt string `json:"parked_at"`
@@ -1423,7 +1508,7 @@ func (r *Runtime) Park(ctx context.Context, fiberID string, sync bool) (string, 
 	// with any error, and the ledger parks the session rather than count a
 	// dead fiber.
 	m := manifest{Fence: f.id, GrantUID: f.grantUID, Birth: f.birth, Endpoint: ep, Handoff: f.handoff != nil, Backend: r.be.Name(),
-		ParkedAt: time.Now().UTC().Format(time.RFC3339Nano)}
+		WUsed: w, ParkedAt: time.Now().UTC().Format(time.RFC3339Nano)}
 	if f.relay != nil {
 		m.Relay = f.relay.sock
 	}
@@ -1708,6 +1793,11 @@ func (r *Runtime) resume(ctx context.Context, spec core.CloneSpec) (core.FiberHa
 	}
 	r.mu.Lock()
 	f.pid = fb.PID
+	if fb.Footprint > m.WUsed {
+		// The image restored holds the pages the fiber dirtied before
+		// its park, so its W carries on from there rather than from 0.
+		f.base = fb.Footprint - m.WUsed
+	}
 	f.endpoint = ep
 	f.ready = true
 	r.mu.Unlock()
@@ -1724,7 +1814,7 @@ func (r *Runtime) HasDelta(ref string) bool {
 
 // Release kills the fiber's leaf and waits for it to be reaped. discard
 // also deletes any parked delta stored under this fiber id. A fiber this
-// runtime does not know (an orphan from a previous agent, found through
+// runtime does not know (an orphan from a previous fiberd, found through
 // List) is killed through its leaf as well.
 func (r *Runtime) Release(ctx context.Context, fiberID string, discard bool) error {
 	r.mu.Lock()
@@ -1764,7 +1854,7 @@ func (r *Runtime) Release(ctx context.Context, fiberID string, discard bool) err
 	return nil
 }
 
-// killOrphan ends a leaf left by a previous agent: kill everything in it,
+// killOrphan ends a leaf left by a previous fiberd: kill everything in it,
 // wait for it to empty, remove it and the endpoint it served on.
 func (r *Runtime) killOrphan(ctx context.Context, fence core.Fence) error {
 	leaf := r.root.Child(fence.GrantUID).Child(leafName(fence))
@@ -2019,10 +2109,16 @@ func (r *Runtime) Stats(_ context.Context, fiberID string) (core.FiberStats, err
 
 func (r *Runtime) Exits() <-chan core.FiberExit { return r.exits }
 
-// Close ends every warm instance (and with them every fiber), and the
-// relays in front of fibers, which are the agent's and not the backend's
-// to end.
+// Close drains every pool, ends every warm instance and its fibers, and
+// fiberd's relays.
 func (r *Runtime) Close() {
+	r.mu.Lock()
+	var ps []*pooled
+	for _, z := range r.warms {
+		ps = append(ps, z.drainAll()...)
+	}
+	r.mu.Unlock()
+	r.discard(ps)
 	r.be.Close()
 	r.mu.Lock()
 	var relays []*relay

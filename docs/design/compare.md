@@ -43,12 +43,12 @@ sequenceDiagram
   I-->>C: first byte of the first 200 (t_first_byte)
 ```
 
-Pods, claims and Firecracker return an address before the instance listens, so they are polled. The poll interval and the failed attempts are in every record as the quantization bound. A [clone](../glossary.md#clone) returns an endpoint that already listens, so fiberd's first request is the measurement. On kind, gVisor and runc fibers are reached through the agent's [relay](../glossary.md#relay), one hop per request. The standalone rows over unix sockets bound that cost.
+Pods, claims and Firecracker return an address before the instance listens, so they are polled. The poll interval and the failed attempts are in every record as the quantization bound. A [clone](../glossary.md#clone) returns an endpoint that already listens, so fiberd's first request is the measurement. On kind, gVisor and runc fibers are reached through fiberd's [relay](../glossary.md#relay), one hop per request. The standalone rows over unix sockets bound that cost.
 
 **Fairness.**
 
 - Every instance gets the same 64 MiB limit. For fiberd it is the grant's [W](../glossary.md#w-working-set) budget. Pods and claims also get a 250m CPU limit but reserve only 10m, since a fiber reserves nothing per instance and a burst of 50 must fit the node. A Firecracker guest gets 1 vCPU and 128 MiB, the same 64 MiB plus its own kernel.
-- fiberd keeps one [warm](../glossary.md#warm) template and no pre-made fibers. So agent-sandbox runs with a pool of 1 as the like-for-like and with a pool of N, each refilled untimed before every burst. Pool memory is charged in density. Sandboxes run without agent-sandbox's default NetworkPolicy, which blocks the client. A pool is deleted after its own runs, so it never stands during another system's.
+- fiberd keeps one [warm](../glossary.md#warm) template and, by default, no pre-made fibers. So agent-sandbox runs with a pool of 1 as the like-for-like and with a pool of N, each refilled untimed before every burst. fiberd gVisor also runs as `fiberd-gvisor-pool2`, whose grant asks for 2 pooled sandboxes (`fibers.warm`), refilled the same way. Pool memory is charged in density. Sandboxes run without agent-sandbox's default NetworkPolicy, which blocks the client. A pool is deleted after its own runs, so it never stands during another system's.
 - The client sits beside the system. On kind it is a Pod pinned to the node, since Pod IPs are not routable from a Mac.
 - Image pulls, template warm, pool fill, snapshots and grant placement are setup. Setup is timed once and reported apart. Removing the image before a cold Pod is not timed, and a burst removes it for all its Pods before the first clock starts.
 - Each run does bursts of 1, 10 and 50 and releases everything in between. Every number is the median of 3 timed runs after a discarded cold run.

@@ -63,10 +63,16 @@ type fakeBackend struct {
 	nextPID  int
 	// warmCalls counts Warm calls, idempotent prepares included.
 	warmCalls int
+	// events is the order of unwarms and pool discards, for tests that
+	// check what goes first.
+	events []string
 
 	// Knobs a test sets before calling the runtime.
 	warmErr, cloneErr, parkErr, resumeErr error
 	warm                                  backend.Warm
+	// footprint is what Clone, Bind and Resume report as the leaf's own
+	// count before the hand-out.
+	footprint uint64
 	// parkFiles is what Park writes into its directory. Nil writes a
 	// page file and a dump log.
 	parkFiles map[string]string
@@ -117,6 +123,13 @@ func (b *fakeBackend) Unwarm(id string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.unwarmed = append(b.unwarmed, id)
+	b.events = append(b.events, "unwarm "+id)
+}
+
+func (b *fakeBackend) eventLog() []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]string(nil), b.events...)
 }
 
 // takeHandoff keeps the fiber's end of a handoff channel open and reads
@@ -158,7 +171,7 @@ func (b *fakeBackend) Clone(_ context.Context, warmID string, spec backend.Fiber
 	fd, identity := takeHandoff(spec.Handoff)
 	b.nextPID++
 	b.fibers[spec.Fence] = &fakeFiber{spec: spec, alive: true, identity: identity, handoff: fd, ln: ln}
-	return backend.Fiber{ID: spec.Fence, PID: b.nextPID}, nil
+	return backend.Fiber{ID: spec.Fence, PID: b.nextPID, Footprint: b.footprint}, nil
 }
 
 // listen serves a fake fiber's unix endpoint when serve is set.
@@ -263,7 +276,7 @@ func (b *fakeBackend) Resume(_ context.Context, spec backend.ResumeSpec) (backen
 	rs := spec
 	b.nextPID++
 	b.fibers[spec.Fence] = &fakeFiber{resume: &rs, alive: true, identity: identity, handoff: fd, ln: ln}
-	return backend.Fiber{ID: spec.Fence, PID: b.nextPID}, nil
+	return backend.Fiber{ID: spec.Fence, PID: b.nextPID, Footprint: b.footprint}, nil
 }
 
 func (b *fakeBackend) Kill(fiberID string) error {
@@ -298,6 +311,16 @@ func (b *fakeBackend) Close() {
 	close(b.exits)
 }
 
+// report delivers an exit unless the backend is closed, for exits that
+// come from a goroutine of the fake's own.
+func (b *fakeBackend) report(e backend.Exit) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if !b.closed {
+		b.exits <- e
+	}
+}
+
 // die reports a fiber's death on its own, with the given status.
 func (b *fakeBackend) die(fiberID, status string) {
 	b.mu.Lock()
@@ -317,6 +340,14 @@ func (b *fakeBackend) fiber(id string) *fakeFiber {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.fibers[id]
+}
+
+// alive reports whether the fake still runs the fiber.
+func (b *fakeBackend) alive(id string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	f := b.fibers[id]
+	return f != nil && f.alive
 }
 
 // closeHandoff ends the fiber's side of its handoff channel, as a dead
@@ -434,6 +465,127 @@ func (m *deviceMixin) evictedIDs() []string {
 	m.dmu.Lock()
 	defer m.dmu.Unlock()
 	return append([]string(nil), m.evicted...)
+}
+
+// poolMixin pools restored sandboxes, as gvisor does. A pooled sandbox
+// becomes a fake fiber at Bind, under the fence it is handed, with the
+// pid it was restored with.
+type poolMixin struct {
+	fb     *fakeBackend
+	pmu    sync.Mutex
+	pooled map[string]*fakePooled
+	n      int
+	// Knobs a test sets before calling the runtime.
+	poolErr, bindErr error
+	noPool           bool          // the template does not bind late
+	bindDelay        time.Duration // how long a Bind takes before it answers
+	bindExitDelay    time.Duration // how long after a failed Bind the sandbox's end is reported
+	bindExits        atomic.Int32  // those ends, once reported
+	poolGate         chan struct{} // holds every Pool until closed
+	discarded        []string
+}
+
+type fakePooled struct {
+	id   string
+	pid  int
+	spec backend.PoolSpec
+}
+
+func newPoolMixin(fb *fakeBackend) *poolMixin {
+	return &poolMixin{fb: fb, pooled: map[string]*fakePooled{}}
+}
+
+func (m *poolMixin) Pool(_ context.Context, warmID string, spec backend.PoolSpec) (backend.Pooled, error) {
+	if gate := m.poolGate; gate != nil {
+		<-gate
+	}
+	if m.poolErr != nil {
+		return backend.Pooled{}, m.poolErr
+	}
+	if m.noPool {
+		return backend.Pooled{}, backend.ErrNoPool
+	}
+	if _, ok := m.fb.warmSpec(warmID); !ok {
+		return backend.Pooled{}, fmt.Errorf("fake: no warm instance %q", warmID)
+	}
+	m.fb.mu.Lock()
+	m.fb.nextPID++
+	pid := m.fb.nextPID
+	m.fb.mu.Unlock()
+	m.pmu.Lock()
+	defer m.pmu.Unlock()
+	m.n++
+	p := &fakePooled{id: fmt.Sprintf("p-%s-%d", warmID, m.n), pid: pid, spec: spec}
+	m.pooled[p.id] = p
+	return backend.Pooled{ID: p.id, PID: p.pid}, nil
+}
+
+func (m *poolMixin) Bind(_ context.Context, pooledID string, spec backend.FiberSpec) (backend.Fiber, error) {
+	m.pmu.Lock()
+	p := m.pooled[pooledID]
+	delete(m.pooled, pooledID)
+	m.pmu.Unlock()
+	if p == nil {
+		return backend.Fiber{}, fmt.Errorf("fake: no pooled sandbox %q", pooledID)
+	}
+	time.Sleep(m.bindDelay)
+	if m.bindErr != nil {
+		// A failed hand-out kills the sandbox under its pooled id, and
+		// its reaper reports that later, as a real one does.
+		go func() {
+			time.Sleep(max(m.bindExitDelay, 10*time.Millisecond))
+			m.fb.report(backend.Exit{PooledID: pooledID, Status: "signal:SIGKILL"})
+			m.bindExits.Add(1)
+		}()
+		return backend.Fiber{}, m.bindErr
+	}
+	m.fb.mu.Lock()
+	defer m.fb.mu.Unlock()
+	ln, err := m.fb.listen(spec.Fence, spec.Endpoint)
+	if err != nil {
+		return backend.Fiber{}, err
+	}
+	fd, identity := takeHandoff(spec.Handoff)
+	m.fb.fibers[spec.Fence] = &fakeFiber{spec: spec, alive: true, identity: identity, handoff: fd, ln: ln}
+	return backend.Fiber{ID: spec.Fence, PID: p.pid, Footprint: m.fb.footprint}, nil
+}
+
+func (m *poolMixin) Discard(pooledID string) {
+	m.pmu.Lock()
+	_, ok := m.pooled[pooledID]
+	delete(m.pooled, pooledID)
+	m.discarded = append(m.discarded, pooledID)
+	m.pmu.Unlock()
+	m.fb.mu.Lock()
+	m.fb.events = append(m.fb.events, "discard "+pooledID)
+	m.fb.mu.Unlock()
+	if ok {
+		m.fb.exits <- backend.Exit{PooledID: pooledID, Status: "signal:SIGKILL"}
+	}
+}
+
+// pooledDie reports a pooled sandbox's death on its own.
+func (m *poolMixin) pooledDie(pooledID, status string) {
+	m.pmu.Lock()
+	delete(m.pooled, pooledID)
+	m.pmu.Unlock()
+	m.fb.exits <- backend.Exit{PooledID: pooledID, Status: status}
+}
+
+func (m *poolMixin) pooledIDs() []string {
+	m.pmu.Lock()
+	defer m.pmu.Unlock()
+	var ids []string
+	for id := range m.pooled {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+func (m *poolMixin) discardedIDs() []string {
+	m.pmu.Lock()
+	defer m.pmu.Unlock()
+	return append([]string(nil), m.discarded...)
 }
 
 type isolatorMixin struct{ isolates bool }
@@ -662,6 +814,21 @@ func newSandboxBackend(tier core.Tier) *sandboxBackend {
 		schemesMixin: schemesMixin{[]string{"unix", "tcp"}}}
 }
 
+// poolBackend is a sandbox backend that pools restored sandboxes, as
+// gvisor is: a fixed footprint, isolated tenants, and a pool.
+type poolBackend struct {
+	*fakeBackend
+	overheadMixin
+	isolatorMixin
+	*poolMixin
+}
+
+func newPoolBackend(tier core.Tier) *poolBackend {
+	fb := newFakeBackend(tier)
+	fb.warm = backend.Warm{Bytes: 4 * mib, TotalBytes: 8 * mib}
+	return &poolBackend{fakeBackend: fb, isolatorMixin: isolatorMixin{true}, poolMixin: newPoolMixin(fb)}
+}
+
 // Test plumbing.
 
 var cgroupSeq atomic.Int64
@@ -853,6 +1020,8 @@ var (
 	_ backend.EndpointSchemer  = (*sandboxBackend)(nil)
 	_ backend.Platformer       = (*sandboxBackend)(nil)
 	_ backend.DeadlineAdvisor  = (*sandboxBackend)(nil)
+	_ backend.Pooler           = (*poolBackend)(nil)
+	_ backend.Overheader       = (*poolBackend)(nil)
 )
 
 // refuseLeaves caps d at the descendants it has now, so the kernel refuses

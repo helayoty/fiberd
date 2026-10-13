@@ -15,7 +15,7 @@ import (
 // to it: nothing outlives min(lease TTL, fence).
 type Fence struct {
 	GrantUID string
-	Epoch    uint64 // agent incarnation — bumped on every agent start
+	Epoch    uint64 // fiberd run, raised on every start
 	Seq      uint64 // fiber incarnation within (grant, epoch)
 }
 
@@ -61,7 +61,7 @@ func (f Fence) Newer(o Fence) bool {
 	return f.Seq > o.Seq
 }
 
-// EpochStore persists the agent's incarnation counter. The epoch file is the
+// EpochStore persists fiberd's incarnation counter. The epoch file is the
 // only state that must never be lost silently: on any read failure the safe
 // response is a large forward jump (timestamp-derived), which preserves the
 // monotonicity guarantee at the cost of invalidating fences that were already
@@ -89,8 +89,8 @@ func OpenEpochStore(dir string) (*EpochStore, error) {
 func (s *EpochStore) Current() uint64 { return s.epoch.Load() }
 
 // Bump advances the epoch without a restart: what a home does when the
-// scope everything was minted under is gone while the agent lives (a
-// rotated service-account issuer, a released fabric claim). Every fence
+// scope everything was minted under is gone while fiberd lives (a
+// rotated service-account issuer, a released DRA claim). Every fence
 // minted before is invalid from the moment the new value is durable.
 func (s *EpochStore) Bump() (uint64, error) {
 	next := s.epoch.Load() + 1

@@ -6,7 +6,7 @@
 #   2. run the issuer inside as the cluster's control plane and mint a
 #      grant for the node;
 #   3. submit fiberd-job.sh: the allocation verifies the grant, starts the
-#      agent in the job step's cgroup and serves on the node's address;
+#      fiberd in the job step's cgroup and serves on the node's address;
 #   4. run grant-conform C1-C10 from the host against the published port,
 #      every hook reaching into the allocation through docker exec;
 #   5. run the 2x overcommit storm inside a second allocation with a 384
@@ -14,7 +14,7 @@
 #
 #   examples/slurm/conform.sh run          (everything; needs docker and go)
 #   examples/slurm/conform.sh up|down      (just the container)
-#   examples/slurm/conform.sh restart|lane up|down|audit <event> <fence>|engine-kill <uid>|scope-lost
+#   examples/slurm/conform.sh restart|issuer-reachable up|down|audit <event> <fence>|engine-kill <uid>|scope-lost
 #                                          (the hooks grant-conform calls)
 #
 # Runs from the repository root: the image build needs fiberd's tree.
@@ -71,7 +71,7 @@ issuer() {
   docker cp "$NAME:$KEY" "$STATE/issuer-key.json"
 }
 
-# job: submit the conformance allocation and wait for the agent.
+# job: submit the conformance allocation and wait for fiberd.
 job() {
   local tok
   tok=$(dexec grant-issuer mint -key "$KEY" -issuer "$ISSUER_URL" -aud "$NODE" -tenant slurm -template sha256:conform \
@@ -84,7 +84,7 @@ job() {
         -template "default=/usr/local/bin/refzygote --heap-mb 16 --device-mb 64" \
         -endpoint-family inet4 -admin-unsafe -stale-ttl 20s)
   echo "$id" > "$STATE/job.id"
-  wait_for 90 "agent in job $id" healthy
+  wait_for 90 "fiberd in job $id" healthy
   dexec squeue
 }
 
@@ -93,18 +93,20 @@ restart() {
   local pid before
   before=$(healthy | tr -d ' \n')
   pid=$(dexec pgrep -f "^fiberd-slurm -state /var/lib/fiberd/job-$(job_id)" | head -1)
-  # A crash: fiberd-job.sh restarts the agent in the same allocation and
+  # A crash: fiberd-job.sh restarts fiberd in the same allocation and
   # the epoch bumps. A clean exit 0 would mean the job ended.
   dexec kill -KILL "$pid"
-  wait_for 60 "agent back with a new epoch" sh -c "[ \"\$($0 healthz | tr -d ' \n')\" != \"$before\" ]"
+  wait_for 60 "fiberd back with a new epoch" sh -c "[ \"\$($0 healthz | tr -d ' \n')\" != \"$before\" ]"
+  # The admin socket answers before the gRPC listener is back, so wait for that too.
+  wait_for 60 "fiberd serving again" dexec bash -c 'exec 3<>/dev/tcp/127.0.0.1/8484'
 }
 healthz() { healthy; }
 
-lane() {
+issuer_reachable() {
   case "$1" in
-    up)   admin -X POST http://x/lane -d '{"healthy":true}' >/dev/null ;;
-    down) admin -X POST http://x/lane -d '{"healthy":false}' >/dev/null ;;
-    *) echo "lane: up|down" >&2; return 2 ;;
+    up)   admin -X POST http://x/issuer -d '{"reachable":true}' >/dev/null ;;
+    down) admin -X POST http://x/issuer -d '{"reachable":false}' >/dev/null ;;
+    *) echo "issuer-reachable: up|down" >&2; return 2 ;;
   esac
 }
 
@@ -117,7 +119,7 @@ audit() {
 # The fiberd subtree sits under the job step's cgroup; find the grant's
 # zygote leaf by name.
 engine_kill() {
-  dexec sh -c "kill -9 \$(cat \$(find /sys/fs/cgroup -path '*/fiberd/$1/zygote/cgroup.procs' | head -1))"
+  dexec sh -c "kill -9 \$(cat \$(find /sys/fs/cgroup -path '*/grants/$1/zygote/cgroup.procs' | head -1))"
 }
 
 scope_lost() { admin -X POST http://x/scope-lost >/dev/null; }
@@ -127,7 +129,7 @@ conform() {
   go test -c -o bin/grant-conform ./tests/conform
   bin/grant-conform -test.v -target "$TARGET" -target-tier FIBER_CHECKPOINT -node-id "$NODE" -isolation TRUSTED \
     -mint jwt -issuer-key "$STATE/issuer-key.json" -issuer "$ISSUER_URL" \
-    -restart-cmd "$0 restart" -cp-health-cmd "$0 lane \$1" -audit-cmd "$0 audit \$1 \$2" \
+    -restart-cmd "$0 restart" -cp-health-cmd "$0 issuer-reachable \$1" -audit-cmd "$0 audit \$1 \$2" \
     -engine-kill-cmd "$0 engine-kill \$1" -scope-cmd "$0 scope-lost" -case-timeout 60s
 }
 
@@ -148,14 +150,14 @@ storm() {
         -verifier jwks -issuer "$ISSUER_URL" -insecure-plaintext -runtime proc -listen :8485 \
         -template "sha256:storm=/usr/local/bin/refzygote --heap-mb 64" -template "default=/usr/local/bin/refzygote --heap-mb 8" \
         -grant-ceiling 167772160 -pressure-interval 200ms -status-interval 100ms -stale-ttl 20s)
-  wait_for 90 "agent in storm job $id" dexec curl -sf --unix-socket "/var/lib/fiberd/job-$id/private/admin.sock" http://x/healthz
+  wait_for 90 "fiberd in storm job $id" dexec curl -sf --unix-socket "/var/lib/fiberd/job-$id/private/admin.sock" http://x/healthz
   # The job's cgroup carries Slurm's memory limit; its OOM counter is the
   # one the storm must leave untouched.
-  dexec sh -c "pid=\$(pgrep -f '^fiberd-slurm -state /var/lib/fiberd/job-$id' | head -1); own=/sys/fs/cgroup\$(grep -m1 '^0::' /proc/\$pid/cgroup | cut -d: -f3); own=\${own%/agent};
+  dexec sh -c "pid=\$(pgrep -f '^fiberd-slurm -state /var/lib/fiberd/job-$id' | head -1); own=/sys/fs/cgroup\$(grep -m1 '^0::' /proc/\$pid/cgroup | cut -d: -f3); own=\${own%/fiberd};
     job=\$(echo \$own | sed 's#\(/job_[0-9]*\).*#\1#');
     echo \"job cgroup \$job memory.max=\$(cat \$job/memory.max)\";
     exec storm -target 127.0.0.1:8485 -node-id $NODE -issuer-key $KEY -issuer $ISSUER_URL -isolation TRUSTED \
-      -cgroup-root \$own/fiberd -container-events \$job/memory.events \
+      -cgroup-root \$own/grants -container-events \$job/memory.events \
       -fibers 8 -ceiling 167772160 -overcommit 2 -step 2097152 -round 250ms"
   echo "--- storm job:"
   dexec scontrol show job "$id" | grep -E "JobState|ExitCode"
@@ -169,12 +171,12 @@ case "${1:-}" in
   job) job ;;
   restart) restart ;;
   healthz) healthz ;;
-  lane) lane "$2" ;;
+  issuer-reachable) issuer_reachable "$2" ;;
   audit) audit "$2" "$3" ;;
   engine-kill) engine_kill "$2" ;;
   scope-lost) scope_lost ;;
   conform) conform ;;
   storm) storm ;;
   run) up; issuer; job; conform; storm ;;
-  *) echo "usage: $0 run|up|down|issuer|job|conform|storm|restart|lane up|down|audit <event> <fence>|engine-kill <uid>|scope-lost" >&2; exit 2 ;;
+  *) echo "usage: $0 run|up|down|issuer|job|conform|storm|restart|issuer-reachable up|down|audit <event> <fence>|engine-kill <uid>|scope-lost" >&2; exit 2 ;;
 esac

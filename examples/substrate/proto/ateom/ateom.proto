@@ -369,7 +369,7 @@ enum StatsSource {
   STATS_SOURCE_CGROUP = 1;
   // Read from inside the guest, over the guest agent's vsock connection. What
   // it counts is the workload's own containers, as the guest kernel accounts
-  // for them: the guest kernel itself, the agent, and the VMM process on the
+  // for them: the guest kernel itself, fiberd, and the VMM process on the
   // host are overhead this source cannot see. The cgroup source above is the
   // other way round -- the sandbox's host process is one process, so its
   // runtime's overhead is charged along with the workload's.

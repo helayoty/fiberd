@@ -17,16 +17,19 @@
 //     where every restored sandbox resumes, and it answers "restore"
 //     there (and "resume" in the original).
 //   - Clone: `runsc restore` the template image into a new sandbox whose
-//     spec carries the fence, endpoint and payload as environment; the
-//     workload reads them from /proc/gvisor/spec_environ and serves a unix
-//     socket on the bind mount, which the host connects to as readiness.
+//     spec carries a one-shot token. The workload claims it on the pool
+//     socket at /fiberd/channel and gets its fence, endpoint, payload and a
+//     seed. It reseeds, serves its endpoint and acks. A template that
+//     never dials gets its identity in the spec environment instead.
+//   - Pool: the same restore, with the identity held back until Bind.
 //   - Park: SIGUSR1 makes the workload close its endpoint (a listening
 //     host socket cannot be checkpointed), then `runsc checkpoint`, which
 //     ends the sandbox; the images are written with O_DIRECT so they are
 //     not charged to the fiber's leaf.
 //   - Resume: `runsc restore` the park image under a new fence and
-//     endpoint; the workload's blocking read returns "restore" and it
-//     re-binds.
+//     endpoint, handed over on the warm instance's channel like a clone's,
+//     so a resume needs the instance; the workload's blocking read
+//     returns "restore" and it re-binds.
 //
 // No delta codec: a park is gVisor's full state file (the memory image is
 // sparse and can skip committed zero pages). Every sandbox pays for the
@@ -38,6 +41,7 @@ package gvisor
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -75,6 +79,26 @@ const (
 	// closeWait bounds Close's wait for its reapers, hit only when runsc
 	// itself is wedged.
 	closeWait = 10 * time.Second
+
+	// channelMount is where a warm instance's own directory is bound in the
+	// template sandbox and in every sandbox restored from it, read-only.
+	// It holds the pool socket alone. The mount is unconditional, since
+	// runsc requires a restore's mounts to match the checkpoint's.
+	channelMount = "/fiberd/channel"
+	poolSocket   = "pool.sock"
+	// tokenBytes is the size of a restore's one-shot token, seedBytes
+	// what each identity carries as fresh entropy.
+	tokenBytes = 16
+	seedBytes  = 32
+	// recordMax bounds one channel record. A payload rides in it as hex.
+	recordMax = 64 << 10
+	// claimWait is how long an accepted connection has to send its
+	// claim. A template claims right after it connects. unclaimedMax
+	// bounds the connections a warm instance holds while they have not,
+	// since any sandbox of the grant can open them, and fiberd serves
+	// every grant.
+	claimWait    = 3 * time.Second
+	unclaimedMax = 8
 )
 
 // runFunc runs one runsc process (args after the binary, the cgroup to
@@ -110,17 +134,26 @@ type Backend struct {
 	// run starts every runsc process. New sets it to execRunsc.
 	run runFunc
 
-	// restores holds one token per restore that may run at once.
+	// restores holds one token per restore that may run at once. A clone
+	// takes one as it comes. A pool restore takes one only while no clone
+	// waits or runs, one pool restore at a time, and a clone that arrives
+	// meanwhile cuts it short, so a pool never costs a clone its deadline.
 	restores chan struct{}
+	gateMu   sync.Mutex
+	clones   int                // clone restores waiting for a slot or running
+	fill     context.CancelFunc // cuts the running pool restore short, nil when none runs
+	quiet    chan struct{}      // closed, and replaced, when a pool restore may try again
 
-	mu    sync.Mutex
-	warms map[string]*warm // warm id
-	boxes map[string]*box  // fiber id
-	gen   uint64           // incarnations started, the suffix of every cid
-	exits chan backend.Exit
+	mu     sync.Mutex
+	warms  map[string]*warm // warm id
+	boxes  map[string]*box  // fiber id
+	pooled map[string]*box  // pooled id, sandboxes restored ahead of a fiber
+	gen    uint64           // incarnations started, the suffix of every cid
+	exits  chan backend.Exit
 	// reapers counts the waitWarm and waitBox goroutines, each deleting
-	// its container's state once the sandbox has exited. Close waits for
-	// them, so nothing of the backend runs once it returns.
+	// its container's state once the sandbox has exited, and the pool
+	// socket goroutines. Close waits for them, so nothing of the backend
+	// runs once it returns.
 	reapers sync.WaitGroup
 }
 
@@ -140,6 +173,23 @@ type warm struct {
 	// the registry template's executable. Empty for a template that
 	// lives in the rootfs.
 	template string
+	// channel is the host directory bound at channelMount in every sandbox
+	// of this instance, <state>/channel/<n>, holding the pool socket ln
+	// listens on.
+	channel string
+	ln      *net.UnixListener
+	// pending maps each token minted for a restore to the sandbox it
+	// was minted for. The first connection with a token takes it, under
+	// the backend's mutex, and later ones are closed. unclaimed are the
+	// connections accepted and not yet claimed or closed, oldest first,
+	// under the same mutex.
+	pending   map[string]*box
+	unclaimed []net.Conn
+	// noPool is set when the footprint probe found that this template
+	// polls the spec environment for its identity instead of dialing
+	// the pool socket. Its fibers are restored the old way and Pool
+	// refuses.
+	noPool bool
 }
 
 type box struct {
@@ -148,7 +198,23 @@ type box struct {
 	pid      int // the sandbox process, 0 when runsc could not say
 	bundle   string
 	endpoint string
-	done     chan struct{} // closed when the sandbox has exited
+	workDir  string
+	// pooled marks a sandbox in b.pooled (id is its pooled id) rather
+	// than in b.boxes (id is its fence). probe marks the footprint probe,
+	// which is in neither and reports no exit. Both are read and written
+	// under b.mu.
+	pooled, probe bool
+	// binding marks a pooled sandbox whose hand-out is running. It keeps
+	// its pooled id until the hand-out succeeds, so a failed one ends
+	// under that id.
+	binding bool
+	// token is what the restore's spec carries, and claim is where the
+	// connection that sends it is delivered. conn is that connection,
+	// held from the claim until the identity is acked, under b.mu.
+	token string
+	claim chan net.Conn
+	conn  net.Conn
+	done  chan struct{} // closed when the sandbox has exited
 }
 
 // New opens the backend. The tier is FIBER_SNAPSHOT when runsc answers
@@ -169,8 +235,8 @@ func newBackend(o Options, run runFunc) *Backend {
 		// runs under; NumCPU would count the node's.
 		o.MaxRestores = max(1, runtime.GOMAXPROCS(0))
 	}
-	b := &Backend{opt: o, run: run, warms: map[string]*warm{}, boxes: map[string]*box{}, exits: make(chan backend.Exit, 1024),
-		restores: make(chan struct{}, o.MaxRestores)}
+	b := &Backend{opt: o, run: run, warms: map[string]*warm{}, boxes: map[string]*box{}, pooled: map[string]*box{}, exits: make(chan backend.Exit, 1024),
+		restores: make(chan struct{}, o.MaxRestores), quiet: make(chan struct{})}
 	if b.run == nil {
 		b.run = b.execRunsc
 	}
@@ -223,16 +289,30 @@ func (b *Backend) FiberOverheadBytes() uint64 { return 0 }
 // relay in front of the unix socket, and the sandbox stays network-free.
 func (b *Backend) EndpointSchemes() []string { return []string{"unix"} }
 
-// WCounter: the guest's memory is the sentry's memfd, which the leaf
-// accounts as shmem; the sentry's own Go heap (anon, tens of MiB and
-// different in every sandbox) is not the fiber's working set.
-func (b *Backend) WCounter() string { return "shmem" }
+// wCounter is the leaf's memory.stat counter W is read from. The guest's
+// memory is the sentry's memfd, which the leaf accounts as shmem, while
+// the sentry's own Go heap (anon, tens of MiB and different in every
+// sandbox) is not the fiber's working set.
+const wCounter = "shmem"
+
+// WCounter names the leaf counter the host reads for W.
+func (b *Backend) WCounter() string { return wCounter }
+
+// leafW reads the leaf's W counter, 0 without a cgroup. Read before the
+// hand-out it is this sandbox's own footprint, since restores of one
+// image settle MiB apart and the template's probe can be off.
+func leafW(cgroupFD int) uint64 {
+	if cgroupFD < 0 {
+		return 0
+	}
+	return cgroupStat(cgroupFD, wCounter)
+}
 
 // globalArgs are the flags every runsc command runs with. Huge pages for
-// the guest's memory are off. W is the leaf's shmem above the template's
-// measured footprint, and with 2 MiB pages a fresh sandbox lands several
-// MiB off that in either direction. That is wider than a small budget and
-// hides a real overrun.
+// the guest's memory are off. W is the leaf's shmem above what the leaf
+// counted before the hand-out, and with 2 MiB pages a sandbox moves
+// several MiB after that count in either direction. That is wider than a
+// small budget and hides a real overrun.
 func (b *Backend) globalArgs() []string {
 	return []string{"--root=" + filepath.Join(b.opt.StateDir, "root"), "--platform=" + runscPlatform,
 		"--network=none", "--ignore-cgroups", "--host-uds=all", "--overlay2=none", "--app-huge-pages=false"}
@@ -276,7 +356,7 @@ func (b *Backend) runsc(ctx context.Context, cgroupFD int, args ...string) (stri
 		if ctx.Err() != nil {
 			// The context ended and CommandContext killed runsc itself:
 			// the deadline is the reason, and the caller must see it as
-			// one ("signal: killed" is not a miss the agent can name).
+			// one ("signal: killed" is not a miss fiberd can name).
 			return string(out), fmt.Errorf("gvisor: runsc %s: %w", args[0], ctx.Err())
 		}
 		return string(out), fmt.Errorf("gvisor: runsc %s: %w: %s", args[0], err, clip(string(out)))
@@ -346,16 +426,17 @@ type spec struct {
 }
 
 // writeBundle creates <dir>/config.json. workDir is bind-mounted at
-// /host, template (when set) read-only at backend.TemplateMount, and
-// images, when set, turns on the workload-triggered checkpoint.
-func (b *Backend) writeBundle(dir string, argv, env []string, workDir, images, template string) error {
+// /host, channel read-only at channelMount, template (when set) read-only at
+// backend.TemplateMount, and images, when set, turns on the
+// workload-triggered checkpoint.
+func (b *Backend) writeBundle(dir string, argv, env []string, workDir, channel, images, template string) error {
 	var s spec
 	s.OCIVersion = "1.0.2"
 	s.Process.Cwd = "/"
 	s.Process.Args = argv
 	s.Process.Env = append([]string{"PATH=/bin:/usr/bin"}, env...)
 	// The rootfs is one host directory shared by every sandbox of every
-	// grant, served by the gofer with the agent's credentials, and the
+	// grant, served by the gofer with fiberd's credentials, and the
 	// workload is uid 0 in its sandbox. Read-only, or one fiber rewrites
 	// /bin/refzygote for every later sandbox. /host and /tmp below are
 	// the sandbox's writable paths.
@@ -375,6 +456,7 @@ func (b *Backend) writeBundle(dir string, argv, env []string, workDir, images, t
 	add("/dev", "tmpfs", "tmpfs")
 	add("/tmp", "tmpfs", "tmpfs")
 	add("/host", "bind", workDir, "rbind", "rw")
+	add(channelMount, "bind", channel, backend.TemplateMountOptions...)
 	if template != "" {
 		add(backend.TemplateMount, "bind", template, backend.TemplateMountOptions...)
 	}
@@ -440,7 +522,7 @@ func (b *Backend) newCID(kind, name string) string {
 }
 
 // sweep ends every sandbox a previous life of this backend left in its
-// root, then clears the bundle and template directories they used.
+// root, then clears the bundle, template and channel directories they used.
 // Nothing there is this life's, since no incarnation has started yet,
 // and a cid is never reused across lives. When runsc cannot list, the
 // sandboxes are left alone and so are their directories.
@@ -452,7 +534,7 @@ func (b *Backend) sweep() {
 	for _, id := range strings.Fields(out) {
 		_, _ = b.runsc(context.Background(), -1, "delete", "-force", id)
 	}
-	for _, sub := range []string{"bundles", "templates"} {
+	for _, sub := range []string{"bundles", "templates", "channel"} {
 		ents, err := os.ReadDir(filepath.Join(b.opt.StateDir, sub))
 		if err != nil {
 			continue
@@ -464,6 +546,19 @@ func (b *Backend) sweep() {
 			}
 		}
 	}
+}
+
+// sandboxPID reads the pid runsc wrote to pidFile, so no `runsc state`
+// sits on a birth's path.
+func (b *Backend) sandboxPID(ctx context.Context, cid, pidFile string) int {
+	data, err := os.ReadFile(pidFile)
+	if err == nil {
+		var pid int
+		if _, err := fmt.Sscan(string(data), &pid); err == nil && pid > 0 {
+			return pid
+		}
+	}
+	return b.pidOf(ctx, cid)
 }
 
 // pidOf reads the sandbox process pid from `runsc state`.
@@ -523,18 +618,43 @@ func (b *Backend) Warm(ctx context.Context, sp backend.WarmSpec) (backend.Warm, 
 	if err := os.MkdirAll(sp.WorkDir, 0o755); err != nil {
 		return backend.Warm{}, err
 	}
-	w := &warm{id: sp.GrantUID, cid: b.newCID("w", sp.GrantUID), argv: sp.Template.Argv, workDir: sp.WorkDir}
+	w := &warm{id: sp.GrantUID, cid: b.newCID("w", sp.GrantUID), argv: sp.Template.Argv, workDir: sp.WorkDir, pending: map[string]*box{}}
 	w.dir = filepath.Join(b.opt.StateDir, "templates", w.cid)
 	w.images = filepath.Join(w.dir, "images")
+	// Named by the incarnation's number alone. A unix socket path is at
+	// most 108 bytes and a cid can be 64.
+	w.channel = filepath.Join(b.opt.StateDir, "channel", w.cid[strings.LastIndex(w.cid, "-")+1:])
 	if err := os.MkdirAll(w.dir, 0o755); err != nil {
 		return backend.Warm{}, err
 	}
-	// A warm that fails leaves nothing of its directory. The reaper takes
-	// it for one that ran.
+	// The pool socket, in a directory of the instance's own that holds
+	// nothing else. The sandbox connects with fiberd's credentials, so
+	// the socket is fiberd's alone.
+	if err := os.MkdirAll(w.channel, 0o700); err != nil {
+		return backend.Warm{}, err
+	}
+	sock := filepath.Join(w.channel, poolSocket)
+	ln, err := net.ListenUnix("unixpacket", &net.UnixAddr{Name: sock, Net: "unixpacket"})
+	if err != nil {
+		_ = os.RemoveAll(w.channel)
+		return backend.Warm{}, fmt.Errorf("gvisor: pool socket: %w", err)
+	}
+	if err := os.Chmod(sock, 0o600); err != nil {
+		_ = ln.Close()
+		_ = os.RemoveAll(w.channel)
+		return backend.Warm{}, fmt.Errorf("gvisor: pool socket: %w", err)
+	}
+	w.ln = ln
+	b.reapers.Add(1)
+	go b.servePool(w)
+	// A warm that fails leaves nothing of its directories. The reaper
+	// takes them for one that ran.
 	warmed := false
 	defer func() {
 		if !warmed {
+			_ = ln.Close()
 			_ = os.RemoveAll(w.dir)
+			_ = os.RemoveAll(w.channel)
 		}
 	}()
 	if sp.Template.Dir != "" {
@@ -552,7 +672,7 @@ func (b *Backend) Warm(ctx context.Context, sp backend.WarmSpec) (backend.Warm, 
 	marker := filepath.Join(sp.WorkDir, readyMarker)
 	_ = os.Remove(marker)
 	bundle := filepath.Join(w.dir, "bundle")
-	if err := b.writeBundle(bundle, w.argv, []string{"FIBERD_FENCE=none"}, sp.WorkDir, "", w.template); err != nil {
+	if err := b.writeBundle(bundle, w.argv, []string{"FIBERD_FENCE=none"}, sp.WorkDir, w.channel, "", w.template); err != nil {
 		return backend.Warm{}, err
 	}
 	if _, err := b.runsc(ctx, sp.CgroupFD, "run", "--detach", "--bundle", bundle, w.cid); err != nil {
@@ -576,8 +696,12 @@ func (b *Backend) Warm(ctx context.Context, sp backend.WarmSpec) (backend.Warm, 
 	// restoring one into the empty probe cgroup the host offers: a fresh
 	// sandbox (its own sentry, gofer and page tables) costs more than the
 	// original restored in place, and only a fiber-like restore in a
-	// cgroup of its own reads true.
+	// cgroup of its own reads true. The same restore tells whether the
+	// template binds its identity late.
 	bytes, total := b.probeFootprint(ctx, w, sp.ProbeCgroupFD)
+	if w.noPool {
+		log.Printf("gvisor: template of %s takes its identity from the spec environment and never dials the pool socket, so it has no pool", w.id)
+	}
 	b.mu.Lock()
 	b.warms[w.id] = w
 	b.mu.Unlock()
@@ -589,43 +713,86 @@ func (b *Backend) Warm(ctx context.Context, sp backend.WarmSpec) (backend.Warm, 
 // probeFootprint restores the template image once into the given empty
 // cgroup exactly as a fiber would be, reads the cgroup (its shmem, the
 // guest memory, and its memory.current), and ends it. 0 when it cannot
-// tell.
+// tell, and without a cgroup it restores all the same, since the probe
+// is also where late binding is detected. Its spec carries a token and
+// the probe's fence and endpoint both, so whichever the template does
+// first, dial or serve, says how it takes its identity, and it is
+// measured serving either way.
 func (b *Backend) probeFootprint(ctx context.Context, w *warm, cgroupFD int) (shmem, total uint64) {
 	if cgroupFD < 0 {
 		log.Printf("gvisor: footprint probe: no cgroup")
-		return 0, 0
 	}
-	cid := w.cid + "-probe"
-	bundle := filepath.Join(filepath.Dir(w.images), "probe-bundle")
-	ep := filepath.Join(w.workDir, "probe.sock")
-	if err := b.writeBundle(bundle, w.argv, []string{"FIBERD_FENCE=probe", "FIBERD_ENDPOINT=/host/probe.sock"}, w.workDir, "", w.template); err != nil {
+	x := &box{id: "probe", cid: w.cid + "-probe", bundle: filepath.Join(w.dir, "probe-bundle"), probe: true, workDir: w.workDir, done: make(chan struct{})}
+	x.endpoint = filepath.Join(w.workDir, "probe.sock")
+	env := []string{"FIBERD_FENCE=probe", "FIBERD_ENDPOINT=/host/probe.sock"}
+	pctx, cancel := context.WithTimeout(ctx, resumeDeadline)
+	defer cancel()
+	if err := b.restore(pctx, w, x, w.images, w.argv, env, cgroupFD); err != nil {
 		log.Printf("gvisor: footprint probe: %v", err)
 		return 0, 0
 	}
-	_ = os.Remove(ep)
-	if _, err := b.runsc(ctx, cgroupFD, "restore", "--detach", "--image-path", w.images, "--bundle", bundle, directIO, cid); err != nil {
-		log.Printf("gvisor: footprint probe: %v", err)
-	} else {
-		// Serving is the state a fiber is measured in.
-		wctx, cancel := context.WithTimeout(ctx, resumeDeadline)
-		if err := waitEndpoint(wctx, ep, nil); err != nil {
+	defer func() {
+		b.endBox(x)
+		_ = os.Remove(x.endpoint)
+	}()
+	// Serving is the state a fiber is measured in.
+	conn, err := b.claimOrServe(pctx, w, x)
+	switch {
+	case err != nil:
+		log.Printf("gvisor: footprint probe did not serve: %v", err)
+		return 0, 0
+	case conn == nil:
+		w.noPool = true
+	default:
+		if _, err := b.bind(pctx, x, conn, "clone", "probe", "/host/probe.sock", nil); err != nil {
 			log.Printf("gvisor: footprint probe did not serve: %v", err)
-		} else {
-			// The image is read as the guest touches it, so a sandbox
-			// grows for a while after it first serves; take the larger
-			// of a reading at readiness and one after it has settled.
-			shmem, total = cgroupStat(cgroupFD, "shmem"), cgroupCurrent(cgroupFD)
-			time.Sleep(200 * time.Millisecond)
-			shmem, total = max(shmem, cgroupStat(cgroupFD, "shmem")), max(total, cgroupCurrent(cgroupFD))
+			return 0, 0
 		}
-		cancel()
 	}
-	_, _ = b.runsc(context.Background(), -1, "kill", cid, "KILL")
-	_, _ = b.runsc(context.Background(), -1, "wait", cid)
-	_, _ = b.runsc(context.Background(), -1, "delete", "-force", cid)
-	_ = os.RemoveAll(bundle)
-	_ = os.Remove(ep)
-	return shmem, total
+	if cgroupFD < 0 {
+		return 0, 0
+	}
+	// The image is read as the guest touches it, so a sandbox grows for a
+	// while after it first serves; take the larger of a reading at
+	// readiness and one after it has settled.
+	shmem, total = cgroupStat(cgroupFD, "shmem"), cgroupCurrent(cgroupFD)
+	time.Sleep(200 * time.Millisecond)
+	return max(shmem, cgroupStat(cgroupFD, "shmem")), max(total, cgroupCurrent(cgroupFD))
+}
+
+// claimOrServe returns the probe's connection when it claims its token,
+// or nil when it serves the endpoint from its spec instead.
+func (b *Backend) claimOrServe(ctx context.Context, w *warm, x *box) (net.Conn, error) {
+	for {
+		select {
+		case conn := <-x.claim:
+			return conn, nil
+		default:
+		}
+		if c, err := net.DialTimeout("unix", x.endpoint, 50*time.Millisecond); err == nil {
+			_ = c.Close()
+			b.forgetToken(w, x)
+			return nil, nil
+		}
+		select {
+		case conn := <-x.claim:
+			return conn, nil
+		case <-ctx.Done():
+			b.forgetToken(w, x)
+			return nil, ctx.Err()
+		case <-x.done:
+			b.forgetToken(w, x)
+			return nil, errors.New("sandbox exited before serving")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+}
+
+// endBox kills a sandbox and waits for its reaper, so its state is gone
+// when this returns.
+func (b *Backend) endBox(x *box) {
+	_, _ = b.runsc(context.Background(), -1, "kill", x.cid, "KILL")
+	<-x.done
 }
 
 // leafDiag describes the fiber's leaf after a failed start: whether the
@@ -686,7 +853,7 @@ func cgroupCurrent(fd int) uint64 {
 // reports how it ended. With the sandbox pid known, the wait is a pidfd
 // parked in the Go runtime's poller, which costs no process and no
 // thread per sandbox. A `runsc wait` is a process of several threads and
-// some 20 MiB in the agent's own leaf for each live fiber. Without a pid
+// some 20 MiB in fiberd's own leaf for each live fiber. Without a pid
 // the sandbox is already gone or runsc could not say, and `runsc wait`
 // sorts it out as before.
 func (b *Backend) reap(cid string, pid int) string {
@@ -733,7 +900,7 @@ func awaitExit(pid int) (string, bool) {
 
 // exitStatus is how the exited process pid ended when this process is
 // its parent, which reaps it here. runsc reparents a detached sandbox
-// to init, so that is the agent when it is a container's init. Otherwise
+// to init, so that is fiberd when it is a container's init. Otherwise
 // the status is "exited", since only a parent can read one.
 func exitStatus(pid int) string {
 	var ws unix.WaitStatus
@@ -769,10 +936,12 @@ func waitStatus(out string) string {
 func (b *Backend) waitWarm(w *warm) {
 	defer b.reapers.Done()
 	b.reap(w.cid, w.pid)
-	// The image and the staged copy go with the sandbox. The directory is
-	// this incarnation's own, so a successor already warmed under the
-	// same grant keeps its own.
+	// The image, the staged copy and the pool socket go with the
+	// sandbox. The directories are this incarnation's own, so a successor
+	// already warmed under the same grant keeps its own.
+	_ = w.ln.Close()
 	_ = os.RemoveAll(w.dir)
+	_ = os.RemoveAll(w.channel)
 	b.mu.Lock()
 	gone := b.warms[w.id] == w
 	if gone {
@@ -796,60 +965,421 @@ func (b *Backend) Unwarm(id string) {
 	}
 }
 
-// start restores an image as a new sandbox and waits for its endpoint,
-// under the deadline when one is given. template is the warm instance's
-// bound template directory, or empty.
-func (b *Backend) start(ctx context.Context, images, workDir, template string, argv []string, fence, endpoint string, payload []byte, cgroupFD int, deadline time.Duration) (backend.Fiber, error) {
+// A channel record is one packet: its kind byte, then every field ended
+// by NUL. The sandbox claims with 't' and its token, the backend hands
+// out identity with 'i', and the sandbox acks with 'a' and the fence once
+// its endpoint is bound.
+//
+//	t token
+//	i generation kind fence endpoint payload-hex|- key-PEM|- cert-PEM|- caller|- seed-hex
+//	a fence
+const (
+	recClaim    = 't'
+	recIdentity = 'i'
+	recAck      = 'a'
+	// identityFields is how many fields an 'i' record carries.
+	identityFields = 9
+)
+
+// record builds one channel record.
+func record(kind byte, fields ...string) []byte {
+	var buf bytes.Buffer
+	buf.WriteByte(kind)
+	for _, f := range fields {
+		buf.WriteString(f)
+		buf.WriteByte(0)
+	}
+	return buf.Bytes()
+}
+
+// parseRecord takes one record apart. It is refused when it is empty or
+// a field is not NUL-ended.
+func parseRecord(data []byte) (kind byte, fields []string, ok bool) {
+	if len(data) < 2 || data[len(data)-1] != 0 {
+		return 0, nil, false
+	}
+	parts := bytes.Split(data[1:len(data)-1], []byte{0})
+	fields = make([]string, len(parts))
+	for i, p := range parts {
+		fields[i] = string(p)
+	}
+	return data[0], fields, true
+}
+
+// servePool accepts the connections of sandboxes restored under w and
+// reads each claim in a goroutine of its own. At most unclaimedMax are
+// held, and one more closes the oldest, so silent connections cannot
+// pile up or keep a real claim out.
+func (b *Backend) servePool(w *warm) {
+	defer b.reapers.Done()
+	for {
+		conn, err := w.ln.Accept()
+		if err != nil {
+			return
+		}
+		b.mu.Lock()
+		if len(w.unclaimed) >= unclaimedMax {
+			_ = w.unclaimed[0].Close()
+			w.unclaimed = w.unclaimed[1:]
+		}
+		w.unclaimed = append(w.unclaimed, conn)
+		b.mu.Unlock()
+		b.reapers.Add(1)
+		go b.claim(w, conn)
+	}
+}
+
+// claimed takes conn off w's unclaimed connections.
+func (b *Backend) claimed(w *warm, conn net.Conn) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for i, c := range w.unclaimed {
+		if c == conn {
+			w.unclaimed = append(w.unclaimed[:i], w.unclaimed[i+1:]...)
+			return
+		}
+	}
+}
+
+// claim delivers conn to the restore that minted its token, or closes
+// it. The token is never logged.
+func (b *Backend) claim(w *warm, conn net.Conn) {
+	defer b.reapers.Done()
+	defer b.claimed(w, conn)
+	_ = conn.SetReadDeadline(time.Now().Add(claimWait))
+	buf := make([]byte, 2+2*tokenBytes+1)
+	n, err := conn.Read(buf)
+	if err != nil {
+		_ = conn.Close()
+		return
+	}
+	kind, fields, ok := parseRecord(buf[:n])
+	if !ok || kind != recClaim || len(fields) != 1 {
+		_ = conn.Close()
+		return
+	}
+	// Delivered under the mutex, so forgetToken finds the connection on
+	// the claim channel or the token still pending, never neither.
+	b.mu.Lock()
+	x := w.pending[fields[0]]
+	delete(w.pending, fields[0])
+	if x != nil {
+		_ = conn.SetReadDeadline(time.Time{})
+		x.claim <- conn
+	}
+	b.mu.Unlock()
+	if x == nil {
+		_ = conn.Close()
+	}
+}
+
+// mintToken gives x a fresh one-shot token for its restore under w.
+func (b *Backend) mintToken(w *warm, x *box) error {
+	raw := make([]byte, tokenBytes)
+	if _, err := rand.Read(raw); err != nil {
+		return fmt.Errorf("gvisor: token: %w", err)
+	}
+	x.token, x.claim = hex.EncodeToString(raw), make(chan net.Conn, 1)
+	b.mu.Lock()
+	w.pending[x.token] = x
+	b.mu.Unlock()
+	return nil
+}
+
+// forgetToken withdraws x's token, which nobody will wait for any more,
+// and closes a claim that arrived meanwhile.
+func (b *Backend) forgetToken(w *warm, x *box) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	delete(w.pending, x.token)
+	select {
+	case conn := <-x.claim:
+		_ = conn.Close()
+	default:
+	}
+}
+
+// enterClone takes a restore slot for a clone, a probe or a resume,
+// cutting short a pool restore that holds one.
+func (b *Backend) enterClone(ctx context.Context) error {
+	b.gateMu.Lock()
+	b.clones++
+	if b.fill != nil {
+		b.fill()
+	}
+	b.gateMu.Unlock()
+	select {
+	case b.restores <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		b.leaveClone(false)
+		return ctx.Err()
+	}
+}
+
+// leaveClone gives the clone's slot back, when it held one, and lets a
+// pool restore try again once no clone is left.
+func (b *Backend) leaveClone(held bool) {
+	if held {
+		<-b.restores
+	}
+	b.gateMu.Lock()
+	b.clones--
+	if b.clones == 0 {
+		close(b.quiet)
+		b.quiet = make(chan struct{})
+	}
+	b.gateMu.Unlock()
+}
+
+// enterFill takes a restore slot for a pool restore only while no clone
+// waits or runs, under a context a later clone cancels.
+func (b *Backend) enterFill(ctx context.Context) (context.Context, error) {
+	for {
+		b.gateMu.Lock()
+		if b.clones == 0 && b.fill == nil {
+			// Every slot is free, since only clones and this hold them.
+			b.restores <- struct{}{}
+			fctx, cancel := context.WithCancel(ctx)
+			b.fill = cancel
+			b.gateMu.Unlock()
+			return fctx, nil
+		}
+		quiet := b.quiet
+		b.gateMu.Unlock()
+		select {
+		case <-quiet:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+}
+
+// leaveFill gives the pool restore's slot back.
+func (b *Backend) leaveFill() {
+	<-b.restores
+	b.gateMu.Lock()
+	b.fill()
+	b.fill = nil
+	close(b.quiet)
+	b.quiet = make(chan struct{})
+	b.gateMu.Unlock()
+}
+
+// restore brings images up as the sandbox x in cgroupFD, with a fresh
+// token in its environment, and registers a reaper. A failed restore
+// leaves no sandbox and no bundle. A pool restore cut short for a clone
+// fails with backend.ErrYielded.
+func (b *Backend) restore(ctx context.Context, w *warm, x *box, images string, argv, env []string, cgroupFD int) error {
+	if err := b.mintToken(w, x); err != nil {
+		return err
+	}
+	// The bundle is the sandbox's own, named after its cid, so the reaper
+	// of an earlier incarnation under the same fence never removes it. It
+	// lives in the state directory, which is fiberd's alone. The
+	// grant's run directory is every sandbox's /host, read and write, so
+	// a bundle there could be rewritten by a sibling before runsc read
+	// it, or planted as a link for fiberd to write through.
+	if err := b.writeBundle(x.bundle, argv, append([]string{"FIBERD_TOKEN=" + x.token}, env...), w.workDir, w.channel, "", w.template); err != nil {
+		b.forgetToken(w, x)
+		return err
+	}
+	// A restore slot, waited for under the deadline.
+	rctx, leave := ctx, func() { b.leaveClone(true) }
+	var err error
+	if x.pooled {
+		rctx, err = b.enterFill(ctx)
+		leave = b.leaveFill
+	} else {
+		err = b.enterClone(ctx)
+	}
+	if err != nil {
+		b.forgetToken(w, x)
+		_ = os.RemoveAll(x.bundle)
+		return fmt.Errorf("gvisor: %s waited for a restore slot: %w", x.id, err)
+	}
+	// The image is read, not cached, in the sandbox's leaf.
+	pidFile := filepath.Join(x.bundle, "pid")
+	_, err = b.runsc(rctx, cgroupFD, "restore", "--detach", "--pid-file", pidFile, "--image-path", images, "--bundle", x.bundle, directIO, x.cid)
+	cut := rctx.Err() != nil
+	leave()
+	if err != nil {
+		// No sandbox, so no reaper to take the bundle.
+		b.forgetToken(w, x)
+		_ = os.RemoveAll(x.bundle)
+		if cut {
+			// runsc was killed midway and may have left a half-restored
+			// sandbox behind, which its leaf's kill ends and this forgets.
+			b.reapers.Add(1)
+			go func() {
+				defer b.reapers.Done()
+				_, _ = b.runsc(context.Background(), -1, "delete", "-force", x.cid)
+			}()
+			if ctx.Err() == nil {
+				return fmt.Errorf("%w: %s", backend.ErrYielded, x.id)
+			}
+		}
+		return fmt.Errorf("%w (%s)", err, leafDiag(cgroupFD))
+	}
+	x.pid = b.sandboxPID(ctx, x.cid, pidFile)
+	b.mu.Lock()
+	switch {
+	case x.probe:
+	case x.pooled:
+		b.pooled[x.id] = x
+	default:
+		b.boxes[x.id] = x
+	}
+	b.mu.Unlock()
+	b.reapers.Add(1)
+	go b.waitBox(x)
+	return nil
+}
+
+// awaitClaim waits for the sandbox x to claim its token. The sandbox
+// exiting first, or the context ending, kills it and is an error.
+func (b *Backend) awaitClaim(ctx context.Context, w *warm, x *box) (net.Conn, error) {
+	var err error
+	select {
+	case conn := <-x.claim:
+		b.mu.Lock()
+		x.conn = conn
+		b.mu.Unlock()
+		return conn, nil
+	case <-ctx.Done():
+		err = fmt.Errorf("gvisor: %s sent no token: %w", x.id, ctx.Err())
+	case <-x.done:
+		err = fmt.Errorf("gvisor: %s exited before sending its token", x.id)
+	}
+	b.forgetToken(w, x)
+	_, _ = b.runsc(context.Background(), -1, "kill", x.cid, "KILL")
+	return nil, err
+}
+
+// bind hands x its identity and a fresh seed on conn, then waits for an
+// ack naming the fence and for the endpoint to accept. Anything else
+// kills the sandbox. The seed never touches a file or a log.
+func (b *Backend) bind(ctx context.Context, x *box, conn net.Conn, kind, fence, endpoint string, payload []byte) (backend.Fiber, error) {
+	// Held in x while the hand-out runs, so the reaper closes it, and
+	// ends the wait for the ack, should the sandbox die meanwhile.
+	b.mu.Lock()
+	x.conn = conn
+	b.mu.Unlock()
+	fiber, err := b.handOut(ctx, x, conn, kind, fence, endpoint, payload)
+	b.mu.Lock()
+	x.conn = nil
+	b.mu.Unlock()
+	_ = conn.Close()
+	if err != nil {
+		_, _ = b.runsc(context.Background(), -1, "kill", x.cid, "KILL")
+		return backend.Fiber{}, err
+	}
+	return fiber, nil
+}
+
+func (b *Backend) handOut(ctx context.Context, x *box, conn net.Conn, kind, fence, endpoint string, payload []byte) (backend.Fiber, error) {
+	seed := make([]byte, seedBytes)
+	if _, err := rand.Read(seed); err != nil {
+		return backend.Fiber{}, fmt.Errorf("gvisor: seed: %w", err)
+	}
+	ph := "-"
+	if len(payload) > 0 {
+		ph = hex.EncodeToString(payload)
+	}
+	// The generation counts the copies of the template this sandbox is.
+	// A restore of the template image is the second. A park's lineage
+	// is not counted here.
+	gen := "2"
+	if kind == "resume" {
+		gen = "0"
+	}
+	rec := record(recIdentity, gen, kind, fence, endpoint, ph, "-", "-", "-", hex.EncodeToString(seed))
+	clear(seed)
+	// The context ending cuts the write and the read short.
+	stop := context.AfterFunc(ctx, func() { _ = conn.SetDeadline(time.Now()) })
+	defer stop()
+	if _, err := conn.Write(rec); err != nil {
+		clear(rec)
+		return backend.Fiber{}, fmt.Errorf("gvisor: %s: identity: %w", fence, err)
+	}
+	clear(rec)
+	buf := make([]byte, 2+len(fence)+1)
+	n, err := conn.Read(buf)
+	if err != nil {
+		if ctx.Err() != nil {
+			err = ctx.Err()
+		}
+		return backend.Fiber{}, fmt.Errorf("gvisor: %s: no ack: %w", fence, err)
+	}
+	k, fields, ok := parseRecord(buf[:n])
+	if !ok || k != recAck || len(fields) != 1 || fields[0] != fence {
+		return backend.Fiber{}, fmt.Errorf("gvisor: %s: ack names %q", fence, buf[:n])
+	}
+	if err := waitEndpoint(ctx, x.endpoint, x.done); err != nil {
+		return backend.Fiber{}, fmt.Errorf("gvisor: %s did not serve: %w", fence, err)
+	}
+	return backend.Fiber{ID: x.id, PID: x.pid}, nil
+}
+
+// sandboxEndpoint is endpoint as the sandbox names it, under /host, or
+// an error when it is not under the grant's run directory.
+func sandboxEndpoint(workDir, endpoint string) (string, error) {
+	if !strings.HasPrefix(endpoint, workDir+"/") {
+		return "", fmt.Errorf("gvisor: endpoint %s is outside the grant's run directory %s", endpoint, workDir)
+	}
+	return "/host/" + strings.TrimPrefix(endpoint, workDir+"/"), nil
+}
+
+// start restores an image as a new sandbox serving endpoint, under the
+// deadline when one is given. The identity goes over the channel, or in
+// the spec environment for a template that never dials.
+func (b *Backend) start(ctx context.Context, w *warm, images string, argv []string, kind, fence, endpoint string, payload []byte, cgroupFD int, deadline time.Duration) (backend.Fiber, error) {
 	if deadline > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, deadline)
 		defer cancel()
 	}
-	if !strings.HasPrefix(endpoint, workDir+"/") {
-		return backend.Fiber{}, fmt.Errorf("gvisor: endpoint %s is outside the grant's run directory %s", endpoint, workDir)
-	}
-	env := []string{"FIBERD_FENCE=" + fence, "FIBERD_ENDPOINT=/host/" + strings.TrimPrefix(endpoint, workDir+"/")}
-	if len(payload) > 0 {
-		env = append(env, "FIBERD_PAYLOAD="+hex.EncodeToString(payload))
-	}
-	// The bundle is the sandbox's own, named after its cid, so the reaper
-	// of an earlier incarnation under the same fence never removes it. It
-	// lives in the state directory, which is the agent's alone. The
-	// grant's run directory is every sandbox's /host, read and write, so
-	// a bundle there could be rewritten by a sibling before runsc read
-	// it, or planted as a link for the agent to write through.
-	x := &box{id: fence, cid: b.newCID("f", fence), endpoint: endpoint, done: make(chan struct{})}
-	x.bundle = b.bundleDir(x.cid)
-	if err := b.writeBundle(x.bundle, argv, env, workDir, "", template); err != nil {
+	inside, err := sandboxEndpoint(w.workDir, endpoint)
+	if err != nil {
 		return backend.Fiber{}, err
 	}
+	x := &box{id: fence, cid: b.newCID("f", fence), endpoint: endpoint, workDir: w.workDir, done: make(chan struct{})}
+	x.bundle = b.bundleDir(x.cid)
 	_ = os.Remove(endpoint)
-	// A restore slot, waited for under the Clone deadline.
-	select {
-	case b.restores <- struct{}{}:
-	case <-ctx.Done():
-		_ = os.RemoveAll(x.bundle)
-		return backend.Fiber{}, fmt.Errorf("gvisor: %s waited for a restore slot: %w", fence, ctx.Err())
+	if w.noPool {
+		env := []string{"FIBERD_FENCE=" + fence, "FIBERD_ENDPOINT=" + inside}
+		if len(payload) > 0 {
+			env = append(env, "FIBERD_PAYLOAD="+hex.EncodeToString(payload))
+		}
+		if err := b.restore(ctx, w, x, images, argv, env, cgroupFD); err != nil {
+			return backend.Fiber{}, err
+		}
+		// The identity sat in the spec, so the restore is the last
+		// moment the sandbox has surely not touched its payload.
+		base := leafW(cgroupFD)
+		b.forgetToken(w, x)
+		if err := waitEndpoint(ctx, endpoint, x.done); err != nil {
+			_, _ = b.runsc(context.Background(), -1, "kill", x.cid, "KILL")
+			return backend.Fiber{}, fmt.Errorf("gvisor: %s did not serve: %w (%s)", fence, err, leafDiag(cgroupFD))
+		}
+		return backend.Fiber{ID: x.id, PID: x.pid, Footprint: base}, nil
 	}
-	// The image is read, not cached, in the fiber's leaf.
-	_, err := b.runsc(ctx, cgroupFD, "restore", "--detach", "--image-path", images, "--bundle", x.bundle, directIO, x.cid)
-	<-b.restores
+	if err := b.restore(ctx, w, x, images, argv, nil, cgroupFD); err != nil {
+		return backend.Fiber{}, err
+	}
+	conn, err := b.awaitClaim(ctx, w, x)
 	if err != nil {
-		// No sandbox, so no reaper to take the bundle.
-		_ = os.RemoveAll(x.bundle)
 		return backend.Fiber{}, fmt.Errorf("%w (%s)", err, leafDiag(cgroupFD))
 	}
-	x.pid = b.pidOf(ctx, x.cid)
-	b.mu.Lock()
-	b.boxes[x.id] = x
-	b.mu.Unlock()
-	b.reapers.Add(1)
-	go b.waitBox(x)
-	if err := waitEndpoint(ctx, endpoint, x.done); err != nil {
-		_, _ = b.runsc(context.Background(), -1, "kill", x.cid, "KILL")
-		return backend.Fiber{}, fmt.Errorf("gvisor: %s did not serve: %w (%s)", fence, err, leafDiag(cgroupFD))
+	// Restored, with every page of the image read, and waiting on the
+	// channel for an identity it has not been given.
+	base := leafW(cgroupFD)
+	fiber, err := b.bind(ctx, x, conn, kind, fence, inside, payload)
+	if err != nil {
+		return backend.Fiber{}, fmt.Errorf("%w (%s)", err, leafDiag(cgroupFD))
 	}
-	return backend.Fiber{ID: x.id, PID: x.pid}, nil
+	fiber.Footprint = base
+	return fiber, nil
 }
 
 func (b *Backend) waitBox(x *box) {
@@ -857,14 +1387,33 @@ func (b *Backend) waitBox(x *box) {
 	status := b.reap(x.cid, x.pid)
 	_ = os.RemoveAll(x.bundle)
 	b.mu.Lock()
-	known := b.boxes[x.id] == x
-	if known {
-		delete(b.boxes, x.id)
+	known := false
+	switch {
+	case x.probe:
+	case x.pooled:
+		known = b.pooled[x.id] == x
+		if known {
+			delete(b.pooled, x.id)
+		}
+	default:
+		known = b.boxes[x.id] == x
+		if known {
+			delete(b.boxes, x.id)
+		}
 	}
+	pooled, id, conn := x.pooled, x.id, x.conn
+	x.conn = nil
 	b.mu.Unlock()
+	if conn != nil {
+		_ = conn.Close()
+	}
 	close(x.done)
-	if known {
-		b.exits <- backend.Exit{FiberID: x.id, Status: status}
+	switch {
+	case !known:
+	case pooled:
+		b.exits <- backend.Exit{PooledID: id, Status: status}
+	default:
+		b.exits <- backend.Exit{FiberID: id, Status: status}
 	}
 }
 
@@ -876,7 +1425,96 @@ func (b *Backend) Clone(ctx context.Context, warmID string, sp backend.FiberSpec
 	if !ok {
 		return backend.Fiber{}, fmt.Errorf("gvisor: no warm template %q", warmID)
 	}
-	return b.start(ctx, w.images, w.workDir, w.template, w.argv, sp.Fence, sp.Endpoint, sp.Payload, sp.CgroupFD, sp.Deadline)
+	return b.start(ctx, w, w.images, w.argv, "clone", sp.Fence, sp.Endpoint, sp.Payload, sp.CgroupFD, sp.Deadline)
+}
+
+// Pool restores a sandbox with no identity, which waits for Bind. A
+// failed Pool leaves no sandbox, and one it restored reports its end
+// under the pooled id.
+func (b *Backend) Pool(ctx context.Context, warmID string, sp backend.PoolSpec) (backend.Pooled, error) {
+	b.mu.Lock()
+	w, ok := b.warms[warmID]
+	b.mu.Unlock()
+	if !ok {
+		return backend.Pooled{}, fmt.Errorf("gvisor: no warm template %q", warmID)
+	}
+	if w.noPool {
+		return backend.Pooled{}, backend.ErrNoPool
+	}
+	if sp.Deadline > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, sp.Deadline)
+		defer cancel()
+	}
+	x := &box{cid: b.newCID("p", warmID), pooled: true, workDir: w.workDir, done: make(chan struct{})}
+	x.id = x.cid
+	x.bundle = b.bundleDir(x.cid)
+	if err := b.restore(ctx, w, x, w.images, w.argv, nil, sp.CgroupFD); err != nil {
+		return backend.Pooled{}, err
+	}
+	if _, err := b.awaitClaim(ctx, w, x); err != nil {
+		return backend.Pooled{}, fmt.Errorf("%w (%s)", err, leafDiag(sp.CgroupFD))
+	}
+	return backend.Pooled{ID: x.id, PID: x.pid}, nil
+}
+
+// Bind hands a pooled sandbox the fiber's identity and waits for it to
+// serve. The sandbox keeps its pooled id until then, so a failed
+// hand-out never reports an end under a fence.
+func (b *Backend) Bind(ctx context.Context, pooledID string, sp backend.FiberSpec) (backend.Fiber, error) {
+	if sp.Deadline > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, sp.Deadline)
+		defer cancel()
+	}
+	b.mu.Lock()
+	x := b.pooled[pooledID]
+	var conn net.Conn
+	if x != nil && !x.binding {
+		x.binding = true
+		x.endpoint, conn = sp.Endpoint, x.conn
+	} else {
+		x = nil
+	}
+	b.mu.Unlock()
+	if x == nil {
+		return backend.Fiber{}, fmt.Errorf("gvisor: no pooled sandbox %q", pooledID)
+	}
+	inside, err := sandboxEndpoint(x.workDir, sp.Endpoint)
+	if err != nil {
+		_, _ = b.runsc(context.Background(), -1, "kill", x.cid, "KILL")
+		return backend.Fiber{}, err
+	}
+	_ = os.Remove(sp.Endpoint)
+	// Idle in the pool since its restore, so this is its settled footprint.
+	base := leafW(sp.CgroupFD)
+	if _, err := b.bind(ctx, x, conn, "clone", sp.Fence, inside, sp.Payload); err != nil {
+		return backend.Fiber{}, fmt.Errorf("%w (%s)", err, leafDiag(sp.CgroupFD))
+	}
+	// The sandbox is the fiber from here on, unless the reaper took it
+	// first, in which case its end went out under the pooled id.
+	b.mu.Lock()
+	alive := b.pooled[pooledID] == x
+	if alive {
+		delete(b.pooled, pooledID)
+		x.pooled, x.id = false, sp.Fence
+		b.boxes[sp.Fence] = x
+	}
+	b.mu.Unlock()
+	if !alive {
+		return backend.Fiber{}, fmt.Errorf("gvisor: %s died during its hand-out", pooledID)
+	}
+	return backend.Fiber{ID: sp.Fence, PID: x.pid, Footprint: base}, nil
+}
+
+// Discard kills a pooled sandbox. Its end is reported as Exit{PooledID}.
+func (b *Backend) Discard(pooledID string) {
+	b.mu.Lock()
+	x := b.pooled[pooledID]
+	b.mu.Unlock()
+	if x != nil {
+		_, _ = b.runsc(context.Background(), -1, "kill", x.cid, "KILL")
+	}
 }
 
 // Park asks the workload to close its endpoint, then checkpoints.
@@ -937,21 +1575,21 @@ func (b *Backend) Resume(ctx context.Context, sp backend.ResumeSpec) (backend.Fi
 			parked = true
 		}
 	}
+	// The resumed sandbox takes its identity from the warm instance's
+	// pool socket, so a resume needs the instance.
 	b.mu.Lock()
 	w := b.warms[sp.WarmID]
 	b.mu.Unlock()
-	template := ""
-	if w != nil {
-		template = w.template
+	if w == nil {
+		return backend.Fiber{}, fmt.Errorf("gvisor: no warm template %q to resume under", sp.WarmID)
 	}
 	switch {
-	case parked && template == "":
+	case parked && w.template == "":
 		return backend.Fiber{}, fmt.Errorf("gvisor: park image was taken with a registry template at %s, which warm instance %q does not have here", backend.TemplateMount, sp.WarmID)
-	case !parked && template != "":
+	case !parked && w.template != "":
 		return backend.Fiber{}, fmt.Errorf("gvisor: park image was taken without a template at %s, which warm instance %q binds here", backend.TemplateMount, sp.WarmID)
 	}
-	workDir := filepath.Dir(sp.Endpoint)
-	return b.start(ctx, sp.Dir, workDir, template, s.Process.Args, sp.Fence, sp.Endpoint, nil, sp.CgroupFD, sp.Deadline)
+	return b.start(ctx, w, sp.Dir, s.Process.Args, "resume", sp.Fence, sp.Endpoint, nil, sp.CgroupFD, sp.Deadline)
 }
 
 func (b *Backend) Kill(fiberID string) error {
@@ -967,8 +1605,8 @@ func (b *Backend) Kill(fiberID string) error {
 
 func (b *Backend) Exits() <-chan backend.Exit { return b.exits }
 
-// Close kills every sandbox and waits (bounded) for their reapers, so the
-// state directory can go once it returns.
+// Close kills every sandbox, pooled ones included, and waits (bounded)
+// for their reapers, so the state directory can go once it returns.
 func (b *Backend) Close() {
 	b.mu.Lock()
 	var cids []string
@@ -976,6 +1614,9 @@ func (b *Backend) Close() {
 		cids = append(cids, w.cid)
 	}
 	for _, x := range b.boxes {
+		cids = append(cids, x.cid)
+	}
+	for _, x := range b.pooled {
 		cids = append(cids, x.cid)
 	}
 	b.mu.Unlock()
@@ -1000,4 +1641,5 @@ var (
 	_ backend.DeadlineAdvisor = (*Backend)(nil)
 	_ backend.Overheader      = (*Backend)(nil)
 	_ backend.WMeter          = (*Backend)(nil)
+	_ backend.Pooler          = (*Backend)(nil)
 )

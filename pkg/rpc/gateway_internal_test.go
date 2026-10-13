@@ -7,7 +7,7 @@ import (
 	"google.golang.org/grpc/codes"
 )
 
-// httpCode is reached through the gateway only with the codes the agent
+// httpCode is reached through the gateway only with the codes fiberd
 // produces. The rest of the mapping is pinned here.
 func TestHTTPCode(t *testing.T) {
 	cases := []struct {

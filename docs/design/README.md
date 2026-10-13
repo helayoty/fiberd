@@ -2,15 +2,15 @@
 
 The design docs explain how each fiberd module works inside, for contributors and reviewers. Read [architecture.md](../architecture.md) first, and look up terms in the [glossary](../glossary.md).
 
-A suggested order is agent, home, grant, core, audit, runtime-host, backends and zygote, then the rest as needed.
+A suggested order is fiberd, home, grant, core, audit, runtime-host, backends and zygote, then the rest as needed.
 
 | Design doc | What it covers | Packages |
 | --- | --- | --- |
 | [core.md](core.md) | The ledger of [grants](../glossary.md#grant) and [sessions](../glossary.md#session), [fences](../glossary.md#fence), revocation and the pressure ladder | `pkg/core` |
 | [audit.md](audit.md) | The hash-chained audit spool, its signed checkpoints and how it is verified | `pkg/core`, `cmd/audit-verify` |
 | [grant.md](grant.md) | Grant verification, caller identity over mutual TLS (Transport Layer Security) and admission | `pkg/grant`, `pkg/rpc`, `pkg/tlsconf` |
-| [agent.md](agent.md) | The [agent](../glossary.md#agent)'s startup order, state layout and the checks that fail at start | `pkg/agent`, `cmd/fiberd` |
-| [home.md](home.md) | The [home](../glossary.md#home) seam, grant delivery, control-plane health and [scope](../glossary.md#scope) loss | `pkg/home`, `pkg/home/standalone`, `pkg/home/filelane` |
+| [fiberd.md](fiberd.md) | [fiberd](../glossary.md#fiberd)'s startup order, state layout and the checks that fail at start | `pkg/fiberd`, `cmd/fiberd` |
+| [home.md](home.md) | The [home](../glossary.md#home) interface, grant delivery, issuer reachability and [scope](../glossary.md#scope) loss | `pkg/home`, `pkg/home/standalone`, `pkg/home/grantdir` |
 | [handoff.md](handoff.md) | Routing callers' TLS connections to [fibers](../glossary.md#fiber) through one address | `pkg/handoff`, `pkg/runtime/host` |
 | [artifact.md](artifact.md) | [Template](../glossary.md#template) artifacts, signing, sealing, moving [deltas](../glossary.md#delta) between homes, and [parity](../glossary.md#parity) | `pkg/artifact`, `pkg/runtime/host` |
 | [runtime-host.md](runtime-host.md) | [Warm](../glossary.md#warm) templates, per-fiber [cgroups](../glossary.md#cgroup), [W](../glossary.md#w-working-set) enforcement and what a fiber can see | `pkg/runtime/host` |
@@ -41,7 +41,7 @@ These have no design doc of their own.
 | `pkg/runtime/stub` | An in-memory runtime for tests and the conformance suite |
 | `pkg/core/coretest` | Helpers for tests of code built on `pkg/core` |
 | `internal/cli` | The plumbing the commands share, which is subcommand dispatch and the version `-version` prints |
-| `cmd/fiberd` | The agent on a standalone host |
+| `cmd/fiberd` | fiberd on a standalone host |
 | `cmd/grant-issuer` | The reference [issuer](../glossary.md#issuer), which mints grants and serves its public keys |
 | `cmd/audit-verify` | Checks a home's audit spool |
 | `cmd/zygotectl` | Builds, pushes, pulls and inspects template artifacts |

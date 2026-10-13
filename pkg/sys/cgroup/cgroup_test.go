@@ -574,7 +574,7 @@ func TestChildren(t *testing.T) {
 		want    []string
 		wantIs  error
 	}{
-		{name: "by prefix", dirs: []string{"fiber-1", "fiber-2", "agent"}, files: []string{"fiber-file"}, prefix: "fiber-", want: []string{"fiber-1", "fiber-2"}},
+		{name: "by prefix", dirs: []string{"fiber-1", "fiber-2", "fiberd"}, files: []string{"fiber-file"}, prefix: "fiber-", want: []string{"fiber-1", "fiber-2"}},
 		{name: "everything", dirs: []string{"a", "b"}, prefix: "", want: []string{"a", "b"}},
 		{name: "none match", dirs: []string{"a"}, prefix: "z"},
 		{name: "missing", missing: true, wantIs: fs.ErrNotExist},
@@ -664,7 +664,7 @@ func TestOwn(t *testing.T) {
 	if err == nil {
 		scope = cgroup.ScopeOf(string(pc))
 	}
-	if filepath.Base(scope) == "agent" {
+	if filepath.Base(scope) == "fiberd" {
 		scope = filepath.Dir(scope)
 	}
 	cases := []struct {

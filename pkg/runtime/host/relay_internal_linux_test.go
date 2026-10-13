@@ -163,7 +163,7 @@ func TestRelayedEndpoints(t *testing.T) {
 					t.Fatalf("%d ports held, leaf exists %v", heldPorts(r), r.root.Child("g1").Child("f-1-1").Exists())
 				}
 			}},
-		{name: "a port the agent cannot bind fails the clone and leaves nothing; freed, the next clone takes it",
+		{name: "a port fiberd cannot bind fails the clone and leaves nothing; freed, the next clone takes it",
 			be: func() backend.Backend { return relayBackend(core.TierSnapshot) },
 			before: func(t *testing.T, _ *Runtime) func() {
 				l, err := net.Listen("tcp4", "127.0.0.1:20000")

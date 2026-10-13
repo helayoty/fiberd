@@ -31,21 +31,21 @@ func TestScopeOf(t *testing.T) {
 	}
 }
 
-// TestOwnFromStripsTheAgentLeaf: an agent restarted in the same
+// TestOwnFromStripsTheFiberdLeaf: a fiberd restarted in the same
 // allocation finds itself in the leaf its predecessor made; its root is
 // the leaf's parent.
-func TestOwnFromStripsTheAgentLeaf(t *testing.T) {
+func TestOwnFromStripsTheFiberdLeaf(t *testing.T) {
 	mount := t.TempDir()
 	step := filepath.Join("system.slice", "slurmstepd.scope", "job_2", "step_batch", "user", "task_0")
-	_ = os.MkdirAll(filepath.Join(mount, step, "agent"), 0o755)
+	_ = os.MkdirAll(filepath.Join(mount, step, "fiberd"), 0o755)
 	_ = os.WriteFile(filepath.Join(mount, step, "cgroup.procs"), nil, 0o644)
 	cases := []struct {
 		name, procSelf string
 		want           string // relative to the mount, "" for the mount root
 	}{
-		{name: "from the agent leaf, the step", procSelf: "0::/system.slice/slurmstepd.scope/job_2/step_batch/user/task_0/agent\n", want: step},
+		{name: "from the fiberd leaf, the step", procSelf: "0::/system.slice/slurmstepd.scope/job_2/step_batch/user/task_0/fiberd\n", want: step},
 		{name: "from the step, the step", procSelf: "0::/system.slice/slurmstepd.scope/job_2/step_batch/user/task_0\n", want: step},
-		{name: "from /agent, the mount root", procSelf: "0::/agent\n"},
+		{name: "from /fiberd, the mount root", procSelf: "0::/fiberd\n"},
 		{name: "from a missing scope, the mount root", procSelf: "0::/nowhere/such\n"},
 		{name: "from the root of a private namespace, the mount root", procSelf: "0::/\n"},
 		{name: "without a v2 line, the mount root", procSelf: "1:name=systemd:/\n"},
@@ -63,7 +63,7 @@ func TestOwnFromStripsTheAgentLeaf(t *testing.T) {
 
 // TestDelegate uses a fake cgroup root with processes and missing
 // controllers. Plain file operations let it run on any OS. The processes
-// move to the agent leaf, and the missing controllers that the root's
+// move to the fiberd leaf, and the missing controllers that the root's
 // cgroup.controllers lists (all when it is absent) are enabled for the
 // subtree. Memory is a must. A root already delegated is not touched.
 func TestDelegate(t *testing.T) {
@@ -72,24 +72,24 @@ func TestDelegate(t *testing.T) {
 		files map[string]string // the root's files before the call
 		// Each enable is a write that replaces a plain file's contents, so
 		// subtree_control holds the last controller enabled.
-		control    string
-		agentProcs string // last pid moved into the agent leaf, "" for no leaf
-		prepare    func(t *testing.T, root string)
-		err        string // substring of the refusal, "" for success
+		control  string
+		ownProcs string // last pid moved into the fiberd leaf, "" for no leaf
+		prepare  func(t *testing.T, root string)
+		err      string // substring of the refusal, "" for success
 	}{
-		{name: "processes move to the agent leaf, then memory and pids are enabled",
+		{name: "processes move to the fiberd leaf, then memory and pids are enabled",
 			files:   map[string]string{"cgroup.subtree_control": "", "cgroup.procs": "1\n42\n"},
-			control: "+pids", agentProcs: "42"},
+			control: "+pids", ownProcs: "42"},
 		{name: "already delegated: nothing is touched",
 			files:   map[string]string{"cgroup.subtree_control": "cpu memory pids", "cgroup.procs": "1\n"},
 			control: "cpu memory pids"},
 		{name: "a root without pids (a Slurm step) delegates memory alone",
 			files:   map[string]string{"cgroup.controllers": "cpuset cpu memory\n", "cgroup.subtree_control": "", "cgroup.procs": "7\n"},
-			control: "+memory", agentProcs: "7"},
+			control: "+memory", ownProcs: "7"},
 		{name: "a root without memory is refused",
 			files: map[string]string{"cgroup.controllers": "cpu\n", "cgroup.subtree_control": "", "cgroup.procs": ""},
 			err:   "memory"},
-		{name: "an empty root enables the controllers without an agent leaf",
+		{name: "an empty root enables the controllers without a fiberd leaf",
 			files:   map[string]string{"cgroup.subtree_control": "", "cgroup.procs": ""},
 			control: "+pids"},
 		{name: "a root with memory already enabled gains pids alone",
@@ -104,13 +104,13 @@ func TestDelegate(t *testing.T) {
 		{name: "a process that cannot be moved",
 			files: map[string]string{"cgroup.subtree_control": "", "cgroup.procs": "42\n"},
 			prepare: func(t *testing.T, root string) {
-				// A file where the agent leaf should be. Making it is
+				// A file where the fiberd leaf should be. Making it is
 				// "already there", and moving a pid into it fails.
-				if err := os.WriteFile(filepath.Join(root, "agent"), nil, 0o644); err != nil {
+				if err := os.WriteFile(filepath.Join(root, "fiberd"), nil, 0o644); err != nil {
 					t.Fatal(err)
 				}
 			},
-			err: "move pid 42 into the agent leaf"},
+			err: "move pid 42 into the fiberd leaf"},
 		{name: "a controller that cannot be enabled",
 			files: map[string]string{"cgroup.procs": ""},
 			prepare: func(t *testing.T, root string) {
@@ -144,22 +144,22 @@ func TestDelegate(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got.Path != filepath.Join(root, "fiberd") {
-				t.Fatalf("subtree = %s, want %s", got.Path, filepath.Join(root, "fiberd"))
+			if got.Path != filepath.Join(root, "grants") {
+				t.Fatalf("subtree = %s, want %s", got.Path, filepath.Join(root, "grants"))
 			}
 			sub, _ := os.ReadFile(filepath.Join(root, "cgroup.subtree_control"))
 			if got := strings.TrimSpace(string(sub)); got != tc.control {
 				t.Fatalf("subtree_control = %q, want %q", got, tc.control)
 			}
-			moved, err := os.ReadFile(filepath.Join(root, "agent", "cgroup.procs"))
-			if tc.agentProcs == "" {
-				if _, serr := os.Stat(filepath.Join(root, "agent")); serr == nil {
-					t.Fatal("agent leaf created although the root was already delegated")
+			moved, err := os.ReadFile(filepath.Join(root, "fiberd", "cgroup.procs"))
+			if tc.ownProcs == "" {
+				if _, serr := os.Stat(filepath.Join(root, "fiberd")); serr == nil {
+					t.Fatal("fiberd leaf created although the root was already delegated")
 				}
-			} else if err != nil || string(moved) != tc.agentProcs {
-				t.Fatalf("agent leaf procs = %q %v, want the last pid written %q", moved, err, tc.agentProcs)
+			} else if err != nil || string(moved) != tc.ownProcs {
+				t.Fatalf("fiberd leaf procs = %q %v, want the last pid written %q", moved, err, tc.ownProcs)
 			}
-			if err := Root(root).Child("fiberd").Ensure("memory", "pids"); err != nil {
+			if err := Root(root).Child("grants").Ensure("memory", "pids"); err != nil {
 				t.Fatalf("Ensure on a child of that root: %v", err)
 			}
 		})

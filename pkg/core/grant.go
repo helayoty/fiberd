@@ -29,7 +29,7 @@ const (
 	// kernel (an Isolator reporting true) may serve the grant.
 	Untrusted
 	// Trusted means any runtime may serve the grant, even one whose
-	// fibers share the host kernel and the agent's uid.
+	// fibers share the host kernel and fiberd's uid.
 	Trusted
 )
 
@@ -66,7 +66,7 @@ type EndpointMode int
 const (
 	// EndpointDirect means each fiber listens on its own endpoint.
 	EndpointDirect EndpointMode = iota
-	// EndpointHandoff means the agent accepts each connection and passes
+	// EndpointHandoff means fiberd accepts each connection and passes
 	// it to the fiber, which never listens.
 	EndpointHandoff
 )
@@ -137,7 +137,7 @@ type Grant struct {
 	// CallerThumbprint is the x5t#S256 of the one client certificate the
 	// grant may be presented over.
 	CallerThumbprint string
-	// Token is the signed grant this value was verified from. The agent
+	// Token is the signed grant this value was verified from. fiberd
 	// sets it on admit so the ledger snapshot carries the proof, not only
 	// the claims. Boot verifies every entry's token again before
 	// re-admitting it and drops an entry without one. A Verifier leaves it

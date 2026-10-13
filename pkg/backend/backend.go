@@ -25,6 +25,13 @@ import (
 // ErrUnsupported: this backend cannot run on this platform.
 var ErrUnsupported = errors.New("backend: not supported on this platform")
 
+// ErrNoPool is Pool's answer for a warm instance whose template does not
+// bind its identity late, so no sandbox of it can wait in a pool.
+var ErrNoPool = errors.New("backend: the template does not bind late, no pool")
+
+// ErrYielded is Pool's answer when a clone cut its restore short.
+var ErrYielded = errors.New("backend: the pool restore yielded to a clone")
+
 // Template is a resolved template the host hands to Warm: either a bare
 // command line, or an artifact directory with its checkpoint images.
 type Template struct {
@@ -50,7 +57,7 @@ type WarmSpec struct {
 	// WorkDir is the grant's run directory: the instance's cwd, its log,
 	// and where fiber endpoints live.
 	WorkDir string
-	// Devices names the devices the grant's fabric channel provisions for
+	// Devices names the devices the grant's device channel provisions for
 	// its engine (device paths or ids), for the warm instance's
 	// environment; nil when the grant has none.
 	Devices []string
@@ -104,6 +111,13 @@ type FiberSpec struct {
 type Fiber struct {
 	ID  string
 	PID int // root process; 0 when the backend has no process per fiber
+	// Footprint is what the fiber's leaf counted on the backend's W
+	// counter just before the fiber took its identity, for a backend
+	// whose fibers carry a fixed footprint. The host subtracts it from
+	// every later reading, because one restore of the same image can
+	// settle MiB above or below another. 0 leaves the host to the
+	// template's measured footprint.
+	Footprint uint64
 }
 
 // ParkSpec asks for a checkpoint of a fiber into Dir. With Sync the
@@ -147,12 +161,42 @@ type Handoffer interface {
 	Handoff() bool
 }
 
-// Exit reports the end of a fiber (FiberID set) or of a warm instance
-// (WarmID set, FiberID empty: its fibers are gone with it).
+// Exit reports the end of a fiber (FiberID set), of a pooled sandbox
+// that was never bound (PooledID set) or of a warm instance (WarmID set,
+// the others empty: its fibers are gone with it).
 type Exit struct {
-	FiberID string
-	WarmID  string
-	Status  string // "exit:N" or "signal:NAME"; free text otherwise
+	FiberID  string
+	PooledID string
+	WarmID   string
+	Status   string // "exit:N" or "signal:NAME"; free text otherwise
+}
+
+// PoolSpec asks for one sandbox restored ahead of its identity.
+type PoolSpec struct {
+	CgroupFD int // the leaf it is born in, which the fiber keeps; -1 when the host has none
+	Deadline time.Duration
+}
+
+// Pooled is a sandbox waiting in the pool, running the template with no
+// fence, endpoint or payload until Bind hands it one.
+type Pooled struct {
+	ID  string
+	PID int
+}
+
+// Pooler is implemented by backends that can restore a sandbox before
+// its fiber exists and hand it an identity later. Pool restores one and
+// holds the channel it dials. Bind writes the identity, with fresh
+// entropy, on that channel and waits for the ack and the endpoint, so
+// a Clone served from the pool skips the restore. Discard kills one.
+// A pooled sandbox that dies before Bind, or whose Bind fails, is
+// reported as Exit{PooledID}.
+// Pool answers ErrNoPool for a warm instance whose template never
+// dials the channel, and ErrYielded when a clone cut it short.
+type Pooler interface {
+	Pool(ctx context.Context, warmID string, spec PoolSpec) (Pooled, error)
+	Bind(ctx context.Context, pooledID string, spec FiberSpec) (Fiber, error)
+	Discard(pooledID string)
 }
 
 // Backend is what a sandbox mechanism implements.
@@ -183,7 +227,7 @@ type Backend interface {
 
 // Isolator is implemented by backends whose fibers run behind a kernel
 // of their own (gVisor's Sentry, a Hyperlight micro-VM) rather than on
-// the host kernel under the agent's uid. Only these serve untrusted
+// the host kernel under fiberd's uid. Only these serve untrusted
 // grants. A backend that does not implement it does not isolate.
 type Isolator interface {
 	IsolatesTenants() bool
@@ -233,7 +277,7 @@ type Prober interface {
 
 // DeadlineAdvisor is implemented by backends whose fork or restore is
 // slower than a process fork: what a Clone without an explicit deadline
-// gets. Zero keeps the agent's defaults.
+// gets. Zero keeps fiberd's defaults.
 type DeadlineAdvisor interface {
 	DefaultDeadlines() (create, resume time.Duration)
 }
@@ -241,9 +285,10 @@ type DeadlineAdvisor interface {
 // Overheader is implemented by backends whose fiber carries a fixed
 // footprint of its own besides the working set (a sandbox kernel, the
 // template's pages when they are not shared copy-on-write). The host adds
-// it to the leaf's memory.max and subtracts it from the measured W. A
-// backend that returns 0 asks the host to use the warm template's own
-// resident size, measured once it is ready.
+// it to the leaf's memory.max, and subtracts it from the measured W of a
+// fiber that reported no Footprint of its own. A backend that returns 0
+// asks the host to use the warm template's own resident size, measured
+// once it is ready.
 type Overheader interface {
 	FiberOverheadBytes() uint64
 }

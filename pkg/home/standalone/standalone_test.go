@@ -34,7 +34,7 @@ func TestStandaloneGrantsDirDrivesAdmission(t *testing.T) {
 	ver := verifierFunc(func(_ context.Context, tok []byte) (core.Grant, error) {
 		return grant.Verify(string(tok), &pub, grant.VerifyOptions{Audience: "node-a"})
 	})
-	a := &core.Agent{NodeID: "node-a", Ledger: core.NewLedger(1), Budget: core.NewBudget(100, 1<<20),
+	a := &core.Core{NodeID: "node-a", Ledger: core.NewLedger(1), RateLimit: core.NewRateLimit(100, 1<<20),
 		Runtime: stub.New(), Verify: ver, Health: h.Health()}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -87,9 +87,9 @@ func TestStandaloneGrantsDirDrivesAdmission(t *testing.T) {
 	}
 }
 
-// TestStandaloneLaneOverrideAndTimer checks that SetLane overrides the
-// staleness timer in both directions, and a paused lane ignores the timer.
-func TestStandaloneLaneOverrideAndTimer(t *testing.T) {
+// TestStandaloneReachabilityOverrideAndTimer checks that SetIssuerReachable overrides the
+// staleness timer in both directions, and a paused home ignores the timer.
+func TestStandaloneReachabilityOverrideAndTimer(t *testing.T) {
 	h := standalone.New(standalone.Config{StaleTTL: 200 * time.Millisecond})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -101,10 +101,10 @@ func TestStandaloneLaneOverrideAndTimer(t *testing.T) {
 		healthy bool
 	}{
 		{name: "a fresh home is healthy", healthy: true},
-		{name: "SetLane(false) makes the lane stale immediately", act: func() { h.SetLane(false) }},
+		{name: "SetIssuerReachable(false) marks the issuer unreachable at once", act: func() { h.SetIssuerReachable(false) }},
 		// The timer keeps ticking but is ignored while paused.
-		{name: "a paused lane stays stale despite the timer", sleep: 300 * time.Millisecond},
-		{name: "SetLane(true) recovers the lane", act: func() { h.SetLane(true) }, healthy: true},
+		{name: "a paused home stays unreachable despite the timer", sleep: 300 * time.Millisecond},
+		{name: "SetIssuerReachable(true) marks the issuer reachable again", act: func() { h.SetIssuerReachable(true) }, healthy: true},
 	}
 	for _, st := range steps {
 		t.Run(st.name, func(t *testing.T) {
@@ -171,10 +171,10 @@ func TestStandaloneAccessors(t *testing.T) {
 	}
 }
 
-// TestStandaloneFabric checks the standalone fabric channel. It is the
+// TestStandaloneDevices checks the standalone device channel. It is the
 // static device set every grant shares, or nothing without devices, and
 // there is nothing to release. Each grant gets its own copy of the list.
-func TestStandaloneFabric(t *testing.T) {
+func TestStandaloneDevices(t *testing.T) {
 	cases := []struct {
 		name     string
 		devices  []string
@@ -186,17 +186,17 @@ func TestStandaloneFabric(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			h := standalone.New(standalone.Config{Devices: tc.devices})
-			fc, release, err := h.Fabric(context.Background(), core.Grant{UID: "g1"})
+			fc, release, err := h.Devices(context.Background(), core.Grant{UID: "g1"})
 			if err != nil || release == nil {
-				t.Fatalf("Fabric = %+v, release %v, %v; want a channel and a release", fc, release != nil, err)
+				t.Fatalf("Devices = %+v, release %v, %v; want a channel and a release", fc, release != nil, err)
 			}
 			release()
 			if fc.Kind != tc.wantKind || !slices.Equal(fc.Devices, tc.devices) {
-				t.Fatalf("Fabric = %+v, want kind %q devices %v", fc, tc.wantKind, tc.devices)
+				t.Fatalf("Devices = %+v, want kind %q devices %v", fc, tc.wantKind, tc.devices)
 			}
 			if len(fc.Devices) > 0 {
 				fc.Devices[0] = "/dev/changed"
-				again, _, _ := h.Fabric(context.Background(), core.Grant{UID: "g2"})
+				again, _, _ := h.Devices(context.Background(), core.Grant{UID: "g2"})
 				if !slices.Equal(again.Devices, tc.devices) {
 					t.Fatalf("a grant's change to its list reached the next grant: %v", again.Devices)
 				}
@@ -205,16 +205,16 @@ func TestStandaloneFabric(t *testing.T) {
 	}
 }
 
-// TestStandaloneGrantsLane checks that a home without a grants directory
-// has no lane, and one with a directory polls it.
-func TestStandaloneGrantsLane(t *testing.T) {
+// TestStandaloneGrantsDir checks that a home without a grants directory
+// delivers nothing, and one with a directory polls it.
+func TestStandaloneGrantsDir(t *testing.T) {
 	cases := []struct {
-		name     string
-		dir      bool
-		wantLane bool
+		name         string
+		dir          bool
+		wantDelivery bool
 	}{
-		{name: "no grants directory is no lane"},
-		{name: "a grants directory is polled", dir: true, wantLane: true},
+		{name: "no grants directory delivers nothing"},
+		{name: "a grants directory is polled", dir: true, wantDelivery: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -228,15 +228,15 @@ func TestStandaloneGrantsLane(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Grants = %v", err)
 			}
-			if (ch != nil) != tc.wantLane {
-				t.Fatalf("lane = %v, want %v", ch != nil, tc.wantLane)
+			if (ch != nil) != tc.wantDelivery {
+				t.Fatalf("delivery = %v, want %v", ch != nil, tc.wantDelivery)
 			}
 		})
 	}
 }
 
 // TestStandaloneIssuerLiveness checks that with an issuer, each key set
-// refresh is the lane's liveness signal, which a paused lane ignores. Run
+// refresh is the liveness signal, which a paused home ignores. Run
 // drives the refreshes until its context ends.
 func TestStandaloneIssuerLiveness(t *testing.T) {
 	cases := []struct {
@@ -245,8 +245,8 @@ func TestStandaloneIssuerLiveness(t *testing.T) {
 		run         bool // refresh through Run instead of directly
 		wantHealthy bool
 	}{
-		{name: "a refresh marks a stale lane healthy", wantHealthy: true},
-		{name: "a paused lane ignores a refresh", paused: true},
+		{name: "a refresh marks the issuer reachable", wantHealthy: true},
+		{name: "a paused home ignores a refresh", paused: true},
 		{name: "Run refreshes the key set", run: true, wantHealthy: true},
 	}
 	for _, tc := range cases {
@@ -266,12 +266,12 @@ func TestStandaloneIssuerLiveness(t *testing.T) {
 			cache := &grant.Cache{IssuerURL: is.URL}
 			h := standalone.New(standalone.Config{Cache: cache, StaleTTL: ttl})
 			if tc.paused {
-				h.SetLane(false)
+				h.SetIssuerReachable(false)
 			} else {
 				h.Health().MarkSync(time.Now().Add(-ttl))
 			}
 			if h.Health().Healthy(time.Now()) {
-				t.Fatal("the lane is healthy before any refresh")
+				t.Fatal("the issuer counts as reachable before any refresh")
 			}
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()

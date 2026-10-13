@@ -1,10 +1,10 @@
 # Design: core
 
-The core is the [agent](../glossary.md#agent)'s decision engine. It keeps the ledger, mints [fences](../glossary.md#fence) and decides every [Clone](../glossary.md#clone). It is for readers changing that logic. Read [architecture.md](../architecture.md) first. The wire format of fences and outcomes belongs to [protocol.md](../protocol.md).
+The core is [fiberd](../glossary.md#fiberd)'s decision engine. It keeps the ledger, mints [fences](../glossary.md#fence) and decides every [Clone](../glossary.md#clone). It is for readers changing that logic. Read [architecture.md](../architecture.md) first. The wire format of fences and outcomes belongs to [protocol.md](../protocol.md).
 
 ## Purpose
 
-A [home](../glossary.md#home) mints [fibers](../glossary.md#fiber) locally, in milliseconds, with no call to a control plane. It must still never run more fibers than the [grant](../glossary.md#grant) paid for, never run two incarnations of one [session](../glossary.md#session), and never let a revoked fiber live on. The core does this with one in-memory ledger, a fence on every incarnation, and an [epoch](../glossary.md#epoch) that moves whenever trust is lost.
+A [home](../glossary.md#home) mints [fibers](../glossary.md#fiber) locally, in milliseconds, with no call to a control plane. It must still never run more fibers than the [grant](../glossary.md#grant) paid for, never run one [session](../glossary.md#session) twice, and never let a revoked fiber live on. The core does this with one in-memory ledger, a fence on every run of a fiber, and an [epoch](../glossary.md#epoch) that moves whenever trust is lost.
 
 ## How it works
 
@@ -24,7 +24,7 @@ stateDiagram-v2
 
 ```mermaid
 flowchart TD
-  V[Verify grant and caller] --> B{Thrash budget left?}
+  V[Verify grant and caller] --> B{Clone rate limit left?}
   B -- no --> SHED
   B -- yes --> R[Resolve under the session gate]
   R -- running session --> AT[Attach, same fence]
@@ -39,7 +39,7 @@ flowchart TD
   C -- yes --> OK[Return endpoint and fence]
 ```
 
-The [thrash budget](../glossary.md#thrash-budget) is checked right after verification, for every Clone. It allows 200 clones a second while running fibers write almost nothing, and half that when their average [W](../glossary.md#w-working-set) reaches 256 MiB. Both numbers are defaults that nobody has measured.
+The [clone rate limit](../glossary.md#clone-rate-limit) is checked right after verification, for every Clone. It allows 200 clones a second while running fibers write almost nothing, and half that when their average [W](../glossary.md#w-working-set) reaches 256 MiB. Both numbers are defaults that nobody has measured.
 
 The commit is the step where the ledger records the new fiber as running. It keeps four invariants.
 
@@ -51,27 +51,29 @@ The commit is the step where the ledger records the new fiber as running. It kee
 **Epochs and restart.**
 
 - The epoch is a file in the private state directory, advanced on every start. A missing file starts at 1, as on a first boot. A corrupt or unreadable one jumps to the current Unix time instead of guessing.
-- Before it serves, the [agent](agent.md) reconciles, rebuilding the ledger from its snapshot on the home's disk. The snapshot is only a cache, so a grant comes back only when its stored token verifies again. A failing or missing token drops the entry, and an undecidable one is held, with its parked sessions, unadmitted.
+- Before it serves, [fiberd](fiberd.md) reconciles, rebuilding the ledger from its snapshot on the home's disk. The snapshot is only a cache, so a grant comes back only when its stored token verifies again. A failing or missing token drops the entry, and an undecidable one is held, with its parked sessions, unadmitted.
 - Parked sessions whose delta still exists are remembered. Every fiber the runtime still reports is from a prior epoch and is killed.
 - An epoch bump without a restart releases every running fiber and keeps grants and parked deltas ([home.md](home.md) says when).
 
 **Revocation.**
 
 - Every 5 seconds a reaper yields every grant whose [lease](../glossary.md#lease) lapsed. A valid token re-admits it.
-- When the home's [lane](../glossary.md#lane) removes a grant, the grant is yielded and its UID also goes on a deny-list. Only the lane delivering the grant again lifts the entry, never a Clone.
+- When the home removes a grant, the grant is yielded and its UID also goes on a deny-list. Only the home delivering the grant again lifts the entry, never a Clone.
 - The deny-list is its own file, because an unreadable snapshot counts as empty and a deny-list never may. An unreadable deny-list fails the start.
 - An entry lasts until the later of the latest lease seen and `-max-lease` past removal (24 hours without it). A grant with no lease is denied for good.
 
-![The highest PSI or device-occupancy reading picks a rung. Below 10 percent shedding clears. From 10 to 25 percent new clones are shed. At 25 percent or more, the largest-W running fiber is parked if named, otherwise released. Three evaluations in a row at that level with nothing reclaimed yield the grant. The watermarks are per-grant defaults, and ATTACH is exempt.](../images/pressure-ladder.svg)
+![The highest PSI or device-occupancy reading picks a rung. Below 10 percent shedding clears. From 10 to 25 percent new clones are shed. At 25 percent or more, one pooled sandbox is discarded first if the grant has any, otherwise the largest-W running fiber is parked if named, or else released. Three evaluations in a row at that level with nothing reclaimed yield the grant. The watermarks are per-grant defaults, and ATTACH is exempt.](../images/pressure-ladder.svg)
 
-**Pressure ladder.** The input is [PSI](../glossary.md#psi) "some avg10" on the grant's [cgroup](../glossary.md#cgroup), or the [engine](../glossary.md#engine)'s device occupancy, whichever is higher. The [shed](../glossary.md#shed-and-deferred) and park watermarks come from the grant's policy. A failed park falls back to release, and every rung is an agent verb, so it writes its audit record.
+**Pressure ladder.** The input is [PSI](../glossary.md#psi) "some avg10" on the grant's [cgroup](../glossary.md#cgroup), or the [engine](../glossary.md#engine)'s device occupancy, whichever is higher. The [shed](../glossary.md#clone-misses) and park watermarks come from the grant's policy. At the park watermark a pooled sandbox is discarded before any fiber, since it holds no state. A failed park falls back to release. Each park, release and yield is a core verb, so it writes its audit record.
 
-**Miss selection.** The lane's health picks the miss for capacity this home does not hold, as [outcomes](../protocol.md#outcomes) maps it.
+**Warm pool.** On gVisor the core keeps `fibers.warm` sandboxes restored ahead of a grant's clones, inside `fibers.max`. It fills one sandbox at a time for the whole home, the grants taking turns, through the clone rate limit and never while the grant sheds. An epoch bump keeps the pool, since a pooled sandbox gets its fence at hand-out.
+
+**Miss selection.** Whether the issuer is reachable picks the miss for capacity this home does not hold, as [outcomes](../protocol.md#outcomes) maps it.
 
 ## Security notes and known gaps
 
 - **Release is best effort.** Yield and the epoch bump log a failed runtime release and still drop the fiber from the ledger. The work can outlive its revocation while its slot looks free.
-- **Grant fields are not immutable per UID.** A lane redelivery replaces the admitted fields in place, and the [warm](../glossary.md#warm) [template](../glossary.md#template) stays. A Clone whose token names another caller than the admitted grant is refused, but other fields are not compared. [Issuers](../glossary.md#issuer) should change only the lease for a UID and mint a new UID for anything else.
+- **Grant fields are not immutable per UID.** A redelivery by the home replaces the admitted fields in place, and the [warm](../glossary.md#warm) [template](../glossary.md#template) stays. A Clone whose token names another caller than the admitted grant is refused, but other fields are not compared. [Issuers](../glossary.md#issuer) should change only the lease for a UID and mint a new UID for anything else.
 - **Revocation is per home.** Every home holding the grant must remove it.
 - **Watch has no tombstone.** A grant that leaves emits no record.
 - **Epoch loss.** A deleted epoch file looks like a first boot and restarts fences at 1, so the private state must live as long as the home's identity.

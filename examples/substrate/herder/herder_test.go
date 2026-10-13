@@ -20,13 +20,13 @@ import (
 	"github.com/helayoty/fiberd/pkg/runtime/stub"
 )
 
-// stubHome: fiberd's agent over the in-memory runtime, reached through
+// stubHome: fiberd over the in-memory runtime, reached through
 // the consumer client, as the kata example tests do.
-// The returned stop takes the agent's server down while the client stays.
-func stubHome(t *testing.T) (*core.Agent, *consumer.Client, func()) {
+// The returned stop takes fiberd's server down while the client stays.
+func stubHome(t *testing.T) (*core.Core, *consumer.Client, func()) {
 	t.Helper()
-	ag := &core.Agent{
-		NodeID: "worker-1", Ledger: core.NewLedger(1), Budget: core.NewBudget(1000, 256<<20),
+	ag := &core.Core{
+		NodeID: "worker-1", Ledger: core.NewLedger(1), RateLimit: core.NewRateLimit(1000, 256<<20),
 		Runtime: stub.NewWithTier(core.TierCheckpoint), Verify: grant.InsecureJSONVerifier{},
 		Health: core.NewSourceHealth(10*time.Second, time.Now()), StatusInterval: 20 * time.Millisecond,
 	}
@@ -34,7 +34,7 @@ func stubHome(t *testing.T) (*core.Agent, *consumer.Client, func()) {
 	t.Cleanup(cancel)
 	go ag.Run(ctx)
 	lis := bufconn.Listen(1 << 20)
-	gs := rpc.NewGRPCServer(&rpc.Server{Agent: ag, Issuer: "https://issuer.test", RetryAfter: time.Second})
+	gs := rpc.NewGRPCServer(&rpc.Server{Core: ag, Issuer: "https://issuer.test", RetryAfter: time.Second})
 	go func() { _ = gs.Serve(lis) }()
 	t.Cleanup(gs.Stop)
 	conn, err := grpc.NewClient("passthrough:///bufconn",
@@ -85,15 +85,15 @@ func newService(t *testing.T, fiberMax int) (*Service, *recordingRouter) {
 
 // worker is a Service with what its tests reach around it for.
 type worker struct {
-	agent  *core.Agent
+	core   *core.Core
 	svc    *Service
 	router *recordingRouter
 	client *consumer.Client
 	grants *jsonGrants
-	stop   func() // takes the agent's server down
+	stop   func() // takes fiberd's server down
 }
 
-// newWorker builds a running Service over the stub agent. mod adjusts the
+// newWorker builds a running Service over the stub fiberd. mod adjusts the
 // config before New.
 func newWorker(t *testing.T, fiberMax int, mod func(*Config)) *worker {
 	t.Helper()
@@ -112,7 +112,7 @@ func newWorker(t *testing.T, fiberMax int, mod func(*Config)) *worker {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	go s.Run(ctx)
-	return &worker{agent: ag, svc: s, router: router, client: client, grants: grants, stop: stop}
+	return &worker{core: ag, svc: s, router: router, client: client, grants: grants, stop: stop}
 }
 
 func runReq(uid string) *ateompbRun {
@@ -170,7 +170,7 @@ func TestRunTerminateAndStats(t *testing.T) {
 			_, err := s.GetWorkloadStats(ctx, &ateompbStatsReq{ActorUid: "nobody"})
 			return err
 		}},
-		{name: "stats of the actor answer once the agent's status stream ticked", do: func(t *testing.T) error {
+		{name: "stats of the actor answer once fiberd's status stream ticked", do: func(t *testing.T) error {
 			deadline := time.Now().Add(3 * time.Second)
 			for {
 				resp, err := s.GetWorkloadStats(ctx, &ateompbStatsReq{ActorUid: "a1"})

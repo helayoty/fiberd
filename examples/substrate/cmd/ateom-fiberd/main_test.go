@@ -25,8 +25,8 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/helayoty/fiberd/pkg/agent"
 	"github.com/helayoty/fiberd/pkg/artifact"
+	"github.com/helayoty/fiberd/pkg/fiberd"
 	"github.com/helayoty/fiberd/pkg/grant"
 
 	"github.com/helayoty/fiberd/examples/substrate/capacity"
@@ -36,14 +36,14 @@ import (
 	ateompb "github.com/helayoty/fiberd/examples/substrate/proto/ateom"
 )
 
-// TestMain keeps a SIGTERM aimed at a stopping agent from ending the test
+// TestMain keeps a SIGTERM aimed at a stopping fiberd from ending the test
 // binary. While a handler is registered, Go never applies the default action.
 func TestMain(m *testing.M) {
 	sig := make(chan os.Signal, 16)
 	signal.Notify(sig, syscall.SIGTERM)
 	go func() {
 		for range sig {
-			// The agent under test handles its own stop.
+			// fiberd under test handles its own stop.
 		}
 	}()
 	os.Exit(m.Run())
@@ -96,7 +96,7 @@ func TestRuntimeEnv(t *testing.T) {
 			for _, k := range []string{"ATEOM_FIBERD_RUNTIME", "ATEOM_FIBERD_GVISOR_ROOTFS", "ATEOM_FIBERD_RUNSC", "ATEOM_FIBERD_CRIU"} {
 				t.Setenv(k, tc.env[k])
 			}
-			var c agent.Config
+			var c fiberd.Config
 			c.Bind(flag.NewFlagSet("fiberd", flag.ContinueOnError))
 			err := runtimeEnv(&c)
 			if tc.err != "" {
@@ -162,7 +162,7 @@ func TestParseArgs(t *testing.T) {
 }
 
 // TestReadyz checks the kubelet's readiness answer. A warming template
-// and an unhealthy agent are both 503, so a poisoned audit spool keeps
+// and an unhealthy fiberd are both 503, so a poisoned audit spool keeps
 // actors off this worker. Only a warm, healthy worker is 200.
 func TestReadyz(t *testing.T) {
 	poisoned := errors.New(`healthz: 503 Service Unavailable: {"audit":"poisoned"}`)
@@ -175,7 +175,7 @@ func TestReadyz(t *testing.T) {
 	}{
 		{name: "warm and healthy is ok", ready: true, status: http.StatusOK, body: "ok"},
 		{name: "a warming template is 503", ready: false, status: http.StatusServiceUnavailable, body: "warming"},
-		{name: "a poisoned spool is 503 with the agent's answer", ready: true, healthz: poisoned,
+		{name: "a poisoned spool is 503 with fiberd's answer", ready: true, healthz: poisoned,
 			status: http.StatusServiceUnavailable, body: poisoned.Error()},
 	}
 	for _, tc := range cases {
@@ -189,8 +189,8 @@ func TestReadyz(t *testing.T) {
 	}
 }
 
-// TestWaitTCP checks that the wait for the agent's port ends when the port
-// accepts, when the agent fails or exits, when the caller gives up, or at
+// TestWaitTCP checks that the wait for fiberd's port ends when the port
+// accepts, when fiberd fails or exits, when the caller gives up, or at
 // the timeout.
 func TestWaitTCP(t *testing.T) {
 	up, err := net.Listen("tcp", "127.0.0.1:0")
@@ -204,34 +204,34 @@ func TestWaitTCP(t *testing.T) {
 	}
 	downAddr := down.Addr().String()
 	_ = down.Close()
-	errBoom := errors.New("agent: boom")
+	errBoom := errors.New("fiberd: boom")
 	cases := []struct {
-		name      string
-		addr      string
-		agentErr  error
-		agentDone bool // the agent returned (with agentErr)
-		cancelled bool
-		err       string
-		is        error
+		name       string
+		addr       string
+		fiberdErr  error
+		fiberdDone bool // fiberd returned (with fiberdErr)
+		cancelled  bool
+		err        string
+		is         error
 	}{
 		{name: "the port accepts", addr: up.Addr().String()},
-		{name: "the agent failed", addr: downAddr, agentDone: true, agentErr: errBoom, err: "boom", is: errBoom},
-		{name: "the agent exited without an error", addr: downAddr, agentDone: true, err: "agent exited"},
+		{name: "fiberd failed", addr: downAddr, fiberdDone: true, fiberdErr: errBoom, err: "boom", is: errBoom},
+		{name: "fiberd exited without an error", addr: downAddr, fiberdDone: true, err: "fiberd exited"},
 		{name: "the caller gave up", addr: downAddr, cancelled: true, err: "canceled", is: context.Canceled},
 		{name: "nothing listens before the timeout", addr: downAddr, err: "not accepting after 1ms"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			agentErr := make(chan error, 1)
-			if tc.agentDone {
-				agentErr <- tc.agentErr
+			fiberdErr := make(chan error, 1)
+			if tc.fiberdDone {
+				fiberdErr <- tc.fiberdErr
 			}
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			if tc.cancelled {
 				cancel()
 			}
-			err := waitTCP(ctx, tc.addr, time.Millisecond, agentErr)
+			err := waitTCP(ctx, tc.addr, time.Millisecond, fiberdErr)
 			if tc.err == "" {
 				if err != nil {
 					t.Fatal(err)
@@ -249,17 +249,17 @@ func TestWaitTCP(t *testing.T) {
 }
 
 // TestServe checks that a worker serving atelet stops, with the error, when
-// it fails, as when its agent exits or it refuses atelet's certificate. A
-// worker that kept serving would hold actors with no agent behind them, or
+// it fails, as when its fiberd exits or it refuses atelet's certificate. A
+// worker that kept serving would hold actors with no fiberd behind them, or
 // sit unready forever. Its context ending is a clean stop.
 func TestServe(t *testing.T) {
-	errAgent := errors.New("agent: exited")
+	errFiberd := errors.New("fiberd: exited")
 	errRefused := errors.New("capacity: the peer is not " + capacity.AteletID)
 	cases := []struct {
 		name string
 		fail error // what the worker fails with, or nil for its context ending
 	}{
-		{name: "the agent exits", fail: errAgent},
+		{name: "fiberd exits", fail: errFiberd},
 		{name: "atelet's certificate is refused", fail: errRefused},
 		{name: "the context ends"},
 	}
@@ -341,14 +341,14 @@ func sharedKeys(t *testing.T) (key, seal string) {
 // runtime, under a temp state dir and a fake cgroup root, with the pool's
 // shared delta keys.
 type worker struct {
-	agent, ready, ingress string
-	base                  string
+	fiberd, ready, ingress string
+	base                   string
 }
 
 func newWorker(t *testing.T) worker {
-	w := worker{agent: freePort(t), ready: freePort(t), ingress: freePort(t), base: shortDir(t)}
+	w := worker{fiberd: freePort(t), ready: freePort(t), ingress: freePort(t), base: shortDir(t)}
 	t.Setenv("ATEOM_FIBERD_STATE", filepath.Join(shortDir(t), "state"))
-	t.Setenv("ATEOM_FIBERD_LISTEN", w.agent)
+	t.Setenv("ATEOM_FIBERD_LISTEN", w.fiberd)
 	t.Setenv("ATEOM_FIBERD_RUNTIME", "stub")
 	t.Setenv("ATEOM_FIBERD_ISOLATION", "TRUSTED")
 	t.Setenv("ATEOM_FIBERD_CGROUP_ROOT", t.TempDir())
@@ -361,9 +361,9 @@ func newWorker(t *testing.T) worker {
 	return w
 }
 
-// stopAgent stops, with SIGTERM, an agent a failed run left behind, and
+// stopFiberd stops, with SIGTERM, a fiberd a failed run left behind, and
 // waits until its port closes.
-func stopAgent(t *testing.T, addr string) {
+func stopFiberd(t *testing.T, addr string) {
 	if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
 		t.Fatal(err)
 	}
@@ -374,22 +374,22 @@ func stopAgent(t *testing.T, addr string) {
 		}
 		_ = c.Close()
 		if time.Now().After(deadline) {
-			t.Fatal("the agent kept running after SIGTERM")
+			t.Fatal("fiberd kept running after SIGTERM")
 		}
 	}
 }
 
-// TestRunRefuses checks what stops a worker, before and after its agent
+// TestRunRefuses checks what stops a worker, before and after its fiberd
 // is up.
 func TestRunRefuses(t *testing.T) {
 	cases := []struct {
-		name    string
-		env     map[string]string
-		podUID  string
-		cred    string
-		base    func(t *testing.T, w worker) string
-		err     string
-		agentUp bool // the agent came up before the failure
+		name     string
+		env      map[string]string
+		podUID   string
+		cred     string
+		base     func(t *testing.T, w worker) string
+		err      string
+		fiberdUp bool // fiberd came up before the failure
 	}{
 		{name: "a template entry that is not digest=command", env: map[string]string{"ATEOM_FIBERD_TEMPLATE": "default=/bin/z;oops"},
 			err: "ATEOM_FIBERD_TEMPLATE"},
@@ -406,19 +406,19 @@ func TestRunRefuses(t *testing.T) {
 			err: "ATEOM_FIBERD_DELTA_SEAL_KEY: stat /nonexistent/seal.json"},
 		{name: "a delta key that is not a key", env: map[string]string{"ATEOM_FIBERD_DELTA_KEY": "/dev/null"},
 			err: "-delta-key"},
-		{name: "an agent that cannot start", env: map[string]string{"ATEOM_FIBERD_RUNTIME": "warp"},
-			err: "agent did not come up"},
+		{name: "a fiberd that cannot start", env: map[string]string{"ATEOM_FIBERD_RUNTIME": "warp"},
+			err: "fiberd did not come up"},
 		{name: "gvisor without its rootfs", env: map[string]string{"ATEOM_FIBERD_RUNTIME": "gvisor", "ATEOM_FIBERD_GVISOR_ROOTFS": "/nonexistent/rootfs"},
 			err: "ATEOM_FIBERD_GVISOR_ROOTFS: /nonexistent/rootfs is not a directory"},
 		{name: "an ingress credential bundle that cannot be read", cred: "/nonexistent/cred.pem",
-			err: "ingress: credential bundle", agentUp: true},
+			err: "ingress: credential bundle", fiberdUp: true},
 		{name: "a base path that cannot hold the worker's directory", base: func(t *testing.T, _ worker) string {
 			f := filepath.Join(t.TempDir(), "file")
 			if err := os.WriteFile(f, nil, 0o600); err != nil {
 				t.Fatal(err)
 			}
 			return f
-		}, err: "not a directory", agentUp: true},
+		}, err: "not a directory", fiberdUp: true},
 		{name: "a socket path that cannot be listened on", base: func(t *testing.T, w worker) string {
 			// A non-empty directory where the socket goes cannot be removed.
 			sock := herder.Paths{Base: w.base}.SocketPath("p-1")
@@ -426,7 +426,7 @@ func TestRunRefuses(t *testing.T) {
 				t.Fatal(err)
 			}
 			return w.base
-		}, err: "address already in use", agentUp: true},
+		}, err: "address already in use", fiberdUp: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -443,8 +443,8 @@ func TestRunRefuses(t *testing.T) {
 				base = tc.base(t, w)
 			}
 			err := run(pod, w.ingress, tc.cred, "", ingress.DefaultAllowedClientID, w.ready, herder.Paths{Base: base})
-			if tc.agentUp {
-				stopAgent(t, w.agent)
+			if tc.fiberdUp {
+				stopFiberd(t, w.fiberd)
 			}
 			if err == nil || !strings.Contains(err.Error(), tc.err) {
 				t.Fatalf("run = %v, want an error with %q", err, tc.err)

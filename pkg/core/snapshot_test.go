@@ -26,7 +26,7 @@ type listingRuntime struct {
 	// onRelease, when set, runs inside Release, as what happens on the
 	// home while the runtime works.
 	onRelease func(id string)
-	dropped   []string // every grant whose template the agent dropped
+	dropped   []string // every grant whose template fiberd dropped
 }
 
 func (l *listingRuntime) List(context.Context) ([]core.FiberHandle, error) {
@@ -46,7 +46,7 @@ func (l *listingRuntime) Release(_ context.Context, id string, _ bool) error {
 //   - epoch 1 runs, parks and persists
 //   - epoch 2 reconciles that snapshot against the runtime, then the home
 //     removes the grant
-//   - epoch 3 refuses it from the persisted deny-list until the lane
+//   - epoch 3 refuses it from the persisted deny-list until the home
 //     delivers it again, and a denial lapses with its entry
 func TestSnapshotRoundTripAndReconcile(t *testing.T) {
 	now := time.Now()
@@ -57,10 +57,10 @@ func TestSnapshotRoundTripAndReconcile(t *testing.T) {
 	forever := core.Grant{UID: "forever", Tenant: "acme", Audience: "node-a", FiberMax: 1}
 	tokens := acceptVerifier{grants: map[string]core.Grant{"live": live, "dead": dead, "live-renewed": renewed, "forever": forever}}
 	ctx := context.Background()
-	clone := func(a *core.Agent, session string) (core.CloneResponse, core.StatusCode, error) {
+	clone := func(a *core.Core, session string) (core.CloneResponse, core.StatusCode, error) {
 		return a.Clone(ctx, core.CloneRequest{GrantJWT: []byte("live"), Session: session, Deadline: time.Second})
 	}
-	present := func(a *core.Agent, token string) (core.StatusCode, error) {
+	present := func(a *core.Core, token string) (core.StatusCode, error) {
 		_, code, err := a.Clone(ctx, core.CloneRequest{GrantJWT: []byte(token), Deadline: time.Second})
 		return code, err
 	}
@@ -70,7 +70,7 @@ func TestSnapshotRoundTripAndReconcile(t *testing.T) {
 	var (
 		snap    core.Snapshot
 		running core.CloneResponse // left running in epoch 1, an orphan in epoch 2
-		a2, a3  *core.Agent
+		a2, a3  *core.Core
 		rt      *listingRuntime
 	)
 	steps := []struct {
@@ -80,7 +80,7 @@ func TestSnapshotRoundTripAndReconcile(t *testing.T) {
 		// Epoch 1 parks one session, leaves one running, parks one whose
 		// delta will be gone after the restart, and persists.
 		{name: "epoch 1 persists its grants and sessions", step: func(t *testing.T) {
-			a1 := newAgent(t, "up", core.TierCheckpoint, live, dead)
+			a1 := newCore(t, "up", core.TierCheckpoint, live, dead)
 			a1.Store = store
 			a1.Ledger.AdmitGrant(dead)
 			p, code, err := clone(a1, "parked")
@@ -105,7 +105,7 @@ func TestSnapshotRoundTripAndReconcile(t *testing.T) {
 		// In epoch 2 the runtime still shows the epoch-1 fiber (an orphan)
 		// and has the delta for "parked" but not for "lost".
 		{name: "epoch 2 reconciles: live grant re-admitted, expired dropped, missing delta dropped, orphan killed", step: func(t *testing.T) {
-			a2 = newAgent(t, "up", core.TierCheckpoint, live, dead)
+			a2 = newCore(t, "up", core.TierCheckpoint, live, dead)
 			a2.Ledger = core.NewLedger(2)
 			rt = &listingRuntime{
 				fakeRuntime: fakeRuntime{tier: core.TierCheckpoint, exits: make(chan core.FiberExit, 8)},
@@ -174,7 +174,7 @@ func TestSnapshotRoundTripAndReconcile(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			a3 = newAgent(t, "up", core.TierCheckpoint)
+			a3 = newCore(t, "up", core.TierCheckpoint)
 			a3.Ledger, a3.Verify, a3.Revoked = core.NewLedger(3), tokens, r
 			a3.Ledger.Now = func() time.Time { return clock }
 			rep, err := a3.Reconcile(ctx, snap)
@@ -191,7 +191,7 @@ func TestSnapshotRoundTripAndReconcile(t *testing.T) {
 				t.Fatalf("renewed token at +2h = %v, want ErrGrantRevoked", err)
 			}
 		}},
-		{name: "the lane delivering it again lifts the denial", step: func(t *testing.T) {
+		{name: "the home delivering it again lifts the denial", step: func(t *testing.T) {
 			a3.Redeliver(ctx, "live")
 			if code, err := present(a3, "live-renewed"); err != nil || code != core.OK {
 				t.Fatalf("after redelivery = %d %v, want OK", code, err)
@@ -227,10 +227,10 @@ func TestSnapshotRoundTripAndReconcile(t *testing.T) {
 // only on transitions Reconcile reads back, so the warm path writes no
 // file. A resume must write, or a restart would resume the session again.
 // Watch subscribers wake on every ledger change. The steps run in order
-// against one agent, and each starts with no file.
+// against one core, and each starts with no file.
 func TestSnapshotPersistsWhatBootReads(t *testing.T) {
 	g := core.Grant{UID: "g1", Tenant: "acme", Audience: "node-a", FiberMax: 4}
-	a := newAgent(t, "up", core.TierCheckpoint, g)
+	a := newCore(t, "up", core.TierCheckpoint, g)
 	path := filepath.Join(t.TempDir(), "ledger.json")
 	a.Store = &core.SnapshotStore{Path: path}
 	wake := core.Subscribe(a)
@@ -355,7 +355,7 @@ func TestReconcileReverifiesSnapshotGrants(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
-			a := newAgent(t, "up", core.TierCheckpoint)
+			a := newCore(t, "up", core.TierCheckpoint)
 			a.Ledger = core.NewLedger(2)
 			a.Verify = acceptVerifier{grants: tc.accepts, down: tc.down}
 			a.Store = &core.SnapshotStore{Path: filepath.Join(t.TempDir(), "ledger.json")}
@@ -438,11 +438,11 @@ func snapshotHolds(s core.Snapshot, uid, session string) bool {
 // TestSweepYieldsExpiredGrants checks that a sweep yields grants whose
 // lease has expired and stops their fibers. An expired grant presented
 // again is a capacity miss, not a re-admission. The steps run in order
-// against one agent and a clock they advance.
+// against one core and a clock they advance.
 func TestSweepYieldsExpiredGrants(t *testing.T) {
 	now := time.Unix(1_000_000, 0)
 	g := core.Grant{UID: "g1", Tenant: "acme", Audience: "node-a", FiberMax: 3, LeaseExpiry: now.Add(time.Minute)}
-	a := newAgent(t, "up", core.TierCheckpoint, g)
+	a := newCore(t, "up", core.TierCheckpoint, g)
 	a.Ledger.Now = func() time.Time { return now }
 	ctx := context.Background()
 	if _, code, err := a.Clone(ctx, core.CloneRequest{GrantJWT: []byte("g1"), Session: "S", Deadline: time.Second}); err != nil || code != core.OK {
@@ -684,7 +684,7 @@ func TestReconcileOrphans(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			a := newAgent(t, "up", core.TierCheckpoint)
+			a := newCore(t, "up", core.TierCheckpoint)
 			a.Ledger = core.NewLedger(2)
 			rt := &listingRuntime{fakeRuntime: fakeRuntime{tier: core.TierCheckpoint}, listErr: tc.listErr, releaseErr: tc.releaseErr}
 			for _, id := range tc.running {
@@ -730,7 +730,7 @@ func TestReconcileHoldsBesideAdmitted(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			a := newAgent(t, "up", core.TierCheckpoint)
+			a := newCore(t, "up", core.TierCheckpoint)
 			a.Ledger = core.NewLedger(2)
 			a.Verify = acceptVerifier{grants: map[string]core.Grant{"good-token": good, "held-token": held}, unavailable: map[string]bool{"held-token": true}}
 			a.Store = &core.SnapshotStore{Path: filepath.Join(t.TempDir(), "ledger.json")}

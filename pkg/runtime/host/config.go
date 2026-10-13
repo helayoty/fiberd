@@ -38,7 +38,7 @@ type Config struct {
 	// TemplateCache holds pulled artifacts, one directory per digest
 	// (default /var/lib/fiberd/templates), and the parent-checkpoint store.
 	// It is hidden from fibers like PrivateDir and DeltaDir: a proc fiber
-	// runs as the agent's uid and could otherwise rewrite a cached
+	// runs as fiberd's uid and could otherwise rewrite a cached
 	// template between the host's check and the exec, or read another
 	// grant's. A proc fiber still sees its own template's executable,
 	// bound back read-only at its path inside the cover, because CRIU
@@ -53,7 +53,7 @@ type Config struct {
 	// under RunDir (the zero value), or tcp on one declared address with
 	// a port per fiber. A backend that lists "tcp" in EndpointSchemes
 	// (proc) binds the port itself. Any other serves the unix socket and
-	// the agent relays the port to it (relay.go).
+	// fiberd relays the port to it (relay.go).
 	Endpoints endpoint.Policy
 	// DeltaDir holds parked images: <DeltaDir>/<grant>/<epoch>-<seq>/.
 	DeltaDir string
@@ -100,10 +100,10 @@ type Config struct {
 	// fiber a mount namespace of its own. A directory holding RunDir is
 	// never hidden, because fiber endpoints live there.
 	FiberHide []string
-	// PrivateDir is the agent's private state (its keys, the ledger
-	// snapshot, the epoch, the audit spool). Fibers run as the agent's uid
+	// PrivateDir is fiberd's private state (its keys, the ledger
+	// snapshot, the epoch, the audit spool). Fibers run as fiberd's uid
 	// and would pass the owner checks on its files, so it is always
-	// hidden from them, like DeltaDir. Empty when the agent has none.
+	// hidden from them, like DeltaDir. Empty when fiberd has none.
 	PrivateDir string
 }
 
@@ -209,7 +209,7 @@ func DefaultCeiling(g core.Grant, templateBytes uint64) uint64 {
 var ErrUnsupported = errors.New("host: not supported on this platform")
 
 // ErrNoTier is New's refusal of a backend that offers no tier, because
-// its tools or files are missing. Confinement fails closed, so the agent
+// its tools or files are missing. Confinement fails closed, so fiberd
 // does not start over such a backend.
 var ErrNoTier = errors.New("offers no tier")
 

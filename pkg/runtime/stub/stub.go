@@ -74,7 +74,7 @@ func (r *Runtime) Clone(_ context.Context, spec core.CloneSpec) (core.FiberHandl
 	defer r.mu.Unlock()
 	var w, dev uint64
 	if spec.Source == core.SourceDelta {
-		// The delta outlives its resume, as on a host: the agent drops it
+		// The delta outlives its resume, as on a host: fiberd drops it
 		// through DiscardDelta at the next park or a discarding release.
 		carried, ok := r.parked[spec.Ref]
 		if !ok {

@@ -78,8 +78,8 @@ type Fence struct {
 func (f Fence) String() string { return fmt.Sprintf("%s/%d/%d", f.GrantUID, f.Epoch, f.Seq) }
 
 // Shed is the miss that says to retry here later: the control plane is
-// unreachable, or the home is under pressure (memory, tasks, the thrash
-// budget). Reason is the home's own. The consumer waits and retries; it
+// unreachable, or the home is under pressure (memory, tasks, the clone
+// rate limit). Reason is the home's own. The caller waits and retries; it
 // does not fall back, because the fallback path needs the same control
 // plane or adds load where there is already too much.
 type Shed struct {
@@ -184,10 +184,10 @@ func (c *Client) Release(ctx context.Context, fiberID string, discard bool) erro
 
 // Status is one grant's line of the Watch stream.
 type Status struct {
-	GrantUID        string
-	Running, Parked uint32
-	WUsedBytes      uint64
-	Latest          Fence
+	GrantUID                string
+	Running, Parked, Pooled uint32
+	WUsedBytes              uint64
+	Latest                  Fence
 }
 
 // Watch streams status until ctx ends or the stream breaks; fn is called
@@ -205,7 +205,7 @@ func (c *Client) Watch(ctx context.Context, fn func(Status)) error {
 			}
 			return err
 		}
-		s := Status{GrantUID: st.GetGrantUid(), Running: st.GetRunning(), Parked: st.GetParked(), WUsedBytes: st.GetWUsedBytes()}
+		s := Status{GrantUID: st.GetGrantUid(), Running: st.GetRunning(), Parked: st.GetParked(), Pooled: st.GetPooled(), WUsedBytes: st.GetWUsedBytes()}
 		if l := st.GetLatest(); l != nil {
 			s.Latest = Fence{GrantUID: l.GetGrantUid(), Epoch: l.GetEpoch(), Seq: l.GetSeq()}
 		}

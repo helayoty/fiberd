@@ -85,7 +85,7 @@ func TestTierNames(t *testing.T) {
 		{in: "warm", want: core.TierWarm, wantName: "FIBER_WARM"},
 		{in: "fiber_checkpoint", want: core.TierCheckpoint, wantName: "FIBER_CHECKPOINT"},
 		{in: "Snapshot", want: core.TierSnapshot, wantName: "FIBER_SNAPSHOT"},
-		{in: "FIBER_FABRIC", want: core.TierFabric, wantName: "FIBER_FABRIC"},
+		{in: "FIBER_FABRIC", wantErr: true}, // removed, so it is unknown like any other name
 		{in: "", want: core.TierUnspecified, wantName: "TIER_UNSPECIFIED"},
 		{in: "tier_unspecified", want: core.TierUnspecified, wantName: "TIER_UNSPECIFIED"},
 		{in: "UNSPECIFIED", want: core.TierUnspecified, wantName: "TIER_UNSPECIFIED"},

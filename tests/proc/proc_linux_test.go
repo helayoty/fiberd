@@ -70,7 +70,7 @@ func newHost(c host.Config) (core.Runtime, error) {
 var (
 	zygoteBin string
 	cgRoot    = os.Getenv("FIBERD_CGROUP_ROOT")
-	// hiddenDir holds a secret the agent can read and no fiber may.
+	// hiddenDir holds a secret fiberd can read and no fiber may.
 	hiddenDir string
 	// deltaKeys are the keys every test home signs, trusts and seals
 	// deltas with, as a deployment's homes share them.
@@ -148,7 +148,7 @@ func TestMain(m *testing.M) {
 	if err := os.MkdirAll(hiddenDir, 0o700); err != nil {
 		panic(err)
 	}
-	if err := os.WriteFile(filepath.Join(hiddenDir, "secret"), []byte("agent only\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(hiddenDir, "secret"), []byte("fiberd only\n"), 0o600); err != nil {
 		panic(err)
 	}
 	k, err := grant.GenerateKey(jose.EdDSA)
@@ -253,7 +253,7 @@ func talk(t *testing.T, endpoint, line string) string {
 	return talkOver(t, c, line)
 }
 
-// handOff connects to a handoff fiber the way the agent does. One end of
+// handOff connects to a handoff fiber the way fiberd does. One end of
 // a fresh socket pair is passed to the fiber, and the other is returned
 // as the caller's TLS client, presenting cert.
 func handOff(t *testing.T, rt core.Runtime, fiberID string, cert tls.Certificate) net.Conn {
@@ -539,7 +539,7 @@ func parkResumeKeepsState(t *testing.T, rt core.Runtime, mode core.EndpointMode,
 }
 
 func TestOrphanAdoptionAcrossRuntimes(t *testing.T) {
-	// A fiber left by a previous agent: a second runtime over the same
+	// A fiber left by a previous fiberd: a second runtime over the same
 	// cgroup root must see it in List and be able to kill it by id.
 	root := filepath.Join(cgRoot, "t"+fmt.Sprint(time.Now().UnixNano()%1_000_000))
 	run := filepath.Join("/tmp", "fz-orphan")
@@ -597,10 +597,10 @@ func TestParkIsWSizedDelta(t *testing.T) {
 	}
 	// Born or resumed, a fiber is the init of its own pid namespace,
 	// without capabilities it could use or regain, and blind to what the
-	// agent hides in its mount namespace.
+	// fiberd hides in its mount namespace.
 	secret := filepath.Join(hiddenDir, "secret")
 	if b, err := os.ReadFile(secret); err != nil || len(b) == 0 {
-		t.Fatalf("the agent cannot read its own secret: %v", err)
+		t.Fatalf("fiberd cannot read its own secret: %v", err)
 	}
 	confined := []struct{ cmd, want string }{
 		{cmd: "pid", want: "1"},
@@ -620,7 +620,7 @@ func TestParkIsWSizedDelta(t *testing.T) {
 	probe("born", h.Endpoint)
 
 	// Neither sibling sees the other's processes, and each has a mount
-	// namespace of its own, apart from the agent's.
+	// namespace of its own, apart from fiberd's.
 	sib, err := rt.Clone(ctx, core.CloneSpec{Grant: g, Fence: core.Fence{GrantUID: "g9", Epoch: 1, Seq: 3}, Deadline: 2 * time.Second})
 	if err != nil {
 		t.Fatal(err)
@@ -874,7 +874,7 @@ func TestResumeOnAnotherRuntimeFromSameArtifact(t *testing.T) {
 	_ = b.Release(ctx, h2.ID, true)
 }
 
-// tokenVerifier hands back the grant named by the token: the agents in
+// tokenVerifier hands back the grant named by the token: the fiberd processes in
 // the mobility test share one grant and need no signatures.
 type tokenVerifier map[string]core.Grant
 
@@ -887,7 +887,7 @@ func (v tokenVerifier) Verify(_ context.Context, tok []byte) (core.Grant, error)
 }
 
 // TestSessionMovesThroughRegistry is the standalone acceptance of phase
-// 6: two agents on one host, each with its own runtime warmed from the
+// 6: two fiberd processes on one host, each with its own runtime warmed from the
 // same artifact, a delta registry between them. Count to three on A, park,
 // Clone(S) on B resumes with the count, and A no longer believes it holds
 // the session.
@@ -910,7 +910,7 @@ func TestSessionMovesThroughRegistry(t *testing.T) {
 		return core.Grant{UID: "mob-" + home, Audience: home, Tenant: "acme", TemplateDigest: digest, FiberMax: 4, WBudgetBytes: 32 << 20, LeaseExpiry: time.Now().Add(time.Hour),
 			Policy: core.Policy{Isolation: core.Trusted}}
 	}
-	mk := func(home string, keys artifact.Keys) (*core.Agent, core.Runtime) {
+	mk := func(home string, keys artifact.Keys) (*core.Core, core.Runtime) {
 		rt, err := newHost(host.Config{
 			Registry: reg + "/zygotes/ref", RegistryPlainHTTP: true, TemplateCache: t.TempDir(),
 			DeltaRegistry: reg + "/deltas", DeltaKeys: keys, HomeID: home,
@@ -925,7 +925,7 @@ func TestSessionMovesThroughRegistry(t *testing.T) {
 				c.Close()
 			}
 		})
-		a := &core.Agent{NodeID: home, Ledger: core.NewLedger(1), Budget: core.NewBudget(1000, 1<<20),
+		a := &core.Core{NodeID: home, Ledger: core.NewLedger(1), RateLimit: core.NewRateLimit(1000, 1<<20),
 			Runtime: rt, Verify: tokenVerifier{"g": grantFor(home)},
 			Health: core.NewSourceHealth(time.Minute, time.Now())}
 		return a, rt
@@ -1105,7 +1105,7 @@ func TestMobilityParityGate(t *testing.T) {
 	if _, err := artifact.Push(ctx, out, reg+"/zygotes/ref:v1", true); err != nil {
 		t.Fatal(err)
 	}
-	mk := func(home string, parity artifact.Parity, platform artifact.Platform) *core.Agent {
+	mk := func(home string, parity artifact.Parity, platform artifact.Platform) *core.Core {
 		rt, err := newHost(host.Config{
 			Registry: reg + "/zygotes/ref", RegistryPlainHTTP: true, TemplateCache: t.TempDir(),
 			DeltaRegistry: reg + "/deltas", HomeID: home, Parity: parity, Platform: platform,
@@ -1118,7 +1118,7 @@ func TestMobilityParityGate(t *testing.T) {
 		t.Cleanup(func() { rt.(interface{ Close() }).Close() })
 		g := core.Grant{UID: "par-" + home, Audience: home, Tenant: "acme", TemplateDigest: digest, FiberMax: 4, WBudgetBytes: 32 << 20, LeaseExpiry: time.Now().Add(time.Hour),
 			Policy: core.Policy{Isolation: core.Trusted}}
-		return &core.Agent{NodeID: home, Ledger: core.NewLedger(1), Budget: core.NewBudget(1000, 1<<20),
+		return &core.Core{NodeID: home, Ledger: core.NewLedger(1), RateLimit: core.NewRateLimit(1000, 1<<20),
 			Runtime: rt, Verify: tokenVerifier{"g": g},
 			Health: core.NewSourceHealth(time.Minute, time.Now())}
 	}
@@ -1340,7 +1340,7 @@ func TestDeadlineIsEnforced(t *testing.T) {
 // so nothing can claim or fall back to that older state. The delta it
 // came from stays on disk until the next park supersedes it or the
 // release discards it. After the release a Clone creates fresh. The
-// steps run in order against one agent.
+// steps run in order against one core.
 func TestResumedDeltaRetiredAndDiscarded(t *testing.T) {
 	ctx := context.Background()
 	out := filepath.Join(t.TempDir(), "art")
@@ -1373,7 +1373,7 @@ func TestResumedDeltaRetiredAndDiscarded(t *testing.T) {
 	if rt.Tier() < core.TierCheckpoint {
 		t.Skip("criu not usable here")
 	}
-	a := &core.Agent{NodeID: "home-a", Ledger: core.NewLedger(1), Budget: core.NewBudget(1000, 1<<20),
+	a := &core.Core{NodeID: "home-a", Ledger: core.NewLedger(1), RateLimit: core.NewRateLimit(1000, 1<<20),
 		Runtime: rt, Verify: tokenVerifier{"g": g}, Health: core.NewSourceHealth(time.Minute, time.Now())}
 	req := core.CloneRequest{GrantJWT: []byte("g"), Session: "S", Deadline: 5 * time.Second}
 	tag := domainRepo(reg, "acme", digest) + ":" + sessionTag("S")

@@ -1,6 +1,6 @@
 # Kata-shaped shim
 
-This is the design of the Kata example in `examples/kata`, a containerd shim that is a protocol consumer. It is for readers who want Kubernetes Pods whose containers are [fibers](../glossary.md#fiber). Read [architecture](../architecture.md), [the protocol](../protocol.md) and [the Kubernetes integration](kubernetes.md) first.
+This is the design of the Kata example in `examples/kata`, a containerd shim that calls the protocol. It is for readers who want Kubernetes Pods whose containers are [fibers](../glossary.md#fiber). Read [architecture](../architecture.md), [the protocol](../protocol.md) and [the Kubernetes integration](kubernetes.md) first.
 
 ## Purpose
 
@@ -10,7 +10,7 @@ Kata Containers plugs into Kubernetes as a containerd shim. Where the default sh
 
 The shim runs on each node, started by containerd. The fiberd [home](../glossary.md#home) runs elsewhere, such as a grant Pod of the [Kubernetes example](kubernetes.md), and the shim dials it at the address the Pod names. Fibers run in that home, not in the application Pod.
 
-A Pod selects the `fiberd` RuntimeClass. containerd passes the Pod's `io.fiberd/*` annotations into the OCI spec through the runtime handler's `pod_annotations`. They name the [grant](../glossary.md#grant), the home's address, the [session](../glossary.md#session), what to do on stop, and an optional [payload](../glossary.md#payload).
+A Pod selects the `fiberd` RuntimeClass. containerd passes the Pod's `io.fiberd/*` annotations into the OCI spec through the runtime handler's `pod_annotations`. They name the [grant](../glossary.md#grant), the home's address, the [session](../glossary.md#session), what to do on stop, and an optional payload.
 
 | containerd asks the shim | The shim does |
 | --- | --- |
@@ -22,7 +22,7 @@ A Pod selects the `fiberd` RuntimeClass. containerd passes the Pod's `io.fiberd/
 | Wait | Returns when the container exits |
 | Stop for a dead shim | Parks or releases the fiber from the bundle's record |
 
-Exec, ptys, pause, checkpoint and [cgroup](../glossary.md#cgroup) stats are refused. A fiber is reached through its endpoint, parked through its home and priced by the home's ledger. Misses map to containerd errors. [Shed](../glossary.md#shed-and-deferred) and deferred are Unavailable, and a [tier](../glossary.md#tier) gap is FailedPrecondition.
+Exec, ptys, pause, checkpoint and [cgroup](../glossary.md#cgroup) stats are refused. A fiber is reached through its endpoint, parked through its home and priced by the home's ledger. Misses map to containerd errors. [Shed](../glossary.md#clone-misses) and deferred are Unavailable, and a [tier](../glossary.md#tier) gap is FailedPrecondition.
 
 ```mermaid
 sequenceDiagram

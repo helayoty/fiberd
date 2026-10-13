@@ -1,5 +1,5 @@
-// Command fiberd-slurm is the fiberd agent for a Slurm allocation: the
-// agent library (pkg/agent) plus the Slurm home. A job (or its prolog)
+// Command fiberd-slurm is fiberd for a Slurm allocation: the
+// library (pkg/fiberd) plus the Slurm home. A job (or its prolog)
 // starts it with the grant the issuer minted for this node; it verifies
 // the grant offline against the issuer's keys before anything else, stages
 // it in the job's grants directory, and serves fibers for as long as the
@@ -21,7 +21,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/helayoty/fiberd/pkg/agent"
+	"github.com/helayoty/fiberd/pkg/fiberd"
 	"github.com/helayoty/fiberd/pkg/grant"
 	fhome "github.com/helayoty/fiberd/pkg/home"
 
@@ -29,9 +29,9 @@ import (
 )
 
 func main() {
-	var c agent.Config
+	var c fiberd.Config
 	c.Bind(flag.CommandLine)
-	grantArg := flag.String("grant", os.Getenv("FIBERD_GRANT"), "the grant for this allocation: a JWT, or @<file>; verified before the agent starts and staged in -grants-dir (default $FIBERD_GRANT)")
+	grantArg := flag.String("grant", os.Getenv("FIBERD_GRANT"), "the grant for this allocation: a JWT, or @<file>; verified before fiberd starts and staged in -grants-dir (default $FIBERD_GRANT)")
 	probe := flag.String("slurm-probe", "", "command reporting the job's state as JobState=<STATE> (default: scontrol show job -o $SLURM_JOB_ID; `none` = a timer)")
 	flag.Parse()
 	c.Finish()
@@ -40,11 +40,11 @@ func main() {
 	}
 }
 
-// run is the agent under a Slurm allocation. env reads the job's
+// run is fiberd under a Slurm allocation. env reads the job's
 // environment. cgroupMount is the cgroup v2 mount the home delegates the
 // job step's cgroup under. Empty means the home's default, /sys/fs/cgroup.
 // Tests point it at a fake mount, so they never touch the host's cgroups.
-func run(c *agent.Config, grantArg, probe string, env func(string) string, cgroupMount string) error {
+func run(c *fiberd.Config, grantArg, probe string, env func(string) string, cgroupMount string) error {
 	job, err := home.ReadJob(env)
 	if err != nil {
 		return err
@@ -58,7 +58,7 @@ func run(c *agent.Config, grantArg, probe string, env func(string) string, cgrou
 		}
 	}
 	p := probeCommand(probe)
-	return agent.Run(c, func(c *agent.Config, _ *grant.Cache) (fhome.Home, error) {
+	return fiberd.Run(c, func(c *fiberd.Config, _ *grant.Cache) (fhome.Home, error) {
 		fam, err := c.Family()
 		if err != nil {
 			return nil, err
@@ -89,9 +89,9 @@ func probeCommand(probe string) []string {
 }
 
 // stage verifies the grant the job was given and writes it where the
-// home's lane picks it up. Verification is what a prolog does: nothing
+// home's grant directory picks it up. Verification is what a prolog does: nothing
 // runs under a grant this node cannot check.
-func stage(c *agent.Config, grantArg string) error {
+func stage(c *fiberd.Config, grantArg string) error {
 	tok := grantArg
 	if path, ok := strings.CutPrefix(grantArg, "@"); ok {
 		b, err := os.ReadFile(path)

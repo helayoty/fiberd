@@ -1,4 +1,4 @@
-# What a grant Pod's agent may do in the compare namespace, and what the
+# What a grant Pod's fiberd may do in the compare namespace, and what the
 # issuer may do here. Copies of the tenant bindings in
 # examples/kubernetes/kind/manifests/30-grant-rbac.yaml for this namespace.
 apiVersion: v1

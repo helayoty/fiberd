@@ -22,12 +22,12 @@ func SetSpoolFsync(s *Spool, fn func(*os.File) error) {
 
 // Subscribe registers a Watch wake-up channel, so a test can see which
 // transitions notify.
-func Subscribe(a *Agent) chan struct{} { return a.subscribe() }
+func Subscribe(a *Core) chan struct{} { return a.subscribe() }
 
 // SetExitLookedUp installs what OnExit calls once it has looked the fiber
 // up, with whether the ledger knew it, so a test can order an exit
 // against a commit.
-func SetExitLookedUp(a *Agent, fn func(fiberID string, known bool)) { a.exitLookedUp = fn }
+func SetExitLookedUp(a *Core, fn func(fiberID string, known bool)) { a.exitLookedUp = fn }
 
 // Seq returns a spool's last assigned sequence number.
 func (s *Spool) Seq() uint64 {

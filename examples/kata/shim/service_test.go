@@ -121,14 +121,14 @@ func (s *shutdownStub) runCallbacks(t *testing.T) {
 }
 
 type home struct {
-	agent  *core.Agent
+	core   *core.Core
 	client *consumer.Client
 }
 
 func newHome(t *testing.T) *home {
 	t.Helper()
-	ag := &core.Agent{
-		NodeID: "node-a", Ledger: core.NewLedger(1), Budget: core.NewBudget(1000, 256<<20),
+	ag := &core.Core{
+		NodeID: "node-a", Ledger: core.NewLedger(1), RateLimit: core.NewRateLimit(1000, 256<<20),
 		Runtime: stub.NewWithTier(core.TierCheckpoint), Verify: grant.InsecureJSONVerifier{},
 		Health: core.NewSourceHealth(10*time.Second, time.Now()), StatusInterval: 20 * time.Millisecond,
 	}
@@ -136,7 +136,7 @@ func newHome(t *testing.T) *home {
 	t.Cleanup(cancel)
 	go ag.Run(ctx)
 	lis := bufconn.Listen(1 << 20)
-	gs := rpc.NewGRPCServer(&rpc.Server{Agent: ag, Issuer: "https://issuer.test", RetryAfter: time.Second})
+	gs := rpc.NewGRPCServer(&rpc.Server{Core: ag, Issuer: "https://issuer.test", RetryAfter: time.Second})
 	go func() { _ = gs.Serve(lis) }()
 	t.Cleanup(gs.Stop)
 	conn, err := grpc.NewClient("passthrough:///bufconn",
@@ -145,7 +145,7 @@ func newHome(t *testing.T) *home {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &home{agent: ag, client: consumer.New(conn)}
+	return &home{core: ag, client: consumer.New(conn)}
 }
 
 func (h *home) dial(context.Context, string) (*consumer.Client, error) { return h.client, nil }
@@ -260,7 +260,7 @@ func TestPodContainersAreFibers(t *testing.T) {
 			if _, err := s.Start(ctx, &taskAPI.StartRequest{ID: "sb1"}); err != nil {
 				t.Fatal(err)
 			}
-			if st, _ := coretest.GrantStatus(h.agent.Ledger, "g1"); st.Running != 0 {
+			if st, _ := coretest.GrantStatus(h.core.Ledger, "g1"); st.Running != 0 {
 				t.Fatalf("sandbox container cloned a fiber: %+v", st)
 			}
 		}},
@@ -269,7 +269,7 @@ func TestPodContainersAreFibers(t *testing.T) {
 			if err != nil || resp.Pid == 0 {
 				t.Fatalf("create = %+v (%v)", resp, err)
 			}
-			if st, _ := coretest.GrantStatus(h.agent.Ledger, "g1"); st.Running != 1 {
+			if st, _ := coretest.GrantStatus(h.core.Ledger, "g1"); st.Running != 1 {
 				t.Fatalf("after create: %+v, want one running fiber", st)
 			}
 			rec, ok := readState(t, cb)
@@ -300,7 +300,7 @@ func TestPodContainersAreFibers(t *testing.T) {
 			case <-time.After(2 * time.Second):
 				t.Fatal("Wait did not return after Kill")
 			}
-			if st, _ := coretest.GrantStatus(h.agent.Ledger, "g1"); st.Running != 0 || st.Parked != 1 {
+			if st, _ := coretest.GrantStatus(h.core.Ledger, "g1"); st.Running != 0 || st.Parked != 1 {
 				t.Fatalf("after kill with on-stop=park: %+v", st)
 			}
 		}},
@@ -316,7 +316,7 @@ func TestPodContainersAreFibers(t *testing.T) {
 			if _, err := s.Create(ctx, &taskAPI.CreateTaskRequest{ID: "c2", Bundle: cb2}); err != nil {
 				t.Fatal(err)
 			}
-			if st, _ := coretest.GrantStatus(h.agent.Ledger, "g1"); st.Running != 1 || st.Parked != 0 || st.Latest.Seq != 2 {
+			if st, _ := coretest.GrantStatus(h.core.Ledger, "g1"); st.Running != 1 || st.Parked != 0 || st.Latest.Seq != 2 {
 				t.Fatalf("after re-create: %+v, want the parked session resumed (seq 2)", st)
 			}
 		}},
@@ -324,7 +324,7 @@ func TestPodContainersAreFibers(t *testing.T) {
 			if _, err := s.Delete(ctx, &taskAPI.DeleteRequest{ID: "c2"}); err != nil {
 				t.Fatal(err)
 			}
-			if st, _ := coretest.GrantStatus(h.agent.Ledger, "g1"); st.Running != 0 || st.Parked != 0 {
+			if st, _ := coretest.GrantStatus(h.core.Ledger, "g1"); st.Running != 0 || st.Parked != 0 {
 				t.Fatalf("after delete: %+v, want nothing left", st)
 			}
 		}},
@@ -476,7 +476,7 @@ func TestCreateRecordsTheFiber(t *testing.T) {
 				fshim.AnnotOnStop: "park", fshim.AnnotPayload: `{"dirty_bytes":1}`}),
 			n: 1, wantDials: []string{"home-a:8484"}, wantPayload: `{"dirty_bytes":1}`,
 			want: &fshim.State{Home: "home-a:8484", Session: "s1", OnStop: "park"}},
-		{name: "by default the home is the node's agent, the session is pod/container, and stop releases",
+		{name: "by default the home is the node's fiberd, the session is pod/container, and stop releases",
 			annotations: appAnnotations(nil), n: 1, wantDials: []string{fshim.DefaultHome},
 			want: &fshim.State{Home: fshim.DefaultHome, Session: "web-0/app", OnStop: "release"}},
 		{name: "without CRI names the session is the container id",

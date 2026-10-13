@@ -32,7 +32,7 @@ const maxPendingPerIP = 32
 var keyEncoding = base32.StdEncoding.WithPadding(base32.NoPadding)
 
 // Router owns the home's handoff listener. Routing keys live in memory
-// only. An agent restart ends every fiber, so no key outlives the agent.
+// only. A fiberd restart ends every fiber, so no key outlives fiberd.
 type Router struct {
 	// Advertise is the address callers dial (tcp://host:port).
 	Advertise string

@@ -1,6 +1,6 @@
 // Package controller is the Kubernetes side of the reference issuer: it
 // turns CapacityGrant resources into signed grants and grant Pods. For
-// every CapacityGrant it creates the Pod (the agent as PID 1, with the
+// every CapacityGrant it creates the Pod (fiberd as PID 1, with the
 // readiness gate), mints a JWT addressed to that Pod with the resource's
 // uid as the grant uid, projects it into the Pod through a Secret, renews
 // it at half-life, and mirrors the Pod's placement and readiness gate
@@ -8,7 +8,7 @@
 // is served as a JWKS beside the OIDC discovery document.
 //
 // It polls rather than watches: a list every few seconds is the same
-// shape as the homes' grant lanes, needs no resourceVersion bookkeeping,
+// shape as the homes' grant delivery, needs no resourceVersion bookkeeping,
 // and is more than fast enough for the number of grants a cluster holds.
 package controller
 
@@ -231,7 +231,7 @@ func (c *Controller) reconcileOne(ctx context.Context, cg *CapacityGrant) error 
 		}
 	}
 	if p.Status.PodIP != "" {
-		st.Endpoint = net.JoinHostPort(p.Status.PodIP, strconv.Itoa(agentPort))
+		st.Endpoint = net.JoinHostPort(p.Status.PodIP, strconv.Itoa(fiberdPort))
 	}
 	if st == cg.Status {
 		return nil
@@ -275,7 +275,7 @@ func leaseOf(cg *CapacityGrant) (time.Duration, error) {
 }
 
 // isolating holds the spec.pod.runtime values whose backend implements
-// backend.Isolator. The agent refuses every Clone of an untrusted grant
+// backend.Isolator. fiberd refuses every Clone of an untrusted grant
 // on any other runtime, so such a grant is refused here instead.
 var isolating = map[string]bool{"gvisor": true, "hyperlight": true}
 

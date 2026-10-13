@@ -3,7 +3,7 @@
 # runs it for `make linux-shell`, `make linux-test` and `make conform-proc`.
 #
 # This is a workbench, not a runtime image. It runs --privileged with a
-# private cgroup namespace so the agent can carve a delegated cgroup subtree
+# private cgroup namespace so fiberd can carve a delegated cgroup subtree
 # and CRIU can dump and restore process trees. It stays root for the same
 # reason.
 #

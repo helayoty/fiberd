@@ -1,5 +1,5 @@
 /* fuzz_recv_line feeds recv_line, the control line reader, a stream cut
- * into chunks as an agent's socket may deliver it, with descriptors riding
+ * into chunks as fiberd's socket may deliver it, with descriptors riding
  * on some of the chunks. The kernel returns a chunk that carries
  * descriptors on its own, so this exercises the reader's buffering. A
  * line split over several reads, a partial line at EOF, and one longer
