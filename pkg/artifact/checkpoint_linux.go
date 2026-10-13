@@ -3,15 +3,11 @@
 package artifact
 
 import (
-	"bufio"
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
-	"strings"
 	"syscall"
-	"time"
 
 	"github.com/helayoty/fiberd/pkg/sys/criu"
 )
@@ -58,32 +54,8 @@ func checkpointZygote(ctx context.Context, o BuildOptions, imagesDir string) err
 	// fiberd speaks first (zygote/libfiberzygote.h). A zygote that
 	// exited already fails the write, and is reported below as such.
 	_, _ = parent.Write([]byte("PREPARE none\n"))
-
-	ready := make(chan error, 1)
-	go func() {
-		line, err := bufio.NewReader(parent).ReadString('\n')
-		if err != nil {
-			ready <- err
-			return
-		}
-		if strings.TrimSpace(line) != "READY" {
-			ready <- fmt.Errorf("zygote said %q, not READY", strings.TrimSpace(line))
-			return
-		}
-		ready <- nil
-	}()
-	select {
-	case err := <-ready:
-		if err != nil {
-			return fmt.Errorf("artifact: zygote did not become ready: %w", err)
-		}
-	case err := <-waited:
-		waited <- err // the deferred cleanup waits on it too
-		return fmt.Errorf("artifact: zygote exited before READY: %w", err)
-	case <-time.After(o.ReadyTimeout):
-		return errors.New("artifact: zygote did not become ready in time")
-	case <-ctx.Done():
-		return ctx.Err()
+	if err := awaitReady(ctx, parent, waited, o.ReadyTimeout); err != nil {
+		return err
 	}
 	_ = os.RemoveAll(imagesDir)
 	// The control socket's peer is this process, outside the dumped tree:

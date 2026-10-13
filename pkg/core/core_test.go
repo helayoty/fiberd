@@ -571,7 +571,7 @@ func TestExitRacesCommit(t *testing.T) {
 // TestCloneIdempotentAndResume runs one session name through its life. A
 // repeated clone attaches to the same fiber, a parked session resumes
 // under the next fence, and a released name is free for a fresh create.
-// The steps run in order against one agent.
+// The steps run in order against one core.
 func TestCloneIdempotentAndResume(t *testing.T) {
 	g := core.Grant{UID: "g1", Tenant: "acme", Audience: "node-a", FiberMax: 2}
 	a := newCore(t, "up", core.TierCheckpoint, g)

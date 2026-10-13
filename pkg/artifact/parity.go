@@ -38,7 +38,7 @@ type Platform struct {
 
 // Host is the platform this process runs on.
 func Host() Platform {
-	arch, kernel, libc := HostInfo()
+	arch, kernel, libc := hostInfo()
 	return Platform{Arch: arch, Kernel: kernel, Libc: libc}
 }
 

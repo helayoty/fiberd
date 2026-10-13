@@ -4,18 +4,23 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
 // TestEnsurePrivate checks that <state>/private exists afterwards, is a real
 // directory of mode 0700, and nothing a fiber may have left at that name
-// is written through. Files under -state are never moved.
+// is written through. Files under -state are never moved. The mode is
+// tightened through a chmod the test watches, and a file system that
+// refuses it (tests/sys TestFiberdEnsurePrivateReadOnly mounts one) is
+// a chmod that answers EROFS.
 func TestEnsurePrivate(t *testing.T) {
 	cases := []struct {
 		name      string
 		under     map[string]string // files under -state before the call
-		privateAs string            // "", "dir0755", "symlink", "file", "toolong" or "readonly"
+		privateAs string            // "", "dir0755", "symlink", "file" or "toolong"
 		stateAs   string            // "" or "under-file": -state cannot be made
+		chmodErr  error             // what chmod answers
 		runs      int
 		wantErr   string
 	}{
@@ -27,7 +32,8 @@ func TestEnsurePrivate(t *testing.T) {
 		{name: "a file at the private dir's name is refused", privateAs: "file", runs: 1, wantErr: "is not a directory"},
 		{name: "a state dir that cannot be made", stateAs: "under-file", runs: 1, wantErr: "state dir: "},
 		{name: "a private dir the kernel cannot make", privateAs: "toolong", runs: 1, wantErr: "private state dir: "},
-		{name: "a private dir whose mode cannot be tightened", privateAs: "readonly", runs: 1, wantErr: "read-only file system"},
+		{name: "a private dir whose mode cannot be tightened", privateAs: "dir0755", chmodErr: syscall.EROFS, runs: 1,
+			wantErr: "private state dir: read-only file system"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -73,11 +79,20 @@ func TestEnsurePrivate(t *testing.T) {
 				if err := os.WriteFile(private, []byte("x"), 0o600); err != nil {
 					t.Fatal(err)
 				}
-			case "readonly":
-				readOnlyDir(t, private)
+			}
+			chmods := 0
+			chmod := func(path string, mode os.FileMode) error {
+				chmods++
+				if path != private || mode != 0o700 {
+					t.Fatalf("chmod(%s, %v), want the private dir and 0700", path, mode)
+				}
+				if tc.chmodErr != nil {
+					return tc.chmodErr
+				}
+				return os.Chmod(path, mode)
 			}
 			for i := 0; i < tc.runs; i++ {
-				err := ensurePrivate(state, private)
+				err := ensurePrivate(state, private, chmod)
 				if tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)) {
 					t.Fatalf("run %d: %v, want %q", i+1, err, tc.wantErr)
 				}
@@ -100,6 +115,9 @@ func TestEnsurePrivate(t *testing.T) {
 			}
 			if entries, _ := os.ReadDir(private); len(entries) != 0 {
 				t.Fatalf("private dir holds %v, want nothing moved in", entries)
+			}
+			if chmods != tc.runs {
+				t.Fatalf("chmod ran %d times, want once per run (%d)", chmods, tc.runs)
 			}
 			for name := range tc.under {
 				if _, err := os.Lstat(filepath.Join(state, name)); err != nil {

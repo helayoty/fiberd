@@ -23,7 +23,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"time"
 
@@ -346,14 +345,6 @@ func repository(ref string, plainHTTP bool) (*remote.Repository, string, error) 
 	}
 	repo.PlainHTTP = plainHTTP
 	return repo, target, nil
-}
-
-// HostInfo fills the parity fields for the running host.
-func HostInfo() (arch, kernel, libc string) {
-	arch = runtime.GOARCH
-	kernel = unameRelease()
-	libc = libcVersion()
-	return
 }
 
 func fileSHA256(path string) (string, error) {

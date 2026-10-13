@@ -156,7 +156,7 @@ type Core struct {
 	// one second.
 	StatusInterval time.Duration
 
-	// Scope, when set, is what the home asserts about where this agent
+	// Scope, when set, is what the home asserts about where this fiberd
 	// runs (namespace, service account, DRA claim, ...); it is stamped
 	// on every audit record. Nil on a standalone host.
 	Scope func() []ScopeClaim
@@ -703,7 +703,7 @@ func (a *Core) Redeliver(ctx context.Context, grantUID string) {
 // deltas; a home that lost a grant's own scope revokes that grant too.
 func (a *Core) BumpEpoch(ctx context.Context, reason string) (uint64, error) {
 	if a.Epoch == nil {
-		return 0, errors.New("agent: no epoch store to bump")
+		return 0, errors.New("fiberd: no epoch store to bump")
 	}
 	next, err := a.Epoch.Bump()
 	if err != nil {

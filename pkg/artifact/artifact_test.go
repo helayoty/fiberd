@@ -75,6 +75,7 @@ func imagesArtifact(t *testing.T) (dir, digest string) {
 // to a registry and pulls it back. The steps run in order because each
 // builds on the last.
 func TestBuildPushPullRoundTrip(t *testing.T) {
+	fakeHost(t)
 	ctx := context.Background()
 	src := filepath.Join(t.TempDir(), "zygote.sh")
 	if err := os.WriteFile(src, []byte("#!/bin/sh\necho READY\n"), 0o755); err != nil {
@@ -112,7 +113,7 @@ func TestBuildPushPullRoundTrip(t *testing.T) {
 			if cfg, err = artifact.ReadConfig(out); err != nil {
 				t.Fatal(err)
 			}
-			if cfg.Arch == "" || cfg.ZygoteSHA256 == "" || cfg.HasImages || len(cfg.Args) != 2 {
+			if cfg.Platform() != fakePlatform || cfg.ZygoteSHA256 == "" || cfg.HasImages || len(cfg.Args) != 2 {
 				t.Fatalf("config = %+v", cfg)
 			}
 		}},
