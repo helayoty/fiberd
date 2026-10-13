@@ -33,16 +33,19 @@ CEILING=$((160 << 20))
 rm -rf "$STATE"; mkdir -p "$STATE"
 # The build happens in an uncapped container first (make overcommit): a
 # cold Go build does not fit under the storm's memory cap.
+# fiberd is built with the fiberd_testhooks tag for the cadence flags,
+# so the ladder reacts within the storm's window.
 if [ -z "${STORM_PREBUILT:-}" ]; then
-  go build -o bin/ ./cmd/fiberd ./cmd/grant-issuer ./hack/storm
+  go build -o bin/ ./cmd/grant-issuer ./hack/storm
+  go build -tags fiberd_testhooks -o bin/fiberd-testhooks ./cmd/fiberd
   make -s zygote
 fi
 
 bin/grant-issuer keygen -alg EdDSA -out "$STATE/issuer-key.json" >/dev/null
 bin/grant-issuer serve -key "$STATE/issuer-key.json" -addr "$ISSUER_ADDR" -issuer "$ISSUER_URL" >"$STATE/issuer.log" 2>&1 &
 ISSUER_PID=$!
-bin/fiberd -state "$STATE" -node-id "$NODE" -verifier jwks -issuer "$ISSUER_URL" -jwks-max-stale 10m -insecure-plaintext \
-  -listen "$ADDR" -runtime proc -template "default=$PWD/bin/refzygote --heap-mb 64" -run-dir /tmp/fz-storm \
+bin/fiberd-testhooks -state "$STATE" -node-id "$NODE" -verifier jwks -issuer "$ISSUER_URL" -jwks-max-stale 10m -insecure-plaintext \
+  -listen "$ADDR" -runtime proc -template "default=$PWD/bin/refzygote --heap-mb 64" \
   -grant-ceiling "$CEILING" -pressure-interval 200ms -status-interval 100ms -stale-ttl 30s \
   >"$STATE/fiberd.log" 2>&1 &
 FIBERD_PID=$!

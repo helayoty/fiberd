@@ -140,14 +140,12 @@ func waitFor(t *testing.T, cond func() bool, what string) {
 // standalone host asserts no scope, and readiness is never published.
 func TestStandaloneAccessors(t *testing.T) {
 	cases := []struct {
-		name         string
-		cfg          standalone.Config
-		wantCgroup   string
-		wantEndpoint string
+		name       string
+		cfg        standalone.Config
+		wantCgroup string
 	}{
 		{name: "defaults", wantCgroup: "/sys/fs/cgroup/fiberd"},
-		{name: "configured", cfg: standalone.Config{CgroupRoot: "/sys/fs/cgroup/custom", Endpoint: "10.0.0.1:7443"},
-			wantCgroup: "/sys/fs/cgroup/custom", wantEndpoint: "10.0.0.1:7443"},
+		{name: "configured", cfg: standalone.Config{CgroupRoot: "/sys/fs/cgroup/custom"}, wantCgroup: "/sys/fs/cgroup/custom"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -155,8 +153,8 @@ func TestStandaloneAccessors(t *testing.T) {
 			if h.Name() != "standalone" {
 				t.Fatalf("Name = %q, want standalone", h.Name())
 			}
-			if h.CgroupRoot() != tc.wantCgroup || h.AdvertisedEndpoint() != tc.wantEndpoint {
-				t.Fatalf("CgroupRoot, AdvertisedEndpoint = %q, %q; want %q, %q", h.CgroupRoot(), h.AdvertisedEndpoint(), tc.wantCgroup, tc.wantEndpoint)
+			if h.CgroupRoot() != tc.wantCgroup {
+				t.Fatalf("CgroupRoot = %q, want %q", h.CgroupRoot(), tc.wantCgroup)
 			}
 			if sc := h.Scope(); sc != nil {
 				t.Fatalf("Scope = %+v, want none", sc)

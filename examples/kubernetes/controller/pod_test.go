@@ -23,7 +23,7 @@ func TestBuildPod(t *testing.T) {
 	base := func(runtime, family string) []string {
 		return []string{"-verifier", "jwks", "-issuer", issuerURL, "-jwks-max-stale", "1m0s", "-insecure-plaintext",
 			"-listen", ":8484", "-runtime", runtime, "-node-id", "$(FIBERD_NODE_ID)",
-			"-state", "/var/lib/fiberd", "-run-dir", "/run/fiberd", "-grants-dir", controller.GrantsMount,
+			"-state", "/var/lib/fiberd", "-grants-dir", controller.GrantsMount,
 			"-endpoint-family", family}
 	}
 	cases := []struct {
@@ -101,7 +101,6 @@ func TestBuildPod(t *testing.T) {
 			wantVolumes := []controller.Volume{
 				{Name: "grants", Secret: &controller.SecretVolume{SecretName: "g-grant", Optional: true}},
 				{Name: "state", EmptyDir: &controller.EmptyDirVolume{}},
-				{Name: "run", EmptyDir: &controller.EmptyDirVolume{}},
 			}
 			if !reflect.DeepEqual(p.Spec.Volumes, wantVolumes) {
 				t.Fatalf("volumes = %+v", p.Spec.Volumes)
@@ -124,7 +123,6 @@ func TestBuildPod(t *testing.T) {
 			wantMounts := []controller.VolumeMount{
 				{Name: "grants", MountPath: controller.GrantsMount, ReadOnly: true},
 				{Name: "state", MountPath: "/var/lib/fiberd"},
-				{Name: "run", MountPath: "/run/fiberd"},
 			}
 			if !reflect.DeepEqual(c.VolumeMounts, wantMounts) {
 				t.Fatalf("mounts = %+v", c.VolumeMounts)

@@ -100,7 +100,7 @@ cg_ready() { [ "$("${KC[@]}" -n "$NS" get cg "$1" -o jsonpath='{.status.ready}')
 runc_logs() {
   echo "--- runc and zygote logs in $1:"
   "${KC[@]}" -n "$NS" exec "$1" -c fiberd -- sh -c \
-    'for f in /var/lib/fiberd/runc/bundles/*.runc.log /run/fiberd/*/zygote.log; do [ -f "$f" ] || continue; echo "--- $f"; tail -c 4096 "$f"; done' || true
+    'for f in /var/lib/fiberd/runc/bundles/*.runc.log /var/lib/fiberd/run/*/zygote.log; do [ -f "$f" ] || continue; echo "--- $f"; tail -c 4096 "$f"; done' || true
 }
 
 restart_count() { "${KC[@]}" -n "$NS" get pod "$POD" -o jsonpath='{.status.containerStatuses[0].restartCount}'; }

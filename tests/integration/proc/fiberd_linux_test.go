@@ -33,18 +33,18 @@ const fiberdNode = "node-a"
 
 // fiberdConfig parses args the way cmd/fiberd does, after a base that
 // starts a plaintext fiberd with the insecure-json verifier on loopback
-// ":0" ports. Later flags win.
+// ":0" ports, with its loops at 10ms. Later flags win.
 func fiberdConfig(t *testing.T, state string, args ...string) *fiberd.Config {
 	t.Helper()
 	fs := flag.NewFlagSet("fiberd", flag.ContinueOnError)
 	var c fiberd.Config
 	c.Bind(fs)
 	base := []string{"-state", state, "-listen", "127.0.0.1:0", "-insecure-plaintext", "-verifier", "insecure-json",
-		"-node-id", fiberdNode, "-status-interval", "10ms", "-pressure-interval", "10ms"}
+		"-node-id", fiberdNode}
 	if err := fs.Parse(append(base, args...)); err != nil {
 		t.Fatal(err)
 	}
-	c.Finish()
+	c.Timing = fiberd.Timing{StatusEvery: 10 * time.Millisecond, PressureEvery: 10 * time.Millisecond}
 	return &c
 }
 
@@ -226,7 +226,7 @@ func TestFiberdRunHostRuntime(t *testing.T) {
 			cg := fiberdCgroup(t)
 			state := fiberdState(t)
 			args := append([]string{"-runtime", "proc", "-template", "default=" + zygoteBin + " --heap-mb 16",
-				"-cgroup-root", cg, "-run-dir", filepath.Join(state, "run")}, tc.args(t.TempDir())...)
+				"-cgroup-root", cg}, tc.args(t.TempDir())...)
 			if tc.prune {
 				seedGrants(t, state, cg)
 			}

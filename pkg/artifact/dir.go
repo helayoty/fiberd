@@ -46,7 +46,7 @@ const (
 // PushDir uploads every regular file in dir (logs excluded) as the
 // artifact at ref, with the annotations on the manifest. It signs with
 // signer when that is set, and returns the manifest digest.
-func PushDir(ctx context.Context, dir, ref, artifactType string, annotations map[string]string, signer *jose.JSONWebKey, plainHTTP bool) (string, error) {
+func PushDir(ctx context.Context, dir, ref, artifactType string, annotations map[string]string, signer *jose.JSONWebKey) (string, error) {
 	dir, err := filepath.Abs(dir)
 	if err != nil {
 		return "", err
@@ -95,7 +95,7 @@ func PushDir(ctx context.Context, dir, ref, artifactType string, annotations map
 	if err != nil {
 		return "", err
 	}
-	repo, tag, err := repository(ref, plainHTTP)
+	repo, tag, err := repository(ref)
 	if err != nil {
 		return "", err
 	}
@@ -130,11 +130,11 @@ func layerFiles(layers []ocispec.Descriptor) []File {
 
 // Resolve fetches only the manifest at ref (repo:tag or repo@digest).
 // found is false when the registry has nothing there.
-func Resolve(ctx context.Context, ref string, plainHTTP bool) (Located, bool, error) {
+func Resolve(ctx context.Context, ref string) (Located, bool, error) {
 	if IsFileRef(ref) {
 		return fileResolve(ref)
 	}
-	repo, target, err := repository(ref, plainHTTP)
+	repo, target, err := repository(ref)
 	if err != nil {
 		return Located{}, false, err
 	}
@@ -163,7 +163,7 @@ func Resolve(ctx context.Context, ref string, plainHTTP bool) (Located, bool, er
 
 // PullDir downloads the artifact at ref into dst (files land under their
 // titles) and returns the manifest digest.
-func PullDir(ctx context.Context, ref, dst string, plainHTTP bool) (string, error) {
+func PullDir(ctx context.Context, ref, dst string) (string, error) {
 	dst, err := filepath.Abs(dst)
 	if err != nil {
 		return "", err
@@ -171,7 +171,7 @@ func PullDir(ctx context.Context, ref, dst string, plainHTTP bool) (string, erro
 	if IsFileRef(ref) {
 		return filePullDir(ref, dst)
 	}
-	repo, target, err := repository(ref, plainHTTP)
+	repo, target, err := repository(ref)
 	if err != nil {
 		return "", err
 	}
@@ -200,11 +200,11 @@ func PullDir(ctx context.Context, ref, dst string, plainHTTP bool) (string, erro
 // deleters of one tag race on the registry's one delete, and only the
 // one whose delete found it wins. A claim of a parked session is that
 // delete, so a caller that is told false lost the claim.
-func Delete(ctx context.Context, ref string, plainHTTP bool) (removed bool, err error) {
+func Delete(ctx context.Context, ref string) (removed bool, err error) {
 	if IsFileRef(ref) {
 		return fileDelete(ref)
 	}
-	repo, target, err := repository(ref, plainHTTP)
+	repo, target, err := repository(ref)
 	if err != nil {
 		return false, err
 	}
@@ -220,7 +220,7 @@ func Delete(ctx context.Context, ref string, plainHTTP bool) (removed bool, err 
 	if isTag {
 		// Registries differ: some delete tags by reference, registry:2
 		// refuses (400) and instead drops tags when the manifest goes.
-		switch err := deleteByReference(ctx, repo, target, plainHTTP); {
+		switch err := deleteByReference(ctx, repo, target); {
 		case err == nil:
 			removed, untagged = true, true
 		case isNotFound(err):
@@ -248,9 +248,9 @@ var errUntagUnsupported = errors.New("registry does not delete by tag")
 
 // deleteByReference issues DELETE /v2/<name>/manifests/<tag>, which the
 // distribution API allows for tags where the registry supports it.
-func deleteByReference(ctx context.Context, repo *remote.Repository, tag string, plainHTTP bool) error {
+func deleteByReference(ctx context.Context, repo *remote.Repository, tag string) error {
 	scheme := "https"
-	if plainHTTP {
+	if repo.PlainHTTP {
 		scheme = "http"
 	}
 	url := fmt.Sprintf("%s://%s/v2/%s/manifests/%s", scheme, repo.Reference.Registry, repo.Reference.Repository, tag)
@@ -293,6 +293,4 @@ func isNotFound(err error) bool {
 }
 
 // Repository is the remote.Repository for callers that need it directly.
-func Repository(ref string, plainHTTP bool) (*remote.Repository, string, error) {
-	return repository(ref, plainHTTP)
-}
+func Repository(ref string) (*remote.Repository, string, error) { return repository(ref) }

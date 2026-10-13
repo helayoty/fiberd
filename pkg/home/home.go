@@ -43,8 +43,6 @@ type Home interface {
 	Health() *core.SourceHealth
 	// CgroupRoot is the delegated cgroup v2 subtree the runtime may carve.
 	CgroupRoot() string
-	// AdvertisedEndpoint is the address callers reach this home at.
-	AdvertisedEndpoint() string
 	// PublishReady tells the home's control plane that the grant's
 	// template is warm (a readiness gate, a status stream, nothing).
 	PublishReady(ctx context.Context, grantUID string, ready bool) error

@@ -24,8 +24,6 @@ func TestRun(t *testing.T) {
 		{name: "fiberd's own checks run first: a verifier is required", wantErr: "-verifier is required"},
 		{name: "the home factory refuses an unknown endpoint family",
 			args: []string{"-verifier", "insecure-json", "-endpoint-family", "carrier-pigeon"}, wantErr: `endpoint family "carrier-pigeon"`},
-		{name: "the home factory refuses a listen address without a port",
-			args: []string{"-verifier", "insecure-json", "-listen", "nowhere"}, wantErr: `-listen "nowhere"`},
 		{name: "a valid configuration reaches the Kubernetes home, which needs a cluster",
 			args: []string{"-verifier", "insecure-json", "-endpoint-family", "inet4", "-devices", "/dev/a,/dev/b"}, wantErr: "not in a cluster"},
 	}

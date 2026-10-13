@@ -12,12 +12,12 @@ This doc explains how a [fiber](../glossary.md#fiber)'s endpoint is formed on ea
 flowchart TB
   G{Grant endpoint mode} -- HANDOFF --> H["home's handoff address + routing key"]
   G -- DIRECT --> F{Home's family}
-  F -- unix --> U["unix://run-dir/grant/epoch-seq.sock"]
+  F -- unix --> U["unix://state/run/grant/epoch-seq.sock"]
   F -- inet4 or inet6 --> T["tcp://home-ip:port, proc binds it, other backends get fiberd's relay"]
 ```
 
 - **One family per home.** The home declares `unix` (the default), `inet4` or `inet6`. A TCP family needs one IP literal of that family and a port range, 30000 to 32767 by default. A dual-stack home still advertises one family. There is no per-fiber IP address and no per-fiber network namespace.
-- **Unix.** The socket is `<run-dir>/<grant>/<epoch>-<seq>.sock`. It serves callers on the same host.
+- **Unix.** The socket is `<state>/run/<grant>/<epoch>-<seq>.sock`. It serves callers on the same host.
 - **TCP.** Each live fiber takes the lowest free port in the range, and an IPv6 host is bracketed in the URL. A parked fiber keeps its port, so the restored listener comes back on it. The port is freed when the fiber ends without a park or when its [delta](../glossary.md#delta) is discarded. The 24-hour delta expiry frees nothing, because it applies only to the copy published in the registry ([artifact.md](artifact.md)). The holds live in fiberd's memory, so a restart forgets them all.
 - **[Relay](../glossary.md#relay).** proc binds the port itself. On runc, gVisor and Hyperlight the backend serves the fiber's unix socket under the run directory, and fiberd listens on the fiber's port in its own network namespace and splices each connection to that socket. Bytes are copied and never read, so TLS between caller and fiber keeps fiberd blind. The fiber writes its grant's directory, so the relay opens the socket without following links and dials that inode, never a link the fiber planted at the name. A fiber may have 256 open connections and a home 4,096. A new connection past either cap is closed at once. The listener opens before the backend is asked for the fiber, so a port fiberd cannot bind fails the Clone, and it closes with the fiber.
 - **[Handoff](../glossary.md#handoff).** The endpoint is the home's handoff address, and Clone adds a routing key and a key pin. The mechanism is in [handoff.md](handoff.md).

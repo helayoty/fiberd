@@ -7,7 +7,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -33,7 +32,7 @@ func stormGvisor(t *testing.T) {
 		repo, digest := pushTemplate(t, filepath.Join(rootfs(t), "bin", "refzygote"), "--heap-mb", "64", "--gvisor")
 		rt, _ = gvisorRuntime(t, func(cfg *host.Config) {
 			cfg.Templates = nil
-			cfg.Registry, cfg.RegistryPlainHTTP = repo, true
+			cfg.Registry = repo
 			cfg.TemplateCache = filepath.Join(work, "cache-"+filepath.Base(cfg.CgroupRoot))
 		})
 		g.TemplateDigest = digest
@@ -138,8 +137,8 @@ func pushTemplate(t *testing.T, executable string, args ...string) (repo, digest
 	}
 	srv := httptest.NewServer(registry.New())
 	t.Cleanup(srv.Close)
-	repo = strings.TrimPrefix(srv.URL, "http://") + "/zygotes/ref"
-	if _, err := artifact.Push(ctx, out, repo+":v1", true); err != nil {
+	repo = srv.URL + "/zygotes/ref"
+	if _, err := artifact.Push(ctx, out, repo+":v1"); err != nil {
 		t.Fatalf("push artifact: %v", err)
 	}
 	return repo, digest

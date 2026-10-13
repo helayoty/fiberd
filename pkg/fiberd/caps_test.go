@@ -46,7 +46,7 @@ func TestNarrowCaps(t *testing.T) {
 				got = keep
 				return tc.narrowErr
 			}
-			c := Config{RuntimeName: tc.runtime, AllCaps: tc.allCaps}
+			c := Config{Runtime: Runtime{Name: tc.runtime}, Node: Node{AllCaps: tc.allCaps}}
 			err := c.NarrowCaps()
 			if !errors.Is(err, tc.wantErr) {
 				t.Fatalf("NarrowCaps: err = %v, want %v", err, tc.wantErr)

@@ -195,7 +195,7 @@ jobs:
             echo "::group::$pod runc and zygote logs"
             # shellcheck disable=SC2016  # $f expands in the Pod
             $kc -n compare exec "$pod" -c fiberd -- sh -c \
-              'for f in /var/lib/fiberd/runc/bundles/*.runc.log /run/fiberd/*/zygote.log; do [ -f "$f" ] || continue; echo "--- $f"; tail -c 4096 "$f"; done' 2>/dev/null || true
+              'for f in /var/lib/fiberd/runc/bundles/*.runc.log /var/lib/fiberd/run/*/zygote.log; do [ -f "$f" ] || continue; echo "--- $f"; tail -c 4096 "$f"; done' 2>/dev/null || true
             echo "::endgroup::"
           done
           # The node's own view: a containerd or kubelet crash, or an OOM kill.

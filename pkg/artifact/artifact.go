@@ -168,8 +168,8 @@ func pack(ctx context.Context, fs *file.Store, dir string, cfg Config) (ocispec.
 }
 
 // Push uploads the artifact directory to ref ("host/repo:tag") and
-// returns the manifest digest. plainHTTP selects http:// registries.
-func Push(ctx context.Context, dir, ref string, plainHTTP bool) (string, error) {
+// returns the manifest digest.
+func Push(ctx context.Context, dir, ref string) (string, error) {
 	dir, err := filepath.Abs(dir)
 	if err != nil {
 		return "", err
@@ -187,7 +187,7 @@ func Push(ctx context.Context, dir, ref string, plainHTTP bool) (string, error) 
 	if err != nil {
 		return "", err
 	}
-	repo, tag, err := repository(ref, plainHTTP)
+	repo, tag, err := repository(ref)
 	if err != nil {
 		return "", err
 	}
@@ -205,8 +205,8 @@ func Push(ctx context.Context, dir, ref string, plainHTTP bool) (string, error) 
 
 // Pull downloads the artifact at repo@digest (or repo:tag) into dst and
 // unpacks images.tar. The manifest digest is verified by the transfer.
-func Pull(ctx context.Context, ref, dst string, plainHTTP bool) (Config, error) {
-	repo, target, err := repository(ref, plainHTTP)
+func Pull(ctx context.Context, ref, dst string) (Config, error) {
+	repo, target, err := repository(ref)
 	if err != nil {
 		return Config{}, err
 	}
@@ -329,14 +329,21 @@ func Reverify(ctx context.Context, dir, digest string) (Config, error) {
 	return cfg, nil
 }
 
-func repository(ref string, plainHTTP bool) (*remote.Repository, string, error) {
-	name, target := ref, ""
-	if i := strings.Index(ref, "@"); i >= 0 {
-		name, target = ref[:i], ref[i+1:]
-	} else if i := strings.LastIndex(ref, ":"); i >= 0 && !strings.Contains(ref[i+1:], "/") {
+// repository is the remote repository ref names and its tag or digest.
+// A ref starting with http:// is reached over plain HTTP, and one
+// starting with https:// or with no scheme over TLS.
+func repository(ref string) (*remote.Repository, string, error) {
+	name, plainHTTP := strings.CutPrefix(ref, "http://")
+	if !plainHTTP {
+		name = strings.TrimPrefix(name, "https://")
+	}
+	target := ""
+	if i := strings.Index(name, "@"); i >= 0 {
+		name, target = name[:i], name[i+1:]
+	} else if i := strings.LastIndex(name, ":"); i >= 0 && !strings.Contains(name[i+1:], "/") {
 		// host:port/repo has a colon before the last slash; a tag has none after.
-		if strings.Contains(ref[:i], "/") {
-			name, target = ref[:i], ref[i+1:]
+		if strings.Contains(name[:i], "/") {
+			name, target = name[:i], name[i+1:]
 		}
 	}
 	repo, err := remote.NewRepository(name)

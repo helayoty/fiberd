@@ -55,21 +55,19 @@ func TestEnv(t *testing.T) {
 // worker without its rootfs.
 func TestRuntimeEnv(t *testing.T) {
 	rootfs := t.TempDir()
-	type runtime struct{ name, rootfs, runsc, criu string }
+	type runtime struct{ name, rootfs string }
 	cases := []struct {
 		name string
 		env  map[string]string
 		want runtime
 		err  string
 	}{
-		{name: "gvisor on a rootfs with runsc from PATH", env: map[string]string{"ATEOM_FIBERD_GVISOR_ROOTFS": rootfs},
-			want: runtime{"gvisor", rootfs, "runsc", "criu"}},
-		{name: "another runsc", env: map[string]string{"ATEOM_FIBERD_GVISOR_ROOTFS": rootfs, "ATEOM_FIBERD_RUNSC": "/opt/runsc"},
-			want: runtime{"gvisor", rootfs, "/opt/runsc", "criu"}},
+		{name: "gvisor on a rootfs", env: map[string]string{"ATEOM_FIBERD_GVISOR_ROOTFS": rootfs},
+			want: runtime{"gvisor", rootfs}},
 		{name: "the image's default rootfs path", env: map[string]string{"ATEOM_FIBERD_RUNTIME": "stub"},
-			want: runtime{"stub", "/var/lib/fiberd/gvisor-rootfs", "runsc", "criu"}},
-		{name: "proc with its own criu, for tests of the mechanism", env: map[string]string{"ATEOM_FIBERD_RUNTIME": "proc", "ATEOM_FIBERD_CRIU": "/opt/criu"},
-			want: runtime{"proc", "/var/lib/fiberd/gvisor-rootfs", "runsc", "/opt/criu"}},
+			want: runtime{"stub", "/var/lib/fiberd/gvisor-rootfs"}},
+		{name: "proc, for tests of the mechanism", env: map[string]string{"ATEOM_FIBERD_RUNTIME": "proc"},
+			want: runtime{"proc", "/var/lib/fiberd/gvisor-rootfs"}},
 		{name: "gvisor without its rootfs refuses", env: map[string]string{"ATEOM_FIBERD_GVISOR_ROOTFS": "/nonexistent/rootfs"},
 			err: "ATEOM_FIBERD_GVISOR_ROOTFS: /nonexistent/rootfs is not a directory"},
 		{name: "gvisor with a file for a rootfs refuses", env: map[string]string{"ATEOM_FIBERD_GVISOR_ROOTFS": "/dev/null"},
@@ -77,7 +75,7 @@ func TestRuntimeEnv(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			for _, k := range []string{"ATEOM_FIBERD_RUNTIME", "ATEOM_FIBERD_GVISOR_ROOTFS", "ATEOM_FIBERD_RUNSC", "ATEOM_FIBERD_CRIU"} {
+			for _, k := range []string{"ATEOM_FIBERD_RUNTIME", "ATEOM_FIBERD_GVISOR_ROOTFS"} {
 				t.Setenv(k, tc.env[k])
 			}
 			var c fiberd.Config
@@ -92,7 +90,7 @@ func TestRuntimeEnv(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			got := runtime{c.RuntimeName, c.GvisorRootfs, c.Runsc, c.CRIUBin}
+			got := runtime{c.Runtime.Name, c.Runtime.Gvisor.Rootfs}
 			if got != tc.want {
 				t.Fatalf("runtime config = %+v, want %+v", got, tc.want)
 			}
@@ -337,7 +335,6 @@ func newWorker(t *testing.T) worker {
 	t.Setenv("ATEOM_FIBERD_ISOLATION", "TRUSTED")
 	t.Setenv("ATEOM_FIBERD_CGROUP_ROOT", t.TempDir())
 	t.Setenv("ATEOM_FIBERD_TEMPLATE", "default=/bin/zygote --http; ;")
-	t.Setenv("ATEOM_FIBERD_RUN_DIR", t.TempDir())
 	key, seal := sharedKeys(t)
 	t.Setenv("ATEOM_FIBERD_DELTA_KEY", key)
 	t.Setenv("ATEOM_FIBERD_DELTA_SEAL_KEY", seal)

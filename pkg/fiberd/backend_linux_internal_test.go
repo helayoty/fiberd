@@ -7,21 +7,22 @@ import (
 	"testing"
 )
 
-// TestProcOptions checks that the fork backend gets -criu and the bind of the
-// host's root a resume restores under, inside the private directory.
+// TestProcOptions checks that the fork backend gets the bind of the host's
+// root a resume restores under, inside the private directory, and finds
+// criu on PATH.
 func TestProcOptions(t *testing.T) {
 	cases := []struct {
-		name, state, criu string
+		name, state string
 	}{
-		{name: "defaults", state: "/var/lib/fiberd", criu: "criu"},
-		{name: "a criu path", state: "/s", criu: "/opt/criu/sbin/criu"},
+		{name: "defaults", state: "/var/lib/fiberd"},
+		{name: "another state dir", state: "/s"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			c := Config{StateDir: tc.state, CRIUBin: tc.criu}
+			c := Config{Node: Node{StateDir: tc.state}}
 			o := c.procOptions()
-			if want := filepath.Join(tc.state, "private", "root"); o.CRIU != tc.criu || o.RootBind != want {
-				t.Fatalf("procOptions = CRIU %q RootBind %q, want %q %q", o.CRIU, o.RootBind, tc.criu, want)
+			if want := filepath.Join(tc.state, "private", "root"); o.CRIU != "" || o.RootBind != want {
+				t.Fatalf("procOptions = CRIU %q RootBind %q, want no binary and %q", o.CRIU, o.RootBind, want)
 			}
 		})
 	}

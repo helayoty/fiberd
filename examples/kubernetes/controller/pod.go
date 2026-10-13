@@ -204,7 +204,7 @@ func BuildPod(cg *CapacityGrant, issuerURL string, lease time.Duration) *Pod {
 		// The Pod's name, from FIBERD_NODE_ID below, which Kubernetes
 		// expands in args.
 		"-node-id", "$(FIBERD_NODE_ID)",
-		"-state", "/var/lib/fiberd", "-run-dir", "/run/fiberd",
+		"-state", "/var/lib/fiberd",
 		"-grants-dir", GrantsMount,
 		"-endpoint-family", family,
 	}
@@ -242,7 +242,6 @@ func BuildPod(cg *CapacityGrant, issuerURL string, lease time.Duration) *Pod {
 			Volumes: []Volume{
 				{Name: "grants", Secret: &SecretVolume{SecretName: SecretName(cg), Optional: true}},
 				{Name: "state", EmptyDir: &EmptyDirVolume{}},
-				{Name: "run", EmptyDir: &EmptyDirVolume{}},
 			},
 			Containers: []Container{{
 				Name:  "fiberd",
@@ -259,7 +258,6 @@ func BuildPod(cg *CapacityGrant, issuerURL string, lease time.Duration) *Pod {
 				VolumeMounts: []VolumeMount{
 					{Name: "grants", MountPath: GrantsMount, ReadOnly: true},
 					{Name: "state", MountPath: "/var/lib/fiberd"},
-					{Name: "run", MountPath: "/run/fiberd"},
 				},
 				ReadinessProbe: ready,
 				StartupProbe:   startup,

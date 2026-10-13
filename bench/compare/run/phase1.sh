@@ -36,7 +36,7 @@ push_templates() {
       bin/zygotectl build -zygote bin/compare-bin/counter-static -args "${t#*:}" -skip-images -out "$TEMPLATES/${t%%:*}" >/dev/null; done'
   : >"$TEMPLATES_ENV"
   for t in http line gvisor; do
-    digest=$(cd "$ROOT" && "$GO" run ./cmd/zygotectl push -dir "$STATE/templates/$t" -ref "$REG/zygotes/counter:$t" -plain-http)
+    digest=$(cd "$ROOT" && "$GO" run ./cmd/zygotectl push -dir "$STATE/templates/$t" -ref "http://$REG/zygotes/counter:$t")
     [ -n "$digest" ] || { echo "zygotectl push printed no digest for $t" >&2; exit 1; }
     echo "DIGEST_$(echo "$t" | tr '[:lower:]' '[:upper:]')=$digest" >>"$TEMPLATES_ENV"
   done

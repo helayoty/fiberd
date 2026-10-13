@@ -783,13 +783,13 @@ func TestResumeOnAnotherRuntimeFromSameArtifact(t *testing.T) {
 	}
 	srv := httptest.NewServer(registry.New())
 	defer srv.Close()
-	reg := strings.TrimPrefix(srv.URL, "http://")
-	if _, err := artifact.Push(ctx, out, reg+"/zygotes/ref:v1", true); err != nil {
+	reg := srv.URL
+	if _, err := artifact.Push(ctx, out, reg+"/zygotes/ref:v1"); err != nil {
 		t.Fatal(err)
 	}
 	mk := func(name string) core.Runtime {
 		rt, err := newHost(host.Config{
-			Registry: reg + "/zygotes/ref", RegistryPlainHTTP: true, TemplateCache: t.TempDir(),
+			Registry: reg + "/zygotes/ref", TemplateCache: t.TempDir(),
 			CgroupRoot: filepath.Join(cgRoot, name+fmt.Sprint(time.Now().UnixNano()%1_000_000)),
 			RunDir:     filepath.Join("/tmp", "fz-"+name), DeltaDir: t.TempDir(),
 		})
@@ -873,8 +873,8 @@ func TestSessionMovesThroughRegistry(t *testing.T) {
 	}
 	srv := httptest.NewServer(registry.New())
 	defer srv.Close()
-	reg := strings.TrimPrefix(srv.URL, "http://")
-	if _, err := artifact.Push(ctx, out, reg+"/zygotes/ref:v1", true); err != nil {
+	reg := srv.URL
+	if _, err := artifact.Push(ctx, out, reg+"/zygotes/ref:v1"); err != nil {
 		t.Fatal(err)
 	}
 	// One grant per home (its own uid and audience), the same template:
@@ -885,7 +885,7 @@ func TestSessionMovesThroughRegistry(t *testing.T) {
 	}
 	mk := func(home string, keys artifact.Keys) (*core.Core, core.Runtime) {
 		rt, err := newHost(host.Config{
-			Registry: reg + "/zygotes/ref", RegistryPlainHTTP: true, TemplateCache: t.TempDir(),
+			Registry: reg + "/zygotes/ref", TemplateCache: t.TempDir(),
 			DeltaRegistry: reg + "/deltas", DeltaKeys: keys, HomeID: home,
 			CgroupRoot: filepath.Join(cgRoot, home+fmt.Sprint(time.Now().UnixNano()%1_000_000)),
 			RunDir:     filepath.Join("/tmp", "fz-"+home), DeltaDir: t.TempDir(),
@@ -922,7 +922,7 @@ func TestSessionMovesThroughRegistry(t *testing.T) {
 	if _, code, err := a.Park(ctx, r1.FiberID, true); err != nil || code != core.OK {
 		t.Fatalf("A park: %v %d", err, code)
 	}
-	if _, found, err := artifact.Resolve(ctx, domainRepo+":"+sessionTag("S"), true); err != nil || !found {
+	if _, found, err := artifact.Resolve(ctx, domainRepo+":"+sessionTag("S")); err != nil || !found {
 		t.Fatalf("delta not published at %s: found=%v err=%v", domainRepo, found, err)
 	}
 
@@ -938,7 +938,7 @@ func TestSessionMovesThroughRegistry(t *testing.T) {
 	if code != core.DeferredFallback || !errors.Is(err, artifact.ErrUntrusted) || !errors.As(err, &untrusted) || untrusted.PreferredHome != "" {
 		t.Fatalf("untrusting home clone = %d %v, want DeferredFallback ErrUntrusted with no preferred home", code, err)
 	}
-	if _, found, err := artifact.Resolve(ctx, domainRepo+":"+sessionTag("S"), true); err != nil || !found {
+	if _, found, err := artifact.Resolve(ctx, domainRepo+":"+sessionTag("S")); err != nil || !found {
 		t.Fatalf("refused session must stay published: found=%v err=%v", found, err)
 	}
 
@@ -1008,8 +1008,8 @@ func TestTemplateParityGate(t *testing.T) {
 	}
 	srv := httptest.NewServer(registry.New())
 	defer srv.Close()
-	reg := strings.TrimPrefix(srv.URL, "http://")
-	if _, err := artifact.Push(ctx, out, reg+"/zygotes/ref:v1", true); err != nil {
+	reg := srv.URL
+	if _, err := artifact.Push(ctx, out, reg+"/zygotes/ref:v1"); err != nil {
 		t.Fatal(err)
 	}
 	here := artifact.Host()
@@ -1030,7 +1030,7 @@ func TestTemplateParityGate(t *testing.T) {
 	for i, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			rt, err := newHost(host.Config{
-				Registry: reg + "/zygotes/ref", RegistryPlainHTTP: true, TemplateCache: t.TempDir(),
+				Registry: reg + "/zygotes/ref", TemplateCache: t.TempDir(),
 				CgroupRoot: filepath.Join(cgRoot, fmt.Sprintf("par%d-%d", i, time.Now().UnixNano()%1_000_000)),
 				RunDir:     filepath.Join("/tmp", fmt.Sprintf("fz-par%d", i)),
 				Parity:     c.parity, Platform: c.platform,
@@ -1074,13 +1074,13 @@ func TestMobilityParityGate(t *testing.T) {
 	}
 	srv := httptest.NewServer(registry.New())
 	defer srv.Close()
-	reg := strings.TrimPrefix(srv.URL, "http://")
-	if _, err := artifact.Push(ctx, out, reg+"/zygotes/ref:v1", true); err != nil {
+	reg := srv.URL
+	if _, err := artifact.Push(ctx, out, reg+"/zygotes/ref:v1"); err != nil {
 		t.Fatal(err)
 	}
 	mk := func(home string, parity artifact.Parity, platform artifact.Platform) *core.Core {
 		rt, err := newHost(host.Config{
-			Registry: reg + "/zygotes/ref", RegistryPlainHTTP: true, TemplateCache: t.TempDir(),
+			Registry: reg + "/zygotes/ref", TemplateCache: t.TempDir(),
 			DeltaRegistry: reg + "/deltas", HomeID: home, Parity: parity, Platform: platform,
 			CgroupRoot: filepath.Join(cgRoot, home+fmt.Sprint(time.Now().UnixNano()%1_000_000)),
 			RunDir:     filepath.Join("/tmp", "fz-"+home), DeltaDir: t.TempDir(),
@@ -1127,7 +1127,7 @@ func TestMobilityParityGate(t *testing.T) {
 	}
 	// The tag is still there: nobody claimed it.
 	domainRepo := domainRepo(reg, "acme", digest)
-	if _, found, err := artifact.Resolve(ctx, domainRepo+":"+sessionTag("S"), true); err != nil || !found {
+	if _, found, err := artifact.Resolve(ctx, domainRepo+":"+sessionTag("S")); err != nil || !found {
 		t.Fatalf("refused session must stay published: found=%v err=%v", found, err)
 	}
 	// With the kernel check off, home-c takes it and the count is intact.
@@ -1181,13 +1181,13 @@ func TestTemplateFromRegistryArtifact(t *testing.T) {
 	// grant's template digest.
 	srv := httptest.NewServer(registry.New())
 	defer srv.Close()
-	reg := strings.TrimPrefix(srv.URL, "http://")
-	if _, err := artifact.Push(ctx, out, reg+"/zygotes/ref:v1", true); err != nil {
+	reg := srv.URL
+	if _, err := artifact.Push(ctx, out, reg+"/zygotes/ref:v1"); err != nil {
 		t.Fatalf("push: %v", err)
 	}
 	cache := t.TempDir()
 	rt, err := newHost(host.Config{
-		Registry: reg + "/zygotes/ref", RegistryPlainHTTP: true, TemplateCache: cache,
+		Registry: reg + "/zygotes/ref", TemplateCache: cache,
 		CgroupRoot: filepath.Join(cgRoot, "t"+fmt.Sprint(time.Now().UnixNano()%1_000_000)),
 		RunDir:     filepath.Join("/tmp", "fz-art"),
 	})
@@ -1323,14 +1323,14 @@ func TestResumedDeltaRetiredAndDiscarded(t *testing.T) {
 	}
 	srv := httptest.NewServer(registry.New())
 	defer srv.Close()
-	reg := strings.TrimPrefix(srv.URL, "http://")
-	if _, err := artifact.Push(ctx, out, reg+"/zygotes/ref:v1", true); err != nil {
+	reg := srv.URL
+	if _, err := artifact.Push(ctx, out, reg+"/zygotes/ref:v1"); err != nil {
 		t.Fatal(err)
 	}
 	g := core.Grant{UID: "ret-a", Audience: "home-a", Tenant: "acme", TemplateDigest: digest, FiberMax: 4, WBudgetBytes: 32 << 20,
 		LeaseExpiry: time.Now().Add(time.Hour), Policy: core.Policy{Isolation: core.Trusted}}
 	rt, err := newHost(host.Config{
-		Registry: reg + "/zygotes/ref", RegistryPlainHTTP: true, TemplateCache: t.TempDir(),
+		Registry: reg + "/zygotes/ref", TemplateCache: t.TempDir(),
 		DeltaRegistry: reg + "/deltas", DeltaKeys: deltaKeys, HomeID: "home-a",
 		CgroupRoot: filepath.Join(cgRoot, "ret"+fmt.Sprint(time.Now().UnixNano()%1_000_000)),
 		RunDir:     filepath.Join("/tmp", "fz-ret-a"), DeltaDir: t.TempDir(),
@@ -1352,7 +1352,7 @@ func TestResumedDeltaRetiredAndDiscarded(t *testing.T) {
 	tag := domainRepo(reg, "acme", digest) + ":" + sessionTag("S")
 	published := func(t *testing.T) bool {
 		t.Helper()
-		_, found, err := artifact.Resolve(ctx, tag, true)
+		_, found, err := artifact.Resolve(ctx, tag)
 		if err != nil {
 			t.Fatal(err)
 		}

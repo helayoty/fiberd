@@ -33,7 +33,6 @@ These checks fail the start.
 - **Private directory.** It is created with mode 0700, and an existing one is reset to 0700. A symlink or a non-directory at that path is refused. A proc fiber runs as fiberd's uid and sees the state directory outside `private/` and `deltas/`, so a symlink it planted there would send the keys wherever it points.
 - **Verifier.** One must be named, and the JWKS verifier needs an [issuer](../glossary.md#issuer).
 - **Endpoints.** With an inet4 or inet6 family and no `-endpoint-host`, fiberd asks the home for the fibers' address, such as the Pod IP. A home that answers with no address of that family fails the start.
-- **Run directory.** A run directory inside the private or [deltas](../glossary.md#delta) directory is refused, because fibers see the run directory ([runtime-host.md](runtime-host.md)).
 - **Deny-list.** An unreadable deny-list fails, as [core.md](core.md) explains.
 - **Listeners.** The gRPC, `-http` and [handoff](../glossary.md#handoff) addresses are bound before serving, so an address that cannot be bound fails the start.
 
@@ -50,13 +49,15 @@ The state layout keeps what fibers must never read under one hidden directory.
     *-key.json          generated audit, delta, seal and handoff keys
   templates/            the pulled template cache, hidden from fibers
   deltas/               parked deltas, also hidden from fibers
+  run/                  fiber endpoints (unix sockets) and zygote logs, one
+                        directory per grant, which fibers see
   runc/, gvisor/        backend state, with each grant's staged template copy
                         and, on gVisor, each warm instance's pool socket
 ```
 
 The private directory is hidden rather than protected by file modes, and so are the [template](../glossary.md#template) cache and the deltas. A proc fiber warmed from a registry template still sees its own executable, bound back read-only inside the cache's cover, because [CRIU](../glossary.md#criu) needs the path to resolve. The full list of what fibers cannot see is in [runtime-host.md](runtime-host.md).
 
-**Test hooks.** The admin socket serves only a health check. A binary built with `-tags fiberd_testhooks` adds `-admin-unsafe` and two test controls, one forcing whether the [issuer](../glossary.md#issuer) counts as reachable and one simulating [scope](../glossary.md#scope) loss. A normal build has neither the flag nor the handlers.
+**Test hooks.** The admin socket serves only a health check. A binary built with `-tags fiberd_testhooks` adds `-admin-unsafe` and two test controls, one forcing whether the [issuer](../glossary.md#issuer) counts as reachable and one simulating [scope](../glossary.md#scope) loss. It also adds two flags that pace the W sampler, the Watch stream and the pressure ladder, which the conformance runs turn down from the one-second default so the suite finishes in seconds. A normal build has neither the flags nor the handlers, and an embedding binary sets the cadence through the library's `Timing` field.
 
 ## Security notes and known gaps
 

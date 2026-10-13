@@ -146,7 +146,7 @@ ATTACH preserves the existing fence. RESUME creates a newer sequence in the same
 `endpoint` is a URL that callers use without discovering the address family.
 
 ```text
-unix:///run/fiberd/<grant>/<epoch>-<seq>.sock
+unix:///var/lib/fiberd/run/<grant>/<epoch>-<seq>.sock
 tcp://10.0.0.7:30012
 tcp://[fd00::7]:30012
 ```

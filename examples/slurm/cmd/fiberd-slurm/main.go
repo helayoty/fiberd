@@ -38,7 +38,6 @@ func main() {
 	if err != nil {
 		err = usageError{err}
 	} else {
-		c.Finish()
 		err = run(context.Background(), &c, *grantArg, *probe, os.Getenv, home.Config{})
 	}
 	code := exitCode(err)
@@ -79,8 +78,8 @@ func run(ctx context.Context, c *fiberd.Config, grantArg, probe string, env func
 	if err != nil {
 		return err
 	}
-	if c.GrantsDir == "" {
-		c.GrantsDir = home.DefaultGrantsDir(job.ID)
+	if c.Node.GrantsDir == "" {
+		c.Node.GrantsDir = home.DefaultGrantsDir(job.ID)
 	}
 	if grantArg != "" {
 		if err := stage(c, grantArg); err != nil {
@@ -93,13 +92,9 @@ func run(ctx context.Context, c *fiberd.Config, grantArg, probe string, env func
 		if err != nil {
 			return nil, err
 		}
-		port, err := c.ListenPort()
-		if err != nil {
-			return nil, err
-		}
 		cfg := base
-		cfg.Env, cfg.GrantsDir, cfg.StaleTTL, cfg.Devices = env, c.GrantsDir, c.StaleTTL, c.Devices
-		cfg.Family, cfg.Host, cfg.ListenPort, cfg.Probe = fam, c.EndpointHost, port, p
+		cfg.Env, cfg.GrantsDir, cfg.StaleTTL, cfg.Devices = env, c.Node.GrantsDir, c.Node.StaleTTL, c.Node.Devices
+		cfg.Family, cfg.Host, cfg.Probe = fam, c.Endpoint.Host, p
 		return home.New(cfg)
 	})
 }
@@ -130,29 +125,29 @@ func stage(c *fiberd.Config, grantArg string) error {
 		}
 		tok = strings.TrimSpace(string(b))
 	}
-	switch c.Verifier {
+	switch c.Trust.Verifier {
 	case "jwks":
-		if c.Issuer == "" {
+		if c.Trust.Issuer == "" {
 			return errors.New("-verifier=jwks needs -issuer to verify -grant")
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		v := &grant.Verifier{Cache: &grant.Cache{IssuerURL: c.Issuer}, Audience: c.NodeID, MaxStale: c.JWKSMaxStale}
+		v := &grant.Verifier{Cache: &grant.Cache{IssuerURL: c.Trust.Issuer}, Audience: c.Node.ID, MaxStale: c.Trust.JWKSMaxStale}
 		g, err := v.Verify(ctx, []byte(tok))
 		if err != nil {
-			return fmt.Errorf("-grant does not verify for node %s: %w", c.NodeID, err)
+			return fmt.Errorf("-grant does not verify for node %s: %w", c.Node.ID, err)
 		}
 		if g.Expired(time.Now()) {
 			return fmt.Errorf("-grant %s expired at %s", g.UID, g.LeaseExpiry.Format(time.RFC3339))
 		}
-		log.Printf("fiberd-slurm: grant %s verified for %s (fibers.max=%d, lease until %s)", g.UID, c.NodeID, g.FiberMax, g.LeaseExpiry.Format(time.RFC3339))
+		log.Printf("fiberd-slurm: grant %s verified for %s (fibers.max=%d, lease until %s)", g.UID, c.Node.ID, g.FiberMax, g.LeaseExpiry.Format(time.RFC3339))
 	case "insecure-json":
 		log.Printf("fiberd-slurm: -verifier=insecure-json: the grant is staged unverified (development only)")
 	default:
-		return fmt.Errorf("-verifier %q", c.Verifier)
+		return fmt.Errorf("-verifier %q", c.Trust.Verifier)
 	}
-	if err := os.MkdirAll(c.GrantsDir, 0o700); err != nil {
+	if err := os.MkdirAll(c.Node.GrantsDir, 0o700); err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(c.GrantsDir, "job.jwt"), []byte(tok+"\n"), 0o600)
+	return os.WriteFile(filepath.Join(c.Node.GrantsDir, "job.jwt"), []byte(tok+"\n"), 0o600)
 }

@@ -48,7 +48,7 @@ watch() {
 }
 trap stop TERM INT HUP
 while [ "$stopping" = 0 ]; do
-  fiberd-slurm -state "$state" -run-dir "/run/fiberd/job-$SLURM_JOB_ID/run" "$@" &
+  fiberd-slurm -state "$state" "$@" &
   fiberd=$!
   watch "$fiberd" &
   watcher=$!

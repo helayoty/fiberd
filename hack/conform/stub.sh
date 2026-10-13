@@ -38,14 +38,14 @@ ISOLATION=UNTRUSTED
 if [ "$RUNTIME" = proc ] || [ "$RUNTIME" = runc ]; then ISOLATION=TRUSTED; fi
 if [ "$RUNTIME" = proc ]; then
   TIER=${CONFORM_TIER:-FIBER_CHECKPOINT}   # what proc offers when criu check passes
-  RUNTIME_FLAGS=(-runtime proc -template "default=$PWD/bin/refzygote --heap-mb 32 --device-mb 64" -run-dir /tmp/fz-conform)
+  RUNTIME_FLAGS=(-runtime proc -template "default=$PWD/bin/refzygote --heap-mb 32 --device-mb 64")
   ENGINE_HOOK=(-engine-kill-cmd "$0 engine-kill \$1")
 elif [ "$RUNTIME" = gvisor ]; then
   TIER=${CONFORM_TIER:-FIBER_SNAPSHOT}
-  RUNTIME_FLAGS=(-runtime gvisor -gvisor-rootfs "$GVISOR_ROOTFS" -template "default=/bin/refzygote --heap-mb 32 --gvisor" -run-dir /tmp/fz-conform)
+  RUNTIME_FLAGS=(-runtime gvisor -gvisor-rootfs "$GVISOR_ROOTFS" -template "default=/bin/refzygote --heap-mb 32 --gvisor")
 elif [ "$RUNTIME" = runc ]; then
   TIER=${CONFORM_TIER:-FIBER_CHECKPOINT}
-  RUNTIME_FLAGS=(-runtime runc -runc-rootfs "$GVISOR_ROOTFS" -template "default=/bin/refzygote --heap-mb 32 --device-mb 64" -run-dir /tmp/fz-conform)
+  RUNTIME_FLAGS=(-runtime runc -runc-rootfs "$GVISOR_ROOTFS" -template "default=/bin/refzygote --heap-mb 32 --device-mb 64")
   ENGINE_HOOK=(-engine-kill-cmd "$0 engine-kill \$1")
 elif [ "$RUNTIME" = hyperlight ]; then
   # CONFORM_HL_HELPER selects the helper: the Rust one where KVM exists,
@@ -55,7 +55,7 @@ elif [ "$RUNTIME" = hyperlight ]; then
   HL_GUEST=${CONFORM_HL_GUEST:-$PWD/bin/fake-guest.bin}
   HL_TEMPLATE="guest --heap-mb 32"
   [ -n "${CONFORM_HL_HELPER:-}" ] || HL_TEMPLATE="guest --init-ms 20"
-  RUNTIME_FLAGS=(-runtime hyperlight -hyperlight-helper "$HL_HELPER" -hyperlight-guest "$HL_GUEST" -template "default=$HL_TEMPLATE" -run-dir /tmp/fz-conform)
+  RUNTIME_FLAGS=(-runtime hyperlight -hyperlight-helper "$HL_HELPER" -hyperlight-guest "$HL_GUEST" -template "default=$HL_TEMPLATE")
 else
   TIER=${CONFORM_TIER:-FIBER_CHECKPOINT}
   RUNTIME_FLAGS=(-runtime stub -runtime-tier "$TIER")

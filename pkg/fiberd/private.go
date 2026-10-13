@@ -13,14 +13,16 @@ import (
 // mount namespace. Fibers run as fiberd's uid, so file modes alone
 // would not stop them. Templates and deltas stay directly under -state,
 // where fibers and CRIU need them.
-func (c *Config) PrivateDir() string { return filepath.Join(c.StateDir, "private") }
+func (c *Config) PrivateDir() string { return filepath.Join(c.Node.StateDir, "private") }
 
 // ensurePrivate creates PrivateDir, or checks the one that is there.
 // -state is visible to fibers, so what sits at this name is checked
 // before anything is written through it. A symlink a fiber planted there
 // would send the keys wherever it points, and MkdirAll and Chmod both
 // follow one.
-func (c *Config) ensurePrivate() error { return ensurePrivate(c.StateDir, c.PrivateDir(), os.Chmod) }
+func (c *Config) ensurePrivate() error {
+	return ensurePrivate(c.Node.StateDir, c.PrivateDir(), os.Chmod)
+}
 
 // chmod tightens the private directory's mode. It is a parameter so a
 // test can stand in for a file system that refuses, which only a mount

@@ -148,22 +148,20 @@ func run(ctx context.Context, podUID, listen, credBundle, trustBundle, clientID,
 	// fiberd, as a library.
 	var c fiberd.Config
 	c.Bind(flag.NewFlagSet("fiberd", flag.ContinueOnError))
-	c.Listen, c.NodeID, c.StateDir = fiberdAddr, podUID, stateDir
-	c.Verifier, c.Issuer = "jwks", issuerURL
-	c.InsecurePlaintext = true
+	c.API.Listen, c.Node.ID, c.Node.StateDir = fiberdAddr, podUID, stateDir
+	c.Trust.Verifier, c.Trust.Issuer = "jwks", issuerURL
+	c.API.TLS.InsecurePlaintext = true
 	if err := runtimeEnv(&c); err != nil {
 		return err
 	}
-	c.Templates = templates
-	c.RunDir = env("ATEOM_FIBERD_RUN_DIR", "/run/fiberd")
-	c.DeltaRegistry = registry
-	c.DeltaKey, c.DeltaSealKey = deltaKey, sealKey
-	c.DeltaTrust = os.Getenv("ATEOM_FIBERD_DELTA_TRUST")
-	c.Finish()
+	c.Runtime.Templates = templates
+	c.Registry.Deltas = registry
+	c.Registry.Keys.Sign, c.Registry.Keys.Seal = deltaKey, sealKey
+	c.Registry.Keys.Trust = os.Getenv("ATEOM_FIBERD_DELTA_TRUST")
 	// The readiness check reads its own copy, since fiberd's goroutine
 	// writes c. Its state dir is absolute, as fiberd makes c's.
-	if abs, err := filepath.Abs(c.StateDir); err == nil {
-		c.StateDir = abs
+	if abs, err := filepath.Abs(c.Node.StateDir); err == nil {
+		c.Node.StateDir = abs
 	}
 	health := c
 	// Load the keys before fiberd starts, so a bad key stops the worker
@@ -320,13 +318,11 @@ const defaultTemplate = "default=/bin/refzygote --heap-mb 16 --gvisor --http"
 // rootfs is missing refuses to start, since a fiberd without one would
 // serve and never warm a template.
 func runtimeEnv(c *fiberd.Config) error {
-	c.RuntimeName = env("ATEOM_FIBERD_RUNTIME", "gvisor")
-	c.GvisorRootfs = env("ATEOM_FIBERD_GVISOR_ROOTFS", "/var/lib/fiberd/gvisor-rootfs")
-	c.Runsc = env("ATEOM_FIBERD_RUNSC", c.Runsc)
-	c.CRIUBin = env("ATEOM_FIBERD_CRIU", c.CRIUBin)
-	if c.RuntimeName == "gvisor" {
-		if st, err := os.Stat(c.GvisorRootfs); err != nil || !st.IsDir() {
-			return fmt.Errorf("ATEOM_FIBERD_GVISOR_ROOTFS: %s is not a directory (the image builds one with hack/gvisor/rootfs.sh)", c.GvisorRootfs)
+	c.Runtime.Name = env("ATEOM_FIBERD_RUNTIME", "gvisor")
+	c.Runtime.Gvisor.Rootfs = env("ATEOM_FIBERD_GVISOR_ROOTFS", "/var/lib/fiberd/gvisor-rootfs")
+	if c.Runtime.Name == "gvisor" {
+		if st, err := os.Stat(c.Runtime.Gvisor.Rootfs); err != nil || !st.IsDir() {
+			return fmt.Errorf("ATEOM_FIBERD_GVISOR_ROOTFS: %s is not a directory (the image builds one with hack/gvisor/rootfs.sh)", c.Runtime.Gvisor.Rootfs)
 		}
 	}
 	return nil

@@ -53,7 +53,7 @@ func TestResolveTemplateDigest(t *testing.T) {
 				t.Fatal(err)
 			}
 			// Nothing listens on port 1, so a pull fails at once.
-			r := &Runtime{cfg: Config{Registry: "127.0.0.1:1/tmpl", RegistryPlainHTTP: true, TemplateCache: cache}}
+			r := &Runtime{cfg: Config{Registry: "127.0.0.1:1/tmpl", TemplateCache: cache}}
 			_, err := r.resolveTemplate(context.Background(), tc.digest)
 			if _, serr := os.Stat(sentinel); serr != nil {
 				t.Fatalf("resolveTemplate(%q) removed a file beside the template cache: %v", tc.digest, serr)
@@ -134,7 +134,7 @@ func templateArtifact(t *testing.T, reg string, p artifact.Platform, images bool
 			t.Fatal(err)
 		}
 	}
-	digest, err := artifact.Push(context.Background(), dir, reg+"/tmpl/x:"+fmt.Sprintf("%v-%s-%s", images, p.Kernel, linking), true)
+	digest, err := artifact.Push(context.Background(), dir, reg+"/tmpl/x:"+fmt.Sprintf("%v-%s-%s", images, p.Kernel, linking))
 	if err != nil {
 		t.Fatalf("push: %v", err)
 	}
@@ -149,7 +149,7 @@ func TestResolveTemplateRegistry(t *testing.T) {
 	ctx := context.Background()
 	srv := httptest.NewServer(registry.New())
 	defer srv.Close()
-	reg := strings.TrimPrefix(srv.URL, "http://")
+	reg := srv.URL
 	host := artifact.Platform{Arch: "arm64", Kernel: "6.10.0-here", Libc: "glibc 2.40", Backend: "fake"}
 	bare := templateArtifact(t, reg, artifact.Platform{Arch: "arm64", Kernel: "5.4.0-elsewhere", Libc: "musl"}, false, artifact.LinkDynamic)
 	static := templateArtifact(t, reg, artifact.Platform{Arch: "arm64", Kernel: "5.4.0-elsewhere", Libc: "musl"}, false, artifact.LinkStatic)
@@ -158,7 +158,7 @@ func TestResolveTemplateRegistry(t *testing.T) {
 	imaged := templateArtifact(t, reg, host, true, artifact.LinkDynamic)
 	imagedElsewhere := templateArtifact(t, reg, artifact.Platform{Arch: "arm64", Kernel: "6.9.0-elsewhere", Libc: "glibc 2.40"}, true, artifact.LinkDynamic)
 	cache := t.TempDir()
-	r := &Runtime{cfg: Config{Registry: reg + "/tmpl/x", RegistryPlainHTTP: true, TemplateCache: cache, Templates: map[string]string{"sha256:local": "/zyg/local --x"}}, host: host}
+	r := &Runtime{cfg: Config{Registry: reg + "/tmpl/x", TemplateCache: cache, Templates: map[string]string{"sha256:local": "/zyg/local --x"}}, host: host}
 	cacheDir := func(digest string) string { return filepath.Join(cache, strings.TrimPrefix(digest, "sha256:")) }
 	steps := []struct {
 		name string
@@ -280,7 +280,7 @@ func TestResolveTemplateRegistry(t *testing.T) {
 		{"a warm from an artifact with images takes them as the delta parent", func(t *testing.T) {
 			cb := newCodecBackend(core.TierCheckpoint)
 			rt := newTestRuntime(t, cb, func(c *Config) {
-				c.Templates, c.Registry, c.RegistryPlainHTTP = nil, reg+"/tmpl/x", true
+				c.Templates, c.Registry = nil, reg+"/tmpl/x"
 				c.Platform = artifact.Platform{Arch: host.Arch, Kernel: host.Kernel, Libc: host.Libc}
 			})
 			g := core.Grant{UID: "g1", TemplateDigest: imaged, WBudgetBytes: 64 << 20}
@@ -303,7 +303,7 @@ func TestResolveTemplateRegistry(t *testing.T) {
 			cb := newCodecBackend(core.TierCheckpoint)
 			cb.failLoadAt = 1
 			rt := newTestRuntime(t, cb, func(c *Config) {
-				c.Templates, c.Registry, c.RegistryPlainHTTP = nil, reg+"/tmpl/x", true
+				c.Templates, c.Registry = nil, reg+"/tmpl/x"
 				c.Platform = artifact.Platform{Arch: host.Arch, Kernel: host.Kernel, Libc: host.Libc}
 			})
 			g := core.Grant{UID: "g1", TemplateDigest: imaged, WBudgetBytes: 64 << 20}

@@ -31,10 +31,9 @@ type Config struct {
 	// ("path [args...]"). The key "default" serves digests not listed.
 	Templates map[string]string
 	// Registry, when set, resolves digests not in Templates by pulling
-	// the template artifact "<Registry>@<digest>" into TemplateCache.
+	// the template artifact "<Registry>@<digest>" into TemplateCache. A
+	// registry starting with http:// is reached over plain HTTP.
 	Registry string
-	// RegistryPlainHTTP selects http:// for Registry.
-	RegistryPlainHTTP bool
 	// TemplateCache holds pulled artifacts, one directory per digest
 	// (default /var/lib/fiberd/templates), and the parent-checkpoint store.
 	// It is hidden from fibers like PrivateDir and DeltaDir: a proc fiber
@@ -59,8 +58,8 @@ type Config struct {
 	DeltaDir string
 	// DeltaRegistry, when set, is the OCI repository prefix (host/prefix)
 	// under which parked deltas are published (one repository per session
-	// domain, one tag per session) and looked up by other homes. Uses
-	// RegistryPlainHTTP.
+	// domain, one tag per session) and looked up by other homes. A prefix
+	// starting with http:// is reached over plain HTTP.
 	DeltaRegistry string
 	// DeltaKeys signs every delta and parent checkpoint this home pushes to
 	// DeltaRegistry. The home pulls or imports only those a trusted key

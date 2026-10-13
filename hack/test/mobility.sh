@@ -21,7 +21,7 @@ curl -sf "http://$REG/v2/" >/dev/null || { echo "registry $REG not reachable (ma
 go build -o bin/ ./cmd/fiberd ./cmd/grant-issuer ./cmd/zygotectl ./hack/fibctl
 make -s zygote
 bin/zygotectl build -zygote bin/refzygote -args "--heap-mb 32" -out "$STATE/art" >/dev/null
-DIGEST=$(bin/zygotectl push -dir "$STATE/art" -ref "$REG/zygotes/ref:mob" -plain-http)
+DIGEST=$(bin/zygotectl push -dir "$STATE/art" -ref "http://$REG/zygotes/ref:mob")
 echo "template $DIGEST"
 
 bin/grant-issuer keygen -alg EdDSA -out "$STATE/issuer-key.json" >/dev/null
@@ -36,10 +36,9 @@ PIDS=$!
 
 start_home() { # name grpc http
   bin/fiberd -state "$STATE/$1" -node-id "$1" -verifier jwks -issuer "$ISSUER_URL" -jwks-max-stale 10m -insecure-plaintext \
-    -listen "127.0.0.1:$2" -http "127.0.0.1:$3" -runtime proc -run-dir "/tmp/fz-$1" \
-    -registry "$REG/zygotes/ref" -delta-registry "$REG/deltas" -delta-key "$STATE/delta-key.json" \
-    -delta-seal-key "$STATE/delta-seal-key.json" -registry-plain-http \
-    -status-interval 100ms >"$STATE/$1.log" 2>&1 &
+    -listen "127.0.0.1:$2" -http "127.0.0.1:$3" -runtime proc \
+    -registry "http://$REG/zygotes/ref" -delta-registry "http://$REG/deltas" -delta-key "$STATE/delta-key.json" \
+    -delta-seal-key "$STATE/delta-seal-key.json" >"$STATE/$1.log" 2>&1 &
   PIDS="$PIDS $!"
   for _ in $(seq 1 100); do curl -sf "http://127.0.0.1:$3/healthz" >/dev/null 2>&1 && return 0; sleep 0.1; done
   echo "$1 did not become healthy"; tail -20 "$STATE/$1.log"; exit 1

@@ -131,7 +131,7 @@ func TestPushDirSigner(t *testing.T) {
 		} {
 			t.Run(c.name+" to "+ref[:4], func(t *testing.T) {
 				ctx := context.Background()
-				_, err := artifact.PushDir(ctx, src, ref, artifact.ArtifactTypeDelta, nil, c.signer, true)
+				_, err := artifact.PushDir(ctx, src, ref, artifact.ArtifactTypeDelta, nil, c.signer)
 				if !c.ok {
 					if err == nil {
 						t.Fatal("PushDir signed with a bad key")
@@ -141,7 +141,7 @@ func TestPushDirSigner(t *testing.T) {
 				if err != nil {
 					t.Fatalf("PushDir: %v", err)
 				}
-				loc, found, err := artifact.Resolve(ctx, ref, true)
+				loc, found, err := artifact.Resolve(ctx, ref)
 				if err != nil || !found {
 					t.Fatalf("Resolve: %v %v", found, err)
 				}

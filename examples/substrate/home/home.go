@@ -222,7 +222,6 @@ func (h *Home) Ready() bool {
 func (h *Home) Name() string               { return "substrate" }
 func (h *Home) Health() *core.SourceHealth { return h.health }
 func (h *Home) CgroupRoot() string         { return h.root }
-func (h *Home) AdvertisedEndpoint() string { return "" }
 func (h *Home) Scope() []core.ScopeClaim   { return append([]core.ScopeClaim(nil), h.cfg.Scope...) }
 
 // Devices: a worker Pod offers no devices.

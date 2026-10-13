@@ -44,7 +44,6 @@ func config(t *testing.T, args ...string) *fiberd.Config {
 	if err := fs.Parse(args); err != nil {
 		t.Fatal(err)
 	}
-	c.Finish()
 	return &c
 }
 
@@ -223,14 +222,14 @@ func TestRunRefuses(t *testing.T) {
 	}{
 		{name: "outside an allocation", env: map[string]string{"SLURM_JOB_ID": ""}, err: "SLURM_JOB_ID",
 			check: func(t *testing.T, c *fiberd.Config) {
-				if c.GrantsDir != "" {
-					t.Fatalf("grants dir = %q, want it left alone", c.GrantsDir)
+				if c.Node.GrantsDir != "" {
+					t.Fatalf("grants dir = %q, want it left alone", c.Node.GrantsDir)
 				}
 			}},
 		{name: "the grants dir defaults to the job's, then fiberd needs a verifier", err: "-verifier is required",
 			check: func(t *testing.T, c *fiberd.Config) {
-				if c.GrantsDir != "/run/fiberd/job-4242/grants" {
-					t.Fatalf("grants dir = %q, want the job's", c.GrantsDir)
+				if c.Node.GrantsDir != "/run/fiberd/job-4242/grants" {
+					t.Fatalf("grants dir = %q, want the job's", c.Node.GrantsDir)
 				}
 			}},
 		{name: "a grant that cannot be staged", args: []string{"-verifier", "insecure-json"}, grant: "@/nonexistent/grant",
@@ -238,7 +237,7 @@ func TestRunRefuses(t *testing.T) {
 		{name: "an endpoint family that does not exist", args: []string{"-verifier", "insecure-json", "-endpoint-family", "ipx"},
 			err: "ipx"},
 		{name: "a listen address without a port", args: []string{"-verifier", "insecure-json", "-listen", "localhost"},
-			err: "-listen"},
+			err: "missing port"},
 		{name: "a cgroup mount without the job step's cgroup", args: []string{"-verifier", "insecure-json"},
 			mount: func(t *testing.T) string { return t.TempDir() }, err: "slurm: cgroup", is: fs.ErrNotExist},
 	}
