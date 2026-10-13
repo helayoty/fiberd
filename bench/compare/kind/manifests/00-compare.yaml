@@ -31,6 +31,12 @@ rules:
     verbs: [get, list, patch]
   - nonResourceURLs: [/metrics]
     verbs: [get]
+  # The scheduler's /metrics, through the API server's Pod proxy. RBAC
+  # names the proxied target scheme:pod:port.
+  - apiGroups: [""]
+    resources: [pods/proxy]
+    resourceNames: ["https:kube-scheduler-compare-control-plane:10259"]
+    verbs: [get]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

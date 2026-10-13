@@ -441,19 +441,30 @@ func TestUntar(t *testing.T) {
 		}
 	}
 	cases := []struct {
-		name string
-		src  func(t *testing.T) string
-		dst  func(t *testing.T, root string) string
-		want map[string]string // the unpacked directory, nil when it must fail
+		name    string
+		src     func(t *testing.T) string
+		dst     func(t *testing.T, root string) string
+		want    map[string]string // the unpacked directory, nil when it must fail
+		wantErr error             // the failure, when one error in particular is due
 	}{
 		{name: "regular entries unpack by name", want: map[string]string{"a.img": "A", "b.img": "B"},
 			src: func(t *testing.T) string {
 				return archive(t, entry{name: "a.img", body: "A"}, entry{name: "b.img", body: "B"})
 			}},
-		{name: "entry paths are reduced to their base name", want: map[string]string{"escape": "E", "deep": "D"},
-			src: func(t *testing.T) string {
-				return archive(t, entry{name: "../../escape", body: "E"}, entry{name: "/abs/dir/deep", body: "D"})
-			}},
+		// An entry's path is never mapped to a name inside dst. Any path
+		// fails the unpack before a byte is written.
+		{name: "an entry that climbs out fails", wantErr: artifact.ErrEntryName,
+			src: func(t *testing.T) string { return archive(t, entry{name: "../../escape", body: "E"}) }},
+		{name: "an entry with a parent step inside fails", wantErr: artifact.ErrEntryName,
+			src: func(t *testing.T) string { return archive(t, entry{name: "a/../../escape", body: "E"}) }},
+		{name: "an absolute entry fails", wantErr: artifact.ErrEntryName,
+			src: func(t *testing.T) string { return archive(t, entry{name: "/abs/dir/deep", body: "D"}) }},
+		{name: "an entry with a directory part fails", wantErr: artifact.ErrEntryName,
+			src: func(t *testing.T) string { return archive(t, entry{name: "dir/deep", body: "D"}) }},
+		{name: "an entry named after the directory itself fails", wantErr: artifact.ErrEntryName,
+			src: func(t *testing.T) string { return archive(t, entry{name: ".", body: "P"}) }},
+		{name: "an entry with an empty name fails", wantErr: artifact.ErrEntryName,
+			src: func(t *testing.T) string { return archive(t, entry{name: "", body: "P"}) }},
 		{name: "links and directories are skipped", want: map[string]string{"a.img": "A"},
 			src: func(t *testing.T) string {
 				return archive(t, entry{name: "evil", typ: tar.TypeSymlink, link: "/etc/passwd"},
@@ -461,7 +472,7 @@ func TestUntar(t *testing.T) {
 					entry{name: "a.img", body: "A"})
 			}},
 		{name: "an empty file is an empty archive", want: map[string]string{}, src: raw("")},
-		{name: "an entry named after the parent fails without writing it",
+		{name: "an entry named after the parent fails without writing it", wantErr: artifact.ErrEntryName,
 			src: func(t *testing.T) string { return archive(t, entry{name: "..", body: "P"}) }},
 		{name: "a truncated entry fails",
 			src: func(t *testing.T) string { return archive(t, entry{name: "a.img", body: "short", size: 4096}) }},
@@ -485,6 +496,9 @@ func TestUntar(t *testing.T) {
 			if c.want == nil {
 				if err == nil {
 					t.Fatal("Untar succeeded")
+				}
+				if c.wantErr != nil && !errors.Is(err, c.wantErr) {
+					t.Fatalf("Untar: %v, want %v", err, c.wantErr)
 				}
 			} else if err != nil {
 				t.Fatalf("Untar: %v", err)

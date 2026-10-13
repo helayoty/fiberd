@@ -5,14 +5,9 @@ on:
     branches: [main]
   pull_request:
   # The release workflow runs the whole suite on the commit it releases.
-  # On push and pull_request the ref is empty, so checkout uses its default.
+  # Every job checks out the commit the run started from, so a caller
+  # cannot hand it another ref.
   workflow_call:
-    inputs:
-      ref:
-        description: "Commit to test"
-        required: false
-        type: string
-        default: ""
 
 permissions:
   contents: read
@@ -24,8 +19,6 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ inputs.ref }}
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod

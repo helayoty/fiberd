@@ -4,7 +4,9 @@ on:
   # Pushing a release tag releases it as it is.
   push:
     tags: ["v*"]
-  # A manual run releases the tag it is given, creating it if it is new.
+  # A manual run releases the commit it starts from under the tag it is
+  # given, creating the tag if it is new. An existing tag is released by
+  # a run started from that tag.
   workflow_dispatch:
     inputs:
       tag:
@@ -36,7 +38,6 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       prerelease: ${{ steps.version.outputs.prerelease }}
-      sha: ${{ steps.version.outputs.sha }}
       image-tags: ${{ steps.version.outputs.image-tags }}
       new-tag: ${{ steps.version.outputs.new-tag }}
       started: ${{ steps.version.outputs.started }}
@@ -66,22 +67,23 @@ jobs:
             echo "$TAG is already released" >&2
             exit 1
           fi
-          # An existing tag is released as it is. A new tag points at the commit
-          # the run started from. It is created only when the release is
-          # published, so a failed run leaves no tag.
-          if sha=$(git rev-parse --verify --quiet "refs/tags/$TAG^{commit}"); then
+          # A new tag is created only when the release is published, so a
+          # failed run leaves no tag.
+          if tagged=$(git rev-parse --verify --quiet "refs/tags/$TAG^{commit}"); then
+            if [[ "$tagged" != "$GITHUB_SHA" ]]; then
+              echo "$TAG points at $tagged, but this run started from $GITHUB_SHA ($GITHUB_REF_NAME): start the run from the tag" >&2
+              exit 1
+            fi
             echo "new-tag=false" >> "$GITHUB_OUTPUT"
-            echo "releasing existing tag $TAG at $sha"
+            echo "releasing existing tag $TAG at $GITHUB_SHA"
           else
-            sha=$GITHUB_SHA
             echo "new-tag=true" >> "$GITHUB_OUTPUT"
-            echo "tag $TAG does not exist yet: it will be created at $sha ($GITHUB_REF_NAME)"
+            echo "tag $TAG does not exist yet: it will be created at $GITHUB_SHA ($GITHUB_REF_NAME)"
           fi
-          if ! git merge-base --is-ancestor "$sha" origin/main; then
-            echo "$TAG would release $sha, which is not on main: start the run from main" >&2
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "$TAG would release $GITHUB_SHA, which is not on main: start the run from main" >&2
             exit 1
           fi
-          echo "sha=$sha" >> "$GITHUB_OUTPUT"
           version=${TAG#v}
           echo "version=$version" >> "$GITHUB_OUTPUT"
           # Every release tags the image with its exact version. A final release
@@ -108,36 +110,26 @@ jobs:
     name: ci
     needs: validate-tag
     uses: ./.github/workflows/ci.yml
-    with:
-      ref: ${{ needs.validate-tag.outputs.sha }}
 
   integration:
     name: integration
     needs: validate-tag
     uses: ./.github/workflows/integration.yml
-    with:
-      ref: ${{ needs.validate-tag.outputs.sha }}
 
   conformance:
     name: conformance
     needs: validate-tag
     uses: ./.github/workflows/conformance.yml
-    with:
-      ref: ${{ needs.validate-tag.outputs.sha }}
 
   examples:
     name: examples
     needs: validate-tag
     uses: ./.github/workflows/examples.yml
-    with:
-      ref: ${{ needs.validate-tag.outputs.sha }}
 
   fuzz:
     name: fuzz
     needs: validate-tag
     uses: ./.github/workflows/fuzz.yml
-    with:
-      ref: ${{ needs.validate-tag.outputs.sha }}
 
   build-assets:
     name: build release archives
@@ -151,7 +143,6 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.validate-tag.outputs.sha }}
           fetch-depth: 0
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -276,8 +267,6 @@ jobs:
             runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ needs.validate-tag.outputs.sha }}
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
@@ -288,13 +277,12 @@ jobs:
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ${{ env.IMAGE }}
-          # Version and revision of the tag, not of the branch the run was
-          # started on.
+          # The version of the tag and the revision of the commit it marks.
           tags: type=raw,value=${{ needs.validate-tag.outputs.version }}
           # The action sets the description to the repository's, which may
           # be empty, so it is set here.
           labels: |
-            org.opencontainers.image.revision=${{ needs.validate-tag.outputs.sha }}
+            org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.description=${{ env.DESCRIPTION }}
       - id: build
         name: build and push by digest
@@ -347,7 +335,7 @@ jobs:
           name: ${{ env.TAG }}
           # Used only for a new tag. Publishing creates it at the commit that
           # was built and tested. A draft makes no tag.
-          commit: ${{ needs.validate-tag.outputs.sha }}
+          commit: ${{ github.sha }}
           draft: true
           prerelease: ${{ needs.validate-tag.outputs.prerelease }}
           generateReleaseNotes: true

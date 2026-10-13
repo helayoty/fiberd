@@ -290,8 +290,8 @@ func fileDelete(ref string) (bool, error) {
 }
 
 // TarDir writes every regular file directly under src into the tar
-// archive dst (flat, reproducible); Untar unpacks such an archive into
-// dst, ignoring any path in the entries.
+// archive dst (flat, reproducible). Untar unpacks such an archive into
+// dst and fails with ErrEntryName on any entry that is not a plain name.
 func TarDir(src, dst string) error { return tarDir(src, dst) }
 
 func Untar(src, dst string) error { return untar(src, dst) }
