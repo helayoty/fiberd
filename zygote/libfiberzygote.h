@@ -15,7 +15,7 @@
  *     /dev/null (stderr once the child is ready), the environment is
  *     emptied and the child gets a new session.
  *   - When asked, the child gets a private mount namespace with the
- *     agent's paths covered, a /proc of its own pid namespace, and no
+ *     fiberd's paths covered, a /proc of its own pid namespace, and no
  *     capabilities under no_new_privs. The grant-wide part of that
  *     namespace (read-only /sys, the run directory narrowed, the HIDE
  *     directories covered) is made once, in a mount namespace the
@@ -32,13 +32,13 @@
  *
  * With FIBERD_CTL_REBIND set in its environment, fz_serve first reads a
  * REBIND message carrying a socket on the control descriptor and serves
- * on that socket instead. The agent made it in the zygote's network
+ * on that socket instead. fiberd made it in the zygote's network
  * namespace, where a checkpoint of the zygote finds it.
  *
  * With FIBERD_OWN_MNTNS set in its environment, fz_init moves the zygote
  * into a private mount namespace of its own, and fz_serve fills it
  * before READY with what every mntns fiber must see (PREPARE mntns
- * below), so a fiber's namespace is a copy. The agent sets it when its
+ * below), so a fiber's namespace is a copy. fiberd sets it when its
  * fibers will ask for a mount namespace. Without it a mntns CLONE is
  * refused.
  *
@@ -53,20 +53,20 @@
  * fiber in.
  *
  * Wire protocol on the control descriptor, one line per message. The
- * agent speaks first. Its setup lines, ended by PREPARE, come before
+ * fiberd speaks first. Its setup lines, ended by PREPARE, come before
  * READY, because the zygote prepares what every mntns fiber's namespace
  * must have once, in a namespace of its own, and answers READY from it.
  *
- *   agent  -> zygote  HIDE <dir>
+ *   fiberd -> zygote  HIDE <dir>
  *                     Cover dir with an empty tmpfs in every mntns fiber.
- *   agent  -> zygote  DROP <path>
+ *   fiberd -> zygote  DROP <path>
  *                     Unmount path in every mntns fiber.
- *   agent  -> zygote  RUNDIR <parent> <own>
- *                     In every mntns fiber, cover parent (the agent's run
+ *   fiberd -> zygote  RUNDIR <parent> <own>
+ *                     In every mntns fiber, cover parent (fiberd's run
  *                     directory, one directory per grant) with an empty
  *                     read-only tmpfs and bind only own, this grant's
  *                     directory, back at its place.
- *   agent  -> zygote  PREPARE mntns|none
+ *   fiberd -> zygote  PREPARE mntns|none
  *                     Ends the setup lines. With mntns, the zygote makes
  *                     every mount under /sys read-only, unmounts the DROP
  *                     paths, narrows the run directory and covers the
@@ -78,12 +78,12 @@
  *                     PREPARE that fails, gets an ERROR ? line naming the
  *                     reason instead of READY, and the zygote ends, since
  *                     a plain proc grant's fibers all ask for a mount
- *                     namespace and the agent fails the warm. Any other
+ *                     namespace and fiberd fails the warm. Any other
  *                     line before PREPARE, or a setup line after READY,
  *                     is a protocol error. The first ends the zygote and
  *                     the second refuses every mntns CLONE.
- *   zygote -> agent   READY
- *   agent  -> zygote  CLONE <fence> <endpoint> <deadline_ms> <hex-payload|-> [opts]
+ *   zygote -> fiberd  READY
+ *   fiberd -> zygote  CLONE <fence> <endpoint> <deadline_ms> <hex-payload|-> [opts]
  *                     The fence is at most 127 characters and the endpoint
  *                     at most 1023. The fiber's cgroup directory fd rides
  *                     along in SCM_RIGHTS on the same message. opts is a
@@ -92,14 +92,14 @@
  *                     namespace. "nocaps" drops every capability under
  *                     no_new_privs. "handoff" means the last descriptor on
  *                     the message is the fiber's end of a SOCK_SEQPACKET
- *                     pair the agent passes connections over, kept at
+ *                     pair fiberd passes connections over, kept at
  *                     FZ_HANDOFF_FD (see fz_accept). A child that cannot
  *                     get what it was asked for ends before it runs, and
  *                     the CLONE is answered with an ERROR. So is a mntns
  *                     CLONE after a refused HIDE, DROP, RUNDIR or
  *                     PREPARE, or after PREPARE none.
- *   zygote -> agent   CLONED <fence> <pid>
- *   zygote -> agent   ERROR <fence> <reason>
+ *   zygote -> fiberd  CLONED <fence> <pid>
+ *   zygote -> fiberd  ERROR <fence> <reason>
  *                     For a child that ended before ready, the reason is
  *                     "died before ready: exit:<code>", followed by what
  *                     the code stands for when the library assigned it.
@@ -107,30 +107,30 @@
  *                     retired, since the zygote narrows the run directory
  *                     at PREPARE), 120 the descriptors, 121 the handoff
  *                     identity and 125 the cgroup leaf on the legacy clone.
- *   zygote -> agent   EXITED <pid> exit:<code>|signal:<num>
+ *   zygote -> fiberd  EXITED <pid> exit:<code>|signal:<num>
  *
  * On a fresh handoff fiber's channel the first message, queued by the
- * agent before the CLONE, is the grant's TLS identity.
+ * fiberd before the CLONE, is the grant's TLS identity.
  *
- *   agent  -> fiber   'k' <key PEM> NUL <cert PEM> NUL <caller> NUL
+ *   fiberd -> fiber   'k' <key PEM> NUL <cert PEM> NUL <caller> NUL
  *
  * The library reads it in the child before the application runs (see
  * fz_handoff_identity). Every message after it carries one connected
  * socket in SCM_RIGHTS (see fz_accept). A fiber restored from a
  * checkpoint keeps the identity it was born with and is sent no new one.
- * The identity is never a file. Every grant's fibers run as the agent's
+ * The identity is never a file. Every grant's fibers run as fiberd's
  * user, so no file mode would keep one grant's fibers out of another's
  * key.
  *
  * An engine zygote, one that owns device state its fibers use over IPC,
  * adds these lines, unsolicited, from any thread.
  *
- *   zygote -> agent   DEVICE <fence> <bytes> 0        one fiber's slice
- *   zygote -> agent   DEVICE - <used> <capacity>      the whole engine
+ *   zygote -> fiberd  DEVICE <fence> <bytes> 0        one fiber's slice
+ *   zygote -> fiberd  DEVICE - <used> <capacity>      the whole engine
  *
  * It receives this one before a fiber is parked.
  *
- *   agent  -> zygote  EVICT <fence>                   drop that slice
+ *   fiberd -> zygote  EVICT <fence>                   drop that slice
  */
 #ifndef FIBERZYGOTE_H
 #define FIBERZYGOTE_H
@@ -191,26 +191,26 @@ typedef void (*fz_on_control)(const char *line);
  * with that reason (fail closed) while serving the rest. */
 void fz_init(int argc, char **argv);
 
-/* Zygote main loop. Returns 0 when the agent closes the channel, -1 on a
+/* Zygote main loop. Returns 0 when fiberd closes the channel, -1 on a
  * protocol or system error (errno set). It refuses to serve, with EINVAL
  * and a line on stderr, when SIGCHLD is not blocked, which means fz_init
  * was skipped. */
 int fz_serve(int ctl_fd, fz_on_fiber on_fiber);
 
 /* Called by on_fiber in the child once its endpoint accepts connections.
- * Until then the agent has not acknowledged the clone, and the child's
+ * Until then fiberd has not acknowledged the clone, and the child's
  * stderr is the zygote's log, for saying why it could not start. After
  * it, stderr is /dev/null. The readiness pipe is fd 3 and is not the
  * fiber's to use. A fiber that writes anything else on it, or closes it
  * without calling this, is killed and its CLONE answered with ERROR. */
 void fz_fiber_ready(void);
 
-/* Where a handoff fiber's channel to the agent lives. FIBERD_HANDOFF_FD
+/* Where a handoff fiber's channel to fiberd lives. FIBERD_HANDOFF_FD
  * names it in the fiber's environment and is unset for other fibers. */
 #define FZ_HANDOFF_FD 4
 
 /* A handoff fiber terminates TLS itself with the grant's identity, which
- * the agent sends down the channel at birth and the library holds in the
+ * fiberd sends down the channel at birth and the library holds in the
  * fiber's memory, never the zygote's, so no key ends up in a template
  * checkpoint. key_pem and cert_pem are the grant's PKCS #8 private key
  * and self-signed certificate. caller is the thumbprint (x5t#S256,
@@ -227,24 +227,24 @@ typedef struct {
  * fz_fiber_ready. */
 const fz_identity_t *fz_handoff_identity(void);
 
-/* Handoff fibers do not listen. The agent accepts on their behalf and
+/* Handoff fibers do not listen. fiberd accepts on their behalf and
  * passes each connected socket here. fz_accept blocks until the next one
  * and returns it with close-on-exec set, or -1 with errno set. EBADF
- * means the fiber is not a handoff fiber. ECONNRESET means the agent has
+ * means the fiber is not a handoff fiber. ECONNRESET means fiberd has
  * closed the channel and the fiber is being released. */
 int fz_accept(void);
 
 /* gVisor templates. Nothing forks on gVisor. Every fiber is a sandbox
  * restored from the template's checkpoint. After its checkpoint read
  * answers "restore", the template calls fz_gvisor_identity, which hands
- * the spec's one-shot FIBERD_TOKEN to the agent at
- * /fiberd/agent/pool.sock and blocks for the identity. It then reseeds,
+ * the spec's one-shot FIBERD_TOKEN to fiberd at
+ * /fiberd/channel/pool.sock and blocks for the identity. It then reseeds,
  * binds the endpoint and calls fz_gvisor_ack, which zeroes the seed.
  *
- *   sandbox -> agent   't' <token> NUL
- *   agent   -> sandbox 'i' <generation> NUL <kind> NUL <fence> NUL <endpoint> NUL <payload-hex|-> NUL
+ *   sandbox -> fiberd  't' <token> NUL
+ *   fiberd  -> sandbox 'i' <generation> NUL <kind> NUL <fence> NUL <endpoint> NUL <payload-hex|-> NUL
  *                      <key PEM|-> NUL <cert PEM|-> NUL <caller|-> NUL <seed-hex> NUL
- *   sandbox -> agent   'a' <fence> NUL
+ *   sandbox -> fiberd  'a' <fence> NUL
  */
 typedef struct {
     const char *kind;             /* "clone" (from the template image) or "resume" (from a park) */
@@ -260,14 +260,14 @@ typedef struct {
  * -1 with errno set on failure, and the template then exits with 122. */
 int fz_gvisor_identity(fz_gvisor_identity_t *id);
 
-/* Tells the agent the endpoint is bound, and closes the channel. */
+/* Tells fiberd the endpoint is bound, and closes the channel. */
 int fz_gvisor_ack(void);
 
 /* Engine support. fz_set_engine names the engine's IPC endpoint, which
  * every fiber finds as FIBERD_ENGINE in its scrubbed environment.
- * fz_report sends one line to the agent from any thread (a DEVICE
+ * fz_report sends one line to fiberd from any thread (a DEVICE
  * report). It fails with -1 before fz_serve has the channel, and always
- * in a fiber, which has no channel to the agent. fz_set_control installs
+ * in a fiber, which has no channel to fiberd. fz_set_control installs
  * the handler for lines such as EVICT. Bind a unix endpoint under the
  * run directory before fz_serve, which remounts that directory. */
 void fz_set_engine(const char *endpoint);

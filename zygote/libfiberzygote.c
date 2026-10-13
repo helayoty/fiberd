@@ -42,7 +42,7 @@
 
 /* A fence is at most FENCE_MAX - 1 characters, so the records below hold
  * it whole and every CLONED, ERROR and EXITED line names exactly the
- * fence the agent sent. A longer one is refused, never cut. */
+ * fence fiberd sent. A longer one is refused, never cut. */
 #define FENCE_MAX 128
 
 /* The ready record is the one byte 'r'. The zygote takes anything else
@@ -51,7 +51,7 @@
 
 /* A control line is at most SEND_MAX - 1 characters. The longest is the
  * ERROR naming a HIDE path that could not be covered (prepare_reason),
- * which must reach the agent whole rather than be dropped. */
+ * which must reach fiberd whole rather than be dropped. */
 #define RUNDIR_MAX 4096
 #define SEND_MAX (RUNDIR_MAX + 512)
 
@@ -73,9 +73,9 @@ static void block_sigchld(void) {
 }
 
 /* Why a HIDE, DROP, RUNDIR or PREPARE line was refused, or NULL. A mntns
- * fiber would run with less hidden than the agent asked for. Set before
+ * fiber would run with less hidden than fiberd asked for. Set before
  * READY, it is sent as the ERROR the zygote ends on instead of READY,
- * and the agent fails the warm. Set after READY (a setup line that came
+ * and fiberd fails the warm. Set after READY (a setup line that came
  * late), every later mntns CLONE is refused with it instead. */
 static const char *paths_refused;
 
@@ -83,7 +83,7 @@ static const char *paths_refused;
  * FIBERD_OWN_MNTNS is set, before any thread exists, and fz_serve fills
  * it at PREPARE mntns (prepare_ns), before READY. A mntns fiber's
  * namespace is then a copy with the grant-wide work already done, and
- * its birth adds only what is its own (see mount_ns). An agent whose
+ * its birth adds only what is its own (see mount_ns). A fiberd whose
  * fibers get no mount namespace (runc, an artifact build) leaves the
  * variable unset, and the zygote stays in the namespace it was started
  * in, as before. */
@@ -92,9 +92,9 @@ static char own_ns_why[160]; /* why it did not, for prepare_ns to refuse with */
 static int ns_prepared;     /* prepare_ns went through, so mntns fibers may be born */
 
 /* What a mntns fiber must not see (HIDE, covered) or keep (DROP,
- * unmounted), as the agent sent them. hide_covered says which HIDE paths
+ * unmounted), as fiberd sent them. hide_covered says which HIDE paths
  * prepare_ns found and covered. One missing then is looked for again at
- * each birth (see mount_ns), so a directory the agent makes after READY
+ * each birth (see mount_ns), so a directory fiberd makes after READY
  * is hidden as it was before the zygote had a namespace of its own. */
 static char *hide_paths[MAX_PATHS];
 static int nhide;
@@ -102,9 +102,9 @@ static unsigned char hide_covered[MAX_PATHS];
 static char *drop_paths[MAX_PATHS];
 static int ndrop;
 
-/* The agent's run directory and this grant's directory in it (RUNDIR),
+/* fiberd's run directory and this grant's directory in it (RUNDIR),
  * in static storage the child reads without allocating. Empty until the
- * agent sends them. */
+ * fiberd sends them. */
 static char rundir_parent[RUNDIR_MAX];
 static char rundir_own[RUNDIR_MAX];
 
@@ -204,7 +204,7 @@ int fz_report(const char *fmt, ...) {
  * newline is. Then exactly that much is read with the control buffer.
  * The descriptors stay attached to the right line because an AF_UNIX
  * stream read, peeking or not, never crosses from one message's data
- * into another's when their SCM_RIGHTS differ, and the agent sends
+ * into another's when their SCM_RIGHTS differ, and fiberd sends
  * descriptors on the CLONE line alone. A read may still stop short of
  * the newline when a long line arrives in several buffers, so the loop
  * goes on from there. */
@@ -288,7 +288,7 @@ static int pending_index(pid_t pid) {
 }
 
 /* Exit codes of a child that could not be confined or set up. New codes
- * go at the end, because the agent's tests name the existing ones. 116
+ * go at the end, because fiberd's tests name the existing ones. 116
  * (the run directory) is retired and not reused. The zygote narrows the
  * run directory once, at PREPARE, and refuses every mntns CLONE when it
  * cannot, so no child ends over it. */
@@ -441,7 +441,7 @@ static pid_t birth(int cgroup_fd, unsigned long long want) {
 
 /* ro_remount makes the mount at path read-only in this namespace alone.
  * MS_REMOUNT|MS_BIND changes the per-mount flags, not the superblock, so
- * the agent and the host keep writing through their own mounts of the
+ * fiberd and the host keep writing through their own mounts of the
  * same filesystem. The flags are set outright, so nosuid, nodev and
  * noexec are restated. Any mount point will do, with no bind first. */
 static int ro_remount(const char *path) {
@@ -628,18 +628,18 @@ static void fd_path(char *buf, int fd) {
 }
 
 /* narrow_rundir leaves the zygote, and so every fiber, one directory of
- * the agent's run directory, its own grant's. Every grant's directory
+ * fiberd's run directory, its own grant's. Every grant's directory
  * (endpoint sockets, fence files, the zygote's log) sits under one
  * parent, and a fiber is euid 0, so without this a fiber of one grant
  * could unlink or rebind another grant's sockets. The parent is covered
  * with an empty read-only tmpfs, in the zygote's own namespace alone,
  * and the grant's own directory is bound back at its place from a
  * descriptor opened before the cover. What a fiber creates there (its
- * endpoint) lands in the agent's real directory and what the agent
+ * endpoint) lands in fiberd's real directory and what fiberd
  * writes there (a fence file) is seen. The cwd is moved onto the bind,
  * and every fiber inherits it there, so a checkpoint names it through
  * the mount that will exist on restore. CRIU dumps the tmpfs with its
- * one empty directory and the bind as an external mount the agent names
+ * one empty directory and the bind as an external mount fiberd names
  * on restore, so a resumed fiber is bound to the resuming grant's
  * directory. Runs once, from prepare_ns. Returns 0, or -1, and every
  * mntns CLONE is then refused. */
@@ -671,7 +671,7 @@ enum { F_PRIVATE = 1, F_PROC = 2, F_RO = 4, F_DROP = 8, F_HIDE = 16, F_RUNDIR = 
 /* The zygote's own executable as /proc/self/exe names it, read once at
  * PREPARE (prepare_ns). Empty when it could not be read. A HIDE path
  * that holds it is covered with the executable bound back at its place
- * (cover_hide), since the agent runs a registry template from its
+ * (cover_hide), since fiberd runs a registry template from its
  * template cache and hides the cache. */
 static char self_exe[RUNDIR_MAX];
 
@@ -692,11 +692,11 @@ static int under(const char *path, const char *dir) {
  * Fibers are forked from the zygote and map the same file, and CRIU
  * names a mapped file by its path, which must resolve in the fiber's
  * namespace to the file it maps, so a fiber whose executable sat under
- * a plain cover could not be parked. The bind is a mount the agent
+ * a plain cover could not be parked. The bind is a mount fiberd
  * names on restore, like the run directory's.
  *
  * The directories are made 0755, like the run directory's cover
- * (narrow_rundir), never 0555. The zygote runs with the agent's narrow
+ * (narrow_rundir), never 0555. The zygote runs with fiberd's narrow
  * capability set, which has no CAP_DAC_OVERRIDE, so uid 0 cannot
  * create anything in a directory without its owner's write bit. What
  * seals the cover is the read-only remount cover_hide ends with, which
@@ -806,8 +806,8 @@ static int mount_exit(int failed) {
 /* prepare_why is the reason the zygote refuses to serve after the first
  * of prepare_ns's failed steps, in the order prepare_ns takes them. A
  * HIDE failure names the path and the error, since the cause is in the
- * agent's environment (a capability it lacks, a mount it cannot make)
- * and the agent's log is where it is read. */
+ * fiberd's environment (a capability it lacks, a mount it cannot make)
+ * and fiberd's log is where it is read. */
 static char prepare_reason[RUNDIR_MAX + 96];
 static const char *prepare_why(int failed, int hide_i, int hide_errno) {
     if (failed & F_RO) return "the zygote could not make /sys read-only in its namespace";
@@ -835,9 +835,9 @@ static const char *prepare_why(int failed, int hide_i, int hide_errno) {
  *
  * Fails closed. Any step refused, or no namespace of the zygote's own
  * to work in (fz_init skipped, a thread before it, unshare refused),
- * sets paths_refused, and fz_serve answers the agent with an ERROR
+ * sets paths_refused, and fz_serve answers fiberd with an ERROR
  * naming it instead of READY, since every fiber of a plain proc grant
- * asks for a mount namespace and the agent fails the warm. A line
+ * asks for a mount namespace and fiberd fails the warm. A line
  * refused earlier keeps its reason and nothing is mounted. Returns 0,
  * or -1 with paths_refused set. */
 static int prepare_ns(void) {
@@ -852,7 +852,7 @@ static int prepare_ns(void) {
     if (lock_sys() < 0) failed |= F_RO;
     if (drop_paths_now() < 0) failed |= F_DROP;
     if (rundir_parent[0] && narrow_rundir() < 0) failed |= F_RUNDIR;
-    /* The agent names a HIDE path as it was configured and the kernel
+    /* fiberd names a HIDE path as it was configured and the kernel
      * names the executable resolved (/proc/self/exe). With a symlink in
      * the path, under() would miss, the cover would land on the real
      * directory with the executable not bound back, and no park of the
@@ -894,10 +894,10 @@ static int thread_count(void) {
 /* own_mountns moves the zygote into a mount namespace of its own and
  * makes every mount in it private, so nothing the host mounts later
  * reaches it and nothing mounted in it reaches the host. prepare_ns
- * fills it, and every mntns fiber's namespace is a copy of it. The agent
+ * fills it, and every mntns fiber's namespace is a copy of it. fiberd
  * asks for it with FIBERD_OWN_MNTNS in the environment, as it asks for
  * the other work done before READY (FIBERD_CTL_REBIND,
- * FIBERD_USERNS_NESTED), because fz_init runs before the agent's first
+ * FIBERD_USERNS_NESTED), because fz_init runs before fiberd's first
  * line can be read and a zygote whose fibers share its namespace has no
  * use for one.
  *
@@ -909,7 +909,7 @@ static int thread_count(void) {
  * is refused here, and the reason ends the zygote at PREPARE instead of
  * READY (fail closed, see prepare_ns). So does a kernel or a capability
  * set that refuses the namespace. No fiber runs less confined than the
- * agent asked. */
+ * fiberd asked. */
 static void own_mountns(void) {
     if (!getenv("FIBERD_OWN_MNTNS")) {
         snprintf(own_ns_why, sizeof own_ns_why, "FIBERD_OWN_MNTNS was not set, so the zygote took no mount namespace of its own");
@@ -960,7 +960,7 @@ struct confine {
     int pidns, mntns, nocaps;
 };
 
-/* Set when the agent asked for nested user namespaces to be denied
+/* Set when fiberd asked for nested user namespaces to be denied
  * (FIBERD_USERNS_NESTED=deny). The zygote's own namespace has its limit
  * set to 0 (cap_nested_userns), and every fiber gets the filter below as
  * well, because a checkpoint restores a fiber into a new user namespace
@@ -1041,7 +1041,7 @@ static int userns_filter(void) {
 /* FZ_HANDOFF_FD in a handoff fiber, -1 otherwise. */
 static int handoff_fd = -1;
 
-/* The grant's identity, as the agent's first message on the channel
+/* The grant's identity, as fiberd's first message on the channel
  * delivers it, 'k' then three NUL-ended fields. It lives in the fiber's
  * memory (the child's copy of the page), never the zygote's. */
 #define IDENTITY_MAX 8192
@@ -1049,7 +1049,7 @@ static char identity_buf[IDENTITY_MAX];
 static fz_identity_t identity;
 static int have_identity;
 
-/* read_identity takes the identity message off the channel. The agent
+/* read_identity takes the identity message off the channel. fiberd
  * queues it before the CLONE, so it is there to read. Returns 0, or -1
  * with a reason for the zygote's log. */
 static int read_identity(int fd, const char **why) {
@@ -1141,7 +1141,7 @@ static void scrub_and_run(int ready_w, int handoff, const char *fence, const cha
 
     /* Descriptors. The zygote's SIGCHLD descriptor goes first, wherever
      * it sits. The readiness pipe is parked at fd 3 (over the inherited
-     * control descriptor), a handoff fiber's channel to the agent at
+     * control descriptor), a handoff fiber's channel to fiberd at
      * FZ_HANDOFF_FD, everything above is closed, and the standard three
      * point at /dev/null (stderr once ready). Nothing else a ready fiber
      * holds leads outside its own tree, and the handoff channel is the
@@ -1186,7 +1186,7 @@ static void scrub_and_run(int ready_w, int handoff, const char *fence, const cha
      * the zygote for its descriptor, reaches the fiber as usual. No
      * PR_SET_PDEATHSIG, because a resumed fiber has a different parent,
      * and the runtime kills leaves through the cgroup when the zygote or
-     * the agent goes away. No reseeding of anything, because srandom
+     * fiberd goes away. No reseeding of anything, because srandom
      * takes libc's lock on the random state, which falls under the rule
      * above, so the template reseeds in on_fiber (see fz_on_fiber). */
     setsid();
@@ -1194,7 +1194,7 @@ static void scrub_and_run(int ready_w, int handoff, const char *fence, const cha
     sigset_t none; sigemptyset(&none); sigprocmask(SIG_SETMASK, &none, NULL);
 
     /* Mounts first, since they need the capabilities dropped right
-     * after. A fiber that cannot be confined as the agent asked does not
+     * after. A fiber that cannot be confined as fiberd asked does not
      * run. The child ends, its exit code naming the step that failed. */
     if (cf.mntns) {
         int failed = mount_ns(cf.pidns);
@@ -1345,11 +1345,11 @@ static int handle_clone(int ctl_fd, char *line, const int passed[MAX_PASSED], fz
         return 0;
     }
     if (cf.mntns && paths_refused) {
-        sendf(ctl_fd, "ERROR %s refused: the mount namespace cannot hide what the agent asked (%s)", fence, paths_refused);
+        sendf(ctl_fd, "ERROR %s refused: the mount namespace cannot hide what fiberd asked (%s)", fence, paths_refused);
         return 0;
     }
     if (cf.mntns && !ns_prepared) {
-        sendf(ctl_fd, "ERROR %s refused: no mount namespace was prepared before READY (the agent sent PREPARE none)", fence);
+        sendf(ctl_fd, "ERROR %s refused: no mount namespace was prepared before READY (fiberd sent PREPARE none)", fence);
         return 0;
     }
     /* With handoff the channel is the last descriptor passed, after the
@@ -1547,9 +1547,9 @@ static int cap_nested_userns(void) {
     return 0;
 }
 
-/* rebind_ctl takes the control socket the agent sends as a REBIND
+/* rebind_ctl takes the control socket fiberd sends as a REBIND
  * message on the bootstrap one and puts it at ctl_fd in its place. The
- * agent makes that socket in this zygote's network namespace, where a
+ * fiberd makes that socket in this zygote's network namespace, where a
  * checkpoint of the zygote finds it. */
 static int rebind_ctl(int ctl_fd) {
     static char line[64];
@@ -1581,16 +1581,16 @@ static void keep_path(const char *line) {
     fprintf(stderr, "libfiberzygote: %s refused\n", paths_refused);
 }
 
-/* read_setup takes the agent's setup lines before READY. HIDE, DROP and
+/* read_setup takes fiberd's setup lines before READY. HIDE, DROP and
  * RUNDIR name what every mntns fiber's namespace must have, and
  * PREPARE ends them. PREPARE mntns has the zygote prepare its own
  * namespace with them (prepare_ns), and PREPARE none says no fiber will
  * ask for a mount namespace, so nothing is mounted and a mntns CLONE is
  * refused later. A refused line leaves its reason in paths_refused and
- * READY still goes out, so the agent sees the warm succeed and every
+ * READY still goes out, so fiberd sees the warm succeed and every
  * mntns CLONE refused with that reason (fail closed). Any other line
  * here is a protocol error, and the zygote does not serve. Returns 1 to
- * serve, 0 when the agent closed the channel first, -1 on an error with
+ * serve, 0 when fiberd closed the channel first, -1 on an error with
  * errno set and a line on stderr. */
 static int read_setup(int ctl_fd) {
     static char line[MAX_LINE];
@@ -1626,7 +1626,7 @@ int fz_serve(int ctl_fd, fz_on_fiber on_fiber) {
     signal(SIGPIPE, SIG_IGN);
     /* All before READY, so a zygote that skipped fz_init, cannot deny
      * nested user namespaces or cannot take its channel never serves and
-     * the agent sees the warm fail. SIGCHLD unblocked here means it may
+     * fiberd sees the warm fail. SIGCHLD unblocked here means it may
      * be unblocked in a thread fz_init would have covered, and a fiber's
      * exit would then reach the loop a timeout late. */
     sigset_t have;
@@ -1653,7 +1653,7 @@ int fz_serve(int ctl_fd, fz_on_fiber on_fiber) {
      * zygote that could not build it says so instead of READY and ends.
      * Every fiber of a plain proc grant asks for a mount namespace, so
      * a zygote that would refuse them all is no warm template, and the
-     * agent must fail the warm rather than report the grant ready. */
+     * fiberd must fail the warm rather than report the grant ready. */
     int setup = read_setup(ctl_fd);
     if (setup <= 0) return setup;
     if (paths_refused) {
@@ -1699,7 +1699,7 @@ int fz_serve(int ctl_fd, fz_on_fiber on_fiber) {
         int passed[MAX_PASSED];
         ssize_t n = recv_line(ctl_fd, line, sizeof line, passed);
         if (n <= 0) {
-            if (n == 0) { /* agent gone: take the family with us */
+            if (n == 0) { /* fiberd gone: take the family with us */
                 for (int i = 0; i < nkids; i++) kill(kids[i].pid, SIGKILL);
                 for (int i = 0; i < npending; i++) kill(pending[i].pid, SIGKILL);
                 return 0;
@@ -1729,7 +1729,7 @@ int fz_serve(int ctl_fd, fz_on_fiber on_fiber) {
 /* ---- gVisor ------------------------------------------------------------ */
 
 #define GVISOR_SPEC_ENV "/proc/gvisor/spec_environ"
-#define GVISOR_POOL_SOCKET "/fiberd/agent/pool.sock"
+#define GVISOR_POOL_SOCKET "/fiberd/channel/pool.sock"
 #define GVISOR_TOKEN_MAX 64
 #define GVISOR_RECORD_MAX 65536
 #define GVISOR_SEED 32

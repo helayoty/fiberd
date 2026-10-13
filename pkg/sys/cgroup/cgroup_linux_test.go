@@ -291,9 +291,9 @@ func TestPidsMaxRefusesForks(t *testing.T) {
 }
 
 // TestDelegateOnARealCgroup checks that a cgroup with a process and no
-// controllers enabled gets the process moved into the agent leaf and memory
+// controllers enabled gets the process moved into the fiberd leaf and memory
 // and pids enabled below it. Doing it again changes nothing. A cgroup that
-// may have no children cannot take the agent leaf, and says so.
+// may have no children cannot take the fiberd leaf, and says so.
 func TestDelegateOnARealCgroup(t *testing.T) {
 	cases := []struct {
 		name           string
@@ -304,7 +304,7 @@ func TestDelegateOnARealCgroup(t *testing.T) {
 	}{
 		{name: "the defaults", wantControl: []string{"memory", "pids"}},
 		{name: "memory alone", controllers: []string{"memory"}, wantControl: []string{"memory"}},
-		{name: "no children allowed", maxDescendants: "0", wantErr: "cgroup: agent leaf: "},
+		{name: "no children allowed", maxDescendants: "0", wantErr: "cgroup: fiberd leaf: "},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -328,12 +328,12 @@ func TestDelegateOnARealCgroup(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if sub.Path != root.Child("fiberd").Path {
-				t.Fatalf("Delegate = %s, want %s", sub.Path, root.Child("fiberd").Path)
+			if sub.Path != root.Child("grants").Path {
+				t.Fatalf("Delegate = %s, want %s", sub.Path, root.Child("grants").Path)
 			}
-			procs, err := root.Child("agent").Procs()
+			procs, err := root.Child("fiberd").Procs()
 			if err != nil || !slices.Equal(procs, []int{cmd.Process.Pid}) {
-				t.Fatalf("agent leaf holds %v, %v, want the moved process %d", procs, err, cmd.Process.Pid)
+				t.Fatalf("fiberd leaf holds %v, %v, want the moved process %d", procs, err, cmd.Process.Pid)
 			}
 			if procs, err := root.Procs(); err != nil || len(procs) != 0 {
 				t.Fatalf("root still holds %v, %v", procs, err)

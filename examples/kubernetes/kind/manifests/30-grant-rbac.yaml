@@ -1,4 +1,4 @@
-# What a grant Pod's agent may do: read its own Pod, Namespace and
+# What a grant Pod's fiberd may do: read its own Pod, Namespace and
 # ResourceClaims, and set its readiness gate. The ClusterRole is bound per
 # tenant namespace with a RoleBinding, which also scopes the Namespace get
 # to that one namespace.

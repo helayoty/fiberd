@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1440" height="1090" viewBox="0 0 1440 1090" role="img" aria-labelledby="example-kubernetes-title example-kubernetes-desc">
   <title id="example-kubernetes-title">The controller sets up a grant Pod; requests use its local capacity</title>
-  <desc id="example-kubernetes-desc">A setup-versus-serving view. The CapacityGrant custom resource is desired-state data, the grant-controller is a service, and the grant Pod is a resource boundary rather than a processing stage. Reconciliation ensures one Pod per grant and an owned Secret carrying a signed JWT addressed to that Pod, renewed at half-life. The Secret projects grant.jwt into fiberd-k8s. The agent verifies and admits the token, prepares its warm template, then publishes the zygote-ready custom gate. A separate local request path calls Clone, receives endpoint and fence, and connects directly to the selected fiber on PodIP:fiberPort. Agent, template and fibers share the Pod's aggregate cgroup ceiling. The reference controller's status.ready mirrors only the custom gate, not complete Pod readiness.</desc>
+  <desc id="example-kubernetes-desc">A setup-versus-serving view. The CapacityGrant custom resource is desired-state data, the grant-controller is a service, and the grant Pod is a resource boundary rather than a processing stage. Reconciliation ensures one Pod per grant and an owned Secret carrying a signed JWT addressed to that Pod, renewed at half-life. The Secret projects grant.jwt into the fiberd container, where fiberd-k8s runs under tini as PID 1. fiberd verifies and admits the token, prepares its warm template, then publishes the zygote-ready custom gate. A separate local request path calls Clone, receives endpoint and fence, and connects directly to the selected fiber on PodIP:fiberPort. fiberd, the template and fibers share the Pod's aggregate cgroup ceiling. The reference controller's status.ready mirrors only the custom gate, not complete Pod readiness.</desc>
   <style>
     :root{--bg:#f7f9fc;--panel:#fff;--ink:#172033;--muted:#5d6b7d;--border:#b8c4d4;--blue:#3165b5;--blue-bg:#eaf1ff;--teal:#13776f;--teal-bg:#e8f7f4;--violet:#704aa1;--violet-bg:#f2edfa;--amber:#a76500;--amber-bg:#fff3d6;--green:#287a4d;--green-bg:#e8f6ed}
     @media(prefers-color-scheme:dark){:root{--bg:#0d1117;--panel:#161b22;--ink:#e6edf3;--muted:#a3adba;--border:#3d4652;--blue:#79a7ff;--blue-bg:#17243d;--teal:#53c7b8;--teal-bg:#102923;--violet:#c09cff;--violet-bg:#251b35;--amber:#f0b44d;--amber-bg:#30240f;--green:#63cf8e;--green-bg:#142b1e}}
@@ -33,7 +33,7 @@
 
   <rect class="scope" x="488" y="382" width="904" height="622" rx="16"/>
   <text class="heading teal" x="520" y="421">One grant · one Pod</text>
-  <text class="secondary muted" x="520" y="453">Aggregate cgroup ceiling: agent + template + fibers</text>
+  <text class="secondary muted" x="520" y="453">Aggregate cgroup ceiling: fiberd + template + fibers</text>
   <path class="flow setup" d="M690 328V382" marker-end="url(#example-kubernetes-blue-arrow)"/>
   <text class="secondary blue" x="716" y="363">ensure Pod</text>
 
@@ -46,7 +46,7 @@
   <text class="secondary blue center" x="976" y="260">mint</text>
 
   <rect class="service agent" x="560" y="620" width="330" height="310" rx="4"/>
-  <text class="heading teal" x="584" y="660">fiberd-k8s · PID 1</text>
+  <text class="heading teal" x="584" y="660">fiberd-k8s · under tini</text>
   <text class="secondary" x="584" y="691">Verify + admit grant</text>
   <text class="secondary" x="584" y="791">Resolve sessions locally</text>
   <path class="divider" d="M584 824H866"/>

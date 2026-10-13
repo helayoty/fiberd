@@ -168,7 +168,7 @@ func TestReconcileLifecycle(t *testing.T) {
 				t.Fatalf("calls = %v, want only the reads %v", got, want)
 			}
 		}},
-		{"placement and the agent's gate mirror into status; the grant is not renewed yet", func(t *testing.T) {
+		{"placement and fiberd's gate mirror into status; the grant is not renewed yet", func(t *testing.T) {
 			srv.Update(podPath, func(pod map[string]any) {
 				pod["spec"].(map[string]any)["nodeName"] = "kind-worker"
 				pod["status"] = map[string]any{"podIP": "10.244.0.9", "conditions": []any{

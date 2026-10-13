@@ -18,7 +18,7 @@ const (
 	Resource   = "capacitygrants"
 	// GrantLabel marks the Pod and Secret of a CapacityGrant.
 	GrantLabel = "fiberd.io/grant"
-	// ReadyCondition is the Pod readiness gate the agent sets.
+	// ReadyCondition is the Pod readiness gate fiberd sets.
 	ReadyCondition = "fiberd.io/zygote-ready"
 )
 
@@ -31,7 +31,7 @@ type CapacityGrant struct {
 }
 
 type Spec struct {
-	// Template is the digest of the zygote artifact (what the agent's
+	// Template is the digest of the zygote artifact (what fiberd's
 	// -template maps).
 	Template string `json:"template"`
 	Fibers   struct {
@@ -68,7 +68,7 @@ type PodSpec struct {
 	// ceiling the kubelet enforces on the Pod's cgroup.
 	Resources          json.RawMessage `json:"resources,omitempty"`
 	ServiceAccountName string          `json:"serviceAccountName,omitempty"`
-	// ResourceClaims are the Pod's DRA claims (its fabric channel).
+	// ResourceClaims are the Pod's DRA claims (its device channel).
 	ResourceClaims json.RawMessage `json:"resourceClaims,omitempty"`
 	// Devices are what the claim exposes, as the engine expects them.
 	Devices []string `json:"devices,omitempty"`
@@ -77,13 +77,13 @@ type PodSpec struct {
 	EndpointFamily string            `json:"endpointFamily,omitempty"`
 	NodeSelector   map[string]string `json:"nodeSelector,omitempty"`
 	NodeName       string            `json:"nodeName,omitempty"`
-	// Privileged runs the agent privileged. When unset, the proc runtime gets
+	// Privileged runs fiberd privileged. When unset, the proc runtime gets
 	// only the capabilities in caps.Proc and no seccomp filter, because criu
 	// cannot dump from under one. Every other runtime runs privileged, a
 	// known gap, even though caps.Runc measures what runc needs.
 	Privileged *bool `json:"privileged,omitempty"`
-	// UnsafeAdmin enables the agent's test-only admin controls. It needs
-	// an image whose agent is built with -tags fiberd_testhooks.
+	// UnsafeAdmin enables fiberd's test-only admin controls. It needs
+	// an image whose fiberd is built with -tags fiberd_testhooks.
 	UnsafeAdmin bool              `json:"unsafeAdmin,omitempty"`
 	Labels      map[string]string `json:"labels,omitempty"`
 	Annotations map[string]string `json:"annotations,omitempty"`
@@ -98,7 +98,7 @@ type Status struct {
 	Node   string `json:"node,omitempty"`
 	// Ready mirrors the Pod's readiness gate: a template is warm.
 	Ready bool `json:"ready"`
-	// Endpoint is where callers reach the agent (Pod IP and port).
+	// Endpoint is where callers reach fiberd (Pod IP and port).
 	Endpoint  string `json:"endpoint,omitempty"`
 	IssuedAt  string `json:"issuedAt,omitempty"`
 	ExpiresAt string `json:"expiresAt,omitempty"`

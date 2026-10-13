@@ -2,8 +2,8 @@
 # Slurm prolog for fiberd (PrologFlags=Alloc: runs once per allocation on
 # each node, as root, before the job). It stages the grants the issuer
 # left for this job in the node's spool into the job's grants directory,
-# where fiberd-slurm's lane picks them up. Verification happens in
-# fiberd-slurm itself, offline against the issuer's keys, before the agent
+# where fiberd-slurm's grant directory picks them up. Verification happens in
+# fiberd-slurm itself, offline against the issuer's keys, before fiberd
 # serves anything; the prolog only moves files.
 #
 # Spool layout: /var/spool/fiberd/grants/<job id>/*.jwt, or

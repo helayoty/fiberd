@@ -1,4 +1,4 @@
-# The fiberd agent image, the one the release publishes. It holds fiberd,
+# The fiberd image, the one the release publishes. It holds fiberd,
 # criu for FIBER_CHECKPOINT, and the zygote library (header and static
 # archive) so a template image can build its zygote from this one. The
 # licenses and notices are under /usr/share/doc.
@@ -53,7 +53,7 @@ RUN set -eu; mkdir -p /out/bin /out/lib /out/doc; \
 FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587
 # Labels for local builds. The release workflow adds the rest.
 LABEL org.opencontainers.image.source="https://github.com/helayoty/fiberd" \
-      org.opencontainers.image.description="The fiberd agent with criu and the zygote library" \
+      org.opencontainers.image.description="fiberd with criu and the zygote library" \
       org.opencontainers.image.licenses="Apache-2.0"
 ARG DEBIAN_FRONTEND=noninteractive
 # The libraries criu links against, and tini.

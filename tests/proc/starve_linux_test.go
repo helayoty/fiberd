@@ -19,17 +19,17 @@ import (
 	"github.com/helayoty/fiberd/pkg/sys/cgroup"
 )
 
-// TestFibersCannotStarveTheAgent lays out a home as a kubelet or docker
-// --memory does: one cgroup with memory.max and pids.max, the agent in
-// an `agent` leaf beside the runtime's subtree. The test process plays
-// the agent and moves itself into the leaf. Fibers are then cloned
+// TestFibersCannotStarveFiberd lays out a home as a kubelet or docker
+// --memory does: one cgroup with memory.max and pids.max, fiberd in
+// a `fiberd` leaf beside the runtime's subtree. The test process plays
+// fiberd and moves itself into the leaf. Fibers are then cloned
 // until one is refused. The subtree must have been capped below the
 // home's limits, the refusal must be the home's own pressure (shed), and
-// the agent must still fork: the limit a fiber runs into is the
+// fiberd must still fork: the limit a fiber runs into is the
 // subtree's, never the home's. Before the cap, the fibers filled the
-// home's pids.max and the agent's next fork failed, which in a Go
-// runtime is a fatal error that takes every fiber down with the agent.
-func TestFibersCannotStarveTheAgent(t *testing.T) {
+// home's pids.max and fiberd's next fork failed, which in a Go
+// runtime is a fatal error that takes every fiber down with fiberd.
+func TestFibersCannotStarveFiberd(t *testing.T) {
 	cases := []struct {
 		name     string
 		pidsMax  uint64
@@ -39,7 +39,7 @@ func TestFibersCannotStarveTheAgent(t *testing.T) {
 		wantMem  string // the subtree's memory.max
 	}{
 		// 96 tasks: the subtree keeps 32 (an eighth is 12, the floor is 64,
-		// half is 48, so 48 are kept). The fibers fill 48, the agent's
+		// half is 48, so 48 are kept). The fibers fill 48, fiberd's
 		// own threads and its fork fit in the rest.
 		{name: "the home's task limit", pidsMax: 96, memMax: 512 << 20, fibers: 128, wantPids: "48", wantMem: strconv.Itoa(448 << 20)},
 	}
@@ -55,16 +55,16 @@ func TestFibersCannotStarveTheAgent(t *testing.T) {
 			if err := home.SetPidsMax(tc.pidsMax); err != nil {
 				t.Fatal(err)
 			}
-			agent := home.Child("agent")
-			if err := os.Mkdir(agent.Path, 0o755); err != nil {
+			own := home.Child("fiberd")
+			if err := os.Mkdir(own.Path, 0o755); err != nil {
 				t.Fatal(err)
 			}
-			// The agent's seat: this process moves in, and back out at the
+			// fiberd's seat: this process moves in, and back out at the
 			// end so the home can be removed.
-			origin := moveSelf(t, agent)
+			origin := moveSelf(t, own)
 			t.Cleanup(func() {
 				_ = os.WriteFile(filepath.Join(origin, "cgroup.procs"), []byte(strconv.Itoa(os.Getpid())), 0o644)
-				for _, d := range []cgroup.Dir{agent, home.Child("fiberd"), home} {
+				for _, d := range []cgroup.Dir{own, home.Child("grants"), home} {
 					_ = d.Kill()
 					for i := 0; i < 100 && d.Remove() != nil; i++ {
 						time.Sleep(10 * time.Millisecond)
@@ -75,7 +75,7 @@ func TestFibersCannotStarveTheAgent(t *testing.T) {
 			run := filepath.Join("/tmp", fmt.Sprintf("fz-starve-%d", os.Getpid()))
 			t.Cleanup(func() { _ = os.RemoveAll(run) })
 			rt, err := newHost(host.Config{Templates: map[string]string{"default": zygoteBin + " --heap-mb 1"},
-				CgroupRoot: home.Child("fiberd").Path, RunDir: run})
+				CgroupRoot: home.Child("grants").Path, RunDir: run})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -99,19 +99,19 @@ func TestFibersCannotStarveTheAgent(t *testing.T) {
 			}
 			t.Logf("%d fibers born, then: %v", born, refusal)
 			for name, want := range map[string]string{"pids.max": tc.wantPids, "memory.max": tc.wantMem} {
-				b, err := os.ReadFile(filepath.Join(home.Path, "fiberd", name))
+				b, err := os.ReadFile(filepath.Join(home.Path, "grants", name))
 				if err != nil {
 					t.Fatal(err)
 				}
 				if got := strings.TrimSpace(string(b)); got != want {
-					t.Errorf("the subtree's %s = %s, want %s: the fibers share the home's limit with the agent", name, got, want)
+					t.Errorf("the subtree's %s = %s, want %s: the fibers share the home's limit with fiberd", name, got, want)
 				}
 			}
 			if born == 0 {
 				t.Fatal("no fiber was born")
 			}
 			if out, err := exec.Command("/bin/true").CombinedOutput(); err != nil {
-				t.Errorf("the agent cannot fork once %d fibers run: %v %s", born, err, out)
+				t.Errorf("fiberd cannot fork once %d fibers run: %v %s", born, err, out)
 			}
 			if refusal == nil {
 				t.Errorf("every one of %d fibers was born under a %d-task home", born, tc.pidsMax)

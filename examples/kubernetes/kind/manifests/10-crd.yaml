@@ -48,7 +48,7 @@ spec:
               properties:
                 template:
                   type: string
-                  description: digest of the zygote artifact the agent's -template maps
+                  description: digest of the zygote artifact fiberd's -template maps
                 fibers:
                   type: object
                   required: [max]

@@ -13,7 +13,7 @@ Substrate installs into a cluster of its own, made with kind (Kubernetes in Dock
 - `kubectl ate suspend` [parks](../../docs/glossary.md#park) the actor, a checkpoint of its whole sandbox, and exports it.
 - The next request resumes it on whichever worker is free, with the count intact.
 
-This example runs the [agent](../../docs/glossary.md#agent) with `-insecure-plaintext`, on the worker's loopback.
+This example runs [fiberd](../../docs/glossary.md#fiberd) with `-insecure-plaintext`, on the worker's loopback.
 
 ## Run it
 

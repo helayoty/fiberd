@@ -84,7 +84,7 @@ func TestOutside(t *testing.T) {
 }
 
 // TestForRuntime checks the measured keep lists. runc's holds everything
-// proc's does and the four the user namespace costs the agent.
+// proc's does and the four the user namespace costs fiberd.
 func TestForRuntime(t *testing.T) {
 	cases := []struct {
 		name     string

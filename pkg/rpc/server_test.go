@@ -27,7 +27,7 @@ import (
 )
 
 type harness struct {
-	agent  *core.Agent
+	core   *core.Core
 	health *core.SourceHealth
 	server *rpc.Server
 	client grantv1.FibersClient
@@ -43,13 +43,13 @@ func (v boundVerifier) Verify(ctx context.Context, token []byte) (core.Grant, er
 	return g, err
 }
 
-func newHarness(t *testing.T, tier core.Tier, opts ...func(*core.Agent)) *harness {
+func newHarness(t *testing.T, tier core.Tier, opts ...func(*core.Core)) *harness {
 	t.Helper()
 	health := core.NewSourceHealth(10*time.Second, time.Now())
-	ag := &core.Agent{
+	ag := &core.Core{
 		NodeID:         "node-a",
 		Ledger:         core.NewLedger(1),
-		Budget:         core.NewBudget(1000, 256<<20),
+		RateLimit:      core.NewRateLimit(1000, 256<<20),
 		Runtime:        stub.NewWithTier(tier),
 		Verify:         grant.InsecureJSONVerifier{},
 		Health:         health,
@@ -63,7 +63,7 @@ func newHarness(t *testing.T, tier core.Tier, opts ...func(*core.Agent)) *harnes
 	go ag.Run(ctx)
 
 	lis := bufconn.Listen(1 << 20)
-	srv := &rpc.Server{Agent: ag, Issuer: "https://issuer.test", RetryAfter: 3 * time.Second}
+	srv := &rpc.Server{Core: ag, Issuer: "https://issuer.test", RetryAfter: 3 * time.Second}
 	gs := rpc.NewGRPCServer(srv)
 	go func() { _ = gs.Serve(lis) }()
 	t.Cleanup(gs.Stop)
@@ -74,7 +74,7 @@ func newHarness(t *testing.T, tier core.Tier, opts ...func(*core.Agent)) *harnes
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = conn.Close() })
-	return &harness{agent: ag, health: health, server: srv, client: grantv1.NewFibersClient(conn)}
+	return &harness{core: ag, health: health, server: srv, client: grantv1.NewFibersClient(conn)}
 }
 
 func jsonGrant(t *testing.T, g core.Grant) string {
@@ -87,19 +87,19 @@ func jsonGrant(t *testing.T, g core.Grant) string {
 }
 
 // A grant at its fiber limit is a miss whose detail travels in the gRPC
-// status. It is DEFERRED_FALLBACK while the lane is healthy and SHED with
+// status. It is DEFERRED_FALLBACK while the issuer is reachable and SHED with
 // retry_after once it is dead.
 func TestMissCarriesDetail(t *testing.T) {
 	cases := []struct {
-		name      string
-		laneDead  bool
-		wantCode  codes.Code
-		wantMiss  grantv1.MissCode
-		wantRetry uint32
+		name       string
+		issuerDown bool
+		wantCode   codes.Code
+		wantMiss   grantv1.MissCode
+		wantRetry  uint32
 	}{
-		{name: "full grant with a healthy lane defers", wantCode: codes.Unavailable,
+		{name: "full grant with the issuer reachable defers", wantCode: codes.Unavailable,
 			wantMiss: grantv1.MissCode_DEFERRED_FALLBACK},
-		{name: "full grant with a dead lane sheds with retry_after", laneDead: true, wantCode: codes.ResourceExhausted,
+		{name: "full grant with the issuer unreachable sheds with retry_after", issuerDown: true, wantCode: codes.ResourceExhausted,
 			wantMiss: grantv1.MissCode_SHED, wantRetry: 3},
 	}
 	for _, tc := range cases {
@@ -110,7 +110,7 @@ func TestMissCarriesDetail(t *testing.T) {
 			if _, err := h.client.Clone(ctx, &grantv1.CloneRequest{GrantJwt: g}); err != nil {
 				t.Fatalf("first clone: %v", err)
 			}
-			if tc.laneDead {
+			if tc.issuerDown {
 				h.health.MarkSync(time.Now().Add(-time.Minute))
 			}
 			_, err := h.client.Clone(ctx, &grantv1.CloneRequest{GrantJwt: g})
@@ -125,7 +125,7 @@ func TestMissCarriesDetail(t *testing.T) {
 	}
 }
 
-// Every agent outcome maps to one gRPC code. Only the two capacity misses
+// Every core outcome maps to one gRPC code. Only the two capacity misses
 // carry a Miss detail, and a deferred remote miss names the home the
 // caller should prefer.
 func TestEveryOutcomeMaps(t *testing.T) {
@@ -281,7 +281,7 @@ func TestIdempotentAttachAndTierFloor(t *testing.T) {
 func TestCallerOwnsItsGrantsFibers(t *testing.T) {
 	owner := tlsconf.Caller{Thumbprint: "owner-x5t"}
 	other := tlsconf.Caller{Thumbprint: "other-x5t"}
-	h := newHarness(t, core.TierCheckpoint, func(a *core.Agent) { a.Verify = boundVerifier{thumbprint: owner.Thumbprint} })
+	h := newHarness(t, core.TierCheckpoint, func(a *core.Core) { a.Verify = boundVerifier{thumbprint: owner.Thumbprint} })
 	gw := (&rpc.Gateway{Server: h.server}).Handler()
 	g := jsonGrant(t, core.Grant{UID: "g1", Audience: "node-a", Tenant: "acme"})
 

@@ -1,5 +1,5 @@
 // ateom-fiberd is a Substrate sandbox-class herder whose actors are
-// fibers: one binary that runs fiberd's agent (the substrate home, the
+// fibers: one binary that runs fiberd (the substrate home, the
 // gVisor backend, a file delta registry) and, in front of it, the gRPC
 // service atelet drives, the mTLS ingress atenet-router dials and the
 // readiness endpoint the kubelet probes. It takes the exact arguments
@@ -25,10 +25,10 @@ import (
 
 	"google.golang.org/grpc"
 
-	"github.com/helayoty/fiberd/pkg/agent"
 	"github.com/helayoty/fiberd/pkg/artifact"
 	"github.com/helayoty/fiberd/pkg/consumer"
 	"github.com/helayoty/fiberd/pkg/core"
+	"github.com/helayoty/fiberd/pkg/fiberd"
 	"github.com/helayoty/fiberd/pkg/grant"
 	fhome "github.com/helayoty/fiberd/pkg/home"
 	"github.com/helayoty/fiberd/pkg/runtime/host"
@@ -97,7 +97,7 @@ func run(podUID, listen, credBundle, trustBundle, clientID, readyAddr string, pa
 
 	// fiberd's side, from the image's environment.
 	stateDir := env("ATEOM_FIBERD_STATE", "/var/lib/fiberd")
-	agentAddr := env("ATEOM_FIBERD_LISTEN", "127.0.0.1:8484")
+	fiberdAddr := env("ATEOM_FIBERD_LISTEN", "127.0.0.1:8484")
 	templates := map[string]string{}
 	for _, e := range strings.Split(env("ATEOM_FIBERD_TEMPLATE", defaultTemplate), ";") {
 		if strings.TrimSpace(e) == "" {
@@ -109,7 +109,7 @@ func run(podUID, listen, credBundle, trustBundle, clientID, readyAddr string, pa
 	}
 	registry := artifact.FileScheme + filepath.Join(stateDir, "registry")
 
-	// The issuer on the loopback: the agent verifies against it.
+	// The issuer on the loopback: fiberd verifies against it.
 	il, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return err
@@ -140,10 +140,10 @@ func run(podUID, listen, credBundle, trustBundle, clientID, readyAddr string, pa
 		}
 	}()
 
-	// The agent, as a library.
-	var c agent.Config
+	// fiberd, as a library.
+	var c fiberd.Config
 	c.Bind(flag.NewFlagSet("fiberd", flag.ContinueOnError))
-	c.Listen, c.NodeID, c.StateDir = agentAddr, podUID, stateDir
+	c.Listen, c.NodeID, c.StateDir = fiberdAddr, podUID, stateDir
 	c.Verifier, c.Issuer = "jwks", issuerURL
 	c.InsecurePlaintext = true
 	if err := runtimeEnv(&c); err != nil {
@@ -155,26 +155,26 @@ func run(podUID, listen, credBundle, trustBundle, clientID, readyAddr string, pa
 	c.DeltaKey, c.DeltaSealKey = deltaKey, sealKey
 	c.DeltaTrust = os.Getenv("ATEOM_FIBERD_DELTA_TRUST")
 	c.Finish()
-	// The readiness check reads its own copy, since the agent's goroutine
-	// writes c. Its state dir is absolute, as the agent makes c's.
+	// The readiness check reads its own copy, since fiberd's goroutine
+	// writes c. Its state dir is absolute, as fiberd makes c's.
 	if abs, err := filepath.Abs(c.StateDir); err == nil {
 		c.StateDir = abs
 	}
 	health := c
-	// Load the keys before the agent starts, so a bad key stops the worker
+	// Load the keys before fiberd starts, so a bad key stops the worker
 	// before it serves anything.
 	deltaKeys, err := c.LoadDeltaKeys()
 	if err != nil {
 		return err
 	}
-	agentErr := make(chan error, 1)
+	fiberdErr := make(chan error, 1)
 	go func() {
-		agentErr <- agent.Run(&c, func(*agent.Config, *grant.Cache) (fhome.Home, error) { return h, nil })
+		fiberdErr <- fiberd.Run(&c, func(*fiberd.Config, *grant.Cache) (fhome.Home, error) { return h, nil })
 	}()
-	if err := waitTCP(ctx, agentAddr, 60*time.Second, agentErr); err != nil {
-		return fmt.Errorf("agent did not come up: %w", err)
+	if err := waitTCP(ctx, fiberdAddr, 60*time.Second, fiberdErr); err != nil {
+		return fmt.Errorf("fiberd did not come up: %w", err)
 	}
-	client, err := consumer.Dial(ctx, agentAddr)
+	client, err := consumer.Dial(ctx, fiberdAddr)
 	if err != nil {
 		return err
 	}
@@ -220,16 +220,16 @@ func run(podUID, listen, credBundle, trustBundle, clientID, readyAddr string, pa
 	}
 	gs := grpc.NewServer()
 	ateompb.RegisterAteomServer(gs, svc)
-	// The worker ends when its agent exits, or when it refuses atelet's
-	// certificate. It would otherwise serve atelet with no agent behind it,
+	// The worker ends when its fiberd exits, or when it refuses atelet's
+	// certificate. It would otherwise serve atelet with no fiberd behind it,
 	// or never be offered an actor.
 	fail := make(chan error, 2)
 	go func() {
-		err := <-agentErr
+		err := <-fiberdErr
 		if err == nil {
 			err = errors.New("exited")
 		}
-		fail <- fmt.Errorf("agent: %w", err)
+		fail <- fmt.Errorf("fiberd: %w", err)
 	}()
 	// Reported once atelet's calls can reach the herder: an actor may be
 	// placed here as soon as atelet accepts it.
@@ -244,7 +244,7 @@ func run(podUID, listen, credBundle, trustBundle, clientID, readyAddr string, pa
 		gs.GracefulStop()
 	}()
 
-	// Readiness for the kubelet: the agent up and every minted template warm.
+	// Readiness for the kubelet: fiberd up and every minted template warm.
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /readyz", readyz(h.Ready, health.Healthz))
 	go func() {
@@ -255,7 +255,7 @@ func run(podUID, listen, credBundle, trustBundle, clientID, readyAddr string, pa
 		}
 	}()
 
-	log.Printf("ateom-fiberd: pod %s serving atelet at %s, ingress on %s, agent at %s, templates %v", podUID, sock, listen, agentAddr, templates)
+	log.Printf("ateom-fiberd: pod %s serving atelet at %s, ingress on %s, fiberd at %s, templates %v", podUID, sock, listen, fiberdAddr, templates)
 	err = serve(ctx, gs, ul, fail)
 	_ = os.Remove(sock)
 	return err
@@ -285,7 +285,7 @@ func serve(ctx context.Context, gs *grpc.Server, l net.Listener, fail <-chan err
 }
 
 // readyz is the kubelet's readiness check. It is 503 while a template
-// warms, and while the agent's /healthz is not 200, as when its audit
+// warms, and while fiberd's /healthz is not 200, as when its audit
 // spool is poisoned. Substrate then places no actor here.
 func readyz(ready func() bool, healthz func(context.Context) error) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -308,13 +308,13 @@ func readyz(ready func() bool, healthz func(context.Context) error) http.Handler
 // a gVisor sandbox's init, serving HTTP, at its path inside the rootfs.
 const defaultTemplate = "default=/bin/refzygote --heap-mb 16 --gvisor --http"
 
-// runtimeEnv picks the agent's backend from the image's environment. The
+// runtimeEnv picks fiberd's backend from the image's environment. The
 // default is gvisor, so every actor runs behind its own sandbox kernel and
 // the pool's `sandboxClass: gvisor` holds. ATEOM_FIBERD_RUNTIME selects
 // another backend for tests of the mechanism. A gvisor worker whose
-// rootfs is missing refuses to start, since an agent without one would
+// rootfs is missing refuses to start, since a fiberd without one would
 // serve and never warm a template.
-func runtimeEnv(c *agent.Config) error {
+func runtimeEnv(c *fiberd.Config) error {
 	c.RuntimeName = env("ATEOM_FIBERD_RUNTIME", "gvisor")
 	c.GvisorRootfs = env("ATEOM_FIBERD_GVISOR_ROOTFS", "/var/lib/fiberd/gvisor-rootfs")
 	c.Runsc = env("ATEOM_FIBERD_RUNSC", c.Runsc)
@@ -346,14 +346,14 @@ func sharedDeltaKeys() (key, seal string, err error) {
 	return key, seal, nil
 }
 
-// waitTCP waits for addr to accept connections, or for the agent to fail.
-func waitTCP(ctx context.Context, addr string, timeout time.Duration, agentErr <-chan error) error {
+// waitTCP waits for addr to accept connections, or for fiberd to fail.
+func waitTCP(ctx context.Context, addr string, timeout time.Duration, fiberdErr <-chan error) error {
 	deadline := time.Now().Add(timeout)
 	for {
 		select {
-		case err := <-agentErr:
+		case err := <-fiberdErr:
 			if err == nil {
-				err = errors.New("agent exited")
+				err = errors.New("fiberd exited")
 			}
 			return err
 		case <-ctx.Done():

@@ -29,7 +29,7 @@ import (
 )
 
 type home struct {
-	agent  *core.Agent
+	core   *core.Core
 	health *core.SourceHealth
 	client *consumer.Client
 }
@@ -37,8 +37,8 @@ type home struct {
 func newHome(t *testing.T, tier core.Tier) *home {
 	t.Helper()
 	health := core.NewSourceHealth(10*time.Second, time.Now())
-	ag := &core.Agent{
-		NodeID: "node-a", Ledger: core.NewLedger(1), Budget: core.NewBudget(1000, 256<<20),
+	ag := &core.Core{
+		NodeID: "node-a", Ledger: core.NewLedger(1), RateLimit: core.NewRateLimit(1000, 256<<20),
 		Runtime: stub.NewWithTier(tier), Verify: grant.InsecureJSONVerifier{},
 		Health: health, StatusInterval: 20 * time.Millisecond,
 	}
@@ -46,7 +46,7 @@ func newHome(t *testing.T, tier core.Tier) *home {
 	t.Cleanup(cancel)
 	go ag.Run(ctx)
 	lis := bufconn.Listen(1 << 20)
-	gs := rpc.NewGRPCServer(&rpc.Server{Agent: ag, Issuer: "https://issuer.test", RetryAfter: 2 * time.Second})
+	gs := rpc.NewGRPCServer(&rpc.Server{Core: ag, Issuer: "https://issuer.test", RetryAfter: 2 * time.Second})
 	go func() { _ = gs.Serve(lis) }()
 	t.Cleanup(gs.Stop)
 	conn, err := grpc.NewClient("passthrough:///bufconn",
@@ -57,7 +57,7 @@ func newHome(t *testing.T, tier core.Tier) *home {
 	}
 	c := consumer.New(conn)
 	t.Cleanup(func() { _ = c.Close() })
-	return &home{agent: ag, health: health, client: c}
+	return &home{core: ag, health: health, client: c}
 }
 
 func jsonGrant(t *testing.T, g core.Grant) string {
@@ -130,24 +130,24 @@ func TestCloneAttachParkResume(t *testing.T) {
 	}
 }
 
-// Misses come back as typed errors. A healthy lane gives *Deferred, the
-// ordinary path. A dead lane gives *Shed with retry_after. A tier gap is
+// Misses come back as typed errors. A reachable issuer gives *Deferred, the
+// ordinary path. An unreachable one gives *Shed with retry_after. A tier gap is
 // not a miss. It is a *TierGap.
 func TestMissesAreTyped(t *testing.T) {
 	cases := []struct {
-		name     string
-		tier     core.Tier // the home's
-		minTier  core.Tier // the grant's
-		full     bool      // a first clone has taken the grant's only fiber
-		laneDown bool
-		want     func(error) bool
+		name       string
+		tier       core.Tier // the home's
+		minTier    core.Tier // the grant's
+		full       bool      // a first clone has taken the grant's only fiber
+		issuerDown bool
+		want       func(error) bool
 	}{
-		{name: "a full grant with the lane healthy is *Deferred from the issuer", tier: core.TierCheckpoint, full: true,
+		{name: "a full grant with the issuer reachable is *Deferred from the issuer", tier: core.TierCheckpoint, full: true,
 			want: func(err error) bool {
 				var def *consumer.Deferred
 				return errors.As(err, &def) && def.Issuer == "https://issuer.test"
 			}},
-		{name: "a full grant with the lane down is *Shed with retry 2s", tier: core.TierCheckpoint, full: true, laneDown: true,
+		{name: "a full grant with the issuer unreachable is *Shed with retry 2s", tier: core.TierCheckpoint, full: true, issuerDown: true,
 			want: func(err error) bool {
 				var shed *consumer.Shed
 				// The home's reason, not one the client assumes.
@@ -169,7 +169,7 @@ func TestMissesAreTyped(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if tc.laneDown {
+			if tc.issuerDown {
 				h.health.MarkSync(time.Now().Add(-time.Hour))
 			}
 			_, err := h.client.Clone(ctx, g, "", time.Second, nil)

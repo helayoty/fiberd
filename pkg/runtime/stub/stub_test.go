@@ -157,12 +157,12 @@ func TestLifecycle(t *testing.T) {
 			if st, err := rt.Stats(ctx, h.ID); err != nil || st.WUsedBytes != 105 {
 				t.Fatalf("Stats = %+v, %v; want W 105", st, err)
 			}
-			// As on a host, the delta stays until the agent discards it.
+			// As on a host, the delta stays until fiberd discards it.
 			if !rt.HasDelta(ref) {
 				t.Fatal("the delta did not survive its resume")
 			}
 		}},
-		{"the agent discards the delta a resume came from", func(t *testing.T) {
+		{"fiberd discards the delta a resume came from", func(t *testing.T) {
 			if err := rt.DiscardDelta(ctx, ref); err != nil || rt.HasDelta(ref) {
 				t.Fatalf("DiscardDelta: %v, delta kept %v", err, rt.HasDelta(ref))
 			}

@@ -59,7 +59,7 @@ const (
 	criContainerName = "io.kubernetes.cri.container-name"
 
 	// DefaultHome is where the shim looks for a home when the Pod names
-	// none: the node's own agent.
+	// none: the node's own fiberd.
 	DefaultHome = "127.0.0.1:8484"
 	// StateFile in the bundle records the fiber, for the manager's Stop
 	// after a shim crash.

@@ -50,7 +50,7 @@ func (p Pair) Issue(t testing.TB, tmpl *x509.Certificate) Pair {
 // Server is a server certificate from p for localhost and 127.0.0.1.
 func (p Pair) Server(t testing.TB) Pair {
 	t.Helper()
-	return p.Issue(t, &x509.Certificate{Subject: pkix.Name{CommonName: "agent"},
+	return p.Issue(t, &x509.Certificate{Subject: pkix.Name{CommonName: "fiberd"},
 		DNSNames: []string{"localhost"}, IPAddresses: []net.IP{net.IPv4(127, 0, 0, 1)},
 		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}})
 }

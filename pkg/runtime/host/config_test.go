@@ -62,7 +62,7 @@ func TestConfigDerivations(t *testing.T) {
 			cfg:   Config{PrivateDir: "state/private", RunDir: "/run/fiberd"},
 			grant: sized, grantPids: 5 * fiberPidsMax, quota: 4 * 4 * 32 << 20, ceiling: 160 << 20,
 			hide: []string{token}, skipped: []string{"state/private"}},
-		// A proc fiber runs as the agent's uid and could rewrite a cached
+		// A proc fiber runs as fiberd's uid and could rewrite a cached
 		// template, so the cache is hidden like the keys and the deltas.
 		{name: "the template cache is hidden without being listed, once, after the private dir",
 			cfg: Config{DeltaDir: "/var/lib/fiberd/deltas", PrivateDir: "/var/lib/fiberd/private", TemplateCache: "/var/lib/fiberd/templates/", RunDir: "/run/fiberd",

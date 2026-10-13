@@ -48,7 +48,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
         payload_num(data, size, keys[sel % 4]);
         break;
     }
-    default: { /* a control line from the agent: EVICT <fence> or anything else */
+    default: { /* a control line from fiberd: EVICT <fence> or anything else */
         char *line = malloc(size + 1);
         if (!line) abort();
         memcpy(line, data, size);

@@ -44,7 +44,7 @@ func httpDo(t *testing.T, method, ep, path string) string {
 
 // TestRelayedTCPEndpoints: a runc home with an inet family. The grant's
 // container has a loopback-only network namespace, so its fibers serve
-// unix sockets under /host and the agent relays a port of the declared
+// unix sockets under /host and fiberd relays a port of the declared
 // address to each. Callers do HTTP over the tcp endpoint, and a park and
 // resume keep the fiber's state and port.
 func TestRelayedTCPEndpoints(t *testing.T) {
@@ -117,7 +117,7 @@ func TestRelayedTCPEndpoints(t *testing.T) {
 				t.Fatalf("GET /count after resume = %q, want 1", got)
 			}
 			// The restored process holds its birth fence. The new one is
-			// the file the agent published beside its socket, under /host.
+			// the file fiberd published beside its socket, under /host.
 			if got := httpDo(t, http.MethodGet, h3.Endpoint, "/fence"); got != h3.ID {
 				t.Fatalf("GET /fence after resume = %q, want %s", got, h3.ID)
 			}

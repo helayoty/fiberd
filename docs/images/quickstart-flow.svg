@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1440" height="736" viewBox="0 0 1440 736" role="img" aria-labelledby="quickstart-flow-title quickstart-flow-desc">
   <title id="quickstart-flow-title">What does the quickstart run?</title>
-  <desc id="quickstart-flow-desc">The quickstart's steps in four rows, read left to right. Set up builds fiberd and its tools, starts the issuer and an agent on the in-memory runtime, which works on any OS, and mints a grant for 2 fibers of 1 MiB each with a 10 minute lease. Session S then runs Clone S, which answers CREATE with fiber g1/1/1, Clone S again, which answers ATTACH with the same fence, Park g1/1/1, and Clone S, which answers RESUME with g1/1/2. Misses and restart probes the refusals, HTTP 400, 503 and 429, stops the agent so its signed audit record verifies, restarts on the same state at epoch 2, and shows that Park g1/1/2 returns 404 because the restart ended it. On Linux, a real agent starts on the proc backend with a real template. Clone S and two calls count to 2, Park and Clone S resume it as g1/1/2, and the next call returns 3 because the state was kept.</desc>
+  <desc id="quickstart-flow-desc">The quickstart's steps in four rows, read left to right. Set up builds fiberd and its tools, starts the issuer and fiberd on the in-memory runtime, which works on any OS, and mints a grant for 2 fibers of 1 MiB each with a 10 minute lease. Session S then runs Clone S, which answers CREATE with fiber g1/1/1, Clone S again, which answers ATTACH with the same fence, Park g1/1/1, and Clone S, which answers RESUME with g1/1/2. Misses and restart probes the refusals, HTTP 400, 503 and 429, stops fiberd so its signed audit record verifies, restarts on the same state at epoch 2, and shows that Park g1/1/2 returns 404 because the restart ended it. On Linux, fiberd starts on the proc backend with a real template. Clone S and two calls count to 2, Park and Clone S resume it as g1/1/2, and the next call returns 3 because the state was kept.</desc>
   <style>
     :root{--bg:#f7f9fc;--panel:#fff;--ink:#172033;--muted:#5d6b7d;--border:#b8c4d4;--blue:#3165b5;--blue-bg:#eaf1ff;--teal:#13776f;--teal-bg:#e8f7f4;--violet:#704aa1;--violet-bg:#f2edfa;--amber:#a76500;--amber-bg:#fff3d6;--green:#287a4d;--green-bg:#e8f6ed}
     @media(prefers-color-scheme:dark){:root{--bg:#0d1117;--panel:#161b22;--ink:#e6edf3;--muted:#a3adba;--border:#3d4652;--blue:#79a7ff;--blue-bg:#17243d;--teal:#53c7b8;--teal-bg:#102923;--violet:#c09cff;--violet-bg:#251b35;--amber:#f0b44d;--amber-bg:#30240f;--green:#63cf8e;--green-bg:#142b1e}}
@@ -26,7 +26,7 @@
   <text class="name blue" x="272" y="209">Build</text>
   <text class="secondary" x="272" y="236">fiberd and its tools</text>
   <rect class="box blue-stroke" x="536" y="176" width="256" height="76" rx="4"/>
-  <text class="name blue" x="560" y="209">Start issuer and agent</text>
+  <text class="name blue" x="560" y="209">Start issuer and fiberd</text>
   <text class="secondary" x="560" y="236">in-memory runtime, any OS</text>
   <rect class="box blue-stroke" x="824" y="176" width="256" height="76" rx="4"/>
   <text class="name blue" x="848" y="209">Mint a grant</text>
@@ -53,7 +53,7 @@
   <text class="name amber" x="272" y="481">Probe refusals</text>
   <text class="secondary" x="272" y="508">400 · 503 · 429</text>
   <rect class="box amber-stroke" x="536" y="448" width="256" height="76" rx="4"/>
-  <text class="name amber" x="560" y="481">Stop the agent</text>
+  <text class="name amber" x="560" y="481">Stop fiberd</text>
   <text class="secondary" x="560" y="508">signed audit verifies</text>
   <rect class="box amber-stroke" x="824" y="448" width="256" height="76" rx="4"/>
   <text class="name amber" x="848" y="481">Restart</text>
@@ -65,7 +65,7 @@
   <rect class="band band-exec" x="48" y="588" width="1344" height="108" rx="12"/>
   <text class="lane green" x="72" y="648">On Linux</text>
   <rect class="box green-stroke" x="248" y="604" width="256" height="76" rx="4"/>
-  <text class="name green" x="272" y="637">Start a real agent</text>
+  <text class="name green" x="272" y="637">Start fiberd</text>
   <text class="secondary" x="272" y="664">proc backend, real template</text>
   <rect class="box green-stroke" x="536" y="604" width="256" height="76" rx="4"/>
   <text class="name green" x="560" y="637">Clone S, call twice</text>

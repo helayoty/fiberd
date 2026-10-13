@@ -1,11 +1,11 @@
-// Command fiberd is the grant agent on a standalone host: one process per
+// Command fiberd is fiberd on a standalone host: one process per
 // home instance. It verifies signed grants offline, mints fibers under
 // them through a runtime, and serves the grant protocol (api/grant/v1)
-// over gRPC. The agent itself is pkg/agent; this binary adds the
+// over gRPC. fiberd itself is pkg/fiberd; this binary adds the
 // standalone home. An integration with another environment builds its
 // own binary the same way (examples/kubernetes/cmd/fiberd-k8s).
 //
-// Startup order is fixed: epoch++ -> reconcile -> open RPC. The agent
+// Startup order is fixed: epoch++ -> reconcile -> open RPC. fiberd
 // serves nothing until its view of the home is real.
 package main
 
@@ -19,7 +19,7 @@ import (
 	"os"
 
 	"github.com/helayoty/fiberd/internal/cli"
-	"github.com/helayoty/fiberd/pkg/agent"
+	"github.com/helayoty/fiberd/pkg/fiberd"
 )
 
 // version is set at link time with -ldflags "-X main.version=v0.1.0".
@@ -31,11 +31,11 @@ func main() {
 
 // run is fiberd until ctx ends, SIGINT or SIGTERM. It returns exit code
 // 0 for a clean stop, -h or -version, 2 for bad flags, and 1 when the
-// agent fails.
+// fiberd fails.
 func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("fiberd", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	var c agent.Config
+	var c fiberd.Config
 	c.Bind(fs)
 	showVersion := fs.Bool("version", false, "print the version and exit")
 	if err := fs.Parse(args); err != nil {
@@ -54,7 +54,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		logger.Print(err)
 		return 1
 	}
-	if err := agent.RunContext(ctx, &c, agent.Standalone); err != nil {
+	if err := fiberd.RunContext(ctx, &c, fiberd.Standalone); err != nil {
 		logger.Print(err)
 		return 1
 	}

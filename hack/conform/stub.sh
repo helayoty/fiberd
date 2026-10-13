@@ -3,7 +3,7 @@
 #
 #   hack/conform/stub.sh run            build, start, conform, stop
 #   hack/conform/stub.sh start|stop|restart
-#   hack/conform/stub.sh lane up|down   flip grant-lane health (admin socket)
+#   hack/conform/stub.sh issuer-reachable up|down   flip whether the issuer is reachable (admin socket)
 #
 # CONFORM_SIGNED=1 runs the signed-grant mode: a grant-issuer serves the
 # JWKS, fiberd verifies with -verifier=jwks, and grant-conform mints real
@@ -13,8 +13,8 @@
 # State lives in $CONFORM_STATE (default bin/conform-state), so the
 # restart hook keeps the epoch file and the audit spool across restarts.
 #
-# The agent is bin/fiberd-testhooks, fiberd built with -tags
-# fiberd_testhooks so -admin-unsafe and the lane and scope-lost hooks exist.
+# fiberd is bin/fiberd-testhooks, fiberd built with -tags
+# fiberd_testhooks so -admin-unsafe and the issuer and scope-lost hooks exist.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
@@ -103,16 +103,16 @@ stop_pidfile() {
 
 stop() { stop_pidfile "$STATE/pid"; }
 
-lane() {
+issuer_reachable() {
   case "$1" in
-    up)   curl -sf --unix-socket "$STATE/private/admin.sock" -X POST http://x/lane -d '{"healthy":true}' >/dev/null ;;
-    down) curl -sf --unix-socket "$STATE/private/admin.sock" -X POST http://x/lane -d '{"healthy":false}' >/dev/null ;;
-    *) echo "lane up|down" >&2; return 2 ;;
+    up)   curl -sf --unix-socket "$STATE/private/admin.sock" -X POST http://x/issuer -d '{"reachable":true}' >/dev/null ;;
+    down) curl -sf --unix-socket "$STATE/private/admin.sock" -X POST http://x/issuer -d '{"reachable":false}' >/dev/null ;;
+    *) echo "issuer-reachable up|down" >&2; return 2 ;;
   esac
 }
 
 # scope-lost: the standalone home's stand-in for losing its scope while
-# running (a namespace, a fabric claim): the agent bumps its epoch in
+# running (a namespace, a DRA claim): fiberd bumps its epoch in
 # place, which revokes every fence at once.
 scope_lost() {
   curl -sf --unix-socket "$STATE/private/admin.sock" -X POST http://x/scope-lost >/dev/null
@@ -130,7 +130,7 @@ case "${1:-}" in
   start) start ;;
   stop) stop ;;
   restart) stop; start ;;
-  lane) lane "$2" ;;
+  issuer-reachable) issuer_reachable "$2" ;;
   engine-kill) engine_kill "$2" ;;
   scope-lost) scope_lost ;;
   run)
@@ -156,7 +156,7 @@ case "${1:-}" in
     fi
     start
     bin/grant-conform -test.v -target "$ADDR" -target-tier "$TIER" -node-id "$NODE" -isolation "$ISOLATION" -fiber-warm "$WARM" "${mint[@]}" \
-      -restart-cmd "$0 restart" -cp-health-cmd "$0 lane \$1" -audit-file "$STATE/private/audit.jsonl" \
+      -restart-cmd "$0 restart" -cp-health-cmd "$0 issuer-reachable \$1" -audit-file "$STATE/private/audit.jsonl" \
       -scope-cmd "$0 scope-lost" ${ENGINE_HOOK[@]+"${ENGINE_HOOK[@]}"} "${@:2}"
     if [ "$WARM" -gt 0 ]; then
       pooled=$(grep -c '"detail":"pooled"' "$STATE/private/audit.jsonl" || true)
@@ -164,5 +164,5 @@ case "${1:-}" in
       [ "$pooled" -gt 0 ] || { echo "pool: fibers.warm=$WARM but no clone was served from the pool" >&2; exit 1; }
     fi
     ;;
-  *) echo "usage: $0 run|start|stop|restart|lane up|down" >&2; exit 2 ;;
+  *) echo "usage: $0 run|start|stop|restart|issuer-reachable up|down" >&2; exit 2 ;;
 esac

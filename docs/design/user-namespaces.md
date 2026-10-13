@@ -6,11 +6,11 @@ This doc explains why runc [fibers](../glossary.md#fiber) run in a user namespac
 
 A fiber on the proc backend is host root with every capability dropped. The kernel checks the owner write bit for euid 0 on sysctl and kernfs files and asks for no capability, so read-only mounts of `/sys` and the host controls under `/proc`, covered paths and empty capability sets are all that stands between the fiber and the host. Mapping a grant's root to an unprivileged host uid range makes the kernel refuse host resources by ownership, and the mounts become a second line.
 
-**The problem with [CRIU](../glossary.md#criu) restore.** A restore creates the fiber's user namespace and a mount namespace copied from the [agent](../glossary.md#agent)'s, and the kernel marks every copied mount `MNT_LOCKED` together with its children. CRIU re-creates a mount inherited from the host, such as `/dev`, with a non-recursive bind, which the kernel refuses for a source with locked children. The restore fails with `open_tree /dev: EINVAL`.
+**The problem with [CRIU](../glossary.md#criu) restore.** A restore creates the fiber's user namespace and a mount namespace copied from [fiberd](../glossary.md#fiberd)'s, and the kernel marks every copied mount `MNT_LOCKED` together with its children. CRIU re-creates a mount inherited from the host, such as `/dev`, with a non-recursive bind, which the kernel refuses for a source with locked children. The restore fails with `open_tree /dev: EINVAL`.
 
 ```mermaid
 flowchart LR
-  subgraph A["Restore into a user namespace from the agent's mounts"]
+  subgraph A["Restore into a user namespace from fiberd's mounts"]
     H[host mount tree] -->|copied into the new namespace| L[every mount MNT_LOCKED]
     L -->|"CRIU binds /dev non-recursively"| E["EINVAL, restore fails"]
   end
@@ -52,6 +52,6 @@ flowchart LR
 - The zygote keeps nine capabilities inside its namespace while serving, and the kernel allows it overlayfs. The nested-namespace cap and the seccomp filter bound what a fiber can do with that.
 - runc coupling. The device bind list and the `exec.fifo` ownership are runc 1.1's and need a check on each bump.
 - Untested with Yama `ptrace_scope` 1.
-- A fiber reads the agent's network devices under its read-only `/sys`, since that is a bind of the host's sysfs.
+- A fiber reads fiberd's network devices under its read-only `/sys`, since that is a bind of the host's sysfs.
 - `runc run` and `criu restore` go through util-linux's `unshare` and `mount`. The backend looks for neither, nor for `runc`, when it opens, so a home without them starts and fails at warm.
 - A Pod with `hostUsers: false` gets a range of only 65536 ids, which leaves no room for per-grant slots ([security.md](../security.md#known-gaps)).

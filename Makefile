@@ -85,8 +85,8 @@ conform-hyperlight: ## C1-C10 against the hyperlight backend with the real helpe
 	  CONFORM_STATE=$(CONFORM_DIR)/conform-state-hyperlight-kvm hack/conform/stub.sh run
 
 ## The Kubernetes example (examples/kubernetes, its own module): the issuer
-## as a controller, a grant Pod with the agent as PID 1, conformance from
-## the host, the storm inside. What fiberd needs for it is pkg/agent and
+## as a controller, a grant Pod with fiberd as PID 1, conformance from
+## the host, the storm inside. What fiberd needs for it is pkg/fiberd and
 ## pkg/home; everything Kubernetes lives in the example.
 
 kind-up: ## create the kind cluster (examples/kubernetes/kind/kind.yaml)
@@ -102,7 +102,7 @@ conform-kind: ## C1-C10, the overcommit storm and an UNTRUSTED gVisor session ch
 	examples/kubernetes/kind/conform.sh run
 
 ## The Slurm example (examples/slurm, its own module): a one-node Slurm in
-## Docker, the agent as a job in its allocation's cgroup, conformance from
+## Docker, fiberd as a job in its allocation's cgroup, conformance from
 ## the host, the storm inside.
 
 slurm-up: ## build fiberd:slurm and start the one-node cluster container

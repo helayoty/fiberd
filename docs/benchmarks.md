@@ -155,7 +155,7 @@ The burst sizes differ because each gVisor sandbox has a much larger fixed footp
 
 ## Run B: fork and copy-on-write mechanism
 
-These numbers came from a standalone C microbenchmark that isolated `fork()` and copy-on-write behavior. It did not use the fiberd agent, protocol, ledger, cgroups, or CRIU. That benchmark has since been removed. [`tests/proc/bench_linux_test.go`](../tests/proc/bench_linux_test.go) now measures the same shapes through the real proc runtime (Run A).
+These numbers came from a standalone C microbenchmark that isolated `fork()` and copy-on-write behavior. It did not use fiberd itself, the protocol, the ledger, cgroups, or CRIU. That benchmark has since been removed. [`tests/proc/bench_linux_test.go`](../tests/proc/bench_linux_test.go) now measures the same shapes through the real proc runtime (Run A).
 
 **Environment**
 
@@ -176,7 +176,7 @@ The warm run initialized a 128 MiB parent, started 50 children concurrently, and
 
 The broad PSS range reflects repeated development runs rather than one archived output file. Read these numbers as a check of the mechanism, not as a fiberd end-to-end latency claim.
 
-To measure these shapes today, run `make bench`. It runs `TestStormNumbers` from [`tests/proc/bench_linux_test.go`](../tests/proc/bench_linux_test.go) in the development container. Its results are not comparable with this table. They include the agent, the control socket and cgroups, and the zygote heap is 32 MiB. There is no cold run.
+To measure these shapes today, run `make bench`. It runs `TestStormNumbers` from [`tests/proc/bench_linux_test.go`](../tests/proc/bench_linux_test.go) in the development container. Its results are not comparable with this table. They include fiberd, the control socket and cgroups, and the zygote heap is 32 MiB. There is no cold run.
 
 ## Run C: Knative-shaped activator
 
@@ -247,7 +247,7 @@ storage or a Substrate control plane.
 
 ## Run F: end-to-end Clone over gRPC
 
-This run measures Clone the way a consumer sees it and splits each round trip into stages. The client calls the Fibers service over loopback TCP. The grant is signed by an in-process issuer and verified through its JWKS. The agent uses the production ledger, budget, audit spool, and snapshot store with the proc backend.
+This run measures Clone the way a caller sees it and splits each round trip into stages. The client calls the Fibers service over loopback TCP. The grant is signed by an in-process issuer and verified through its JWKS. fiberd uses the production ledger, budget, audit spool, and snapshot store with the proc backend.
 
 **Environment**
 
@@ -271,11 +271,11 @@ make bench-e2e
 - Host is the host runtime's work around the backend. That covers the cgroup leaf and its limits, the run directory, and the endpoint.
 - Zygote is the backend round trip from `CLONE` to `CLONED`, including any wait behind other clones.
 - Audit is the create record. A sync record also waits for fsync.
-- Agent is everything else. That covers gRPC, protobuf, admission, grant verification, the budget, the ledger, and the snapshot store.
-- Verify is also reported on its own because it is a part of agent.
+- fiberd is everything else. That covers gRPC, protobuf, admission, grant verification, the clone rate limit, the ledger, and the snapshot store.
+- Verify is also reported on its own because it is a part of the fiberd stage.
 - Each case warms its grant with one clone first, which is reported separately and excluded from the quantiles. Sequential cases run 100 clones and release each one before the next. Burst cases run 5 rounds of 50 concurrent clones and release each round before the next.
 
-| Case, p50 (p99) | Round trip | Host | Zygote | Audit | Agent | Of which verify |
+| Case, p50 (p99) | Round trip | Host | Zygote | Audit | fiberd | Of which verify |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | Sequential, best-effort audit | 1.81 ms (9.01 ms) | 0.15 ms | 0.93 ms | 0.02 ms | 0.50 ms | 0.18 ms |
 | Sequential, sync audit | 2.49 ms (21.87 ms) | 0.13 ms | 0.72 ms | 0.65 ms (14.42 ms) | 0.39 ms | 0.13 ms |
@@ -288,8 +288,8 @@ The stage columns are each stage's own p50, so they do not add up to the round t
 
 **What the run shows**
 
-- One clone is about 2 ms end to end. The zygote round trip is half of that. The agent's own work, including signature verification, is about 0.5 ms.
-- Under a burst, time is spent waiting rather than computing. Zygote time grows because the zygote handles `CLONE` requests one at a time. Agent time grows to several milliseconds while verification stays under 0.1 ms.
+- One clone is about 2 ms end to end. The zygote round trip is half of that. fiberd's own work, including signature verification, is about 0.5 ms.
+- Under a burst, time is spent waiting rather than computing. Zygote time grows because the zygote handles `CLONE` requests one at a time. fiberd time grows to several milliseconds while verification stays under 0.1 ms.
 - The snapshot store writes the whole ledger after every clone. Without it, a burst finished in less than half the wall time.
 - Sync audit records wait for fsync one at a time, which made audit the largest stage in the sync burst.
 - Concurrent snapshot saves shared one temporary file. During bursts some saves failed with `rename ... ledger.json.tmp: no such file or directory`.
@@ -299,7 +299,7 @@ The stage columns are each stage's own p50, so they do not add up to the round t
 
 `make overcommit` is a pass or fail resource test rather than a latency benchmark. It runs a proc home inside a container with a 384 MiB memory and swap limit, sets the grant ceiling to 160 MiB, and drives eight fibers toward twice that grant ceiling.
 
-The test passes only when the pressure ladder reclaims fibers while the agent remains alive and the container's OOM counter stays unchanged. Its parameters and checks are in [`hack/test/overcommit.sh`](../hack/test/overcommit.sh).
+The test passes only when the pressure ladder reclaims fibers while fiberd remains alive and the container's OOM counter stays unchanged. Its parameters and checks are in [`hack/test/overcommit.sh`](../hack/test/overcommit.sh).
 
 ## Reproducing backend measurements
 

@@ -155,7 +155,7 @@ func TestForkFallbackWithoutClone3(t *testing.T) {
 			}
 			_, err := cloneFallback(t, be, w, dir, "gx/1-1", fd, "")
 			// The ERROR names the code and what it stands for, so the
-			// agent's log needs no table of the zygote's exit codes.
+			// fiberd's log needs no table of the zygote's exit codes.
 			if err == nil || !strings.Contains(err.Error(), "died before ready: exit:125 (could not join its cgroup leaf)") {
 				t.Fatalf("clone into a removed leaf = %v, want the child's exit 125 and its reason", err)
 			}

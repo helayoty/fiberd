@@ -50,8 +50,6 @@ const (
 	Tier_FIBER_CHECKPOINT Tier = 3
 	// MicroVM or gVisor snapshot-restore per fiber. Multi-tenant per node.
 	Tier_FIBER_SNAPSHOT Tier = 4
-	// Reserved. Multi-node fabric tier; nothing implements it.
-	Tier_FIBER_FABRIC Tier = 5
 )
 
 // Enum value maps for Tier.
@@ -62,7 +60,6 @@ var (
 		2: "FIBER_WARM",
 		3: "FIBER_CHECKPOINT",
 		4: "FIBER_SNAPSHOT",
-		5: "FIBER_FABRIC",
 	}
 	Tier_value = map[string]int32{
 		"TIER_UNSPECIFIED": 0,
@@ -70,7 +67,6 @@ var (
 		"FIBER_WARM":       2,
 		"FIBER_CHECKPOINT": 3,
 		"FIBER_SNAPSHOT":   4,
-		"FIBER_FABRIC":     5,
 	}
 )
 
@@ -111,7 +107,7 @@ const (
 	// the OS has not flushed yet.
 	Durability_BEST_EFFORT Durability = 1
 	// Ack only once the record is durable on local disk. After a failed
-	// fsync, every SYNC operation fails until the agent restarts.
+	// fsync, every SYNC operation fails until fiberd restarts.
 	Durability_SYNC Durability = 2
 )
 
@@ -317,7 +313,7 @@ func (CloneKind) EnumDescriptor() ([]byte, []int) {
 type MissCode int32
 
 const (
-	// The control plane is unreachable or the thrash budget is exceeded.
+	// The control plane is unreachable or the clone rate limit is exceeded.
 	// Back off for retry_after_s; never queue on a dead control plane.
 	MissCode_SHED MissCode = 0
 	// Capacity is not on this home and the control plane is healthy.
@@ -714,8 +710,8 @@ func (x *CapacityGrant) GetDeviceBudget() *DeviceBudget {
 	return nil
 }
 
-// Fence identifies one incarnation of a fiber: (grant, agent epoch, seq).
-// Every credential and claim is scoped to it. An epoch bump on agent
+// Fence identifies one run of a fiber: (grant, fiberd epoch, seq).
+// Every credential and claim is scoped to it. An epoch bump on fiberd
 // restart invalidates every prior fence at once.
 type Fence struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -1276,15 +1272,14 @@ const file_grant_v1_grant_proto_rawDesc = "" +
 	"\fw_used_bytes\x18\x04 \x01(\x04R\n" +
 	"wUsedBytes\x12.\n" +
 	"\x06latest\x18\x05 \x01(\v2\x16.fiberd.grant.v1.FenceR\x06latest\x12\x16\n" +
-	"\x06pooled\x18\x06 \x01(\rR\x06pooled*y\n" +
+	"\x06pooled\x18\x06 \x01(\rR\x06pooled*g\n" +
 	"\x04Tier\x12\x14\n" +
 	"\x10TIER_UNSPECIFIED\x10\x00\x12\x0f\n" +
 	"\vFIBER_BASIC\x10\x01\x12\x0e\n" +
 	"\n" +
 	"FIBER_WARM\x10\x02\x12\x14\n" +
 	"\x10FIBER_CHECKPOINT\x10\x03\x12\x12\n" +
-	"\x0eFIBER_SNAPSHOT\x10\x04\x12\x10\n" +
-	"\fFIBER_FABRIC\x10\x05*C\n" +
+	"\x0eFIBER_SNAPSHOT\x10\x04*C\n" +
 	"\n" +
 	"Durability\x12\x1a\n" +
 	"\x16DURABILITY_UNSPECIFIED\x10\x00\x12\x0f\n" +

@@ -55,7 +55,7 @@ type Driver struct {
 	// Restart restarts the target in place (same address, same state
 	// directory) and returns when it is serving again. Nil skips C3.
 	Restart func(ctx context.Context) error
-	// SetCPHealth makes the target's grant lane healthy or stale. Nil
+	// SetCPHealth makes the target's issuer reachable or unreachable. Nil
 	// skips C4.
 	SetCPHealth func(ctx context.Context, healthy bool) error
 	// AuditHas reports whether the target's audit spool holds a record for
@@ -65,7 +65,7 @@ type Driver struct {
 	// way a crash would. Nil skips C9.
 	EngineKill func(ctx context.Context, grantUID string) error
 	// ScopeLost tells the home the scope everything was minted under is
-	// gone while it keeps running (a namespace, a fabric claim): the home
+	// gone while it keeps running (a namespace, a DRA claim): the home
 	// must turn that into fence revocation. Nil skips C10.
 	ScopeLost func(ctx context.Context) error
 	// Timeout bounds each case (default 15s); Restart gets twice that.
@@ -620,7 +620,7 @@ func (c *client) c10(t *testing.T) {
 func (c *client) c7(t *testing.T) {
 	ctx, cancel := c.ctx(t, 1)
 	defer cancel()
-	if c.d.TargetTier >= core.TierFabric {
+	if c.d.TargetTier >= core.TierSnapshot {
 		t.Skip("target advertises the top tier; nothing is above it")
 	}
 	_, tok := c.grant(t, "c7", func(g *core.Grant) { g.MinTier = c.d.TargetTier + 1 })

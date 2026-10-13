@@ -43,7 +43,7 @@ sequenceDiagram
   I-->>C: first byte of the first 200 (t_first_byte)
 ```
 
-Pods, claims and Firecracker return an address before the instance listens, so they are polled. The poll interval and the failed attempts are in every record as the quantization bound. A [clone](../glossary.md#clone) returns an endpoint that already listens, so fiberd's first request is the measurement. On kind, gVisor and runc fibers are reached through the agent's [relay](../glossary.md#relay), one hop per request. The standalone rows over unix sockets bound that cost.
+Pods, claims and Firecracker return an address before the instance listens, so they are polled. The poll interval and the failed attempts are in every record as the quantization bound. A [clone](../glossary.md#clone) returns an endpoint that already listens, so fiberd's first request is the measurement. On kind, gVisor and runc fibers are reached through fiberd's [relay](../glossary.md#relay), one hop per request. The standalone rows over unix sockets bound that cost.
 
 **Fairness.**
 

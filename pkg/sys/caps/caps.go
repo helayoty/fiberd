@@ -1,4 +1,4 @@
-// Package caps narrows the capabilities of the agent and of everything it
+// Package caps narrows the capabilities of fiberd and of everything it
 // starts, such as criu, the zygote and a backend's helpers. A process
 // started as root gets exactly its bounding set. One that execs a file
 // with inheritable file capabilities gets what the inheritable and ambient
@@ -41,9 +41,9 @@ var Proc = []int{SetPCAP, NetAdmin, SysChroot, SysPtrace, SysAdmin, SysResource,
 // Runc is what the runc runtime needs, measured by running tests/runc
 // and the conformance suite under setpriv with each candidate left out.
 // The grant's container runs in a user namespace, so its root is an
-// unprivileged host uid and the agent crosses that line in a few places.
+// unprivileged host uid and fiberd crosses that line in a few places.
 // runc writes the mapped root's uid and gid maps (SetUID, SetGID) and
-// chowns exec.fifo to it (Chown), and runc, criu and the agent open
+// chowns exec.fifo to it (Chown), and runc, criu and fiberd open
 // files that uid owns with modes that keep root out (DACOverride, which
 // covers what DAC_READ_SEARCH would). Kill is not needed, since fibers
 // and the container's init are ended through their cgroups.

@@ -12,7 +12,7 @@ import (
 // v2. New never returns one here.
 type Runtime struct{ core.Runtime }
 
-// New fails on platforms without cgroup v2; the agent must use another
+// New fails on platforms without cgroup v2; fiberd must use another
 // runtime there.
 func New(Config) (*Runtime, error) { return nil, ErrUnsupported }
 

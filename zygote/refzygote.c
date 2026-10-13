@@ -24,7 +24,7 @@
  *                                 shows whether the kernel's entropy is
  *                                 fresh in a copy, with no template
  *                                 state in between)
- *   fence           -> <fence>   (the current one: after a resume the agent
+ *   fence           -> <fence>   (the current one: after a resume fiberd
  *                                 publishes the new fence beside a unix
  *                                 endpoint, and that file wins over the
  *                                 birth fence in memory)
@@ -51,7 +51,7 @@
  *                      host controls sit under a read-only mount)
  *
  * A handoff fiber (FIBERD_HANDOFF_FD set) serves the same protocol inside
- * TLS 1.3 on the connections the agent passes it through fz_accept(),
+ * TLS 1.3 on the connections fiberd passes it through fz_accept(),
  * instead of a listener of its own. It serves the grant's identity
  * (fz_handoff_identity(), sent down the channel at birth, never a file)
  * and accepts only the client certificate whose x5t#S256 that identity
@@ -83,7 +83,7 @@
  * MiB: the GPU model in miniature. The zygote owns the device; fibers are
  * its clients over the unix socket named by FIBERD_ENGINE, holding slices
  * ("reserve <bytes>" on the fiber sets its slice; "devfree" drops it).
- * The engine reports every slice to the agent (DEVICE lines) and drops a
+ * The engine reports every slice to fiberd (DEVICE lines) and drops a
  * slice on EVICT, which is what a park does before the CPU checkpoint; a
  * resumed fiber renegotiates by reserving again. A real CUDA engine is a
  * drop-in that speaks the same lines.
@@ -96,7 +96,7 @@
  * (fiberd's gvisor backend). There is no fork: after init the process
  * triggers its own checkpoint through /proc/gvisor/checkpoint; every fiber
  * is a sandbox restored from that image, which learns its fence, endpoint,
- * payload and a fresh seed on the agent's channel (fz_gvisor_identity),
+ * payload and a fresh seed on fiberd's channel (fz_gvisor_identity),
  * serves on /host (the grant's run directory, bind-mounted), closes its
  * endpoint on SIGUSR1 so the sandbox can be checkpointed, and re-binds
  * under the next fence when restored again. --http applies there too.
@@ -194,7 +194,7 @@ static char engine_path[256];
 static int engine_fd = -1; /* bound in engine_start, served by engine_thread */
 
 /* dev_set replaces a fiber's slice (0 drops it) and reports both the
- * slice and the whole device to the agent. Called with dev_mu held. */
+ * slice and the whole device to fiberd. Called with dev_mu held. */
 static const char *dev_set(const char *fence, unsigned long long bytes) {
     int i;
     for (i = 0; i < ndev && strcmp(dev_slices[i].fence, fence) != 0; i++) {}
@@ -229,7 +229,7 @@ static void on_control(const char *line) {
 static void *engine_thread(void *arg) {
     (void)arg;
     int s = engine_fd;
-    /* The agent learns of the device once the channel is up. */
+    /* fiberd learns of the device once the channel is up. */
     while (fz_report("DEVICE - %llu %llu", dev_used, dev_cap) < 0) usleep(5000);
     for (;;) {
         int c = accept4(s, NULL, NULL, SOCK_CLOEXEC);
@@ -271,10 +271,10 @@ static void engine_start(size_t mb) {
 static const char *cur_endpoint; /* this fiber's endpoint, for the fence file */
 static const char *cur_fence;
 
-/* The fence this incarnation lives under: the one the agent published
+/* The fence this incarnation lives under: the one fiberd published
  * after a resume (the fence in memory is the birth fence, stale then),
  * else fallback, the fence in memory. The file sits beside the unix
- * endpoint; a fiber behind the agent's tcp relay serves a unix socket
+ * endpoint; a fiber behind fiberd's tcp relay serves a unix socket
  * too and reads the file beside it. One that binds tcp itself, or takes
  * handed-off connections, has no socket, and finds the file in its
  * working directory (its grant's run directory) under the name of its
@@ -531,7 +531,7 @@ static void conn_close(conn_t *c) {
 
 #ifdef FZ_TLS
 /* The handoff fiber's TLS server, loaded after the fork from the identity
- * the agent sent down the fiber's channel, so the key never sits in the
+ * fiberd sent down the fiber's channel, so the key never sits in the
  * zygote's memory or in a file another grant's fibers could read. */
 static SSL_CTX *tls_ctx;
 static const char *tls_caller;
@@ -909,7 +909,7 @@ static int gvisor_serve_once(const char *fence, const char *ep, const unsigned c
         fprintf(stderr, "refzygote %s: bind %s: %s\n", fence, ep, strerror(errno));
         return 4;
     }
-    /* Bound, so the agent may connect. */
+    /* Bound, so fiberd may connect. */
     (void)fz_gvisor_ack();
     size_t db = (size_t)payload_num(payload, plen, "\"dirty_bytes\"");
     if (db) dirty(db);
@@ -955,7 +955,7 @@ static int gvisor_main(void) {
             continue;
         }
         /* "restore": running in a freshly restored sandbox. Its identity
-         * comes on the agent's channel, and a pooled sandbox waits there
+         * comes on fiberd's channel, and a pooled sandbox waits there
          * until it is handed one. Every sandbox restored from one image
          * holds the same RNG state, so reseed from the seed it brings
          * before anything draws from it. */

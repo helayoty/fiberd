@@ -1,5 +1,5 @@
 // Package tlsconf builds the control plane's TLS configurations, for the
-// agent's mutual-TLS server and for the callers that dial it. It also
+// fiberd's mutual-TLS server and for the callers that dial it. It also
 // names a caller from the certificate it presented.
 package tlsconf
 
@@ -26,7 +26,7 @@ var (
 	ErrPlaintextWithTLS = errors.New("tlsconf: plaintext and TLS are mutually exclusive")
 )
 
-// Server returns the agent's server configuration. It requires TLS 1.3
+// Server returns fiberd's server configuration. It requires TLS 1.3
 // and a client certificate signed by clientCA on every connection. With
 // plaintext set and no files it returns nil, which tells the caller to
 // serve without TLS.
@@ -58,7 +58,7 @@ func Server(certFile, keyFile, clientCAFile string, plaintext bool) (*tls.Config
 	}, nil
 }
 
-// Client returns a caller's TLS 1.3 configuration. It verifies the agent
+// Client returns a caller's TLS 1.3 configuration. It verifies fiberd
 // against caFile and presents the caller's own certificate. With no files
 // it returns nil, which tells the caller to dial in plaintext.
 func Client(caFile, certFile, keyFile string) (*tls.Config, error) {

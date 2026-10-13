@@ -1,5 +1,5 @@
 /* fuzz_identity delivers one message on a handoff fiber's channel, as the
- * agent queues it before the CLONE, and lets read_identity take it apart
+  * fiberd queues it before the CLONE, and lets read_identity take it apart
  * ('k' then three NUL-ended fields), with descriptors it must not keep.
  *
  * The input is [descriptor count][message bytes]. An empty message is a

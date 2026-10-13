@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1440" height="1030" viewBox="0 0 1440 1030" role="img" aria-labelledby="networking-title networking-desc">
-  <title id="networking-title">Control asks the agent, and every fiber gets a TCP port</title>
-  <desc id="networking-desc">In this DIRECT TCP example, the caller sends Clone to the agent's control endpoint on port 8484 and gets back tcp://10.244.0.8 with a port, plus a fence. It then connects to that port. Fiber A is a proc fiber that binds port 30001 itself, so its traffic bypasses the agent. Fiber B runs on gVisor, runc or Hyperlight and serves a unix socket. The agent's relay listens on port 30002 and copies bytes to that socket without reading them, so TLS stays end to end. Both fibers share the home address and differ only by port. HANDOFF is a different path for proc and runc only. One shared TLS listener on the agent hands each connection to its fiber, and the fiber terminates TLS.</desc>
+  <title id="networking-title">Control asks fiberd, and every fiber gets a TCP port</title>
+  <desc id="networking-desc">In this DIRECT TCP example, the caller sends Clone to fiberd's control endpoint on port 8484 and gets back tcp://10.244.0.8 with a port, plus a fence. It then connects to that port. Fiber A is a proc fiber that binds port 30001 itself, so its traffic bypasses fiberd. Fiber B runs on gVisor, runc or Hyperlight and serves a unix socket. fiberd's relay listens on port 30002 and copies bytes to that socket without reading them, so TLS stays end to end. Both fibers share the home address and differ only by port. HANDOFF is a different path for proc and runc only. One shared TLS listener in fiberd hands each connection to its fiber, and the fiber terminates TLS.</desc>
   <style>
     :root{--bg:#f7f9fc;--panel:#fff;--ink:#172033;--muted:#5d6b7d;--border:#b8c4d4;--blue:#3165b5;--blue-bg:#eaf1ff;--teal:#13776f;--teal-bg:#e8f7f4;--violet:#704aa1;--violet-bg:#f2edfa;--amber:#a76500;--amber-bg:#fff3d6;--green:#287a4d;--green-bg:#e8f6ed}
     text{font-family:ui-sans-serif,-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;fill:var(--ink)}
@@ -17,7 +17,7 @@
     <marker id="networking-amber-arrow" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="12" markerHeight="12" markerUnits="userSpaceOnUse" orient="auto"><path d="M1 1 11 6 1 11Z" fill="var(--amber)"/></marker>
   </defs>
   <rect class="bg" width="1440" height="1030"/>
-  <text class="title" x="48" y="66">Control asks the agent. Every fiber gets a TCP port.</text>
+  <text class="title" x="48" y="66">Control asks fiberd. Every fiber gets a TCP port.</text>
   <text class="secondary muted" x="48" y="100">DIRECT TCP example · one home address, one port per fiber</text>
   <path class="divider" d="M48 130H1392"/>
 
@@ -32,9 +32,9 @@
   <text class="heading center" x="166" y="446">Caller / router</text>
   <text class="secondary center muted" x="166" y="475">Keeps returned route</text>
 
-  <!-- Agent -->
+  <!-- fiberd -->
   <rect class="service" x="596" y="270" width="340" height="350" rx="6"/>
-  <text class="heading teal" x="620" y="304">fiberd agent</text>
+  <text class="heading teal" x="620" y="304">fiberd</text>
   <rect class="part" x="620" y="322" width="292" height="124" rx="4"/>
   <text class="label" x="644" y="372">Control endpoint · :8484</text>
   <text class="secondary muted" x="644" y="404">Clone · Park · Release</text>
@@ -63,7 +63,7 @@
   <text class="number violet" x="210" y="634">3</text>
   <text class="heading violet" x="236" y="636">Connect to the port</text>
   <text class="secondary muted" x="236" y="664">Workload traffic</text>
-  <text class="secondary violet" x="196" y="717">Fiber A · agent bypassed</text>
+  <text class="secondary violet" x="196" y="717">Fiber A · fiberd bypassed</text>
 
   <!-- Relayed fiber -->
   <path class="flow data" d="M918 548H965" marker-end="url(#networking-violet-arrow)"/>
@@ -90,7 +90,7 @@
   <path class="flow handoff" d="M276 945H514" marker-end="url(#networking-amber-arrow)"/>
   <text class="secondary center amber" x="396" y="933">TLS</text>
   <rect class="step" x="520" y="917" width="340" height="56" rx="4"/>
-  <text class="label center" x="690" y="952">Agent · shared TLS listener</text>
+  <text class="label center" x="690" y="952">fiberd · shared TLS listener</text>
   <path class="flow handoff" d="M860 945H1098" marker-end="url(#networking-amber-arrow)"/>
   <text class="secondary center amber" x="980" y="933">hands over the connection</text>
   <rect class="step" x="1104" y="917" width="260" height="56" rx="4"/>

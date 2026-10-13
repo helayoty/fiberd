@@ -3,7 +3,7 @@
 # template, criu for FIBER_CHECKPOINT, runsc and a gVisor rootfs for
 # UNTRUSTED grants, and the conformance, storm and sessioncheck binaries
 # so an acceptance run can exec them inside the cluster. It is built
-# locally and never released. The release publishes the plain agent image
+# locally and never released. The release publishes the plain fiberd image
 # from docker/fiberd/Dockerfile. Local builds can start from
 # fiberd-dev:local. Without it the build starts from the plain Go image and
 # installs the same patched criu and the same pinned runsc.
@@ -59,7 +59,7 @@ COPY . .
 # aarch64 it is built without PAC branch protection, because a process
 # restored from a checkpoint keeps stale PAC keys (see
 # docker/criu/Dockerfile).
-# The agent is built with the fiberd_testhooks tag, since kind conformance
+# fiberd is built with the fiberd_testhooks tag, since kind conformance
 # drives the test-only admin controls (-admin-unsafe). The release image
 # (docker/fiberd) is built without it.
 # The gVisor rootfs is what every sandbox of a gvisor grant Pod runs in: a
@@ -82,7 +82,7 @@ FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595
 # The release workflow adds version, revision, created and title labels.
 # These static ones cover local builds.
 LABEL org.opencontainers.image.source="https://github.com/helayoty/fiberd" \
-      org.opencontainers.image.description="fiberd for Kubernetes: the grant Pod agent (fiberd-k8s), the issuer controller (grant-controller), the reference zygote, criu, runc, runsc, and the conformance and storm binaries" \
+      org.opencontainers.image.description="fiberd for Kubernetes: the grant Pod's fiberd (fiberd-k8s), the issuer controller (grant-controller), the reference zygote, criu, runc, runsc, and the conformance and storm binaries" \
       org.opencontainers.image.licenses="Apache-2.0"
 ARG DEBIAN_FRONTEND=noninteractive
 # Runtime packages only. The libraries serve criu and the zygote's TLS.
@@ -106,7 +106,7 @@ COPY --from=build /out/rootfs /usr/share/fiberd/gvisor-rootfs
 # No USER on purpose. fiberd-k8s creates namespaces and cgroups and runs
 # criu, so it starts as root. Its privilege is narrowed at runtime instead.
 # The Pod spec drops ALL capabilities and adds back only the runtime's list
-# (examples/kubernetes/controller/pod.go), and the agent drops what it does
+# (examples/kubernetes/controller/pod.go), and fiberd drops what it does
 # not need (pkg/sys/caps). grant-controller needs none of this, so its
 # Deployment runs it as non-root with a read-only root filesystem
 # (examples/kubernetes/kind/manifests/20-issuer.yaml).

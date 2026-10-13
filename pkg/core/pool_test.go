@@ -129,8 +129,8 @@ func (p *fakePool) fillCalls() []fillCall {
 	return append([]fillCall(nil), p.filled...)
 }
 
-// runAgent drives Run on a fast tick until the returned stop is called.
-func runAgent(t *testing.T, a *core.Agent) (stop func()) {
+// runCore drives Run on a fast tick until the returned stop is called.
+func runCore(t *testing.T, a *core.Core) (stop func()) {
 	t.Helper()
 	a.StatusInterval = 10 * time.Millisecond
 	ctx, cancel := context.WithCancel(context.Background())
@@ -163,18 +163,18 @@ func TestRefillPolicy(t *testing.T) {
 		name    string
 		warm    int
 		max     int
-		budget  float64 // the thrash budget's base rate, 1000 when zero
+		rate    float64 // the clone rate limit's base rate, 1000 when zero
 		shed    bool    // the grant is shedding
 		fillErr error
 		gate    bool // fills wait until the test lets them through
-		check   func(t *testing.T, a *core.Agent, p *fakePool)
+		check   func(t *testing.T, a *core.Core, p *fakePool)
 	}{
-		{name: "warm 0 fills nothing", warm: 0, max: 2, check: func(t *testing.T, _ *core.Agent, p *fakePool) {
+		{name: "warm 0 fills nothing", warm: 0, max: 2, check: func(t *testing.T, _ *core.Core, p *fakePool) {
 			if n := settled(p, 200*time.Millisecond); n != 0 {
 				t.Fatalf("fills = %d, want 0", n)
 			}
 		}},
-		{name: "warm past max fills to max", warm: 5, max: 2, check: func(t *testing.T, a *core.Agent, p *fakePool) {
+		{name: "warm past max fills to max", warm: 5, max: 2, check: func(t *testing.T, a *core.Core, p *fakePool) {
 			waitUntil(t, 5*time.Second, "two pooled", func() bool { return p.Pooled("g1") == 2 })
 			if n := settled(p, 200*time.Millisecond); n != 2 {
 				t.Fatalf("fills = %d, want 2", n)
@@ -183,25 +183,25 @@ func TestRefillPolicy(t *testing.T) {
 				t.Fatalf("status = %+v, want pooled 2 running 0", st)
 			}
 		}},
-		{name: "an empty budget holds the fill", warm: 2, max: 2, budget: -1, check: func(t *testing.T, _ *core.Agent, p *fakePool) {
+		{name: "an empty rate limit holds the fill", warm: 2, max: 2, rate: -1, check: func(t *testing.T, _ *core.Core, p *fakePool) {
 			if n := settled(p, 200*time.Millisecond); n != 0 {
 				t.Fatalf("fills = %d, want 0", n)
 			}
 		}},
-		{name: "a shedding grant is not filled", warm: 2, max: 2, shed: true, check: func(t *testing.T, _ *core.Agent, p *fakePool) {
+		{name: "a shedding grant is not filled", warm: 2, max: 2, shed: true, check: func(t *testing.T, _ *core.Core, p *fakePool) {
 			if n := settled(p, 200*time.Millisecond); n != 0 {
 				t.Fatalf("fills = %d, want 0", n)
 			}
 		}},
 		{name: "a failed fill backs off, doubling", warm: 1, max: 1, fillErr: errors.New("fake: restore refused"), check: backsOff},
 		{name: "pressure from the fill backs off", warm: 1, max: 1, fillErr: core.ErrPressure, check: backsOff},
-		{name: "no pool is remembered", warm: 1, max: 1, fillErr: core.ErrNoPool, check: func(t *testing.T, _ *core.Agent, p *fakePool) {
+		{name: "no pool is remembered", warm: 1, max: 1, fillErr: core.ErrNoPool, check: func(t *testing.T, _ *core.Core, p *fakePool) {
 			waitUntil(t, 5*time.Second, "one fill", func() bool { return p.fillCount() == 1 })
 			if n := settled(p, 300*time.Millisecond); n != 1 {
 				t.Fatalf("fills = %d, want 1 and no retry", n)
 			}
 		}},
-		{name: "a pooled death backs off", warm: 1, max: 1, check: func(t *testing.T, _ *core.Agent, p *fakePool) {
+		{name: "a pooled death backs off", warm: 1, max: 1, check: func(t *testing.T, _ *core.Core, p *fakePool) {
 			waitUntil(t, 5*time.Second, "one pooled", func() bool { return p.Pooled("g1") == 1 })
 			died := time.Now()
 			p.die("g1")
@@ -210,7 +210,7 @@ func TestRefillPolicy(t *testing.T) {
 				t.Fatalf("refilled %s after the death, want 100ms or more", gap)
 			}
 		}},
-		{name: "one fill in flight per grant", warm: 3, max: 3, gate: true, check: func(t *testing.T, _ *core.Agent, p *fakePool) {
+		{name: "one fill in flight per grant", warm: 3, max: 3, gate: true, check: func(t *testing.T, _ *core.Core, p *fakePool) {
 			waitUntil(t, 5*time.Second, "one fill", func() bool { return p.fillCount() == 1 })
 			if n := settled(p, 200*time.Millisecond); n != 1 {
 				t.Fatalf("fills = %d while one waits, want 1", n)
@@ -225,15 +225,15 @@ func TestRefillPolicy(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			g := core.Grant{UID: "g1", Tenant: "acme", Audience: "node-a", FiberMax: tc.max, FiberWarm: tc.warm, LeaseExpiry: time.Now().Add(time.Hour)}
-			a := newAgent(t, "up", core.TierSnapshot, g)
+			a := newCore(t, "up", core.TierSnapshot, g)
 			p := newFakePool(core.TierSnapshot)
 			p.fillErr = tc.fillErr
 			if tc.gate {
 				p.gate = make(chan struct{})
 			}
 			a.Runtime = p
-			if tc.budget < 0 {
-				a.Budget = core.NewBudget(0, 256<<20)
+			if tc.rate < 0 {
+				a.RateLimit = core.NewRateLimit(0, 256<<20)
 			}
 			ctx := context.Background()
 			if code, err := a.Admit(ctx, g); err != nil || code != core.OK {
@@ -245,7 +245,7 @@ func TestRefillPolicy(t *testing.T) {
 				a.Pressure = &core.PressureController{Ledger: a.Ledger, Source: src}
 				a.Pressure.Tick(ctx)
 			}
-			stop := runAgent(t, a)
+			stop := runCore(t, a)
 			defer stop()
 			tc.check(t, a, p)
 		})
@@ -253,7 +253,7 @@ func TestRefillPolicy(t *testing.T) {
 }
 
 // backsOff checks that failed fills are retried 100 ms apart, then 200.
-func backsOff(t *testing.T, _ *core.Agent, p *fakePool) {
+func backsOff(t *testing.T, _ *core.Core, p *fakePool) {
 	t.Helper()
 	waitUntil(t, 5*time.Second, "three fills", func() bool { return p.fillCount() >= 3 })
 	ts := p.fillTimes()
@@ -281,7 +281,7 @@ func TestPooledCountsInMax(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			g := core.Grant{UID: "g1", Tenant: "acme", Audience: "node-a", FiberMax: 2, FiberWarm: 2, LeaseExpiry: time.Now().Add(time.Hour)}
-			a := newAgent(t, "up", core.TierSnapshot, g)
+			a := newCore(t, "up", core.TierSnapshot, g)
 			p := newFakePool(core.TierSnapshot)
 			a.Runtime = p
 			rec := &auditLog{}
@@ -290,7 +290,7 @@ func TestPooledCountsInMax(t *testing.T) {
 			if code, err := a.Admit(ctx, g); err != nil || code != core.OK {
 				t.Fatalf("admit = %d %v", code, err)
 			}
-			stop := runAgent(t, a)
+			stop := runCore(t, a)
 			defer stop()
 			waitUntil(t, 5*time.Second, "the pool to fill", func() bool { return p.Pooled("g1") == 2 })
 			var first string
@@ -346,7 +346,7 @@ func TestLadderDrainsPoolFirst(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			g := core.Grant{UID: "g1", Tenant: "acme", Audience: "node-a", FiberMax: 4, FiberWarm: 1,
 				Policy: core.Policy{PSISomeAvg10Shed: 10, PSISomeAvg10Park: 25}}
-			a := newAgent(t, "up", core.TierSnapshot, g)
+			a := newCore(t, "up", core.TierSnapshot, g)
 			p := newFakePool(core.TierSnapshot)
 			a.Runtime = p
 			ctx := context.Background()
@@ -398,7 +398,7 @@ func TestEpochBumpKeepsPool(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			g := core.Grant{UID: "g1", Tenant: "acme", Audience: "node-a", FiberMax: 8, FiberWarm: tc.pooled}
-			a := newAgent(t, "up", core.TierSnapshot, g)
+			a := newCore(t, "up", core.TierSnapshot, g)
 			p := newFakePool(core.TierSnapshot)
 			a.Runtime = p
 			store, err := core.OpenEpochStore(t.TempDir())
@@ -506,7 +506,7 @@ func TestRefillOneAtATime(t *testing.T) {
 			for i := range tc.grants {
 				tc.grants[i].Tenant, tc.grants[i].Audience, tc.grants[i].LeaseExpiry = "acme", "node-a", time.Now().Add(time.Hour)
 			}
-			a := newAgent(t, "up", core.TierSnapshot, tc.grants...)
+			a := newCore(t, "up", core.TierSnapshot, tc.grants...)
 			p := newFakePool(core.TierSnapshot)
 			p.yields = tc.yields
 			if tc.gate {
@@ -519,7 +519,7 @@ func TestRefillOneAtATime(t *testing.T) {
 					t.Fatalf("admit %s = %d %v", g.UID, code, err)
 				}
 			}
-			stop := runAgent(t, a)
+			stop := runCore(t, a)
 			defer stop()
 			tc.check(t, p)
 		})

@@ -15,7 +15,7 @@ import (
 )
 
 // Snapshot is the on-disk cache of the ledger. It is a cache: at boot the
-// runtime's view of reality wins, and the snapshot only tells the agent
+// runtime's view of reality wins, and the snapshot only tells fiberd
 // which grants to re-admit and which parked sessions to remember.
 type Snapshot struct {
 	Epoch    uint64            `json:"epoch"`
@@ -175,7 +175,7 @@ type heldGrant struct {
 //
 //  1. Each unexpired grant whose token verifies again is re-admitted and
 //     its template warmed again, because the old zygote died with the old
-//     agent. An entry whose token fails, names another grant or home, or
+//     fiberd process. An entry whose token fails, names another grant or home, or
 //     is missing is dropped. An entry the verifier cannot check yet is
 //     held. It is not admitted, but it stays in the snapshot for a
 //     redelivery or a later boot.
@@ -187,7 +187,7 @@ type heldGrant struct {
 // Reality wins over the snapshot at every step. The snapshot is a file on
 // the home's disk, so only a grant's signature re-admits it, never the
 // file.
-func (a *Agent) Reconcile(ctx context.Context, snap Snapshot) (ReconcileReport, error) {
+func (a *Core) Reconcile(ctx context.Context, snap Snapshot) (ReconcileReport, error) {
 	var rep ReconcileReport
 	now := a.Ledger.Now()
 	untokened := 0
@@ -265,8 +265,8 @@ func (a *Agent) Reconcile(ctx context.Context, snap Snapshot) (ReconcileReport, 
 		rep.OrphansKilled++
 		_ = a.audit(ctx, BestEffort, AuditRecord{Event: "orphan", Fence: fence, FiberID: h.ID, Detail: "killed at boot: prior epoch"})
 	}
-	// A session that was running when the old agent stopped is gone. Its
-	// fiber died with that agent or was killed just above. The delta it
+	// A session that was running when the old fiberd process stopped is gone. Its
+	// fiber died with that process or was killed just above. The delta it
 	// was resumed from was consumed by that resume, so it goes too. This
 	// runs after the runtime's List, once the runtime answers. Parked
 	// sessions keep their deltas.
@@ -283,7 +283,7 @@ func (a *Agent) Reconcile(ctx context.Context, snap Snapshot) (ReconcileReport, 
 // reverify checks a snapshot entry's token the way Clone checks a
 // presented one, and returns what the token says, with the token kept, in
 // place of what the file says.
-func (a *Agent) reverify(ctx context.Context, g Grant) (Grant, error) {
+func (a *Core) reverify(ctx context.Context, g Grant) (Grant, error) {
 	vg, err := a.Verify.Verify(ctx, []byte(g.Token))
 	if err != nil {
 		return Grant{}, fmt.Errorf("snapshot token: %w", err)
@@ -301,7 +301,7 @@ func (a *Agent) reverify(ctx context.Context, g Grant) (Grant, error) {
 // hold keeps a snapshot grant the verifier could not check, so persist
 // carries it into the next snapshot. The entry is the file's, unverified,
 // and nothing reads it but the next boot.
-func (a *Agent) hold(g Grant) {
+func (a *Core) hold(g Grant) {
 	a.heldMu.Lock()
 	defer a.heldMu.Unlock()
 	if a.held == nil {
@@ -313,7 +313,7 @@ func (a *Agent) hold(g Grant) {
 // holdParked files a parked session under its held grant and reports
 // whether it did. Its delta stays on disk, and Admit restores it once the
 // grant is admitted again.
-func (a *Agent) holdParked(s SessionSnapshot) bool {
+func (a *Core) holdParked(s SessionSnapshot) bool {
 	a.heldMu.Lock()
 	defer a.heldMu.Unlock()
 	h, ok := a.held[s.GrantUID]
@@ -325,7 +325,7 @@ func (a *Agent) holdParked(s SessionSnapshot) bool {
 
 // restoreHeld registers the parked sessions held since boot under uid,
 // which Admit has just admitted again, and lets the held entry go.
-func (a *Agent) restoreHeld(uid string) {
+func (a *Core) restoreHeld(uid string) {
 	a.heldMu.Lock()
 	h, ok := a.held[uid]
 	delete(a.held, uid)
@@ -344,7 +344,7 @@ func (a *Agent) restoreHeld(uid string) {
 // held because the verifier was unavailable. Without them the first persist
 // after boot would drop those grants and their parked sessions from the
 // file for good.
-func (a *Agent) snapshot() Snapshot {
+func (a *Core) snapshot() Snapshot {
 	s := a.Ledger.Snapshot()
 	a.heldMu.Lock()
 	defer a.heldMu.Unlock()
@@ -382,7 +382,7 @@ func (a *Agent) snapshot() Snapshot {
 // Sweep is the lease reaper's step: every admitted grant whose lease has
 // lapsed is yielded (fibers released, grant revoked). Parked deltas are
 // kept; they are the only state that cannot be rebuilt.
-func (a *Agent) Sweep(ctx context.Context) int {
+func (a *Core) Sweep(ctx context.Context) int {
 	now := a.Ledger.Now()
 	n := 0
 	for _, st := range a.Ledger.Statuses() {

@@ -17,8 +17,6 @@ func ParseTier(s string) (Tier, error) {
 		return TierCheckpoint, nil
 	case "SNAPSHOT":
 		return TierSnapshot, nil
-	case "FABRIC":
-		return TierFabric, nil
 	case "", "TIER_UNSPECIFIED", "UNSPECIFIED":
 		return TierUnspecified, nil
 	}

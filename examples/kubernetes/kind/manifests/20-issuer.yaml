@@ -95,7 +95,7 @@ spec:
       labels: { app: grant-issuer }
     spec:
       serviceAccountName: grant-issuer
-      # The controller needs none of the agent's privilege. It only talks to
+      # The controller needs none of fiberd's privilege. It only talks to
       # the API server, keeps its key in a Secret and serves on 8080. So it
       # runs the image (root by default for fiberd-k8s) as a non-root user,
       # with a read-only root filesystem, no capabilities and the default

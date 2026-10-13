@@ -144,7 +144,7 @@ func TestMiss(t *testing.T) {
 	}{
 		{name: "shed is 503 with the home's Retry-After",
 			err: func(t *testing.T) error {
-				return missErr(t, codes.ResourceExhausted, "lane down", &grantv1.Miss{Code: grantv1.MissCode_SHED, RetryAfterS: 7})
+				return missErr(t, codes.ResourceExhausted, "issuer unreachable", &grantv1.Miss{Code: grantv1.MissCode_SHED, RetryAfterS: 7})
 			},
 			code: 503, bodyHas: "shed: ", header: map[string]string{"Retry-After": "7", "X-Fiberd-Preferred-Home": ""}},
 		{name: "deferred is 503 naming the home that holds the session",

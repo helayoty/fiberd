@@ -15,7 +15,7 @@ import (
 
 // mobileRuntime is fakeRuntime plus a shared "registry": a map from
 // grant/session to a published delta, shared between two runtimes so two
-// agents can hand a session to each other.
+// fiberd processes can hand a session to each other.
 type store struct {
 	mu          sync.Mutex // guards the store and every runtime's records of it
 	deltas      map[string]published
@@ -34,8 +34,8 @@ type mobileRuntime struct {
 	home      string
 	st        *store
 	claims    []string
-	discarded []string // claimed refs the agent told it to drop
-	retired   []string // local refs whose published copy the agent withdrew
+	discarded []string // claimed refs fiberd told it to drop
+	retired   []string // local refs whose published copy fiberd withdrew
 	deltaW    uint64   // W the next park will report
 	// retireFails is how many RetireDelta calls fail before one works,
 	// like a registry that is down for a while.
@@ -57,7 +57,7 @@ type mobileRuntime struct {
 func (m *mobileRuntime) key(g core.Grant, session string) string {
 	domain, err := g.SessionDomain()
 	if err != nil {
-		panic(err) // the agent never asks the store for a grant without a domain
+		panic(err) // fiberd never asks the store for a grant without a domain
 	}
 	return domain + "/" + session
 }
@@ -170,10 +170,10 @@ func (m *mobileRuntime) Clone(_ context.Context, spec core.CloneSpec) (core.Fibe
 	return core.FiberHandle{ID: spec.Fence.String(), Endpoint: m.home + ":" + spec.Fence.String()}, nil
 }
 
-func newMobileAgent(t *testing.T, home string, st *store, g core.Grant) (*core.Agent, *mobileRuntime) {
+func newMobileCore(t *testing.T, home string, st *store, g core.Grant) (*core.Core, *mobileRuntime) {
 	t.Helper()
 	rt := &mobileRuntime{fakeRuntime: fakeRuntime{tier: core.TierCheckpoint, exits: make(chan core.FiberExit, 8)}, home: home, st: st}
-	a := newAgent(t, "up", core.TierCheckpoint, g)
+	a := newCore(t, "up", core.TierCheckpoint, g)
 	a.NodeID = home
 	a.Runtime = rt
 	return a, rt
@@ -187,8 +187,8 @@ func TestSessionMovesBetweenHomes(t *testing.T) {
 	ga := core.Grant{UID: "ga", Tenant: "acme", Audience: "A", TemplateDigest: "sha256:t", FiberMax: 4, WBudgetBytes: 10 << 20}
 	gb := core.Grant{UID: "gb", Tenant: "acme", Audience: "B", TemplateDigest: "sha256:t", FiberMax: 4, WBudgetBytes: 10 << 20}
 	st := &store{deltas: map[string]published{}}
-	a, ra := newMobileAgent(t, "A", st, ga)
-	b, rb := newMobileAgent(t, "B", st, gb)
+	a, ra := newMobileCore(t, "A", st, ga)
+	b, rb := newMobileCore(t, "B", st, gb)
 	ctx := context.Background()
 	reqA := core.CloneRequest{GrantJWT: []byte("ga"), Session: "S", Deadline: time.Second}
 	reqB := core.CloneRequest{GrantJWT: []byte("gb"), Session: "S", Deadline: time.Second}
@@ -286,8 +286,8 @@ func TestSessionDomain(t *testing.T) {
 // makes it the only copy, which is kept.
 func TestParkedSessionPickup(t *testing.T) {
 	ctx := context.Background()
-	yield := func(_ *testing.T, b *core.Agent) { b.Yield(ctx, "g1", "ladder") }
-	remove := func(t *testing.T, b *core.Agent) {
+	yield := func(_ *testing.T, b *core.Core) { b.Yield(ctx, "g1", "ladder") }
+	remove := func(t *testing.T, b *core.Core) {
 		r, err := core.OpenRevoked(filepath.Join(t.TempDir(), "revoked.json"), time.Hour, time.Now())
 		if err != nil {
 			t.Fatal(err)
@@ -295,7 +295,7 @@ func TestParkedSessionPickup(t *testing.T) {
 		b.Revoked = r
 		b.Remove(ctx, "g1")
 	}
-	arrive := func(t *testing.T, b *core.Agent) {
+	arrive := func(t *testing.T, b *core.Core) {
 		if !b.Ledger.RestoreParked(core.SessionSnapshot{Name: "S", GrantUID: "g1", State: core.StateParked, DeltaRef: "delta-local"}) {
 			t.Fatal("could not register S on B mid-claim")
 		}
@@ -307,13 +307,13 @@ func TestParkedSessionPickup(t *testing.T) {
 		pubErr        error  // publishing the delta fails
 		refuse        error  // the picker's parity gate refuses S
 		from          string // the home that clones S again: "A" or "B"
-		laneDown      bool
-		homeCap       uint64                            // the picker's MobilityBudget, 0 means unset
-		failAudit     string                            // a sync grant whose picker fails this audit event
-		midClaim      func(t *testing.T, a *core.Agent) // runs on the picker while its claim is in flight
-		findErr       error                             // the picker cannot reach the store
-		claimErr      error                             // the picker's pull fails
-		discardErr    error                             // the picker cannot drop a claimed copy
+		issuerDown    bool
+		homeCap       uint64                           // the picker's MobilityBudget, 0 means unset
+		failAudit     string                           // a sync grant whose picker fails this audit event
+		midClaim      func(t *testing.T, a *core.Core) // runs on the picker while its claim is in flight
+		findErr       error                            // the picker cannot reach the store
+		claimErr      error                            // the picker's pull fails
+		discardErr    error                            // the picker cannot drop a claimed copy
 		wantCode      core.StatusCode
 		wantErr       error
 		wantPreferred string
@@ -330,7 +330,7 @@ func TestParkedSessionPickup(t *testing.T) {
 			wantCode: core.OK, wantKind: core.ActResume, wantClaims: 1, wantDiscarded: 1},
 		{name: "too large to move is deferred with the preferred home", budget: 1 << 20, deltaW: 3 << 20, from: "B",
 			wantCode: core.DeferredFallback, wantErr: core.ErrDeltaTooLarge, wantPreferred: "A", wantStored: true},
-		{name: "too large with the lane down is shed", budget: 1 << 20, deltaW: 3 << 20, from: "B", laneDown: true,
+		{name: "too large with the issuer unreachable is shed", budget: 1 << 20, deltaW: 3 << 20, from: "B", issuerDown: true,
 			wantCode: core.Shed, wantErr: core.ErrDeltaTooLarge, wantStored: true},
 		{name: "a home-level cap wins over the grant's budget", budget: 1 << 20, deltaW: 3 << 20, from: "B", homeCap: 8 << 20,
 			wantCode: core.OK, wantKind: core.ActResume, wantClaims: 1},
@@ -358,8 +358,8 @@ func TestParkedSessionPickup(t *testing.T) {
 				g.Policy.Durability = core.Sync
 			}
 			st := &store{deltas: map[string]published{}}
-			a, ra := newMobileAgent(t, "A", st, g)
-			b, rb := newMobileAgent(t, "B", st, g)
+			a, ra := newMobileCore(t, "A", st, g)
+			b, rb := newMobileCore(t, "B", st, g)
 			a.NodeID, b.NodeID = "", ""
 			ra.deltaW, ra.pubErr = tc.deltaW, tc.pubErr
 			req := core.CloneRequest{GrantJWT: []byte("g1"), Session: "S", Deadline: time.Second}
@@ -376,7 +376,7 @@ func TestParkedSessionPickup(t *testing.T) {
 			if tc.failAudit != "" {
 				picker.Audit = eventAuditor{tc.failAudit}
 			}
-			if tc.laneDown {
+			if tc.issuerDown {
 				picker.Health.MarkSync(time.Now().Add(-time.Minute))
 			}
 			if tc.homeCap != 0 {
@@ -465,8 +465,8 @@ func TestConcurrentClaims(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			g := core.Grant{UID: "g1", Tenant: "acme", TemplateDigest: "sha256:t", FiberMax: 4, WBudgetBytes: 8 << 20}
 			st := &store{deltas: map[string]published{}}
-			a, _ := newMobileAgent(t, "A", st, g)
-			b, rb := newMobileAgent(t, "B", st, g)
+			a, _ := newMobileCore(t, "A", st, g)
+			b, rb := newMobileCore(t, "B", st, g)
 			a.NodeID, b.NodeID = "", ""
 			ctx := context.Background()
 			req := core.CloneRequest{GrantJWT: []byte("g1"), Session: "S", Deadline: time.Second}
@@ -572,7 +572,7 @@ func TestResumedDeltaLifecycle(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			g := core.Grant{UID: "g1", Tenant: "acme", Audience: "A", TemplateDigest: "sha256:t", FiberMax: 4, WBudgetBytes: 8 << 20}
 			st := &store{deltas: map[string]published{}}
-			a, ra := newMobileAgent(t, "A", st, g)
+			a, ra := newMobileCore(t, "A", st, g)
 			ra.retireFails = tc.retireFails
 			req := core.CloneRequest{GrantJWT: []byte("g1"), Session: "S", Deadline: time.Second}
 			r1, code, err := a.Clone(ctx, req)
@@ -629,13 +629,13 @@ func TestResumedDeltaLifecycle(t *testing.T) {
 // quota. A parked session's delta stays through the same events.
 func TestLostFiberDiscardsResumedDelta(t *testing.T) {
 	ctx := context.Background()
-	// lose ends the running fiber (or the whole agent) one way.
-	type loser func(t *testing.T, a *core.Agent, ra *mobileRuntime, fiber string)
-	exit := func(_ *testing.T, a *core.Agent, _ *mobileRuntime, fiber string) {
+	// lose ends the running fiber (or the whole of fiberd) one way.
+	type loser func(t *testing.T, a *core.Core, ra *mobileRuntime, fiber string)
+	exit := func(_ *testing.T, a *core.Core, _ *mobileRuntime, fiber string) {
 		a.OnExit(ctx, core.FiberExit{FiberID: fiber, Reason: "oom", Detail: "dirtied past w_budget"})
 	}
-	yield := func(_ *testing.T, a *core.Agent, _ *mobileRuntime, _ string) { a.Yield(ctx, "g1", "ladder") }
-	remove := func(t *testing.T, a *core.Agent, _ *mobileRuntime, _ string) {
+	yield := func(_ *testing.T, a *core.Core, _ *mobileRuntime, _ string) { a.Yield(ctx, "g1", "ladder") }
+	remove := func(t *testing.T, a *core.Core, _ *mobileRuntime, _ string) {
 		r, err := core.OpenRevoked(filepath.Join(t.TempDir(), "revoked.json"), time.Hour, time.Now())
 		if err != nil {
 			t.Fatal(err)
@@ -643,7 +643,7 @@ func TestLostFiberDiscardsResumedDelta(t *testing.T) {
 		a.Revoked = r
 		a.Remove(ctx, "g1")
 	}
-	bump := func(t *testing.T, a *core.Agent, _ *mobileRuntime, _ string) {
+	bump := func(t *testing.T, a *core.Core, _ *mobileRuntime, _ string) {
 		store, err := core.OpenEpochStore(t.TempDir())
 		if err != nil {
 			t.Fatal(err)
@@ -653,11 +653,11 @@ func TestLostFiberDiscardsResumedDelta(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	restart := func(t *testing.T, a *core.Agent, ra *mobileRuntime, _ string) {
-		// A new agent over the same runtime boots from the snapshot the
+	restart := func(t *testing.T, a *core.Core, ra *mobileRuntime, _ string) {
+		// A new core over the same runtime boots from the snapshot the
 		// old one left, as after a crash.
 		snap := a.Ledger.Snapshot()
-		b := newAgent(t, "up", core.TierCheckpoint)
+		b := newCore(t, "up", core.TierCheckpoint)
 		b.NodeID, b.Runtime, b.Ledger = "A", ra, core.NewLedger(snap.Epoch+1)
 		if _, err := b.Reconcile(ctx, snap); err != nil {
 			t.Fatal(err)
@@ -681,7 +681,7 @@ func TestLostFiberDiscardsResumedDelta(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			g := core.Grant{UID: "g1", Tenant: "acme", Audience: "A", TemplateDigest: "sha256:t", FiberMax: 4, WBudgetBytes: 8 << 20}
 			st := &store{deltas: map[string]published{}}
-			a, ra := newMobileAgent(t, "A", st, g)
+			a, ra := newMobileCore(t, "A", st, g)
 			req := core.CloneRequest{GrantJWT: []byte("g1"), Session: "S", Deadline: time.Second}
 			r1, code, err := a.Clone(ctx, req)
 			if err != nil || code != core.OK || r1.Kind != core.ActCreate {
@@ -740,8 +740,8 @@ func TestMigrateOutDiscardsDelta(t *testing.T) {
 			ga := core.Grant{UID: "ga", Tenant: "acme", Audience: "A", TemplateDigest: "sha256:t", FiberMax: 4, WBudgetBytes: 10 << 20}
 			gb := core.Grant{UID: "gb", Tenant: "acme", Audience: "B", TemplateDigest: "sha256:t", FiberMax: 4, WBudgetBytes: 10 << 20}
 			st := &store{deltas: map[string]published{}}
-			a, ra := newMobileAgent(t, "A", st, ga)
-			b, _ := newMobileAgent(t, "B", st, gb)
+			a, ra := newMobileCore(t, "A", st, ga)
+			b, _ := newMobileCore(t, "B", st, gb)
 			ra.discardErr = tc.discardErr
 			ctx := context.Background()
 			r1, code, err := a.Clone(ctx, core.CloneRequest{GrantJWT: []byte("ga"), Session: "S", Deadline: time.Second})
@@ -806,8 +806,8 @@ func TestTenantKeepsSessionsApart(t *testing.T) {
 			owner := core.Grant{UID: "ga", Tenant: "acme", Audience: "A", TemplateDigest: "sha256:t", FiberMax: 4, WBudgetBytes: 10 << 20,
 				Policy: tc.claimant.Policy}
 			st := &store{deltas: map[string]published{}}
-			a, _ := newMobileAgent(t, "A", st, owner)
-			b, rb := newMobileAgent(t, "B", st, tc.claimant)
+			a, _ := newMobileCore(t, "A", st, owner)
+			b, rb := newMobileCore(t, "B", st, tc.claimant)
 			r, code, err := a.Clone(ctx, core.CloneRequest{GrantJWT: []byte("ga"), Session: "S", Deadline: time.Second})
 			if err != nil || code != core.OK || r.Kind != core.ActCreate {
 				t.Fatalf("A clone: %v %d %v", err, code, r.Kind)
@@ -863,7 +863,7 @@ func TestNamedSessionNeedsTenant(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
-			a, _ := newMobileAgent(t, "A", &store{deltas: map[string]published{}}, tc.grant)
+			a, _ := newMobileCore(t, "A", &store{deltas: map[string]published{}}, tc.grant)
 			r, code, err := a.Clone(ctx, core.CloneRequest{GrantJWT: []byte("g1"), Session: tc.session, Deadline: time.Second})
 			if code != tc.wantClone {
 				t.Fatalf("clone = %d %v, want %d", code, err, tc.wantClone)
@@ -945,8 +945,8 @@ func TestParkRacesClone(t *testing.T) {
 			ga := core.Grant{UID: "ga", Tenant: "acme", Audience: "A", TemplateDigest: "sha256:t", FiberMax: 4, WBudgetBytes: 10 << 20}
 			gb := core.Grant{UID: "gb", Tenant: "acme", Audience: "B", TemplateDigest: "sha256:t", FiberMax: 4, WBudgetBytes: 10 << 20}
 			st := &store{deltas: map[string]published{}}
-			a, ra := newMobileAgent(t, "A", st, ga)
-			b, _ := newMobileAgent(t, "B", st, gb)
+			a, ra := newMobileCore(t, "A", st, ga)
+			b, _ := newMobileCore(t, "B", st, gb)
 			sp := slowPublish{mobileRuntime: ra, enter: make(chan struct{}), wait: make(chan struct{})}
 			a.Runtime = sp
 			ra.deltaW = 1 << 20

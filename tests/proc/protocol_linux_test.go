@@ -17,7 +17,7 @@ import (
 
 // rawZygote starts refzygote the way the backend does, with one end of a
 // socketpair at fd 3 and its stdio on a log file under dir, sends it
-// PREPARE none as its whole setup, and returns the agent's end once
+// PREPARE none as its whole setup, and returns fiberd's end once
 // READY was read. Closing the connection ends the zygote and every child
 // it has.
 func rawZygote(t *testing.T, dir string) (*net.UnixConn, *bufio.Reader) {
@@ -97,7 +97,7 @@ func tcpEndpoint(n int) string {
 
 // TestControlProtocolLines sends the zygote lines the backend never would
 // and checks the exact answers. A fence over 127 characters is refused,
-// never cut, because a cut fence would not match the agent's and its fiber
+// never cut, because a cut fence would not match fiberd's and its fiber
 // would run unknown to it.
 func TestControlProtocolLines(t *testing.T) {
 	long := strings.Repeat("f", 2000)
@@ -164,12 +164,12 @@ func TestControlProtocolLines(t *testing.T) {
 	}
 }
 
-// TestSetupPhase pins the lines around READY. The agent's setup lines
+// TestSetupPhase pins the lines around READY. fiberd's setup lines
 // come first and PREPARE ends them, so READY means the zygote's own mount
 // namespace, the one every mntns fiber copies, is built. A line out of
 // place is a protocol error. Before PREPARE it ends the zygote, since the
-// agent is not the one the zygote was written for. After READY a setup
-// line would leave a path uncovered that the agent asked for, so it
+// fiberd is not the one the zygote was written for. After READY a setup
+// line would leave a path uncovered that fiberd asked for, so it
 // refuses every later mntns CLONE instead (fail closed), while a CLONE
 // without mntns is still born. All of this is new with the zygote's own
 // namespace. The old zygote said READY first and took HIDE at any time.
@@ -199,7 +199,7 @@ func TestSetupPhase(t *testing.T) {
 			lines: []string{"HIDE /etc", "CLONE c %s/c.sock 2000 - pidns,mntns", "CLONE d %s/d.sock 2000 - pidns"},
 			want: []string{
 				"ERROR ? HIDE after READY refused",
-				"ERROR c refused: the mount namespace cannot hide what the agent asked (a setup line (HIDE, DROP, RUNDIR or PREPARE) came after READY)",
+				"ERROR c refused: the mount namespace cannot hide what fiberd asked (a setup line (HIDE, DROP, RUNDIR or PREPARE) came after READY)",
 				"CLONED d ",
 			},
 		},

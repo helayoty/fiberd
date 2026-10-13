@@ -19,7 +19,7 @@ import (
 	"github.com/helayoty/fiberd/examples/substrate/herder"
 )
 
-// TestWhatTheHomeOffers checks the home's fixed answers to the agent.
+// TestWhatTheHomeOffers checks the home's fixed answers to fiberd.
 func TestWhatTheHomeOffers(t *testing.T) {
 	scope := []core.ScopeClaim{{Name: "pod_uid", Value: "p-1"}, {Name: "node", Value: "n-1"}}
 	h, _ := newHome(t, Config{Scope: scope})
@@ -37,11 +37,11 @@ func TestWhatTheHomeOffers(t *testing.T) {
 			s[0].Value = "changed"
 			return h.Scope()[0].Value
 		}, "p-1"},
-		{"a worker pod offers no fabric", func() string {
-			fc, release, err := h.Fabric(context.Background(), core.Grant{UID: "g"})
+		{"a worker pod offers no device channel", func() string {
+			fc, release, err := h.Devices(context.Background(), core.Grant{UID: "g"})
 			release()
 			return fmt.Sprintf("%+v %v", fc, err)
-		}, fmt.Sprintf("%+v %v", core.FabricChannel{}, nil)},
+		}, fmt.Sprintf("%+v %v", core.DeviceChannel{}, nil)},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -52,7 +52,7 @@ func TestWhatTheHomeOffers(t *testing.T) {
 	}
 }
 
-// TestGrantFailures checks minting that cannot sign and a lane nobody
+// TestGrantFailures checks minting that cannot sign and a delivery nobody
 // drains. Neither may lose the grant the herder asked for.
 func TestGrantFailures(t *testing.T) {
 	ctx := context.Background()
@@ -64,12 +64,12 @@ func TestGrantFailures(t *testing.T) {
 	cases := []struct {
 		name   string
 		cfg    Config
-		mints  int // templates minted in a row, no one draining the lane
+		mints  int // templates minted in a row, no one draining the delivery
 		err    bool
-		queued int // events on the lane afterwards
+		queued int // events queued afterwards
 	}{
 		{name: "a public key cannot sign: no grant, nothing announced", cfg: Config{Key: &pub}, mints: 1, err: true},
-		{name: "a full lane still hands out the grant; the agent admits it on its first Clone", mints: 65, queued: 64},
+		{name: "a full delivery still hands out the grant; fiberd admits it on its first Clone", mints: 65, queued: 64},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -85,9 +85,9 @@ func TestGrantFailures(t *testing.T) {
 			if (last != nil) != tc.err {
 				t.Fatalf("last mint err = %v, want error %v", last, tc.err)
 			}
-			lane, _ := h.Grants(ctx)
-			if len(lane) != tc.queued {
-				t.Fatalf("lane holds %d events, want %d", len(lane), tc.queued)
+			events, _ := h.Grants(ctx)
+			if len(events) != tc.queued {
+				t.Fatalf("delivery holds %d events, want %d", len(events), tc.queued)
 			}
 			if tc.err && len(h.grants) != 0 {
 				t.Fatalf("a failed mint was kept: %v", h.grants)
@@ -200,7 +200,7 @@ func TestDelegateOwn(t *testing.T) {
 	}{
 		{name: "a writable mount delegates at once", delegate: []error{nil}, wantCalls: 1},
 		{name: "a read-only mount is remounted and the delegation retried",
-			delegate:   []error{fmt.Errorf("cgroup: agent leaf: %w", &os.PathError{Op: "mkdir", Path: "/sys/fs/cgroup/agent", Err: syscall.EROFS})},
+			delegate:   []error{fmt.Errorf("cgroup: fiberd leaf: %w", &os.PathError{Op: "mkdir", Path: "/sys/fs/cgroup/fiberd", Err: syscall.EROFS})},
 			wantRemnts: 1, wantCalls: 2},
 		{name: "a read-only mount that cannot be remounted fails with both reasons",
 			delegate: []error{fmt.Errorf("cgroup: %w", syscall.EROFS)}, remount: errRemount,
@@ -223,15 +223,15 @@ func TestDelegateOwn(t *testing.T) {
 				if err != nil {
 					return cgroup.Dir{}, err
 				}
-				return d.Child("fiberd"), nil
+				return d.Child("grants"), nil
 			}
 			remount := func(string) error { remounts++; return tc.remount }
 			got, err := delegateOwn(t.TempDir(), delegate, remount)
 			if !errors.Is(err, tc.wantErr) {
 				t.Fatalf("err = %v, want %v", err, tc.wantErr)
 			}
-			if tc.wantErr == nil && filepath.Base(got.Path) != "fiberd" {
-				t.Fatalf("delegated %q, want the fiberd subtree", got.Path)
+			if tc.wantErr == nil && filepath.Base(got.Path) != "grants" {
+				t.Fatalf("delegated %q, want the grants subtree", got.Path)
 			}
 			if errors.Is(err, syscall.EROFS) != tc.wantROFS {
 				t.Fatalf("err = %v: read-only cause present = %v, want %v", err, !tc.wantROFS, tc.wantROFS)

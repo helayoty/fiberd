@@ -5,14 +5,14 @@ import "testing"
 // TestRoundsOver checks when the storm stops sampling. It once stopped as
 // soon as the demand was reached and gave the ladder two seconds, which a
 // park in flight on a loaded CI runner missed (storm: FAIL no fiber was
-// parked, with the agent's "shedding, reclaiming" line and no park after
+// parked, with fiberd's "shedding, reclaiming" line and no park after
 // it).
 func TestRoundsOver(t *testing.T) {
 	cases := []struct {
 		name    string
 		allDone bool
 		running uint32
-		seen    bool // a status from the agent has arrived
+		seen    bool // a status from fiberd has arrived
 		parked  bool
 		want    bool
 	}{

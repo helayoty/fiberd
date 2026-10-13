@@ -25,7 +25,7 @@ import (
 )
 
 // TestE2ECloneNumbers measures Clone as a consumer sees it, over gRPC on
-// loopback TCP with a JWKS-verified grant and the agent, host runtime and
+// loopback TCP with a JWKS-verified grant and fiberd, host runtime and
 // fork backend wired as fiberd wires them. It prints numbers rather than
 // asserting them, and splits each round trip into stages keyed by fiber.
 //
@@ -34,7 +34,7 @@ import (
 //	zygote   CLONE to CLONED on the control socket, with any wait behind
 //	         other clones
 //	audit    the create record, also fsynced when durability is sync
-//	agent    everything else, including verify, which is also shown alone
+//	fiberd   everything else, including verify, which is also shown alone
 //
 // FIBERD_BENCH=1 enables it. The audit spool and snapshot live in
 // FIBERD_BENCH_STATE. Point it at a disk to see what a sync record costs,
@@ -151,20 +151,20 @@ func breakdown(t *testing.T, rtt map[string]time.Duration, stamps []stamp) {
 		}
 		by[s.stage][s.fiber] += s.d
 	}
-	var total, hostPrep, zygote, audit, agent []time.Duration
+	var total, hostPrep, zygote, audit, fiberd []time.Duration
 	for id, d := range rtt {
 		rt, zy, au := by[stageRuntime][id], by[stageZygote][id], by[stageAudit][id]
 		total = append(total, d)
 		hostPrep = append(hostPrep, rt-zy)
 		zygote = append(zygote, zy)
 		audit = append(audit, au)
-		agent = append(agent, d-rt-au)
+		fiberd = append(fiberd, d-rt-au)
 	}
 	report(t, fmt.Sprintf("client round trip (n=%d)", len(total)), total)
 	report(t, "  host", hostPrep)
 	report(t, "  zygote", zygote)
 	report(t, "  audit", audit)
-	report(t, "  agent", agent)
+	report(t, "  fiberd", fiberd)
 	report(t, "    of which verify", verify)
 }
 
@@ -205,7 +205,7 @@ func (c *stageClock) take() []stamp {
 }
 
 // The timed seams embed the concrete types, so every optional interface
-// the agent or the host runtime looks for is still there.
+// fiberd or the host runtime looks for is still there.
 type timedVerifier struct {
 	core.Verifier
 	clock *stageClock
@@ -260,7 +260,7 @@ type e2eHome struct {
 	clock  *stageClock
 }
 
-// newE2EHome wires a home as pkg/agent does for -runtime proc
+// newE2EHome wires a home as pkg/fiberd does for -runtime proc
 // -verifier jwks, with the timed seams in place. store adds the ledger
 // snapshot store fiberd keeps under its state directory.
 func newE2EHome(t *testing.T, store bool) *e2eHome {
@@ -305,14 +305,14 @@ func newE2EHome(t *testing.T, store bool) *e2eHome {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = spool.Close() })
-	ag := &core.Agent{
-		NodeID:  benchNode,
-		Ledger:  core.NewLedger(1),
-		Budget:  core.NewBudget(core.DefaultBaseRate, core.DefaultRefW), // fiberd's thrash budget
-		Runtime: timedRuntime{Runtime: hr, clock: clock},
-		Audit:   timedAuditor{Auditor: spool, clock: clock},
-		Verify:  timedVerifier{Verifier: &grant.Verifier{Cache: &grant.Cache{IssuerURL: srv.URL}, Audience: benchNode}, clock: clock},
-		Health:  core.NewSourceHealth(time.Hour, time.Now()),
+	ag := &core.Core{
+		NodeID:    benchNode,
+		Ledger:    core.NewLedger(1),
+		RateLimit: core.NewRateLimit(core.DefaultBaseRate, core.DefaultRefW), // fiberd's clone rate limit
+		Runtime:   timedRuntime{Runtime: hr, clock: clock},
+		Audit:     timedAuditor{Auditor: spool, clock: clock},
+		Verify:    timedVerifier{Verifier: &grant.Verifier{Cache: &grant.Cache{IssuerURL: srv.URL}, Audience: benchNode}, clock: clock},
+		Health:    core.NewSourceHealth(time.Hour, time.Now()),
 	}
 	if store {
 		ag.Store = &core.SnapshotStore{Path: filepath.Join(state, "ledger.json")}
@@ -325,7 +325,7 @@ func newE2EHome(t *testing.T, store bool) *e2eHome {
 	if err != nil {
 		t.Fatal(err)
 	}
-	gs := rpc.NewGRPCServer(&rpc.Server{Agent: ag, Issuer: srv.URL, RetryAfter: time.Second})
+	gs := rpc.NewGRPCServer(&rpc.Server{Core: ag, Issuer: srv.URL, RetryAfter: time.Second})
 	go func() { _ = gs.Serve(lis) }()
 	t.Cleanup(gs.Stop)
 	c, err := consumer.Dial(ctx, lis.Addr().String())

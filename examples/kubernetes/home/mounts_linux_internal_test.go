@@ -31,7 +31,7 @@ func readOnlyMount(t *testing.T, dir string) {
 	}
 }
 
-// TestWritableMounts checks that the agent makes its read-only cgroupfs
+// TestWritableMounts checks that fiberd makes its read-only cgroupfs
 // and criu's sysctls writable, and what it does when it cannot.
 func TestWritableMounts(t *testing.T) {
 	cases := []struct {

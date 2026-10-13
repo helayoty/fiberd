@@ -157,7 +157,7 @@ jobs:
       - name: make the state readable for the upload (written as root inside the container)
         if: failure()
         run: sudo chmod -R a+rX bin/conform-state-gvisor 2>/dev/null || true
-      - name: keep the agent's logs
+      - name: keep fiberd's logs
         if: failure()
         continue-on-error: true
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

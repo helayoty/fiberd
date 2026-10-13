@@ -13,7 +13,7 @@ flowchart LR
   subgraph T[Transport and grants]
     P[examples run plaintext] --> G1[gate 1]
     GF[grant fields replaced in place] --> G10[gate 10]
-    LD[lane directory writable] --> G11[gate 11]
+    LD[grant directory writable] --> G11[gate 11]
   end
   subgraph S[State]
     E[epoch on emptyDir] --> G3[gate 3]
@@ -38,18 +38,18 @@ flowchart LR
 
 **The gates.** A deployment passes each with recorded evidence against its own configuration.
 
-1. Every home serves TLS, every consumer dials with a client certificate, and a plaintext call is refused.
+1. Every home serves TLS, every caller dials with a client certificate, and a plaintext call is refused.
 2. Grant replay, removal, lease expiry and an issuer-key outage behave as [core.md](core.md) and [grant.md](grant.md) describe, tested on the real platform.
 3. The [epoch](../glossary.md#epoch) survives a process restart and the intended home replacement, or the replacement starts under a new audience and grant UID.
 4. A failed runtime [release](../glossary.md#release) is retried or the capacity stays quarantined, checked by killing the [backend](../glossary.md#backend) under a release.
 5. [Parked](../glossary.md#park) [deltas](../glossary.md#delta) and ports stay bounded under the deployment's retention policy, and anonymous parks are not used.
 6. Where cross-home resume matters, a fresh session after an unreachable registry is acceptable or ruled out.
 7. A full disk and a failed fsync are visible in monitoring, and the spool is copied off the host where records matter.
-8. Readiness, [scope](../glossary.md#scope) loss, drain and deletion are tested against the real platform, not only through the test hooks ([agent.md](agent.md)).
+8. Readiness, [scope](../glossary.md#scope) loss, drain and deletion are tested against the real platform, not only through the test hooks ([fiberd.md](fiberd.md)).
 9. The conformance suite passes on the exact production backend and configuration, and the benchmarks are re-run there with the method in [benchmarks.md](../benchmarks.md).
 10. Issuers change only the lease of a grant UID and mint a new UID for any other change ([core.md](core.md)).
-11. Only the control plane can write each home's grant lane directory ([home.md](home.md)).
-12. Consumers reconcile their grants through an inventory other than Watch ([core.md](core.md)).
+11. Only the control plane can write each home's grant directory ([home.md](home.md)).
+12. Callers reconcile their grants through an inventory other than Watch ([core.md](core.md)).
 13. A grant with a [device budget](../glossary.md#device-budget) runs only on homes whose [engine](../glossary.md#engine) has the class it asks for ([runtime-host.md](runtime-host.md)).
 
 ## Security notes and known gaps

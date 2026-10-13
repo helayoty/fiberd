@@ -128,7 +128,7 @@ func (l *Ledger) Epoch() uint64 {
 
 // BumpEpoch moves the ledger to a new epoch in place: every fence minted
 // from here on carries it, and every fence minted before is stale by
-// construction. The agent releases the running fibers after this call,
+// construction. fiberd releases the running fibers after this call,
 // and a clone in flight cannot commit under the old epoch. Parked
 // sessions keep their deltas and resume under the new epoch.
 func (l *Ledger) BumpEpoch(epoch uint64) {

@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1440" height="914" viewBox="0 0 1440 914" role="img" aria-labelledby="architecture-components-title architecture-components-desc">
-  <title id="architecture-components-title">Which components make up one fiberd agent?</title>
-  <desc id="architecture-components-desc">The components of one fiberd agent, grouped in three bordered lanes, with the path of one Clone numbered in blue. Above the agent sit two callers. The issuer signs grants, and the grant verifier reads its published signing keys. The consumer is any caller of the agent. The control lane holds the grant verifier, the control API, the home and the handoff router. The record lane holds admission and pressure, the ledger and the audit spool. The execution lane holds artifact and mobility, the runtime host and the backends. Below the agent sit the registry, the zygote and the fibers. The Clone path runs as follows. 1, the consumer calls the control API over gRPC or JSON with mutual TLS. 2, the control API has the grant verifier check the grant. 3, the control API calls the ledger. 4, the ledger calls the runtime host. 5, the runtime host calls a backend. 6, a fiber starts. On proc and runc the backend drives the zygote, the warm template's own process, which forks the fiber. On gVisor and Hyperlight the backend restores the fiber instead. Other calls are drawn in grey. The home delivers grants, health and scope to the ledger. The ledger consults admission and pressure, which can ask the ledger to reclaim fibers. The ledger records every change in the audit spool. The runtime host calls artifact and mobility, which pulls from and publishes to the untrusted registry. Separately, the consumer opens a TLS connection to the handoff router, which passes it to its fiber without decrypting it.</desc>
+  <title id="architecture-components-title">Which components make up fiberd?</title>
+  <desc id="architecture-components-desc">The components of one fiberd process, grouped in three bordered bands, with the path of one Clone numbered in blue. Above fiberd sit the issuer and a caller. The issuer signs grants, and the grant verifier reads its published signing keys. The caller is any client of fiberd. The control band holds the grant verifier, the control API, the home and the handoff router. The record band holds admission and pressure, the ledger and the audit spool. The execution band holds artifact and mobility, the runtime host and the backends. Below fiberd sit the registry, the zygote and the fibers. The Clone path runs as follows. 1, the caller calls the control API over gRPC or JSON with mutual TLS. 2, the control API has the grant verifier check the grant. 3, the control API calls the ledger. 4, the ledger calls the runtime host. 5, the runtime host calls a backend. 6, a fiber starts. On proc and runc the backend drives the zygote, the warm template's own process, which forks the fiber. On gVisor and Hyperlight the backend restores the fiber instead. Other calls are drawn in grey. The home delivers grants, whether the issuer is reachable, and scope to the ledger. The ledger consults admission and pressure, which can ask the ledger to reclaim fibers. The ledger records every change in the audit spool. The runtime host calls artifact and mobility, which pulls from and publishes to the untrusted registry. Separately, the caller opens a TLS connection to the handoff router, which passes it to its fiber without decrypting it.</desc>
   <style>
     :root{--bg:#f7f9fc;--panel:#fff;--ink:#172033;--muted:#5d6b7d;--border:#b8c4d4;--blue:#3165b5;--blue-bg:#eaf1ff;--teal:#13776f;--teal-bg:#e8f7f4;--violet:#704aa1;--violet-bg:#f2edfa;--amber:#a76500;--amber-bg:#fff3d6;--green:#287a4d;--green-bg:#e8f6ed}
     @media(prefers-color-scheme:dark){:root{--bg:#0d1117;--panel:#161b22;--ink:#e6edf3;--muted:#a3adba;--border:#3d4652;--blue:#79a7ff;--blue-bg:#17243d;--teal:#53c7b8;--teal-bg:#102923;--violet:#c09cff;--violet-bg:#251b35;--amber:#f0b44d;--amber-bg:#30240f;--green:#63cf8e;--green-bg:#142b1e}}
@@ -19,19 +19,19 @@
     <marker id="architecture-components-violet-arrow" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="12" markerHeight="12" markerUnits="userSpaceOnUse" orient="auto"><path d="M1 1 11 6 1 11Z" fill="var(--violet)"/></marker>
   </defs>
   <rect class="bg" width="1440" height="914"/>
-  <text class="title" x="48" y="66">Which components make up one fiberd agent?</text>
-  <text class="secondary muted" x="48" y="100">Blue numbers follow one Clone from the consumer to a new fiber.</text>
+  <text class="title" x="48" y="66">Which components make up fiberd?</text>
+  <text class="secondary muted" x="48" y="100">Blue numbers follow one Clone from the caller to a new fiber.</text>
   <path class="divider" d="M48 130H1392"/>
 
   <rect class="outside" x="184" y="156" width="256" height="84" rx="4"/>
   <text class="name center" x="312" y="190">Issuer</text>
   <text class="secondary center muted" x="312" y="218">Signs grants</text>
   <rect class="outside" x="512" y="156" width="856" height="84" rx="4"/>
-  <text class="name center" x="948" y="190">Consumer</text>
-  <text class="secondary center muted" x="948" y="218">Any caller of the agent</text>
+  <text class="name center" x="948" y="190">Caller</text>
+  <text class="secondary center muted" x="948" y="218">Any client of fiberd</text>
 
   <rect class="scope" x="48" y="280" width="1344" height="458" rx="18"/>
-  <text class="label" x="72" y="309">fiberd agent</text>
+  <text class="label" x="72" y="309">fiberd</text>
   <rect class="band band-control" x="60" y="322" width="1320" height="108" rx="12"/>
   <rect class="band band-record" x="60" y="470" width="1320" height="108" rx="12"/>
   <rect class="band band-exec" x="60" y="618" width="1320" height="108" rx="12"/>
@@ -62,7 +62,7 @@
   <text class="secondary center" x="640" y="396">gRPC · JSON · mTLS</text>
   <rect class="box control" x="856" y="334" width="224" height="84" rx="4"/>
   <text class="name blue center" x="968" y="368">Home</text>
-  <text class="secondary center" x="968" y="396">Grants · health · scope</text>
+  <text class="secondary center" x="968" y="396">Grants · issuer · scope</text>
   <rect class="box control" x="1144" y="334" width="224" height="84" rx="4"/>
   <text class="name blue center" x="1256" y="368">Handoff router</text>
   <text class="secondary center" x="1256" y="396">One shared address</text>

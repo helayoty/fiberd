@@ -38,14 +38,14 @@ func (r *auditLog) events(event string) []core.AuditRecord {
 	return out
 }
 
-// TestBumpEpochRevokesEveryFence: scope loss while the agent lives is an
+// TestBumpEpochRevokesEveryFence: scope loss while fiberd lives is an
 // epoch bump in place: running fibers are released with a scope-revoked
 // record, their fences answer NotFound, new fences carry the new epoch,
 // parked sessions resume under it, and grants stay admitted. The setup
 // runs one fiber and parks one session. The steps bump and then probe.
 func TestBumpEpochRevokesEveryFence(t *testing.T) {
 	g := core.Grant{UID: "g1", Tenant: "acme", TemplateDigest: "sha256:t", FiberMax: 4, LeaseExpiry: time.Now().Add(time.Hour)}
-	a := newAgent(t, "up", core.TierCheckpoint, g)
+	a := newCore(t, "up", core.TierCheckpoint, g)
 	a.NodeID = ""
 	store, err := core.OpenEpochStore(t.TempDir())
 	if err != nil {
@@ -129,20 +129,20 @@ func TestBumpEpochRevokesEveryFence(t *testing.T) {
 	}
 }
 
-// TestFabricProvisionedWithGrantAndReleasedWithIt: the home's fabric hook
+// TestDevicesProvisionedWithGrantAndReleasedWithIt: the home's device hook
 // runs before the template is warmed and its release with Revoke. The
-// steps run in order against one agent.
-func TestFabricProvisionedWithGrantAndReleasedWithIt(t *testing.T) {
+// steps run in order against one core.
+func TestDevicesProvisionedWithGrantAndReleasedWithIt(t *testing.T) {
 	g := core.Grant{UID: "g2", Tenant: "acme", TemplateDigest: "sha256:t", FiberMax: 1}
-	a := newAgent(t, "up", core.TierWarm, g)
+	a := newCore(t, "up", core.TierWarm, g)
 	a.NodeID = ""
 	var provisioned, released int
-	a.Fabric = func(_ context.Context, got core.Grant) (core.FabricChannel, func(), error) {
+	a.Devices = func(_ context.Context, got core.Grant) (core.DeviceChannel, func(), error) {
 		if got.UID != g.UID {
-			t.Errorf("fabric for %s, want %s", got.UID, g.UID)
+			t.Errorf("device channel for %s, want %s", got.UID, g.UID)
 		}
 		provisioned++
-		return core.FabricChannel{Kind: "static", Devices: []string{"/dev/sim0"}}, func() { released++ }, nil
+		return core.DeviceChannel{Kind: "static", Devices: []string{"/dev/sim0"}}, func() { released++ }, nil
 	}
 	ctx := context.Background()
 	steps := []struct {
@@ -152,12 +152,12 @@ func TestFabricProvisionedWithGrantAndReleasedWithIt(t *testing.T) {
 		wantReleased    int
 		wantAdmitted    bool
 	}{
-		{name: "admit provisions the fabric", act: func(t *testing.T) {
+		{name: "admit provisions the device channel", act: func(t *testing.T) {
 			if code, err := a.Admit(ctx, g); err != nil || code != core.OK {
 				t.Fatalf("admit: %v %d", err, code)
 			}
 		}, wantProvisioned: 1, wantAdmitted: true},
-		{name: "revoke releases the fabric with the grant", act: func(*testing.T) { a.Revoke(g.UID) },
+		{name: "revoke releases the device channel with the grant", act: func(*testing.T) { a.Revoke(g.UID) },
 			wantProvisioned: 1, wantReleased: 1},
 	}
 	for _, tc := range steps {
@@ -210,7 +210,7 @@ func TestBumpEpochOutcomes(t *testing.T) {
 			if tc.syncAudit {
 				g.Policy.Durability = core.Sync
 			}
-			a := newAgent(t, "up", core.TierCheckpoint, g)
+			a := newCore(t, "up", core.TierCheckpoint, g)
 			a.NodeID = ""
 			dir := filepath.Join(t.TempDir(), "state")
 			if err := os.MkdirAll(dir, 0o700); err != nil {

@@ -186,7 +186,7 @@ func callerCert(t *testing.T) (tls.Certificate, string) {
 	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key, Leaf: leaf}, tlsconf.Thumbprint(leaf)
 }
 
-// handOff connects to a handoff fiber the way the agent does. One end of
+// handOff connects to a handoff fiber the way fiberd does. One end of
 // a fresh pair goes to the fiber, the other is the caller's TLS client.
 func handOff(t *testing.T, rt core.Runtime, fiberID string, cert tls.Certificate) net.Conn {
 	t.Helper()
@@ -262,7 +262,7 @@ func TestFiberIsolation(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// A listener on the host's loopback stands in for the agent's gRPC
+	// A listener on the host's loopback stands in for fiberd's gRPC
 	// port. The test itself reaches it, so a fiber that could would say ok.
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -300,11 +300,11 @@ func TestFiberIsolation(t *testing.T) {
 		{name: "modprobe refused by identity", cmd: "wopen /proc/sys/kernel/modprobe", want: []string{"EACCES"}},
 		{name: "sysrq-trigger refused by identity", cmd: "wopen /proc/sysrq-trigger", want: []string{"EACCES"}},
 		{name: "sysfs knob", cmd: "wopen /sys/kernel/mm/transparent_hugepage/enabled", want: []string{"EACCES", "EROFS"}},
-		// /sys is a bind of the agent's read-only bind of the host's sysfs,
+		// /sys is a bind of fiberd's read-only bind of the host's sysfs,
 		// so its flags are locked and the mapped root cannot lift them,
-		// and the agent's network devices are there, read-only.
+		// and fiberd's network devices are there, read-only.
 		{name: "sysfs read-only flag locked", cmd: "remount /sys", want: []string{"EPERM"}},
-		{name: "the agent's loopback device, read-only", cmd: "wopen /sys/class/net/lo/mtu", want: []string{"EACCES", "EROFS"}},
+		{name: "fiberd's loopback device, read-only", cmd: "wopen /sys/class/net/lo/mtu", want: []string{"EACCES", "EROFS"}},
 		{name: "no cgroup hierarchy", cmd: "wopen /sys/fs/cgroup/cgroup.procs", want: []string{"ENOENT"}},
 		{name: "cannot mount the cgroup hierarchy", cmd: "mount cgroup2", want: []string{"EPERM"}},
 		{name: "cannot make a user namespace", cmd: "unshare user", want: []string{"EPERM"}},

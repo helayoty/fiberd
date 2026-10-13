@@ -324,9 +324,9 @@ func TestCommand(t *testing.T) {
 				}
 				// Not a sysfs mount of the container's own: the kernel refuses
 				// one to a user namespace when a locked mount covers part of
-				// the host's /sys, as in some Pods. A bind of the agent's bind.
+				// the host's /sys, as in some Pods. A bind of fiberd's bind.
 				if m := cfg.Mounts[2]; m.Source != l.sysDir() || !reflect.DeepEqual(m.Options, []string{"rbind", "nosuid", "noexec", "nodev", "ro"}) {
-					t.Errorf("/sys mount = %+v, want a read-only rbind of the agent's /sys bind %s", m, l.sysDir())
+					t.Errorf("/sys mount = %+v, want a read-only rbind of fiberd's /sys bind %s", m, l.sysDir())
 				}
 				if want := []string{"/proc/bus", "/proc/fs", "/proc/irq", "/proc/sys", "/proc/sysrq-trigger"}; !reflect.DeepEqual(cfg.Linux.Readonly, want) {
 					t.Errorf("readonlyPaths = %v, want %v", cfg.Linux.Readonly, want)
@@ -581,8 +581,8 @@ func TestCommand(t *testing.T) {
 		// cgroup or other mount under /sys comes with it, and it is
 		// read-only, nosuid, nodev and noexec, which the container's copy
 		// inherits as locked flags. It is in the wrapper's own mount
-		// namespace, never the agent's.
-		{name: "the /sys bind: the top sysfs mount alone, read-only, in runc's namespace, not the agent's", grant: "g1",
+		// namespace, never fiberd's.
+		{name: "the /sys bind: the top sysfs mount alone, read-only, in runc's namespace, not fiberd's", grant: "g1",
 			check: func(t *testing.T, l *launcher, _ backend.WarmSpec, _ ociConfig, cmd *exec.Cmd) {
 				wrap := cmd.Args[:len(l.sysWrap())]
 				out, err := exec.Command(wrap[0], append(wrap[1:], "sh", "-c", "cat /proc/self/mountinfo; ls -A "+l.sysDir()+"/fs/cgroup")...).CombinedOutput()
@@ -602,7 +602,7 @@ func TestCommand(t *testing.T) {
 					t.Errorf("the host's cgroup mount came with the bind:\n%s", out)
 				}
 				if ents := mountsUnder(t, l.sysDir()); len(ents) != 0 {
-					t.Errorf("the agent's own namespace has the bind: %+v", ents)
+					t.Errorf("fiberd's own namespace has the bind: %+v", ents)
 				}
 			}},
 		{name: "the /sys bind cannot be made", grant: "g1", wantErr: "not a directory",

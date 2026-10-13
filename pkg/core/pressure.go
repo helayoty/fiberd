@@ -79,7 +79,7 @@ var ErrPressure = errors.New("pressure: grant is shedding new clones")
 //	release kill the anonymous fiber with the largest W
 //	yield   nothing left to reclaim and pressure persists: take the grant
 //
-// Park and Release are the agent's own verbs so every rung writes its
+// Park and Release are fiberd's own verbs so every rung writes its
 // audit record; Yield revokes the grant.
 type PressureController struct {
 	Ledger   *Ledger

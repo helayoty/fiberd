@@ -363,8 +363,8 @@ func listenAt(t *testing.T, path string) net.Listener {
 // TestRelayRefusesPlantedNames checks that the relay reaches what is a
 // socket at the fiber's name and never follows a link planted there. The
 // fiber writes its grant's run directory, so a link at its own socket's
-// name could point the relay at another grant's socket, the agent's, or
-// any socket the agent can reach. A caller is closed instead.
+// name could point the relay at another grant's socket, fiberd's, or
+// any socket fiberd can reach. A caller is closed instead.
 func TestRelayRefusesPlantedNames(t *testing.T) {
 	cases := []struct {
 		name string

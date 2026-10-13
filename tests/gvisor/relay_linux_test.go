@@ -44,7 +44,7 @@ func httpDo(t *testing.T, method, ep, path string) string {
 
 // TestRelayedTCPEndpoints: a gVisor home with an inet family. The
 // sandbox has no network (--network=none) and serves a unix socket; the
-// agent relays a port of the declared address to it. Callers do HTTP over
+// fiberd relays a port of the declared address to it. Callers do HTTP over
 // the tcp endpoint, a park ends the relay, and a resume brings the fiber
 // back on its parked port with its state.
 func TestRelayedTCPEndpoints(t *testing.T) {

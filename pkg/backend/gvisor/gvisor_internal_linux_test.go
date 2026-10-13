@@ -242,7 +242,7 @@ func poolSocketOf(t *testing.T, b *Backend, id string) string {
 	if w == nil {
 		t.Fatalf("no warm instance %q", id)
 	}
-	return filepath.Join(w.agent, poolSocket)
+	return filepath.Join(w.channel, poolSocket)
 }
 
 // TestNew checks that the tier is FIBER_SNAPSHOT only with a runsc that
@@ -417,8 +417,8 @@ func clipped(s string) string {
 }
 
 // TestWriteBundle checks the OCI spec every sandbox is created or restored
-// with. The run directory is /host, the agent directory is read-only at
-// /fiberd/agent in every sandbox, and the self-checkpoint annotations
+// with. The run directory is /host, fiberd directory is read-only at
+// /fiberd/channel in every sandbox, and the self-checkpoint annotations
 // are there only for a template with images.
 func TestWriteBundle(t *testing.T) {
 	cases := []struct {
@@ -447,7 +447,7 @@ func TestWriteBundle(t *testing.T) {
 			if tc.dir != nil {
 				dir = tc.dir(t)
 			}
-			err := b.writeBundle(dir, []string{"/bin/refzygote", "--gvisor"}, tc.env, "/run/g", "/state/agent/w-g-1", tc.images, tc.template)
+			err := b.writeBundle(dir, []string{"/bin/refzygote", "--gvisor"}, tc.env, "/run/g", "/state/channel/w-g-1", tc.images, tc.template)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("writeBundle = %v, want error %v", err, tc.wantErr)
 			}
@@ -468,7 +468,7 @@ func TestWriteBundle(t *testing.T) {
 				t.Fatalf("spec = %+v", s)
 			}
 			// The rootfs is shared by every sandbox of every grant and
-			// served with the agent's credentials, so it is read-only.
+			// served with fiberd's credentials, so it is read-only.
 			if !s.Root.Readonly {
 				t.Fatalf("root = %+v, want read-only", s.Root)
 			}
@@ -476,9 +476,9 @@ func TestWriteBundle(t *testing.T) {
 			for _, m := range s.Mounts {
 				mounts = append(mounts, m.Destination+":"+m.Type+":"+m.Source+":"+strings.Join(m.Options, ","))
 			}
-			// The agent directory is read-only, after /host, in every
+			// fiberd directory is read-only, after /host, in every
 			// sandbox, since a restore's mounts must match the checkpoint's.
-			wantMounts := "/proc:proc:proc: /dev:tmpfs:tmpfs: /tmp:tmpfs:tmpfs: /host:bind:/run/g:rbind,rw /fiberd/agent:bind:/state/agent/w-g-1:bind,ro,nosuid,nodev"
+			wantMounts := "/proc:proc:proc: /dev:tmpfs:tmpfs: /tmp:tmpfs:tmpfs: /host:bind:/run/g:rbind,rw /fiberd/channel:bind:/state/channel/w-g-1:bind,ro,nosuid,nodev"
 			if tc.template != "" {
 				// Read-only, after /host, at the fixed path every home uses.
 				wantMounts += " /fiberd/template:bind:" + tc.template + ":bind,ro,nosuid,nodev"
@@ -1167,7 +1167,7 @@ func TestRestoreBound(t *testing.T) {
 // the state directory, never under the grant's run directory. Every
 // sandbox of the grant has that directory as /host, read and write, so
 // a bundle there could be rewritten by a sibling before runsc read it,
-// and a name there may be a link a sandbox planted for the agent to
+// and a name there may be a link a sandbox planted for fiberd to
 // write through. Here the run directory's "bundles" entry is planted
 // before the clone, as a sandbox could plant it.
 func TestBundleOutsideRunDir(t *testing.T) {
@@ -1209,7 +1209,7 @@ func TestBundleOutsideRunDir(t *testing.T) {
 				t.Fatalf("bundle under the state directory: %v", err)
 			}
 			if ents, _ := os.ReadDir(victim); len(ents) != 0 {
-				t.Fatalf("the agent wrote through the planted link: %v", ents)
+				t.Fatalf("fiberd wrote through the planted link: %v", ents)
 			}
 			if err := b.Kill("g/1-1"); err != nil {
 				t.Fatalf("Kill: %v", err)
@@ -1621,7 +1621,7 @@ func TestSweep(t *testing.T) {
 			// What the previous life left on disk: a fiber's bundle and a
 			// template's directory, and a stray file beside them.
 			state := filepath.Join(t.TempDir(), "state")
-			stale := []string{filepath.Join(state, "bundles", "f-old-9"), filepath.Join(state, "templates", "w-old-7", "images"), filepath.Join(state, "agent", "w-old-7")}
+			stale := []string{filepath.Join(state, "bundles", "f-old-9"), filepath.Join(state, "templates", "w-old-7", "images"), filepath.Join(state, "channel", "w-old-7")}
 			for _, d := range stale {
 				if err := os.MkdirAll(d, 0o755); err != nil {
 					t.Fatal(err)
@@ -1633,7 +1633,7 @@ func TestSweep(t *testing.T) {
 			b := newBackend(Options{Runsc: "runsc", Rootfs: t.TempDir(), StateDir: state}, f.run)
 			t.Cleanup(b.Close)
 			left := 0
-			for _, sub := range []string{"bundles", "templates", "agent"} {
+			for _, sub := range []string{"bundles", "templates", "channel"} {
 				ents, _ := os.ReadDir(filepath.Join(state, sub))
 				left += len(ents)
 			}

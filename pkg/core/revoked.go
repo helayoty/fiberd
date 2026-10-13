@@ -14,7 +14,7 @@ import (
 // lease when the home has no -max-lease to bound its tokens by.
 const DefaultRevokeTTL = 24 * time.Hour
 
-// Revoked is the home's deny-list of grant UIDs its lane removed. Each
+// Revoked is the home's deny-list of grant UIDs the home removed. Each
 // stays until every token for it has expired. Admit refuses them, so a
 // token a caller still holds cannot re-admit what the home took away. It
 // lives in its own file, not the ledger snapshot, because an unreadable
@@ -98,7 +98,7 @@ func outlasts(a, b time.Time) bool {
 }
 
 // Clear lifts uid's entry and reports whether there was one. It runs when
-// the lane delivers the grant again.
+// the home delivers the grant again.
 func (r *Revoked) Clear(uid string) (bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

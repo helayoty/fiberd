@@ -32,7 +32,7 @@ func (f *fakePressure) Pressure(uid string) (float64, error) {
 	return f.psi[uid], nil
 }
 
-// recorder wraps the agent's verbs so the test sees the ladder's choices.
+// recorder wraps fiberd's verbs so the test sees the ladder's choices.
 type recorder struct {
 	mu      sync.Mutex
 	parked  []string
@@ -48,7 +48,7 @@ type recorder struct {
 func TestPressureLadder(t *testing.T) {
 	g := core.Grant{UID: "g1", Tenant: "acme", Audience: "node-a", FiberMax: 10,
 		Policy: core.Policy{PSISomeAvg10Shed: 10, PSISomeAvg10Park: 25}}
-	a := newAgent(t, "up", core.TierCheckpoint, g)
+	a := newCore(t, "up", core.TierCheckpoint, g)
 	src := &fakePressure{}
 	rec := &recorder{}
 	ctl := &core.PressureController{
@@ -195,7 +195,7 @@ func TestPressureReclaimVictim(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			g := core.Grant{UID: "g1", Tenant: "acme", Audience: "node-a", FiberMax: 10}
-			a := newAgent(t, "up", tc.tier, g)
+			a := newCore(t, "up", tc.tier, g)
 			src := &fakePressure{}
 			var parked, released, yielded []string
 			ctl := &core.PressureController{

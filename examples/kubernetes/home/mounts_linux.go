@@ -19,7 +19,7 @@ var criuSysctls = []string{
 
 // writableMounts makes the container's cgroupfs (in its own cgroup
 // namespace) and criuSysctls writable. The runtime mounts them read-only in
-// an unprivileged Pod, and the agent must write them. This needs
+// an unprivileged Pod, and fiberd must write them. This needs
 // CAP_SYS_ADMIN and a profile that allows mount, which containerd's default
 // AppArmor profile does not. Without the sysctls the proc backend offers
 // only FIBER_WARM, so failing to bind them is just a warning.

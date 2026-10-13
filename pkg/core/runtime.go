@@ -27,8 +27,6 @@ const (
 	// TierSnapshot: microVM or gVisor snapshot-restore per fiber.
 	// Multi-tenant per node.
 	TierSnapshot
-	// TierFabric is reserved. Nothing implements it.
-	TierFabric
 )
 
 func (t Tier) String() string {
@@ -41,8 +39,6 @@ func (t Tier) String() string {
 		return "FIBER_CHECKPOINT"
 	case TierSnapshot:
 		return "FIBER_SNAPSHOT"
-	case TierFabric:
-		return "FIBER_FABRIC"
 	default:
 		return "TIER_UNSPECIFIED"
 	}
@@ -139,14 +135,14 @@ func (g Grant) SessionDomain() (string, error) {
 }
 
 // DeltaPublisher is implemented by runtimes that can put a parked delta
-// where other homes can find it. The agent calls it after every park of a
+// where other homes can find it. fiberd calls it after every park of a
 // named session; the returned handle is remembered with the session.
 type DeltaPublisher interface {
 	PublishDelta(ctx context.Context, deltaRef string, g Grant, session string) (remote string, err error)
 }
 
 // DeltaRetirer is implemented by runtimes that can withdraw a delta's
-// published copy. The agent calls it once the session resumes here, so
+// published copy. fiberd calls it once the session resumes here, so
 // the copy in the store no longer names state another home may take or
 // a later Clone may fall back to, and again before a local delta is
 // discarded. A delta never published, or whose tag a later park has
@@ -156,7 +152,7 @@ type DeltaRetirer interface {
 }
 
 // TemplateDropper is implemented by runtimes that can end a grant's warm
-// template. The agent calls it at the end of a yield, once the grant's
+// template. fiberd calls it at the end of a yield, once the grant's
 // fibers are released, so a revoked grant holds no pages. The next
 // admission warms the template again.
 type TemplateDropper interface {
@@ -178,7 +174,7 @@ type RemoteDelta struct {
 //
 // FindDelta may return a *RemoteMiss as its error when the session exists
 // but this home must not take it (the state was made on an incompatible
-// platform); the agent turns that into a miss naming the preferred home.
+// platform); fiberd turns that into a miss naming the preferred home.
 // Any other error means the store is unreachable.
 type DeltaFinder interface {
 	FindDelta(ctx context.Context, g Grant, session string) (RemoteDelta, bool, error)
@@ -217,7 +213,7 @@ type Runtime interface {
 	// Stats measures one running fiber.
 	Stats(ctx context.Context, fiberID string) (FiberStats, error)
 
-	// Exits delivers fibers that died without a Park or Release. The agent
+	// Exits delivers fibers that died without a Park or Release. fiberd
 	// frees their ledger slot and writes the audit record.
 	Exits() <-chan FiberExit
 }

@@ -3,8 +3,8 @@
 // Package netns runs small pieces of work inside another process's
 // network namespace. A unix socket belongs to the namespace it was
 // created in, and criu only finds the sockets of the namespaces it
-// dumps, so a channel the agent shares with a tree inside a container
-// has to be made in the container's namespace. The agent is root in the
+// dumps, so a channel fiberd shares with a tree inside a container
+// has to be made in the container's namespace. fiberd is root in the
 // initial user namespace, which may enter every namespace below it.
 package netns
 

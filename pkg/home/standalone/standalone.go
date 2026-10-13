@@ -1,8 +1,8 @@
 // Package standalone is the home for a plain host: no scheduler, no
 // kubelet. The issuer is the control plane. Liveness is "the issuer's key
-// set refreshed recently"; grants arrive inside Clone requests or as
-// *.jwt files dropped into a directory for pre-warming; readiness is the
-// Watch stream. The agent owns a delegated cgroup subtree it was pointed
+// set refreshed recently". Grants arrive inside Clone requests or as
+// *.jwt files dropped into a directory for pre-warming. Readiness is the
+// Watch stream. fiberd owns a delegated cgroup subtree it was pointed
 // at.
 package standalone
 
@@ -15,13 +15,13 @@ import (
 	"github.com/helayoty/fiberd/pkg/core"
 	"github.com/helayoty/fiberd/pkg/grant"
 	"github.com/helayoty/fiberd/pkg/home"
-	"github.com/helayoty/fiberd/pkg/home/filelane"
+	"github.com/helayoty/fiberd/pkg/home/grantdir"
 )
 
 type Config struct {
 	// Cache is the verifier's JWKS cache; its refreshes are the liveness
-	// signal. Nil means no issuer (development verifier): the lane then
-	// stays healthy on a timer until told otherwise.
+	// signal. Nil means no issuer (development verifier). The issuer then
+	// counts as reachable on a timer until told otherwise.
 	Cache *grant.Cache
 	// StaleTTL: silence from the issuer longer than this is unhealthy.
 	StaleTTL time.Duration
@@ -33,7 +33,7 @@ type Config struct {
 	CgroupRoot string
 	Endpoint   string
 	// Devices is the static device set every grant's engine may drive
-	// (paths or ids): the standalone home's fabric channel. Empty means
+	// (paths or ids): the standalone home's device channel. Empty means
 	// no devices.
 	Devices []string
 }
@@ -74,13 +74,13 @@ func (h *Home) PublishReady(context.Context, string, bool) error {
 // Scope: a standalone host asserts nothing beyond min(lease, fence).
 func (h *Home) Scope() []core.ScopeClaim { return nil }
 
-// Fabric: the static device set the agent was started with, shared by
+// Devices: the static device set fiberd was started with, shared by
 // every grant; nothing to release.
-func (h *Home) Fabric(context.Context, core.Grant) (core.FabricChannel, func(), error) {
+func (h *Home) Devices(context.Context, core.Grant) (core.DeviceChannel, func(), error) {
 	if len(h.cfg.Devices) == 0 {
-		return core.FabricChannel{}, func() {}, nil
+		return core.DeviceChannel{}, func() {}, nil
 	}
-	return core.FabricChannel{Kind: "static", Devices: append([]string(nil), h.cfg.Devices...)}, func() {}, nil
+	return core.DeviceChannel{Kind: "static", Devices: append([]string(nil), h.cfg.Devices...)}, func() {}, nil
 }
 
 // mark is the liveness signal, ignored while paused.
@@ -92,19 +92,19 @@ func (h *Home) mark(at time.Time) {
 	}
 }
 
-// SetLane is the test-only override behind fiberd's admin socket: false
-// makes the lane stale now and keeps it so; true resumes and marks it
-// healthy.
-func (h *Home) SetLane(healthy bool) {
+// SetIssuerReachable is the test-only override behind fiberd's admin
+// socket. false marks the issuer unreachable now and keeps it so. true
+// resumes the liveness signal and marks it reachable.
+func (h *Home) SetIssuerReachable(reachable bool) {
 	h.mu.Lock()
-	h.paused = !healthy
+	h.paused = !reachable
 	h.mu.Unlock()
-	if healthy {
+	if reachable {
 		h.health.MarkSync(time.Now())
 	} else {
 		h.health.MarkSync(time.Now().Add(-h.cfg.StaleTTL))
 	}
-	log.Printf("standalone: grant lane set healthy=%v", healthy)
+	log.Printf("standalone: issuer reachable=%v (admin override)", reachable)
 }
 
 // Run keeps the liveness signal flowing: issuer key refreshes when there
@@ -127,11 +127,11 @@ func (h *Home) Run(ctx context.Context) {
 	}
 }
 
-// Grants polls GrantsDir (see filelane): a new or changed *.jwt file is
+// Grants polls GrantsDir (see grantdir): a new or changed *.jwt file is
 // GrantAdded, a removed one GrantRemoved.
 func (h *Home) Grants(ctx context.Context) (<-chan home.GrantEvent, error) {
 	if h.cfg.GrantsDir == "" {
 		return nil, nil
 	}
-	return filelane.Poll(ctx, h.cfg.GrantsDir, h.cfg.Poll)
+	return grantdir.Poll(ctx, h.cfg.GrantsDir, h.cfg.Poll)
 }

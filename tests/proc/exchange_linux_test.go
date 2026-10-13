@@ -42,9 +42,9 @@ func httpTo(t *testing.T, endpoint, method, path string) (int, string) {
 	return resp.StatusCode, strings.TrimSpace(string(b))
 }
 
-// An agent over a host runtime with a file delta registry of its own,
+// A fiberd over a host runtime with a file delta registry of its own,
 // warming the reference workload in HTTP mode.
-func httpAgent(t *testing.T, home, registry string) (*core.Agent, host.Config, core.Grant) {
+func httpCore(t *testing.T, home, registry string) (*core.Core, host.Config, core.Grant) {
 	t.Helper()
 	cfg := host.Config{
 		Templates:     map[string]string{"default": zygoteBin + " --heap-mb 8 --http"},
@@ -68,7 +68,7 @@ func httpAgent(t *testing.T, home, registry string) (*core.Agent, host.Config, c
 	})
 	g := core.Grant{UID: "x-" + home, Audience: home, Tenant: "acme", TemplateDigest: "sha256:ref", FiberMax: 4, WBudgetBytes: 32 << 20, LeaseExpiry: time.Now().Add(time.Hour),
 		Policy: core.Policy{Isolation: core.Trusted}}
-	a := &core.Agent{NodeID: home, Ledger: core.NewLedger(1), Budget: core.NewBudget(1000, 1<<20),
+	a := &core.Core{NodeID: home, Ledger: core.NewLedger(1), RateLimit: core.NewRateLimit(1000, 1<<20),
 		Runtime: rt, Verify: tokenVerifier{"g": g},
 		Health: core.NewSourceHealth(time.Minute, time.Now())}
 	return a, cfg, g
@@ -79,7 +79,7 @@ func httpAgent(t *testing.T, home, registry string) (*core.Agent, host.Config, c
 // protocol's.
 func TestHTTPMode(t *testing.T) {
 	ctx := context.Background()
-	a, _, _ := httpAgent(t, "http-home", "")
+	a, _, _ := httpCore(t, "http-home", "")
 	if a.Runtime.Tier() < core.TierCheckpoint {
 		t.Skip("criu not usable here")
 	}
@@ -125,8 +125,8 @@ func TestHTTPMode(t *testing.T) {
 func TestSessionExportImport(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
-	a, cfgA, gA := httpAgent(t, "exp-a", artifact.FileScheme+filepath.Join(root, "reg-a"))
-	b, cfgB, gB := httpAgent(t, "exp-b", artifact.FileScheme+filepath.Join(root, "reg-b"))
+	a, cfgA, gA := httpCore(t, "exp-a", artifact.FileScheme+filepath.Join(root, "reg-a"))
+	b, cfgB, gB := httpCore(t, "exp-b", artifact.FileScheme+filepath.Join(root, "reg-b"))
 	if b.Runtime.Tier() < core.TierCheckpoint {
 		t.Skip("criu not usable here")
 	}

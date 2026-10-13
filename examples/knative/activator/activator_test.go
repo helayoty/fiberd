@@ -32,7 +32,7 @@ import (
 // stub hands out: a line server that counts, keyed by endpoint so each
 // fiber has its own state.
 type world struct {
-	agent  *core.Agent
+	core   *core.Core
 	health *core.SourceHealth
 	client *consumer.Client
 	mu     sync.Mutex
@@ -85,8 +85,8 @@ func (w *world) dial(_ context.Context, ep string) (net.Conn, error) {
 func newWorld(t *testing.T) *world {
 	t.Helper()
 	health := core.NewSourceHealth(10*time.Second, time.Now())
-	ag := &core.Agent{
-		NodeID: "home-a", Ledger: core.NewLedger(1), Budget: core.NewBudget(1000, 256<<20),
+	ag := &core.Core{
+		NodeID: "home-a", Ledger: core.NewLedger(1), RateLimit: core.NewRateLimit(1000, 256<<20),
 		Runtime: stub.NewWithTier(core.TierSnapshot), Verify: grant.InsecureJSONVerifier{},
 		Health: health, StatusInterval: 20 * time.Millisecond,
 	}
@@ -94,7 +94,7 @@ func newWorld(t *testing.T) *world {
 	t.Cleanup(cancel)
 	go ag.Run(ctx)
 	lis := bufconn.Listen(1 << 20)
-	gs := rpc.NewGRPCServer(&rpc.Server{Agent: ag, Issuer: "https://issuer.test", RetryAfter: 1 * time.Second})
+	gs := rpc.NewGRPCServer(&rpc.Server{Core: ag, Issuer: "https://issuer.test", RetryAfter: 1 * time.Second})
 	go func() { _ = gs.Serve(lis) }()
 	t.Cleanup(gs.Stop)
 	conn, err := grpc.NewClient("passthrough:///bufconn",
@@ -105,7 +105,7 @@ func newWorld(t *testing.T) *world {
 	}
 	c := consumer.New(conn)
 	t.Cleanup(func() { _ = c.Close() })
-	return &world{agent: ag, health: health, client: c, guests: map[string]*guest{}}
+	return &world{core: ag, health: health, client: c, guests: map[string]*guest{}}
 }
 
 func jsonGrant(t *testing.T, g core.Grant) string {
@@ -143,7 +143,7 @@ func waitParked(t *testing.T, w *world, uid string) {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
 	for {
-		st, _ := coretest.GrantStatus(w.agent.Ledger, uid)
+		st, _ := coretest.GrantStatus(w.core.Ledger, uid)
 		if st.Parked == 1 && st.Running == 0 {
 			return
 		}
@@ -203,9 +203,9 @@ func TestActivator(t *testing.T) {
 				{name: "the first revision is served", path: "/one", code: 200, clone: "CREATE"},
 				{name: "an idle fiber takes the next request instead of a second clone",
 					path: "/one", code: 200, clone: "ATTACH"},
-				{name: "the other revision needs a second fiber the grant lacks: with the lane healthy, 503 deferred",
+				{name: "the other revision needs a second fiber the grant lacks: with the issuer reachable, 503 deferred",
 					path: "/two", code: 503, replyHas: "deferred"},
-				{name: "with the lane down, 503 shed with Retry-After",
+				{name: "with the issuer unreachable, 503 shed with Retry-After",
 					before: func(_ *testing.T, w *world) { w.health.MarkSync(time.Now().Add(-time.Hour)) },
 					path:   "/two", code: 503, replyHas: "shed", retryAfter: "1"},
 				{name: "an unknown revision is 404", path: "/nope", code: 404},

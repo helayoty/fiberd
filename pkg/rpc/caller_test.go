@@ -85,13 +85,13 @@ func TestCallerInterceptors(t *testing.T) {
 }
 
 // Over a real mutual-TLS connection the certificate a caller presents is
-// the identity the agent checks a bound grant against, on gRPC and on the
+// the identity fiberd checks a bound grant against, on gRPC and on the
 // JSON gateway alike.
 func TestMutualTLSBindsGrantsToCallers(t *testing.T) {
 	ca := tlsconftest.NewCA(t, "ca")
 	owner, other := ca.Client(t, "owner"), ca.Client(t, "other")
 	ownerX5t := tlsconf.Thumbprint(owner.Cert)
-	h := newHarness(t, core.TierCheckpoint, func(a *core.Agent) { a.Verify = boundVerifier{thumbprint: ownerX5t} })
+	h := newHarness(t, core.TierCheckpoint, func(a *core.Core) { a.Verify = boundVerifier{thumbprint: ownerX5t} })
 	scfg := &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{ca.Server(t).TLS()},
 		ClientAuth: tls.VerifyClientCertIfGiven, ClientCAs: ca.Pool()}
 

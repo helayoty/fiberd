@@ -215,7 +215,7 @@ func TestJWKSOffline(t *testing.T) {
 
 // A burst of verifications for a kid the cache has never seen must all
 // succeed on the one refresh they share, not race the rate limit into
-// "no key": the herder mints a grant, announces it on the lane and
+// "no key": the herder mints a grant, delivers it to fiberd and
 // clones with it in the same instant.
 func TestJWKSConcurrentMissesShareOneRefresh(t *testing.T) {
 	k, err := grant.GenerateKey(jose.EdDSA)

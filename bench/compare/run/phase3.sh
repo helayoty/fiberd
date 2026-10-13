@@ -2,7 +2,7 @@
 # Phase 3: the sandboxed class in kind, on the cluster phase 1 deployed.
 # Pod under the gvisor RuntimeClass, agent-sandbox under gvisor with
 # pools of 1 and N, and fiberd gVisor on demand and with a pool of 2
-# through the agent's TCP relay (the gvisor grant's fibers are served on
+# through fiberd's TCP relay (the gvisor grant's fibers are served on
 # the Pod IP, one relay hop each).
 set -euo pipefail
 # shellcheck source=lib.sh

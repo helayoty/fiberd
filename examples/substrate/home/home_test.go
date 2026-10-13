@@ -34,13 +34,13 @@ func newHome(t *testing.T, cfg Config) (*Home, string) {
 
 // TestGrantsAreMintedPerTemplateAndVerifiable checks that a template's
 // first run mints a grant sized by the actor's memory limit and announces
-// it on the lane. The same template again gets the same grant, another
+// it for delivery. The same template again gets the same grant, another
 // template gets another, and every token verifies against the home's keys.
 func TestGrantsAreMintedPerTemplateAndVerifiable(t *testing.T) {
 	ctx := context.Background()
 	h, issuer := newHome(t, Config{Isolation: core.Trusted})
 	v := &grant.Verifier{Cache: &grant.Cache{IssuerURL: issuer}, Audience: "worker-1", MaxStale: time.Hour}
-	lane, _ := h.Grants(ctx)
+	events, _ := h.Grants(ctx)
 	minted := map[string]core.Grant{} // by digest
 	tokens := map[string]string{}     // by digest
 	cases := []struct {
@@ -49,7 +49,7 @@ func TestGrantsAreMintedPerTemplateAndVerifiable(t *testing.T) {
 		memory uint64
 		digest string
 		budget uint64
-		reused bool // the template's earlier grant and token, nothing new on the lane
+		reused bool // the template's earlier grant and token, nothing new delivered
 	}{
 		{name: "a template's first run mints a grant sized by its memory limit",
 			tmpl: herder.Template{Atespace: "team-a", Name: "counter"}, memory: 128 << 20, digest: "team-a/counter", budget: 128 << 20},
@@ -67,7 +67,7 @@ func TestGrantsAreMintedPerTemplateAndVerifiable(t *testing.T) {
 			if g.UID != GrantUID(tc.tmpl) || g.TemplateDigest != tc.digest || g.WBudgetBytes != tc.budget || g.Audience != "worker-1" || g.MinTier != core.TierCheckpoint || g.Policy.Isolation != core.Trusted {
 				t.Fatalf("grant %+v", g)
 			}
-			// The agent's verifier accepts it against the home's own key set.
+			// fiberd's verifier accepts it against the home's own key set.
 			got, err := v.Verify(ctx, []byte(tok))
 			if err != nil {
 				t.Fatalf("verify: %v", err)
@@ -80,7 +80,7 @@ func TestGrantsAreMintedPerTemplateAndVerifiable(t *testing.T) {
 					t.Fatal("a template must map to one grant")
 				}
 				select {
-				case ev := <-lane:
+				case ev := <-events:
 					t.Fatalf("a reused grant announced again: %+v", ev.Kind)
 				default:
 				}
@@ -92,14 +92,14 @@ func TestGrantsAreMintedPerTemplateAndVerifiable(t *testing.T) {
 				}
 			}
 			minted[tc.digest], tokens[tc.digest] = g, tok
-			// Announced on the lane, in order.
+			// Delivered in order.
 			select {
-			case ev := <-lane:
+			case ev := <-events:
 				if ev.Kind != fhome.GrantAdded || string(ev.Token) != tok {
-					t.Fatalf("lane event: %+v", ev.Kind)
+					t.Fatalf("delivery event: %+v", ev.Kind)
 				}
 			case <-time.After(time.Second):
-				t.Fatal("lane event missing")
+				t.Fatal("delivery event missing")
 			}
 		}) {
 			t.FailNow()
@@ -145,7 +145,7 @@ func TestReadyOnceEveryMintedTemplateIsWarm(t *testing.T) {
 }
 
 // TestLivenessFollowsTheProbe checks that liveness follows the probe within
-// StaleTTL, and that the admin override on the lane wins over the probe.
+// StaleTTL, and that the admin override wins over the probe.
 // Steps run in order on one home and one clock.
 func TestLivenessFollowsTheProbe(t *testing.T) {
 	now := time.Now()
@@ -160,7 +160,7 @@ func TestLivenessFollowsTheProbe(t *testing.T) {
 	ctx := context.Background()
 	cases := []struct {
 		name    string
-		lane    string // the admin override, "up" or "down", set before the probe
+		issuer  string // the admin override, "up" or "down", set before the probe
 		probe   bool
 		down    bool // the probe fails
 		advance time.Duration
@@ -170,14 +170,14 @@ func TestLivenessFollowsTheProbe(t *testing.T) {
 		{name: "probed 9s ago with a 10s TTL: healthy", probe: true, advance: 9 * time.Second, healthy: true},
 		{name: "11s of failed probes: unhealthy", probe: true, down: true, advance: 2 * time.Second},
 		{name: "the supervisor is back: healthy", probe: true, healthy: true},
-		{name: "lane forced down stays down though the probe answers", lane: "down", probe: true},
-		{name: "lane forced up", lane: "up", healthy: true},
+		{name: "issuer forced down stays down though the probe answers", issuer: "down", probe: true},
+		{name: "issuer forced up", issuer: "up", healthy: true},
 	}
 	for _, tc := range cases {
 		if !t.Run(tc.name, func(t *testing.T) {
 			alive = !tc.down
-			if tc.lane != "" {
-				h.SetLane(tc.lane == "up")
+			if tc.issuer != "" {
+				h.SetIssuerReachable(tc.issuer == "up")
 			}
 			if tc.probe {
 				h.probe(ctx)

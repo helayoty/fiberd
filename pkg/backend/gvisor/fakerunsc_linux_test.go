@@ -77,7 +77,7 @@ type knobs struct {
 	WrongToken bool   // sends a token nobody minted
 	NoAck      bool   // binds the endpoint and never acks
 	BadAck     bool   // acks with another fence
-	PoolSocket string // dials this socket instead of its own agent mount's
+	PoolSocket string // dials this socket instead of its own channel mount's
 	// NoPidFile makes a run or restore ignore --pid-file, as an older
 	// runsc might.
 	NoPidFile bool
@@ -427,13 +427,13 @@ func (f *fakeRunsc) startSandbox(cid, bundle string, k knobs, out io.Writer) err
 		_, _ = fmt.Fprintf(out, "fake runsc: bundle: %v\n", err)
 		return errExit
 	}
-	host, agent := "", ""
+	host, channel := "", ""
 	for _, m := range s.Mounts {
 		switch m.Destination {
 		case "/host":
 			host = m.Source
-		case agentMount:
-			agent = m.Source
+		case channelMount:
+			channel = m.Source
 		}
 	}
 	env := map[string]string{}
@@ -488,7 +488,7 @@ func (f *fakeRunsc) startSandbox(cid, bundle string, k knobs, out io.Writer) err
 	x.proc, x.stdin, x.pid = cmd.Process, stdin, cmd.Process.Pid
 	f.boxes[cid] = x
 	if dial {
-		sock := filepath.Join(agent, poolSocket)
+		sock := filepath.Join(channel, poolSocket)
 		if k.PoolSocket != "" {
 			sock = k.PoolSocket
 		}

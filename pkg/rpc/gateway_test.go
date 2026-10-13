@@ -94,10 +94,10 @@ func TestGateway(t *testing.T) {
 			wantStatus: http.StatusPreconditionFailed, wantCode: codes.FailedPrecondition},
 		{name: "the only fiber of a grant is taken", method: "POST", path: "/v1/clone", body: fixed(cloneBody(full, "")),
 			wantStatus: http.StatusOK},
-		{name: "a full grant with the lane healthy is 503 with a deferred miss", method: "POST", path: "/v1/clone",
+		{name: "a full grant with the issuer reachable is 503 with a deferred miss", method: "POST", path: "/v1/clone",
 			body: fixed(cloneBody(full, "")), wantStatus: http.StatusServiceUnavailable, wantCode: codes.Unavailable,
 			wantMiss: ptrMiss(grantv1.MissCode_DEFERRED_FALLBACK)},
-		{name: "a full grant with the lane dead is 429 with Retry-After", method: "POST", path: "/v1/clone",
+		{name: "a full grant with the issuer unreachable is 429 with Retry-After", method: "POST", path: "/v1/clone",
 			before: func() { ckpt.health.MarkSync(time.Now().Add(-time.Minute)) },
 			body:   fixed(cloneBody(full, "")), wantStatus: http.StatusTooManyRequests, wantCode: codes.ResourceExhausted,
 			wantMiss: ptrMiss(grantv1.MissCode_SHED), wantRetry: "3"},
@@ -115,13 +115,13 @@ func TestGateway(t *testing.T) {
 					t.Fatalf("status = %s, want g1 and g2", body)
 				}
 			}},
-		{name: "healthz reports epoch, tier and the dead lane", method: "GET", path: "/healthz", wantStatus: http.StatusOK,
+		{name: "healthz reports epoch, tier and the unreachable issuer", method: "GET", path: "/healthz", wantStatus: http.StatusOK,
 			check: func(t *testing.T, body []byte) {
 				var m map[string]any
 				if err := json.Unmarshal(body, &m); err != nil {
 					t.Fatal(err)
 				}
-				if m["epoch"] != float64(7) || m["tier"] != core.TierCheckpoint.String() || m["grantLaneHealthy"] != false {
+				if m["epoch"] != float64(7) || m["tier"] != core.TierCheckpoint.String() || m["issuerReachable"] != false {
 					t.Fatalf("healthz = %s", body)
 				}
 			}},
@@ -210,7 +210,7 @@ func checkStatusBody(t *testing.T, body []byte, code codes.Code, miss *grantv1.M
 // TestGatewayHealthz pins the /healthz body and status. Without a Health
 // func it is an empty object. A poisoned audit spool is a 503 with the
 // word "poisoned", never the fsync error, which names the spool's path.
-// A stale lane alone stays 200, so the two read apart.
+// An unreachable issuer alone stays 200, so the two read apart.
 func TestGatewayHealthz(t *testing.T) {
 	fresh := core.NewSourceHealth(10*time.Second, time.Now())
 	stale := core.NewSourceHealth(10*time.Second, time.Now().Add(-time.Minute))
@@ -223,18 +223,18 @@ func TestGatewayHealthz(t *testing.T) {
 		want   map[string]any
 	}{
 		{name: "no health func is an empty object", gw: &rpc.Gateway{}, status: http.StatusOK, want: map[string]any{}},
-		{name: "no lane and no spool omit their keys", gw: &rpc.Gateway{Health: rpc.HealthFunc(func() uint64 { return 3 }, nil, core.TierWarm, nil)},
+		{name: "no health and no spool omit their keys", gw: &rpc.Gateway{Health: rpc.HealthFunc(func() uint64 { return 3 }, nil, core.TierWarm, nil)},
 			status: http.StatusOK, want: map[string]any{"epoch": float64(3), "tier": core.TierWarm.String()}},
-		{name: "a fresh lane and a healthy spool are 200", gw: &rpc.Gateway{Health: rpc.HealthFunc(func() uint64 { return 4 }, fresh, core.TierBasic, ok)},
-			status: http.StatusOK, want: map[string]any{"epoch": float64(4), "tier": core.TierBasic.String(), "grantLaneHealthy": true, "audit": "ok"}},
-		{name: "a stale lane alone is still 200", gw: &rpc.Gateway{Health: rpc.HealthFunc(func() uint64 { return 5 }, stale, core.TierBasic, ok)},
-			status: http.StatusOK, want: map[string]any{"epoch": float64(5), "tier": core.TierBasic.String(), "grantLaneHealthy": false, "audit": "ok"}},
+		{name: "a reachable issuer and a healthy spool are 200", gw: &rpc.Gateway{Health: rpc.HealthFunc(func() uint64 { return 4 }, fresh, core.TierBasic, ok)},
+			status: http.StatusOK, want: map[string]any{"epoch": float64(4), "tier": core.TierBasic.String(), "issuerReachable": true, "audit": "ok"}},
+		{name: "an unreachable issuer alone is still 200", gw: &rpc.Gateway{Health: rpc.HealthFunc(func() uint64 { return 5 }, stale, core.TierBasic, ok)},
+			status: http.StatusOK, want: map[string]any{"epoch": float64(5), "tier": core.TierBasic.String(), "issuerReachable": false, "audit": "ok"}},
 		{name: "a poisoned spool is 503 without the fsync error", gw: &rpc.Gateway{Health: rpc.HealthFunc(func() uint64 { return 6 }, fresh, core.TierBasic, poisoned)},
 			status: http.StatusServiceUnavailable,
-			want:   map[string]any{"epoch": float64(6), "tier": core.TierBasic.String(), "grantLaneHealthy": true, "audit": "poisoned"}},
-		{name: "a stale lane and a poisoned spool are both reported", gw: &rpc.Gateway{Health: rpc.HealthFunc(func() uint64 { return 7 }, stale, core.TierBasic, poisoned)},
+			want:   map[string]any{"epoch": float64(6), "tier": core.TierBasic.String(), "issuerReachable": true, "audit": "poisoned"}},
+		{name: "an unreachable issuer and a poisoned spool are both reported", gw: &rpc.Gateway{Health: rpc.HealthFunc(func() uint64 { return 7 }, stale, core.TierBasic, poisoned)},
 			status: http.StatusServiceUnavailable,
-			want:   map[string]any{"epoch": float64(7), "tier": core.TierBasic.String(), "grantLaneHealthy": false, "audit": "poisoned"}},
+			want:   map[string]any{"epoch": float64(7), "tier": core.TierBasic.String(), "issuerReachable": false, "audit": "poisoned"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

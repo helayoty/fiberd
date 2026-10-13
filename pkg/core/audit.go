@@ -48,7 +48,7 @@ type AuditRecord struct {
 	FiberID string    `json:"fiber_id,omitempty"`
 	Detail  string    `json:"detail,omitempty"`
 	// Scope is what the home asserts about where this happened
-	// (namespace, service account, fabric claim, ...): facts a reader can
+	// (namespace, service account, DRA claim, ...): facts a reader can
 	// check integrity against, empty on a standalone host.
 	Scope map[string]string `json:"scope,omitempty"`
 	// Lost is the range of sequence numbers a gap stands for, when they
@@ -260,8 +260,8 @@ func (s *Spool) syncThrough(n uint64) error {
 }
 
 // Poisoned returns the fsync failure that poisoned the spool, or nil. A
-// poisoned spool refuses every Sync record until the agent restarts, so
-// the agent reports it on /healthz. It takes no lock.
+// poisoned spool refuses every Sync record until fiberd restarts, so
+// fiberd reports it on /healthz. It takes no lock.
 func (s *Spool) Poisoned() error {
 	if p := s.poison.Load(); p != nil {
 		return *p

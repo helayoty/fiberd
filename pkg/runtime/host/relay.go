@@ -12,14 +12,14 @@ import (
 )
 
 // A relay is the tcp face of a fiber that can only serve a unix socket.
-// It listens on the home's address in the agent's network namespace and
+// It listens on the home's address in fiberd's network namespace and
 // splices every accepted connection to the fiber's socket under the run
 // directory. Bytes are copied, never read, so TLS end to end keeps the
-// agent blind. It dials the one path the host minted for the fence and
+// fiberd blind. It dials the one path the host minted for the fence and
 // nothing a caller sends can change that. The socket is reached by its
 // inode, so a link the fiber plants at that name leads nowhere.
 //
-//	caller --tcp--> relay (agent) --unix--> <run-dir>/<grant>/<epoch>-<seq>.sock
+//	caller --tcp--> relay (fiberd) --unix--> <run-dir>/<grant>/<epoch>-<seq>.sock
 //
 // gVisor (--network=none), Hyperlight (the helper serves the socket) and
 // runc (a loopback-only network namespace) are reached this way under an

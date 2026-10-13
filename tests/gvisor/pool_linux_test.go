@@ -20,7 +20,7 @@ import (
 
 // TestPooledHandOut drives the backend's pool with real runsc. Sandboxes
 // restored ahead of their fibers wait on the pool socket, which is the
-// agent's alone (0600 in a 0700 directory), serving nothing. Bind hands
+// fiberd's alone (0600 in a 0700 directory), serving nothing. Bind hands
 // each a fence, an endpoint and a seed on that channel, and the first
 // request answers the fence. The seed is fresh per hand-out, so a
 // pooled fiber's random differs from an on-demand sibling's and from
@@ -49,7 +49,7 @@ func TestPooledHandOut(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Warm: %v", err)
 			}
-			socks, err := filepath.Glob(filepath.Join(state, "agent", "*", "pool.sock"))
+			socks, err := filepath.Glob(filepath.Join(state, "channel", "*", "pool.sock"))
 			if err != nil || len(socks) != 1 {
 				t.Fatalf("pool sockets = %v (%v), want one", socks, err)
 			}
@@ -57,7 +57,7 @@ func TestPooledHandOut(t *testing.T) {
 				t.Fatalf("pool socket mode = %v (%v), want 0600", st.Mode(), err)
 			}
 			if st, err := os.Stat(filepath.Dir(socks[0])); err != nil || st.Mode().Perm() != 0o700 {
-				t.Fatalf("agent directory mode = %v (%v), want 0700", st.Mode(), err)
+				t.Fatalf("channel directory mode = %v (%v), want 0700", st.Mode(), err)
 			}
 			var pooled []backend.Pooled
 			t0 := time.Now()

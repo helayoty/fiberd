@@ -8,7 +8,7 @@
 # names the same digest and carries the per-instance limits (64 MiB
 # wBudget, from -w-budget). The resource's own grant only keeps the Pod
 # ready. Fibers are served on the Pod IP (inet4). For gvisor and runc the
-# agent relays each port to the sandbox's unix socket, so those rows
+# fiberd relays each port to the sandbox's unix socket, so those rows
 # include one relay hop, about 20 to 40 us per request.
 apiVersion: fiberd.io/v1alpha1
 kind: CapacityGrant
@@ -88,7 +88,7 @@ spec:
       - -registry-plain-http
     resources:
       # A restored sandbox holding the counter's 32 MiB heap is about 90
-      # MiB, so 50 need about 4.5 GiB. The agent keeps an eighth of the
+      # MiB, so 50 need about 4.5 GiB. fiberd keeps an eighth of the
       # limit for itself and caps the fibers below the rest.
       limits: { memory: 8Gi }
       requests: { memory: 256Mi }

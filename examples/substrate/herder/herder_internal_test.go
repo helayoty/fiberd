@@ -32,7 +32,7 @@ func (failingGrants) Grant(context.Context, Template, uint64) (string, core.Gran
 	return "", core.Grant{}, errNoGrant
 }
 
-// badTokenGrants hands out a token the agent cannot verify.
+// badTokenGrants hands out a token fiberd cannot verify.
 type badTokenGrants struct{}
 
 func (badTokenGrants) Grant(context.Context, Template, uint64) (string, core.Grant, error) {
@@ -65,7 +65,7 @@ func TestStartFailures(t *testing.T) {
 				return err
 			},
 			want: codes.Internal},
-		{name: "a grant the agent cannot verify keeps the agent's code",
+		{name: "a grant fiberd cannot verify keeps fiberd's code",
 			mod:  func(c *Config) { c.Grants = badTokenGrants{} },
 			call: func(s *Service) error { _, err := s.RunWorkload(ctx, runReq("a1")); return err },
 			want: codes.Unauthenticated},
@@ -83,7 +83,7 @@ func TestStartFailures(t *testing.T) {
 			call: func(s *Service) error { _, err := s.RunWorkload(ctx, runReq("a1")); return err },
 			want: codes.Internal,
 			after: func(t *testing.T, w *worker) {
-				if f := w.agent.Ledger.FibersOf("g-counter"); len(f) != 0 {
+				if f := w.core.Ledger.FibersOf("g-counter"); len(f) != 0 {
 					t.Fatalf("fibers still running under the grant: %+v", f)
 				}
 			}},
@@ -187,7 +187,7 @@ func TestReady(t *testing.T) {
 	}
 }
 
-// TestLifecycleFailures checks checkpoint and terminate when the agent
+// TestLifecycleFailures checks checkpoint and terminate when fiberd
 // does not follow. The actor stays where atelet can act on it again.
 func TestLifecycleFailures(t *testing.T) {
 	ctx := context.Background()
@@ -204,7 +204,7 @@ func TestLifecycleFailures(t *testing.T) {
 		active bool // the actor is still here afterwards
 		routed bool // the router still routes it
 	}{
-		{name: "a checkpoint the agent cannot park keeps the actor routed", break_: gone,
+		{name: "a checkpoint fiberd cannot park keeps the actor routed", break_: gone,
 			call: func(s *Service) error {
 				_, err := s.CheckpointWorkload(ctx, &ateompbCkpt{ActorUid: "a1", Scope: scopeFull})
 				return err
@@ -219,7 +219,7 @@ func TestLifecycleFailures(t *testing.T) {
 		{name: "terminating a fiber already gone is done", break_: gone,
 			call: func(s *Service) error { _, err := s.TerminateWorkload(ctx, &ateompbTerm{ActorUid: "a1"}); return err },
 			want: codes.OK},
-		{name: "a terminate the agent does not answer keeps the actor", break_: func(_ *testing.T, w *worker) { w.stop() },
+		{name: "a terminate fiberd does not answer keeps the actor", break_: func(_ *testing.T, w *worker) { w.stop() },
 			call: func(s *Service) error { _, err := s.TerminateWorkload(ctx, &ateompbTerm{ActorUid: "a1"}); return err },
 			want: codes.Unavailable, active: true},
 	}
@@ -246,7 +246,7 @@ func TestLifecycleFailures(t *testing.T) {
 }
 
 // TestStats checks both stats calls against what executes here and what
-// the agent last reported for it.
+// fiberd last reported for it.
 func TestStats(t *testing.T) {
 	ctx := context.Background()
 	at := time.Unix(1700000000, 42)
@@ -263,7 +263,7 @@ func TestStats(t *testing.T) {
 		want     *ateompbStatsSample   // the sample both return
 	}{
 		{name: "nothing executes", code: codes.NotFound, reason: noWorkload},
-		{name: "an actor the agent has not reported on yet", active: running(),
+		{name: "an actor fiberd has not reported on yet", active: running(),
 			code: codes.FailedPrecondition, reason: notMeasurableYet},
 		{name: "a report for the grant but none since this actor started", active: running(),
 			stats: map[string]consumer.Status{"g-counter": {GrantUID: "g-counter", WUsedBytes: 7}},
@@ -307,7 +307,7 @@ func TestStats(t *testing.T) {
 	}
 }
 
-// fakeFibers is an agent whose Watch stream breaks once, then reports
+// fakeFibers is a fiberd whose Watch stream breaks once, then reports
 // one status and stays open.
 type fakeFibers struct {
 	grantv1.UnimplementedFibersServer
@@ -321,7 +321,7 @@ func (f *fakeFibers) Watch(_ *emptypb.Empty, stream grantv1.Fibers_WatchServer) 
 	n := f.watches
 	f.mu.Unlock()
 	if n == 1 {
-		return status.Error(codes.Unavailable, "agent restarting")
+		return status.Error(codes.Unavailable, "fiberd restarting")
 	}
 	if err := stream.Send(&grantv1.Status{GrantUid: "g-counter", Running: 1, WUsedBytes: 99}); err != nil {
 		return err

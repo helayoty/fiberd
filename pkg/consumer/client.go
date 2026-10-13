@@ -78,8 +78,8 @@ type Fence struct {
 func (f Fence) String() string { return fmt.Sprintf("%s/%d/%d", f.GrantUID, f.Epoch, f.Seq) }
 
 // Shed is the miss that says to retry here later: the control plane is
-// unreachable, or the home is under pressure (memory, tasks, the thrash
-// budget). Reason is the home's own. The consumer waits and retries; it
+// unreachable, or the home is under pressure (memory, tasks, the clone
+// rate limit). Reason is the home's own. The caller waits and retries; it
 // does not fall back, because the fallback path needs the same control
 // plane or adds load where there is already too much.
 type Shed struct {

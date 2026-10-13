@@ -13,7 +13,7 @@ var (
 	ErrMalformed = errors.New("handoff: malformed ClientHello")
 	// ErrNoServerName means the ClientHello names no server.
 	ErrNoServerName = errors.New("handoff: ClientHello has no server name")
-	// ErrUnknownRoute means the server name is not a routing key this agent
+	// ErrUnknownRoute means the server name is not a routing key fiberd
 	// handed out, or the fiber behind it is gone.
 	ErrUnknownRoute = errors.New("handoff: unknown routing key")
 	// ErrKeyMismatch means the fiber's TLS key is not the one the home

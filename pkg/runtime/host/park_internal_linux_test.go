@@ -661,7 +661,7 @@ func TestReleaseDiscard(t *testing.T) {
 	}
 }
 
-// TestReleaseOrphan restarts the agent under a live fiber and releases it
+// TestReleaseOrphan restarts fiberd under a live fiber and releases it
 // as an orphan. Its leaf goes, and so do the files it served on. A resumed
 // fiber keeps the socket name of its park, which only the fence file beside
 // it ties to the current fence. Other fibers' files stay.
@@ -724,7 +724,7 @@ func TestReleaseOrphan(t *testing.T) {
 			write(t, run, map[string]string{"8-8.sock": ""})
 			kept := []string{"9-9.sock", "9-9.sock.fence", "8-8.sock", "8-8.sock.fence"}
 
-			// A restarted agent over the same directories knows nothing of
+			// A restarted fiberd over the same directories knows nothing of
 			// the fiber, whose leaf still holds a task.
 			cfg := f.r.cfg
 			cfg.Backend = newFakeBackend(core.TierWarm)
@@ -764,7 +764,7 @@ func TestReleaseOrphan(t *testing.T) {
 // or not, finds it beside that socket, the one path it knows. One that
 // binds tcp itself finds it under the run directory by its birth fence,
 // the one fence it holds in memory.
-// The grant's fibers write that directory too, so the agent, which runs
+// The grant's fibers write that directory too, so fiberd, which runs
 // as root, never writes through a name there. A link a fiber planted is
 // replaced, not followed, and a directory denies the fiber its file and
 // nothing else. A restore that fails leaves no fence file behind.
@@ -833,7 +833,7 @@ func TestResumeFenceFile(t *testing.T) {
 				t.Fatalf("resume = %+v, %v, want error %v", h, err, tc.resumeErr)
 			}
 			if b, _ := os.ReadFile(victim); string(b) != "untouched\n" {
-				t.Fatalf("the agent wrote through the planted link: victim reads %q", b)
+				t.Fatalf("fiberd wrote through the planted link: victim reads %q", b)
 			}
 			st, lerr := os.Lstat(fenceFn)
 			switch {

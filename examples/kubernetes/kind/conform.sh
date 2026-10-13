@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # The Kubernetes home's acceptance, end to end in kind:
 #
-#   1. build fiberd:kind (agent, controller, zygote, criu) and load it;
+#   1. build fiberd:kind (fiberd, controller, zygote, criu) and load it;
 #   2. apply the CRD, the issuer controller and a CapacityGrant;
-#   3. wait until the controller minted the grant, the agent admitted it,
+#   3. wait until the controller minted the grant, fiberd admitted it,
 #      warmed the template and set the readiness gate (the Pod is Ready);
 #   4. run grant-conform C1-C10 from the host against the Pod's NodePort,
 #      with every hook reaching into the Pod through kubectl exec;
@@ -11,7 +11,7 @@
 #      384 MiB limit: a park must fire before any OOM kill;
 #   6. run sessioncheck from a client Pod against an UNTRUSTED gVisor
 #      grant: a Clone from another Pod reaches the fiber over the Pod IP
-#      (the agent relays the port to the sandbox's unix socket), and a
+#      (fiberd relays the port to the sandbox's unix socket), and a
 #      park and resume keep its state.
 #
 #   examples/kubernetes/kind/conform.sh run       (everything; needs docker, kind, kubectl, go)
@@ -19,7 +19,7 @@
 #   examples/kubernetes/kind/conform.sh up|down   (just the cluster)
 #   examples/kubernetes/kind/conform.sh runc-logs [pod]
 #                                                 (runc's log and the zygote log inside a runc grant Pod)
-#   examples/kubernetes/kind/conform.sh restart|lane up|down|audit <event> <fence>|engine-kill <uid>|scope-lost
+#   examples/kubernetes/kind/conform.sh restart|issuer-reachable up|down|audit <event> <fence>|engine-kill <uid>|scope-lost
 #                                                 (the hooks grant-conform calls)
 #
 # Runs from the repository root: the image build needs fiberd's tree (the
@@ -37,7 +37,7 @@ ISSUER_URL=http://grant-issuer.fiberd-system.svc:8080
 STATE=${CONFORM_STATE:-bin/conform-state-kind}
 KC=(kubectl --context "kind-$CLUSTER")
 
-kexec() { "${KC[@]}" -n "$NS" exec "$POD" -c agent -- "$@"; }
+kexec() { "${KC[@]}" -n "$NS" exec "$POD" -c fiberd -- "$@"; }
 admin() { kexec curl -sf --unix-socket /var/lib/fiberd/private/admin.sock "$@"; }
 
 wait_for() { # wait_for <seconds> <description> <cmd...>
@@ -73,7 +73,7 @@ deploy() {
   "${KC[@]}" apply -f "$KIND_DIR/manifests/20-issuer.yaml" -f "$KIND_DIR/manifests/30-grant-rbac.yaml"
   "${KC[@]}" -n fiberd-system rollout status deploy/grant-issuer --timeout=120s
   "${KC[@]}" apply -f "$KIND_DIR/manifests/40-conform.yaml" -f "$KIND_DIR/manifests/41-conform-runc.yaml"
-  # The controller creates the Pod and mints the grant; the agent admits
+  # The controller creates the Pod and mints the grant; fiberd admits
   # it, warms the template and sets the gate: the Pod becomes Ready. The
   # runc home (41-conform-runc.yaml) only has to get that far.
   wait_for 60 "grant pod created" "${KC[@]}" -n "$NS" get pod "$POD"
@@ -93,13 +93,13 @@ deploy() {
 cg_ready() { [ "$("${KC[@]}" -n "$NS" get cg "$1" -o jsonpath='{.status.ready}')" = true ]; }
 
 # runc_logs <pod>: the end of runc's own log and of the zygote log of
-# every grant the Pod's agent warmed. runc's log is beside the bundle
+# every grant the Pod's fiberd warmed. runc's log is beside the bundle
 # under the state volume, and the zygote log is in the grant's run
 # directory (pkg/backend/runc). `runc run` removes its container on the
 # way out, so these are the evidence when a runc grant never warms.
 runc_logs() {
   echo "--- runc and zygote logs in $1:"
-  "${KC[@]}" -n "$NS" exec "$1" -c agent -- sh -c \
+  "${KC[@]}" -n "$NS" exec "$1" -c fiberd -- sh -c \
     'for f in /var/lib/fiberd/runc/bundles/*.runc.log /run/fiberd/*/zygote.log; do [ -f "$f" ] || continue; echo "--- $f"; tail -c 4096 "$f"; done' || true
 }
 
@@ -111,17 +111,17 @@ restarted_past() { [ "$(restart_count)" -gt "$1" ]; }
 restart() {
   local before
   before=$(restart_count)
-  kexec kill 1 # SIGTERM to the agent: it stops, the kubelet restarts the container, the epoch bumps
+  kexec kill 1 # SIGTERM to fiberd: it stops, the kubelet restarts the container, the epoch bumps
   wait_for 60 "container restart" restarted_past "$before"
-  wait_for 60 "agent healthy again" healthy
+  wait_for 60 "fiberd healthy again" healthy
   "${KC[@]}" -n "$NS" wait --for=condition=Ready "pod/$POD" --timeout=60s >/dev/null
 }
 
-lane() {
+issuer_reachable() {
   case "$1" in
-    up)   admin -X POST http://x/lane -d '{"healthy":true}' >/dev/null ;;
-    down) admin -X POST http://x/lane -d '{"healthy":false}' >/dev/null ;;
-    *) echo "lane: up|down" >&2; return 2 ;;
+    up)   admin -X POST http://x/issuer -d '{"reachable":true}' >/dev/null ;;
+    down) admin -X POST http://x/issuer -d '{"reachable":false}' >/dev/null ;;
+    *) echo "issuer-reachable: up|down" >&2; return 2 ;;
   esac
 }
 
@@ -134,11 +134,11 @@ audit() {
 
 # The fiberd subtree sits under the container's cgroup: the mount root in
 # a private cgroup namespace, the scope /proc/1/cgroup names in the host's
-# (PID 1 has moved into that scope's `agent` leaf by then).
-own_cgroup='own=/sys/fs/cgroup$(cut -d: -f3 /proc/1/cgroup | head -1); own=${own%/agent}; [ -d "$own" ] || own=/sys/fs/cgroup'
+# (PID 1 has moved into that scope's `fiberd` leaf by then).
+own_cgroup='own=/sys/fs/cgroup$(cut -d: -f3 /proc/1/cgroup | head -1); own=${own%/fiberd}; [ -d "$own" ] || own=/sys/fs/cgroup'
 
 engine_kill() {
-  kexec sh -c "$own_cgroup; kill -9 \$(cat \$own/fiberd/$1/zygote/cgroup.procs)"
+  kexec sh -c "$own_cgroup; kill -9 \$(cat \$own/grants/$1/zygote/cgroup.procs)"
 }
 
 scope_lost() { admin -X POST http://x/scope-lost >/dev/null; }
@@ -150,7 +150,7 @@ conform() {
   "${KC[@]}" -n fiberd-system get secret grant-issuer-key -o jsonpath='{.data.key\.json}' | base64 -d >"$STATE/issuer-key.json"
   bin/grant-conform -test.v -target "$TARGET" -target-tier FIBER_CHECKPOINT -node-id "$POD" -isolation TRUSTED \
     -mint jwt -issuer-key "$STATE/issuer-key.json" -issuer "$ISSUER_URL" \
-    -restart-cmd "$0 restart" -cp-health-cmd "$0 lane \$1" -audit-cmd "$0 audit \$1 \$2" \
+    -restart-cmd "$0 restart" -cp-health-cmd "$0 issuer-reachable \$1" -audit-cmd "$0 audit \$1 \$2" \
     -engine-kill-cmd "$0 engine-kill \$1" -scope-cmd "$0 scope-lost" -case-timeout 60s
 }
 
@@ -158,13 +158,13 @@ storm() {
   "${KC[@]}" apply -f "$KIND_DIR/manifests/50-storm.yaml"
   wait_for 60 "storm pod created" "${KC[@]}" -n "$NS" get pod storm-grant
   "${KC[@]}" -n "$NS" wait --for=condition=Ready pod/storm-grant --timeout=180s
-  "${KC[@]}" -n "$NS" cp --no-preserve "$STATE/issuer-key.json" storm-grant:/tmp/issuer-key.json -c agent
+  "${KC[@]}" -n "$NS" cp --no-preserve "$STATE/issuer-key.json" storm-grant:/tmp/issuer-key.json -c fiberd
   # The container's cgroup is the mount root in a private cgroup
   # namespace and the scope /proc/1/cgroup names in the host's (what a
   # privileged Pod gets); the OOM counter and the fiberd subtree are there.
-  "${KC[@]}" -n "$NS" exec storm-grant -c agent -- sh -c "$own_cgroup"'
+  "${KC[@]}" -n "$NS" exec storm-grant -c fiberd -- sh -c "$own_cgroup"'
     exec storm -target 127.0.0.1:8484 -node-id storm-grant -issuer-key /tmp/issuer-key.json -issuer "$0" -isolation TRUSTED \
-      -cgroup-root "$own/fiberd" -container-events "$own/memory.events" \
+      -cgroup-root "$own/grants" -container-events "$own/memory.events" \
       -fibers 8 -ceiling 167772160 -overcommit 2 -step 2097152 -round 250ms' "$ISSUER_URL"
   echo "--- storm pod:"
   "${KC[@]}" -n "$NS" get pod storm-grant -o jsonpath='restarts={.status.containerStatuses[0].restartCount} lastState={.status.containerStatuses[0].lastState}'; echo
@@ -173,7 +173,7 @@ storm() {
 
 # gvisor: an UNTRUSTED grant whose fibers are runsc sandboxes behind the
 # Pod IP, checked from a second Pod. The grant Pod's endpoint family is
-# inet4, which the gvisor runtime serves through the agent's relay.
+# inet4, which the gvisor runtime serves through fiberd's relay.
 gvisor() {
   local gpod=conform-gvisor-grant client=sessioncheck-client ip
   mkdir -p "$STATE"
@@ -188,8 +188,8 @@ gvisor() {
   "${KC[@]}" -n "$NS" cp --no-preserve "$STATE/issuer-key.json" "$client:/tmp/issuer-key.json"
   "${KC[@]}" -n "$NS" exec "$client" -- sessioncheck -target "$ip:8484" -node-id "$gpod" -issuer-key /tmp/issuer-key.json \
     -issuer "$ISSUER_URL" -isolation UNTRUSTED -want-scheme tcp
-  echo "--- gvisor grant pod agent log (relay lines):"
-  "${KC[@]}" -n "$NS" logs "$gpod" -c agent | grep -i "relay\|endpoints" | tail -5 || true
+  echo "--- gvisor grant pod fiberd log (relay lines):"
+  "${KC[@]}" -n "$NS" logs "$gpod" -c fiberd | grep -i "relay\|endpoints" | tail -5 || true
   "${KC[@]}" -n "$NS" delete pod "$client" --wait=false >/dev/null
 }
 
@@ -199,7 +199,7 @@ case "${1:-}" in
   image) image ;;
   deploy) deploy ;;
   restart) restart ;;
-  lane) lane "$2" ;;
+  issuer-reachable) issuer_reachable "$2" ;;
   audit) audit "$2" "$3" ;;
   engine-kill) engine_kill "$2" ;;
   scope-lost) scope_lost ;;
@@ -213,5 +213,5 @@ case "${1:-}" in
     down 2>/dev/null || true
     up; image; deploy; conform; storm; gvisor
     ;;
-  *) echo "usage: $0 run|up|down|image|deploy|conform|storm|gvisor|runc-logs [pod]|restart|lane up|down|audit <event> <fence>|engine-kill <uid>|scope-lost" >&2; exit 2 ;;
+  *) echo "usage: $0 run|up|down|image|deploy|conform|storm|gvisor|runc-logs [pod]|restart|issuer-reachable up|down|audit <event> <fence>|engine-kill <uid>|scope-lost" >&2; exit 2 ;;
 esac

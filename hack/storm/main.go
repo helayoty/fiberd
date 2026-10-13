@@ -8,7 +8,7 @@
 // times the grant's ceiling. Meanwhile it samples the grant cgroup's
 // memory.current and PSI, the ledger status stream, and the container's
 // own OOM counter. Exit status is non-zero if the container recorded an
-// OOM kill, if no fiber was parked, or if the agent stopped reporting.
+// OOM kill, if no fiber was parked, or if fiberd stopped reporting.
 package main
 
 import (
@@ -256,7 +256,7 @@ func run(o opts) int {
 		rc = 1
 	}
 	if !ok {
-		fmt.Println("storm: FAIL no status from the agent (did it die?)")
+		fmt.Println("storm: FAIL no status from fiberd (did it die?)")
 		rc = 1
 	}
 	if rc == 0 {

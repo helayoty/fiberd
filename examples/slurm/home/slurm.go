@@ -1,19 +1,19 @@
-// Package home is the Slurm home: the agent runs inside an allocation,
+// Package home is the Slurm home: fiberd runs inside an allocation,
 // started by the job (or its prolog) after the grant was verified. It is
 // the integration point with fiberd: everything fiberd needs from an
 // environment is the home.Home interface (pkg/home) plus the optional
-// interfaces pkg/agent looks for, and this package implements them from
+// interfaces pkg/fiberd looks for, and this package implements them from
 // what Slurm tells a job through its environment and scontrol.
 //
 // Grants are *.jwt files in a directory the launcher (or prolog) fills;
 // control-plane liveness is slurmctld answering for the job; readiness is
 // the allocation's own state plus the Watch stream; the cgroup subtree is
 // the job step's (task/cgroup's memory limit on it is the block ceiling);
-// endpoints are the node's address; the fabric channel is the
+// endpoints are the node's address; the device channel is the
 // allocation's GRES; scope claims are the job, user, account, partition,
 // node and GRES. A grant asking for more fibers than the allocation has
-// CPUs is refused. The job leaving RUNNING while the agent lives is scope
-// loss, and the agent bumps its epoch.
+// CPUs is refused. The job leaving RUNNING while fiberd lives is scope
+// loss, and fiberd bumps its epoch.
 package home
 
 import (
@@ -36,7 +36,7 @@ import (
 	"github.com/helayoty/fiberd/pkg/core"
 	"github.com/helayoty/fiberd/pkg/endpoint"
 	"github.com/helayoty/fiberd/pkg/home"
-	"github.com/helayoty/fiberd/pkg/home/filelane"
+	"github.com/helayoty/fiberd/pkg/home/grantdir"
 	"github.com/helayoty/fiberd/pkg/sys/cgroup"
 )
 
@@ -60,7 +60,7 @@ type Config struct {
 	// node's address of that family).
 	Family endpoint.Family
 	Host   string
-	// ListenPort is the agent's gRPC port, for the advertised endpoint.
+	// ListenPort is fiberd's gRPC port, for the advertised endpoint.
 	ListenPort string
 	// Probe is the command whose output carries the job's state as
 	// JobState=<STATE> (default: scontrol show job -o <id>); nil disables
@@ -68,10 +68,10 @@ type Config struct {
 	// without an issuer.
 	Probe []string
 	// OnJobEnd runs after the scope-loss hook when the job reached a
-	// terminal state: the allocation is over, so is the agent. Default:
-	// SIGTERM to this process, which the agent takes as a graceful stop
+	// terminal state: the allocation is over, so is fiberd. Default:
+	// SIGTERM to this process, which fiberd takes as a graceful stop
 	// (slurmstepd kills the step's own cgroups, not the ones fiberd made
-	// beneath them, so the agent must leave on its own).
+	// beneath them, so fiberd must leave on its own).
 	OnJobEnd func()
 }
 
@@ -250,7 +250,7 @@ func (h *Home) EndpointHost() string {
 	return ""
 }
 
-// AdvertisedEndpoint is where callers reach this agent.
+// AdvertisedEndpoint is where callers reach this fiberd.
 func (h *Home) AdvertisedEndpoint() string {
 	host := h.EndpointHost()
 	if host == "" || h.cfg.ListenPort == "" {
@@ -262,14 +262,14 @@ func (h *Home) AdvertisedEndpoint() string {
 // Scope: the facts the allocation is made of.
 func (h *Home) Scope() []core.ScopeClaim { return append([]core.ScopeClaim(nil), h.scope...) }
 
-// Fabric: the allocation's GRES, with the devices Slurm exposed. The
+// Devices: the allocation's GRES, with the devices Slurm exposed. The
 // allocation is also the capacity bound: a grant asking for more fibers
 // than it has CPUs is refused here, before its template is warmed.
-func (h *Home) Fabric(_ context.Context, g core.Grant) (core.FabricChannel, func(), error) {
+func (h *Home) Devices(_ context.Context, g core.Grant) (core.DeviceChannel, func(), error) {
 	if h.job.CPUs > 0 && g.FiberMax > h.job.CPUs {
-		return core.FabricChannel{}, nil, fmt.Errorf("slurm: grant %s asks for %d fibers; job %s has %d CPUs", g.UID, g.FiberMax, h.job.ID, h.job.CPUs)
+		return core.DeviceChannel{}, nil, fmt.Errorf("slurm: grant %s asks for %d fibers; job %s has %d CPUs", g.UID, g.FiberMax, h.job.ID, h.job.CPUs)
 	}
-	fc := core.FabricChannel{Devices: append([]string(nil), h.devices...)}
+	fc := core.DeviceChannel{Devices: append([]string(nil), h.devices...)}
 	switch {
 	case h.job.GRES != "":
 		fc.Kind, fc.Detail = "gres", h.job.GRES
@@ -281,7 +281,7 @@ func (h *Home) Fabric(_ context.Context, g core.Grant) (core.FabricChannel, func
 
 // Grants is the job's grants directory.
 func (h *Home) Grants(ctx context.Context) (<-chan home.GrantEvent, error) {
-	return filelane.Poll(ctx, h.cfg.GrantsDir, h.cfg.Poll)
+	return grantdir.Poll(ctx, h.cfg.GrantsDir, h.cfg.Poll)
 }
 
 // PublishReady: readiness under Slurm is the allocation's own state plus
@@ -289,24 +289,24 @@ func (h *Home) Grants(ctx context.Context) (<-chan home.GrantEvent, error) {
 func (h *Home) PublishReady(context.Context, string, bool) error { return nil }
 
 // OnScopeLost sets what to call (once per reason) when the job leaves
-// RUNNING under a live agent: cmd/fiberd-slurm wires Agent.BumpEpoch.
+// RUNNING while fiberd lives: cmd/fiberd-slurm wires Core.BumpEpoch.
 func (h *Home) OnScopeLost(fn func(ctx context.Context, reason string)) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.scopeLost = fn
 }
 
-// SetLane is the test-only override behind fiberd's admin socket.
-func (h *Home) SetLane(healthy bool) {
+// SetIssuerReachable is the test-only override behind fiberd's admin socket.
+func (h *Home) SetIssuerReachable(reachable bool) {
 	h.mu.Lock()
-	h.paused = !healthy
+	h.paused = !reachable
 	h.mu.Unlock()
-	if healthy {
+	if reachable {
 		h.health.MarkSync(time.Now())
 	} else {
 		h.health.MarkSync(time.Now().Add(-h.cfg.StaleTTL))
 	}
-	log.Printf("slurm: grant lane set healthy=%v", healthy)
+	log.Printf("slurm: issuer reachable=%v (admin override)", reachable)
 }
 
 var jobState = regexp.MustCompile(`\bJobState=([A-Z_]+)`)
@@ -358,8 +358,8 @@ func (h *Home) poll(ctx context.Context) {
 		}
 	default:
 		// COMPLETING, COMPLETED, CANCELLED, FAILED, TIMEOUT, PREEMPTED,
-		// NODE_FAIL, ...: the allocation is over while the agent lives.
-		// Every fence is revoked, then the agent leaves with it.
+		// NODE_FAIL, ...: the allocation is over while fiberd lives.
+		// Every fence is revoked, then fiberd leaves with it.
 		if h.lose(ctx, "job "+h.job.ID+" is "+state) {
 			h.cfg.OnJobEnd()
 		}

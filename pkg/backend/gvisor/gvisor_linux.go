@@ -18,7 +18,7 @@
 //     there (and "resume" in the original).
 //   - Clone: `runsc restore` the template image into a new sandbox whose
 //     spec carries a one-shot token. The workload claims it on the pool
-//     socket at /fiberd/agent and gets its fence, endpoint, payload and a
+//     socket at /fiberd/channel and gets its fence, endpoint, payload and a
 //     seed. It reseeds, serves its endpoint and acks. A template that
 //     never dials gets its identity in the spec environment instead.
 //   - Pool: the same restore, with the identity held back until Bind.
@@ -80,12 +80,12 @@ const (
 	// itself is wedged.
 	closeWait = 10 * time.Second
 
-	// agentMount is where a warm instance's own directory is bound in the
+	// channelMount is where a warm instance's own directory is bound in the
 	// template sandbox and in every sandbox restored from it, read-only.
 	// It holds the pool socket alone. The mount is unconditional, since
 	// runsc requires a restore's mounts to match the checkpoint's.
-	agentMount = "/fiberd/agent"
-	poolSocket = "pool.sock"
+	channelMount = "/fiberd/channel"
+	poolSocket   = "pool.sock"
 	// tokenBytes is the size of a restore's one-shot token, seedBytes
 	// what each identity carries as fresh entropy.
 	tokenBytes = 16
@@ -95,7 +95,7 @@ const (
 	// claimWait is how long an accepted connection has to send its
 	// claim. A template claims right after it connects. unclaimedMax
 	// bounds the connections a warm instance holds while they have not,
-	// since any sandbox of the grant can open them, and the agent serves
+	// since any sandbox of the grant can open them, and fiberd serves
 	// every grant.
 	claimWait    = 3 * time.Second
 	unclaimedMax = 8
@@ -173,11 +173,11 @@ type warm struct {
 	// the registry template's executable. Empty for a template that
 	// lives in the rootfs.
 	template string
-	// agent is the host directory bound at agentMount in every sandbox
-	// of this instance, <state>/agent/<n>, holding the pool socket ln
+	// channel is the host directory bound at channelMount in every sandbox
+	// of this instance, <state>/channel/<n>, holding the pool socket ln
 	// listens on.
-	agent string
-	ln    *net.UnixListener
+	channel string
+	ln      *net.UnixListener
 	// pending maps each token minted for a restore to the sandbox it
 	// was minted for. The first connection with a token takes it, under
 	// the backend's mutex, and later ones are closed. unclaimed are the
@@ -342,7 +342,7 @@ func (b *Backend) runsc(ctx context.Context, cgroupFD int, args ...string) (stri
 		if ctx.Err() != nil {
 			// The context ended and CommandContext killed runsc itself:
 			// the deadline is the reason, and the caller must see it as
-			// one ("signal: killed" is not a miss the agent can name).
+			// one ("signal: killed" is not a miss fiberd can name).
 			return string(out), fmt.Errorf("gvisor: runsc %s: %w", args[0], ctx.Err())
 		}
 		return string(out), fmt.Errorf("gvisor: runsc %s: %w: %s", args[0], err, clip(string(out)))
@@ -412,17 +412,17 @@ type spec struct {
 }
 
 // writeBundle creates <dir>/config.json. workDir is bind-mounted at
-// /host, agent read-only at agentMount, template (when set) read-only at
+// /host, channel read-only at channelMount, template (when set) read-only at
 // backend.TemplateMount, and images, when set, turns on the
 // workload-triggered checkpoint.
-func (b *Backend) writeBundle(dir string, argv, env []string, workDir, agent, images, template string) error {
+func (b *Backend) writeBundle(dir string, argv, env []string, workDir, channel, images, template string) error {
 	var s spec
 	s.OCIVersion = "1.0.2"
 	s.Process.Cwd = "/"
 	s.Process.Args = argv
 	s.Process.Env = append([]string{"PATH=/bin:/usr/bin"}, env...)
 	// The rootfs is one host directory shared by every sandbox of every
-	// grant, served by the gofer with the agent's credentials, and the
+	// grant, served by the gofer with fiberd's credentials, and the
 	// workload is uid 0 in its sandbox. Read-only, or one fiber rewrites
 	// /bin/refzygote for every later sandbox. /host and /tmp below are
 	// the sandbox's writable paths.
@@ -442,7 +442,7 @@ func (b *Backend) writeBundle(dir string, argv, env []string, workDir, agent, im
 	add("/dev", "tmpfs", "tmpfs")
 	add("/tmp", "tmpfs", "tmpfs")
 	add("/host", "bind", workDir, "rbind", "rw")
-	add(agentMount, "bind", agent, backend.TemplateMountOptions...)
+	add(channelMount, "bind", channel, backend.TemplateMountOptions...)
 	if template != "" {
 		add(backend.TemplateMount, "bind", template, backend.TemplateMountOptions...)
 	}
@@ -508,7 +508,7 @@ func (b *Backend) newCID(kind, name string) string {
 }
 
 // sweep ends every sandbox a previous life of this backend left in its
-// root, then clears the bundle, template and agent directories they used.
+// root, then clears the bundle, template and channel directories they used.
 // Nothing there is this life's, since no incarnation has started yet,
 // and a cid is never reused across lives. When runsc cannot list, the
 // sandboxes are left alone and so are their directories.
@@ -520,7 +520,7 @@ func (b *Backend) sweep() {
 	for _, id := range strings.Fields(out) {
 		_, _ = b.runsc(context.Background(), -1, "delete", "-force", id)
 	}
-	for _, sub := range []string{"bundles", "templates", "agent"} {
+	for _, sub := range []string{"bundles", "templates", "channel"} {
 		ents, err := os.ReadDir(filepath.Join(b.opt.StateDir, sub))
 		if err != nil {
 			continue
@@ -609,25 +609,25 @@ func (b *Backend) Warm(ctx context.Context, sp backend.WarmSpec) (backend.Warm, 
 	w.images = filepath.Join(w.dir, "images")
 	// Named by the incarnation's number alone. A unix socket path is at
 	// most 108 bytes and a cid can be 64.
-	w.agent = filepath.Join(b.opt.StateDir, "agent", w.cid[strings.LastIndex(w.cid, "-")+1:])
+	w.channel = filepath.Join(b.opt.StateDir, "channel", w.cid[strings.LastIndex(w.cid, "-")+1:])
 	if err := os.MkdirAll(w.dir, 0o755); err != nil {
 		return backend.Warm{}, err
 	}
 	// The pool socket, in a directory of the instance's own that holds
-	// nothing else. The sandbox connects with the agent's credentials, so
-	// the socket is the agent's alone.
-	if err := os.MkdirAll(w.agent, 0o700); err != nil {
+	// nothing else. The sandbox connects with fiberd's credentials, so
+	// the socket is fiberd's alone.
+	if err := os.MkdirAll(w.channel, 0o700); err != nil {
 		return backend.Warm{}, err
 	}
-	sock := filepath.Join(w.agent, poolSocket)
+	sock := filepath.Join(w.channel, poolSocket)
 	ln, err := net.ListenUnix("unixpacket", &net.UnixAddr{Name: sock, Net: "unixpacket"})
 	if err != nil {
-		_ = os.RemoveAll(w.agent)
+		_ = os.RemoveAll(w.channel)
 		return backend.Warm{}, fmt.Errorf("gvisor: pool socket: %w", err)
 	}
 	if err := os.Chmod(sock, 0o600); err != nil {
 		_ = ln.Close()
-		_ = os.RemoveAll(w.agent)
+		_ = os.RemoveAll(w.channel)
 		return backend.Warm{}, fmt.Errorf("gvisor: pool socket: %w", err)
 	}
 	w.ln = ln
@@ -640,7 +640,7 @@ func (b *Backend) Warm(ctx context.Context, sp backend.WarmSpec) (backend.Warm, 
 		if !warmed {
 			_ = ln.Close()
 			_ = os.RemoveAll(w.dir)
-			_ = os.RemoveAll(w.agent)
+			_ = os.RemoveAll(w.channel)
 		}
 	}()
 	if sp.Template.Dir != "" {
@@ -658,7 +658,7 @@ func (b *Backend) Warm(ctx context.Context, sp backend.WarmSpec) (backend.Warm, 
 	marker := filepath.Join(sp.WorkDir, readyMarker)
 	_ = os.Remove(marker)
 	bundle := filepath.Join(w.dir, "bundle")
-	if err := b.writeBundle(bundle, w.argv, []string{"FIBERD_FENCE=none"}, sp.WorkDir, w.agent, "", w.template); err != nil {
+	if err := b.writeBundle(bundle, w.argv, []string{"FIBERD_FENCE=none"}, sp.WorkDir, w.channel, "", w.template); err != nil {
 		return backend.Warm{}, err
 	}
 	if _, err := b.runsc(ctx, sp.CgroupFD, "run", "--detach", "--bundle", bundle, w.cid); err != nil {
@@ -839,7 +839,7 @@ func cgroupCurrent(fd int) uint64 {
 // reports how it ended. With the sandbox pid known, the wait is a pidfd
 // parked in the Go runtime's poller, which costs no process and no
 // thread per sandbox. A `runsc wait` is a process of several threads and
-// some 20 MiB in the agent's own leaf for each live fiber. Without a pid
+// some 20 MiB in fiberd's own leaf for each live fiber. Without a pid
 // the sandbox is already gone or runsc could not say, and `runsc wait`
 // sorts it out as before.
 func (b *Backend) reap(cid string, pid int) string {
@@ -886,7 +886,7 @@ func awaitExit(pid int) (string, bool) {
 
 // exitStatus is how the exited process pid ended when this process is
 // its parent, which reaps it here. runsc reparents a detached sandbox
-// to init, so that is the agent when it is a container's init. Otherwise
+// to init, so that is fiberd when it is a container's init. Otherwise
 // the status is "exited", since only a parent can read one.
 func exitStatus(pid int) string {
 	var ws unix.WaitStatus
@@ -927,7 +927,7 @@ func (b *Backend) waitWarm(w *warm) {
 	// already warmed under the same grant keeps its own.
 	_ = w.ln.Close()
 	_ = os.RemoveAll(w.dir)
-	_ = os.RemoveAll(w.agent)
+	_ = os.RemoveAll(w.channel)
 	b.mu.Lock()
 	gone := b.warms[w.id] == w
 	if gone {
@@ -1162,11 +1162,11 @@ func (b *Backend) restore(ctx context.Context, w *warm, x *box, images string, a
 	}
 	// The bundle is the sandbox's own, named after its cid, so the reaper
 	// of an earlier incarnation under the same fence never removes it. It
-	// lives in the state directory, which is the agent's alone. The
+	// lives in the state directory, which is fiberd's alone. The
 	// grant's run directory is every sandbox's /host, read and write, so
 	// a bundle there could be rewritten by a sibling before runsc read
-	// it, or planted as a link for the agent to write through.
-	if err := b.writeBundle(x.bundle, argv, append([]string{"FIBERD_TOKEN=" + x.token}, env...), w.workDir, w.agent, "", w.template); err != nil {
+	// it, or planted as a link for fiberd to write through.
+	if err := b.writeBundle(x.bundle, argv, append([]string{"FIBERD_TOKEN=" + x.token}, env...), w.workDir, w.channel, "", w.template); err != nil {
 		b.forgetToken(w, x)
 		return err
 	}

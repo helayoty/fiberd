@@ -12,7 +12,7 @@
  *                           endpoint it is given (proc, runc).
  *   --gvisor                the init of a gVisor sandbox: warm, then the
  *                           self-checkpoint loop refzygote uses, serving
- *                           the endpoint the agent hands it on its
+ *                           the endpoint fiberd hands it on its
  *                           channel until SIGUSR1 (fiberd gVisor).
  *
  * The framing is HTTP/1.1 by default. GET /readyz answers ok, POST /incr
@@ -237,7 +237,7 @@ static int gvisor_main(void) {
     for (;;) {
         if (!wait_checkpoint()) continue;
         /* A sandbox restored from the image. Its identity and a fresh
-         * seed come on the agent's channel, see refzygote. */
+         * seed come on fiberd's channel, see refzygote. */
         fz_gvisor_identity_t id;
         if (fz_gvisor_identity(&id) < 0) { fprintf(stderr, "counter: restored without an identity: %s\n", strerror(errno)); return 122; }
         reseed_rngs(id.seed, id.seed_len);

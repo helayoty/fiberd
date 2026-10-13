@@ -11,9 +11,9 @@ import (
 	"testing"
 )
 
-// TestRun checks the agent command up to where it needs a cluster. That
-// covers its flags, the agent's own checks, and the Kubernetes home factory
-// reading the agent's configuration.
+// TestRun checks fiberd command up to where it needs a cluster. That
+// covers its flags, fiberd's own checks, and the Kubernetes home factory
+// reading fiberd's configuration.
 func TestRun(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -21,7 +21,7 @@ func TestRun(t *testing.T) {
 		wantErr string
 	}{
 		{name: "an unknown flag is an error", args: []string{"-nope"}, wantErr: "flag provided but not defined: -nope"},
-		{name: "the agent's own checks run first: a verifier is required", wantErr: "-verifier is required"},
+		{name: "fiberd's own checks run first: a verifier is required", wantErr: "-verifier is required"},
 		{name: "the home factory refuses an unknown endpoint family",
 			args: []string{"-verifier", "insecure-json", "-endpoint-family", "carrier-pigeon"}, wantErr: `endpoint family "carrier-pigeon"`},
 		{name: "the home factory refuses a listen address without a port",
@@ -40,9 +40,9 @@ func TestRun(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 				t.Fatalf("run = %v, want %q", err, tc.wantErr)
 			}
-			// The agent makes its private state directory under -state
+			// fiberd makes its private state directory under -state
 			// before the verifier check, so finding it proves the flags
-			// reached the agent.
+			// reached fiberd.
 			if tc.wantErr != "flag provided but not defined: -nope" {
 				if st, err := os.Stat(filepath.Join(state, "private")); err != nil || st.Mode().Perm() != 0o700 {
 					t.Fatalf("private state dir: %v (%v), want mode 0700 under -state", st, err)
@@ -55,14 +55,14 @@ func TestRun(t *testing.T) {
 // TestRunHealthz checks -healthz, the grant Pod's liveness and startup
 // probe. It succeeds only when the admin socket under -state answers 200.
 // The 503 of a poisoned audit spool and a socket not up yet both fail,
-// and the agent itself is never started.
+// and fiberd itself is never started.
 func TestRunHealthz(t *testing.T) {
 	cases := []struct {
 		name    string
 		status  int // 0 means nothing listens
 		wantErr string
 	}{
-		{name: "a healthy agent passes", status: http.StatusOK},
+		{name: "a healthy fiberd passes", status: http.StatusOK},
 		{name: "a poisoned audit spool fails", status: http.StatusServiceUnavailable, wantErr: `503 Service Unavailable: {"audit":"poisoned"}`},
 		{name: "no admin socket yet fails", wantErr: "healthz:"},
 	}

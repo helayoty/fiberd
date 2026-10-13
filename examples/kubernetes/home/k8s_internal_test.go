@@ -55,7 +55,7 @@ func TestNewGivesUpWithoutAnAddress(t *testing.T) {
 			if err != nil || h.EndpointHost() != "10.0.0.1" {
 				t.Fatalf("New = %v, host %q", err, h.EndpointHost())
 			}
-			if !strings.HasSuffix(h.CgroupRoot(), "fiberd") {
+			if !strings.HasSuffix(h.CgroupRoot(), "grants") {
 				t.Fatalf("cgroup root = %q", h.CgroupRoot())
 			}
 		})

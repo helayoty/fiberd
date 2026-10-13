@@ -142,7 +142,7 @@ func TestHandshakeNamesCaller(t *testing.T) {
 	dir := t.TempDir()
 	ca := tlsconftest.NewCA(t, "ca")
 	caFile, _ := ca.Write(t, dir, "ca")
-	srvCert, srvKey := ca.Server(t).Write(t, dir, "agent")
+	srvCert, srvKey := ca.Server(t).Write(t, dir, "fiberd")
 	scfg, err := tlsconf.Server(srvCert, srvKey, caFile, false)
 	if err != nil {
 		t.Fatal(err)

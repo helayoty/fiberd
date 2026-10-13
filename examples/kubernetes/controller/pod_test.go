@@ -19,7 +19,7 @@ func TestBuildPod(t *testing.T) {
 	measured := &controller.SecurityContext{
 		Capabilities:   &controller.Capabilities{Add: []string{"SETPCAP", "NET_ADMIN", "SYS_CHROOT", "SYS_PTRACE", "SYS_ADMIN", "SYS_RESOURCE", "SYS_TIME"}, Drop: []string{"ALL"}},
 		SeccompProfile: &controller.SeccompProfile{Type: "Unconfined"}}
-	// base is the flags every grant Pod's agent gets, for a 1m lease.
+	// base is the flags every grant Pod's fiberd gets, for a 1m lease.
 	base := func(runtime, family string) []string {
 		return []string{"-verifier", "jwks", "-issuer", issuerURL, "-jwks-max-stale", "1m0s", "-insecure-plaintext",
 			"-listen", ":8484", "-runtime", runtime, "-node-id", "$(FIBERD_NODE_ID)",
@@ -110,7 +110,7 @@ func TestBuildPod(t *testing.T) {
 				t.Fatalf("containers = %+v", p.Spec.Containers)
 			}
 			c := p.Spec.Containers[0]
-			if c.Name != "agent" || c.Image != tc.pod.Image || !reflect.DeepEqual(c.Command, []string{"tini", "--", "fiberd-k8s"}) {
+			if c.Name != "fiberd" || c.Image != tc.pod.Image || !reflect.DeepEqual(c.Command, []string{"tini", "--", "fiberd-k8s"}) {
 				t.Fatalf("container = %s %s %v", c.Name, c.Image, c.Command)
 			}
 			if !reflect.DeepEqual(c.Args, tc.args) {
@@ -134,7 +134,7 @@ func TestBuildPod(t *testing.T) {
 				t.Fatalf("ports %+v, readiness probe %+v", c.Ports, c.ReadinessProbe)
 			}
 			// Liveness is the admin socket's /healthz, which a poisoned
-			// audit spool turns to 503, so the kubelet restarts the agent.
+			// audit spool turns to 503, so the kubelet restarts fiberd.
 			healthz := &controller.ExecAction{Command: []string{"fiberd-k8s", "-state", "/var/lib/fiberd", "-healthz"}}
 			if !reflect.DeepEqual(c.LivenessProbe, &controller.Probe{Exec: healthz, PeriodSeconds: 10, TimeoutSeconds: 5, FailureThreshold: 3}) ||
 				!reflect.DeepEqual(c.StartupProbe, &controller.Probe{Exec: healthz, PeriodSeconds: 2, TimeoutSeconds: 5, FailureThreshold: 60}) {

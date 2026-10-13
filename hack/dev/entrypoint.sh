@@ -5,7 +5,7 @@
 # with controllers enabled may not itself hold processes. Docker puts this
 # shell in the namespace root, so move it into a leaf first, then enable
 # the controllers we need on the root and create the fiberd subtree that
-# the agent treats as its delegated root ($FIBERD_CGROUP_ROOT).
+# fiberd treats as its delegated root ($FIBERD_CGROUP_ROOT).
 set -e
 CG=/sys/fs/cgroup
 if [ -w "$CG/cgroup.subtree_control" ]; then

@@ -16,7 +16,7 @@ import (
 
 // TestFiberSeesOnlyItsRunDir pins that a proc fiber, which is euid 0,
 // cannot see another grant's endpoint sockets or fence files. Its mount
-// namespace covers the agent's run directory with an empty read-only tmpfs
+// namespace covers fiberd's run directory with an empty read-only tmpfs
 // and binds back only its own grant's directory. A park and resume keep
 // the view, because CRIU restores the cover and binds the resuming grant's
 // directory.

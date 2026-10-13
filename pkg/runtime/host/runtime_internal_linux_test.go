@@ -505,9 +505,9 @@ func TestPrepareTemplate(t *testing.T) {
 					t.Fatalf("overhead of an unknown grant = %d", got)
 				}
 			}},
-		{name: "the grant's fabric devices reach the warm instance", be: func() backend.Backend { return newFakeBackend(core.TierWarm) }, grant: sized,
+		{name: "the grant's device channel reaches the warm instance", be: func() backend.Backend { return newFakeBackend(core.TierWarm) }, grant: sized,
 			before: func(t *testing.T, r *Runtime) {
-				r.AttachFabric("g1", core.FabricChannel{Kind: "static", Devices: []string{"/dev/sim0"}})
+				r.AttachDevices("g1", core.DeviceChannel{Kind: "static", Devices: []string{"/dev/sim0"}})
 			},
 			check: func(t *testing.T, r *Runtime, be backend.Backend) {
 				spec, _ := be.(*fakeBackend).warmSpec("g1")
@@ -918,7 +918,7 @@ func TestFiberEnds(t *testing.T) {
 				t.Fatal(err)
 			}
 		}},
-		{name: "releasing an orphan of a previous agent kills its leaf and removes its files", run: func(t *testing.T, r *Runtime, _ *fakeBackend, _ core.FiberHandle) {
+		{name: "releasing an orphan of a previous fiberd kills its leaf and removes its files", run: func(t *testing.T, r *Runtime, _ *fakeBackend, _ core.FiberHandle) {
 			orphan := core.Fence{GrantUID: "g1", Epoch: 5, Seq: 5}
 			leaf := r.root.Child("g1").Child(leafName(orphan))
 			if err := leaf.Create(0, false); err != nil {
@@ -1439,14 +1439,14 @@ func TestPidsPressure(t *testing.T) {
 	}
 }
 
-// TestNewReservesTheAgent checks that New caps the subtree below the
+// TestNewReservesFiberd checks that New caps the subtree below the
 // limits it finds above its root, keeping an eighth (at least 64 MiB or
-// 64 tasks, at most half) for the agent, and leaves a root with nothing
+// 64 tasks, at most half) for fiberd, and leaves a root with nothing
 // above it alone. A fake root makes the limits plain files. The root's
 // own pids.max is there from the start, as the kernel shows it once the
 // parent delegated the controller (without it no task cap is written,
 // as on a Slurm step).
-func TestNewReservesTheAgent(t *testing.T) {
+func TestNewReservesFiberd(t *testing.T) {
 	cases := []struct {
 		name  string
 		above map[string]string // files above the root, path relative to the home
@@ -1694,7 +1694,7 @@ func TestFileHelpers(t *testing.T) {
 	}
 }
 
-// TestDropTemplate checks what the host does when the agent drops a
+// TestDropTemplate checks what the host does when fiberd drops a
 // yielded grant's template. The warm instance is unwarmed and forgotten,
 // its pages lose their memory.min on the grant's cgroups and in the
 // root's sum, the backend's later report of its exit changes nothing,

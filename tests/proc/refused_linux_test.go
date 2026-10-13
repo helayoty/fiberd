@@ -150,7 +150,7 @@ func births(t *testing.T, trace string) (clone3, legacy int) {
 // to the legacy clone (a property the old code had too). And the zygote,
 // refused its own mount namespace in fz_init, ends at PREPARE mntns with
 // the reason instead of READY, before any birth, so no clone3 is even
-// asked for and the agent fails the warm. The oldest code asked the
+// asked for and fiberd fails the warm. The oldest code asked the
 // kernel, which refused CLONE_NEWNS the same way. The code after it said
 // READY and refused each mntns CLONE, which let a home report ready on
 // a grant that served nothing. Where the refusal lands has moved twice,

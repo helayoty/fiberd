@@ -1,9 +1,9 @@
-// Command fiberd-k8s is the fiberd agent for a Kubernetes grant Pod: the
-// agent library (pkg/agent) plus the Kubernetes home. It is what the
+// Command fiberd-k8s is fiberd for a Kubernetes grant Pod: the
+// library (pkg/fiberd) plus the Kubernetes home. It is what the
 // issuer controller runs as PID 1 of every grant Pod. Every fiberd flag
 // applies; -grants-dir defaults to the projected grant volume and the
 // Pod's cgroup replaces -cgroup-root. With -healthz it is the Pod's
-// liveness and startup probe instead of the agent.
+// liveness and startup probe instead of fiberd.
 package main
 
 import (
@@ -13,7 +13,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/helayoty/fiberd/pkg/agent"
+	"github.com/helayoty/fiberd/pkg/fiberd"
 	"github.com/helayoty/fiberd/pkg/grant"
 	fhome "github.com/helayoty/fiberd/pkg/home"
 
@@ -26,12 +26,12 @@ func main() {
 	}
 }
 
-// run is the agent with its flags bound on fs and parsed from args. With
-// -healthz it only checks the running agent and returns.
+// run is fiberd with its flags bound on fs and parsed from args. With
+// -healthz it only checks the running fiberd and returns.
 func run(fs *flag.FlagSet, args []string) error {
-	var c agent.Config
+	var c fiberd.Config
 	c.Bind(fs)
-	healthz := fs.Bool("healthz", false, "check the running agent's /healthz on the admin socket under -state, then exit: 0 on 200, 1 otherwise, as when its audit spool is poisoned. The grant Pod's liveness and startup probes run it")
+	healthz := fs.Bool("healthz", false, "check the running fiberd's /healthz on the admin socket under -state, then exit: 0 on 200, 1 otherwise, as when its audit spool is poisoned. The grant Pod's liveness and startup probes run it")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -44,12 +44,12 @@ func run(fs *flag.FlagSet, args []string) error {
 	if err := c.NarrowCaps(); err != nil {
 		return err
 	}
-	return agent.Run(&c, kubernetes)
+	return fiberd.Run(&c, kubernetes)
 }
 
 // kubernetes is the home factory: what the Kubernetes home needs from
-// the agent's configuration.
-func kubernetes(c *agent.Config, _ *grant.Cache) (fhome.Home, error) {
+// fiberd's configuration.
+func kubernetes(c *fiberd.Config, _ *grant.Cache) (fhome.Home, error) {
 	fam, err := c.Family()
 	if err != nil {
 		return nil, err

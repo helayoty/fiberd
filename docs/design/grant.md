@@ -4,7 +4,7 @@
 
 ## Purpose
 
-A caller hands the [agent](../glossary.md#agent) a signed grant with every Clone. The [home](../glossary.md#home) must check it with no round trip to the [issuer](../glossary.md#issuer). It must refuse a forged token, one for another home, a lease longer than policy allows, and a copied token replayed by another caller. It must also stop one caller from [parking](../glossary.md#park), [releasing](../glossary.md#release) or watching another caller's fibers.
+A caller hands [fiberd](../glossary.md#fiberd) a signed grant with every Clone. The [home](../glossary.md#home) must check it with no round trip to the [issuer](../glossary.md#issuer). It must refuse a forged token, one for another home, a lease longer than policy allows, and a copied token replayed by another caller. It must also stop one caller from [parking](../glossary.md#park), [releasing](../glossary.md#release) or watching another caller's fibers.
 
 ## How it works
 
@@ -14,7 +14,7 @@ sequenceDiagram
   participant S as RPC server
   participant V as Verifier
   participant K as Key cache
-  participant A as Agent core
+  participant A as Core
   C->>S: Clone over mutual TLS
   S->>S: caller = thumbprint of client certificate
   S->>S: refuse unknown fields
@@ -40,9 +40,9 @@ sequenceDiagram
 
 The verifier does not enforce `exp`. Lease expiry is a capacity miss the [core](core.md) handles.
 
-**Keys.** Keys come only from OIDC discovery of the configured issuer, and the discovery document must name that same issuer. Keys are looked up by `kid` alone. An unknown `kid` triggers one refresh, at most once a minute. A key set older than `-jwks-max-stale` is refreshed once, and is refused if still stale. A stale key set, or one never loaded, makes the token unverifiable rather than bad, so the answer is [SHED](../glossary.md#shed-and-deferred), not `Unauthenticated`. Each refresh is the standalone home's liveness signal ([home.md](home.md)).
+**Keys.** Keys come only from OIDC discovery of the configured issuer, and the discovery document must name that same issuer. Keys are looked up by `kid` alone. An unknown `kid` triggers one refresh, at most once a minute. A key set older than `-jwks-max-stale` is refreshed once, and is refused if still stale. A stale key set, or one never loaded, makes the token unverifiable rather than bad, so the answer is [SHED](../glossary.md#clone-misses), not `Unauthenticated`. Each refresh is the standalone home's liveness signal ([home.md](home.md)).
 
-**Caller binding.** The `cnf` claim holds the `x5t#S256` thumbprint, the base64url SHA-256 of the caller's whole certificate. A bound grant presented over another certificate, or over plaintext, is refused. A home serving mutual TLS refuses unbound grants. When a token names another caller than the already admitted grant with that UID, it is refused until the [lane](../glossary.md#lane) delivers the grant again.
+**Caller binding.** The `cnf` claim holds the `x5t#S256` thumbprint, the base64url SHA-256 of the caller's whole certificate. A bound grant presented over another certificate, or over plaintext, is refused. A home serving mutual TLS refuses unbound grants. When a token names another caller than the already admitted grant with that UID, it is refused until the home delivers the grant again.
 
 **Transport and ownership.** The gRPC API and the JSON gateway require TLS 1.3 and a client certificate signed by `-client-ca`. The start fails unless exactly one of these holds.
 

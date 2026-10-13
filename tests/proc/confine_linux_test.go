@@ -112,7 +112,7 @@ func TestHideFailureRefusesClone(t *testing.T) {
 				// Five directories of 200 characters, then a file, so the
 				// ERROR naming the path passes the 1024 bytes the old
 				// zygote's send buffer held. It dropped the line, and the
-				// agent saw a bare EOF instead of the reason.
+				// fiberd saw a bare EOF instead of the reason.
 				long := dir
 				for i := 0; i < 5; i++ {
 					long = filepath.Join(long, strings.Repeat("d", 200))
@@ -173,7 +173,7 @@ func secretUnder(t *testing.T, dir string) (secretDir, secret string) {
 		t.Fatal(err)
 	}
 	secret = filepath.Join(secretDir, "key")
-	if err := os.WriteFile(secret, []byte("agent only\n"), 0o600); err != nil {
+	if err := os.WriteFile(secret, []byte("fiberd only\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	return secretDir, secret

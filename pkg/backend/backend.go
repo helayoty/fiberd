@@ -57,7 +57,7 @@ type WarmSpec struct {
 	// WorkDir is the grant's run directory: the instance's cwd, its log,
 	// and where fiber endpoints live.
 	WorkDir string
-	// Devices names the devices the grant's fabric channel provisions for
+	// Devices names the devices the grant's device channel provisions for
 	// its engine (device paths or ids), for the warm instance's
 	// environment; nil when the grant has none.
 	Devices []string
@@ -220,7 +220,7 @@ type Backend interface {
 
 // Isolator is implemented by backends whose fibers run behind a kernel
 // of their own (gVisor's Sentry, a Hyperlight micro-VM) rather than on
-// the host kernel under the agent's uid. Only these serve untrusted
+// the host kernel under fiberd's uid. Only these serve untrusted
 // grants. A backend that does not implement it does not isolate.
 type Isolator interface {
 	IsolatesTenants() bool
@@ -270,7 +270,7 @@ type Prober interface {
 
 // DeadlineAdvisor is implemented by backends whose fork or restore is
 // slower than a process fork: what a Clone without an explicit deadline
-// gets. Zero keeps the agent's defaults.
+// gets. Zero keeps fiberd's defaults.
 type DeadlineAdvisor interface {
 	DefaultDeadlines() (create, resume time.Duration)
 }

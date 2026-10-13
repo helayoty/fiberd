@@ -46,13 +46,13 @@ func (s *poolState) delay() {
 	s.until = time.Now().Add(s.backoff)
 }
 
-func (a *Agent) pooler() Pooler {
+func (a *Core) pooler() Pooler {
 	p, _ := a.Runtime.(Pooler)
 	return p
 }
 
 // poolState returns the grant's refill state, under poolMu.
-func (a *Agent) poolState(grantUID string) *poolState {
+func (a *Core) poolState(grantUID string) *poolState {
 	if a.pools == nil {
 		a.pools = map[string]*poolState{}
 	}
@@ -66,14 +66,14 @@ func (a *Agent) poolState(grantUID string) *poolState {
 
 // forgetPool drops a revoked grant's refill state, so a re-admission
 // starts fresh.
-func (a *Agent) forgetPool(grantUID string) {
+func (a *Core) forgetPool(grantUID string) {
 	a.poolMu.Lock()
 	delete(a.pools, grantUID)
 	a.poolMu.Unlock()
 }
 
 // refillKicks is the channel that wakes the refill loop.
-func (a *Agent) refillKicks() chan struct{} {
+func (a *Core) refillKicks() chan struct{} {
 	a.poolMu.Lock()
 	defer a.poolMu.Unlock()
 	if a.refill == nil {
@@ -83,7 +83,7 @@ func (a *Agent) refillKicks() chan struct{} {
 }
 
 // kickRefill wakes the refill loop. One kick waiting is enough.
-func (a *Agent) kickRefill() {
+func (a *Core) kickRefill() {
 	select {
 	case a.refillKicks() <- struct{}{}:
 	default:
@@ -92,7 +92,7 @@ func (a *Agent) kickRefill() {
 
 // syncPooled copies the runtime's pool count into the ledger, where
 // Watch reads it.
-func (a *Agent) syncPooled(grantUID string) {
+func (a *Core) syncPooled(grantUID string) {
 	p := a.pooler()
 	if p == nil {
 		return
@@ -103,14 +103,14 @@ func (a *Agent) syncPooled(grantUID string) {
 }
 
 // handedOut records that a Clone took a pooled sandbox.
-func (a *Agent) handedOut(grantUID string) {
+func (a *Core) handedOut(grantUID string) {
 	a.syncPooled(grantUID)
 	a.kickRefill()
 }
 
 // pooledDied holds the grant's next fill, since its template may be
 // dying at restore.
-func (a *Agent) pooledDied(grantUID string) {
+func (a *Core) pooledDied(grantUID string) {
 	a.poolMu.Lock()
 	st := a.poolState(grantUID)
 	st.delay()
@@ -122,7 +122,7 @@ func (a *Agent) pooledDied(grantUID string) {
 
 // DrainPool discards up to n of the grant's pooled sandboxes and returns
 // how many went. The pressure ladder calls it before it parks a fiber.
-func (a *Agent) DrainPool(grantUID string, n int) int {
+func (a *Core) DrainPool(grantUID string, n int) int {
 	p := a.pooler()
 	if p == nil {
 		return 0
@@ -138,7 +138,7 @@ func (a *Agent) DrainPool(grantUID string, n int) int {
 // room after the last one filled, so the grants take turns and the home
 // restores one sandbox ahead at a time. It returns when the earliest
 // held grant may be tried again, zero when none is held.
-func (a *Agent) refillPass(ctx context.Context) time.Time {
+func (a *Core) refillPass(ctx context.Context) time.Time {
 	p := a.pooler()
 	if p == nil {
 		return time.Time{}
@@ -184,8 +184,8 @@ func (a *Agent) refillPass(ctx context.Context) time.Time {
 			a.poolMu.Unlock()
 			continue
 		}
-		if a.Budget != nil {
-			if err := a.Budget.Take(); err != nil {
+		if a.RateLimit != nil {
+			if err := a.RateLimit.Take(); err != nil {
 				ps.delay()
 				until := ps.until
 				a.poolMu.Unlock()
@@ -203,7 +203,7 @@ func (a *Agent) refillPass(ctx context.Context) time.Time {
 }
 
 // fill restores one sandbox for the grant and settles the loop's state.
-func (a *Agent) fill(ctx context.Context, p Pooler, g Grant) {
+func (a *Core) fill(ctx context.Context, p Pooler, g Grant) {
 	create, _ := a.deadlines()
 	deadline := fillDeadlineFactor * create
 	fctx, cancel := context.WithTimeout(ctx, deadline)

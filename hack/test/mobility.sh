@@ -4,7 +4,7 @@
 # Run INSIDE the dev container with the registry up on the host:
 #   make registry-start && make mobility
 #
-# Two fiberd agents (home-a, home-b) on one host, each with its own grant
+# Two fiberd processes (home-a, home-b) on one host, each with its own grant
 # for the same zygote artifact, a delta registry between them. Count to
 # three on A, park, Clone(S) on B resumes with the count, and A's stale
 # copy is not served. Then B parks and A brings the session back.

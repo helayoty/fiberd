@@ -14,7 +14,7 @@ import (
 
 // dialFiberSocket connects to the unix socket at path without following
 // a link planted in its place. The fiber writes its grant's run directory,
-// so the name could be a symlink to another grant's socket, the agent's
+// so the name could be a symlink to another grant's socket, fiberd's
 // own, or a container runtime's, and a dial by name would splice the
 // caller there. The name is opened relative to its directory with no
 // symlink resolution at all (openat2 where the kernel has it, else a

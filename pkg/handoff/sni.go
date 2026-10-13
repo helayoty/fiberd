@@ -1,4 +1,4 @@
-// Package handoff is the agent side of connection handoff. It accepts a
+// Package handoff is fiberd side of connection handoff. It accepts a
 // caller's TLS connection, reads the routing key from the ClientHello's
 // server name without consuming or decrypting anything, and passes the
 // socket to the fiber the key belongs to. It also derives the TLS
@@ -10,7 +10,7 @@ import (
 	"fmt"
 )
 
-// MaxHello is the most the agent reads of a ClientHello. That is one TLS
+// MaxHello is the most fiberd reads of a ClientHello. That is one TLS
 // record, its header plus the largest plaintext a record may carry.
 const MaxHello = 5 + 16384
 

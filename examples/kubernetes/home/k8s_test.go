@@ -116,10 +116,10 @@ func claim(name string) func(*testing.T, *home.Home, *kubetest.Server) string {
 
 func endpointHost(_ *testing.T, h *home.Home, _ *kubetest.Server) string { return h.EndpointHost() }
 
-func fabric(t *testing.T, h *home.Home, _ *kubetest.Server) string {
-	fc, release, err := h.Fabric(context.Background(), core.Grant{UID: "g"})
+func deviceChannel(t *testing.T, h *home.Home, _ *kubetest.Server) string {
+	fc, release, err := h.Devices(context.Background(), core.Grant{UID: "g"})
 	if err != nil {
-		t.Fatalf("fabric: %v", err)
+		t.Fatalf("device channel: %v", err)
 	}
 	release()
 	return fc.Kind + "|" + fc.Detail + "|" + strings.Join(fc.Devices, ",")
@@ -147,11 +147,11 @@ func TestHomeFromItsPod(t *testing.T) {
 	}{
 		{name: "the home is named k8s",
 			got: func(_ *testing.T, h *home.Home, _ *kubetest.Server) string { return h.Name() }, want: "k8s"},
-		{name: "the cgroup root is fiberd under the delegated root",
+		{name: "the cgroup root is grants under the delegated root",
 			got: func(_ *testing.T, h *home.Home, _ *kubetest.Server) string {
 				r := h.CgroupRoot()
 				return filepath.Join(filepath.Base(filepath.Dir(r)), filepath.Base(r))
-			}, want: "cgroup/fiberd"},
+			}, want: "cgroup/grants"},
 		{name: "the own-Pod read carries the service-account token as bearer",
 			got: func(t *testing.T, _ *home.Home, srv *kubetest.Server) string {
 				calls := srv.Calls()
@@ -216,12 +216,12 @@ func TestHomeFromItsPod(t *testing.T) {
 				return h.EndpointHost() + "|" + h.AdvertisedEndpoint()
 			},
 			want: "|"},
-		{name: "the fabric is the Pod's DRA claim and its devices", got: fabric, want: "dra|" + claimName + "|/dev/sim0"},
-		{name: "devices without a claim are a static fabric",
-			pod: func(p map[string]any) { delete(p["spec"].(map[string]any), "resourceClaims") }, got: fabric, want: "static||/dev/sim0"},
-		{name: "no claim and no devices is no fabric",
+		{name: "the device channel is the Pod's DRA claim and its devices", got: deviceChannel, want: "dra|" + claimName + "|/dev/sim0"},
+		{name: "devices without a claim are a static device channel",
+			pod: func(p map[string]any) { delete(p["spec"].(map[string]any), "resourceClaims") }, got: deviceChannel, want: "static||/dev/sim0"},
+		{name: "no claim and no devices is no device channel",
 			pod: func(p map[string]any) { delete(p["spec"].(map[string]any), "resourceClaims") },
-			cfg: func(c *home.Config) { c.Devices = nil }, got: fabric, want: "||"},
+			cfg: func(c *home.Config) { c.Devices = nil }, got: deviceChannel, want: "||"},
 		{name: "the stale TTL defaults to 30s",
 			cfg: func(c *home.Config) { c.StaleTTL = 0 },
 			got: func(_ *testing.T, h *home.Home, _ *kubetest.Server) string {
@@ -377,7 +377,7 @@ func TestNew(t *testing.T) {
 	}
 }
 
-// TestGrants checks the grant lane, which reads *.jwt files from the
+// TestGrants checks grant delivery, which reads *.jwt files from the
 // projected volume.
 func TestGrants(t *testing.T) {
 	cases := []struct {
@@ -438,9 +438,9 @@ func TestGrants(t *testing.T) {
 }
 
 // TestReadinessGate checks the gate, one Pod condition over every grant the
-// agent holds. It reads False only once no grant is warm, and its transition
+// fiberd holds. It reads False only once no grant is warm, and its transition
 // time moves only when its status does. The Pod starts with the gate open,
-// as an agent left it before a restart.
+// as fiberd left it before a restart.
 func TestReadinessGate(t *testing.T) {
 	const opened = "2020-01-01T00:00:00Z"
 	srv := newCluster(t)
@@ -531,7 +531,7 @@ func podReads(srv *kubetest.Server) int {
 	return n
 }
 
-// TestLivenessAndScopeLoss checks that the lane is healthy while the API
+// TestLivenessAndScopeLoss checks that the issuer counts as reachable while the API
 // server answers, and that each trip is reported as scope loss exactly
 // once. A failing API server or a token rotated by the same issuer is not
 // scope loss.
@@ -541,7 +541,7 @@ func TestLivenessAndScopeLoss(t *testing.T) {
 		trip       func(srv *kubetest.Server, tokenFile string)
 		reason     string            // empty means no scope loss
 		scope      map[string]string // claims expected afterwards
-		stale      bool              // the lane goes stale
+		stale      bool              // the issuer becomes unreachable
 		noCallback bool              // no OnScopeLost before the trip
 	}{
 		{name: "namespace terminating", reason: "namespace tenant-a terminating",
@@ -572,7 +572,7 @@ func TestLivenessAndScopeLoss(t *testing.T) {
 			}},
 		{name: "pod gone", reason: "pod tenant-a/grant-x-0 gone", stale: true,
 			trip: func(srv *kubetest.Server, _ string) { srv.Delete(podPath) }},
-		{name: "the Pod read failing is no loss, and the lane goes stale", stale: true,
+		{name: "the Pod read failing is no loss, and the issuer becomes unreachable", stale: true,
 			trip: func(srv *kubetest.Server, _ string) { srv.Fail("GET", podPath, 500, 0) }},
 		{name: "a claim read failing is no loss",
 			trip: func(srv *kubetest.Server, _ string) { srv.Fail("GET", claimPath, 503, 0) }},
@@ -638,9 +638,9 @@ func TestLivenessAndScopeLoss(t *testing.T) {
 				t.Fatalf("scope-loss reasons = %v, want exactly one %q", r, tc.reason)
 			}
 			if tc.stale {
-				waitFor(t, "the lane to go stale", func() bool { return !h.Health().Healthy(time.Now()) })
+				waitFor(t, "the issuer to become unreachable", func() bool { return !h.Health().Healthy(time.Now()) })
 			} else {
-				waitFor(t, "the lane healthy while the Pod answers", func() bool { return h.Health().Healthy(time.Now()) })
+				waitFor(t, "the issuer reachable while the Pod answers", func() bool { return h.Health().Healthy(time.Now()) })
 			}
 			for k, v := range tc.scope {
 				if got := scopeOf(h, k); got != v {
@@ -651,9 +651,9 @@ func TestLivenessAndScopeLoss(t *testing.T) {
 	}
 }
 
-// TestLaneHealth checks that the lane follows the API server and that
-// SetLane overrides it. The steps share one home and run in order.
-func TestLaneHealth(t *testing.T) {
+// TestIssuerReachability checks that reachability follows the API server and that
+// SetIssuerReachable overrides it. The steps share one home and run in order.
+func TestIssuerReachability(t *testing.T) {
 	srv := newCluster(t)
 	h, _ := newHome(t, srv)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -666,18 +666,18 @@ func TestLaneHealth(t *testing.T) {
 		act  func(t *testing.T)
 		want bool
 	}{
-		{"the API server answering keeps the lane healthy", func(t *testing.T) {
+		{"the API server answering keeps the issuer reachable", func(t *testing.T) {
 			waitFor(t, "a liveness probe", healthy)
 		}, true},
-		{"SetLane(false) makes the lane stale, and answers do not revive it", func(t *testing.T) {
-			h.SetLane(false)
+		{"SetIssuerReachable(false) marks the issuer unreachable, and answers do not revive it", func(t *testing.T) {
+			h.SetIssuerReachable(false)
 			after := podReads(srv)
 			waitFor(t, "two more polls", func() bool { return podReads(srv) >= after+3 })
 		}, false},
-		{"SetLane(true) recovers the lane", func(*testing.T) { h.SetLane(true) }, true},
-		{"the API server unreachable past the stale TTL makes the lane stale", func(t *testing.T) {
+		{"SetIssuerReachable(true) marks the issuer reachable again", func(*testing.T) { h.SetIssuerReachable(true) }, true},
+		{"the API server unreachable past the stale TTL marks the issuer unreachable", func(t *testing.T) {
 			srv.Close()
-			waitFor(t, "the lane to go stale", func() bool { return !healthy() })
+			waitFor(t, "the issuer to become unreachable", func() bool { return !healthy() })
 		}, false},
 	}
 	for _, step := range steps {

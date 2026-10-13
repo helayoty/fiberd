@@ -22,10 +22,10 @@ type ready struct {
 	ready bool
 }
 
-// fakeHome hands Drive a lane the test feeds and records readiness.
+// fakeHome hands Drive a delivery channel the test feeds and records readiness.
 type fakeHome struct {
-	lane    chan home.GrantEvent
-	laneErr error
+	events    chan home.GrantEvent
+	eventsErr error
 
 	mu        sync.Mutex
 	published []ready
@@ -33,13 +33,13 @@ type fakeHome struct {
 
 func (h *fakeHome) Name() string { return "fake" }
 func (h *fakeHome) Grants(context.Context) (<-chan home.GrantEvent, error) {
-	if h.laneErr != nil {
-		return nil, h.laneErr
+	if h.eventsErr != nil {
+		return nil, h.eventsErr
 	}
-	if h.lane == nil {
+	if h.events == nil {
 		return nil, nil // a nil channel, not a nil-valued typed one
 	}
-	return h.lane, nil
+	return h.events, nil
 }
 func (h *fakeHome) Health() *core.SourceHealth { return nil }
 func (h *fakeHome) CgroupRoot() string         { return "" }
@@ -51,8 +51,8 @@ func (h *fakeHome) PublishReady(_ context.Context, uid string, r bool) error {
 	return nil
 }
 func (h *fakeHome) Scope() []core.ScopeClaim { return nil }
-func (h *fakeHome) Fabric(context.Context, core.Grant) (core.FabricChannel, func(), error) {
-	return core.FabricChannel{}, func() {}, nil
+func (h *fakeHome) Devices(context.Context, core.Grant) (core.DeviceChannel, func(), error) {
+	return core.DeviceChannel{}, func() {}, nil
 }
 func (h *fakeHome) Run(context.Context) {}
 
@@ -65,18 +65,18 @@ func token(t *testing.T, g core.Grant) []byte {
 	return b
 }
 
-func newAgent(t *testing.T) *core.Agent {
+func newCore(t *testing.T) *core.Core {
 	t.Helper()
 	revoked, err := core.OpenRevoked(filepath.Join(t.TempDir(), "revoked.json"), time.Hour, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &core.Agent{Ledger: core.NewLedger(1), Budget: core.NewBudget(100, 1<<20),
+	return &core.Core{Ledger: core.NewLedger(1), RateLimit: core.NewRateLimit(100, 1<<20),
 		Runtime: stub.New(), Verify: grant.InsecureJSONVerifier{}, Revoked: revoked}
 }
 
-// TestDriveEvents feeds a lane and checks what the agent admitted and
-// what the home was told once the lane closes.
+// TestDriveEvents feeds deliveries and checks what fiberd admitted and
+// what the home was told once delivery closes.
 func TestDriveEvents(t *testing.T) {
 	g1 := token(t, core.Grant{UID: "g1", FiberMax: 1})
 	// The stub runtime offers FIBER_CHECKPOINT, so a grant needing more
@@ -95,25 +95,25 @@ func TestDriveEvents(t *testing.T) {
 			events: []home.GrantEvent{added(g1)}, admitted: []string{"g1"}, published: []ready{{"g1", true}}},
 		{name: "a token that does not verify is skipped",
 			events: []home.GrantEvent{added([]byte("not a grant")), added(g1)}, admitted: []string{"g1"}, published: []ready{{"g1", true}}},
-		{name: "a grant the agent refuses is not published",
+		{name: "a grant fiberd refuses is not published",
 			events: []home.GrantEvent{added(tooHigh)}},
 		{name: "a removal takes the grant away and publishes not ready",
 			events: []home.GrantEvent{added(g1), removed("g1")}, published: []ready{{"g1", true}, {"g1", false}}},
-		{name: "the lane delivering a removed grant again lifts its denial",
+		{name: "delivering a removed grant again lifts its denial",
 			events:    []home.GrantEvent{added(g1), removed("g1"), added(g1)},
 			admitted:  []string{"g1"},
 			published: []ready{{"g1", true}, {"g1", false}, {"g1", true}}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			a := newAgent(t)
-			h := &fakeHome{lane: make(chan home.GrantEvent)}
+			a := newCore(t)
+			h := &fakeHome{events: make(chan home.GrantEvent)}
 			done := make(chan struct{})
 			go func() { defer close(done); home.Drive(context.Background(), h, a) }()
 			for _, ev := range c.events {
-				h.lane <- ev // unbuffered, so Drive took the previous event
+				h.events <- ev // unbuffered, so Drive took the previous event
 			}
-			close(h.lane)
+			close(h.events)
 			waitDone(t, done)
 
 			var admitted []string
@@ -125,7 +125,7 @@ func TestDriveEvents(t *testing.T) {
 			}
 			for _, uid := range c.admitted {
 				if g, _ := a.Ledger.Grant(uid); g.Token != string(g1) {
-					t.Fatalf("grant %s keeps token %q, want the lane's", uid, g.Token)
+					t.Fatalf("grant %s keeps token %q, want the delivered one", uid, g.Token)
 				}
 			}
 			if !slices.Equal(h.published, c.published) {
@@ -135,16 +135,16 @@ func TestDriveEvents(t *testing.T) {
 	}
 }
 
-// TestDriveReturns checks every way the lane ends Drive.
+// TestDriveReturns checks every way delivery ends Drive.
 func TestDriveReturns(t *testing.T) {
 	cases := []struct {
 		name   string
 		home   *fakeHome
 		cancel bool
 	}{
-		{name: "the lane fails to open", home: &fakeHome{laneErr: errors.New("no lane")}},
-		{name: "the home has no lane", home: &fakeHome{}},
-		{name: "the context ends while the lane is open", home: &fakeHome{lane: make(chan home.GrantEvent)}, cancel: true},
+		{name: "delivery fails to open", home: &fakeHome{eventsErr: errors.New("no delivery")}},
+		{name: "the home delivers nothing", home: &fakeHome{}},
+		{name: "the context ends while delivery is open", home: &fakeHome{events: make(chan home.GrantEvent)}, cancel: true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -153,7 +153,7 @@ func TestDriveReturns(t *testing.T) {
 			if c.cancel {
 				cancel()
 			}
-			a := newAgent(t)
+			a := newCore(t)
 			done := make(chan struct{})
 			go func() { defer close(done); home.Drive(ctx, c.home, a) }()
 			waitDone(t, done)

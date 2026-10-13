@@ -59,7 +59,7 @@ type Options struct {
 	RefillWait time.Duration
 	Framing    compare.Framing
 	// WantScheme refuses an endpoint of another scheme. "tcp" gates the
-	// gVisor row on kind on the agent's relay.
+	// gVisor row on kind on fiberd's relay.
 	WantScheme string
 	// CgroupRoot is the home's cgroup root for density. Empty disables it.
 	CgroupRoot string

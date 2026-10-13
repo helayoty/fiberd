@@ -44,7 +44,7 @@ import (
 )
 
 // The whole worker, in process, driven the way atelet drives it: an
-// agent over a sandbox backend with a file delta registry, the substrate
+// fiberd over a sandbox backend with a file delta registry, the substrate
 // home minting grants and serving its keys, the ingress in front, and
 // fake atelet directories under a temp root. The image's backend is
 // gVisor, so that is the path the lifecycle runs on first. The proc
@@ -193,7 +193,7 @@ func newWorker(t *testing.T, name string, bc backendCase, cgRoot, base string) *
 	}
 	isrv.Config.Handler = h.Handler()
 
-	// The agent over the case's backend, publishing to a file registry.
+	// fiberd over the case's backend, publishing to a file registry.
 	hc := host.Config{
 		Backend:       bc.open(t, filepath.Join(state, "backend")),
 		Templates:     map[string]string{"default": bc.templateOf(t)},
@@ -219,15 +219,15 @@ func newWorker(t *testing.T, name string, bc backendCase, cgRoot, base string) *
 	if rt.Tier() < core.TierCheckpoint {
 		t.Skipf("%s backend cannot park here (tier %s)", bc.name, rt.Tier())
 	}
-	ag := &core.Agent{
-		NodeID: name, Ledger: core.NewLedger(1), Budget: core.NewBudget(1000, 1<<20),
+	ag := &core.Core{
+		NodeID: name, Ledger: core.NewLedger(1), RateLimit: core.NewRateLimit(1000, 1<<20),
 		Runtime: rt, Verify: &grant.Verifier{Cache: &grant.Cache{IssuerURL: isrv.URL}, Audience: name, MaxStale: time.Hour},
 		Health: h.Health(), StatusInterval: 20 * time.Millisecond,
 	}
 	go ag.Run(ctx)
-	go fhome.Drive(ctx, h, ag) // the lane: minted grants are admitted and warmed, readiness published
+	go fhome.Drive(ctx, h, ag) // delivery: minted grants are admitted and warmed, readiness published
 	lis := bufconn.Listen(1 << 20)
-	gs := rpc.NewGRPCServer(&rpc.Server{Agent: ag, Issuer: isrv.URL, RetryAfter: time.Second})
+	gs := rpc.NewGRPCServer(&rpc.Server{Core: ag, Issuer: isrv.URL, RetryAfter: time.Second})
 	go func() { _ = gs.Serve(lis) }()
 	t.Cleanup(gs.Stop)
 	conn, err := grpc.NewClient("passthrough:///bufconn",

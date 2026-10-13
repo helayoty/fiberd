@@ -1,5 +1,5 @@
 # An UNTRUSTED grant on gVisor: every fiber is a runsc sandbox with no
-# network of its own, and the agent relays a port of the Pod IP to each
+# network of its own, and fiberd relays a port of the Pod IP to each
 # sandbox's unix socket, so a consumer in another Pod dials
 # tcp://<pod-ip>:<port> as it would a proc fiber. The template is the
 # reference zygote in HTTP mode, which sessioncheck speaks
