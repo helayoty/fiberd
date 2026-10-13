@@ -105,7 +105,7 @@ func (r *Runtime) PublishDelta(ctx context.Context, deltaRef string, g core.Gran
 // was not warmed from the same artifact can still merge the delta.
 func (r *Runtime) publishParent(ctx context.Context, repo, sha string) error {
 	ref := repo + ":" + parentTag(sha)
-	if _, found, err := artifact.Resolve(ctx, ref, r.cfg.RegistryPlainHTTP); err != nil {
+	if _, found, err := artifact.Resolve(ctx, ref); err != nil {
 		return err
 	} else if found {
 		return nil
@@ -116,7 +116,7 @@ func (r *Runtime) publishParent(ctx context.Context, repo, sha string) error {
 	}
 	ann := map[string]string{artifact.AnnotationParent: sha, artifact.AnnotationHome: r.cfg.HomeID}
 	r.host.Annotate(ann)
-	_, err := artifact.PushDir(ctx, dir, ref, artifact.ArtifactTypeParent, ann, r.cfg.DeltaKeys.Signer, r.cfg.RegistryPlainHTTP)
+	_, err := artifact.PushDir(ctx, dir, ref, artifact.ArtifactTypeParent, ann, r.cfg.DeltaKeys.Signer)
 	if err == nil {
 		log.Printf("host: published parent checkpoint %s", sha[:12])
 	}
@@ -133,7 +133,7 @@ func (r *Runtime) FindDelta(ctx context.Context, g core.Grant, session string) (
 		return core.RemoteDelta{}, false, err
 	}
 	ref := repo + ":" + sessionTag(session)
-	loc, found, err := artifact.Resolve(ctx, ref, r.cfg.RegistryPlainHTTP)
+	loc, found, err := artifact.Resolve(ctx, ref)
 	if err != nil || !found {
 		return core.RemoteDelta{}, false, err
 	}
@@ -189,7 +189,7 @@ func (r *Runtime) ClaimDelta(ctx context.Context, g core.Grant, session string, 
 	}
 	ref := repo + ":" + sessionTag(session)
 	dst := filepath.Join(r.cfg.DeltaDir, grantUID, fmt.Sprintf("claimed-%s-%d", sessionTag(session), time.Now().UnixNano()))
-	if _, err := artifact.PullDir(ctx, repo+"@"+rd.Handle, dst, r.cfg.RegistryPlainHTTP); err != nil {
+	if _, err := artifact.PullDir(ctx, repo+"@"+rd.Handle, dst); err != nil {
 		_ = os.RemoveAll(dst)
 		return "", err
 	}
@@ -214,7 +214,7 @@ func (r *Runtime) ClaimDelta(ctx context.Context, g core.Grant, session string, 
 	// The claim: the tag must still point at what we pulled, and its
 	// delete must be ours. Two homes that both passed the check race on
 	// the delete, and the registry hands the tag to exactly one.
-	loc, found, err := artifact.Resolve(ctx, ref, r.cfg.RegistryPlainHTTP)
+	loc, found, err := artifact.Resolve(ctx, ref)
 	if err != nil {
 		_ = os.RemoveAll(dst)
 		return "", err
@@ -223,7 +223,7 @@ func (r *Runtime) ClaimDelta(ctx context.Context, g core.Grant, session string, 
 		_ = os.RemoveAll(dst)
 		return "", errors.New("host: session was claimed or re-parked elsewhere meanwhile")
 	}
-	removed, err := artifact.Delete(ctx, ref, r.cfg.RegistryPlainHTTP)
+	removed, err := artifact.Delete(ctx, ref)
 	if err != nil {
 		_ = os.RemoveAll(dst)
 		return "", fmt.Errorf("host: claim %s: %w", ref, err)
@@ -269,7 +269,7 @@ func (r *Runtime) pullParent(ctx context.Context, repo, sha string) error {
 	if err != nil {
 		return err
 	}
-	loc, found, err := artifact.Resolve(ctx, repo+":"+parentTag(sha), r.cfg.RegistryPlainHTTP)
+	loc, found, err := artifact.Resolve(ctx, repo+":"+parentTag(sha))
 	if err != nil {
 		_ = os.RemoveAll(tmp)
 		return err
@@ -286,7 +286,7 @@ func (r *Runtime) pullParent(ctx context.Context, repo, sha string) error {
 		_ = os.RemoveAll(tmp)
 		return fmt.Errorf("parent %s: %w", sha[:12], err)
 	}
-	if _, err := artifact.PullDir(ctx, repo+"@"+loc.Digest, tmp, r.cfg.RegistryPlainHTTP); err != nil {
+	if _, err := artifact.PullDir(ctx, repo+"@"+loc.Digest, tmp); err != nil {
 		_ = os.RemoveAll(tmp)
 		return err
 	}
@@ -331,7 +331,7 @@ func (r *Runtime) Owned(ctx context.Context, deltaRef string) bool {
 	if err := readJSON(filepath.Join(deltaRef, remoteFile), &rec); err != nil {
 		return true
 	}
-	loc, found, err := artifact.Resolve(ctx, rec.Ref, r.cfg.RegistryPlainHTTP)
+	loc, found, err := artifact.Resolve(ctx, rec.Ref)
 	if err != nil {
 		return true // cannot tell; keep serving what we have
 	}
@@ -352,12 +352,12 @@ func (r *Runtime) RetireDelta(ctx context.Context, deltaRef string) error {
 		}
 		return err
 	}
-	loc, found, err := artifact.Resolve(ctx, rec.Ref, r.cfg.RegistryPlainHTTP)
+	loc, found, err := artifact.Resolve(ctx, rec.Ref)
 	if err != nil {
 		return err
 	}
 	if found && loc.Digest == rec.Digest {
-		if _, err := artifact.Delete(ctx, rec.Ref, r.cfg.RegistryPlainHTTP); err != nil {
+		if _, err := artifact.Delete(ctx, rec.Ref); err != nil {
 			return fmt.Errorf("host: retire %s: %w", rec.Ref, err)
 		}
 		log.Printf("host: retired %s@%s", rec.Ref, rec.Digest[:19])

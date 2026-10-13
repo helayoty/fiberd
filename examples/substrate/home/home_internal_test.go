@@ -30,7 +30,6 @@ func TestWhatTheHomeOffers(t *testing.T) {
 	}{
 		{"the home is named substrate", h.Name, "substrate"},
 		{"the cgroup root is the configured subtree", h.CgroupRoot, h.cfg.CgroupRoot},
-		{"callers reach fibers through the ingress, not an advertised endpoint", h.AdvertisedEndpoint, ""},
 		{"scope is the configured claims", func() string { return fmt.Sprint(h.Scope()) }, fmt.Sprint(scope)},
 		{"scope is a copy the caller may change", func() string {
 			s := h.Scope()

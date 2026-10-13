@@ -86,7 +86,7 @@ func config(t *testing.T, srv *kubetest.Server) (home.Config, string) {
 		Client:    &kube.Client{Base: srv.URL(), TokenFile: bearer},
 		Namespace: ns, PodName: podName, GrantsDir: filepath.Join(dir, "grants"), Poll: 20 * time.Millisecond,
 		StaleTTL: 100 * time.Millisecond, CgroupRoot: cg, Devices: []string{"/dev/sim0"}, Family: endpoint.Inet4,
-		ListenPort: "8484", TokenFile: tokenFile,
+		TokenFile: tokenFile,
 	}, tokenFile
 }
 
@@ -194,13 +194,8 @@ func TestHomeFromItsPod(t *testing.T) {
 		{name: "no token file names no issuer",
 			cfg: func(c *home.Config) { c.TokenFile = filepath.Join(t.TempDir(), "missing") }, got: claim("issuer"), want: ""},
 		{name: "inet4: the endpoint host is the Pod's IPv4 address", got: endpointHost, want: "10.1.2.3"},
-		{name: "inet4: the advertised endpoint is host:port",
-			got: func(_ *testing.T, h *home.Home, _ *kubetest.Server) string { return h.AdvertisedEndpoint() }, want: "10.1.2.3:8484"},
 		{name: "inet6: the endpoint host is the Pod's IPv6 address",
 			cfg: func(c *home.Config) { c.Family = endpoint.Inet6 }, got: endpointHost, want: "fd00::3"},
-		{name: "inet6: the advertised endpoint is [host]:port",
-			cfg: func(c *home.Config) { c.Family = endpoint.Inet6 },
-			got: func(_ *testing.T, h *home.Home, _ *kubetest.Server) string { return h.AdvertisedEndpoint() }, want: "[fd00::3]:8484"},
 		{name: "unix: the endpoint host is still the Pod's IPv4 address",
 			cfg: func(c *home.Config) { c.Family = endpoint.Unix }, got: endpointHost, want: "10.1.2.3"},
 		{name: "no family set: the endpoint host is the Pod's IPv4 address",
@@ -210,12 +205,9 @@ func TestHomeFromItsPod(t *testing.T) {
 		{name: "an address that does not parse is skipped",
 			pod: setStatus(map[string]any{"podIPs": []any{map[string]any{"ip": "bogus"}, map[string]any{"ip": "10.4.4.4"}}}),
 			got: endpointHost, want: "10.4.4.4"},
-		{name: "unix with no address: no endpoint host and nothing advertised",
+		{name: "unix with no address: no endpoint host",
 			pod: setStatus(map[string]any{"podIPs": nil, "podIP": ""}), cfg: func(c *home.Config) { c.Family = endpoint.Unix },
-			got: func(_ *testing.T, h *home.Home, _ *kubetest.Server) string {
-				return h.EndpointHost() + "|" + h.AdvertisedEndpoint()
-			},
-			want: "|"},
+			got: endpointHost, want: ""},
 		{name: "the device channel is the Pod's DRA claim and its devices", got: deviceChannel, want: "dra|" + claimName + "|/dev/sim0"},
 		{name: "devices without a claim are a static device channel",
 			pod: func(p map[string]any) { delete(p["spec"].(map[string]any), "resourceClaims") }, got: deviceChannel, want: "static||/dev/sim0"},

@@ -51,18 +51,19 @@ func stateDir(t *testing.T) string {
 }
 
 // newConfig parses args the way a binary does, after a base that starts
-// a plaintext stub fiberd on loopback ":0" ports. Later flags win.
+// a plaintext stub fiberd on loopback ":0" ports, with its loops at
+// 10ms. Later flags win.
 func newConfig(t *testing.T, state string, args ...string) *fiberd.Config {
 	t.Helper()
 	fs := flag.NewFlagSet("fiberd", flag.ContinueOnError)
 	var c fiberd.Config
 	c.Bind(fs)
 	base := []string{"-state", state, "-listen", "127.0.0.1:0", "-insecure-plaintext", "-verifier", "insecure-json",
-		"-node-id", nodeID, "-runtime", "stub", "-status-interval", "10ms", "-pressure-interval", "10ms"}
+		"-node-id", nodeID, "-runtime", "stub"}
 	if err := fs.Parse(append(base, args...)); err != nil {
 		t.Fatal(err)
 	}
-	c.Finish()
+	c.Timing = fiberd.Timing{StatusEvery: 10 * time.Millisecond, PressureEvery: 10 * time.Millisecond}
 	return &c
 }
 
@@ -273,7 +274,7 @@ func mode(t *testing.T, path string) os.FileMode {
 type (
 	hostedHome struct {
 		home.Home
-		host, advertised string
+		host string
 	}
 	scopedHome struct {
 		home.Home
@@ -281,16 +282,15 @@ type (
 	}
 )
 
-func (h hostedHome) EndpointHost() string       { return h.host }
-func (h hostedHome) AdvertisedEndpoint() string { return h.advertised }
+func (h hostedHome) EndpointHost() string { return h.host }
 func (h scopedHome) OnScopeLost(f func(context.Context, string)) {
 	h.lost <- f
 }
 
-func hosted(host, advertised string) fiberd.HomeFactory {
+func hosted(host string) fiberd.HomeFactory {
 	return func(c *fiberd.Config, jwks *grant.Cache) (home.Home, error) {
 		h, err := fiberd.Standalone(c, jwks)
-		return hostedHome{Home: h, host: host, advertised: advertised}, err
+		return hostedHome{Home: h, host: host}, err
 	}
 }
 
@@ -339,7 +339,9 @@ func TestRunServes(t *testing.T) {
 		home fiberd.HomeFactory
 		// setup prepares the state directory and returns more flags.
 		setup func(t *testing.T, state string) fixture
-		check func(t *testing.T, r *running, f fixture)
+		// config adjusts what no flag sets, after parsing.
+		config func(c *fiberd.Config)
+		check  func(t *testing.T, r *running, f fixture)
 	}{
 		{
 			name: "plaintext clone, status over the gateway, state files private",
@@ -455,8 +457,8 @@ func TestRunServes(t *testing.T) {
 				return fixture{cwd: cwd, args: []string{"-state", "rel"}}
 			},
 			check: func(t *testing.T, r *running, f fixture) {
-				if want := filepath.Join(f.cwd, "rel"); r.c.StateDir != want {
-					t.Fatalf("StateDir = %s, want %s", r.c.StateDir, want)
+				if want := filepath.Join(f.cwd, "rel"); r.c.Node.StateDir != want {
+					t.Fatalf("StateDir = %s, want %s", r.c.Node.StateDir, want)
 				}
 				if got := mode(t, filepath.Join(f.cwd, "rel", "private")); got != 0o700 {
 					t.Fatalf("private dir mode %v, want 0700", got)
@@ -464,28 +466,28 @@ func TestRunServes(t *testing.T) {
 			},
 		},
 		{
-			name: "the home fills the endpoint host and the advertised address",
+			name: "the home fills the endpoint host",
 			args: []string{"-endpoint-family", "inet4"},
-			home: hosted("10.1.2.3", "home.example:8484"),
+			home: hosted("10.1.2.3"),
 			check: func(t *testing.T, r *running, _ fixture) {
-				if r.c.EndpointHost != "10.1.2.3" || r.c.Advertise != "home.example:8484" {
-					t.Fatalf("endpoint host %q advertise %q, want the home's", r.c.EndpointHost, r.c.Advertise)
+				if r.c.Endpoint.Host != "10.1.2.3" {
+					t.Fatalf("endpoint host %q, want the home's", r.c.Endpoint.Host)
 				}
 			},
 		},
 		{
-			name: "an explicit endpoint host and advertise address win over the home",
-			args: []string{"-endpoint-family", "inet4", "-endpoint-host", "10.9.9.9", "-advertise", "mine:1"},
-			home: hosted("10.1.2.3", "home.example:8484"),
+			name: "an explicit endpoint host wins over the home",
+			args: []string{"-endpoint-family", "inet4", "-endpoint-host", "10.9.9.9"},
+			home: hosted("10.1.2.3"),
 			check: func(t *testing.T, r *running, _ fixture) {
-				if r.c.EndpointHost != "10.9.9.9" || r.c.Advertise != "mine:1" {
-					t.Fatalf("endpoint host %q advertise %q, want the flags'", r.c.EndpointHost, r.c.Advertise)
+				if r.c.Endpoint.Host != "10.9.9.9" {
+					t.Fatalf("endpoint host %q, want the flag's", r.c.Endpoint.Host)
 				}
 			},
 		},
 		{
-			name: "no pressure ladder still serves",
-			args: []string{"-pressure-interval", "0"},
+			name:   "no pressure ladder still serves",
+			config: func(c *fiberd.Config) { c.Timing.PressureEvery = -1 },
 			check: func(t *testing.T, r *running, _ fixture) {
 				if _, err := dial(t, r.grpc, nil).Clone(context.Background(),
 					&grantv1.CloneRequest{GrantJwt: jsonGrant(t, testGrant("g2"))}); err != nil {
@@ -506,7 +508,11 @@ func TestRunServes(t *testing.T) {
 			if nh == nil {
 				nh = fiberd.Standalone
 			}
-			r := start(t, newConfig(t, state, append(append([]string{}, tc.args...), f.args...)...), nh)
+			c := newConfig(t, state, append(append([]string{}, tc.args...), f.args...)...)
+			if tc.config != nil {
+				tc.config(c)
+			}
+			r := start(t, c, nh)
 			if _, err := os.Stat(r.c.AdminSocket()); err != nil {
 				t.Fatalf("admin socket: %v", err)
 			}
@@ -666,10 +672,8 @@ func TestRunRefuses(t *testing.T) {
 		}
 	}
 	missing := "/nonexistent/fiberd-test"
-	// noTool is a bare name no PATH holds, so a backend's probe of it
-	// fails at the lookup and starts nothing.
 	noTool := "fiberd-test-no-such-tool"
-	proc := []string{"-runtime", "proc", "-template", "default=/bin/true", "-criu", noTool}
+	proc := []string{"-runtime", "proc", "-template", "default=/bin/true"}
 	cases := []struct {
 		name  string
 		args  []string
@@ -699,7 +703,7 @@ func TestRunRefuses(t *testing.T) {
 		{name: "unknown verifier", args: []string{"-verifier", "trust-me"}, want: `unknown verifier "trust-me"`},
 		{name: "home fails", home: func(*fiberd.Config, *grant.Cache) (home.Home, error) { return nil, errors.New("home is down") },
 			want: "home is down"},
-		{name: "home has no address of the family", args: []string{"-endpoint-family", "inet6"}, home: hosted("", ""),
+		{name: "home has no address of the family", args: []string{"-endpoint-family", "inet6"}, home: hosted(""),
 			want: "-endpoint-family inet6: home standalone has no address of that family"},
 		{name: "bad runtime tier", args: []string{"-runtime-tier", "FIBER_WARP"}, want: "runtime-tier"},
 		{name: "host runtime without a template", args: []string{"-runtime", "proc"}, want: "-runtime=proc needs a -template"},
@@ -719,8 +723,8 @@ func TestRunRefuses(t *testing.T) {
 		{name: "gvisor without a rootfs", args: []string{"-runtime", "gvisor", "-template", "default=/z"}, want: "-runtime=gvisor needs -gvisor-rootfs"},
 		// Confinement fails closed: a backend whose tools are missing
 		// offers no tier, and fiberd does not start over it.
-		{name: "gvisor whose runsc is missing", args: []string{"-runtime", "gvisor", "-template", "default=/z", "-gvisor-rootfs", "/r", "-runsc", noTool},
-			want: "gvisor runtime: ", wantLinux: "gvisor runtime: host: backend gvisor offers no tier: runsc " + noTool + " unavailable"},
+		{name: "gvisor whose runsc is missing", args: []string{"-runtime", "gvisor", "-template", "default=/z", "-gvisor-rootfs", "/r"},
+			want: "gvisor runtime: ", wantLinux: "gvisor runtime: host: backend gvisor offers no tier: runsc runsc unavailable"},
 		{name: "hyperlight whose helper is missing", args: []string{"-runtime", "hyperlight", "-template", "default=/g", "-hyperlight-helper", noTool},
 			want: "hyperlight runtime: ", wantLinux: "hyperlight runtime: host: backend hyperlight offers no tier: helper " + noTool + " unusable"},
 		{name: "bad parity", args: append([]string{"-parity", "kernel=sometimes"}, proc...), want: "parity"},
@@ -733,8 +737,6 @@ func TestRunRefuses(t *testing.T) {
 			want: "-handoff-key"},
 		{name: "handoff address taken", args: proc, want: "-handoff-listen",
 			setup: func(t *testing.T, _ string) []string { return []string{"-handoff-listen", busy(t)} }},
-		{name: "bad handoff advertise", args: append([]string{"-handoff-listen", "127.0.0.1:0", "-handoff-advertise", "no-port"}, proc...),
-			want: "-handoff-advertise"},
 		// Linux's getcwd fails once the working directory is removed.
 		// Darwin still names the removed directory, so the relative
 		// path resolves there and the refusal cannot be reached.
@@ -777,6 +779,9 @@ func TestRunRefuses(t *testing.T) {
 			if tc.linux && runtime.GOOS != "linux" {
 				t.Skip("the case rests on Linux getcwd semantics")
 			}
+			// An empty PATH, so a backend's probe of criu or runsc fails at
+			// the lookup and starts nothing.
+			t.Setenv("PATH", t.TempDir())
 			state := stateDir(t)
 			args := tc.args
 			if tc.setup != nil {

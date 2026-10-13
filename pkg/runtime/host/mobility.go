@@ -67,7 +67,7 @@ func pushDelta(ctx context.Context, cfg Config, src, ref string, ann map[string]
 	ann[artifact.AnnotationSession] = c.Session
 	ann[artifact.AnnotationExpires] = c.Expires.UTC().Format(time.RFC3339)
 	ann[artifact.AnnotationSealKey] = cfg.DeltaKeys.Seal.ID
-	return artifact.PushDir(ctx, tmp, ref, artifact.ArtifactTypeDelta, ann, cfg.DeltaKeys.Signer, cfg.RegistryPlainHTTP)
+	return artifact.PushDir(ctx, tmp, ref, artifact.ArtifactTypeDelta, ann, cfg.DeltaKeys.Signer)
 }
 
 // sealContext is what a delta for session of g pushed now is sealed for.
@@ -152,7 +152,7 @@ var platformAnnotations = []string{artifact.AnnotationArch, artifact.AnnotationK
 // manifest is believed before the signature is, and a signed parent
 // copied onto another checkpoint's tag is not that checkpoint.
 func resolveParent(ctx context.Context, cfg Config, repo, sha string) (artifact.Located, error) {
-	loc, found, err := artifact.Resolve(ctx, repo+":"+parentTag(sha), cfg.RegistryPlainHTTP)
+	loc, found, err := artifact.Resolve(ctx, repo+":"+parentTag(sha))
 	if err != nil {
 		return artifact.Located{}, err
 	}
@@ -195,7 +195,7 @@ func ExportDelta(ctx context.Context, cfg Config, g core.Grant, session, dir str
 	}
 	repo := domainRepoFor(cfg.DeltaRegistry, domain)
 	ref := repo + ":" + sessionTag(session)
-	loc, found, err := artifact.Resolve(ctx, ref, cfg.RegistryPlainHTTP)
+	loc, found, err := artifact.Resolve(ctx, ref)
 	if err != nil {
 		return nil, err
 	}
@@ -219,7 +219,7 @@ func ExportDelta(ctx context.Context, cfg Config, g core.Grant, session, dir str
 		return nil, err
 	}
 	defer func() { _ = os.RemoveAll(tmp) }()
-	if _, err := artifact.PullDir(ctx, repo+"@"+loc.Digest, filepath.Join(tmp, "delta"), cfg.RegistryPlainHTTP); err != nil {
+	if _, err := artifact.PullDir(ctx, repo+"@"+loc.Digest, filepath.Join(tmp, "delta")); err != nil {
 		return nil, err
 	}
 	if err := artifact.TarDir(filepath.Join(tmp, "delta"), filepath.Join(dir, ExportDeltaFile)); err != nil {
@@ -236,7 +236,7 @@ func ExportDelta(ctx context.Context, cfg Config, g core.Grant, session, dir str
 		if err != nil {
 			return nil, fmt.Errorf("host: refusing to export %s/%s: delta needs %w", g.UID, session, err)
 		}
-		if _, err := artifact.PullDir(ctx, repo+"@"+ploc.Digest, filepath.Join(tmp, "parent"), cfg.RegistryPlainHTTP); err != nil {
+		if _, err := artifact.PullDir(ctx, repo+"@"+ploc.Digest, filepath.Join(tmp, "parent")); err != nil {
 			return nil, fmt.Errorf("host: delta needs parent %s: %w", info.Parent[:12], err)
 		}
 		info.ParentAnnotations = ploc.Annotations
@@ -252,7 +252,7 @@ func ExportDelta(ctx context.Context, cfg Config, g core.Grant, session, dir str
 	if err := os.WriteFile(filepath.Join(dir, ExportInfoFile), b, 0o644); err != nil {
 		return nil, err
 	}
-	if _, err := artifact.Delete(ctx, ref, cfg.RegistryPlainHTTP); err != nil {
+	if _, err := artifact.Delete(ctx, ref); err != nil {
 		return nil, fmt.Errorf("host: retire %s after export: %w", ref, err)
 	}
 	return files, nil
@@ -327,7 +327,7 @@ func ImportDelta(ctx context.Context, cfg Config, g core.Grant, session, dir str
 	}
 	if info.Parent != "" {
 		pref := repo + ":" + parentTag(info.Parent)
-		if _, found, err := artifact.Resolve(ctx, pref, cfg.RegistryPlainHTTP); err != nil {
+		if _, found, err := artifact.Resolve(ctx, pref); err != nil {
 			return err
 		} else if !found {
 			if err := artifact.Untar(filepath.Join(dir, ExportParentFile), filepath.Join(tmp, "parent")); err != nil {
@@ -349,7 +349,7 @@ func ImportDelta(ctx context.Context, cfg Config, g core.Grant, session, dir str
 					ann[k] = v
 				}
 			}
-			if _, err := artifact.PushDir(ctx, filepath.Join(tmp, "parent"), pref, artifact.ArtifactTypeParent, ann, cfg.DeltaKeys.Signer, cfg.RegistryPlainHTTP); err != nil {
+			if _, err := artifact.PushDir(ctx, filepath.Join(tmp, "parent"), pref, artifact.ArtifactTypeParent, ann, cfg.DeltaKeys.Signer); err != nil {
 				return err
 			}
 		}

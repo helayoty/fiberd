@@ -35,7 +35,6 @@ func run(fs *flag.FlagSet, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	c.Finish()
 	if *healthz {
 		ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 		defer cancel()
@@ -54,11 +53,7 @@ func kubernetes(c *fiberd.Config, _ *grant.Cache) (fhome.Home, error) {
 	if err != nil {
 		return nil, err
 	}
-	port, err := c.ListenPort()
-	if err != nil {
-		return nil, err
-	}
 	return home.New(home.Config{
-		GrantsDir: c.GrantsDir, StaleTTL: c.StaleTTL, Devices: c.Devices, Family: fam, ListenPort: port,
+		GrantsDir: c.Node.GrantsDir, StaleTTL: c.Node.StaleTTL, Devices: c.Node.Devices, Family: fam,
 	})
 }

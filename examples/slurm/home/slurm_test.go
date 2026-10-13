@@ -47,7 +47,7 @@ func newHome(t *testing.T, over map[string]string, probe []string, onEnd func(),
 	}
 	cfg := home.Config{
 		Env: env(over), GrantsDir: filepath.Join(t.TempDir(), "grants"), Poll: 20 * time.Millisecond, StaleTTL: 100 * time.Millisecond,
-		CgroupMount: fakeCgroup(t), Family: endpoint.Inet4, Host: "10.9.8.7", ListenPort: "8484", Probe: probe, OnJobEnd: onEnd,
+		CgroupMount: fakeCgroup(t), Family: endpoint.Inet4, Host: "10.9.8.7", Probe: probe, OnJobEnd: onEnd,
 	}
 	for _, m := range mods {
 		m(&cfg)
@@ -93,7 +93,6 @@ func TestHomeFromTheAllocation(t *testing.T) {
 		{"scope names the GRES", scope("gres"), "gpu:2"},
 		{"scope names the CPUs", scope("cpus"), "4"},
 		{"the endpoint host is the configured host", h.EndpointHost, "10.9.8.7"},
-		{"the advertised endpoint is host:port", h.AdvertisedEndpoint, "10.9.8.7:8484"},
 		{"Job is the allocation the environment names", func() string {
 			j := h.Job()
 			return fmt.Sprintf("%s %s %s %s %s %s %s %s %d", j.ID, j.Name, j.User, j.Account, j.Partition, j.Node, j.NodeList, j.GRES, j.CPUs)
@@ -321,30 +320,22 @@ func TestEndpointHost(t *testing.T) {
 		name   string
 		node   string
 		family endpoint.Family
-		port   string
 		check  func(string) error
-		adv    string // the advertised endpoint, or "-" to skip the check
 	}{
-		{name: "an IPv4 node address for inet4", node: "10.1.2.3", family: endpoint.Inet4, port: "8484", check: is("10.1.2.3"), adv: "10.1.2.3:8484"},
-		{name: "an IPv6 node address for inet6", node: "2001:db8::7", family: endpoint.Inet6, port: "8484", check: is("2001:db8::7"), adv: "[2001:db8::7]:8484"},
-		{name: "unix serves callers over inet4", node: "10.1.2.3", family: endpoint.Unix, port: "8484", check: is("10.1.2.3"), adv: "10.1.2.3:8484"},
-		{name: "no family is inet4", node: "10.1.2.3", port: "8484", check: is("10.1.2.3"), adv: "10.1.2.3:8484"},
-		{name: "no listen port: nothing to advertise", node: "10.1.2.3", family: endpoint.Inet4, check: is("10.1.2.3"), adv: ""},
-		{name: "a loopback node falls back to this host's IPv4 address", node: "127.0.0.1", family: endpoint.Inet4, check: own(true), adv: "-"},
-		{name: "an IPv4 node for inet6 falls back to this host's IPv6 address", node: "10.1.2.3", family: endpoint.Inet6, check: own(false), adv: "-"},
+		{name: "an IPv4 node address for inet4", node: "10.1.2.3", family: endpoint.Inet4, check: is("10.1.2.3")},
+		{name: "an IPv6 node address for inet6", node: "2001:db8::7", family: endpoint.Inet6, check: is("2001:db8::7")},
+		{name: "unix serves callers over inet4", node: "10.1.2.3", family: endpoint.Unix, check: is("10.1.2.3")},
+		{name: "no family is inet4", node: "10.1.2.3", check: is("10.1.2.3")},
+		{name: "a loopback node falls back to this host's IPv4 address", node: "127.0.0.1", family: endpoint.Inet4, check: own(true)},
+		{name: "an IPv4 node for inet6 falls back to this host's IPv6 address", node: "10.1.2.3", family: endpoint.Inet6, check: own(false)},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newHome(t, map[string]string{"SLURMD_NODENAME": tc.node}, []string{}, nil, func(c *home.Config) {
-				c.Host, c.Family, c.ListenPort = "", tc.family, tc.port
+				c.Host, c.Family = "", tc.family
 			})
 			if err := tc.check(h.EndpointHost()); err != nil {
 				t.Fatal(err)
-			}
-			if tc.adv != "-" {
-				if got := h.AdvertisedEndpoint(); got != tc.adv {
-					t.Fatalf("advertised = %q, want %q", got, tc.adv)
-				}
 			}
 		})
 	}

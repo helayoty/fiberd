@@ -6,12 +6,46 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/helayoty/fiberd/pkg/fiberd"
 	"github.com/helayoty/fiberd/pkg/grant"
 	"github.com/helayoty/fiberd/pkg/home"
 )
+
+// TestTimingFlags checks that the testhooks build binds the cadence flags
+// on Timing, which no flag reaches in a release build.
+func TestTimingFlags(t *testing.T) {
+	cases := []struct {
+		name    string
+		args    []string
+		want    fiberd.Timing
+		wantErr string
+	}{
+		{name: "unset is the core's default"},
+		{name: "both cadences", args: []string{"-status-interval", "50ms", "-pressure-interval", "200ms"},
+			want: fiberd.Timing{StatusEvery: 50 * time.Millisecond, PressureEvery: 200 * time.Millisecond}},
+		{name: "a negative pressure interval turns the ladder off", args: []string{"-pressure-interval", "-1s"},
+			want: fiberd.Timing{PressureEvery: -time.Second}},
+		{name: "a bad duration is refused", args: []string{"-status-interval", "soon"}, wantErr: "invalid value"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c, err := parse(tc.args...)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("parse: %v, want %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil || c.Timing != tc.want {
+				t.Fatalf("Timing = %+v, %v, want %+v", c.Timing, err, tc.want)
+			}
+		})
+	}
+}
 
 // bareHome is a home without an issuer override. Embedding home.Home
 // promotes only the interface's methods, so SetIssuerReachable is not one of them.

@@ -30,7 +30,6 @@ func parse(args ...string) (*fiberd.Config, error) {
 	if err := fs.Parse(args); err != nil {
 		return nil, err
 	}
-	c.Finish()
 	return &c, nil
 }
 
@@ -41,32 +40,30 @@ func TestBind(t *testing.T) {
 	cases := []struct {
 		name    string
 		args    []string
-		want    map[string]any // Config field -> value
+		want    map[string]any // Config field path -> value
 		wantErr string
 	}{
 		{name: "defaults", want: map[string]any{
-			"Listen": ":8484", "Advertise": ":8484", "HTTPAddr": "", "StateDir": "/var/lib/fiberd", "NodeID": hostname,
-			"Verifier": "", "Issuer": "", "JWKSMaxStale": time.Hour, "MaxLease": time.Duration(0),
-			"CgroupRoot": "/sys/fs/cgroup/fiberd", "RuntimeName": "stub", "RuntimeTier": "FIBER_CHECKPOINT",
-			"Templates": map[string]string{}, "RunDir": "/run/fiberd", "EndpointFamily": "unix", "EndpointHost": "",
-			"CRIUBin": "criu", "GrantCeiling": uint64(0), "AllCaps": false, "UsernsPool": runcbackend.DefaultPool,
-			"FiberHide": []string(nil), "Runsc": "runsc", "Runc": "runc", "Parity": "strict", "InsecurePlaintext": false,
-			"Devices": []string(nil), "StaleTTL": 30 * time.Second, "StatusEvery": time.Second, "PressureEvery": time.Second,
+			"API.Listen": ":8484", "API.HTTP": "", "Node.StateDir": "/var/lib/fiberd", "Node.ID": hostname,
+			"Trust.Verifier": "", "Trust.Issuer": "", "Trust.JWKSMaxStale": time.Hour, "Trust.MaxLease": time.Duration(0),
+			"Node.CgroupRoot": "/sys/fs/cgroup/fiberd", "Runtime.Name": "stub", "Runtime.StubTier": "FIBER_CHECKPOINT",
+			"Runtime.Templates": map[string]string{}, "Endpoint.Family": "unix", "Endpoint.Host": "",
+			"Runtime.GrantCeiling": uint64(0), "Node.AllCaps": false, "Runtime.Runc.UsernsPool": runcbackend.DefaultPool,
+			"Runtime.FiberHide": []string(nil), "Runtime.Parity": "strict", "API.TLS.InsecurePlaintext": false,
+			"Node.Devices": []string(nil), "Node.StaleTTL": 30 * time.Second, "Timing": fiberd.Timing{},
 		}},
-		{name: "advertise defaults to the listen address", args: []string{"-listen", "10.0.0.1:9"},
-			want: map[string]any{"Listen": "10.0.0.1:9", "Advertise": "10.0.0.1:9"}},
-		{name: "an explicit advertise address is kept", args: []string{"-advertise", "home:1"},
-			want: map[string]any{"Listen": ":8484", "Advertise": "home:1"}},
 		{name: "templates repeat and later ones win", args: []string{"-template", "sha256:a=/bin/a --x", "-template", " default = /bin/d ", "-template", "sha256:a=/bin/b"},
-			want: map[string]any{"Templates": map[string]string{"sha256:a": "/bin/b", "default": "/bin/d"}}},
+			want: map[string]any{"Runtime.Templates": map[string]string{"sha256:a": "/bin/b", "default": "/bin/d"}}},
 		{name: "a template without a command is refused", args: []string{"-template", "sha256:a="}, wantErr: "want digest=path"},
 		{name: "fiber-hide repeats", args: []string{"-fiber-hide", "/a", "-fiber-hide", "/b"},
-			want: map[string]any{"FiberHide": []string{"/a", "/b"}}},
+			want: map[string]any{"Runtime.FiberHide": []string{"/a", "/b"}}},
 		{name: "devices are trimmed and empty entries dropped", args: []string{"-devices", " gpu0, ,gpu1 ,"},
-			want: map[string]any{"Devices": []string{"gpu0", "gpu1"}}},
+			want: map[string]any{"Node.Devices": []string{"gpu0", "gpu1"}}},
+		{name: "a later -devices replaces an earlier one", args: []string{"-devices", "a,b", "-devices", "c"},
+			want: map[string]any{"Node.Devices": []string{"c"}}},
 		{name: "durations and numbers parse", args: []string{"-stale-ttl", "5s", "-max-lease", "1m", "-grant-ceiling", "4096", "-all-caps"},
-			want: map[string]any{"StaleTTL": 5 * time.Second, "MaxLease": time.Minute, "GrantCeiling": uint64(4096), "AllCaps": true}},
-		{name: "a bad duration is refused", args: []string{"-status-interval", "soon"}, wantErr: "invalid value"},
+			want: map[string]any{"Node.StaleTTL": 5 * time.Second, "Trust.MaxLease": time.Minute, "Runtime.GrantCeiling": uint64(4096), "Node.AllCaps": true}},
+		{name: "a bad duration is refused", args: []string{"-stale-ttl", "soon"}, wantErr: "invalid value"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -80,67 +77,25 @@ func TestBind(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			v := reflect.ValueOf(c).Elem()
-			for field, want := range tc.want {
-				f := v.FieldByName(field)
-				if !f.IsValid() {
-					t.Fatalf("Config has no field %s", field)
-				}
-				if got := f.Interface(); !reflect.DeepEqual(got, want) {
-					t.Errorf("%s = %#v, want %#v", field, got, want)
+			for path, want := range tc.want {
+				if got := field(t, c, path); !reflect.DeepEqual(got, want) {
+					t.Errorf("%s = %#v, want %#v", path, got, want)
 				}
 			}
 		})
 	}
 }
 
-// TestFinishIsIdempotent checks that finishing twice does not repeat the device
-// list.
-func TestFinishIsIdempotent(t *testing.T) {
-	cases := []struct {
-		name string
-		runs int
-	}{{name: "once", runs: 1}, {name: "three times", runs: 3}}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			c, err := parse("-devices", "a,b")
-			if err != nil {
-				t.Fatal(err)
-			}
-			for i := 1; i < tc.runs; i++ {
-				c.Finish()
-			}
-			if !reflect.DeepEqual(c.Devices, []string{"a", "b"}) {
-				t.Fatalf("Devices = %v", c.Devices)
-			}
-		})
+// field is the value at a dotted path into c, such as "API.TLS.Cert".
+func field(t *testing.T, c *fiberd.Config, path string) any {
+	t.Helper()
+	v := reflect.ValueOf(c).Elem()
+	for _, name := range strings.Split(path, ".") {
+		if v = v.FieldByName(name); !v.IsValid() {
+			t.Fatalf("Config has no field %s", path)
+		}
 	}
-}
-
-func TestListenPort(t *testing.T) {
-	cases := []struct {
-		listen, want, wantErr string
-	}{
-		{listen: ":8484", want: "8484"},
-		{listen: "127.0.0.1:0", want: "0"},
-		{listen: "[::1]:9", want: "9"},
-		{listen: "no-port", wantErr: `-listen "no-port"`},
-	}
-	for _, tc := range cases {
-		t.Run(tc.listen, func(t *testing.T) {
-			c := fiberd.Config{Listen: tc.listen}
-			got, err := c.ListenPort()
-			if tc.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-					t.Fatalf("ListenPort = %q, %v, want %q", got, err, tc.wantErr)
-				}
-				return
-			}
-			if err != nil || got != tc.want {
-				t.Fatalf("ListenPort = %q, %v, want %q", got, err, tc.want)
-			}
-		})
-	}
+	return v.Interface()
 }
 
 func TestFamily(t *testing.T) {
@@ -157,7 +112,7 @@ func TestFamily(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.family, func(t *testing.T) {
-			c := fiberd.Config{EndpointFamily: tc.family}
+			c := fiberd.Config{Endpoint: fiberd.Endpoint{Family: tc.family}}
 			got, err := c.Family()
 			if (err != nil) != tc.wantErr || got != tc.want {
 				t.Fatalf("Family = %q, %v, want %q (error %v)", got, err, tc.want, tc.wantErr)
@@ -177,7 +132,7 @@ func TestPaths(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.state, func(t *testing.T) {
-			c := fiberd.Config{StateDir: tc.state}
+			c := fiberd.Config{Node: fiberd.Node{StateDir: tc.state}}
 			if c.PrivateDir() != tc.private || c.AdminSocket() != tc.admin {
 				t.Fatalf("PrivateDir %s AdminSocket %s, want %s %s", c.PrivateDir(), c.AdminSocket(), tc.private, tc.admin)
 			}
@@ -258,7 +213,8 @@ func TestLoadDeltaKeys(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			c := fiberd.Config{StateDir: state, DeltaRegistry: tc.registry, DeltaKey: tc.deltaKey, DeltaTrust: tc.trust, DeltaSealKey: tc.sealed}
+			c := fiberd.Config{Node: fiberd.Node{StateDir: state},
+				Registry: fiberd.Registry{Deltas: tc.registry, Keys: fiberd.DeltaKeys{Sign: tc.deltaKey, Trust: tc.trust, Seal: tc.sealed}}}
 			k, err := c.LoadDeltaKeys()
 			if tc.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {

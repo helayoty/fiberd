@@ -1,8 +1,8 @@
 // Command zygotectl builds, pushes, pulls and inspects zygote artifacts.
 //
 //	zygotectl build -zygote bin/refzygote -args "--heap-mb 32" -out out/ref
-//	zygotectl push  -dir out/ref -ref 127.0.0.1:5000/zygotes/ref:v1 -plain-http
-//	zygotectl pull  -ref 127.0.0.1:5000/zygotes/ref@sha256:... -out /tmp/ref -plain-http
+//	zygotectl push  -dir out/ref -ref http://127.0.0.1:5000/zygotes/ref:v1
+//	zygotectl pull  -ref http://127.0.0.1:5000/zygotes/ref@sha256:... -out /tmp/ref
 //	zygotectl inspect -dir out/ref
 //
 // The digest build and push print is the grant's template_digest.
@@ -78,15 +78,14 @@ func build(ctx context.Context, host artifact.Platform, args []string, stdout, s
 func push(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("push", flag.ContinueOnError)
 	dir := fs.String("dir", "", "artifact directory from build")
-	ref := fs.String("ref", "", "registry reference host/repo:tag")
-	plain := fs.Bool("plain-http", false, "registry speaks http, not https")
+	ref := fs.String("ref", "", "registry reference host/repo:tag (http://host/repo:tag for a plain-http registry)")
 	if err := cli.ParseFlags(fs, args, stderr); err != nil {
 		return err
 	}
 	if *dir == "" || *ref == "" {
 		return fmt.Errorf("push: -dir and -ref are required")
 	}
-	digest, err := artifact.Push(ctx, *dir, *ref, *plain)
+	digest, err := artifact.Push(ctx, *dir, *ref)
 	if err != nil {
 		return err
 	}
@@ -96,16 +95,15 @@ func push(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 
 func pull(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("pull", flag.ContinueOnError)
-	ref := fs.String("ref", "", "registry reference host/repo@digest or host/repo:tag")
+	ref := fs.String("ref", "", "registry reference host/repo@digest or host/repo:tag (http://host/... for a plain-http registry)")
 	out := fs.String("out", "", "directory to unpack into")
-	plain := fs.Bool("plain-http", false, "registry speaks http, not https")
 	if err := cli.ParseFlags(fs, args, stderr); err != nil {
 		return err
 	}
 	if *ref == "" || *out == "" {
 		return fmt.Errorf("pull: -ref and -out are required")
 	}
-	cfg, err := artifact.Pull(ctx, *ref, *out, *plain)
+	cfg, err := artifact.Pull(ctx, *ref, *out)
 	if err != nil {
 		return err
 	}

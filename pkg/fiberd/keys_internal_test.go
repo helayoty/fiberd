@@ -67,7 +67,7 @@ func TestLoadAuditKey(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			c := Config{StateDir: stateFor(t, tc.unusable), AuditKey: tc.flag}
+			c := Config{Node: Node{StateDir: stateFor(t, tc.unusable)}, Audit: Audit{Key: tc.flag}}
 			cp, err := c.loadAuditKey()
 			if tc.wantErr {
 				if err == nil || !strings.HasPrefix(err.Error(), "-audit-key: ") {
@@ -121,7 +121,7 @@ func TestLoadHandoffKey(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			c := Config{StateDir: stateFor(t, tc.unusable), HandoffKey: tc.flag}
+			c := Config{Node: Node{StateDir: stateFor(t, tc.unusable)}, Handoff: Handoff{Key: tc.flag}}
 			k, err := c.loadHandoffKey()
 			if tc.wantErr {
 				if err == nil || !strings.HasPrefix(err.Error(), "-handoff-key: ") {
@@ -168,7 +168,7 @@ func TestStateKey(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			c := Config{StateDir: filepath.Join(t.TempDir(), "state")}
+			c := Config{Node: Node{StateDir: filepath.Join(t.TempDir(), "state")}}
 			path := filepath.Join(c.PrivateDir(), "k.json")
 			if tc.existing != "" || tc.dangling {
 				if err := os.MkdirAll(c.PrivateDir(), 0o700); err != nil {
@@ -233,9 +233,8 @@ type badAddr struct{}
 func (badAddr) Network() string { return "tcp" }
 func (badAddr) String() string  { return "no-port" }
 
-// TestHandoffAdvertise checks that -handoff-advertise wins. Otherwise the bound
-// address is advertised, its wildcard host replaced by -endpoint-host or
-// the loopback.
+// TestHandoffAdvertise checks that the bound address is advertised, its
+// wildcard host replaced by -endpoint-host or the loopback.
 func TestHandoffAdvertise(t *testing.T) {
 	tcp := func(s string) net.Addr {
 		a, err := net.ResolveTCPAddr("tcp", s)
@@ -245,13 +244,11 @@ func TestHandoffAdvertise(t *testing.T) {
 		return a
 	}
 	cases := []struct {
-		name                string
-		advertise, endpoint string
-		addr                net.Addr
-		want, wantErr       string
+		name          string
+		endpoint      string
+		addr          net.Addr
+		want, wantErr string
 	}{
-		{name: "the flag wins", advertise: "edge.example:443", addr: tcp("0.0.0.0:7"), want: "tcp://edge.example:443"},
-		{name: "a flag without a port", advertise: "edge.example", addr: tcp("0.0.0.0:7"), wantErr: "-handoff-advertise"},
 		{name: "a bound host is kept", addr: tcp("192.0.2.4:7"), endpoint: "10.0.0.1", want: "tcp://192.0.2.4:7"},
 		{name: "a wildcard takes the endpoint host", addr: tcp("0.0.0.0:7"), endpoint: "10.0.0.1", want: "tcp://10.0.0.1:7"},
 		{name: "an IPv6 wildcard takes an IPv6 endpoint host", addr: tcp("[::]:7"), endpoint: "fd00::1", want: "tcp://[fd00::1]:7"},
@@ -260,7 +257,7 @@ func TestHandoffAdvertise(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			c := Config{HandoffAdvertise: tc.advertise, EndpointHost: tc.endpoint}
+			c := Config{Endpoint: Endpoint{Host: tc.endpoint}}
 			got, err := c.handoffAdvertise(tc.addr)
 			if tc.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
@@ -297,7 +294,7 @@ func TestEndpointPolicy(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			c := Config{EndpointFamily: tc.family, EndpointHost: tc.host}
+			c := Config{Endpoint: Endpoint{Family: tc.family, Host: tc.host}}
 			got, err := c.endpointPolicy()
 			if tc.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {

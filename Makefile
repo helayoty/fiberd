@@ -144,7 +144,7 @@ example-knative-kvm: ## the same over the real Hyperlight helper (needs /dev/kvm
 	  CONFORM_HL_HELPER=/src/bin/hyperlight-helper CONFORM_HL_GUEST=/src/bin/hyperlight-guest examples/knative/run.sh
 
 overcommit: ## 2x overcommit storm under a 384 MiB container cap: park must fire before any OOM kill
-	hack/dev/run.sh sh -c 'go build -o bin/ ./cmd/fiberd ./cmd/grant-issuer ./hack/storm && make -s zygote'
+	hack/dev/run.sh sh -c 'go build -o bin/ ./cmd/grant-issuer ./hack/storm && go build -tags fiberd_testhooks -o bin/fiberd-testhooks ./cmd/fiberd && make -s zygote'
 	FIBERD_DEV_DOCKER_ARGS="--memory=384m --memory-swap=384m" hack/dev/run.sh env STORM_PREBUILT=1 hack/test/overcommit.sh
 
 ## OCI artifacts (zygote templates, parked deltas) through a local registry

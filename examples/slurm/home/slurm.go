@@ -60,8 +60,6 @@ type Config struct {
 	// node's address of that family).
 	Family endpoint.Family
 	Host   string
-	// ListenPort is fiberd's gRPC port, for the advertised endpoint.
-	ListenPort string
 	// Probe is the command whose output carries the job's state as
 	// JobState=<STATE> (default: scontrol show job -o <id>); nil disables
 	// the probe and liveness comes from a timer, as on a standalone host
@@ -268,15 +266,6 @@ func (h *Home) EndpointHost() string {
 		}
 	}
 	return ""
-}
-
-// AdvertisedEndpoint is where callers reach this fiberd.
-func (h *Home) AdvertisedEndpoint() string {
-	host := h.EndpointHost()
-	if host == "" || h.cfg.ListenPort == "" {
-		return ""
-	}
-	return net.JoinHostPort(host, h.cfg.ListenPort)
 }
 
 // Scope: the facts the allocation is made of.

@@ -124,7 +124,7 @@ func TestBuildPushPullRoundTrip(t *testing.T) {
 			}
 		}},
 		{"push returns the packed digest", func(t *testing.T) {
-			pushed, err := artifact.Push(ctx, out, ref, true)
+			pushed, err := artifact.Push(ctx, out, ref)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -134,7 +134,7 @@ func TestBuildPushPullRoundTrip(t *testing.T) {
 		}},
 		{"pull by digest restores an executable zygote and records the digest", func(t *testing.T) {
 			dst := filepath.Join(t.TempDir(), "pulled")
-			got, err := artifact.Pull(ctx, reg+"/zygotes/test@"+digest, dst, true)
+			got, err := artifact.Pull(ctx, reg+"/zygotes/test@"+digest, dst)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -154,13 +154,13 @@ func TestBuildPushPullRoundTrip(t *testing.T) {
 			}
 		}},
 		{"pull by tag works too", func(t *testing.T) {
-			if _, err := artifact.Pull(ctx, ref, filepath.Join(t.TempDir(), "bytag"), true); err != nil {
+			if _, err := artifact.Pull(ctx, ref, filepath.Join(t.TempDir(), "bytag")); err != nil {
 				t.Fatalf("pull by tag: %v", err)
 			}
 		}},
 		{"a wrong digest is refused by the transfer", func(t *testing.T) {
 			bogus := "sha256:" + strings.Repeat("0", 64)
-			if _, err := artifact.Pull(ctx, reg+"/zygotes/test@"+bogus, filepath.Join(t.TempDir(), "bogus"), true); err == nil {
+			if _, err := artifact.Pull(ctx, reg+"/zygotes/test@"+bogus, filepath.Join(t.TempDir(), "bogus")); err == nil {
 				t.Fatal("pull of a nonexistent digest succeeded")
 			}
 		}},
@@ -251,10 +251,10 @@ func TestBuildPushPullRoundTrip(t *testing.T) {
 				if signer == nil {
 					tag = reg + "/deltas/d:unsigned"
 				}
-				if _, err := artifact.PushDir(ctx, dir, tag, artifact.ArtifactTypeDelta, ann, signer, true); err != nil {
+				if _, err := artifact.PushDir(ctx, dir, tag, artifact.ArtifactTypeDelta, ann, signer); err != nil {
 					t.Fatal(err)
 				}
-				loc, found, err := artifact.Resolve(ctx, tag, true)
+				loc, found, err := artifact.Resolve(ctx, tag)
 				if err != nil || !found || len(loc.Files) != 2 {
 					t.Fatalf("resolve %s: %+v %v %v", tag, loc, found, err)
 				}
@@ -590,7 +590,7 @@ func TestPush(t *testing.T) {
 	}{
 		{name: "a push without a tag is pulled by its digest", ref: "z",
 			check: func(t *testing.T, reg, digest string) {
-				if c, err := artifact.Pull(context.Background(), reg+"/z@"+digest, t.TempDir(), true); err != nil || c.Digest != digest {
+				if c, err := artifact.Pull(context.Background(), reg+"/z@"+digest, t.TempDir()); err != nil || c.Digest != digest {
 					t.Fatalf("Pull = %+v, %v", c, err)
 				}
 			}},
@@ -612,7 +612,7 @@ func TestPush(t *testing.T) {
 			if c.edit != nil {
 				c.edit(t, dir)
 			}
-			d, err := artifact.Push(context.Background(), dir, reg+"/"+c.ref, true)
+			d, err := artifact.Push(context.Background(), dir, reg+"/"+c.ref)
 			if c.want != "" {
 				if err == nil || !strings.Contains(err.Error(), c.want) {
 					t.Fatalf("Push = %s, %v; want an error about %q", d, err, c.want)
@@ -631,7 +631,7 @@ func TestPull(t *testing.T) {
 	ctx := context.Background()
 	pushZygote := func(t *testing.T, reg, dir string) {
 		t.Helper()
-		if _, err := artifact.Push(ctx, dir, reg+"/z:t", true); err != nil {
+		if _, err := artifact.Push(ctx, dir, reg+"/z:t"); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -647,7 +647,7 @@ func TestPull(t *testing.T) {
 				}
 				writeFile(t, filepath.Join(part, n), string(b))
 			}
-			if _, err := artifact.PushDir(ctx, part, reg+"/z:t", typ, nil, nil, true); err != nil {
+			if _, err := artifact.PushDir(ctx, part, reg+"/z:t", typ, nil, nil); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -703,7 +703,7 @@ func TestPull(t *testing.T) {
 			if c.ref != "" {
 				ref = c.ref
 			}
-			cfg, err := artifact.Pull(ctx, reg+"/"+ref, dst, true)
+			cfg, err := artifact.Pull(ctx, reg+"/"+ref, dst)
 			if c.want != "" {
 				if err == nil || !strings.Contains(err.Error(), c.want) {
 					t.Fatalf("Pull = %+v, %v; want an error about %q", cfg, err, c.want)

@@ -93,7 +93,7 @@ func TestExportImportDelta(t *testing.T) {
 	repo := domainRepoFor(a.DeltaRegistry, domainOf(t, g))
 	write(t, filepath.Join(root, "parent"), map[string]string{"pages-1.img": "template pages"})
 	if _, err := artifact.PushDir(ctx, filepath.Join(root, "parent"), repo+":"+parentTag(parentSHA), artifact.ArtifactTypeParent,
-		map[string]string{artifact.AnnotationParent: parentSHA}, keyA, false); err != nil {
+		map[string]string{artifact.AnnotationParent: parentSHA}, keyA); err != nil {
 		t.Fatal(err)
 	}
 	write(t, filepath.Join(root, "delta"), map[string]string{"pages-1.img": "dirty pages", "manifest.json": `{"fence":"g1/1/1"}`, "dump.log": "x"})
@@ -162,12 +162,12 @@ func TestExportImportDelta(t *testing.T) {
 		// Someone who can write the registry but holds no key copies a
 		// signed manifest onto another session's tag or domain's repo.
 		{"a signed delta copied to another session or domain is refused", func(t *testing.T) {
-			sloc, found, err := artifact.Resolve(ctx, repo+":"+sessionTag("S"), false)
+			sloc, found, err := artifact.Resolve(ctx, repo+":"+sessionTag("S"))
 			if err != nil || !found {
 				t.Fatalf("resolve S: %v", err)
 			}
 			pulled := filepath.Join(t.TempDir(), "copy")
-			if _, err := artifact.PullDir(ctx, repo+"@"+sloc.Digest, pulled, false); err != nil {
+			if _, err := artifact.PullDir(ctx, repo+"@"+sloc.Digest, pulled); err != nil {
 				t.Fatal(err)
 			}
 			cases := []struct {
@@ -181,10 +181,10 @@ func TestExportImportDelta(t *testing.T) {
 			for _, tc := range cases {
 				t.Run(tc.name, func(t *testing.T) {
 					ref := domainRepoFor(a.DeltaRegistry, domainOf(t, tc.grant)) + ":" + sessionTag(tc.session)
-					if _, err := artifact.PushDir(ctx, pulled, ref, artifact.ArtifactTypeDelta, sloc.Annotations, nil, false); err != nil {
+					if _, err := artifact.PushDir(ctx, pulled, ref, artifact.ArtifactTypeDelta, sloc.Annotations, nil); err != nil {
 						t.Fatal(err)
 					}
-					if cloc, _, _ := artifact.Resolve(ctx, ref, false); a.DeltaKeys.Verify(cloc) != nil {
+					if cloc, _, _ := artifact.Resolve(ctx, ref); a.DeltaKeys.Verify(cloc) != nil {
 						t.Fatal("the copy must still carry a valid signature for the test to mean anything")
 					}
 					if _, err := ExportDelta(ctx, a, tc.grant, tc.session, t.TempDir()); !errors.Is(err, artifact.ErrUntrusted) {
@@ -219,7 +219,7 @@ func TestExportImportDelta(t *testing.T) {
 						signedAs = tc.sha
 					}
 					if _, err := artifact.PushDir(ctx, filepath.Join(root, "parent"), repo+":"+parentTag(tc.sha), artifact.ArtifactTypeParent,
-						map[string]string{artifact.AnnotationParent: signedAs}, tc.signer, false); err != nil {
+						map[string]string{artifact.AnnotationParent: signedAs}, tc.signer); err != nil {
 						t.Fatal(err)
 					}
 					session := "P" + strconv.Itoa(i)
@@ -231,7 +231,7 @@ func TestExportImportDelta(t *testing.T) {
 					if _, err := ExportDelta(ctx, a, g, session, t.TempDir()); !errors.Is(err, artifact.ErrUntrusted) {
 						t.Fatalf("export = %v, want ErrUntrusted", err)
 					}
-					if _, found, _ := artifact.Resolve(ctx, repo+":"+sessionTag(session), false); !found {
+					if _, found, _ := artifact.Resolve(ctx, repo+":"+sessionTag(session)); !found {
 						t.Fatal("a refused export retired the session")
 					}
 				})
@@ -255,7 +255,7 @@ func TestExportImportDelta(t *testing.T) {
 			if len(want) > 0 {
 				t.Errorf("missing export files: %v", want)
 			}
-			if _, found, _ := artifact.Resolve(ctx, repo+":"+sessionTag("S"), false); found {
+			if _, found, _ := artifact.Resolve(ctx, repo+":"+sessionTag("S")); found {
 				t.Fatal("the exporting home still holds the session")
 			}
 		}},
@@ -334,7 +334,7 @@ func TestExportImportDelta(t *testing.T) {
 						t.Fatalf("import = %v, want ErrUntrusted", err)
 					}
 					for _, tag := range []string{parentTag(parentSHA), sessionTag("S2")} {
-						if _, found, _ := artifact.Resolve(ctx, repoB+":"+tag, false); found {
+						if _, found, _ := artifact.Resolve(ctx, repoB+":"+tag); found {
 							t.Fatalf("%s was published by a refused import", tag)
 						}
 					}
@@ -363,7 +363,7 @@ func TestExportImportDelta(t *testing.T) {
 			}
 			var found bool
 			var err error
-			loc, found, err = artifact.Resolve(ctx, repoB+":"+sessionTag("S2"), false)
+			loc, found, err = artifact.Resolve(ctx, repoB+":"+sessionTag("S2"))
 			if err != nil || !found {
 				t.Fatalf("imported session not found: %v", err)
 			}
@@ -379,7 +379,7 @@ func TestExportImportDelta(t *testing.T) {
 			}
 		}},
 		{"import brings the parent along, signed by the importer", func(t *testing.T) {
-			ploc, found, err := artifact.Resolve(ctx, repoB+":"+parentTag(parentSHA), false)
+			ploc, found, err := artifact.Resolve(ctx, repoB+":"+parentTag(parentSHA))
 			if err != nil || !found || ploc.ArtifactType != artifact.ArtifactTypeParent {
 				t.Fatalf("parent not imported: found=%v %+v %v", found, ploc, err)
 			}
@@ -389,7 +389,7 @@ func TestExportImportDelta(t *testing.T) {
 		}},
 		{"the imported delta is resealed for its new name and opens with its pages and without logs", func(t *testing.T) {
 			dst := filepath.Join(root, "pulled")
-			if _, err := artifact.PullDir(ctx, repoB+"@"+loc.Digest, dst, false); err != nil {
+			if _, err := artifact.PullDir(ctx, repoB+"@"+loc.Digest, dst); err != nil {
 				t.Fatal(err)
 			}
 			if got, _ := os.ReadFile(filepath.Join(dst, "pages-1.img")); strings.Contains(string(got), "dirty pages") {
@@ -549,7 +549,7 @@ func TestExportImportRefusals(t *testing.T) {
 	write(t, filepath.Join(root, "parent"), map[string]string{"pages-1.img": "template pages"})
 	write(t, filepath.Join(root, "delta"), map[string]string{"pages-1.img": "dirty pages", "manifest.json": `{"fence":"g1/1/1"}`})
 	// A session whose tag holds a parent, not a delta.
-	if _, err := artifact.PushDir(ctx, filepath.Join(root, "parent"), repo+":"+sessionTag("P"), artifact.ArtifactTypeParent, nil, keyA, false); err != nil {
+	if _, err := artifact.PushDir(ctx, filepath.Join(root, "parent"), repo+":"+sessionTag("P"), artifact.ArtifactTypeParent, nil, keyA); err != nil {
 		t.Fatal(err)
 	}
 	// A delta whose parent is not published, and one whose parent tag
@@ -560,7 +560,7 @@ func TestExportImportRefusals(t *testing.T) {
 			t.Fatal(err)
 		}
 		if tc.typ != "" {
-			if _, err := artifact.PushDir(ctx, filepath.Join(root, "parent"), repo+":"+parentTag(tc.parent), tc.typ, ann, keyA, false); err != nil {
+			if _, err := artifact.PushDir(ctx, filepath.Join(root, "parent"), repo+":"+parentTag(tc.parent), tc.typ, ann, keyA); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -581,15 +581,15 @@ func TestExportImportRefusals(t *testing.T) {
 	// exported in full, and the same parent signed under another hash.
 	withParent := "WP"
 	parentAnn := map[string]string{artifact.AnnotationParent: parentSHA, artifact.AnnotationArch: "arm64", artifact.AnnotationKernel: "6.10.0"}
-	if _, err := artifact.PushDir(ctx, filepath.Join(root, "parent"), repo+":"+parentTag(parentSHA), artifact.ArtifactTypeParent, parentAnn, keyA, false); err != nil {
+	if _, err := artifact.PushDir(ctx, filepath.Join(root, "parent"), repo+":"+parentTag(parentSHA), artifact.ArtifactTypeParent, parentAnn, keyA); err != nil {
 		t.Fatal(err)
 	}
 	otherSHA := strings.Repeat("ef", 32)
 	if _, err := artifact.PushDir(ctx, filepath.Join(root, "parent"), repo+":"+parentTag(otherSHA), artifact.ArtifactTypeParent,
-		map[string]string{artifact.AnnotationParent: otherSHA}, keyA, false); err != nil {
+		map[string]string{artifact.AnnotationParent: otherSHA}, keyA); err != nil {
 		t.Fatal(err)
 	}
-	otherLoc, _, err := artifact.Resolve(ctx, repo+":"+parentTag(otherSHA), false)
+	otherLoc, _, err := artifact.Resolve(ctx, repo+":"+parentTag(otherSHA))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -642,7 +642,7 @@ func TestExportImportRefusals(t *testing.T) {
 	// of it fails after its manifest still resolves.
 	breakBlob := func(t *testing.T, ref string) {
 		t.Helper()
-		loc, found, err := artifact.Resolve(ctx, ref, false)
+		loc, found, err := artifact.Resolve(ctx, ref)
 		if err != nil || !found {
 			t.Fatalf("resolve %s: %v %v", ref, found, err)
 		}
@@ -679,7 +679,7 @@ func TestExportImportRefusals(t *testing.T) {
 			if err := ImportDelta(ctx, b, g, "S", exported); err != nil {
 				return err
 			}
-			ploc, found, err := artifact.Resolve(ctx, domainRepoFor(b.DeltaRegistry, domainOf(t, g))+":"+parentTag(parentSHA), false)
+			ploc, found, err := artifact.Resolve(ctx, domainRepoFor(b.DeltaRegistry, domainOf(t, g))+":"+parentTag(parentSHA))
 			if err != nil || !found {
 				return fmt.Errorf("imported parent: found %v: %w", found, err)
 			}
@@ -699,7 +699,7 @@ func TestExportImportRefusals(t *testing.T) {
 		{name: "export: the parent's files are gone from the registry", run: func(t *testing.T) error {
 			lost := strings.Repeat("1a", 32)
 			if _, err := artifact.PushDir(ctx, filepath.Join(root, "parent"), repo+":"+parentTag(lost), artifact.ArtifactTypeParent,
-				map[string]string{artifact.AnnotationParent: lost}, keyA, false); err != nil {
+				map[string]string{artifact.AnnotationParent: lost}, keyA); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := pushDelta(ctx, a, filepath.Join(root, "delta"), repo+":"+sessionTag("LP"), map[string]string{artifact.AnnotationParent: lost}, sealFor(t, a, g, "LP", "g1/1/1", time.Now())); err != nil {

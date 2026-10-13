@@ -39,7 +39,7 @@ func TestFiberdEnsurePrivateReadOnly(t *testing.T) {
 			if err := syscall.Mount("", private, "", syscall.MS_BIND|syscall.MS_REMOUNT|syscall.MS_RDONLY, ""); err != nil {
 				t.Fatalf("read-only remount: %v", err)
 			}
-			c := fiberd.Config{StateDir: state, DeltaRegistry: "r.example/d"}
+			c := fiberd.Config{Node: fiberd.Node{StateDir: state}, Registry: fiberd.Registry{Deltas: "r.example/d"}}
 			_, err := c.LoadDeltaKeys()
 			for _, want := range []string{"private state dir", "read-only file system"} {
 				if err == nil || !strings.Contains(err.Error(), want) {

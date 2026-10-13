@@ -43,7 +43,6 @@ func (h *fakeHome) Grants(context.Context) (<-chan home.GrantEvent, error) {
 }
 func (h *fakeHome) Health() *core.SourceHealth { return nil }
 func (h *fakeHome) CgroupRoot() string         { return "" }
-func (h *fakeHome) AdvertisedEndpoint() string { return "" }
 func (h *fakeHome) PublishReady(_ context.Context, uid string, r bool) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()

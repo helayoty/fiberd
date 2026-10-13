@@ -69,11 +69,11 @@ func TestFileRegistryRoundTrip(t *testing.T) {
 	}{
 		{"push then resolve by tag returns the digest, type, annotations and files", func(t *testing.T) {
 			var err error
-			if digest, err = PushDir(ctx, src, ref, ArtifactTypeDelta, ann, signer, false); err != nil {
+			if digest, err = PushDir(ctx, src, ref, ArtifactTypeDelta, ann, signer); err != nil {
 				t.Fatalf("push: %v", err)
 			}
 			var found bool
-			loc, found, err = Resolve(ctx, ref, false)
+			loc, found, err = Resolve(ctx, ref)
 			if err != nil || !found {
 				t.Fatalf("resolve: found=%v err=%v", found, err)
 			}
@@ -130,17 +130,17 @@ func TestFileRegistryRoundTrip(t *testing.T) {
 			}
 		}},
 		{"the same content pushed again is the same digest", func(t *testing.T) {
-			if again, err := PushDir(ctx, src, ref, ArtifactTypeDelta, ann, signer, false); err != nil || again != digest {
+			if again, err := PushDir(ctx, src, ref, ArtifactTypeDelta, ann, signer); err != nil || again != digest {
 				t.Fatalf("second push: %s %v, want %s", again, err, digest)
 			}
 		}},
 		{"a digest reference resolves", func(t *testing.T) {
-			if _, found, err := Resolve(ctx, byDigest(), false); err != nil || !found {
+			if _, found, err := Resolve(ctx, byDigest()); err != nil || !found {
 				t.Fatalf("resolve by digest: found=%v err=%v", found, err)
 			}
 		}},
 		{"pull by digest restores the files", func(t *testing.T) {
-			if got, err := PullDir(ctx, byDigest(), dst, false); err != nil || got != digest {
+			if got, err := PullDir(ctx, byDigest(), dst); err != nil || got != digest {
 				t.Fatalf("pull: %s %v", got, err)
 			}
 			if b, err := os.ReadFile(filepath.Join(dst, "pages-1.img")); err != nil || string(b) != "pages" {
@@ -164,7 +164,7 @@ func TestFileRegistryRoundTrip(t *testing.T) {
 			stored, _ := os.ReadFile(filepath.Join(files, "pages-1.img"))
 			writeFiles(t, files, map[string]string{"pages-1.img": "evil!"})
 			defer writeFiles(t, files, map[string]string{"pages-1.img": string(stored)})
-			if _, err := PullDir(ctx, byDigest(), filepath.Join(root, "tampered"), false); err == nil {
+			if _, err := PullDir(ctx, byDigest(), filepath.Join(root, "tampered")); err == nil {
 				t.Fatal("pull of a rewritten file succeeded")
 			}
 		}},
@@ -181,7 +181,7 @@ func TestFileRegistryRoundTrip(t *testing.T) {
 				t.Fatalf("seal: %v", err)
 			}
 			repo := FileScheme + filepath.Join(root, "reg", "sealed")
-			sd, err := PushDir(ctx, sealed, repo+":s", ArtifactTypeDelta, nil, signer, false)
+			sd, err := PushDir(ctx, sealed, repo+":s", ArtifactTypeDelta, nil, signer)
 			if err != nil {
 				t.Fatalf("push sealed: %v", err)
 			}
@@ -266,7 +266,7 @@ func TestFileRegistryRoundTrip(t *testing.T) {
 			for _, c := range cases {
 				t.Run(c.name, func(t *testing.T) {
 					dir := filepath.Join(t.TempDir(), "pulled")
-					if _, err := PullDir(ctx, repo+"@"+sd, dir, false); err != nil {
+					if _, err := PullDir(ctx, repo+"@"+sd, dir); err != nil {
 						t.Fatal(err)
 					}
 					if b, _ := os.ReadFile(filepath.Join(dir, "pages-1.img")); strings.Contains(string(b), "0123456789abcdef") {
@@ -304,7 +304,7 @@ func TestFileRegistryRoundTrip(t *testing.T) {
 			mb, _ := os.ReadFile(filepath.Join(blob, "manifest.json"))
 			writeFiles(t, blob, map[string]string{"manifest.json": strings.Replace(string(mb), `"5"`, `"6"`, 1)})
 			defer writeFiles(t, blob, map[string]string{"manifest.json": string(mb)})
-			if _, _, err := Resolve(ctx, byDigest(), false); err == nil {
+			if _, _, err := Resolve(ctx, byDigest()); err == nil {
 				t.Fatal("resolve of a rewritten manifest succeeded")
 			}
 		}},
@@ -355,7 +355,7 @@ func TestFileRegistryDelete(t *testing.T) {
 			repo := FileScheme + filepath.Join(root, "reg", "r")
 			var digest string
 			for _, tag := range tc.tags {
-				d, err := PushDir(ctx, src, repo+":"+tag, tc.typ, tc.ann, nil, false)
+				d, err := PushDir(ctx, src, repo+":"+tag, tc.typ, tc.ann, nil)
 				if err != nil || (digest != "" && d != digest) {
 					t.Fatalf("push %s: %s %v, want the same digest as before %s", tag, d, err, digest)
 				}
@@ -365,25 +365,25 @@ func TestFileRegistryDelete(t *testing.T) {
 			if tc.del == "@" {
 				target = repo + "@" + digest
 			}
-			if removed, err := Delete(ctx, target, false); err != nil || removed != tc.wantRemoved {
+			if removed, err := Delete(ctx, target); err != nil || removed != tc.wantRemoved {
 				t.Fatalf("delete = %v %v, want removed %v", removed, err, tc.wantRemoved)
 			}
 			if tc.again {
-				if removed, err := Delete(ctx, target, false); err != nil || removed != tc.wantAgain {
+				if removed, err := Delete(ctx, target); err != nil || removed != tc.wantAgain {
 					t.Fatalf("second delete = %v %v, want removed %v", removed, err, tc.wantAgain)
 				}
 			}
 			for _, tag := range tc.kept {
-				if _, found, _ := Resolve(ctx, repo+":"+tag, false); !found {
+				if _, found, _ := Resolve(ctx, repo+":"+tag); !found {
 					t.Fatalf("tag %s no longer resolves", tag)
 				}
 			}
 			for _, tag := range tc.gone {
-				if _, found, _ := Resolve(ctx, repo+":"+tag, false); found {
+				if _, found, _ := Resolve(ctx, repo+":"+tag); found {
 					t.Fatalf("tag %s still resolves after delete", tag)
 				}
 			}
-			if _, found, _ := Resolve(ctx, repo+"@"+digest, false); digest != "" && found == tc.contentGone {
+			if _, found, _ := Resolve(ctx, repo+"@"+digest); digest != "" && found == tc.contentGone {
 				t.Fatalf("content resolves = %v, want %v", found, !tc.contentGone)
 			}
 		})
@@ -555,7 +555,7 @@ func TestFileRegistryFaults(t *testing.T) {
 			writeFiles(t, src, map[string]string{"pages-1.img": "pages"})
 			repoDir := filepath.Join(root, "reg", "r")
 			repo := FileScheme + repoDir
-			digest, err := PushDir(ctx, src, repo+":t", ArtifactTypeDelta, nil, nil, false)
+			digest, err := PushDir(ctx, src, repo+":t", ArtifactTypeDelta, nil, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -574,13 +574,13 @@ func TestFileRegistryFaults(t *testing.T) {
 			var found bool
 			switch c.op {
 			case "push":
-				_, err = PushDir(ctx, src, ref, ArtifactTypeDelta, nil, nil, false)
+				_, err = PushDir(ctx, src, ref, ArtifactTypeDelta, nil, nil)
 			case "resolve":
-				_, found, err = Resolve(ctx, ref, false)
+				_, found, err = Resolve(ctx, ref)
 			case "pull":
-				_, err = PullDir(ctx, ref, filepath.Join(root, "dst", "out"), false)
+				_, err = PullDir(ctx, ref, filepath.Join(root, "dst", "out"))
 			case "delete":
-				_, err = Delete(ctx, ref, false)
+				_, err = Delete(ctx, ref)
 			}
 			if c.ok != (err == nil) || found != c.found {
 				t.Fatalf("%s %s = found %v, %v; want ok %v, found %v", c.op, ref, found, err, c.ok, c.found)

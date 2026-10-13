@@ -33,7 +33,7 @@ func newRegistry(t *testing.T) string {
 	t.Helper()
 	srv := httptest.NewServer(registry.New(registry.Logger(log.New(io.Discard, "", 0))))
 	t.Cleanup(srv.Close)
-	return strings.TrimPrefix(srv.URL, "http://")
+	return srv.URL
 }
 
 // The command dispatches subcommands and maps outcomes to exit codes. It
@@ -50,7 +50,7 @@ func TestRunDispatch(t *testing.T) {
 		{name: "no subcommand is a usage error", want: 2, wantStderr: "usage: zygotectl"},
 		{name: "help prints usage", args: []string{"--help"}, want: 0, wantStderr: "usage: zygotectl"},
 		{name: "an unknown subcommand fails", args: []string{"run"}, want: 1, wantStderr: `unknown subcommand "run"`},
-		{name: "-h on a subcommand prints its flags", args: []string{"push", "-h"}, want: 0, wantStderr: "-plain-http"},
+		{name: "-h on a subcommand prints its flags", args: []string{"push", "-h"}, want: 0, wantStderr: "-ref"},
 		{name: "an unknown flag is a usage error", args: []string{"pull", "-bogus"}, want: 2, wantStderr: "flag provided but not defined: -bogus"},
 		{name: "build needs -zygote and -out", args: []string{"build", "-out", "x"}, want: 1, wantStderr: "-zygote and -out are required"},
 		{name: "push needs -dir and -ref", args: []string{"push", "-dir", "x"}, want: 1, wantStderr: "-dir and -ref are required"},
@@ -139,16 +139,16 @@ func TestBuildPushPullInspect(t *testing.T) {
 		{name: "inspect of a directory that is not an artifact fails",
 			args: func() []string { return []string{"inspect", "-dir", dir} }, wantStderr: "config.json"},
 		{name: "push prints the same digest",
-			args: func() []string { return []string{"push", "-dir", art, "-ref", ref + ":v1", "-plain-http"} },
+			args: func() []string { return []string{"push", "-dir", art, "-ref", ref + ":v1"} },
 			check: func(t *testing.T, stdout string) {
 				if got := strings.TrimSpace(stdout); got != digest {
 					t.Fatalf("pushed digest = %q, want %q", got, digest)
 				}
 			}},
 		{name: "push of a directory that is not an artifact fails",
-			args: func() []string { return []string{"push", "-dir", dir, "-ref", ref + ":v2", "-plain-http"} }, wantStderr: "config.json"},
+			args: func() []string { return []string{"push", "-dir", dir, "-ref", ref + ":v2"} }, wantStderr: "config.json"},
 		{name: "pull by digest prints the config",
-			args: func() []string { return []string{"pull", "-ref", ref + "@" + digest, "-out", pulled, "-plain-http"} },
+			args: func() []string { return []string{"pull", "-ref", ref + "@" + digest, "-out", pulled} },
 			check: func(t *testing.T, stdout string) {
 				var cfg struct {
 					Args []string `json:"args"`
@@ -186,7 +186,7 @@ func TestBuildPushPullInspect(t *testing.T) {
 			}},
 		{name: "pull of a tag the registry lacks fails",
 			args: func() []string {
-				return []string{"pull", "-ref", ref + ":missing", "-out", filepath.Join(dir, "p2"), "-plain-http"}
+				return []string{"pull", "-ref", ref + ":missing", "-out", filepath.Join(dir, "p2")}
 			},
 			wantStderr: "artifact: pull"},
 	}

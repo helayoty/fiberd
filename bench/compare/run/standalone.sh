@@ -51,7 +51,7 @@ rootfs() {
 push_counter() { # push_counter <tag> <args>
   curl -sf "http://$REG/v2/" >/dev/null || { echo "registry $REG not reachable: make registry-start" >&2; exit 1; }
   bin/zygotectl build -zygote bin/counter-static -args "$2" -skip-images -out "$STATE/counter-art-$1" >/dev/null
-  bin/zygotectl push -dir "$STATE/counter-art-$1" -ref "$REG/zygotes/counter:$1" -plain-http
+  bin/zygotectl push -dir "$STATE/counter-art-$1" -ref "http://$REG/zygotes/counter:$1"
 }
 
 issuer_pid=""
@@ -67,10 +67,9 @@ start_issuer() {
 home_pid=""
 start_home() { # start_home <runtime> <flags...>
   local rt=$1; shift
-  rm -rf "$STATE/$rt" /tmp/fz-compare; mkdir -p "$STATE/$rt" /tmp/fz-compare
+  rm -rf "$STATE/$rt"; mkdir -p "$STATE/$rt"
   bin/fiberd -state "$STATE/$rt" -node-id "compare-$rt" -verifier jwks -issuer "$ISSUER_URL" -jwks-max-stale 10m \
-    -insecure-plaintext -listen "$ADDR" -runtime "$rt" -run-dir /tmp/fz-compare -cgroup-root "$CGROOT" \
-    -status-interval 100ms "$@" >>"$STATE/$rt/fiberd.log" 2>&1 &
+    -insecure-plaintext -listen "$ADDR" -runtime "$rt" -cgroup-root "$CGROOT" "$@" >>"$STATE/$rt/fiberd.log" 2>&1 &
   home_pid=$!
   for _ in $(seq 1 100); do
     curl -sf --unix-socket "$STATE/$rt/private/admin.sock" http://x/healthz >/dev/null 2>&1 && return
@@ -102,13 +101,13 @@ for rt in "$@"; do
     runc)
       rootfs
       template=$(push_counter runc "--heap-mb 32")
-      start_home runc -runc-rootfs "$ROOTFS" -registry "$REG/zygotes/counter" -registry-plain-http
+      start_home runc -runc-rootfs "$ROOTFS" -registry "http://$REG/zygotes/counter"
       measure fiberd-runc shared-kernel runc -template "$template"
       stop_home ;;
     gvisor)
       rootfs
       template=$(push_counter gvisor "--heap-mb 32 --gvisor")
-      start_home gvisor -gvisor-rootfs "$ROOTFS" -registry "$REG/zygotes/counter" -registry-plain-http
+      start_home gvisor -gvisor-rootfs "$ROOTFS" -registry "http://$REG/zygotes/counter"
       measure fiberd-gvisor sandboxed gvisor -isolation UNTRUSTED -template "$template"
       measure fiberd-gvisor-pool2 sandboxed gvisor -isolation UNTRUSTED -template "$template" -fiber-warm 2
       stop_home ;;

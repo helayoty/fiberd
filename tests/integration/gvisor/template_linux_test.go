@@ -37,8 +37,8 @@ func pushTemplate(t *testing.T, executable string, args ...string) (repo, digest
 	}
 	srv := httptest.NewServer(registry.New())
 	t.Cleanup(srv.Close)
-	repo = strings.TrimPrefix(srv.URL, "http://") + "/zygotes/ref"
-	if _, err := artifact.Push(ctx, out, repo+":v1", true); err != nil {
+	repo = srv.URL + "/zygotes/ref"
+	if _, err := artifact.Push(ctx, out, repo+":v1"); err != nil {
 		t.Fatalf("push artifact: %v", err)
 	}
 	return repo, digest
@@ -51,7 +51,7 @@ func registryHome(t *testing.T, repo string, mods ...func(*host.Config)) (core.R
 	var state string
 	rt := newRuntimeWith(t, "", append([]func(*host.Config){func(cfg *host.Config) {
 		cfg.Templates = nil
-		cfg.Registry, cfg.RegistryPlainHTTP = repo, true
+		cfg.Registry = repo
 		state = filepath.Join(work, name)
 		cfg.TemplateCache = filepath.Join(state, "cache")
 	}}, mods...)...)

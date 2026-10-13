@@ -1,7 +1,7 @@
 // Package endpoint is how a fiber's address is written, chosen and
 // dialled. Clone returns one string; it is a URL with a scheme:
 //
-//	unix:///run/fiberd/<grant>/<epoch>-<seq>.sock   same-host callers
+//	unix:///var/lib/fiberd/run/<grant>/<epoch>-<seq>.sock   same-host callers
 //	tcp://10.0.0.7:30012  tcp://[fd00::7]:30012      callers over the network
 //
 // Which family a home hands out is declared per deployment (a flag on

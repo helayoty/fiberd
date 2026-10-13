@@ -138,13 +138,13 @@ func TestRegistryMobility(t *testing.T) {
 			if err := readJSON(filepath.Join(deltaA, remoteFile), &rec); err != nil || rec.Ref != repo+":"+sessionTag("S") || remote != rec.Ref+"@"+rec.Digest {
 				t.Fatalf("remote record = %+v %v, published as %s", rec, err, remote)
 			}
-			ploc, pfound, err := artifact.Resolve(ctx, repo+":"+parentTag(parentSHA), false)
+			ploc, pfound, err := artifact.Resolve(ctx, repo+":"+parentTag(parentSHA))
 			if err != nil || !pfound || ploc.ArtifactType != artifact.ArtifactTypeParent || a.cfg.DeltaKeys.Verify(ploc) != nil ||
 				ploc.Annotations[artifact.AnnotationParent] != parentSHA || ploc.Annotations[artifact.AnnotationHome] != "home-a" ||
 				ploc.Annotations[artifact.AnnotationArch] != "arm64" || ploc.Annotations[artifact.AnnotationBackend] != "fake" {
 				t.Fatalf("parent = %+v %v %v", ploc, pfound, err)
 			}
-			loc, sfound, err := artifact.Resolve(ctx, rec.Ref, false)
+			loc, sfound, err := artifact.Resolve(ctx, rec.Ref)
 			if err != nil || !sfound || loc.Digest != rec.Digest || loc.ArtifactType != artifact.ArtifactTypeDelta || a.cfg.DeltaKeys.Verify(loc) != nil {
 				t.Fatalf("session = %+v %v %v", loc, sfound, err)
 			}
@@ -165,7 +165,7 @@ func TestRegistryMobility(t *testing.T) {
 			if err != nil {
 				t.Fatalf("second publish: %v", err)
 			}
-			if ploc2, _, _ := artifact.Resolve(ctx, repo+":"+parentTag(parentSHA), false); ploc2.Digest != ploc.Digest {
+			if ploc2, _, _ := artifact.Resolve(ctx, repo+":"+parentTag(parentSHA)); ploc2.Digest != ploc.Digest {
 				t.Fatal("the parent was pushed again")
 			}
 			remote = remote2
@@ -216,7 +216,7 @@ func TestRegistryMobility(t *testing.T) {
 				sealFor(t, a.cfg, g, "E", "g1/1/1", time.Now().Add(-2*deltaTTL))); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := artifact.PushDir(ctx, filepath.Join(a.parentsDir(), parentSHA), repo+":"+sessionTag("X"), artifact.ArtifactTypeParent, nil, keyA, false); err != nil {
+			if _, err := artifact.PushDir(ctx, filepath.Join(a.parentsDir(), parentSHA), repo+":"+sessionTag("X"), artifact.ArtifactTypeParent, nil, keyA); err != nil {
 				t.Fatal(err)
 			}
 			cases := []struct {
@@ -269,7 +269,7 @@ func TestRegistryMobility(t *testing.T) {
 				sha, typ string
 				key      *jose.JSONWebKey
 			}{{foreign, artifact.ArtifactTypeParent, keyC}, {mistyped, artifact.ArtifactTypeDelta, keyA}, {mismatched, artifact.ArtifactTypeParent, keyA}} {
-				if _, err := artifact.PushDir(ctx, pdir, repo+":"+parentTag(p.sha), p.typ, map[string]string{artifact.AnnotationParent: p.sha}, p.key, false); err != nil {
+				if _, err := artifact.PushDir(ctx, pdir, repo+":"+parentTag(p.sha), p.typ, map[string]string{artifact.AnnotationParent: p.sha}, p.key); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -315,7 +315,7 @@ func TestRegistryMobility(t *testing.T) {
 					if n := pullsLeft(tc.home); n != 0 {
 						t.Fatalf("a refused claim left %d pull directories in the parent store", n)
 					}
-					if _, still, _ := artifact.Resolve(ctx, repo+":"+sessionTag(tc.session), false); !still {
+					if _, still, _ := artifact.Resolve(ctx, repo+":"+sessionTag(tc.session)); !still {
 						t.Fatal("a refused claim took the session")
 					}
 				})
@@ -361,7 +361,7 @@ func TestRegistryMobility(t *testing.T) {
 			if err != nil || p.SHA256() != parentSHA || !exists(filepath.Join(b.parentsDir(), parentSHA, fakePagesFile)) {
 				t.Fatalf("parent after the claim: %v %v", p, err)
 			}
-			if _, still, _ := artifact.Resolve(ctx, repo+":"+sessionTag("S"), false); still {
+			if _, still, _ := artifact.Resolve(ctx, repo+":"+sessionTag("S")); still {
 				t.Fatal("the claimed session is still published")
 			}
 			if a.Owned(ctx, deltaA) {
@@ -423,15 +423,15 @@ func TestRegistryMobility(t *testing.T) {
 		}},
 		{"a published parent whose files the registry lost cannot be pulled", func(t *testing.T) {
 			lost := shaOf("lost")
-			ploc, _, err := artifact.Resolve(ctx, repo+":"+parentTag(parentSHA), false)
+			ploc, _, err := artifact.Resolve(ctx, repo+":"+parentTag(parentSHA))
 			if err != nil {
 				t.Fatal(err)
 			}
 			if _, err := artifact.PushDir(ctx, filepath.Join(a.parentsDir(), parentSHA), repo+":"+parentTag(lost), artifact.ArtifactTypeParent,
-				map[string]string{artifact.AnnotationParent: lost}, keyA, false); err != nil {
+				map[string]string{artifact.AnnotationParent: lost}, keyA); err != nil {
 				t.Fatal(err)
 			}
-			lloc, _, err := artifact.Resolve(ctx, repo+":"+parentTag(lost), false)
+			lloc, _, err := artifact.Resolve(ctx, repo+":"+parentTag(lost))
 			if err != nil || lloc.Digest == ploc.Digest {
 				t.Fatalf("the lost parent must be its own blob: %v", err)
 			}
@@ -449,7 +449,7 @@ func TestRegistryMobility(t *testing.T) {
 		{"pulling a parent the codec cannot load, or without a codec", func(t *testing.T) {
 			odd := shaOf("odd")
 			if _, err := artifact.PushDir(ctx, filepath.Join(a.cfg.DeltaDir, "g1", "1-1"), repo+":"+parentTag(odd), artifact.ArtifactTypeParent,
-				map[string]string{artifact.AnnotationParent: odd}, keyA, false); err != nil {
+				map[string]string{artifact.AnnotationParent: odd}, keyA); err != nil {
 				t.Fatal(err)
 			}
 			if err := b.pullParent(ctx, repo, odd); !errors.Is(err, os.ErrNotExist) {
@@ -534,7 +534,7 @@ func TestRetireDelta(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, _ = artifact.Delete(ctx, tag, false)
+			_, _ = artifact.Delete(ctx, tag)
 			dir := tc.setup(t)
 			var before remoteRecord
 			_ = readJSON(filepath.Join(dir, remoteFile), &before)
@@ -548,7 +548,7 @@ func TestRetireDelta(t *testing.T) {
 			if _, serr := os.Stat(filepath.Join(dir, "manifest.json")); serr != nil {
 				t.Fatalf("the delta itself was touched: %v", serr)
 			}
-			loc, found, rerr := artifact.Resolve(ctx, tag, false)
+			loc, found, rerr := artifact.Resolve(ctx, tag)
 			if rerr != nil {
 				t.Fatal(rerr)
 			}
@@ -711,7 +711,7 @@ func TestClaimRace(t *testing.T) {
 				if won != 1 {
 					t.Fatalf("round %d: %d of %d homes claimed the session, want exactly one", round, won, tc.homes)
 				}
-				if _, still, _ := artifact.Resolve(ctx, domainRepoFor(a.cfg.DeltaRegistry, domainOf(t, g))+":"+sessionTag("S"), false); still {
+				if _, still, _ := artifact.Resolve(ctx, domainRepoFor(a.cfg.DeltaRegistry, domainOf(t, g))+":"+sessionTag("S")); still {
 					t.Fatalf("round %d: the session is still published", round)
 				}
 			}
@@ -753,9 +753,8 @@ func TestClaimLost(t *testing.T) {
 				reg.ServeHTTP(w, r)
 			}))
 			t.Cleanup(srv.Close)
-			registry := strings.TrimPrefix(srv.URL, "http://") + "/deltas"
+			registry := srv.URL + "/deltas"
 			a := mobilityHome(t, "home-a", newCodecBackend(core.TierCheckpoint), artifact.Keys{Signer: keyA, Seal: seal}, platform, registry)
-			a.cfg.RegistryPlainHTTP = true
 			if err := writeParentDir(filepath.Join(a.parentsDir(), parentSHA), parentPages); err != nil {
 				t.Fatal(err)
 			}
@@ -766,7 +765,6 @@ func TestClaimLost(t *testing.T) {
 				t.Fatal(err)
 			}
 			b := mobilityHome(t, "home-b", newCodecBackend(core.TierCheckpoint), artifact.Keys{Signer: signingKey(t, "home-b"), Trust: []jose.JSONWebKey{keyA.Public()}, Seal: seal}, platform, registry)
-			b.cfg.RegistryPlainHTTP = true
 			rd, ok, err := b.FindDelta(ctx, g, "S")
 			if err != nil || !ok {
 				t.Fatalf("FindDelta = %v %v", ok, err)
@@ -785,7 +783,7 @@ func TestClaimLost(t *testing.T) {
 			if err != nil || !exists(filepath.Join(dst, "manifest.json")) {
 				t.Fatalf("ClaimDelta = %q, %v", dst, err)
 			}
-			if _, still, _ := artifact.Resolve(ctx, domainRepoFor(a.cfg.DeltaRegistry, domainOf(t, g))+":"+sessionTag("S"), true); still {
+			if _, still, _ := artifact.Resolve(ctx, domainRepoFor(a.cfg.DeltaRegistry, domainOf(t, g))+":"+sessionTag("S")); still {
 				t.Fatal("the claim left the session published")
 			}
 		})

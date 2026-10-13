@@ -13,7 +13,6 @@ Environments differ in how [grants](../glossary.md#grant) arrive, how they show 
 | How do grants arrive ahead of time? | `*.jwt` files in `-grants-dir`, else only inside [Clone](../glossary.md#clone) |
 | Is the issuer reachable? | The [issuer](../glossary.md#issuer)'s key set refreshed recently |
 | Which cgroup subtree may the runtime carve? | `-cgroup-root` |
-| Where do callers reach this home? | `-advertise` |
 | How is readiness published? | Only through the Watch stream |
 | What does the home vouch for? | Nothing |
 | Which devices may an [engine](../glossary.md#engine) drive? | The static `-devices` set, its [device channel](../glossary.md#device-channel) |

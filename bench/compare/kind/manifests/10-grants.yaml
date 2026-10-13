@@ -29,8 +29,7 @@ spec:
     nodeName: compare-control-plane
     args:
       - -registry
-      - "@REGISTRY@/zygotes/counter"
-      - -registry-plain-http
+      - "http://@REGISTRY@/zygotes/counter"
     resources:
       limits: { memory: 4Gi }
       requests: { memory: 256Mi }
@@ -56,8 +55,7 @@ spec:
       - -runc-rootfs
       - /usr/share/fiberd/gvisor-rootfs
       - -registry
-      - "@REGISTRY@/zygotes/counter"
-      - -registry-plain-http
+      - "http://@REGISTRY@/zygotes/counter"
     resources:
       limits: { memory: 4Gi }
       requests: { memory: 256Mi }
@@ -84,8 +82,7 @@ spec:
       - -gvisor-rootfs
       - /usr/share/fiberd/gvisor-rootfs
       - -registry
-      - "@REGISTRY@/zygotes/counter"
-      - -registry-plain-http
+      - "http://@REGISTRY@/zygotes/counter"
     resources:
       # A restored sandbox holding the counter's 32 MiB heap is about 90
       # MiB, so 50 need about 4.5 GiB. fiberd keeps an eighth of the

@@ -48,7 +48,6 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintln(stdout, "fiberd", cli.Version(version))
 		return 0
 	}
-	c.Finish()
 	logger := log.New(stderr, "", log.LstdFlags)
 	if err := c.NarrowCaps(); err != nil {
 		logger.Print(err)

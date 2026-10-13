@@ -31,7 +31,6 @@ type Config struct {
 	// CgroupRoot is the delegated cgroup v2 subtree (default
 	// /sys/fs/cgroup/fiberd).
 	CgroupRoot string
-	Endpoint   string
 	// Devices is the static device set every grant's engine may drive
 	// (paths or ids): the standalone home's device channel. Empty means
 	// no devices.
@@ -66,7 +65,6 @@ func New(cfg Config) *Home {
 func (h *Home) Name() string               { return "standalone" }
 func (h *Home) Health() *core.SourceHealth { return h.health }
 func (h *Home) CgroupRoot() string         { return h.cfg.CgroupRoot }
-func (h *Home) AdvertisedEndpoint() string { return h.cfg.Endpoint }
 func (h *Home) PublishReady(context.Context, string, bool) error {
 	return nil // readiness rides the Watch stream; nothing to publish
 }

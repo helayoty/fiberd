@@ -60,9 +60,6 @@ type Config struct {
 	// Family picks which Pod IP callers dial (inet4 or inet6; unix means
 	// fibers are reachable from this Pod only).
 	Family endpoint.Family
-	// ListenPort is the port of fiberd's gRPC listener, for the
-	// advertised endpoint.
-	ListenPort string
 	// TokenFile is the projected service-account token, watched for an
 	// issuer change (default: the in-cluster path).
 	TokenFile string
@@ -274,16 +271,6 @@ func (h *Home) EndpointHost() string {
 		}
 	}
 	return ""
-}
-
-// AdvertisedEndpoint is where callers in the cluster reach this fiberd:
-// the Pod IP of the family and the gRPC port.
-func (h *Home) AdvertisedEndpoint() string {
-	host := h.EndpointHost()
-	if host == "" {
-		return ""
-	}
-	return net.JoinHostPort(host, h.cfg.ListenPort)
 }
 
 // Scope: the facts the Pod is made of.

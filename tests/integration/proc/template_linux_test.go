@@ -31,14 +31,14 @@ func pushTemplates(t *testing.T, args ...[]string) (repo string, digests []strin
 	ctx := context.Background()
 	srv := httptest.NewServer(registry.New())
 	t.Cleanup(srv.Close)
-	repo = strings.TrimPrefix(srv.URL, "http://") + "/zygotes/ref"
+	repo = srv.URL + "/zygotes/ref"
 	for i, a := range args {
 		out := filepath.Join(t.TempDir(), "art")
 		digest, err := artifact.Build(ctx, artifact.BuildOptions{Zygote: zygoteBin, Args: a, Out: out, SkipImages: true})
 		if err != nil {
 			t.Fatalf("build artifact: %v", err)
 		}
-		if _, err := artifact.Push(ctx, out, fmt.Sprintf("%s:v%d", repo, i), true); err != nil {
+		if _, err := artifact.Push(ctx, out, fmt.Sprintf("%s:v%d", repo, i)); err != nil {
 			t.Fatalf("push artifact: %v", err)
 		}
 		digests = append(digests, digest)
@@ -180,7 +180,7 @@ func hiddenTemplateRoundTrip(t *testing.T, state string) {
 		}
 	}
 	rt, err := newHost(host.Config{
-		Registry: repo, RegistryPlainHTTP: true, TemplateCache: cache,
+		Registry: repo, TemplateCache: cache,
 		CgroupRoot: filepath.Join(cgRoot, fmt.Sprintf("tpl%d-%d", os.Getpid(), time.Now().UnixNano()%1_000_000)),
 		RunDir:     filepath.Join("/tmp", "fz-tpl-"+fmt.Sprint(os.Getpid())), DeltaDir: deltas,
 	})

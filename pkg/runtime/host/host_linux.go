@@ -888,7 +888,7 @@ func (r *Runtime) resolveTemplate(ctx context.Context, digest string) (backend.T
 	}
 	if err != nil {
 		log.Printf("host: pulling template %s from %s", digest, r.cfg.Registry)
-		cfg, err = artifact.Pull(ctx, r.cfg.Registry+"@"+digest, dir, r.cfg.RegistryPlainHTTP)
+		cfg, err = artifact.Pull(ctx, r.cfg.Registry+"@"+digest, dir)
 		if err != nil {
 			_ = os.RemoveAll(dir)
 			return backend.Template{}, fmt.Errorf("%w %q: %w", ErrNoTemplate, digest, err)

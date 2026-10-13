@@ -25,8 +25,8 @@ import (
 type middleware func(next http.Handler) http.Handler
 
 // newFaultyRegistry serves go-containerregistry's in-memory registry,
-// and returns its host:port. Once arm is called, requests go through mw.
-func newFaultyRegistry(t *testing.T, mw middleware) (host string, arm func()) {
+// and returns its http:// URL. Once arm is called, requests go through mw.
+func newFaultyRegistry(t *testing.T, mw middleware) (url string, arm func()) {
 	t.Helper()
 	plain := registry.New(registry.Logger(log.New(io.Discard, "", 0)))
 	faulty := plain
@@ -42,7 +42,7 @@ func newFaultyRegistry(t *testing.T, mw middleware) (host string, arm func()) {
 		plain.ServeHTTP(w, r)
 	}))
 	t.Cleanup(srv.Close)
-	return strings.TrimPrefix(srv.URL, "http://"), func() { armed.Store(true) }
+	return srv.URL, func() { armed.Store(true) }
 }
 
 // matches reports whether r is method on a manifest (kind "manifest")
@@ -150,7 +150,7 @@ func pushDelta(t *testing.T, reg string) string {
 	t.Helper()
 	src := t.TempDir()
 	writeFile(t, filepath.Join(src, "pages-1.img"), "pages")
-	d, err := artifact.PushDir(context.Background(), src, reg+"/r:t", artifact.ArtifactTypeDelta, nil, nil, true)
+	d, err := artifact.PushDir(context.Background(), src, reg+"/r:t", artifact.ArtifactTypeDelta, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -212,7 +212,7 @@ func TestDelete(t *testing.T) {
 			if c.ref != "" {
 				ref = c.ref
 			}
-			removed, err := artifact.Delete(ctx, full(ref), true)
+			removed, err := artifact.Delete(ctx, full(ref))
 			if c.want == "" && (err != nil || removed != c.removed) {
 				t.Fatalf("Delete = %v %v, want removed %v", removed, err, c.removed)
 			}
@@ -224,7 +224,7 @@ func TestDelete(t *testing.T) {
 				found bool
 			}{{c.gone, false}, {c.kept, true}} {
 				for _, r := range list.refs {
-					_, found, err := artifact.Resolve(ctx, full(r), true)
+					_, found, err := artifact.Resolve(ctx, full(r))
 					if err != nil || found != list.found {
 						t.Fatalf("after delete, %s found = %v (%v), want %v", r, found, err, list.found)
 					}
@@ -238,7 +238,7 @@ func TestDelete(t *testing.T) {
 // serve something other than what they were asked for.
 func TestResolveRegistry(t *testing.T) {
 	notJSON := func(t *testing.T, reg string) {
-		req, err := http.NewRequest(http.MethodPut, "http://"+reg+"/v2/r/manifests/t", bytes.NewReader([]byte("not json")))
+		req, err := http.NewRequest(http.MethodPut, reg+"/v2/r/manifests/t", bytes.NewReader([]byte("not json")))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -278,7 +278,7 @@ func TestResolveRegistry(t *testing.T) {
 				pushDelta(t, reg)
 			}
 			arm()
-			loc, found, err := artifact.Resolve(context.Background(), reg+"/"+c.ref, true)
+			loc, found, err := artifact.Resolve(context.Background(), reg+"/"+c.ref)
 			if c.ok != (err == nil) || found != c.found {
 				t.Fatalf("Resolve = %+v, %v, %v; want ok %v, found %v", loc, found, err, c.ok, c.found)
 			}
@@ -329,7 +329,7 @@ func TestDirRegistryTransfers(t *testing.T) {
 				if c.noSrc {
 					src = filepath.Join(src, "missing")
 				}
-				d, err := artifact.PushDir(ctx, src, reg+"/"+c.ref, artifact.ArtifactTypeDelta, c.ann, nil, true)
+				d, err := artifact.PushDir(ctx, src, reg+"/"+c.ref, artifact.ArtifactTypeDelta, c.ann, nil)
 				if c.ok != (err == nil) {
 					t.Fatalf("PushDir = %s, %v; want ok %v", d, err, c.ok)
 				}
@@ -337,7 +337,7 @@ func TestDirRegistryTransfers(t *testing.T) {
 					return
 				}
 				repo, _, _ := strings.Cut(c.ref, ":")
-				loc, found, err := artifact.Resolve(ctx, reg+"/"+repo+"@"+d, true)
+				loc, found, err := artifact.Resolve(ctx, reg+"/"+repo+"@"+d)
 				if err != nil || !found || loc.Digest != d {
 					t.Fatalf("Resolve by digest = %+v, %v, %v", loc, found, err)
 				}
@@ -345,7 +345,7 @@ func TestDirRegistryTransfers(t *testing.T) {
 					t.Fatalf("created = %q, want %q", loc.Annotations[ocispec.AnnotationCreated], want)
 				}
 			case "pull":
-				pushed, err := artifact.PushDir(ctx, src, reg+"/r:t", artifact.ArtifactTypeDelta, nil, nil, true)
+				pushed, err := artifact.PushDir(ctx, src, reg+"/r:t", artifact.ArtifactTypeDelta, nil, nil)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -355,7 +355,7 @@ func TestDirRegistryTransfers(t *testing.T) {
 					writeFile(t, filepath.Join(root, "file"), "")
 					dst = filepath.Join(root, "file", "dst")
 				}
-				d, err := artifact.PullDir(ctx, reg+"/"+c.ref, dst, true)
+				d, err := artifact.PullDir(ctx, reg+"/"+c.ref, dst)
 				if c.ok != (err == nil) {
 					t.Fatalf("PullDir = %s, %v; want ok %v", d, err, c.ok)
 				}
@@ -382,15 +382,19 @@ func TestRepository(t *testing.T) {
 		plain                             bool
 		bad                               bool
 	}{
-		{name: "a tag", ref: "reg.example:5000/a/b:v1", registry: "reg.example:5000", repo: "a/b", target: "v1", plain: true},
+		{name: "a tag", ref: "reg.example:5000/a/b:v1", registry: "reg.example:5000", repo: "a/b", target: "v1"},
 		{name: "a digest", ref: "reg.example/a@sha256:" + strings.Repeat("ab", 32), registry: "reg.example", repo: "a",
 			target: "sha256:" + strings.Repeat("ab", 32)},
 		{name: "a port and no tag", ref: "reg.example:5000/a", registry: "reg.example:5000", repo: "a"},
+		{name: "http:// is plain HTTP", ref: "http://reg.example:5000/a/b:v1", registry: "reg.example:5000", repo: "a/b", target: "v1", plain: true},
+		{name: "http:// with a digest", ref: "http://reg.example/a@sha256:" + strings.Repeat("ab", 32), registry: "reg.example", repo: "a",
+			target: "sha256:" + strings.Repeat("ab", 32), plain: true},
+		{name: "https:// is TLS", ref: "https://reg.example/a/b:v1", registry: "reg.example", repo: "a/b", target: "v1"},
 		{name: "a name the registry cannot hold", ref: "reg.example/UPPER:v1", bad: true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			repo, target, err := artifact.Repository(c.ref, c.plain)
+			repo, target, err := artifact.Repository(c.ref)
 			if c.bad {
 				if err == nil {
 					t.Fatalf("Repository(%q) accepted it", c.ref)

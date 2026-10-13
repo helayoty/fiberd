@@ -24,18 +24,18 @@ import (
 
 // fiberdConfig parses args the way cmd/fiberd does, after a base that
 // starts a plaintext fiberd with the insecure-json verifier on loopback
-// ":0" ports. Later flags win.
+// ":0" ports, with its loops at 10ms. Later flags win.
 func fiberdConfig(t *testing.T, state string, args ...string) *fiberd.Config {
 	t.Helper()
 	fs := flag.NewFlagSet("fiberd", flag.ContinueOnError)
 	var c fiberd.Config
 	c.Bind(fs)
 	base := []string{"-state", state, "-listen", "127.0.0.1:0", "-insecure-plaintext", "-verifier", "insecure-json",
-		"-node-id", "node-a", "-status-interval", "10ms", "-pressure-interval", "10ms"}
+		"-node-id", "node-a"}
 	if err := fs.Parse(append(base, args...)); err != nil {
 		t.Fatal(err)
 	}
-	c.Finish()
+	c.Timing = fiberd.Timing{StatusEvery: 10 * time.Millisecond, PressureEvery: 10 * time.Millisecond}
 	return &c
 }
 
@@ -168,7 +168,7 @@ func TestFiberdRunRunc(t *testing.T) {
 			}
 			t.Cleanup(func() { _ = os.RemoveAll(state) })
 			args := append([]string{"-runtime", "runc", "-runc-rootfs", rootfs, "-template", "default=/bin/refzygote --heap-mb 32",
-				"-cgroup-root", cg, "-run-dir", filepath.Join(state, "run")}, tc.args...)
+				"-cgroup-root", cg}, tc.args...)
 			r := startFiberd(t, fiberdConfig(t, state, args...))
 			for _, d := range []string{cg, filepath.Join(state, "run"), filepath.Join(state, "deltas"), filepath.Join(state, "templates"),
 				filepath.Join(state, "runc")} {

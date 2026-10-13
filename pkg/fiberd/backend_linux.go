@@ -12,5 +12,5 @@ import (
 // resume restores under lives in the private state directory, which
 // fibers never see.
 func (c *Config) procOptions() procbackend.Options {
-	return procbackend.Options{CRIU: c.CRIUBin, RootBind: filepath.Join(c.PrivateDir(), "root")}
+	return procbackend.Options{RootBind: filepath.Join(c.PrivateDir(), "root")}
 }

@@ -44,7 +44,7 @@ pids+=($!)
 for _ in $(seq 1 50); do curl -sf --max-time 2 "$ISSUER_URL/openid/v1/jwks" >/dev/null 2>&1 && break; sleep 0.1; done
 bin/fiberd -state "$STATE" -node-id "$NODE" -verifier jwks -issuer "$ISSUER_URL" -jwks-max-stale 10m -insecure-plaintext \
   -listen "$HOME_ADDR" -runtime hyperlight -hyperlight-helper "$HL_HELPER" -hyperlight-guest "$HL_GUEST" \
-  -template "default=$HL_TEMPLATE" -run-dir /tmp/fz-knative -status-interval 50ms -stale-ttl 30s \
+  -template "default=$HL_TEMPLATE" -stale-ttl 30s \
   >"$STATE/fiberd.log" 2>&1 &
 pids+=($!)
 for _ in $(seq 1 100); do curl -sf --max-time 2 --unix-socket "$STATE/private/admin.sock" http://x/healthz >/dev/null 2>&1 && break; sleep 0.1; done
@@ -92,7 +92,7 @@ for _ in $(seq 1 60); do
   if grep -q "activator: parked hello-0" "$STATE/activator.log"; then parked=1; break; fi
   sleep 0.5
 done
-[ "$parked" = 1 ] || { echo "FAIL: no park logged within 30s"; tail -n 20 "$STATE/activator.log" "$STATE/fiberd.log" /tmp/fz-knative/*/zygote.log 2>/dev/null; exit 1; }
+[ "$parked" = 1 ] || { echo "FAIL: no park logged within 30s"; tail -n 20 "$STATE/activator.log" "$STATE/fiberd.log" "$STATE"/run/*/zygote.log 2>/dev/null; exit 1; }
 echo "ok   parked: $(grep 'activator: parked' "$STATE/activator.log" | tail -1 | sed 's/.*activator: //')"
 t2=$(date +%s%N)
 expect "resume with state intact" "$(ask incr)" "RESUME 3"

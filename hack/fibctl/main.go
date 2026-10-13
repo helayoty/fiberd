@@ -1,7 +1,7 @@
 // Command fibctl sends one line to a fiber's endpoint and prints the
 // reply: the shell's way to talk to a reference-zygote fiber.
 //
-//	fibctl unix:///run/fiberd/g/1-1.sock incr
+//	fibctl unix:///var/lib/fiberd/run/g/1-1.sock incr
 //	fibctl tcp://10.0.0.7:30012 get
 package main
 
