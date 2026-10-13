@@ -70,6 +70,7 @@ func TestReadPidfile(t *testing.T) {
 		{name: "not a number", content: "garbage\n"},
 		{name: "zero", content: "0\n"},
 		{name: "negative", content: "-3\n"},
+		{name: "a pid with no newline, as criu writes it", content: "4242", want: 4242, wantOK: true},
 		{name: "a pid with a newline", content: "4242\n", want: 4242, wantOK: true},
 		{name: "a pid with spaces", content: " 7 ", want: 7, wantOK: true},
 	}
@@ -90,13 +91,16 @@ func TestReadPidfile(t *testing.T) {
 }
 
 // TestAwaitRestore checks that a written pid file is the tree being up, a
-// half-written one is read again, criu ending first is its exit, and a
-// finished context ends the wait.
+// missing or still empty one is read again, criu ending first is its
+// exit, and a finished context ends the wait. The states a reader can
+// see are criu's, which creates the file and then writes the pid in one
+// write, so a file holding a shorter pid is not one of them.
 func TestAwaitRestore(t *testing.T) {
 	errExit := errors.New("exit status 1")
 	cases := []struct {
 		name      string
 		content   string // the pid file before the call, "" for none
+		empty     bool   // the pid file exists but is empty before the call
 		later     string // the pid file written once the wait has started
 		exit      error  // sent on done before the call
 		ended     bool   // done carries exit
@@ -105,8 +109,9 @@ func TestAwaitRestore(t *testing.T) {
 		wantErr   error
 		wantExit  bool // the error is "exited"
 	}{
-		{name: "the pid file is there", content: "4242\n", want: 4242},
-		{name: "written while waiting", content: "42", later: "4242\n", want: 4242},
+		{name: "the pid file is there", content: "4242", want: 4242},
+		{name: "written while waiting", later: "4242", want: 4242},
+		{name: "created empty, then written", empty: true, later: "4242", want: 4242},
 		{name: "criu failed first", ended: true, exit: errExit, wantErr: errExit},
 		{name: "criu exited without a tree", ended: true, wantExit: true},
 		{name: "a finished context", cancelled: true, wantErr: context.Canceled},
@@ -115,7 +120,7 @@ func TestAwaitRestore(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			pidfile := filepath.Join(t.TempDir(), "restore.pid")
-			if tc.content != "" {
+			if tc.content != "" || tc.empty {
 				if err := os.WriteFile(pidfile, []byte(tc.content), 0o600); err != nil {
 					t.Fatal(err)
 				}

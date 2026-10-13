@@ -52,10 +52,15 @@ wait_for() { # wait_for <seconds> <description> <cmd...>
 
 healthy() { admin http://x/healthz; }
 
+# up keeps a cluster from an earlier run while its nodes are Ready and
+# replaces it otherwise, so a broken one is never reused.
 up() {
-  if ! kind get clusters 2>/dev/null | grep -qx "$CLUSTER"; then
-    kind create cluster --name "$CLUSTER" --config "$KIND_DIR/kind.yaml" --wait 120s
+  if kind get clusters 2>/dev/null | grep -qx "$CLUSTER"; then
+    if "${KC[@]}" wait --for=condition=Ready node --all --timeout=30s >/dev/null 2>&1; then return 0; fi
+    echo "kind cluster $CLUSTER has no Ready node, replacing it" >&2
+    down
   fi
+  kind create cluster --name "$CLUSTER" --config "$KIND_DIR/kind.yaml" --wait 120s
 }
 
 down() { kind delete cluster --name "$CLUSTER"; }

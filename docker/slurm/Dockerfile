@@ -51,6 +51,7 @@ COPY --from=build --chmod=0755 /out/ /usr/local/bin/
 COPY examples/slurm/docker/slurm.conf.in /etc/slurm/slurm.conf.in
 COPY examples/slurm/docker/cgroup.conf /etc/slurm/cgroup.conf
 COPY --chmod=0755 examples/slurm/docker/entrypoint.sh /usr/local/bin/slurm-entrypoint
+COPY --chmod=0755 examples/slurm/docker/cgroup-setup.sh /usr/local/bin/slurm-cgroup-setup
 COPY --chmod=0755 examples/slurm/prolog/fiberd-prolog.sh /usr/local/bin/fiberd-prolog.sh
 COPY --chmod=0755 examples/slurm/prolog/fiberd-job.sh /usr/local/bin/fiberd-job.sh
 # No USER on purpose. The entrypoint starts the Slurm daemons and carves
