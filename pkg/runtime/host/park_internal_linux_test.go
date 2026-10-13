@@ -544,22 +544,22 @@ func TestResume(t *testing.T) {
 				*codecMixin
 				*selfCheckpointMixin
 				*idMapperMixin
-			}{newFakeBackend(core.TierCheckpoint), &codecMixin{}, &selfCheckpointMixin{}, &idMapperMixin{uid: 65534}}
-		}, grant: g,
+			}{newFakeBackend(core.TierCheckpoint), &codecMixin{}, &selfCheckpointMixin{}, &idMapperMixin{uid: uint32(os.Geteuid())}}
+		}, grant: g, mod: func(c *Config) { delegatedUnder(c.CgroupRoot, "g1", "g1/f-1-1") },
 			ref: func(t *testing.T, f *parkFixture) string {
 				ref := parkFirst(t, f)
 				f.be.(interface{ mapper() *idMapperMixin }).mapper().err = errors.New("fake: range revoked")
 				return ref
 			},
 			errText: "range revoked"},
-		{name: "a grant cgroup that refuses another leaf", be: func() backend.Backend { return newCodecBackend(core.TierCheckpoint) },
+		{name: "a leaf that cannot be made", be: func() backend.Backend { return newCodecBackend(core.TierCheckpoint) },
 			grant:       g,
 			resumeGrant: &core.Grant{UID: "tiny", TemplateDigest: "sha256:tmpl", FiberMax: 1, WBudgetBytes: 64 * mib},
 			ref: func(t *testing.T, f *parkFixture) string {
 				if err := f.r.PrepareTemplate(context.Background(), core.Grant{UID: "tiny", TemplateDigest: "sha256:tmpl", FiberMax: 1, WBudgetBytes: 64 * mib}); err != nil {
 					t.Fatal(err)
 				}
-				refuseLeaves(t, f.r.root.Child("tiny"))
+				inTheWay(t, f.r.root.Child("tiny"), "f-2-1")
 				return manifestOnly(t, f, manifest{Fence: "tiny/1/1", Backend: "fake", Endpoint: "unix:///x.sock"}, nil)
 			},
 			errText: "f-2-1",
@@ -664,7 +664,8 @@ func TestReleaseDiscard(t *testing.T) {
 // TestReleaseOrphan restarts fiberd under a live fiber and releases it
 // as an orphan. Its leaf goes, and so do the files it served on. A resumed
 // fiber keeps the socket name of its park, which only the fence file beside
-// it ties to the current fence. Other fibers' files stay.
+// it ties to the current fence. Other fibers' files stay. The kill of a
+// task still in the leaf is tests/host TestOrphanKilledInLeaf.
 func TestReleaseOrphan(t *testing.T) {
 	g := core.Grant{UID: "g1", TemplateDigest: "sha256:tmpl", WBudgetBytes: 64 * mib}
 	next := core.Fence{GrantUID: "g1", Epoch: 2, Seq: 1}
@@ -734,11 +735,12 @@ func TestReleaseOrphan(t *testing.T) {
 			}
 			t.Cleanup(r.Close)
 			leaf := r.root.Child("g1").Child(leafName(orphan))
-			startSleeper(t, leaf)
+			cgSet(t, leaf, "cgroup.procs", "4242")
 			list, err := r.List(context.Background())
 			if err != nil || len(list) != 1 || list[0].ID != orphan.String() {
 				t.Fatalf("List = %+v %v, want the orphan alone", list, err)
 			}
+			cgSet(t, leaf, "cgroup.procs", "")
 			if err := r.Release(context.Background(), orphan.String(), false); err != nil {
 				t.Fatal(err)
 			}
@@ -1247,8 +1249,8 @@ func TestResumeW(t *testing.T) {
 		// reported is what the backend counts in the resumed leaf before
 		// the hand-out, given the parked W.
 		reported func(parked uint64) uint64
-		// positive is whether the resumed fiber's W, with a task of the
-		// test's own in its leaf, must be above zero.
+		// positive is whether the resumed fiber's W, with its leaf charged
+		// 5 MiB, must be above zero.
 		positive bool
 	}{
 		{name: "the count less the parked W is the footprint", reported: func(w uint64) uint64 { return w + 1 }, positive: true},
@@ -1265,7 +1267,7 @@ func TestResumeW(t *testing.T) {
 			}{fb, overheadMixin{}}
 			g := core.Grant{UID: "g1", TemplateDigest: "sha256:tmpl", FiberMax: 2}
 			f := newParkFixture(t, be, g, nil)
-			startSleeper(t, f.r.root.Child("g1").Child("f-1-1"))
+			charge(t, f.r.root.Child("g1").Child("f-1-1"), 5*mib)
 			ctx := context.Background()
 			ref, err := f.r.Park(ctx, f.h.ID, false)
 			if err != nil {
@@ -1283,7 +1285,7 @@ func TestResumeW(t *testing.T) {
 			if err != nil {
 				t.Fatalf("resume: %v", err)
 			}
-			startSleeper(t, f.r.root.Child("g1").Child("f-2-1"))
+			charge(t, f.r.root.Child("g1").Child("f-2-1"), 5*mib)
 			st, err := f.r.Stats(ctx, h.ID)
 			if err != nil || (st.WUsedBytes > 0) != tc.positive {
 				t.Fatalf("Stats = %+v %v, want W above zero %v", st, err, tc.positive)

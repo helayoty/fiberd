@@ -5,6 +5,7 @@ package host
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -186,6 +187,9 @@ func TestFillRefused(t *testing.T) {
 				if limitOf(r.root.Child("g1"), "memory.high") == 0 {
 					t.Fatal("the grant has no memory.high")
 				}
+				if plainTree {
+					charge(t, r.root.Child("g1"), 0)
+				}
 				r.mu.Lock()
 				r.warms["g1"].total = 1 << 40
 				r.mu.Unlock()
@@ -252,16 +256,18 @@ func TestFillRefused(t *testing.T) {
 	}
 }
 
-// TestBootSweepsPool checks that a new life kills and removes the pool
-// leaves of the previous one before it serves, and that List never
-// reports them.
+// TestBootSweepsPool checks that a new life removes the pool leaves of
+// the previous one before it serves, and that List never reports them.
+// A pool leaf still holding its sandbox, which the sweep must kill
+// first, is tests/host TestBootSweepsPool.
 func TestBootSweepsPool(t *testing.T) {
 	cases := []struct {
-		name  string
-		procs bool // the leaf still holds the sandbox
+		name string
+		// grants is how many grants of the previous life left a pool.
+		grants int
 	}{
-		{name: "a leaf holding a sandbox", procs: true},
-		{name: "an empty leaf", procs: false},
+		{name: "one grant's pool", grants: 1},
+		{name: "every grant's pool", grants: 3},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -281,9 +287,14 @@ func TestBootSweepsPool(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			startSleeper(t, live)
-			if tc.procs {
-				startSleeper(t, stale)
+			cgSet(t, live, "cgroup.procs", "4242")
+			var others []cgroup.Dir
+			for i := 1; i < tc.grants; i++ {
+				p := root.Child(fmt.Sprintf("g%d", i+1)).Child(poolDir)
+				if err := p.Child("p-1").Ensure("memory", "pids"); err != nil {
+					t.Fatal(err)
+				}
+				others = append(others, p)
 			}
 			r, err := New(cfg)
 			if err != nil {
@@ -292,6 +303,11 @@ func TestBootSweepsPool(t *testing.T) {
 			t.Cleanup(r.Close)
 			if stale.Exists() || pool.Exists() {
 				t.Fatalf("after New: %s exists %v, %s exists %v", stale.Path, stale.Exists(), pool.Path, pool.Exists())
+			}
+			for _, p := range others {
+				if p.Exists() {
+					t.Fatalf("after New: %s exists", p.Path)
+				}
 			}
 			list, err := r.List(context.Background())
 			if err != nil || len(list) != 1 || list[0].ID != "g1/1/1" {
