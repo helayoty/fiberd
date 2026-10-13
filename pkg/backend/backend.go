@@ -111,6 +111,13 @@ type FiberSpec struct {
 type Fiber struct {
 	ID  string
 	PID int // root process; 0 when the backend has no process per fiber
+	// Footprint is what the fiber's leaf counted on the backend's W
+	// counter just before the fiber took its identity, for a backend
+	// whose fibers carry a fixed footprint. The host subtracts it from
+	// every later reading, because one restore of the same image can
+	// settle MiB above or below another. 0 leaves the host to the
+	// template's measured footprint.
+	Footprint uint64
 }
 
 // ParkSpec asks for a checkpoint of a fiber into Dir. With Sync the
@@ -278,9 +285,10 @@ type DeadlineAdvisor interface {
 // Overheader is implemented by backends whose fiber carries a fixed
 // footprint of its own besides the working set (a sandbox kernel, the
 // template's pages when they are not shared copy-on-write). The host adds
-// it to the leaf's memory.max and subtracts it from the measured W. A
-// backend that returns 0 asks the host to use the warm template's own
-// resident size, measured once it is ready.
+// it to the leaf's memory.max, and subtracts it from the measured W of a
+// fiber that reported no Footprint of its own. A backend that returns 0
+// asks the host to use the warm template's own resident size, measured
+// once it is ready.
 type Overheader interface {
 	FiberOverheadBytes() uint64
 }

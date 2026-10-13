@@ -70,6 +70,9 @@ type fakeBackend struct {
 	// Knobs a test sets before calling the runtime.
 	warmErr, cloneErr, parkErr, resumeErr error
 	warm                                  backend.Warm
+	// footprint is what Clone, Bind and Resume report as the leaf's own
+	// count before the hand-out.
+	footprint uint64
 	// parkFiles is what Park writes into its directory. Nil writes a
 	// page file and a dump log.
 	parkFiles map[string]string
@@ -168,7 +171,7 @@ func (b *fakeBackend) Clone(_ context.Context, warmID string, spec backend.Fiber
 	fd, identity := takeHandoff(spec.Handoff)
 	b.nextPID++
 	b.fibers[spec.Fence] = &fakeFiber{spec: spec, alive: true, identity: identity, handoff: fd, ln: ln}
-	return backend.Fiber{ID: spec.Fence, PID: b.nextPID}, nil
+	return backend.Fiber{ID: spec.Fence, PID: b.nextPID, Footprint: b.footprint}, nil
 }
 
 // listen serves a fake fiber's unix endpoint when serve is set.
@@ -273,7 +276,7 @@ func (b *fakeBackend) Resume(_ context.Context, spec backend.ResumeSpec) (backen
 	rs := spec
 	b.nextPID++
 	b.fibers[spec.Fence] = &fakeFiber{resume: &rs, alive: true, identity: identity, handoff: fd, ln: ln}
-	return backend.Fiber{ID: spec.Fence, PID: b.nextPID}, nil
+	return backend.Fiber{ID: spec.Fence, PID: b.nextPID, Footprint: b.footprint}, nil
 }
 
 func (b *fakeBackend) Kill(fiberID string) error {
@@ -544,7 +547,7 @@ func (m *poolMixin) Bind(_ context.Context, pooledID string, spec backend.FiberS
 	}
 	fd, identity := takeHandoff(spec.Handoff)
 	m.fb.fibers[spec.Fence] = &fakeFiber{spec: spec, alive: true, identity: identity, handoff: fd, ln: ln}
-	return backend.Fiber{ID: spec.Fence, PID: p.pid}, nil
+	return backend.Fiber{ID: spec.Fence, PID: p.pid, Footprint: m.fb.footprint}, nil
 }
 
 func (m *poolMixin) Discard(pooledID string) {

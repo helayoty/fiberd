@@ -145,6 +145,7 @@ type fiber struct {
 	budget   uint64 // w_budget_bytes; 0 = unlimited
 	devMax   uint64 // device_budget bytes; 0 = none
 	quota    uint64 // the grant's parked-delta bytes on this home (0 = none)
+	base     uint64 // the leaf's own count before the hand-out, subtracted from W (0 = the template's probe)
 	overWhy  string // why the host killed it, for the exit's detail
 	released bool   // Release or Park in progress: do not report the exit
 	parked   bool   // the end in progress is a park: the port stays with the delta
@@ -508,10 +509,11 @@ func (r *Runtime) DefaultDeadlines() (create, resume time.Duration) {
 }
 
 // overhead is the fixed per-fiber footprint for a grant's fibers, added
-// to every leaf's memory.max and subtracted from measured W. Only a
-// backend that is an Overheader gets it. It is the warm template's
-// resident size, measured once ready, because a sandbox restored from the
-// template pays for those pages itself.
+// to every leaf's memory.max and subtracted from the measured W of a
+// fiber whose backend did not report its own. Only a backend that is an
+// Overheader gets it. It is the warm template's resident size, measured
+// once ready, because a sandbox restored from the template pays for
+// those pages itself.
 func (r *Runtime) overhead(grantUID string) uint64 {
 	if _, ok := r.be.(backend.Overheader); !ok {
 		return 0
@@ -527,6 +529,9 @@ func (r *Runtime) overhead(grantUID string) uint64 {
 // wBytes reads a fiber's working set: what the backend reports when its
 // fibers have no leaf of their own, else the leaf's memory.current or
 // the memory.stat counter the backend names, less the fixed footprint.
+// The footprint is the leaf's own count before the hand-out when the
+// backend read one, since restores of one image settle MiB apart, and
+// the template's probe otherwise.
 func (r *Runtime) wBytes(f *fiber) (uint64, error) {
 	if rep, ok := r.be.(backend.WReporter); ok {
 		if w, known := rep.FiberW(f.id); known {
@@ -544,7 +549,11 @@ func (r *Runtime) wBytes(f *fiber) (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
-	if o := r.overhead(f.grantUID); cur > o {
+	o := f.base
+	if o == 0 {
+		o = r.overhead(f.grantUID)
+	}
+	if cur > o {
 		return cur - o, nil
 	}
 	return 0, nil
@@ -1400,6 +1409,7 @@ func (r *Runtime) start(ctx context.Context, z *warm, spec core.CloneSpec, p *po
 	}
 	r.mu.Lock()
 	f.pid = fb.PID
+	f.base = fb.Footprint
 	f.endpoint = ep
 	f.ready = true
 	r.mu.Unlock()
@@ -1424,7 +1434,10 @@ type manifest struct {
 	Backend  string `json:"backend"`
 	// WBytes is what the park costs to move: the delta's bytes when the
 	// checkpoint is a delta, else the full image bytes.
-	WBytes   uint64 `json:"w_bytes"`
+	WBytes uint64 `json:"w_bytes"`
+	// WUsed is the fiber's W when it was parked, which a resume of the
+	// image continues counting from.
+	WUsed    uint64 `json:"w_used_bytes,omitempty"`
 	Delta    bool   `json:"delta"`
 	Parent   string `json:"parent_sha256,omitempty"`
 	ParkedAt string `json:"parked_at"`
@@ -1495,7 +1508,7 @@ func (r *Runtime) Park(ctx context.Context, fiberID string, sync bool) (string, 
 	// with any error, and the ledger parks the session rather than count a
 	// dead fiber.
 	m := manifest{Fence: f.id, GrantUID: f.grantUID, Birth: f.birth, Endpoint: ep, Handoff: f.handoff != nil, Backend: r.be.Name(),
-		ParkedAt: time.Now().UTC().Format(time.RFC3339Nano)}
+		WUsed: w, ParkedAt: time.Now().UTC().Format(time.RFC3339Nano)}
 	if f.relay != nil {
 		m.Relay = f.relay.sock
 	}
@@ -1780,6 +1793,11 @@ func (r *Runtime) resume(ctx context.Context, spec core.CloneSpec) (core.FiberHa
 	}
 	r.mu.Lock()
 	f.pid = fb.PID
+	if fb.Footprint > m.WUsed {
+		// The image restored holds the pages the fiber dirtied before
+		// its park, so its W carries on from there rather than from 0.
+		f.base = fb.Footprint - m.WUsed
+	}
 	f.endpoint = ep
 	f.ready = true
 	r.mu.Unlock()

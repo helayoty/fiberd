@@ -289,16 +289,30 @@ func (b *Backend) FiberOverheadBytes() uint64 { return 0 }
 // relay in front of the unix socket, and the sandbox stays network-free.
 func (b *Backend) EndpointSchemes() []string { return []string{"unix"} }
 
-// WCounter: the guest's memory is the sentry's memfd, which the leaf
-// accounts as shmem; the sentry's own Go heap (anon, tens of MiB and
-// different in every sandbox) is not the fiber's working set.
-func (b *Backend) WCounter() string { return "shmem" }
+// wCounter is the leaf's memory.stat counter W is read from. The guest's
+// memory is the sentry's memfd, which the leaf accounts as shmem, while
+// the sentry's own Go heap (anon, tens of MiB and different in every
+// sandbox) is not the fiber's working set.
+const wCounter = "shmem"
+
+// WCounter names the leaf counter the host reads for W.
+func (b *Backend) WCounter() string { return wCounter }
+
+// leafW reads the leaf's W counter, 0 without a cgroup. Read before the
+// hand-out it is this sandbox's own footprint, since restores of one
+// image settle MiB apart and the template's probe can be off.
+func leafW(cgroupFD int) uint64 {
+	if cgroupFD < 0 {
+		return 0
+	}
+	return cgroupStat(cgroupFD, wCounter)
+}
 
 // globalArgs are the flags every runsc command runs with. Huge pages for
-// the guest's memory are off. W is the leaf's shmem above the template's
-// measured footprint, and with 2 MiB pages a fresh sandbox lands several
-// MiB off that in either direction. That is wider than a small budget and
-// hides a real overrun.
+// the guest's memory are off. W is the leaf's shmem above what the leaf
+// counted before the hand-out, and with 2 MiB pages a sandbox moves
+// several MiB after that count in either direction. That is wider than a
+// small budget and hides a real overrun.
 func (b *Backend) globalArgs() []string {
 	return []string{"--root=" + filepath.Join(b.opt.StateDir, "root"), "--platform=" + runscPlatform,
 		"--network=none", "--ignore-cgroups", "--host-uds=all", "--overlay2=none", "--app-huge-pages=false"}
@@ -1340,12 +1354,15 @@ func (b *Backend) start(ctx context.Context, w *warm, images string, argv []stri
 		if err := b.restore(ctx, w, x, images, argv, env, cgroupFD); err != nil {
 			return backend.Fiber{}, err
 		}
+		// The identity sat in the spec, so the restore is the last
+		// moment the sandbox has surely not touched its payload.
+		base := leafW(cgroupFD)
 		b.forgetToken(w, x)
 		if err := waitEndpoint(ctx, endpoint, x.done); err != nil {
 			_, _ = b.runsc(context.Background(), -1, "kill", x.cid, "KILL")
 			return backend.Fiber{}, fmt.Errorf("gvisor: %s did not serve: %w (%s)", fence, err, leafDiag(cgroupFD))
 		}
-		return backend.Fiber{ID: x.id, PID: x.pid}, nil
+		return backend.Fiber{ID: x.id, PID: x.pid, Footprint: base}, nil
 	}
 	if err := b.restore(ctx, w, x, images, argv, nil, cgroupFD); err != nil {
 		return backend.Fiber{}, err
@@ -1354,10 +1371,14 @@ func (b *Backend) start(ctx context.Context, w *warm, images string, argv []stri
 	if err != nil {
 		return backend.Fiber{}, fmt.Errorf("%w (%s)", err, leafDiag(cgroupFD))
 	}
+	// Restored, with every page of the image read, and waiting on the
+	// channel for an identity it has not been given.
+	base := leafW(cgroupFD)
 	fiber, err := b.bind(ctx, x, conn, kind, fence, inside, payload)
 	if err != nil {
 		return backend.Fiber{}, fmt.Errorf("%w (%s)", err, leafDiag(cgroupFD))
 	}
+	fiber.Footprint = base
 	return fiber, nil
 }
 
@@ -1465,6 +1486,8 @@ func (b *Backend) Bind(ctx context.Context, pooledID string, sp backend.FiberSpe
 		return backend.Fiber{}, err
 	}
 	_ = os.Remove(sp.Endpoint)
+	// Idle in the pool since its restore, so this is its settled footprint.
+	base := leafW(sp.CgroupFD)
 	if _, err := b.bind(ctx, x, conn, "clone", sp.Fence, inside, sp.Payload); err != nil {
 		return backend.Fiber{}, fmt.Errorf("%w (%s)", err, leafDiag(sp.CgroupFD))
 	}
@@ -1481,7 +1504,7 @@ func (b *Backend) Bind(ctx context.Context, pooledID string, sp backend.FiberSpe
 	if !alive {
 		return backend.Fiber{}, fmt.Errorf("gvisor: %s died during its hand-out", pooledID)
 	}
-	return backend.Fiber{ID: sp.Fence, PID: x.pid}, nil
+	return backend.Fiber{ID: sp.Fence, PID: x.pid, Footprint: base}, nil
 }
 
 // Discard kills a pooled sandbox. Its end is reported as Exit{PooledID}.

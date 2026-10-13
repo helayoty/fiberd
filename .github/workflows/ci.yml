@@ -157,13 +157,15 @@ jobs:
       - name: make the state readable for the upload (written as root inside the container)
         if: failure()
         run: sudo chmod -R a+rX bin/conform-state-gvisor 2>/dev/null || true
-      - name: keep fiberd's logs
+      - name: keep fiberd's logs and audit trail
         if: failure()
         continue-on-error: true
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: conform-gvisor-state
-          path: bin/conform-state-gvisor/**/*.log
+          path: |
+            bin/conform-state-gvisor/**/*.log
+            bin/conform-state-gvisor/private/audit.jsonl
           if-no-files-found: ignore
 
   conform-runc:

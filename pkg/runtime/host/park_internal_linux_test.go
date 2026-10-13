@@ -1235,3 +1235,59 @@ func TestParkDurability(t *testing.T) {
 		})
 	}
 }
+
+// TestResumeW checks that a park records the fiber's W and a resume
+// carries on from it. A sandbox's own count before its hand-out is its
+// footprint, and the pages it dirtied before the park are in the image it
+// is restored from, so the footprint of the resumed fiber is that count
+// less the parked W.
+func TestResumeW(t *testing.T) {
+	cases := []struct {
+		name string
+		// reported is what the backend counts in the resumed leaf before
+		// the hand-out, given the parked W.
+		reported func(parked uint64) uint64
+		// positive is whether the resumed fiber's W, with a task of the
+		// test's own in its leaf, must be above zero.
+		positive bool
+	}{
+		{name: "the count less the parked W is the footprint", reported: func(w uint64) uint64 { return w + 1 }, positive: true},
+		{name: "no count reported leaves the template's probe", reported: func(uint64) uint64 { return 0 }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fb := newFakeBackend(core.TierCheckpoint)
+			fb.warm = backend.Warm{Bytes: 1 << 40} // a probe no leaf ever reaches
+			fb.footprint = 1
+			be := &struct {
+				*fakeBackend
+				overheadMixin
+			}{fb, overheadMixin{}}
+			g := core.Grant{UID: "g1", TemplateDigest: "sha256:tmpl", FiberMax: 2}
+			f := newParkFixture(t, be, g, nil)
+			startSleeper(t, f.r.root.Child("g1").Child("f-1-1"))
+			ctx := context.Background()
+			ref, err := f.r.Park(ctx, f.h.ID, false)
+			if err != nil {
+				t.Fatalf("Park: %v", err)
+			}
+			m := readManifest(t, ref)
+			if m.WUsed == 0 {
+				t.Fatalf("manifest = %+v, want the W at park recorded", m)
+			}
+			fb.mu.Lock()
+			fb.footprint = tc.reported(m.WUsed)
+			fb.mu.Unlock()
+			next := core.Fence{GrantUID: "g1", Epoch: 2, Seq: 1}
+			h, err := f.r.Clone(ctx, core.CloneSpec{Grant: g, Source: core.SourceDelta, Ref: ref, Fence: next, Deadline: time.Second})
+			if err != nil {
+				t.Fatalf("resume: %v", err)
+			}
+			startSleeper(t, f.r.root.Child("g1").Child("f-2-1"))
+			st, err := f.r.Stats(ctx, h.ID)
+			if err != nil || (st.WUsedBytes > 0) != tc.positive {
+				t.Fatalf("Stats = %+v %v, want W above zero %v", st, err, tc.positive)
+			}
+		})
+	}
+}

@@ -1047,6 +1047,26 @@ func TestWBytes(t *testing.T) {
 			b.warm = backend.Warm{Bytes: 1 << 40}
 			return b
 		}(), overheadMixin{}}, task: true},
+		// The CI flake of C6 on amd64. The template's probe read 8 MiB more
+		// than this fiber's own restore settled at, so 4 MiB dirtied over a
+		// 1 MiB budget read as nothing.
+		{name: "a sandbox's own count before the hand-out beats the template's probe", be: &struct {
+			*fakeBackend
+			overheadMixin
+		}{func() *fakeBackend {
+			b := newFakeBackend(core.TierWarm)
+			b.warm = backend.Warm{Bytes: 1 << 40}
+			b.footprint = 1
+			return b
+		}(), overheadMixin{}}, task: true, positive: true},
+		{name: "a sandbox's own count above the leaf's reads 0", be: &struct {
+			*fakeBackend
+			overheadMixin
+		}{func() *fakeBackend {
+			b := newFakeBackend(core.TierWarm)
+			b.footprint = 1 << 40
+			return b
+		}(), overheadMixin{}}, task: true},
 		{name: "a metered backend reads one memory.stat counter", be: &struct {
 			*fakeBackend
 			wMeterMixin

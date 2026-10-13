@@ -2261,3 +2261,74 @@ func TestRestorePidFile(t *testing.T) {
 		})
 	}
 }
+
+// TestFootprintBeforeHandOut checks that every birth reports what its leaf
+// counted on the W counter before the sandbox took its identity, which is
+// the sandbox's own fixed footprint. The template's probe is one restore
+// of the image and another settles MiB away from it, which on amd64 CI let
+// a fiber dirty 4 MiB over a 1 MiB budget unseen (C6). A pooled sandbox is
+// counted at its hand-out, not at its restore, and a resume counts the
+// image it brought back.
+func TestFootprintBeforeHandOut(t *testing.T) {
+	leaf := map[string]string{"memory.stat": "anon 4096\nshmem 8192\nfile 0\n", "memory.current": "12288\n"}
+	cases := []struct {
+		name     string
+		knobs    knobs
+		pooled   bool
+		resume   bool
+		noCgroup bool
+		want     uint64
+	}{
+		{name: "a clone counts its leaf once restored and claimed", want: 8192},
+		{name: "a template that polls its spec counts its leaf once restored", knobs: knobs{NoToken: true}, want: 8192},
+		{name: "a pooled sandbox counts its leaf at its hand-out", pooled: true, want: 8192},
+		{name: "a resume counts the image it brought back", resume: true, want: 8192},
+		{name: "without a cgroup nothing is counted", noCgroup: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fd := -1
+			if !tc.noCgroup {
+				fd = cgroupFiles(t, leaf)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			var fb backend.Fiber
+			var err error
+			switch {
+			case tc.pooled:
+				b, _, w, workDir := warmed(t, tc.knobs)
+				// The pool leaf counted less when the sandbox was restored
+				// into it, and the hand-out reads the leaf again.
+				pfd := cgroupFiles(t, map[string]string{"memory.stat": "shmem 4096\n"})
+				p, perr := b.Pool(ctx, w.ID, backend.PoolSpec{CgroupFD: pfd, Deadline: 2 * time.Second})
+				if perr != nil {
+					t.Fatalf("Pool: %v", perr)
+				}
+				fb, err = b.Bind(ctx, p.ID, backend.FiberSpec{Fence: "g/1-1", Endpoint: filepath.Join(workDir, "ep.sock"), CgroupFD: fd, Deadline: 2 * time.Second})
+			case tc.resume:
+				b, _, workDir, _ := cloned(t, tc.knobs)
+				fc := boxCID(t, b, "g/1-1")
+				dir := filepath.Join(t.TempDir(), "park")
+				if perr := b.Park(ctx, "g/1-1", backend.ParkSpec{Dir: dir}); perr != nil {
+					t.Fatalf("Park: %v", perr)
+				}
+				waitFor(t, "the reaper to remove the bundle", func() bool {
+					_, serr := os.Stat(b.bundleDir(fc))
+					return serr != nil
+				})
+				waitExit(t, b)
+				fb, err = b.Resume(ctx, backend.ResumeSpec{Dir: dir, Fence: "g/2-1", Endpoint: filepath.Join(workDir, "ep2.sock"), CgroupFD: fd, Deadline: 2 * time.Second, WarmID: "g", WorkDir: workDir})
+			default:
+				b, _, w, workDir := warmed(t, tc.knobs)
+				fb, err = b.Clone(ctx, w.ID, backend.FiberSpec{Fence: "g/1-1", Endpoint: filepath.Join(workDir, "ep.sock"), CgroupFD: fd, Deadline: 2 * time.Second})
+			}
+			if err != nil {
+				t.Fatalf("birth: %v", err)
+			}
+			if fb.Footprint != tc.want {
+				t.Fatalf("Footprint = %d, want %d", fb.Footprint, tc.want)
+			}
+		})
+	}
+}
