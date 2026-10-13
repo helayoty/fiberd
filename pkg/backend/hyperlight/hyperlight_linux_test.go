@@ -5,8 +5,11 @@ package hyperlight
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -15,27 +18,6 @@ import (
 	"github.com/helayoty/fiberd/pkg/backend"
 	"github.com/helayoty/fiberd/pkg/core"
 )
-
-const (
-	kvmIntel = "fiberd-hyperlight-helper/0.1.0 hyperlight_host/0.17.0 kvm GenuineIntel"
-	fake     = "fakehelper/1 none none none"
-)
-
-// fakeHelper writes a helper that answers `--version` with the version
-// command (an echo, or a failure) and otherwise says READY on fd 3 and
-// waits for fiberd to hang up.
-func fakeHelper(t *testing.T, versionCmd, ready string) string {
-	t.Helper()
-	path := filepath.Join(t.TempDir(), "helper")
-	script := "#!/bin/sh\nif [ \"$1\" = --version ]; then " + versionCmd + "; fi\n" +
-		"echo \"READY " + ready + "\" >&3\nexec cat <&3 >/dev/null\n"
-	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	return path
-}
-
-func says(facts string) string { return "echo '" + facts + "'; exit 0" }
 
 // homePlatform is what pkg/runtime/host records at open. It is the host's
 // own facts, with the backend's non-empty ones in their place.
@@ -52,22 +34,25 @@ func homePlatform(be backend.Backend) artifact.Platform {
 
 func TestNew(t *testing.T) {
 	cases := []struct {
-		name       string
-		versionCmd string
-		guest      string // "" for none, "present" or "missing"
-		wantTier   core.Tier
+		name     string
+		starter  *fakeStarter
+		guest    string // "" for none, "present" or "missing"
+		wantTier core.Tier
+		wantWhy  string
 	}{
-		{"a helper that reports its four facts", says(kvmIntel), "", core.TierSnapshot},
-		{"the fake helper", says(fake), "", core.TierSnapshot},
-		{"a helper that cannot say what it is", "exit 1", "", core.TierUnspecified},
-		{"a helper from before the facts", says("hyperlight-helper/0.1.0"), "", core.TierUnspecified},
-		{"a helper short one fact", says("fiberd-hyperlight-helper/0.1.0 hyperlight_host/0.17.0 kvm"), "", core.TierUnspecified},
-		{"a guest that is there", says(kvmIntel), "present", core.TierSnapshot},
-		{"a guest that is not there", says(kvmIntel), "missing", core.TierUnspecified},
+		{name: "a helper that reports its four facts", starter: says(kvmIntel), wantTier: core.TierSnapshot},
+		{name: "the fake helper", starter: says(fake), wantTier: core.TierSnapshot},
+		{name: "a helper that cannot say what it is", starter: &fakeStarter{versionErr: errors.New("exit status 1")}, wantWhy: "unusable"},
+		{name: "no helper at all", starter: &fakeStarter{versionErr: os.ErrNotExist}, wantWhy: "unusable"},
+		{name: "a helper from before the facts", starter: says("hyperlight-helper/0.1.0"), wantWhy: "want 4 facts"},
+		{name: "a helper short one fact", starter: says("fiberd-hyperlight-helper/0.1.0 hyperlight_host/0.17.0 kvm"), wantWhy: "want 4 facts"},
+		{name: "only the first line of --version counts", starter: &fakeStarter{version: kvmIntel + "\nbuilt yesterday"}, wantTier: core.TierSnapshot},
+		{name: "a guest that is there", starter: says(kvmIntel), guest: "present", wantTier: core.TierSnapshot},
+		{name: "a guest that is not there", starter: says(kvmIntel), guest: "missing", wantWhy: "guest unusable"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			opt := Options{Helper: fakeHelper(t, c.versionCmd, kvmIntel)}
+			opt := Options{Helper: "helper"}
 			if c.guest != "" {
 				opt.Guest = filepath.Join(t.TempDir(), "guest.bin")
 				if c.guest == "present" {
@@ -76,25 +61,24 @@ func TestNew(t *testing.T) {
 					}
 				}
 			}
-			be := New(opt)
+			be := newFake(t, opt, c.starter)
 			if be.Tier() != c.wantTier {
 				t.Fatalf("tier = %s, want %s", be.Tier(), c.wantTier)
 			}
 			// A backend without a tier says why, and only then.
-			if why := be.(backend.Prober).ProbeErr(); (why == nil) != (c.wantTier != core.TierUnspecified) {
+			why := be.ProbeErr()
+			if (why == nil) != (c.wantWhy == "") {
 				t.Fatalf("ProbeErr = %v with tier %s", why, be.Tier())
+			}
+			if c.wantWhy != "" && !strings.Contains(why.Error(), c.wantWhy) {
+				t.Fatalf("ProbeErr = %v, want it to say %q", why, c.wantWhy)
+			}
+			// New only asks for the version. Nothing is started until a warm.
+			if n := len(c.starter.started()); n != 0 {
+				t.Fatalf("New started %d helpers", n)
 			}
 		})
 	}
-	t.Run("no helper at all", func(t *testing.T) {
-		be := New(Options{Helper: filepath.Join(t.TempDir(), "missing")})
-		if be.Tier() != core.TierUnspecified {
-			t.Fatalf("tier = %s, want unspecified", be.Tier())
-		}
-		if why := be.(backend.Prober).ProbeErr(); why == nil || !strings.Contains(why.Error(), "unusable") {
-			t.Fatalf("ProbeErr = %v, want the helper named unusable", why)
-		}
-	})
 }
 
 // TestPlatformParity offers a snapshot made through one helper to a home
@@ -121,8 +105,8 @@ func TestPlatformParity(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			home := homePlatform(New(Options{Helper: fakeHelper(t, says(c.home), c.home)}))
-			made := homePlatform(New(Options{Helper: fakeHelper(t, says(c.made), c.made)}))
+			home := homePlatform(newFake(t, Options{Helper: "home"}, says(c.home)))
+			made := homePlatform(newFake(t, Options{Helper: "made"}, says(c.made)))
 			err := c.parity.Check(home, made)
 			if c.wantOK && err != nil {
 				t.Fatalf("Check(%s, %s) = %v, want nil", home, made, err)
@@ -149,11 +133,9 @@ func TestWarmHoldsHelperToItsFacts(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			be := New(Options{Helper: fakeHelper(t, says(kvmIntel), c.ready)})
-			defer be.Close()
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			_, err := be.Warm(ctx, backend.WarmSpec{GrantUID: "g", WorkDir: t.TempDir(), CgroupFD: -1, ProbeCgroupFD: -1})
+			s := &fakeStarter{version: kvmIntel, body: ready(c.ready)}
+			be := newFake(t, Options{Helper: "helper"}, s)
+			_, err := be.Warm(warmCtx(t), warmSpec(t.TempDir()))
 			if c.wantErr == "" {
 				if err != nil {
 					t.Fatalf("Warm: %v", err)
@@ -162,6 +144,162 @@ func TestWarmHoldsHelperToItsFacts(t *testing.T) {
 			}
 			if err == nil || !errors.Is(err, ErrHelper) || !strings.Contains(err.Error(), c.wantErr) {
 				t.Fatalf("Warm = %v, want ErrHelper containing %q", err, c.wantErr)
+			}
+			// A helper that is held to its facts is ended, not left talking.
+			if r := s.started()[0]; !r.killed.Load() || !r.waited.Load() {
+				t.Fatalf("the refused helper was killed %v and reaped %v", r.killed.Load(), r.waited.Load())
+			}
+		})
+	}
+}
+
+// TestWarm checks what the helper is started with, and every way it fails
+// to come up. What only a real process shows, the cgroup it is born in
+// and that it is reaped, is tests/hyperlight TestHelperStartsInCgroup.
+func TestWarm(t *testing.T) {
+	cases := []struct {
+		name    string
+		starter *fakeStarter // nil for one that says READY and holds
+		opt     func(t *testing.T) Options
+		setup   func(t *testing.T, sp *backend.WarmSpec)
+		ctx     func(t *testing.T) context.Context
+		wantIs  error
+		wantErr string
+		check   func(t *testing.T, be *Backend, sp backend.WarmSpec, w backend.Warm, r *fakeRun)
+	}{
+		{name: "the template's arguments follow the guest",
+			opt: func(t *testing.T) Options {
+				guest := filepath.Join(t.TempDir(), "guest.bin")
+				if err := os.WriteFile(guest, []byte("guest"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				return Options{Helper: "helper", Guest: guest}
+			},
+			setup: func(_ *testing.T, sp *backend.WarmSpec) {
+				sp.Template.Argv = []string{"guest", "--init-ms", "5"}
+			},
+			check: func(t *testing.T, be *Backend, sp backend.WarmSpec, w backend.Warm, r *fakeRun) {
+				if w.ID != sp.GrantUID || w.PID != r.pid {
+					t.Errorf("Warm = %+v, want %s with pid %d", w, sp.GrantUID, r.pid)
+				}
+				if want := []string{"--guest", be.opt.Guest, "--init-ms", "5"}; !reflect.DeepEqual(r.args, want) {
+					t.Errorf("helper args = %q, want %q", r.args, want)
+				}
+			}},
+		{name: "a bare template passes nothing",
+			setup: func(_ *testing.T, sp *backend.WarmSpec) {
+				sp.Template.Argv = []string{"guest"}
+			},
+			check: func(t *testing.T, _ *Backend, _ backend.WarmSpec, _ backend.Warm, r *fakeRun) {
+				if len(r.args) != 0 {
+					t.Errorf("helper args = %q, want none", r.args)
+				}
+			}},
+		{name: "the helper runs in the run directory with the grant's cgroup",
+			setup: func(_ *testing.T, sp *backend.WarmSpec) { sp.CgroupFD = 7 },
+			check: func(t *testing.T, _ *Backend, sp backend.WarmSpec, _ backend.Warm, r *fakeRun) {
+				if r.workDir != sp.WorkDir || r.cgroupFD != 7 {
+					t.Errorf("helper started in %q with cgroup %d, want %q and 7", r.workDir, r.cgroupFD, sp.WorkDir)
+				}
+			}},
+		{name: "the helper's output goes to the zygote log",
+			starter: &fakeStarter{version: kvmIntel, body: func(r *fakeRun) {
+				_, _ = fmt.Fprintln(r.log, "hello from the helper")
+				ready(kvmIntel)(r)
+			}},
+			check: func(t *testing.T, _ *Backend, sp backend.WarmSpec, _ backend.Warm, _ *fakeRun) {
+				if b, err := os.ReadFile(filepath.Join(sp.WorkDir, "zygote.log")); err != nil || !strings.Contains(string(b), "hello from the helper") {
+					t.Errorf("zygote.log = %q, %v", b, err)
+				}
+			}},
+		{name: "no usable helper", wantErr: "helper or guest unavailable",
+			starter: &fakeStarter{versionErr: os.ErrNotExist}},
+		{name: "the run directory cannot be made", wantErr: "not a directory",
+			setup: func(t *testing.T, sp *backend.WarmSpec) {
+				if err := os.WriteFile(filepath.Dir(sp.WorkDir), nil, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}},
+		{name: "the log cannot be opened", wantErr: "is a directory",
+			setup: func(t *testing.T, sp *backend.WarmSpec) {
+				if err := os.MkdirAll(filepath.Join(sp.WorkDir, "zygote.log"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}},
+		{name: "the helper cannot be started", wantErr: "start helper", wantIs: os.ErrPermission,
+			starter: &fakeStarter{version: kvmIntel, startErr: os.ErrPermission}},
+		{name: "the helper exits before READY", wantIs: io.EOF, wantErr: "did not become ready",
+			starter: &fakeStarter{version: kvmIntel, body: func(*fakeRun) {}}},
+		{name: "the helper says something else first", wantIs: ErrHelper, wantErr: "expected READY",
+			starter: &fakeStarter{version: kvmIntel, body: func(r *fakeRun) {
+				_, _ = fmt.Fprintln(r.ctl, "HELLO")
+				r.hold()
+			}}},
+		{name: "the caller gives up", wantIs: context.DeadlineExceeded,
+			starter: &fakeStarter{version: kvmIntel, body: (*fakeRun).hold},
+			ctx: func(t *testing.T) context.Context {
+				ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+				t.Cleanup(cancel)
+				return ctx
+			}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := tc.starter
+			if s == nil {
+				s = says(kvmIntel)
+			}
+			opt := Options{Helper: "helper"}
+			if tc.opt != nil {
+				opt = tc.opt(t)
+			}
+			be := newFake(t, opt, s)
+			sp := warmSpec(filepath.Join(t.TempDir(), "run", "g1"))
+			if tc.setup != nil {
+				tc.setup(t, &sp)
+			}
+			ctx := warmCtx(t)
+			if tc.ctx != nil {
+				ctx = tc.ctx(t)
+			}
+			w, err := be.Warm(ctx, sp)
+			if tc.wantErr != "" || tc.wantIs != nil {
+				if err == nil {
+					t.Fatalf("Warm = %+v, want an error (%s %v)", w, tc.wantErr, tc.wantIs)
+				}
+				if tc.wantErr != "" && !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("Warm = %v, want an error containing %q", err, tc.wantErr)
+				}
+				if tc.wantIs != nil && !errors.Is(err, tc.wantIs) {
+					t.Fatalf("Warm = %v, want %v", err, tc.wantIs)
+				}
+				if _, ok := be.warmOf(sp.GrantUID); ok {
+					t.Fatal("a warm that failed is registered")
+				}
+				// The helper it started, if any, is killed and reaped.
+				for _, r := range s.started() {
+					awaitRun(t, r)
+					if !r.killed.Load() || !r.waited.Load() {
+						t.Fatalf("helper %d: killed %v, reaped %v", r.pid, r.killed.Load(), r.waited.Load())
+					}
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Warm: %v", err)
+			}
+			r := s.started()[0]
+			tc.check(t, be, sp, w, r)
+			// Close ends the helper, and the reaper Warm started takes it.
+			be.Close()
+			awaitRun(t, r)
+			if !r.killed.Load() {
+				t.Fatal("Close did not kill the helper")
+			}
+			for deadline := time.Now().Add(5 * time.Second); !r.waited.Load(); time.Sleep(time.Millisecond) {
+				if time.Now().After(deadline) {
+					t.Fatal("the helper was not reaped after Close")
+				}
 			}
 		})
 	}

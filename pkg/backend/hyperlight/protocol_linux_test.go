@@ -6,11 +6,8 @@ import (
 	"bufio"
 	"context"
 	"errors"
-	"fmt"
-	"io"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -18,47 +15,12 @@ import (
 	"testing"
 	"time"
 
+	"go.uber.org/goleak"
+
 	"github.com/helayoty/fiberd/pkg/artifact"
 	"github.com/helayoty/fiberd/pkg/backend"
 	"github.com/helayoty/fiberd/pkg/core"
 )
-
-// fakeHelperBin is hack/hyperlight/fakehelper, built once for the run.
-// It is the helper the backend is tested against where no hypervisor is.
-var fakeHelperBin string
-
-func TestMain(m *testing.M) {
-	dir, err := os.MkdirTemp("", "fiberd-hyperlight-unit")
-	if err != nil {
-		panic(err)
-	}
-	fakeHelperBin = filepath.Join(dir, "fakehelper")
-	build := exec.Command("go", "build", "-o", fakeHelperBin, "../../../hack/hyperlight/fakehelper")
-	build.Stderr = os.Stderr
-	if err := build.Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "cannot build the fake helper: %v\n", err)
-		fakeHelperBin = ""
-	}
-	code := m.Run()
-	_ = os.RemoveAll(dir)
-	os.Exit(code)
-}
-
-// shellHelper writes a helper that answers `--version` with the kvm
-// facts and otherwise runs body with the control socket as fd 3 and the
-// run directory as its working directory.
-func shellHelper(t *testing.T, body string) string {
-	t.Helper()
-	path := filepath.Join(t.TempDir(), "helper")
-	script := "#!/bin/sh\nif [ \"$1\" = --version ]; then echo '" + kvmIntel + "'; exit 0; fi\n" + body + "\n"
-	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	return path
-}
-
-// readyThenWait is a helper body that says READY and serves nothing.
-const readyThenWait = "echo 'READY " + kvmIntel + "' >&3\nexec cat <&3 >/dev/null"
 
 // TestParseFacts checks that the four facts parse, or what is wrong with them.
 func TestParseFacts(t *testing.T) {
@@ -95,19 +57,19 @@ func TestParseFacts(t *testing.T) {
 // be warmed here.
 func TestPlatform(t *testing.T) {
 	cases := []struct {
-		name       string
-		versionCmd string
-		want       artifact.Platform
+		name    string
+		starter *fakeStarter
+		want    artifact.Platform
 	}{
-		{name: "a usable helper", versionCmd: says(kvmIntel),
+		{name: "a usable helper", starter: says(kvmIntel),
 			want: artifact.Platform{Kernel: "hyperlight-hyperlight_host/0.17.0", Libc: "fiberd-hyperlight-helper/0.1.0+kvm+GenuineIntel"}},
-		{name: "the fake helper", versionCmd: says(fake), want: artifact.Platform{Kernel: "hyperlight-none", Libc: "fakehelper/1+none+none"}},
-		{name: "no usable helper", versionCmd: "exit 1", want: artifact.Platform{Kernel: "hyperlight-unusable", Libc: "n/a"}},
+		{name: "the fake helper", starter: says(fake), want: artifact.Platform{Kernel: "hyperlight-none", Libc: "fakehelper/1+none+none"}},
+		{name: "no usable helper", starter: &fakeStarter{versionErr: errors.New("exit status 1")}, want: artifact.Platform{Kernel: "hyperlight-unusable", Libc: "n/a"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			be := New(Options{Helper: fakeHelper(t, tc.versionCmd, kvmIntel)})
-			if got := be.(backend.Platformer).Platform(); got != tc.want {
+			be := newFake(t, Options{Helper: "helper"}, tc.starter)
+			if got := be.Platform(); got != tc.want {
 				t.Fatalf("Platform = %+v, want %+v", got, tc.want)
 			}
 		})
@@ -116,7 +78,7 @@ func TestPlatform(t *testing.T) {
 
 // TestSurface checks what the backend tells the host about itself.
 func TestSurface(t *testing.T) {
-	be := New(Options{Helper: fakeHelper(t, says(kvmIntel), kvmIntel)})
+	be := newFake(t, Options{Helper: "helper"}, says(kvmIntel))
 	cases := []struct {
 		name  string
 		check func(t *testing.T)
@@ -127,22 +89,22 @@ func TestSurface(t *testing.T) {
 			}
 		}},
 		{name: "fibers are tenants behind a hypervisor", check: func(t *testing.T) {
-			if !be.(backend.Isolator).IsolatesTenants() {
+			if !be.IsolatesTenants() {
 				t.Fatal("IsolatesTenants = false")
 			}
 		}},
 		{name: "the deadlines", check: func(t *testing.T) {
-			if c, r := be.(backend.DeadlineAdvisor).DefaultDeadlines(); c != 500*time.Millisecond || r != 2*time.Second {
+			if c, r := be.DefaultDeadlines(); c != 500*time.Millisecond || r != 2*time.Second {
 				t.Fatalf("DefaultDeadlines = %s, %s", c, r)
 			}
 		}},
 		{name: "a fiber costs a whole sandbox", check: func(t *testing.T) {
-			if got := be.(backend.Overheader).FiberOverheadBytes(); got != 0 {
+			if got := be.FiberOverheadBytes(); got != 0 {
 				t.Fatalf("FiberOverheadBytes = %d, want 0 (measure it)", got)
 			}
 		}},
 		{name: "W of a fiber it does not know", check: func(t *testing.T) {
-			if w, ok := be.(backend.WReporter).FiberW("nope"); ok || w != 0 {
+			if w, ok := be.FiberW("nope"); ok || w != 0 {
 				t.Fatalf("FiberW = %d, %v, want unknown", w, ok)
 			}
 		}},
@@ -198,295 +160,18 @@ func TestPayloadHex(t *testing.T) {
 	}
 }
 
-// warmCtx is a context a Warm must finish within.
-func warmCtx(t *testing.T) context.Context {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	t.Cleanup(cancel)
-	return ctx
-}
-
-// waitGone waits for pid to be reaped.
-func waitGone(t *testing.T, pid int) {
-	t.Helper()
-	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(5 * time.Millisecond) {
-		if err := syscall.Kill(pid, 0); errors.Is(err, syscall.ESRCH) {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("process %d is still there", pid)
-		}
-	}
-}
-
-// TestWarm checks how the helper is started, and every way it fails to
-// come up.
-func TestWarm(t *testing.T) {
-	cases := []struct {
-		name    string
-		body    string // the shell helper's body after --version
-		opt     func(t *testing.T, helper string) Options
-		setup   func(t *testing.T, be backend.Backend, sp *backend.WarmSpec, helper string)
-		ctx     func(t *testing.T) context.Context
-		wantIs  error
-		wantErr string
-		check   func(t *testing.T, be backend.Backend, sp backend.WarmSpec, w backend.Warm)
-	}{
-		{name: "the template's arguments follow the guest", body: "echo \"$@\" > args\n" + readyThenWait,
-			opt: func(t *testing.T, helper string) Options {
-				guest := filepath.Join(t.TempDir(), "guest.bin")
-				if err := os.WriteFile(guest, []byte("guest"), 0o644); err != nil {
-					t.Fatal(err)
-				}
-				return Options{Helper: helper, Guest: guest}
-			},
-			setup: func(_ *testing.T, _ backend.Backend, sp *backend.WarmSpec, _ string) {
-				sp.Template.Argv = []string{"guest", "--init-ms", "5"}
-			},
-			check: func(t *testing.T, be backend.Backend, sp backend.WarmSpec, w backend.Warm) {
-				if w.ID != sp.GrantUID || w.PID <= 0 {
-					t.Errorf("Warm = %+v", w)
-				}
-				b, err := os.ReadFile(filepath.Join(sp.WorkDir, "args"))
-				if err != nil || strings.TrimSpace(string(b)) != "--guest "+be.(*Backend).opt.Guest+" --init-ms 5" {
-					t.Errorf("helper args = %q, %v", b, err)
-				}
-			}},
-		{name: "a bare template passes nothing", body: "echo \"$@\" > args\n" + readyThenWait,
-			setup: func(_ *testing.T, _ backend.Backend, sp *backend.WarmSpec, _ string) {
-				sp.Template.Argv = []string{"guest"}
-			},
-			check: func(t *testing.T, _ backend.Backend, sp backend.WarmSpec, _ backend.Warm) {
-				if b, err := os.ReadFile(filepath.Join(sp.WorkDir, "args")); err != nil || strings.TrimSpace(string(b)) != "" {
-					t.Errorf("helper args = %q, %v, want none", b, err)
-				}
-			}},
-		{name: "the helper's output goes to the zygote log", body: "echo hello from the helper\n" + readyThenWait,
-			check: func(t *testing.T, _ backend.Backend, sp backend.WarmSpec, _ backend.Warm) {
-				if b, err := os.ReadFile(filepath.Join(sp.WorkDir, "zygote.log")); err != nil || !strings.Contains(string(b), "hello from the helper") {
-					t.Errorf("zygote.log = %q, %v", b, err)
-				}
-			}},
-		{name: "the helper is born in the grant's cgroup", body: readyThenWait,
-			setup: func(t *testing.T, _ backend.Backend, sp *backend.WarmSpec, _ string) {
-				name := fmt.Sprintf("fiberd-unit-hl-%d", os.Getpid())
-				p := filepath.Join("/sys/fs/cgroup", name)
-				if err := os.Mkdir(p, 0o755); err != nil {
-					t.Skipf("cannot make a cgroup: %v", err)
-				}
-				t.Cleanup(func() { _ = os.Remove(p) })
-				f, err := os.Open(p)
-				if err != nil {
-					t.Fatal(err)
-				}
-				t.Cleanup(func() { _ = f.Close() })
-				sp.CgroupFD = int(f.Fd())
-			},
-			check: func(t *testing.T, be backend.Backend, sp backend.WarmSpec, w backend.Warm) {
-				b, err := os.ReadFile(fmt.Sprintf("/proc/%d/cgroup", w.PID))
-				if err != nil || !strings.Contains(string(b), fmt.Sprintf("fiberd-unit-hl-%d", os.Getpid())) {
-					t.Errorf("helper cgroup = %q, %v", b, err)
-				}
-				// The cgroup must be empty before its directory can go.
-				be.Unwarm(w.ID)
-				waitGone(t, w.PID)
-			}},
-		{name: "no usable helper", body: readyThenWait, wantErr: "helper or guest unavailable",
-			opt: func(_ *testing.T, helper string) Options { return Options{Helper: helper + "-missing"} }},
-		{name: "the run directory cannot be made", body: readyThenWait, wantErr: "not a directory",
-			setup: func(t *testing.T, _ backend.Backend, sp *backend.WarmSpec, _ string) {
-				if err := os.WriteFile(filepath.Dir(sp.WorkDir), nil, 0o644); err != nil {
-					t.Fatal(err)
-				}
-			}},
-		{name: "the log cannot be opened", body: readyThenWait, wantErr: "is a directory",
-			setup: func(t *testing.T, _ backend.Backend, sp *backend.WarmSpec, _ string) {
-				if err := os.MkdirAll(filepath.Join(sp.WorkDir, "zygote.log"), 0o755); err != nil {
-					t.Fatal(err)
-				}
-			}},
-		{name: "the helper cannot be started", body: readyThenWait, wantErr: "start helper",
-			setup: func(t *testing.T, _ backend.Backend, _ *backend.WarmSpec, helper string) {
-				if err := os.Chmod(helper, 0o644); err != nil {
-					t.Fatal(err)
-				}
-			}},
-		{name: "the helper exits before READY", body: "exit 3", wantIs: io.EOF, wantErr: "did not become ready"},
-		{name: "the helper says something else first", body: "echo HELLO >&3\n" + readyThenWait, wantIs: ErrHelper, wantErr: "expected READY"},
-		{name: "the caller gives up", body: "exec sleep 30", wantIs: context.DeadlineExceeded,
-			ctx: func(t *testing.T) context.Context {
-				ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-				t.Cleanup(cancel)
-				return ctx
-			}},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			helper := shellHelper(t, tc.body)
-			opt := Options{Helper: helper}
-			if tc.opt != nil {
-				opt = tc.opt(t, helper)
-			}
-			be := New(opt)
-			defer be.Close()
-			sp := backend.WarmSpec{GrantUID: "g1", WorkDir: filepath.Join(t.TempDir(), "run", "g1"), CgroupFD: -1, ProbeCgroupFD: -1}
-			if tc.setup != nil {
-				tc.setup(t, be, &sp, helper)
-			}
-			ctx := warmCtx(t)
-			if tc.ctx != nil {
-				ctx = tc.ctx(t)
-			}
-			before := children(t)
-			w, err := be.Warm(ctx, sp)
-			if tc.wantErr != "" || tc.wantIs != nil {
-				if err == nil {
-					t.Fatalf("Warm = %+v, want an error (%s %v)", w, tc.wantErr, tc.wantIs)
-				}
-				if tc.wantErr != "" && !strings.Contains(err.Error(), tc.wantErr) {
-					t.Fatalf("Warm = %v, want an error containing %q", err, tc.wantErr)
-				}
-				if tc.wantIs != nil && !errors.Is(err, tc.wantIs) {
-					t.Fatalf("Warm = %v, want %v", err, tc.wantIs)
-				}
-				if _, ok := be.(*Backend).warmOf(sp.GrantUID); ok {
-					t.Fatal("a warm that failed is registered")
-				}
-				// The helper it started, if any, is killed and reaped.
-				noNewChildren(t, before)
-				return
-			}
-			if err != nil {
-				t.Fatalf("Warm: %v", err)
-			}
-			tc.check(t, be, sp, w)
-			be.Close()
-			waitGone(t, w.PID)
-		})
-	}
-}
-
-// noNewChildren fails when a child this process did not have before is
-// still there, alive or as a zombie nobody reaped, once a moment has
-// passed.
-func noNewChildren(t *testing.T, before []string) {
-	t.Helper()
-	had := map[string]bool{}
-	for _, c := range before {
-		had[strings.Fields(c)[0]] = true
-	}
-	var left []string
-	for deadline := time.Now().Add(2 * time.Second); ; time.Sleep(10 * time.Millisecond) {
-		left = left[:0]
-		for _, c := range children(t) {
-			if !had[strings.Fields(c)[0]] {
-				left = append(left, c)
-			}
-		}
-		if len(left) == 0 {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("children left behind: %v", left)
-		}
-	}
-}
-
-// children lists this process's children as "<pid> <comm> <state>".
-func children(t *testing.T) []string {
-	t.Helper()
-	ents, err := os.ReadDir("/proc")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var out []string
-	for _, e := range ents {
-		b, err := os.ReadFile(filepath.Join("/proc", e.Name(), "stat"))
-		if err != nil {
-			continue
-		}
-		// "<pid> (<comm>) <state> <ppid> ...", and comm may hold spaces.
-		s := string(b)
-		i := strings.LastIndexByte(s, ')')
-		if i < 0 {
-			continue
-		}
-		f := strings.Fields(s[i+1:])
-		if len(f) < 2 || f[1] != fmt.Sprint(os.Getpid()) {
-			continue
-		}
-		out = append(out, e.Name()+" "+s[strings.IndexByte(s, '(')+1:i]+" "+f[0])
-	}
-	return out
-}
-
-// warmOf is the registered helper of a warm, for the tests.
-func (b *Backend) warmOf(id string) (*helper, bool) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	h, ok := b.warms[id]
-	return h, ok
-}
-
-// talk sends one line to a fiber's endpoint and reads the reply.
-func talk(t *testing.T, endpoint, line string) string {
-	t.Helper()
-	c, err := net.DialTimeout("unix", endpoint, 2*time.Second)
-	if err != nil {
-		t.Fatalf("dial %s: %v", endpoint, err)
-	}
-	defer func() { _ = c.Close() }()
-	_ = c.SetDeadline(time.Now().Add(5 * time.Second))
-	if _, err := fmt.Fprintln(c, line); err != nil {
-		t.Fatalf("%s: %v", line, err)
-	}
-	reply, err := bufio.NewReader(c).ReadString('\n')
-	if err != nil {
-		t.Fatalf("%s: %v", line, err)
-	}
-	return strings.TrimSpace(reply)
-}
-
-// awaitExit is the next exit the backend reports.
-func awaitExit(t *testing.T, be backend.Backend) backend.Exit {
-	t.Helper()
-	select {
-	case e := <-be.Exits():
-		return e
-	case <-time.After(5 * time.Second):
-		t.Fatal("no exit was reported")
-		return backend.Exit{}
-	}
-}
-
-// awaitW waits for the fiber's W to reach want.
-func awaitW(t *testing.T, be backend.Backend, id string, want uint64) {
-	t.Helper()
-	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(5 * time.Millisecond) {
-		w, ok := be.(backend.WReporter).FiberW(id)
-		if ok && w == want {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("FiberW(%s) = %d, %v, want %d", id, w, ok, want)
-		}
-	}
-}
-
 // TestFakeHelperProtocol drives the backend over hack/hyperlight's fake
-// helper, in the order of a grant's life. That is warm, clone, W, park,
-// kill, resume, and the ends of fibers and of the helper itself. Each
-// step builds on the one before, so a failure stops the sequence.
+// helper, run as a goroutine over the control socket, in the order of a
+// grant's life. That is warm, clone, W, park, kill, resume, and the ends
+// of fibers and of the helper itself. Each step builds on the one
+// before, so a failure stops the sequence.
 func TestFakeHelperProtocol(t *testing.T) {
-	if fakeHelperBin == "" {
-		t.Fatal("the fake helper did not build")
-	}
 	guest := filepath.Join(t.TempDir(), "guest.bin")
 	if err := os.WriteFile(guest, []byte("fake guest"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	be := New(Options{Helper: fakeHelperBin, Guest: guest})
-	defer be.Close()
+	s := &fakeStarter{version: fake}
+	be := newFake(t, Options{Helper: "fakehelper", Guest: guest}, s)
 	work := filepath.Join(t.TempDir(), "run", "g1")
 	park := filepath.Join(t.TempDir(), "park")
 	ep := func(fence string) string { return filepath.Join(work, fence+".sock") }
@@ -549,7 +234,7 @@ func TestFakeHelperProtocol(t *testing.T) {
 			if _, err := os.Stat(ep("f1")); err == nil {
 				t.Fatal("the endpoint is still there after the park")
 			}
-			if _, ok := be.(backend.WReporter).FiberW("f1"); !ok {
+			if _, ok := be.FiberW("f1"); !ok {
 				t.Fatal("the fiber is gone after a sync park")
 			}
 		}},
@@ -560,7 +245,7 @@ func TestFakeHelperProtocol(t *testing.T) {
 			if e := awaitExit(t, be); e != (backend.Exit{FiberID: "f1", Status: "exit:137"}) {
 				t.Fatalf("exit = %+v", e)
 			}
-			if _, ok := be.(backend.WReporter).FiberW("f1"); ok {
+			if _, ok := be.FiberW("f1"); ok {
 				t.Fatal("the fiber is still known after its exit")
 			}
 		}},
@@ -598,7 +283,7 @@ func TestFakeHelperProtocol(t *testing.T) {
 			if !errors.Is(err, context.DeadlineExceeded) {
 				t.Fatalf("Clone = %v, want the deadline exceeded", err)
 			}
-			if _, ok := be.(backend.WReporter).FiberW("f3"); ok {
+			if _, ok := be.FiberW("f3"); ok {
 				t.Fatal("a fiber that missed is still known")
 			}
 		}},
@@ -607,7 +292,7 @@ func TestFakeHelperProtocol(t *testing.T) {
 			if !errors.Is(err, ErrHelper) || !strings.Contains(err.Error(), "state.json") {
 				t.Fatalf("Resume = %v, want ErrHelper about state.json", err)
 			}
-			if _, ok := be.(backend.WReporter).FiberW("f4"); ok {
+			if _, ok := be.FiberW("f4"); ok {
 				t.Fatal("a fiber that failed to resume is still known")
 			}
 		}},
@@ -633,11 +318,15 @@ func TestFakeHelperProtocol(t *testing.T) {
 				t.Fatal(err)
 			}
 			be.Unwarm("g1")
-			waitGone(t, warm.PID)
+			awaitRun(t, s.started()[0])
 			got := []backend.Exit{awaitExit(t, be), awaitExit(t, be)}
 			want := []backend.Exit{{FiberID: f.ID, Status: "signal:helper"}, {WarmID: "g1", Status: "helper exited"}}
 			if !reflect.DeepEqual(got, want) {
 				t.Fatalf("exits = %+v, want %+v", got, want)
+			}
+			// The helper took its sandboxes with it.
+			if _, err := os.Stat(ep("f6")); err == nil {
+				t.Fatal("the orphan's endpoint is still there")
 			}
 			if _, err := be.Clone(ctx, "g1", backend.FiberSpec{Fence: "f7", Endpoint: ep("f7"), CgroupFD: -1}); err == nil {
 				t.Fatal("a clone under the unwarmed helper succeeded")
@@ -678,6 +367,9 @@ func newPipe(t *testing.T) *pipe {
 		return c.(*net.UnixConn)
 	}
 	ours, theirs := conn(fds[0], "ours"), conn(fds[1], "theirs")
+	// Closing both ends is what ends the read loop, so the leak check
+	// runs after it (cleanups run last registered first).
+	t.Cleanup(func() { goleak.VerifyNone(t) })
 	t.Cleanup(func() { _ = ours.Close(); _ = theirs.Close() })
 	b := &Backend{warms: map[string]*helper{}, fibers: map[string]*fiber{}, exits: make(chan backend.Exit, 16), tier: core.TierSnapshot}
 	h := &helper{id: "g1", ctl: ours, pend: map[string]chan reply{}, gone: make(chan struct{})}
@@ -730,18 +422,6 @@ func (p *pipe) ask(ctx context.Context, fence, line string) <-chan asked {
 		ch <- asked{r, err}
 	}()
 	return ch
-}
-
-func await[T any](t *testing.T, ch <-chan T) T {
-	t.Helper()
-	select {
-	case v := <-ch:
-		return v
-	case <-time.After(5 * time.Second):
-		t.Fatal("nothing arrived")
-		var zero T
-		return zero
-	}
 }
 
 // TestReadLoop covers every line the helper may send, well formed or not, and

@@ -6,8 +6,8 @@
 // line protocol in hack/hyperlight/PROTOCOL.md. Hyperlight has a Rust
 // host API only, so the mechanism lives in the helper
 // (hack/hyperlight/helper); the same protocol is served without a
-// hypervisor by hack/hyperlight/fakehelper, which is what the container
-// tests and conformance run against.
+// hypervisor by hack/hyperlight/fakehelper, which conformance runs against
+// and the unit tests run inside their own process through the starter.
 //
 // The helper's sandboxes are threads of one process, so a fiber has no
 // process and no cgroup leaf of its own: the helper runs in the grant's
@@ -92,13 +92,61 @@ func (f facts) platform() artifact.Platform {
 	return artifact.Platform{Kernel: "hyperlight-" + f.hyperlight, Libc: f.helper + "+" + f.hypervisor + "+" + f.cpu}
 }
 
+// starter starts helper processes. It is the one point where a process
+// enters the backend, so the unit tests put a goroutine there.
+type starter interface {
+	// Version is what `helper --version` prints.
+	Version(ctx context.Context) (string, error)
+	// Start runs the helper with args in workDir, in the cgroup when
+	// cgroupFD is not negative, with its output on logf and ctl as fd 3.
+	Start(args []string, workDir string, cgroupFD int, logf, ctl *os.File) (process, error)
+}
+
+// process is a started helper.
+type process interface {
+	Pid() int
+	Kill() error
+	Wait() error
+}
+
+// execStarter starts the helper executable.
+type execStarter struct{ helper string }
+
+func (s execStarter) Version(ctx context.Context) (string, error) {
+	out, err := exec.CommandContext(ctx, s.helper, "--version").Output()
+	return string(out), err
+}
+
+func (s execStarter) Start(args []string, workDir string, cgroupFD int, logf, ctl *os.File) (process, error) {
+	cmd := exec.Command(s.helper, args...)
+	cmd.ExtraFiles = []*os.File{ctl}
+	cmd.Stdout, cmd.Stderr = logf, logf
+	cmd.Dir = workDir
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if cgroupFD >= 0 {
+		cmd.SysProcAttr.UseCgroupFD = true
+		cmd.SysProcAttr.CgroupFD = cgroupFD
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	return execProcess{cmd}, nil
+}
+
+type execProcess struct{ cmd *exec.Cmd }
+
+func (p execProcess) Pid() int    { return p.cmd.Process.Pid }
+func (p execProcess) Kill() error { return p.cmd.Process.Kill() }
+func (p execProcess) Wait() error { return p.cmd.Wait() }
+
 // Backend implements backend.Backend, Platformer, DeadlineAdvisor,
 // WReporter and Prober.
 type Backend struct {
-	opt   Options
-	tier  core.Tier
-	why   error // why tier is unspecified, nil when it is not
-	facts facts // from `helper --version` at open, and every READY must agree
+	opt     Options
+	starter starter // New sets it to the helper executable
+	tier    core.Tier
+	why     error // why tier is unspecified, nil when it is not
+	facts   facts // from `helper --version` at open, and every READY must agree
 
 	mu     sync.Mutex
 	warms  map[string]*helper
@@ -108,7 +156,7 @@ type Backend struct {
 
 type helper struct {
 	id   string
-	cmd  *exec.Cmd
+	proc process
 	ctl  *net.UnixConn
 	pmu  sync.Mutex
 	pend map[string]chan reply // fence -> reply
@@ -129,9 +177,16 @@ type fiber struct {
 // New opens the backend. The tier is FIBER_SNAPSHOT when the helper
 // answers `--version` and the guest exists. Otherwise it offers none,
 // and ProbeErr says why.
-func New(o Options) backend.Backend {
-	b := &Backend{opt: o, warms: map[string]*helper{}, fibers: map[string]*fiber{}, exits: make(chan backend.Exit, 1024)}
-	f, err := probeFacts(o.Helper)
+func New(o Options) backend.Backend { return newBackend(o, nil) }
+
+// newBackend is New with the starter chosen, nil for the helper
+// executable.
+func newBackend(o Options, start starter) *Backend {
+	if start == nil {
+		start = execStarter{o.Helper}
+	}
+	b := &Backend{opt: o, starter: start, warms: map[string]*helper{}, fibers: map[string]*fiber{}, exits: make(chan backend.Exit, 1024)}
+	f, err := probeFacts(start)
 	if err != nil {
 		b.why = fmt.Errorf("helper %s unusable: %w", o.Helper, err)
 		return b
@@ -154,14 +209,14 @@ func (b *Backend) ProbeErr() error { return b.why }
 // probeFacts runs `helper --version` for the facts a snapshot through
 // this helper depends on. They are known before any grant is warmed,
 // because the host records them at open.
-func probeFacts(helper string) (facts, error) {
+func probeFacts(start starter) (facts, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), versionTimeout)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, helper, "--version").Output()
+	out, err := start.Version(ctx)
 	if err != nil {
 		return facts{}, fmt.Errorf("--version: %w", err)
 	}
-	return parseFacts(strings.Fields(strings.SplitN(string(out), "\n", 2)[0]))
+	return parseFacts(strings.Fields(strings.SplitN(out, "\n", 2)[0]))
 }
 
 func (b *Backend) Name() string    { return "hyperlight" }
@@ -228,16 +283,7 @@ func (b *Backend) Warm(ctx context.Context, sp backend.WarmSpec) (backend.Warm, 
 		return backend.Warm{}, err
 	}
 	defer func() { _ = logf.Close() }()
-	cmd := exec.Command(b.opt.Helper, args...)
-	cmd.ExtraFiles = []*os.File{childF}
-	cmd.Stdout, cmd.Stderr = logf, logf
-	cmd.Dir = sp.WorkDir
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	if sp.CgroupFD >= 0 {
-		cmd.SysProcAttr.UseCgroupFD = true
-		cmd.SysProcAttr.CgroupFD = sp.CgroupFD
-	}
-	err = cmd.Start()
+	proc, err := b.starter.Start(args, sp.WorkDir, sp.CgroupFD, logf, childF)
 	// The helper holds its own copy of its end. Ours closes, so a
 	// helper that dies before READY is read as EOF below rather than
 	// waited for until the caller's deadline.
@@ -249,11 +295,11 @@ func (b *Backend) Warm(ctx context.Context, sp backend.WarmSpec) (backend.Warm, 
 	conn, err := net.FileConn(parentF)
 	_ = parentF.Close()
 	if err != nil {
-		end(cmd)
+		end(proc)
 		return backend.Warm{}, err
 	}
 	uc, _ := conn.(*net.UnixConn)
-	h := &helper{id: sp.GrantUID, cmd: cmd, ctl: uc, pend: map[string]chan reply{}, gone: make(chan struct{})}
+	h := &helper{id: sp.GrantUID, proc: proc, ctl: uc, pend: map[string]chan reply{}, gone: make(chan struct{})}
 
 	ready := make(chan error, 1)
 	rd := bufio.NewReaderSize(uc, 64<<10)
@@ -284,12 +330,12 @@ func (b *Backend) Warm(ctx context.Context, sp backend.WarmSpec) (backend.Warm, 
 	select {
 	case err := <-ready:
 		if err != nil {
-			end(cmd)
+			end(proc)
 			_ = uc.Close()
 			return backend.Warm{}, fmt.Errorf("hyperlight: helper for %s did not become ready: %w", sp.GrantUID, err)
 		}
 	case <-ctx.Done():
-		end(cmd)
+		end(proc)
 		_ = uc.Close()
 		return backend.Warm{}, ctx.Err()
 	}
@@ -297,16 +343,16 @@ func (b *Backend) Warm(ctx context.Context, sp backend.WarmSpec) (backend.Warm, 
 	b.warms[h.id] = h
 	b.mu.Unlock()
 	go b.read(h, rd)
-	go func() { _ = cmd.Wait() }()
-	return backend.Warm{ID: h.id, PID: cmd.Process.Pid}, nil
+	go func() { _ = proc.Wait() }()
+	return backend.Warm{ID: h.id, PID: proc.Pid()}, nil
 }
 
 // end kills a helper that did not come up and reaps it, so a failed
 // warm leaves no zombie behind. A helper that did come up is reaped by
 // the goroutine Warm starts for it.
-func end(cmd *exec.Cmd) {
-	_ = cmd.Process.Kill()
-	_ = cmd.Wait()
+func end(p process) {
+	_ = p.Kill()
+	_ = p.Wait()
 }
 
 func (b *Backend) read(h *helper, rd *bufio.Reader) {
@@ -448,7 +494,7 @@ func (b *Backend) Unwarm(id string) {
 	b.mu.Unlock()
 	if ok {
 		_ = h.ctl.Close()
-		_ = h.cmd.Process.Kill()
+		_ = h.proc.Kill()
 	}
 }
 
@@ -558,7 +604,7 @@ func (b *Backend) Close() {
 	b.mu.Unlock()
 	for _, h := range hs {
 		_ = h.ctl.Close()
-		_ = h.cmd.Process.Kill()
+		_ = h.proc.Kill()
 	}
 }
 
