@@ -209,10 +209,10 @@ linux-check: ## probe the container for cgroup v2, PSI, criu, gcc
 linux-gvisor-check: ## probe runsc in the container: run, checkpoint/restore, host unix sockets, self-checkpoint
 	hack/dev/run.sh hack/dev/gvisor-check.sh
 
-linux-test: ## unit tests as uid 65534 (as CI's runners run them), then the integration suites as root, inside the container
+linux-test: ## unit tests as uid 1001 (the GitHub runner's uid, not nobody, so a chown to 65534 cannot pass by luck), then the integration suites as root, inside the container
 	hack/dev/run.sh sh -ec 'go mod download; for m in $(EXAMPLES); do (cd $$m && go mod download); done; \
 	  mkdir -p /tmp/nr && chmod 777 /tmp/nr; \
-	  env -u FIBERD_CGROUP_ROOT setpriv --reuid=65534 --regid=65534 --clear-groups --inh-caps=-all \
+	  env -u FIBERD_CGROUP_ROOT setpriv --reuid=1001 --regid=1001 --clear-groups --inh-caps=-all \
 	    env HOME=/tmp/nr GOCACHE=/tmp/nr/cache GOMODCACHE=/go/pkg/mod PATH=$$PATH make test'
 	$(MAKE) integration-tests
 

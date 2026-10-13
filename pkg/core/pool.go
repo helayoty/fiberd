@@ -146,9 +146,11 @@ func (a *Core) refillPass(ctx context.Context) time.Time {
 	var next time.Time
 	sts := a.Ledger.Statuses()
 	// Statuses are sorted by uid, so the turn after the last filled grant
-	// starts at the first uid above it.
+	// starts at the first uid above it. Whether a fill runs is read once
+	// per pass, so a fill that ends mid-pass cannot give its grant a second
+	// turn. Its end kicks the next pass.
 	a.poolMu.Lock()
-	last := a.lastFill
+	last, busy := a.lastFill, a.filling
 	a.poolMu.Unlock()
 	start := 0
 	for i, st := range sts {
@@ -169,7 +171,7 @@ func (a *Core) refillPass(ctx context.Context) time.Time {
 		}
 		a.poolMu.Lock()
 		ps := a.poolState(g.UID)
-		if ps.noPool || a.filling {
+		if ps.noPool || busy {
 			a.poolMu.Unlock()
 			continue
 		}
@@ -195,7 +197,7 @@ func (a *Core) refillPass(ctx context.Context) time.Time {
 				continue
 			}
 		}
-		a.filling, a.lastFill = true, g.UID
+		a.filling, a.lastFill, busy = true, g.UID, true
 		a.poolMu.Unlock()
 		go a.fill(ctx, p, g)
 	}

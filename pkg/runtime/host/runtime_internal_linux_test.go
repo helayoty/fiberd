@@ -820,7 +820,7 @@ func TestClone(t *testing.T) {
 			return &struct {
 				*fakeBackend
 				*idMapperMixin
-			}{newFakeBackend(core.TierWarm), &idMapperMixin{uid: 65534}}
+			}{newFakeBackend(core.TierWarm), &idMapperMixin{uid: uint32(os.Geteuid())}}
 		}, grant: g, prepare: true,
 			seed: func(t *testing.T, r *Runtime) { delegated(t, r.root.Child("g1")) },
 			before: func(t *testing.T, r *Runtime) {
