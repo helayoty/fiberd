@@ -8,10 +8,10 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -31,6 +31,8 @@ import (
 	"github.com/helayoty/fiberd/pkg/core"
 	"github.com/helayoty/fiberd/pkg/fiberd"
 	"github.com/helayoty/fiberd/pkg/grant"
+
+	"github.com/helayoty/fiberd/examples/slurm/home"
 )
 
 // config is fiberd's config as main builds it, from args.
@@ -251,7 +253,7 @@ func TestRunRefuses(t *testing.T) {
 			if tc.mount != nil {
 				mount = tc.mount(t)
 			}
-			err := run(c, tc.grant, "none", jobEnv(tc.env), mount)
+			err := run(context.Background(), c, tc.grant, "none", jobEnv(tc.env), home.Config{CgroupMount: mount})
 			if err == nil || !strings.Contains(err.Error(), tc.err) {
 				t.Fatalf("run = %v, want an error naming %q", err, tc.err)
 			}
@@ -283,9 +285,29 @@ func (l *logTail) find(re *regexp.Regexp) []string {
 	return re.FindStringSubmatch(l.buf.String())
 }
 
+// fakeProbe answers the job's state in process. The test flips it.
+type fakeProbe struct {
+	mu    sync.Mutex
+	state string
+}
+
+func (p *fakeProbe) run(context.Context, []string) ([]byte, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return []byte("JobId=4242 JobState=" + p.state + "\n"), nil
+}
+
+func (p *fakeProbe) set(state string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.state = state
+}
+
 // TestRunLeavesWithTheJob runs fiberd in an allocation until the job
 // ends. fiberd stages its grant, serves, and on the job's end bumps
-// its epoch and stops on its own, without an error.
+// its epoch and stops on its own, without an error. The job's end
+// stops it through the context here, as the home's default SIGTERM
+// does in the binary (tests/ TestFiberdLeavesWithTheJob).
 func TestRunLeavesWithTheJob(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -301,39 +323,29 @@ func TestRunLeavesWithTheJob(t *testing.T) {
 			log.SetOutput(logs)
 			t.Cleanup(func() { log.SetOutput(os.Stderr) })
 
-			dir := t.TempDir()
-			stateFile := filepath.Join(dir, "state")
-			if err := os.WriteFile(stateFile, []byte("RUNNING"), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			probe := filepath.Join(dir, "probe.sh")
-			if err := os.WriteFile(probe, []byte("#!/bin/sh\necho \"JobId=4242 JobState=$(cat "+stateFile+")\"\n"), 0o755); err != nil {
-				t.Fatal(err)
-			}
-			state, grants := shortDir(t), filepath.Join(dir, "grants")
+			probe := &fakeProbe{state: "RUNNING"}
+			state, grants := shortDir(t), filepath.Join(t.TempDir(), "grants")
 			c := config(t, "-state", state, "-listen", "127.0.0.1:0", "-insecure-plaintext", "-verifier", "insecure-json", "-runtime", "stub",
 				"-grants-dir", grants, "-endpoint-host", "127.0.0.1", "-stale-ttl", "200ms")
+			ready := make(chan net.Addr, 1)
+			c.Ready = func(grpc, _, _ net.Addr) { ready <- grpc }
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			ended := make(chan struct{}, 1)
+			base := home.Config{CgroupMount: fakeCgroup(t), RunProbe: probe.run, OnJobEnd: func() { ended <- struct{}{}; cancel() }}
 
 			done := make(chan error, 1)
-			go func() { done <- run(c, "staged-token", "/bin/sh "+probe, jobEnv(nil), fakeCgroup(t)) }()
+			go func() { done <- run(ctx, c, "staged-token", "/usr/bin/scontrol show job", jobEnv(nil), base) }()
 
-			// Wait for the warm path, then for an answer from it.
-			addrRE := regexp.MustCompile(`warm path on (\S+)`)
-			var addr string
-			for deadline := time.Now().Add(20 * time.Second); addr == ""; time.Sleep(10 * time.Millisecond) {
-				if m := logs.find(addrRE); m != nil {
-					addr = m[1]
-				}
-				select {
-				case err := <-done:
-					t.Fatalf("run returned before serving: %v", err)
-				default:
-				}
-				if time.Now().After(deadline) {
-					t.Fatal("fiberd never served")
-				}
+			var addr net.Addr
+			select {
+			case addr = <-ready:
+			case err := <-done:
+				t.Fatalf("run returned before serving: %v", err)
+			case <-time.After(20 * time.Second):
+				t.Fatal("fiberd never served")
 			}
-			conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+			conn, err := grpc.NewClient(addr.String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -355,9 +367,7 @@ func TestRunLeavesWithTheJob(t *testing.T) {
 				t.Fatalf("staged grant = %q (%v), want the -grant token", got, err)
 			}
 
-			if err := os.WriteFile(stateFile, []byte(tc.state), 0o600); err != nil {
-				t.Fatal(err)
-			}
+			probe.set(tc.state)
 			select {
 			case err := <-done:
 				if err != nil {
@@ -365,6 +375,11 @@ func TestRunLeavesWithTheJob(t *testing.T) {
 				}
 			case <-time.After(20 * time.Second):
 				t.Fatal("the job ended but fiberd kept running")
+			}
+			select {
+			case <-ended:
+			default:
+				t.Fatal("fiberd stopped without the job's end")
 			}
 			got, err := os.ReadFile(filepath.Join(state, "private", "epoch"))
 			if err != nil || strings.TrimSpace(string(got)) != tc.epoch {
@@ -377,40 +392,23 @@ func TestRunLeavesWithTheJob(t *testing.T) {
 	}
 }
 
-// TestMainExit runs main in a child process and checks its exit status.
-// It is 0 for -h, 2 for a bad command line and 1 for any other failure.
-func TestMainExit(t *testing.T) {
-	if args, ok := os.LookupEnv("FIBERD_SLURM_TEST_ARGS"); ok {
-		os.Args = append([]string{"fiberd-slurm"}, strings.Fields(args)...)
-		main()
-		os.Exit(0)
-	}
+// TestExitCode checks the exit status main gives each outcome. The
+// statuses of the binary itself are checked in tests/ TestSlurmMainExit.
+func TestExitCode(t *testing.T) {
 	cases := []struct {
-		name   string
-		args   string
-		code   int
-		stderr string
+		name string
+		err  error
+		want int
 	}{
-		{name: "-h exits 0", args: "-h", code: 0, stderr: "-slurm-probe"},
-		{name: "a bad flag exits 2", args: "-nope", code: 2, stderr: "flag provided but not defined: -nope"},
-		{name: "outside an allocation exits 1", args: "-insecure-plaintext", code: 1, stderr: "SLURM_JOB_ID unset"},
+		{"a clean stop exits 0", nil, 0},
+		{"-h exits 0", usageError{flag.ErrHelp}, 0},
+		{"a bad command line exits 2", usageError{errors.New("flag provided but not defined: -nope")}, 2},
+		{"any other failure exits 1", errors.New("slurm: not inside an allocation (SLURM_JOB_ID unset)"), 1},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			cmd := exec.Command(os.Args[0], "-test.run=^TestMainExit$")
-			cmd.Env = append(os.Environ(), "FIBERD_SLURM_TEST_ARGS="+tc.args, "SLURM_JOB_ID=", "FIBERD_GRANT=")
-			var stderr bytes.Buffer
-			cmd.Stderr = &stderr
-			err := cmd.Run()
-			code := 0
-			var exit *exec.ExitError
-			if errors.As(err, &exit) {
-				code = exit.ExitCode()
-			} else if err != nil {
-				t.Fatal(err)
-			}
-			if code != tc.code || !strings.Contains(stderr.String(), tc.stderr) {
-				t.Fatalf("exit %d with %q, want %d with %q", code, stderr.String(), tc.code, tc.stderr)
+			if got := exitCode(tc.err); got != tc.want {
+				t.Fatalf("exitCode(%v) = %d, want %d", tc.err, got, tc.want)
 			}
 		})
 	}

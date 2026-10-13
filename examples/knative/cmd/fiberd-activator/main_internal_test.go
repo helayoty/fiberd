@@ -12,7 +12,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strconv"
@@ -282,40 +281,23 @@ func TestRun(t *testing.T) {
 	}
 }
 
-// TestMainExit runs main in a child process and checks its exit status.
-// It is 0 for -h, 2 for a bad command line and 1 for any other failure.
-func TestMainExit(t *testing.T) {
-	if args, ok := os.LookupEnv("FIBERD_ACTIVATOR_ARGS"); ok {
-		os.Args = append([]string{"fiberd-activator"}, strings.Fields(args)...)
-		main()
-		os.Exit(0)
-	}
+// TestExitCode checks the exit status main gives each outcome. The
+// statuses of the binary itself are checked in tests/ TestActivatorMainExit.
+func TestExitCode(t *testing.T) {
 	cases := []struct {
-		name   string
-		args   string
-		code   int
-		stderr string
+		name string
+		err  error
+		want int
 	}{
-		{name: "-h exits 0", args: "-h", code: 0, stderr: "Usage of fiberd-activator"},
-		{name: "a bad flag exits 2", args: "-nope", code: 2, stderr: "flag provided but not defined: -nope"},
-		{name: "a failure exits 1", args: "-home %zz -revision a=t", code: 1, stderr: "invalid URL escape"},
+		{"a clean stop exits 0", nil, 0},
+		{"-h exits 0", usageError{flag.ErrHelp}, 0},
+		{"a bad command line exits 2", usageError{errors.New("flag provided but not defined: -nope")}, 2},
+		{"any other failure exits 1", errors.New("invalid URL escape"), 1},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			cmd := exec.Command(os.Args[0], "-test.run=^TestMainExit$")
-			cmd.Env = append(os.Environ(), "FIBERD_ACTIVATOR_ARGS="+tc.args)
-			var stderr bytes.Buffer
-			cmd.Stderr = &stderr
-			err := cmd.Run()
-			code := 0
-			var exit *exec.ExitError
-			if errors.As(err, &exit) {
-				code = exit.ExitCode()
-			} else if err != nil {
-				t.Fatal(err)
-			}
-			if code != tc.code || !strings.Contains(stderr.String(), tc.stderr) {
-				t.Fatalf("exit %d with %q, want %d with %q", code, stderr.String(), tc.code, tc.stderr)
+			if got := exitCode(tc.err); got != tc.want {
+				t.Fatalf("exitCode(%v) = %d, want %d", tc.err, got, tc.want)
 			}
 		})
 	}

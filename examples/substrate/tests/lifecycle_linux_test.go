@@ -1,6 +1,6 @@
-//go:build linux
+//go:build linux && integration
 
-package herder_test
+package substratetest
 
 import (
 	"context"
@@ -43,14 +43,15 @@ import (
 	ateompb "github.com/helayoty/fiberd/examples/substrate/proto/ateom"
 )
 
-// The whole worker, in process, driven the way atelet drives it: an
+// The whole worker, in process, driven the way atelet drives it: a
 // fiberd over a sandbox backend with a file delta registry, the substrate
 // home minting grants and serving its keys, the ingress in front, and
 // fake atelet directories under a temp root. The image's backend is
 // gVisor, so that is the path the lifecycle runs on first. The proc
 // backend runs the same lifecycle, as proof that the herder is a plain
 // consumer and takes no backend for granted. Needs the dev container (a
-// writable cgroup root, gcc, runsc, criu); skipped elsewhere.
+// writable cgroup root, gcc, runsc, criu). The unit side of the herder
+// stays beside it in herder_test.go and herder_internal_test.go.
 
 // workerKeys are the delta keys every worker shares. A pool's workers must
 // share them so a snapshot taken on one restores on another.
@@ -73,21 +74,6 @@ var workerKeys = sync.OnceValue(func() artifact.Keys {
 // work holds every worker's state. Not a tmpfs: gVisor's template and
 // park images would be memory there.
 const work = "/var/lib/fiberd-test/substrate"
-
-// cgroupRoot is the delegated subtree the dev container offers, or a skip.
-func cgroupRoot(t *testing.T) string {
-	t.Helper()
-	cgRoot := os.Getenv("FIBERD_CGROUP_ROOT")
-	if cgRoot == "" {
-		cgRoot = "/sys/fs/cgroup/fiberd"
-	}
-	if f, err := os.OpenFile(filepath.Join(cgRoot, "cgroup.subtree_control"), os.O_WRONLY, 0); err != nil {
-		t.Skipf("%s not writable (run under make linux-test)", cgRoot)
-	} else {
-		_ = f.Close()
-	}
-	return cgRoot
-}
 
 // backendCase is one sandbox backend the worker can run on: how to open
 // it under a state directory and the template command it runs.
@@ -308,7 +294,6 @@ type snapshot struct {
 
 // TestActorLifecycleAcrossWorkers runs the lifecycle on each backend.
 func TestActorLifecycleAcrossWorkers(t *testing.T) {
-	cgRoot := cgroupRoot(t)
 	for _, bc := range backends() {
 		t.Run(bc.name, func(t *testing.T) { lifecycleAcrossWorkers(t, bc, cgRoot) })
 	}

@@ -17,6 +17,23 @@ var criuSysctls = []string{
 	"/proc/sys/kernel/shm_next_id",
 }
 
+// mounter is where the mount table enters. The kernel's calls by
+// default, a fake in the unit tests.
+type mounter interface {
+	Mount(source, target, fstype string, flags uintptr, data string) error
+	Access(path string, mode uint32) error
+}
+
+type sysMounter struct{}
+
+func (sysMounter) Mount(source, target, fstype string, flags uintptr, data string) error {
+	return syscall.Mount(source, target, fstype, flags, data)
+}
+
+func (sysMounter) Access(path string, mode uint32) error { return syscall.Access(path, mode) }
+
+var mounts mounter = sysMounter{}
+
 // writableMounts makes the container's cgroupfs (in its own cgroup
 // namespace) and criuSysctls writable. The runtime mounts them read-only in
 // an unprivileged Pod, and fiberd must write them. This needs
@@ -26,7 +43,7 @@ var criuSysctls = []string{
 func writableMounts(cgroupfs string) error {
 	if readOnly(cgroupfs) {
 		const flags = syscall.MS_REMOUNT | syscall.MS_NOSUID | syscall.MS_NODEV | syscall.MS_NOEXEC | syscall.MS_RELATIME
-		if err := syscall.Mount("", cgroupfs, "", flags, ""); err != nil {
+		if err := mounts.Mount("", cgroupfs, "", flags, ""); err != nil {
 			return fmt.Errorf("remount %s read-write (a Pod that is not privileged needs CAP_SYS_ADMIN and an AppArmor profile that allows mount): %w", cgroupfs, err)
 		}
 		log.Printf("k8s: remounted %s read-write", cgroupfs)
@@ -35,11 +52,11 @@ func writableMounts(cgroupfs string) error {
 		if !readOnly(f) {
 			continue
 		}
-		if err := syscall.Mount(f, f, "", syscall.MS_BIND, ""); err != nil {
+		if err := mounts.Mount(f, f, "", syscall.MS_BIND, ""); err != nil {
 			log.Printf("WARNING: k8s: bind %s: %v; criu check will fail", f, err)
 			continue
 		}
-		if err := syscall.Mount("", f, "", syscall.MS_REMOUNT|syscall.MS_BIND, ""); err != nil {
+		if err := mounts.Mount("", f, "", syscall.MS_REMOUNT|syscall.MS_BIND, ""); err != nil {
 			log.Printf("WARNING: k8s: remount %s read-write: %v; criu check will fail", f, err)
 			continue
 		}
@@ -48,4 +65,4 @@ func writableMounts(cgroupfs string) error {
 	return nil
 }
 
-func readOnly(path string) bool { return errors.Is(syscall.Access(path, 2), syscall.EROFS) }
+func readOnly(path string) bool { return errors.Is(mounts.Access(path, 2), syscall.EROFS) }

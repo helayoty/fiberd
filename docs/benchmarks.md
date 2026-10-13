@@ -241,7 +241,7 @@ make linux-test
 | Files copied | 8.6 MB, comprising an 8 MB parent and a 0.5 MB delta after rounding |
 
 The measured path is implemented by
-[`TestActorLifecycleAcrossWorkers`](../examples/substrate/herder/herder_linux_test.go).
+[`TestActorLifecycleAcrossWorkers`](../examples/substrate/tests/lifecycle_linux_test.go).
 It demonstrates the example's mapping to fiberd and does not include object
 storage or a Substrate control plane.
 

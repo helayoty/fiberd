@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -29,19 +28,6 @@ func env(over map[string]string) func(string) string {
 		base[k] = v
 	}
 	return func(k string) string { return base[k] }
-}
-
-// probeScript writes a shell script that reports the state a file names,
-// so a test flips the job's state under the home.
-func probeScript(t *testing.T, dir string) (probe []string, set func(state string)) {
-	stateFile := filepath.Join(dir, "state")
-	set = func(s string) { _ = os.WriteFile(stateFile, []byte(s), 0o644) }
-	set("RUNNING")
-	script := filepath.Join(dir, "probe.sh")
-	if err := os.WriteFile(script, []byte("#!/bin/sh\necho \"JobId=4242 JobName=x JobState=$(cat "+stateFile+") NodeList=localhost\"\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	return []string{"/bin/sh", script}, set
 }
 
 // fakeCgroup is a cgroup v2 mount with its controllers already delegated.
@@ -425,104 +411,34 @@ func TestGrants(t *testing.T) {
 	}
 }
 
-// TestProbeIsLivenessAndTerminalStateIsScopeLoss checks that the issuer is
-// reachable while the job is RUNNING, and another live state changes nothing.
-// A terminal state is scope loss, reported once, and then fiberd leaves
-// with the job.
-func TestProbeIsLivenessAndTerminalStateIsScopeLoss(t *testing.T) {
-	cases := []struct {
-		name   string
-		state  string
-		reason string // empty means no scope loss, and fiberd stays
-	}{
-		{"staying RUNNING is nothing", "RUNNING", ""},
-		{"SUSPENDED is still the job's lifetime", "SUSPENDED", ""},
-		{"COMPLETING is scope loss", "COMPLETING", "job 4242 is COMPLETING"},
-		{"CANCELLED is scope loss", "CANCELLED", "job 4242 is CANCELLED"},
-		{"TIMEOUT is scope loss", "TIMEOUT", "job 4242 is TIMEOUT"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			probe, set := probeScript(t, t.TempDir())
-			var mu sync.Mutex
-			var reasons []string
-			var ended int
-			h := newHome(t, nil, probe, func() { mu.Lock(); ended++; mu.Unlock() })
-			h.OnScopeLost(func(_ context.Context, r string) {
-				mu.Lock()
-				reasons = append(reasons, r)
-				mu.Unlock()
-			})
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			go h.Run(ctx)
-			// Poll instead of a fixed sleep, so a slow machine does not flake.
-			for deadline := time.Now().Add(2 * time.Second); !h.Health().Healthy(time.Now()); time.Sleep(10 * time.Millisecond) {
-				if time.Now().After(deadline) {
-					t.Fatal("job RUNNING: the issuer must be reachable")
-				}
-			}
-			mu.Lock()
-			if len(reasons) != 0 {
-				t.Fatalf("scope lost while RUNNING: %v", reasons)
-			}
-			mu.Unlock()
-			set(tc.state)
-			if tc.reason == "" {
-				// Nothing should happen, so give the probe time to run.
-				time.Sleep(200 * time.Millisecond)
-			} else {
-				for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
-					mu.Lock()
-					done := ended > 0
-					mu.Unlock()
-					if done {
-						break
-					}
-				}
-			}
-			mu.Lock()
-			defer mu.Unlock()
-			wantEnded := 0
-			if tc.reason == "" {
-				if len(reasons) != 0 {
-					t.Fatalf("reasons = %v, want none for %s", reasons, tc.state)
-				}
-			} else {
-				if len(reasons) != 1 || reasons[0] != tc.reason {
-					t.Fatalf("reasons = %v, want exactly one for %s", reasons, tc.state)
-				}
-				// The fences are revoked first, then fiberd leaves
-				// with the job, once.
-				wantEnded = 1
-			}
-			if ended != wantEnded {
-				t.Fatalf("OnJobEnd calls = %d, want %d", ended, wantEnded)
-			}
-		})
-	}
-}
-
-// TestIssuerReachability checks that reachability follows the probe and that SetIssuerReachable
-// overrides it. The steps share one home and run in order.
+// TestIssuerReachability checks that reachability follows the probe and
+// that SetIssuerReachable overrides it. The probe fails and ends Run's
+// context on its first call, so the steps start from one failed probe
+// and share that home, in order.
 func TestIssuerReachability(t *testing.T) {
-	h := newHome(t, nil, []string{"/bin/sh", "-c", "exit 1"}, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go h.Run(ctx)
+	down := func(context.Context, []string) ([]byte, error) {
+		cancel()
+		return []byte("slurmctld down"), errors.New("exit status 1")
+	}
+	h := newHome(t, nil, []string{"scontrol"}, nil, func(c *home.Config) { c.RunProbe = down })
+	h.Run(ctx)
 	steps := []struct {
 		name    string
 		act     func()
+		at      time.Duration // how far past now reachability is judged
 		healthy bool
 	}{
-		{"the probe failing past the stale TTL marks the issuer unreachable", func() { time.Sleep(250 * time.Millisecond) }, false},
-		{"SetIssuerReachable(true) marks the issuer reachable again", func() { h.SetIssuerReachable(true) }, true},
-		{"SetIssuerReachable(false) marks the issuer unreachable", func() { h.SetIssuerReachable(false) }, false},
+		{"a failed probe leaves the boot sync, so the issuer is reachable within the stale TTL", func() {}, 0, true},
+		{"the probe failing past the stale TTL marks the issuer unreachable", func() {}, 100 * time.Millisecond, false},
+		{"SetIssuerReachable(true) marks the issuer reachable again", func() { h.SetIssuerReachable(true) }, 0, true},
+		{"SetIssuerReachable(false) marks the issuer unreachable", func() { h.SetIssuerReachable(false) }, 0, false},
 	}
 	for _, step := range steps {
 		ok := t.Run(step.name, func(t *testing.T) {
 			step.act()
-			if got := h.Health().Healthy(time.Now()); got != step.healthy {
+			if got := h.Health().Healthy(time.Now().Add(step.at)); got != step.healthy {
 				t.Fatalf("healthy = %v, want %v", got, step.healthy)
 			}
 		})

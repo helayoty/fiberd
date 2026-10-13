@@ -1,4 +1,6 @@
-package prolog_test
+//go:build linux && integration
+
+package slurmtest
 
 import (
 	"bytes"
@@ -11,7 +13,7 @@ import (
 	"time"
 )
 
-// TestJobRestartsUnhealthyFiberd runs fiberd-job.sh with a fake
+// TestPrologRestartsUnhealthyFiberd runs fiberd-job.sh with a fake
 // fiberd-slurm and a fake curl that answers /healthz with a fixed code.
 // A 503, which a poisoned audit spool answers, makes the script stop
 // fiberd and start it again in the same allocation. A 200, or a socket
@@ -19,11 +21,11 @@ import (
 // crashes is started again. One that exits 0 by itself left because its
 // job ended, so the script ends with it. SIGTERM otherwise ends the
 // script cleanly, and only once fiberd has drained.
-func TestJobRestartsUnhealthyFiberd(t *testing.T) {
+func TestPrologRestartsUnhealthyFiberd(t *testing.T) {
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skip("no bash")
 	}
-	script, err := filepath.Abs("fiberd-job.sh")
+	script, err := filepath.Abs("../prolog/fiberd-job.sh")
 	if err != nil {
 		t.Fatal(err)
 	}
