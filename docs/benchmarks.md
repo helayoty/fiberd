@@ -107,7 +107,7 @@ A pool of restored sandboxes (`fibers.warm`) should serve a gVisor clone far fas
 | Pool of 2 | 1.7 | 6.3 | 103 | 322 |
 | Pool of 10 | 1.8 | 5.0 | 3.7 | 7.1 |
 
-A pooled clone answers in under 2 ms against about 52 ms on demand. A burst larger than the pool falls back to on-demand restores. Each idle pooled sandbox holds 54.3 MiB of grant memory, read as the grant's `memory.current` with the pool full minus the same without a pool. About 15 MiB of that is transparent huge pages backing the Sentry's heap, and with THP off for the sandboxes it holds 38.9 MiB.
+A pooled clone answers in under 2 ms against about 52 ms on demand. A burst larger than the pool falls back to on-demand restores. Each idle pooled sandbox holds 39 MiB of grant memory (2026-10-13), read as the grant's `memory.current` with the pool full minus the same without a pool. fiberd starts every runsc process with transparent huge pages off.
 
 ```bash
 # In the dev container, per variant: a gVisor home, then the client.
