@@ -1,6 +1,6 @@
-//go:build linux
+//go:build linux && integration
 
-package cgroup_test
+package systest
 
 import (
 	"errors"
@@ -17,10 +17,10 @@ import (
 	"github.com/helayoty/fiberd/pkg/sys/cgroup"
 )
 
-// TestHelperProcess is the body of the processes the tests below start
-// in cgroup leaves. It does nothing unless FIBERD_CGROUP_HELPER names a
+// TestCgroupHelperProcess is the body of the processes the cgroup tests
+// start in leaves. It does nothing unless FIBERD_CGROUP_HELPER names a
 // role.
-func TestHelperProcess(t *testing.T) {
+func TestCgroupHelperProcess(t *testing.T) {
 	if os.Getenv("FIBERD_CGROUP_HELPER") == "hog" {
 		// Touch far more memory than the leaf allows, until killed.
 		for {
@@ -32,40 +32,12 @@ func TestHelperProcess(t *testing.T) {
 	}
 }
 
-// waitFor polls cond until it holds or the deadline passes.
-func waitFor(t *testing.T, what string, timeout time.Duration, cond func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for !cond() {
-		if time.Now().After(deadline) {
-			t.Fatalf("timed out waiting for %s", what)
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-}
-
-// delegatedRoot is the cgroup subtree the dev container delegates to
-// the tests, and skips the test without one.
-func delegatedRoot(t *testing.T) cgroup.Dir {
-	t.Helper()
-	root := os.Getenv("FIBERD_CGROUP_ROOT")
-	if root == "" {
-		root = "/sys/fs/cgroup/fiberd"
-	}
-	f, err := os.OpenFile(filepath.Join(root, "cgroup.subtree_control"), os.O_WRONLY, 0)
-	if err != nil {
-		t.Skipf("no writable delegated cgroup root at %s: %v", root, err)
-	}
-	_ = f.Close()
-	return cgroup.Root(root)
-}
-
 // testLeaf is a fresh cgroup under the delegated root, named for the
 // test, killed and removed with everything under it when the test ends.
 func testLeaf(t *testing.T) cgroup.Dir {
 	t.Helper()
 	name := "test-" + strconv.Itoa(os.Getpid()) + "-" + strings.NewReplacer("/", "_", " ", "_").Replace(t.Name())
-	d := delegatedRoot(t).Child(name)
+	d := cgroup.Root(cgRoot).Child(name)
 	if err := os.Mkdir(d.Path, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -102,10 +74,20 @@ func startIn(t *testing.T, d cgroup.Dir, cmd *exec.Cmd) *exec.Cmd {
 	return cmd
 }
 
-// TestLeafLifecycle checks that on a real cgroup the settings land in the
-// kernel's files, a process placed in the leaf is listed and charged,
+// fileIn reads one file of a cgroup directory.
+func fileIn(t *testing.T, d cgroup.Dir, name string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(d.Path, name))
+	if err != nil {
+		t.Fatalf("read %s: %v", name, err)
+	}
+	return string(b)
+}
+
+// TestCgroupLeafLifecycle checks that on a real cgroup the settings land in
+// the kernel's files, a process placed in the leaf is listed and charged,
 // the counters read, Kill ends it and Remove takes the leaf away.
-func TestLeafLifecycle(t *testing.T) {
+func TestCgroupLeafLifecycle(t *testing.T) {
 	cases := []struct {
 		name          string
 		memMax        uint64
@@ -220,9 +202,10 @@ func TestLeafLifecycle(t *testing.T) {
 	}
 }
 
-// TestGroupOOM checks that a leaf over its ceiling is killed as a whole and the
-// kill is counted, which is what a parked fiber's ladder reads.
-func TestGroupOOM(t *testing.T) {
+// TestCgroupGroupOOM checks that a leaf over its ceiling is killed as a
+// whole and the kill is counted, which is what a parked fiber's ladder
+// reads.
+func TestCgroupGroupOOM(t *testing.T) {
 	cases := []struct {
 		name   string
 		memMax uint64
@@ -239,7 +222,7 @@ func TestGroupOOM(t *testing.T) {
 			if err := leaf.Create(tc.memMax, true); err != nil {
 				t.Fatal(err)
 			}
-			cmd := exec.Command(os.Args[0], "-test.run=^TestHelperProcess$")
+			cmd := exec.Command(os.Args[0], "-test.run=^TestCgroupHelperProcess$")
 			cmd.Env = append(os.Environ(), "FIBERD_CGROUP_HELPER=hog")
 			startIn(t, leaf, cmd)
 			werr := cmd.Wait()
@@ -258,9 +241,9 @@ func TestGroupOOM(t *testing.T) {
 	}
 }
 
-// TestPidsMaxRefusesForks checks that with pids.max at one, the one process
-// in the leaf cannot fork, and the refusal is counted.
-func TestPidsMaxRefusesForks(t *testing.T) {
+// TestCgroupPidsMaxRefusesForks checks that with pids.max at one, the one
+// process in the leaf cannot fork, and the refusal is counted.
+func TestCgroupPidsMaxRefusesForks(t *testing.T) {
 	cases := []struct {
 		name string
 		max  uint64
@@ -290,11 +273,12 @@ func TestPidsMaxRefusesForks(t *testing.T) {
 	}
 }
 
-// TestDelegateOnARealCgroup checks that a cgroup with a process and no
-// controllers enabled gets the process moved into the fiberd leaf and memory
-// and pids enabled below it. Doing it again changes nothing. A cgroup that
-// may have no children cannot take the fiberd leaf, and says so.
-func TestDelegateOnARealCgroup(t *testing.T) {
+// TestCgroupDelegateReal checks that a cgroup with a process and no
+// controllers enabled gets the process moved into the fiberd leaf and
+// memory and pids enabled below it. Doing it again changes nothing. A
+// cgroup that may have no children cannot take the fiberd leaf, and says
+// so.
+func TestCgroupDelegateReal(t *testing.T) {
 	cases := []struct {
 		name           string
 		controllers    []string

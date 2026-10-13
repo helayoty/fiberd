@@ -6,41 +6,28 @@ import (
 	"fmt"
 	"os"
 	"runtime"
-	"slices"
 	"syscall"
 	"unsafe"
 )
 
 // Extra lists, ascending, the capabilities outside keep that this process
 // holds in its bounding set, or in its inheritable or ambient set (read
-// from /proc/self/status). The last two matter because a binary with
-// inheritable file capabilities, or an ambient set, carries them through
-// exec whatever the bounding set says about everything else.
+// from /proc/self/status).
 func Extra(keep []int) []int {
-	extra := boundingExtra(keep)
-	if b, err := os.ReadFile("/proc/self/status"); err == nil {
-		if inh, amb, err := statusCaps(string(b)); err == nil {
-			for _, c := range outside(inh|amb, keep) {
-				if !slices.Contains(extra, c) {
-					extra = append(extra, c)
-				}
-			}
-		}
-	}
-	slices.Sort(extra)
-	return extra
+	status, _ := os.ReadFile("/proc/self/status")
+	return extraFrom(boundingSet(), string(status), keep)
 }
 
-// boundingExtra lists the capabilities in the bounding set outside keep.
-func boundingExtra(keep []int) []int {
-	var extra []int
+// boundingSet lists the capabilities in the bounding set, ascending.
+func boundingSet() []int {
+	var held []int
 	for c := 0; ; c++ {
 		r, _, errno := syscall.RawSyscall(syscall.SYS_PRCTL, syscall.PR_CAPBSET_READ, uintptr(c), 0)
 		if errno != 0 {
-			return extra
+			return held
 		}
-		if r == 1 && !slices.Contains(keep, c) {
-			extra = append(extra, c)
+		if r == 1 {
+			held = append(held, c)
 		}
 	}
 }
@@ -60,7 +47,7 @@ func Narrow(keep []int) error {
 	// The thread stays locked on every path but the first-drop refusal,
 	// because the others exec or exit.
 	runtime.LockOSThread()
-	for i, c := range boundingExtra(keep) {
+	for i, c := range outside(maskOf(boundingSet()), keep) {
 		if _, _, errno := syscall.RawSyscall(syscall.SYS_PRCTL, syscall.PR_CAPBSET_DROP, uintptr(c), 0); errno != 0 {
 			if i == 0 && errno == syscall.EPERM {
 				runtime.UnlockOSThread()
@@ -115,7 +102,7 @@ func maskInheritable(keep []int) error {
 	if _, _, errno := syscall.RawSyscall(syscall.SYS_CAPGET, uintptr(unsafe.Pointer(&hdr)), uintptr(unsafe.Pointer(&data[0])), 0); errno != 0 {
 		return fmt.Errorf("capget: %w", errno)
 	}
-	inh := (uint64(data[0].inheritable) | uint64(data[1].inheritable)<<32) & keepMask(keep)
+	inh := (uint64(data[0].inheritable) | uint64(data[1].inheritable)<<32) & maskOf(keep)
 	data[0].inheritable = uint32(inh)
 	data[1].inheritable = uint32(inh >> 32)
 	if _, _, errno := syscall.RawSyscall(syscall.SYS_CAPSET, uintptr(unsafe.Pointer(&hdr)), uintptr(unsafe.Pointer(&data[0])), 0); errno != 0 {

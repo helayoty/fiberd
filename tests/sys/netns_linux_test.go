@@ -1,6 +1,6 @@
-//go:build linux
+//go:build linux && integration
 
-package netns_test
+package systest
 
 import (
 	"errors"
@@ -21,15 +21,6 @@ import (
 
 // newNetNS starts a process in a network namespace of its own and
 // returns its pid. The kernel refusing the namespace skips the test.
-
-// needRoot skips a test that needs root. The launcher chowns into mapped
-// id ranges and enters namespaces, so these run in the dev container.
-func needRoot(t *testing.T) {
-	t.Helper()
-	if os.Geteuid() != 0 {
-		t.Skip("needs root (run it with hack/dev/run.sh)")
-	}
-}
 func newNetNS(t *testing.T) int {
 	t.Helper()
 	cmd := exec.Command("sleep", "60")
@@ -114,10 +105,10 @@ func connectLoopback() error {
 	return syscall.Connect(s, &syscall.SockaddrInet4{Port: 1, Addr: [4]byte{127, 0, 0, 1}})
 }
 
-// TestDo checks that fn runs on a thread inside the target's network namespace,
+// TestNetnsDo checks that fn runs on a thread inside the target's network namespace,
 // its error comes back, and no thread of ours stays in that namespace
 // afterwards. A process that is not there is an error before fn runs.
-func TestDo(t *testing.T) {
+func TestNetnsDo(t *testing.T) {
 	errFn := errors.New("from fn")
 	child := newNetNS(t)
 	cases := []struct {
@@ -162,9 +153,9 @@ func TestDo(t *testing.T) {
 	}
 }
 
-// TestSocketpair checks that the pair is made in the target's namespace,
+// TestNetnsSocketpair checks that the pair is made in the target's namespace,
 // connected and close-on-exec.
-func TestSocketpair(t *testing.T) {
+func TestNetnsSocketpair(t *testing.T) {
 	child := newNetNS(t)
 	cases := []struct {
 		name   string
@@ -208,10 +199,9 @@ func TestSocketpair(t *testing.T) {
 	}
 }
 
-// TestLoopbackUp checks that a fresh namespace has no route to 127.0.0.1
+// TestNetnsLoopbackUp checks that a fresh namespace has no route to 127.0.0.1
 // until lo is up. One that is up already stays as it is.
-func TestLoopbackUp(t *testing.T) {
-	needRoot(t)
+func TestNetnsLoopbackUp(t *testing.T) {
 	cases := []struct {
 		name        string
 		pid         func(t *testing.T) int
@@ -250,12 +240,12 @@ func TestLoopbackUp(t *testing.T) {
 	}
 }
 
-// TestHelperProcess is the body of the unprivileged processes
-// TestWithoutCapabilities starts. It does nothing unless
+// TestNetnsHelperProcess is the body of the unprivileged processes
+// TestNetnsWithoutCapabilities starts. It does nothing unless
 // FIBERD_NETNS_HELPER names what to try against the namespace of
 // FIBERD_NETNS_PID, and fails loudly when the refusal is not the one
 // the package promises.
-func TestHelperProcess(t *testing.T) {
+func TestNetnsHelperProcess(t *testing.T) {
 	what := os.Getenv("FIBERD_NETNS_HELPER")
 	if what == "" {
 		return
@@ -282,10 +272,10 @@ func TestHelperProcess(t *testing.T) {
 	}
 }
 
-// TestWithoutCapabilities checks that entering a namespace needs CAP_SYS_ADMIN
+// TestNetnsWithoutCapabilities checks that entering a namespace needs CAP_SYS_ADMIN
 // and bringing lo up CAP_NET_ADMIN. A process without them is refused
 // with EPERM, and the refusal says which step failed.
-func TestWithoutCapabilities(t *testing.T) {
+func TestNetnsWithoutCapabilities(t *testing.T) {
 	setpriv, err := exec.LookPath("setpriv")
 	if err != nil {
 		t.Skip("setpriv not installed")
@@ -301,7 +291,7 @@ func TestWithoutCapabilities(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			pid := newNetNS(t)
-			args := []string{"--bounding-set=-" + tc.drop, os.Args[0], "-test.run=^TestHelperProcess$"}
+			args := []string{"--bounding-set=-" + tc.drop, os.Args[0], "-test.run=^TestNetnsHelperProcess$"}
 			if dir := flag.Lookup("test.gocoverdir"); dir != nil && dir.Value.String() != "" {
 				// Count the helper's coverage with ours.
 				args = append(args, "-test.gocoverdir="+dir.Value.String())

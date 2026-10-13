@@ -2,6 +2,7 @@ package caps
 
 import (
 	"slices"
+	"strconv"
 	"testing"
 )
 
@@ -68,11 +69,11 @@ func TestOutside(t *testing.T) {
 		want []int
 	}{
 		{name: "empty mask", mask: 0, keep: Proc},
-		{name: "only kept capabilities", mask: keepMask(Proc), keep: Proc},
-		{name: "one extra below and one above", mask: keepMask(Proc) | 1<<0 | 1<<40, keep: Proc, want: []int{0, 40}},
+		{name: "only kept capabilities", mask: maskOf(Proc), keep: Proc},
+		{name: "one extra below and one above", mask: maskOf(Proc) | 1<<0 | 1<<40, keep: Proc, want: []int{0, 40}},
 		{name: "everything with nothing kept", mask: 0b1011, keep: nil, want: []int{0, 1, 3}},
 		{name: "keep outside the mask is not reported", mask: 1 << SysAdmin, keep: []int{SysAdmin, SysTime}},
-		{name: "keep mask ignores numbers out of range", mask: 1 << 63, keep: []int{63, 64, -1}},
+		{name: "the mask ignores numbers out of range", mask: 1 << 63, keep: []int{63, 64, -1}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -138,6 +139,43 @@ func TestRuncSet(t *testing.T) {
 			}
 			if tc.inRunc && Names[tc.cap] == "" {
 				t.Fatalf("capability %d has no Kubernetes name", tc.cap)
+			}
+		})
+	}
+}
+
+// TestExtraFrom checks what a process holds beyond keep across its
+// bounding set and the inheritable and ambient sets of its status text,
+// ascending and once each. A status that cannot be read counts nothing.
+func TestExtraFrom(t *testing.T) {
+	status := func(inh, amb uint64) string {
+		return "Name:\tfiberd\n" + "CapInh:\t" + strconv.FormatUint(inh, 16) + "\nCapAmb:\t" + strconv.FormatUint(amb, 16) + "\n"
+	}
+	all := make([]int, 64)
+	for i := range all {
+		all[i] = i
+	}
+	cases := []struct {
+		name     string
+		bounding []int
+		status   string
+		keep     []int
+		want     []int
+	}{
+		{name: "nothing held", keep: Proc},
+		{name: "bounding set beyond keep", bounding: []int{Chown, DACOverride, SysAdmin}, status: status(0, 0), keep: Proc,
+			want: []int{Chown, DACOverride}},
+		{name: "inheritable and ambient sets beyond keep", bounding: Proc, status: status(1<<Chown|1<<Kill, 1<<SysTime|1<<Kill), keep: Proc,
+			want: []int{Chown, Kill}},
+		{name: "every set at once, ascending and once", bounding: []int{40, Chown}, status: status(1<<Chown|1<<Kill, 0), keep: nil,
+			want: []int{Chown, Kill, 40}},
+		{name: "a status that cannot be read counts nothing", bounding: []int{Chown}, status: "garbage", keep: Proc, want: []int{Chown}},
+		{name: "everything kept", bounding: all, status: status(^uint64(0), ^uint64(0)), keep: all},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := extraFrom(tc.bounding, tc.status, tc.keep); !slices.Equal(got, tc.want) {
+				t.Fatalf("extraFrom(%v, %q, %v) = %v, want %v", tc.bounding, tc.status, tc.keep, got, tc.want)
 			}
 		})
 	}

@@ -1,6 +1,6 @@
-//go:build linux
+//go:build linux && integration
 
-package criu_test
+package systest
 
 import (
 	"bytes"
@@ -19,18 +19,6 @@ import (
 
 	"github.com/helayoty/fiberd/pkg/sys/criu"
 )
-
-// waitFor polls cond until it holds or the deadline passes.
-func waitFor(t *testing.T, what string, timeout time.Duration, cond func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for !cond() {
-		if time.Now().After(deadline) {
-			t.Fatalf("timed out waiting for %s", what)
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-}
 
 // mountNSChild starts a process in a mount namespace of its own that
 // bind-mounts one regular file over another, and returns its pid and
@@ -66,9 +54,9 @@ func mountNSChild(t *testing.T) (int, string) {
 	return cmd.Process.Pid, dst
 }
 
-// TestOwnMountNS checks that only a process in another mount namespace has
-// one of its own, and a process that is not there has none.
-func TestOwnMountNS(t *testing.T) {
+// TestCriuOwnMountNS checks that only a process in another mount namespace
+// has one of its own, and a process that is not there has none.
+func TestCriuOwnMountNS(t *testing.T) {
 	pid, _ := mountNSChild(t)
 	cases := []struct {
 		name string
@@ -88,11 +76,11 @@ func TestOwnMountNS(t *testing.T) {
 	}
 }
 
-// TestDumpMounts checks that a tree in its own mount namespace has each of its
-// single-file mounts named in the dump arguments and recorded beside
-// the images, so RestoreMounts can hand them back by name. A tree in
-// the caller's namespace needs nothing.
-func TestDumpMounts(t *testing.T) {
+// TestCriuDumpMounts checks that a tree in its own mount namespace has each
+// of its single-file mounts named in the dump arguments and recorded
+// beside the images, so RestoreMounts can hand them back by name. A tree
+// in the caller's namespace needs nothing.
+func TestCriuDumpMounts(t *testing.T) {
 	pid, mounted := mountNSChild(t)
 	cases := []struct {
 		name    string
