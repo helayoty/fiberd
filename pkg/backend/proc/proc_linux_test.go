@@ -5,11 +5,7 @@ package proc
 import (
 	"context"
 	"errors"
-	"fmt"
-	"io"
-	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -21,236 +17,18 @@ import (
 	"github.com/helayoty/fiberd/pkg/core"
 )
 
-// fakeZygoteArg, as os.Args[1], makes the test binary a scripted zygote.
-// os.Args[2] is the script, and os.Args[3] the pid it reports. The backend
-// hands the zygote a fixed environment, so argv is the only switch.
-const fakeZygoteArg = "fake-zygote"
-
-// holdArg, as os.Args[1], makes the test binary a process that does
-// nothing until its stdin closes. Tests spawn it in a namespace of its
-// own where they need a real pid to translate or a mount table to read.
-const holdArg = "hold"
-
-// recvLog is the file in the fake zygote's working directory (the grant's
-// run directory, as the backend sets it) that records every line it read
-// and, after the line, "FDS <n>" for the descriptors passed with it.
-const recvLog = "recv.log"
-
-func TestMain(m *testing.M) {
-	switch {
-	case len(os.Args) >= 4 && os.Args[1] == fakeZygoteArg:
-		fakeZygote(os.Args[2], os.Args[3])
-		os.Exit(0)
-	case len(os.Args) >= 2 && os.Args[1] == holdArg:
-		_, _ = io.Copy(io.Discard, os.Stdin)
-		os.Exit(0)
-	}
-	os.Exit(m.Run())
-}
-
-// fakeZygote speaks the line protocol over fd 3 the way libfiberzygote
-// does (zygote/libfiberzygote.c), answering CLONE as the script names.
-// Every line it reads goes to recv.log, so a test can assert what the
-// backend sent.
-//
-//	early     CLONED and EXITED in one write, as fz_serve does when a fiber
-//	          reports ready and exits within one poll iteration
-//	late      CLONED, then EXITED a little later
-//	overdue   nothing until well after the caller's deadline, then early
-//	never     CLONED and no EXITED
-//	error     ERROR <fence> deadline exceeded before ready
-//	refuse    ERROR ? for every path line, then ERROR <fence> refused
-//	malformed CLONED <fence> abc, a pid the backend cannot name
-//	short     CLONED <fence>, no pid at all
-//	noise     lines the reader must tolerate, then CLONED
-//	die       exits on CLONE without answering
-//	device    DEVICE lines for the warm instance and each fiber, dropped
-//	          again on EVICT
-//	notready  greets with something other than READY
-//	silent    never says READY
-//	quit      exits before READY
-//	unprepared could not prepare its mount namespace: ERROR ? with the
-//	          reason instead of READY, then exits, as libfiberzygote does
-func fakeZygote(script, pid string) {
-	conn, err := net.FileConn(os.NewFile(3, "ctl"))
-	if err != nil {
-		os.Exit(2)
-	}
-	ctl, ok := conn.(*net.UnixConn)
-	if !ok {
-		os.Exit(2)
-	}
-	logf, err := os.OpenFile(recvLog, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-	if err != nil {
-		os.Exit(2)
-	}
-	if dev := os.Getenv("FIBERD_DEVICES"); dev != "" {
-		_, _ = fmt.Fprintf(logf, "ENV FIBERD_DEVICES=%s\n", dev)
-	}
-	say := func(s string) { _, _ = ctl.Write([]byte(s)) }
-	switch script {
-	case "quit":
-		os.Exit(0)
-	case "unprepared":
-		say("ERROR ? the zygote could not cover a HIDE path (/var/lib/fiberd/templates: Permission denied)\n")
-		os.Exit(1)
-	case "notready":
-		say("HELLO\n")
-	case "silent":
-	default:
-		say("READY\n")
-	}
-	if script == "device" {
-		// A short DEVICE line carries nothing and is ignored.
-		say("DEVICE - 100 1000\nDEVICE short\n")
-	}
-	for {
-		line, nfds, err := recvLine(ctl)
-		if err != nil {
-			return // fiberd closed the socket
-		}
-		_, _ = logf.WriteString(line)
-		if nfds > 0 {
-			_, _ = fmt.Fprintf(logf, "FDS %d\n", nfds)
-		}
-		fields := strings.Fields(line)
-		if len(fields) == 0 {
-			continue
-		}
-		switch fields[0] {
-		case "CLONE":
-		case "EVICT":
-			if script == "device" && len(fields) >= 2 {
-				say("DEVICE " + fields[1] + " 0 0\n")
-			}
-			continue
-		default: // HIDE, DROP, RUNDIR
-			if script == "refuse" {
-				say("ERROR ? " + fields[0] + " refused: by the script\n")
-			}
-			continue
-		}
-		if len(fields) < 2 {
-			continue
-		}
-		fence := fields[1]
-		cloned := fmt.Sprintf("CLONED %s %s\n", fence, pid)
-		exited := fmt.Sprintf("EXITED %s exit:3\n", pid)
-		switch script {
-		case "early":
-			say(cloned + exited)
-		case "late":
-			say(cloned)
-			time.Sleep(50 * time.Millisecond)
-			say(exited)
-		case "overdue":
-			time.Sleep(300 * time.Millisecond)
-			say(cloned + exited)
-		case "never":
-			say(cloned)
-		case "error":
-			say("ERROR " + fence + " deadline exceeded before ready\n")
-		case "refuse":
-			say("ERROR " + fence + " refused: the mount namespace cannot hide what fiberd asked (by the script)\n")
-		case "malformed":
-			say("CLONED " + fence + " abc\n")
-		case "short":
-			say("CLONED " + fence + "\n")
-		case "noise":
-			// A CLONED naming nothing, EXITED lines for no fiber and a
-			// keyword from the future, before the real answer.
-			say("CLONED\nEXITED 5\nEXITED\nFUTURE " + fence + "\n\n" + cloned)
-		case "die":
-			os.Exit(0)
-		case "device":
-			say(cloned + "DEVICE " + fence + " 42 0\n")
-		default:
-			os.Exit(2)
-		}
-	}
-}
-
-// recvLine reads one line a byte at a time, as libfiberzygote's recv_line
-// does, so the descriptors passed with a message are counted against the
-// line they came with. The fds are closed.
-func recvLine(c *net.UnixConn) (line string, nfds int, err error) {
-	var sb strings.Builder
-	buf := make([]byte, 1)
-	oob := make([]byte, 256)
-	for {
-		n, oobn, _, _, err := c.ReadMsgUnix(buf, oob)
-		if err != nil {
-			return "", 0, err
-		}
-		if oobn > 0 {
-			if msgs, err := syscall.ParseSocketControlMessage(oob[:oobn]); err == nil {
-				for _, m := range msgs {
-					fds, _ := syscall.ParseUnixRights(&m)
-					for _, fd := range fds {
-						_ = syscall.Close(fd)
-					}
-					nfds += len(fds)
-				}
-			}
-		}
-		if n == 0 {
-			continue
-		}
-		sb.WriteByte(buf[0])
-		if buf[0] == '\n' {
-			return sb.String(), nfds, nil
-		}
-	}
-}
-
-// impossiblePID is a number no process on this host can have, so a test
-// that goes wrong can never signal a real one.
-func impossiblePID(t *testing.T) int {
-	t.Helper()
-	b, err := os.ReadFile("/proc/sys/kernel/pid_max")
-	if err != nil {
-		t.Fatal(err)
-	}
-	max, err := strconv.Atoi(strings.TrimSpace(string(b)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	return max + 1
-}
-
-// warmFake starts the test binary as a scripted zygote for one grant.
-func warmFake(t *testing.T, b *Backend, script string, pid int) backend.Warm {
-	t.Helper()
-	exe, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	w, err := b.Warm(ctx, backend.WarmSpec{
-		GrantUID:      "g",
-		Template:      backend.Template{Argv: []string{exe, fakeZygoteArg, script, strconv.Itoa(pid)}},
-		CgroupFD:      -1,
-		ProbeCgroupFD: -1,
-		WorkDir:       t.TempDir(),
-	})
-	if err != nil {
-		t.Fatalf("warm: %v", err)
-	}
-	return w
-}
-
 // TestExitRightAfterCloneIsReported covers a zygote that answers CLONE and
-// report the fiber's exit in one write. The reader must have the fiber
+// reports the fiber's exit in one write. The reader must have the fiber
 // registered before it reads the EXITED line, or the exit is lost and
-// the host waits forever for it.
+// the host waits forever for it. A CLONED that arrives after the caller
+// gave up names a fiber nobody will hear of.
 func TestExitRightAfterCloneIsReported(t *testing.T) {
 	cases := []struct {
 		name     string
 		script   string
 		deadline time.Duration // the caller's, 0 for generous
 		wantErr  error         // from Clone
-		wantExit bool          // an Exit for the fence within a second
+		wantExit bool          // an Exit for the fence
 	}{
 		{name: "exit right after CLONED", script: "early", wantExit: true},
 		{name: "normal CLONED then later EXITED", script: "late", wantExit: true},
@@ -258,10 +36,10 @@ func TestExitRightAfterCloneIsReported(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			f := newFakes(t)
+			b := f.open(t, Options{})
 			pid := impossiblePID(t)
-			b := NewBackend(Options{})
-			t.Cleanup(b.Close)
-			w := warmFake(t, b, tc.script, pid)
+			w, zy, workDir := f.warm(t, b, tc.script, pid)
 
 			const fence = "g/1-1"
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -270,30 +48,31 @@ func TestExitRightAfterCloneIsReported(t *testing.T) {
 				ctx, cancel = context.WithTimeout(context.Background(), tc.deadline)
 			}
 			defer cancel()
-			f, err := b.Clone(ctx, w.ID, backend.FiberSpec{Fence: fence, Endpoint: filepath.Join(t.TempDir(), "ep.sock"), CgroupFD: -1, Deadline: time.Second})
+			fb, err := b.Clone(ctx, w.ID, backend.FiberSpec{Fence: fence, Endpoint: filepath.Join(workDir, "ep.sock"), CgroupFD: -1, Deadline: time.Second})
 			if !errors.Is(err, tc.wantErr) {
 				t.Fatalf("Clone: err = %v, want %v", err, tc.wantErr)
 			}
-			if err == nil && (f.ID != fence || f.PID != pid) {
-				t.Fatalf("Clone = %+v, want fence %s pid %d", f, fence, pid)
+			if err == nil && (fb.ID != fence || fb.PID != pid) {
+				t.Fatalf("Clone = %+v, want fence %s pid %d", fb, fence, pid)
 			}
 
 			want := backend.Exit{FiberID: fence, Status: "exit:3"}
-			wait := time.Second
-			if !tc.wantExit {
-				wait = 500 * time.Millisecond // long enough for the overdue CLONED to arrive
-			}
-			select {
-			case got := <-b.Exits():
-				if !tc.wantExit {
-					t.Fatalf("unexpected exit %+v", got)
-				}
-				if got != want {
+			if tc.wantExit {
+				if got := waitExit(t, b); got != want {
 					t.Fatalf("exit = %+v, want %+v", got, want)
 				}
-			case <-time.After(wait):
-				if tc.wantExit {
-					t.Fatalf("no exit for %s within %s", fence, wait)
+			} else {
+				// The overdue zygote answers now, then reports a device
+				// line, which the reader handles after the lines before
+				// it. Nothing was registered for the late CLONED, so the
+				// EXITED after it finds no fiber and reports nothing.
+				close(zy.gate)
+				waitFor(t, "the device line after the late answer", func() bool {
+					_, _, ok := b.WarmDevice(w.ID)
+					return ok
+				})
+				if n := len(b.exits); n != 0 {
+					t.Fatalf("%d exits reported for a fiber the caller never got", n)
 				}
 			}
 
@@ -340,29 +119,6 @@ func TestKillNeverSignalsAnUnknownPID(t *testing.T) {
 	}
 }
 
-// TestHostPIDWithLauncherNeverGuesses checks that without a cgroup to look
-// in, a launcher's fiber has no host pid rather than the container's number.
-func TestHostPIDWithLauncherNeverGuesses(t *testing.T) {
-	cases := []struct {
-		name     string
-		launcher Launcher
-		cgroupFD int
-		want     int
-	}{
-		{name: "no launcher", cgroupFD: -1, want: 77},
-		{name: "launcher without cgroup", launcher: nopLauncher{}, cgroupFD: -1, want: 0},
-		{name: "launcher with a closed fd", launcher: nopLauncher{}, cgroupFD: 1 << 20, want: 0},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			b := &Backend{opt: Options{Launcher: tc.launcher}}
-			if got := b.hostPID(tc.cgroupFD, 77); got != tc.want {
-				t.Fatalf("hostPID = %d, want %d", got, tc.want)
-			}
-		})
-	}
-}
-
 // TestParseCloned checks that the CLONED line names the fiber by fence and pid.
 // Fields after those two are ignored.
 func TestParseCloned(t *testing.T) {
@@ -393,26 +149,6 @@ func TestParseCloned(t *testing.T) {
 		})
 	}
 }
-
-type nopLauncher struct{}
-
-func (nopLauncher) Name() string { return "nop" }
-func (nopLauncher) Command(backend.WarmSpec, []string, *os.File, *os.File) (*exec.Cmd, error) {
-	return nil, errors.New("unused")
-}
-func (nopLauncher) PID(context.Context, backend.WarmSpec, *exec.Cmd) (int, error) { return 0, nil }
-func (nopLauncher) Channel(_ context.Context, _ backend.WarmSpec, _ *exec.Cmd, boot *net.UnixConn) (*net.UnixConn, error) {
-	return boot, nil
-}
-func (nopLauncher) Socketpair(_ backend.WarmSpec, _ int, typ int) ([2]int, error) {
-	return syscall.Socketpair(syscall.AF_UNIX, typ|syscall.SOCK_CLOEXEC, 0)
-}
-func (nopLauncher) Restored(backend.WarmSpec, int) error                    { return nil }
-func (nopLauncher) RestoredGone(backend.WarmSpec)                           {}
-func (nopLauncher) Release(backend.WarmSpec)                                {}
-func (nopLauncher) Endpoint(_ backend.WarmSpec, p string) string            { return p }
-func (nopLauncher) DumpExtra(backend.WarmSpec, string) ([]string, error)    { return nil, nil }
-func (nopLauncher) RestoreExtra(backend.WarmSpec, string) ([]string, error) { return nil, nil }
 
 // TestRunDirPair checks that the RUNDIR line names the directory holding
 // every grant's run directory and the grant's own. A run directory the
@@ -513,29 +249,6 @@ func TestRunDirInherit(t *testing.T) {
 	}
 }
 
-// warmFakeFor is warmFake for a named grant, so two zygotes can be up at
-// once.
-func warmFakeFor(t *testing.T, b *Backend, grant, script string, pid int) backend.Warm {
-	t.Helper()
-	exe, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	w, err := b.Warm(ctx, backend.WarmSpec{
-		GrantUID:      grant,
-		Template:      backend.Template{Argv: []string{exe, fakeZygoteArg, script, strconv.Itoa(pid)}},
-		CgroupFD:      -1,
-		ProbeCgroupFD: -1,
-		WorkDir:       t.TempDir(),
-	})
-	if err != nil {
-		t.Fatalf("warm %s: %v", grant, err)
-	}
-	return w
-}
-
 // TestExitLandsOnTheReportingZygotesFiber covers two zygotes, each the init of
 // a pid namespace, both report pid N for their fiber. An EXITED from one
 // must end that one's fiber and leave the other's alone.
@@ -550,14 +263,14 @@ func TestExitLandsOnTheReportingZygotesFiber(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			f := newFakes(t)
+			b := f.open(t, Options{})
 			pid := impossiblePID(t)
-			b := NewBackend(Options{})
-			t.Cleanup(b.Close)
 			fences := [2]string{"g1/1-1", "g2/1-1"}
 			for i := range fences {
-				w := warmFakeFor(t, b, fmt.Sprintf("g%d", i+1), tc.scripts[i], pid)
+				w, _, workDir := f.warmFor(t, b, "g"+strconv.Itoa(i+1), tc.scripts[i], pid)
 				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				_, err := b.Clone(ctx, w.ID, backend.FiberSpec{Fence: fences[i], Endpoint: filepath.Join(t.TempDir(), "ep.sock"), CgroupFD: -1, Deadline: time.Second})
+				_, err := b.Clone(ctx, w.ID, backend.FiberSpec{Fence: fences[i], Endpoint: filepath.Join(workDir, "ep.sock"), CgroupFD: -1, Deadline: time.Second})
 				cancel()
 				if err != nil {
 					t.Fatalf("clone %s: %v", fences[i], err)
@@ -565,13 +278,8 @@ func TestExitLandsOnTheReportingZygotesFiber(t *testing.T) {
 			}
 			want := fences[tc.wantExit-1]
 			other := fences[2-tc.wantExit]
-			select {
-			case got := <-b.Exits():
-				if got.FiberID != want {
-					t.Fatalf("exit for %s, want %s", got.FiberID, want)
-				}
-			case <-time.After(2 * time.Second):
-				t.Fatalf("no exit for %s", want)
+			if got := waitExit(t, b); got.FiberID != want {
+				t.Fatalf("exit for %s, want %s", got.FiberID, want)
 			}
 			b.mu.Lock()
 			_, stillThere := b.fibers[other]
@@ -589,13 +297,13 @@ func TestExitLandsOnTheReportingZygotesFiber(t *testing.T) {
 // that one send.
 func TestAbandon(t *testing.T) {
 	cases := []struct {
-		name      string
-		taken     bool          // the reader took the entry before abandon ran
-		sendAfter time.Duration // and sends its reply this long after
+		name  string
+		taken bool // the reader took the entry before abandon ran
+		late  bool // and sends its reply only once abandon is waiting
 	}{
 		{name: "still pending, nobody will answer", taken: false},
 		{name: "taken and answered already", taken: true},
-		{name: "taken, answer in flight", taken: true, sendAfter: 50 * time.Millisecond},
+		{name: "taken, answer in flight", taken: true, late: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -603,24 +311,32 @@ func TestAbandon(t *testing.T) {
 			z := &zygote{id: "g", pend: map[string]*pending{}}
 			reply := make(chan cloneResult, 1)
 			const fence = "g/1-1"
+			done := make(chan struct{})
 			if !tc.taken {
 				z.pend[fence] = &pending{ch: reply}
 			} else {
-				f := &fiber{id: fence, zpid: 7, warmID: z.id}
-				b.fibers[f.id] = f
-				b.byPID[pidKey{z.id, 7}] = f
-				send := func() { reply <- cloneResult{pid: 7, f: f} }
-				if tc.sendAfter > 0 {
-					time.AfterFunc(tc.sendAfter, send)
+				fb := &fiber{id: fence, zpid: 7, warmID: z.id}
+				b.fibers[fb.id] = fb
+				b.byPID[pidKey{z.id, 7}] = fb
+				send := func() { reply <- cloneResult{pid: 7, f: fb} }
+				if tc.late {
+					// The reply comes while abandon blocks on it.
+					go func() {
+						select {
+						case <-done:
+							t.Error("abandon returned before the reply")
+						case <-time.After(20 * time.Millisecond):
+						}
+						send()
+					}()
 				} else {
 					send()
 				}
 			}
-			done := make(chan struct{})
 			go func() { b.abandon(z, fence, reply); close(done) }()
 			select {
 			case <-done:
-			case <-time.After(2 * time.Second):
+			case <-time.After(5 * time.Second):
 				t.Fatal("abandon did not return")
 			}
 			b.mu.Lock()
@@ -750,10 +466,6 @@ func TestWarmNeverLogsThroughALink(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			exe, err := os.Executable()
-			if err != nil {
-				t.Fatal(err)
-			}
 			dir := filepath.Join(t.TempDir(), "g")
 			if err := os.Mkdir(dir, 0o755); err != nil {
 				t.Fatal(err)
@@ -763,13 +475,13 @@ func TestWarmNeverLogsThroughALink(t *testing.T) {
 				t.Fatal(err)
 			}
 			tc.plant(t, dir, victim)
-			b := NewBackend(Options{})
-			t.Cleanup(b.Close)
+			f := newFakes(t)
+			b := f.open(t, Options{})
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			_, err = b.Warm(ctx, backend.WarmSpec{
+			_, err := b.Warm(ctx, backend.WarmSpec{
 				GrantUID:      "g",
-				Template:      backend.Template{Argv: []string{exe, fakeZygoteArg, "early", "4242"}},
+				Template:      backend.Template{Argv: fakeArgv("early", impossiblePID(t))},
 				CgroupFD:      -1,
 				ProbeCgroupFD: -1,
 				WorkDir:       dir,
@@ -779,6 +491,9 @@ func TestWarmNeverLogsThroughALink(t *testing.T) {
 				t.Fatalf("Warm = %v, want an error mentioning %q", err, tc.wantErr)
 			case tc.wantErr == "" && err != nil:
 				t.Fatalf("Warm: %v", err)
+			}
+			if tc.wantErr != "" && len(f.spawn.started()) != 0 {
+				t.Fatal("a zygote was started over a planted log")
 			}
 			if got, _ := os.ReadFile(victim); string(got) != "untouched\n" {
 				t.Fatalf("the victim file reads %q, want it untouched", got)

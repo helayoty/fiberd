@@ -3,6 +3,8 @@
 package runc_test
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,7 +15,17 @@ import (
 	"github.com/helayoty/fiberd/pkg/artifact"
 	"github.com/helayoty/fiberd/pkg/backend"
 	"github.com/helayoty/fiberd/pkg/backend/runc"
+	"github.com/helayoty/fiberd/pkg/sys/criu"
 )
+
+// okCriu stands in for criu at open: check passes and nothing else is
+// asked of it.
+type okCriu struct{}
+
+func (okCriu) Output(context.Context, []string) ([]byte, error) { return nil, nil }
+func (okCriu) Start([]string, []*os.File, int) (criu.Process, error) {
+	return nil, errors.New("not here")
+}
 
 // TestNew checks what the backend refuses at open, the defaults it fills in,
 // and the surface it offers the host.
@@ -45,7 +57,7 @@ func TestNew(t *testing.T) {
 			}},
 		{name: "the defaults: runc, the default pool, and the state directory made searchable",
 			opt: func(_ *testing.T, state string) runc.Options {
-				return runc.Options{Rootfs: "/tpl/alpine", StateDir: state, CRIU: "/nonexistent/criu"}
+				return runc.Options{Rootfs: "/tpl/alpine", StateDir: state, Commander: okCriu{}}
 			},
 			check: func(t *testing.T, be backend.Backend, state string) {
 				if be.Name() != "runc" {
@@ -72,7 +84,7 @@ func TestNew(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
-				return runc.Options{Rootfs: "/tpl", StateDir: state, CRIU: "/nonexistent/criu", Pool: runc.IDPool{Start: 1 << 20, Slots: 2}}
+				return runc.Options{Rootfs: "/tpl", StateDir: state, Commander: okCriu{}, Pool: runc.IDPool{Start: 1 << 20, Slots: 2}}
 			},
 			check: func(t *testing.T, _ backend.Backend, state string) {
 				for _, sub := range []string{"rootfs", "bundles"} {

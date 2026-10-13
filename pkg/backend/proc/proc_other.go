@@ -9,11 +9,13 @@ import (
 
 	"github.com/helayoty/fiberd/pkg/backend"
 	"github.com/helayoty/fiberd/pkg/core"
+	"github.com/helayoty/fiberd/pkg/sys/criu"
 )
 
 // Options configure the fork backend.
 type Options struct {
-	CRIU string
+	CRIU      string
+	Commander criu.Commander
 }
 
 type unsupported struct{}
