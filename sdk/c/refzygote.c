@@ -29,6 +29,8 @@
  *                                 endpoint, and that file wins over the
  *                                 birth fence in memory)
  *   getenv <NAME>   -> value or "-" (proves the scrub: only FIBERD_* exist)
+ *   session         -> the session the caller named, or "-"
+ *   payload         -> the birth payload in hex (up to 127 bytes), or "-"
  *   status <Key>    -> that field of /proc/self/status, or "-"
  *                      (CapEff and NoNewPrivs prove the privilege drop)
  *   read <path>     -> the file's first line, or "-" when it cannot be
@@ -270,6 +272,7 @@ static void engine_start(size_t mb) {
 
 static const char *cur_endpoint; /* this fiber's endpoint, for the fence file */
 static const char *cur_fence;
+static const fz_fiber_t *cur_fiber; /* this fiber's record, for session and payload */
 
 /* The fence this incarnation lives under: the one fiberd published
  * after a resume (the fence in memory is the birth fence, stale then),
@@ -700,6 +703,12 @@ static int serve_client(conn_t *c, const char *fence, unsigned long *counter) {
             snprintf(out, sizeof out, "%ld\n", pages * 4096L);
         }
         else if (strncmp(line, "getenv ", 7) == 0) { const char *v = getenv(line + 7); snprintf(out, sizeof out, "%s\n", v ? v : "-"); }
+        else if (strcmp(line, "session") == 0) snprintf(out, sizeof out, "%s\n", cur_fiber && cur_fiber->session[0] ? cur_fiber->session : "-");
+        else if (strcmp(line, "payload") == 0) {
+            size_t n = cur_fiber ? cur_fiber->payload_len : 0;
+            if (n == 0 || 2 * n + 2 > sizeof out) snprintf(out, sizeof out, "-\n");
+            else { for (size_t i = 0; i < n; i++) snprintf(out + 2 * i, 3, "%02x", cur_fiber->payload[i]); memcpy(out + 2 * n, "\n", 2); }
+        }
         else if (strncmp(line, "status ", 7) == 0) status_field(line + 7, out, sizeof out);
         else if (strncmp(line, "read ", 5) == 0) first_line(line + 5, out, sizeof out);
         else if (strncmp(line, "wopen ", 6) == 0) wopen_errno(line + 6, out, sizeof out);
@@ -804,6 +813,7 @@ static int listen_endpoint(const char *ep) {
 static int on_fiber(const fz_fiber_t *f) {
     cur_endpoint = f->endpoint;
     cur_fence = f->fence;
+    cur_fiber = f;
     /* This fiber's random() would otherwise replay the zygote's
      * sequence, the same in every sibling. The library leaves reseeding
      * to the template (see fz_on_fiber). */

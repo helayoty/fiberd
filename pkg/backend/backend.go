@@ -96,6 +96,9 @@ type FiberSpec struct {
 	CgroupFD int // the fiber's leaf; -1 when the host has none
 	Deadline time.Duration
 	Payload  []byte
+	// Session is the name the caller gave the Clone, "" for an anonymous
+	// fiber. The fiber learns it at birth.
+	Session string
 	// OwnPIDNS asks for the fiber to be the init of its own pid namespace
 	// so its checkpoint restores anywhere. Backends that always isolate
 	// ignore it.

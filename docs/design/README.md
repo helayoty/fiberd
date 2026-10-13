@@ -2,7 +2,7 @@
 
 The design docs explain how each fiberd module works inside, for contributors and reviewers. Read [architecture.md](../architecture.md) first, and look up terms in the [glossary](../glossary.md).
 
-A suggested order is fiberd, home, grant, core, audit, runtime-host, backends and zygote, then the rest as needed.
+A suggested order is fiberd, home, grant, core, audit, runtime-host, backends, zygote and sdk, then the rest as needed.
 
 | Design doc | What it covers | Packages |
 | --- | --- | --- |
@@ -19,6 +19,7 @@ A suggested order is fiberd, home, grant, core, audit, runtime-host, backends an
 | [backends.md](backends.md) | The backend interface and how proc, runc, gVisor and Hyperlight make a fiber | `pkg/backend`, `pkg/backend/proc`, `pkg/backend/runc`, `pkg/backend/gvisor`, `pkg/backend/hyperlight` |
 | [sys.md](sys.md) | Cgroup delegation, [CRIU](../glossary.md#criu) dump and restore, capability narrowing and network namespaces | `pkg/sys/caps`, `pkg/sys/cgroup`, `pkg/sys/criu`, `pkg/sys/netns` |
 | [zygote.md](zygote.md) | The C library a template links to, its wire protocol and how a [zygote](../glossary.md#zygote) forks a fiber | `sdk/c` |
+| [sdk.md](sdk.md) | The SDK's three languages, how the Python binding brings the interpreter through a raw fork, and the rules it enforces | `sdk/python`, `sdk/go/consumer` |
 | [user-namespaces.md](user-namespaces.md) | Why runc fibers get a user namespace per grant, and how their ids are assigned | `pkg/backend/runc` |
 | [readiness.md](readiness.md) | The acceptance gates a deployment passes before production | none |
 | [kubernetes.md](kubernetes.md) | The Kubernetes home, its grant controller and the grant Pod | `examples/kubernetes` |

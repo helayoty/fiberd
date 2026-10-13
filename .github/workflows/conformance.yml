@@ -33,6 +33,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: make conform-proc
 
+  conform-proc-python:
+    name: conformance C1-C10 against the proc backend with the Python reference template (sdk/python)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: make conform-proc-python
+
   conform-gvisor:
     name: conformance C1-C10 against the gvisor backend (a runsc sandbox per fiber)
     runs-on: ubuntu-24.04

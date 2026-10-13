@@ -300,8 +300,9 @@ func TestWarmCommand(t *testing.T) {
 }
 
 // TestCloneLine checks that the CLONE line carries the fence, the endpoint as
-// the zygote sees it, the deadline in ms, the payload in hex and the
-// confinement options, and the cgroup and handoff descriptors ride with it.
+// the zygote sees it, the deadline in ms, the payload in hex, the session
+// in hex and the confinement options, and the cgroup and handoff
+// descriptors ride with it.
 func TestCloneLine(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -312,15 +313,18 @@ func TestCloneLine(t *testing.T) {
 		wantLine string // after "CLONE g/1-1 ", with EP for the endpoint path
 		wantFDs  int
 	}{
-		{name: "defaults", spec: backend.FiberSpec{}, wantLine: "EP 50 - mntns,nocaps"},
+		{name: "defaults", spec: backend.FiberSpec{}, wantLine: "EP 50 - - mntns,nocaps"},
 		{name: "deadline, payload and own pid namespace", spec: backend.FiberSpec{Deadline: 1500 * time.Millisecond, Payload: []byte{0xde, 0xad}, OwnPIDNS: true},
-			wantLine: "EP 1500 dead pidns,mntns,nocaps"},
+			wantLine: "EP 1500 dead - pidns,mntns,nocaps"},
+		// A session name is hex, so one with a space stays one field.
+		{name: "session", spec: backend.FiberSpec{Deadline: time.Second, Session: "conv 42"},
+			wantLine: "EP 1000 - " + hex.EncodeToString([]byte("conv 42")) + " mntns,nocaps"},
 		{name: "cgroup and handoff descriptors", spec: backend.FiberSpec{Deadline: time.Second}, cgroup: true, handoff: true,
-			wantLine: "EP 1000 - mntns,nocaps,handoff", wantFDs: 2},
+			wantLine: "EP 1000 - - mntns,nocaps,handoff", wantFDs: 2},
 		{name: "launcher maps a unix endpoint and keeps capabilities", spec: backend.FiberSpec{Deadline: time.Second, OwnPIDNS: true}, launcher: &fakeLauncher{endpointRoot: "/run/inside"},
-			wantLine: "/run/inside/ep.sock 1000 - pidns"},
+			wantLine: "/run/inside/ep.sock 1000 - - pidns"},
 		{name: "launcher leaves a tcp endpoint alone", spec: backend.FiberSpec{Deadline: time.Second, Endpoint: "tcp://0.0.0.0:9000"}, launcher: &fakeLauncher{endpointRoot: "/run/inside"},
-			wantLine: "tcp://0.0.0.0:9000 1000 -"},
+			wantLine: "tcp://0.0.0.0:9000 1000 - -"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

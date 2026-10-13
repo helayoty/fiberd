@@ -59,7 +59,7 @@ The `Fibers` service has four RPCs.
 The request has exactly four fields.
 
 - `grant_jwt` contains the signed grant.
-- `session` is an optional stable name. An empty value requests an anonymous fiber.
+- `session` is an optional stable name. An empty value requests an anonymous fiber. A proc or runc fiber learns the name at birth ([zygote.md](design/zygote.md)).
 - `deadline` is an optional absolute timestamp for runtime work.
 - `payload` is up to 4096 opaque bytes for the new fiber ([Clone](glossary.md#clone)).
 

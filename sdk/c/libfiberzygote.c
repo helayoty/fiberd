@@ -2,9 +2,9 @@
 #define _GNU_SOURCE
 #include "libfiberzygote.h"
 
-/* This file implements ABI version 1, so a header of another version refuses to build it. */
-#if FZ_ABI_VERSION != 1
-#error "libfiberzygote.c implements FZ_ABI_VERSION 1"
+/* This file implements ABI version 2, so a header of another version refuses to build it. */
+#if FZ_ABI_VERSION != 2
+#error "libfiberzygote.c implements FZ_ABI_VERSION 2"
 #endif
 
 #include <dirent.h>
@@ -1099,7 +1099,10 @@ static char env_fence[sizeof "FIBERD_FENCE=" + FENCE_MAX];
 static char env_endpoint[sizeof "FIBERD_ENDPOINT=" + ENV_VALUE_MAX];
 static char env_engine[sizeof "FIBERD_ENGINE=" + sizeof engine_endpoint];
 static char env_handoff[sizeof "FIBERD_HANDOFF_FD=" + 16];
-static char *fiber_environ[5];
+static char env_session[sizeof "FIBERD_SESSION=" + ENV_VALUE_MAX];
+static char *fiber_environ[6];
+/* The session named on the CLONE line, decoded, for the fiber's record. */
+static char session_buf[ENV_VALUE_MAX];
 
 /* child_say writes a startup failure to stderr, still the zygote's log
  * here, with write(2) alone (see the rule above scrub_and_run). */
@@ -1133,7 +1136,7 @@ static void child_say_errno(const char *fence, const char *what, int e) {
  * the parent before the clone or read into static storage with raw
  * syscalls, and errors are written with write(2) (child_say). */
 static void scrub_and_run(int ready_w, int handoff, const char *fence, const char *endpoint,
-                          const unsigned char *payload, size_t payload_len,
+                          const unsigned char *payload, size_t payload_len, const char *session,
                           struct confine cf, fz_on_fiber on_fiber) {
     /* The control channel is the zygote's, not this child's. fz_report
      * from a fiber must fail, not write into whatever lands at fd 3 (the
@@ -1214,7 +1217,7 @@ static void scrub_and_run(int ready_w, int handoff, const char *fence, const cha
     if (cf.nocaps && drop_caps() < 0) _exit(EX_CAPS);
 
     fz_fiber_t f = { .fence = fence, .endpoint = endpoint,
-                     .payload = payload, .payload_len = payload_len };
+                     .payload = payload, .payload_len = payload_len, .session = session };
     _exit(on_fiber(&f) & 0xff);
 }
 
@@ -1322,13 +1325,14 @@ static void expire_pending(int ctl_fd) {
 }
 
 static int handle_clone(int ctl_fd, char *line, const int passed[MAX_PASSED], fz_on_fiber on_fiber) {
-    /* CLONE <fence> <endpoint> <deadline_ms> <hexpayload|-> [opt,opt...] */
+    /* CLONE <fence> <endpoint> <deadline_ms> <hexpayload|-> <hexsession|-> [opt,opt...] */
     char *save = NULL;
     strtok_r(line, " ", &save);
     const char *fence = strtok_r(NULL, " ", &save);
     const char *endpoint = strtok_r(NULL, " ", &save);
     const char *dl = strtok_r(NULL, " ", &save);
     const char *hex = strtok_r(NULL, " ", &save);
+    const char *shex = strtok_r(NULL, " ", &save);
     char *opts = strtok_r(NULL, " ", &save);
     struct confine cf = {0};
     int want_handoff = 0;
@@ -1341,7 +1345,7 @@ static int handle_clone(int ctl_fd, char *line, const int passed[MAX_PASSED], fz
     }
     /* Until the fence is known to fit, it goes on the line cut to what
      * the records hold, so the line is sent rather than dropped. */
-    if (!fence || !endpoint || !dl) {
+    if (!fence || !endpoint || !dl || !hex || !shex) {
         sendf(ctl_fd, "ERROR %.*s malformed CLONE", FENCE_MAX - 1, fence ? fence : "?");
         return 0;
     }
@@ -1371,7 +1375,22 @@ static int handle_clone(int ctl_fd, char *line, const int passed[MAX_PASSED], fz
     int deadline_ms = atoi(dl);
     if (deadline_ms <= 0) deadline_ms = 50;
     static unsigned char payload[MAX_LINE / 2];
-    size_t plen = (hex && strcmp(hex, "-") != 0) ? unhex(hex, payload, sizeof payload) : 0;
+    size_t plen = strcmp(hex, "-") != 0 ? unhex(hex, payload, sizeof payload) : 0;
+    /* The session is a C string for the fiber and its environment, so a
+     * NUL inside it, or more than fits, is refused rather than cut. */
+    size_t slen = 0;
+    if (strcmp(shex, "-") != 0) {
+        if (strlen(shex) / 2 >= sizeof session_buf) {
+            sendf(ctl_fd, "ERROR %s session too long (at most %d bytes)", fence, ENV_VALUE_MAX - 1);
+            return 0;
+        }
+        slen = unhex(shex, (unsigned char *)session_buf, sizeof session_buf - 1);
+        if (memchr(session_buf, 0, slen)) {
+            sendf(ctl_fd, "ERROR %s session holds a NUL byte", fence);
+            return 0;
+        }
+    }
+    session_buf[slen] = 0;
 
     if (npending >= MAX_PENDING) {
         sendf(ctl_fd, "ERROR %s too many clones in flight", fence);
@@ -1401,6 +1420,10 @@ static int handle_clone(int ctl_fd, char *line, const int passed[MAX_PASSED], fz
         snprintf(env_handoff, sizeof env_handoff, "FIBERD_HANDOFF_FD=%d", FZ_HANDOFF_FD);
         fiber_environ[ne++] = env_handoff;
     }
+    if (slen) {
+        snprintf(env_session, sizeof env_session, "FIBERD_SESSION=%s", session_buf);
+        fiber_environ[ne++] = env_session;
+    }
     fiber_environ[ne] = NULL;
     int rp[2];
     if (pipe2(rp, O_CLOEXEC) < 0) { sendf(ctl_fd, "ERROR %s pipe: %s", fence, strerror(errno)); return 0; }
@@ -1414,7 +1437,7 @@ static int handle_clone(int ctl_fd, char *line, const int passed[MAX_PASSED], fz
     }
     if (pid == 0) {
         close(rp[0]);
-        scrub_and_run(rp[1], handoff, fence, endpoint, payload, plen, cf, on_fiber);
+        scrub_and_run(rp[1], handoff, fence, endpoint, payload, plen, session_buf, cf, on_fiber);
         _exit(127); /* not reached */
     }
     close(rp[1]);

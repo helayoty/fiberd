@@ -1374,7 +1374,7 @@ func (r *Runtime) start(ctx context.Context, z *warm, spec core.CloneSpec, p *po
 	r.mu.Unlock()
 	fspec := backend.FiberSpec{
 		Fence: f.id, Endpoint: bind, CgroupFD: int(lfd.Fd()), Deadline: spec.Deadline,
-		Payload: spec.Payload, OwnPIDNS: true, Handoff: fiberEnd,
+		Payload: spec.Payload, Session: spec.Session, OwnPIDNS: true, Handoff: fiberEnd,
 	}
 	var fb backend.Fiber
 	if p != nil {

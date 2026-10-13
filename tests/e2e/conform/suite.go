@@ -72,6 +72,12 @@ type Driver struct {
 	ScopeLost func(ctx context.Context) error
 	// Timeout bounds each case (default 15s); Restart gets twice that.
 	Timeout time.Duration
+	// WBudget is the w_budget_bytes C6 minds (default 1 MiB). A template
+	// with a runtime dirties more at birth (a CPython 3.11 fiber about
+	// 2.5 MiB, from reference counts on the pages it touches), so its
+	// run sets a budget that fiber fits under. The over-budget fiber
+	// dirties four times it.
+	WBudget uint64
 }
 
 func (d Driver) timeout() time.Duration {
@@ -79,6 +85,13 @@ func (d Driver) timeout() time.Duration {
 		return d.Timeout
 	}
 	return 15 * time.Second
+}
+
+func (d Driver) wBudget() uint64 {
+	if d.WBudget > 0 {
+		return d.WBudget
+	}
+	return 1 << 20
 }
 
 // Run executes the seven cases as subtests.
@@ -412,7 +425,7 @@ func (c *client) c5(t *testing.T) {
 func (c *client) c6(t *testing.T) {
 	ctx, cancel := c.ctx(t, 2)
 	defer cancel()
-	const budget = 1 << 20
+	budget := c.d.wBudget()
 	g, tok := c.grant(t, "c6", func(g *core.Grant) { g.WBudgetBytes = budget; g.FiberMax = 2 })
 
 	r, err := c.clone(ctx, tok, "", []byte(fmt.Sprintf(`{"dirty_bytes": %d}`, 4*budget)))

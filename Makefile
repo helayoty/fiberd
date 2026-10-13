@@ -44,7 +44,8 @@ CONFORM_DIR ?= $(BIN)
 endif
 
 .PHONY: all build test integration-tests vet lint proto proto-lint proto-check clean \
-        bench zygote fuzz conform-stub conform-signed conform-logs conform-proc conform-gvisor conform-runc conform-hyperlight-fake conform-hyperlight \
+        bench zygote fuzz conform-stub conform-signed conform-logs conform-proc conform-proc-python conform-gvisor conform-runc conform-hyperlight-fake conform-hyperlight \
+        python-build python-test \
         hyperlight-helper linux-hyperlight-check overcommit kind-up kind-down kind-image conform-kind slurm-up slurm-down conform-slurm example-knative example-knative-kvm example-kata example-substrate \
         registry-start mobility linux-shell linux-check linux-gvisor-check linux-test linux-lint bench-e2e \
         compare-phase0 compare-phase1 compare-phase2 compare-phase3 compare-phase4 compare-down
@@ -65,6 +66,10 @@ conform-signed: ## same, over real signed grants: grant-issuer serve + -verifier
 
 conform-proc: ## C1-C10 against the fork runtime with real cgroups, inside the Linux dev container
 	hack/dev/run.sh env CONFORM_RUNTIME=proc CONFORM_SIGNED=1 CONFORM_STATE=$(CONFORM_DIR)/conform-state-proc hack/conform/stub.sh run
+
+conform-proc-python: ## C1-C10 against the fork runtime with the Python reference template (sdk/python), inside the Linux dev container
+	hack/dev/run.sh sh -ec 'hack/python/build.sh; env CONFORM_RUNTIME=proc CONFORM_SIGNED=1 CONFORM_W_BUDGET=8388608 \
+	  CONFORM_TEMPLATE="$$PWD/hack/python/template.sh --heap-mb 32" CONFORM_STATE=$(CONFORM_DIR)/conform-state-proc-python hack/conform/stub.sh run'
 
 conform-gvisor: ## C1-C10 against the gvisor backend (a runsc sandbox per fiber), with a pool of 2 per grant, inside the Linux dev container
 	hack/dev/run.sh env CONFORM_RUNTIME=gvisor CONFORM_SIGNED=1 CONFORM_WARM=2 CONFORM_STATE=$(CONFORM_DIR)/conform-state-gvisor hack/conform/stub.sh run
@@ -196,6 +201,15 @@ zygote: ## build bin/refzygote, the reference zygote, with TLS for handoff grant
 fuzz: ## fuzz the zygote's parsers (libFuzzer) and the handoff parser (go test -fuzz), FUZZTIME seconds each
 	FUZZTIME=$(FUZZTIME) FUZZ_OUT=$(BIN)/fuzz sdk/c/fuzz/run.sh
 	$(GO) test -run='^$$' -fuzz=FuzzServerName -fuzztime=$(FUZZTIME)s ./pkg/handoff/
+
+## The Python SDK (sdk/python). Its extension needs Linux, so it is built
+## and its unit tests run inside the dev container.
+
+python-build: ## build the fiberd._zygote extension in place (sdk/python/src/fiberd), inside the dev container
+	hack/dev/run.sh hack/python/build.sh
+
+python-test: ## the Python unit tests (pytest, no process started), after the build, inside the dev container
+	hack/dev/run.sh sh -ec 'hack/python/build.sh; cd sdk/python && PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q -p no:cacheprovider'
 
 ## Linux-only work runs in the dev container (hack/dev): privileged,
 ## private cgroup namespace, criu installed. Needs Docker.

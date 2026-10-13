@@ -113,6 +113,12 @@ RUN set -eu; cd /tmp; \
     make install_dev >/dev/null; \
     cd /; rm -rf /tmp/openssl.tar.gz "/tmp/openssl-${OPENSSL_VERSION}"
 
+# Python for the template SDK (sdk/python). The headers its extension
+# builds against, setuptools to build it and pytest for its unit tests.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      python3-dev python3-setuptools python3-pytest \
+    && rm -rf /var/lib/apt/lists/*
+
 # GOTOOLCHAIN=auto lets the go.mod toolchain line fetch the exact version.
 ENV GOTOOLCHAIN=auto \
     GOFLAGS=-buildvcs=false \

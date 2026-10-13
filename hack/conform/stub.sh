@@ -10,6 +10,11 @@
 # JWTs with the issuer's key. Otherwise grants are protobuf JSON through
 # the insecure development verifier.
 #
+# CONFORM_TEMPLATE replaces the template command of the proc runtime, for
+# another language's reference template (make conform-proc-python), and
+# CONFORM_W_BUDGET the W budget C6 minds, since a fiber of a template with
+# a runtime dirties more at birth than the suite's 1 MiB default.
+#
 # State lives in $CONFORM_STATE (default bin/conform-state), so the
 # restart hook keeps the epoch file and the audit spool across restarts.
 #
@@ -25,6 +30,7 @@ NODE=${CONFORM_NODE:-conform-node}
 STATE=${CONFORM_STATE:-bin/conform-state}
 SIGNED=${CONFORM_SIGNED:-0}
 WARM=${CONFORM_WARM:-0}   # fibers.warm of every minted grant
+W_BUDGET=${CONFORM_W_BUDGET:-1048576}
 LOG=$STATE/fiberd.log
 ISSUER_URL="http://$ISSUER_ADDR"
 GVISOR_ROOTFS=${CONFORM_GVISOR_ROOTFS:-/var/lib/fiberd/gvisor-rootfs}
@@ -38,7 +44,7 @@ ISOLATION=UNTRUSTED
 if [ "$RUNTIME" = proc ] || [ "$RUNTIME" = runc ]; then ISOLATION=TRUSTED; fi
 if [ "$RUNTIME" = proc ]; then
   TIER=${CONFORM_TIER:-FIBER_CHECKPOINT}   # what proc offers when criu check passes
-  RUNTIME_FLAGS=(-runtime proc -template "default=$PWD/bin/refzygote --heap-mb 32 --device-mb 64")
+  RUNTIME_FLAGS=(-runtime proc -template "default=${CONFORM_TEMPLATE:-$PWD/bin/refzygote --heap-mb 32 --device-mb 64}")
   ENGINE_HOOK=(-engine-kill-cmd "$0 engine-kill \$1")
 elif [ "$RUNTIME" = gvisor ]; then
   TIER=${CONFORM_TIER:-FIBER_SNAPSHOT}
@@ -141,7 +147,7 @@ case "${1:-}" in
     # refuses to overwrite a test binary built for the other OS.
     rm -f bin/grant-conform
     go test -c -tags integration -o bin/grant-conform ./tests/e2e/conform
-    if [ "$RUNTIME" = proc ]; then make -s zygote; fi
+    if [ "$RUNTIME" = proc ] && [ -z "${CONFORM_TEMPLATE:-}" ]; then make -s zygote; fi
     if [ "$RUNTIME" = gvisor ] || [ "$RUNTIME" = runc ]; then hack/gvisor/rootfs.sh "$GVISOR_ROOTFS" >/dev/null; fi
     if [ "$RUNTIME" = hyperlight ] && [ -z "${CONFORM_HL_HELPER:-}" ]; then
       go build -o bin/fakehelper ./hack/hyperlight/fakehelper; echo "fake guest" > bin/fake-guest.bin
@@ -155,7 +161,7 @@ case "${1:-}" in
       trap stop EXIT
     fi
     start
-    bin/grant-conform -test.v -target "$ADDR" -target-tier "$TIER" -node-id "$NODE" -isolation "$ISOLATION" -fiber-warm "$WARM" "${mint[@]}" \
+    bin/grant-conform -test.v -target "$ADDR" -target-tier "$TIER" -node-id "$NODE" -isolation "$ISOLATION" -fiber-warm "$WARM" -w-budget "$W_BUDGET" "${mint[@]}" \
       -restart-cmd "$0 restart" -cp-health-cmd "$0 issuer-reachable \$1" -audit-file "$STATE/private/audit.jsonl" \
       -scope-cmd "$0 scope-lost" ${ENGINE_HOOK[@]+"${ENGINE_HOOK[@]}"} "${@:2}"
     if [ "$WARM" -gt 0 ]; then

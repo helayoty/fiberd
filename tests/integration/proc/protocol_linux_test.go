@@ -4,6 +4,7 @@ package proctest
 
 import (
 	"bufio"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"os"
@@ -109,17 +110,17 @@ func TestControlProtocolLines(t *testing.T) {
 	}{
 		{
 			name: "a fence of 127 characters is born",
-			line: "CLONE " + strings.Repeat("a", 127) + " %s/a.sock 2000 -",
+			line: "CLONE " + strings.Repeat("a", 127) + " %s/a.sock 2000 - -",
 			want: "CLONED " + strings.Repeat("a", 127) + " ",
 		},
 		{
 			name: "a fence of 128 characters is refused, not cut",
-			line: "CLONE " + strings.Repeat("b", 128) + " %s/b.sock 2000 -",
+			line: "CLONE " + strings.Repeat("b", 128) + " %s/b.sock 2000 - -",
 			want: "ERROR " + strings.Repeat("b", 127) + " fence too long",
 		},
 		{
 			name: "an over-long fence gets its ERROR line, cut to 127 characters",
-			line: "CLONE " + long + " %s/c.sock 2000 -",
+			line: "CLONE " + long + " %s/c.sock 2000 - -",
 			want: "ERROR " + long[:127] + " fence too long",
 		},
 		{
@@ -131,13 +132,39 @@ func TestControlProtocolLines(t *testing.T) {
 			// A tcp endpoint binds the wildcard whatever its host says,
 			// so the length is all that is checked here.
 			name: "an endpoint of 1023 characters is born",
-			line: "CLONE ep1023 " + tcpEndpoint(1023) + " 2000 -",
+			line: "CLONE ep1023 " + tcpEndpoint(1023) + " 2000 - -",
 			want: "CLONED ep1023 ",
 		},
 		{
 			name: "an endpoint of 1024 characters is refused",
-			line: "CLONE ep1024 " + tcpEndpoint(1024) + " 2000 -",
+			line: "CLONE ep1024 " + tcpEndpoint(1024) + " 2000 - -",
 			want: "ERROR ep1024 endpoint too long (at most 1023 characters)",
+		},
+		{
+			// The session field is hex, so one with a space is one field.
+			name: "a session is born and named",
+			line: "CLONE s1 %s/s1.sock 2000 - " + hex.EncodeToString([]byte("conv 42")),
+			want: "CLONED s1 ",
+		},
+		{
+			name: "a session of 1023 bytes is born",
+			line: "CLONE s2 %s/s2.sock 2000 - " + strings.Repeat("61", 1023),
+			want: "CLONED s2 ",
+		},
+		{
+			name: "a session of 1024 bytes is refused",
+			line: "CLONE s3 %s/s3.sock 2000 - " + strings.Repeat("61", 1024),
+			want: "ERROR s3 session too long (at most 1023 bytes)",
+		},
+		{
+			name: "a session with a NUL byte is refused",
+			line: "CLONE s4 %s/s4.sock 2000 - 610062",
+			want: "ERROR s4 session holds a NUL byte",
+		},
+		{
+			name: "a CLONE without the session field is malformed",
+			line: "CLONE s5 %s/s5.sock 2000 -",
+			want: "ERROR s5 malformed CLONE",
 		},
 		{
 			name: "PING is not a message",
@@ -190,13 +217,13 @@ func TestSetupPhase(t *testing.T) {
 		{
 			name:  "PREPARE none refuses a mntns CLONE and births the rest",
 			setup: "PREPARE none\n",
-			lines: []string{"CLONE a %s/a.sock 2000 - pidns,mntns", "CLONE b %s/b.sock 2000 - pidns"},
+			lines: []string{"CLONE a %s/a.sock 2000 - - pidns,mntns", "CLONE b %s/b.sock 2000 - - pidns"},
 			want:  []string{"ERROR a refused: no mount namespace was prepared before READY", "CLONED b "},
 		},
 		{
 			name:  "a setup line after READY refuses every mntns CLONE",
 			setup: "PREPARE mntns\n",
-			lines: []string{"HIDE /etc", "CLONE c %s/c.sock 2000 - pidns,mntns", "CLONE d %s/d.sock 2000 - pidns"},
+			lines: []string{"HIDE /etc", "CLONE c %s/c.sock 2000 - - pidns,mntns", "CLONE d %s/d.sock 2000 - - pidns"},
 			want: []string{
 				"ERROR ? HIDE after READY refused",
 				"ERROR c refused: the mount namespace cannot hide what fiberd asked (a setup line (HIDE, DROP, RUNDIR or PREPARE) came after READY)",
@@ -206,12 +233,12 @@ func TestSetupPhase(t *testing.T) {
 		{
 			name:  "a second PREPARE is refused the same way",
 			setup: "PREPARE mntns\n",
-			lines: []string{"PREPARE mntns", "CLONE e %s/e.sock 2000 - pidns,mntns"},
+			lines: []string{"PREPARE mntns", "CLONE e %s/e.sock 2000 - - pidns,mntns"},
 			want:  []string{"ERROR ? PREPARE after READY refused", "ERROR e refused"},
 		},
 		{
 			name:  "a CLONE before PREPARE ends the zygote without READY",
-			lines: []string{"CLONE f %s/f.sock 2000 - pidns"},
+			lines: []string{"CLONE f %s/f.sock 2000 - - pidns"},
 			gone:  true,
 		},
 		{

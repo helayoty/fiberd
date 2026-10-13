@@ -69,7 +69,7 @@ make conform-stub   # the conformance suite on the in-memory runtime, on any OS
 make conform-proc   # the same on real fibers, in the Linux dev container (hack/dev)
 ```
 
-The [quickstart](docs/quickstart.md) walks through each call. To write your own template, read [sdk/c/README.md](sdk/c/README.md) and [the zygote design](docs/design/zygote.md).
+The [quickstart](docs/quickstart.md) walks through each call. To write your own template, read [sdk/c/README.md](sdk/c/README.md) for C or [sdk/python/README.md](sdk/python/README.md) for Python, and [the zygote design](docs/design/zygote.md).
 
 ## Examples
 

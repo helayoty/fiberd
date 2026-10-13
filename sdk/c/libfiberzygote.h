@@ -83,11 +83,16 @@
  *                     is a protocol error. The first ends the zygote and
  *                     the second refuses every mntns CLONE.
  *   zygote -> fiberd  READY
- *   fiberd -> zygote  CLONE <fence> <endpoint> <deadline_ms> <hex-payload|-> [opts]
+ *   fiberd -> zygote  CLONE <fence> <endpoint> <deadline_ms> <hex-payload|-> <hex-session|-> [opts]
  *                     The fence is at most 127 characters and the endpoint
- *                     at most 1023. The fiber's cgroup directory fd rides
- *                     along in SCM_RIGHTS on the same message. opts is a
- *                     comma list. "pidns" makes the child the init of its
+ *                     at most 1023. The session is the name the caller
+ *                     gave the Clone, hex so it may hold any character,
+ *                     "-" for an anonymous fiber, and at most 1023 bytes
+ *                     decoded with no NUL in them. The fiber also finds
+ *                     it as FIBERD_SESSION in its environment, unset
+ *                     when anonymous. The fiber's cgroup
+ *                     directory fd rides along in SCM_RIGHTS on the same
+ *                     message. opts is a comma list. "pidns" makes the child the init of its
  *                     own pid namespace. "mntns" gives it a private mount
  *                     namespace. "nocaps" drops every capability under
  *                     no_new_privs. "handoff" means the last descriptor on
@@ -136,7 +141,7 @@
 #define FIBERZYGOTE_H
 
 /* The ABI this header describes, which every binding checks at build time. */
-#define FZ_ABI_VERSION 1
+#define FZ_ABI_VERSION 2
 
 #include <stddef.h>
 
@@ -146,6 +151,7 @@ typedef struct {
                                      or "handoff" when it serves fz_accept() instead */
     const unsigned char *payload; /* opaque data delivered at birth */
     size_t payload_len;
+    const char *session;          /* the session the caller named, "" for an anonymous fiber */
 } fz_fiber_t;
 
 /* Runs in the CHILD after the scrub. Serve on f->endpoint, call
