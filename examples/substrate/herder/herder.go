@@ -35,10 +35,10 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"github.com/helayoty/fiberd/pkg/consumer"
 	"github.com/helayoty/fiberd/pkg/core"
 	fiberendpoint "github.com/helayoty/fiberd/pkg/endpoint"
 	"github.com/helayoty/fiberd/pkg/runtime/host"
+	"github.com/helayoty/fiberd/sdk/go/consumer"
 
 	ateompb "github.com/helayoty/fiberd/examples/substrate/proto/ateom"
 )

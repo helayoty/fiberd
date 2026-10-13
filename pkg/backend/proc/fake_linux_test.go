@@ -186,7 +186,7 @@ func (z *fakeZygote) waitRecv(t *testing.T, want string) []string {
 }
 
 // serve speaks the line protocol the way libfiberzygote does
-// (zygote/libfiberzygote.c), answering CLONE as the script names. Every
+// (sdk/c/libfiberzygote.c), answering CLONE as the script names. Every
 // line it reads is recorded, so a test can assert what the backend sent.
 // The setup lines are read up to PREPARE before any answer, as
 // read_setup does, so a script that ends on its answer never closes the

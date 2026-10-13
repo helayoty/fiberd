@@ -33,7 +33,7 @@ ENV CGO_ENABLED=0 GOFLAGS=-trimpath
 RUN set -eu; mkdir -p /out; flags=""; \
     if [ "$(uname -m)" = aarch64 ]; then flags="-mbranch-protection=none"; fi; \
     cflags="-D_FORTIFY_SOURCE=3 -O2 -fstack-protector-strong -fstack-clash-protection -fPIE -Wformat=2 -Werror=format-security -Wall -Wextra -pthread $flags"; \
-    src="bench/compare/workload/counter.c zygote/libfiberzygote.c"; \
+    src="bench/compare/workload/counter.c sdk/c/libfiberzygote.c"; \
     gcc $cflags -pie -Wl,-z,relro,-z,now -o /out/counter $src; \
     gcc $cflags -static-pie -Wl,-z,relro,-z,now -o /out/counter-static $src; \
     { /out/counter-static --help 2>&1 || true; } | grep -q usage; \

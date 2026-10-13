@@ -13,11 +13,11 @@ import (
 	"google.golang.org/grpc/test/bufconn"
 	"google.golang.org/protobuf/encoding/protojson"
 
-	"github.com/helayoty/fiberd/pkg/consumer"
 	"github.com/helayoty/fiberd/pkg/core"
 	"github.com/helayoty/fiberd/pkg/grant"
 	"github.com/helayoty/fiberd/pkg/rpc"
 	"github.com/helayoty/fiberd/pkg/runtime/stub"
+	"github.com/helayoty/fiberd/sdk/go/consumer"
 )
 
 // stubHome: fiberd over the in-memory runtime, reached through

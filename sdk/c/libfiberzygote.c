@@ -2,6 +2,11 @@
 #define _GNU_SOURCE
 #include "libfiberzygote.h"
 
+/* This file implements ABI version 1, so a header of another version refuses to build it. */
+#if FZ_ABI_VERSION != 1
+#error "libfiberzygote.c implements FZ_ABI_VERSION 1"
+#endif
+
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>

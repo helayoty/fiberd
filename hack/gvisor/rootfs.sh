@@ -34,7 +34,7 @@ if [ "$ARCH" = aarch64 ]; then FLAGS="$FLAGS -mbranch-protection=none"; fi
 # -static-pie in place of -pie so the binary stays self-contained.
 # shellcheck disable=SC2086  # $FLAGS is a list
 gcc -static-pie -D_FORTIFY_SOURCE=3 -O2 -fstack-protector-strong -fstack-clash-protection -fPIE -Wformat=2 -Werror=format-security \
-  -Wl,-z,relro,-z,now -Wall -pthread $FLAGS -DFZ_TLS -o "$OUT/bin/refzygote" zygote/refzygote.c zygote/libfiberzygote.c -lssl -lcrypto -ldl 2>&1 | grep -v "requires at runtime the shared libraries\|^/usr/bin/ld: .*in function" >&2 || true
+  -Wl,-z,relro,-z,now -Wall -pthread $FLAGS -DFZ_TLS -o "$OUT/bin/refzygote" sdk/c/refzygote.c sdk/c/libfiberzygote.c -lssl -lcrypto -ldl 2>&1 | grep -v "requires at runtime the shared libraries\|^/usr/bin/ld: .*in function" >&2 || true
 [ -x "$OUT/bin/refzygote" ] || { echo "rootfs.sh: refzygote did not build" >&2; exit 1; }
 if [ "$ARCH" = aarch64 ]; then
   command -v objdump >/dev/null || { echo "rootfs.sh: objdump is needed to check $OUT/bin/refzygote for PAC" >&2; exit 1; }

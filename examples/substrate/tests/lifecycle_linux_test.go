@@ -30,12 +30,12 @@ import (
 	"github.com/helayoty/fiberd/pkg/backend"
 	gvisorbackend "github.com/helayoty/fiberd/pkg/backend/gvisor"
 	procbackend "github.com/helayoty/fiberd/pkg/backend/proc"
-	"github.com/helayoty/fiberd/pkg/consumer"
 	"github.com/helayoty/fiberd/pkg/core"
 	"github.com/helayoty/fiberd/pkg/grant"
 	fhome "github.com/helayoty/fiberd/pkg/home"
 	"github.com/helayoty/fiberd/pkg/rpc"
 	"github.com/helayoty/fiberd/pkg/runtime/host"
+	"github.com/helayoty/fiberd/sdk/go/consumer"
 
 	"github.com/helayoty/fiberd/examples/substrate/herder"
 	subhome "github.com/helayoty/fiberd/examples/substrate/home"
@@ -111,7 +111,7 @@ var procZygote = sync.OnceValues(func() (string, error) {
 	if runtime.GOARCH == "arm64" {
 		args = append(args, "-mbranch-protection=none")
 	}
-	build := exec.Command("gcc", append(args, "-o", bin, "../../../zygote/refzygote.c", "../../../zygote/libfiberzygote.c")...)
+	build := exec.Command("gcc", append(args, "-o", bin, "../../../sdk/c/refzygote.c", "../../../sdk/c/libfiberzygote.c")...)
 	build.Stderr = os.Stderr
 	if err := build.Run(); err != nil {
 		return "", fmt.Errorf("gcc: %w", err)

@@ -19,8 +19,8 @@ import (
 	"google.golang.org/protobuf/types/known/emptypb"
 
 	grantv1 "github.com/helayoty/fiberd/api/grant/v1"
-	"github.com/helayoty/fiberd/pkg/consumer"
 	"github.com/helayoty/fiberd/pkg/core"
+	"github.com/helayoty/fiberd/sdk/go/consumer"
 )
 
 var errNoGrant = errors.New("no grant for this template")

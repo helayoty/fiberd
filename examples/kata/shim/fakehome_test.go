@@ -13,7 +13,7 @@ import (
 	"google.golang.org/protobuf/types/known/emptypb"
 
 	grantv1 "github.com/helayoty/fiberd/api/grant/v1"
-	"github.com/helayoty/fiberd/pkg/consumer"
+	"github.com/helayoty/fiberd/sdk/go/consumer"
 )
 
 // fakeHome is a Fibers server on a TCP port. It records what the shim

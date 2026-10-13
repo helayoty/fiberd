@@ -18,7 +18,6 @@ import (
 	"google.golang.org/grpc/test/bufconn"
 	"google.golang.org/protobuf/encoding/protojson"
 
-	"github.com/helayoty/fiberd/pkg/consumer"
 	"github.com/helayoty/fiberd/pkg/core"
 	"github.com/helayoty/fiberd/pkg/grant"
 	"github.com/helayoty/fiberd/pkg/handoff"
@@ -26,6 +25,7 @@ import (
 	"github.com/helayoty/fiberd/pkg/runtime/stub"
 	"github.com/helayoty/fiberd/pkg/tlsconf"
 	"github.com/helayoty/fiberd/pkg/tlsconf/tlsconftest"
+	"github.com/helayoty/fiberd/sdk/go/consumer"
 )
 
 type home struct {

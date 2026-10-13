@@ -135,6 +135,9 @@
 #ifndef FIBERZYGOTE_H
 #define FIBERZYGOTE_H
 
+/* The ABI this header describes, which every binding checks at build time. */
+#define FZ_ABI_VERSION 1
+
 #include <stddef.h>
 
 typedef struct {

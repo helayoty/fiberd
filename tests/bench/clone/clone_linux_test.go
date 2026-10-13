@@ -17,11 +17,11 @@ import (
 
 	"github.com/helayoty/fiberd/pkg/backend"
 	procbackend "github.com/helayoty/fiberd/pkg/backend/proc"
-	"github.com/helayoty/fiberd/pkg/consumer"
 	"github.com/helayoty/fiberd/pkg/core"
 	"github.com/helayoty/fiberd/pkg/grant"
 	"github.com/helayoty/fiberd/pkg/rpc"
 	"github.com/helayoty/fiberd/pkg/runtime/host"
+	"github.com/helayoty/fiberd/sdk/go/consumer"
 	"github.com/helayoty/fiberd/tests/internal/testenv"
 )
 

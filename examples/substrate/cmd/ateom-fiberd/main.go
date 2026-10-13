@@ -26,12 +26,12 @@ import (
 	"google.golang.org/grpc"
 
 	"github.com/helayoty/fiberd/pkg/artifact"
-	"github.com/helayoty/fiberd/pkg/consumer"
 	"github.com/helayoty/fiberd/pkg/core"
 	"github.com/helayoty/fiberd/pkg/fiberd"
 	"github.com/helayoty/fiberd/pkg/grant"
 	fhome "github.com/helayoty/fiberd/pkg/home"
 	"github.com/helayoty/fiberd/pkg/runtime/host"
+	"github.com/helayoty/fiberd/sdk/go/consumer"
 
 	"github.com/helayoty/fiberd/examples/substrate/capacity"
 	"github.com/helayoty/fiberd/examples/substrate/herder"

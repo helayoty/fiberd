@@ -31,7 +31,7 @@ RUN set -eu; mkdir -p /out; \
     flags=""; if [ "$(uname -m)" = aarch64 ]; then flags="-mbranch-protection=none"; fi; \
     gcc -D_FORTIFY_SOURCE=3 -O2 -fstack-protector-strong -fstack-clash-protection -fPIE -Wformat=2 -Werror=format-security \
       -pie -Wl,-z,relro,-z,now -Wall -Wextra -pthread $flags -DFZ_TLS -o /out/refzygote \
-      zygote/refzygote.c zygote/libfiberzygote.c -lssl -lcrypto
+      sdk/c/refzygote.c sdk/c/libfiberzygote.c -lssl -lcrypto
 
 FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587
 LABEL org.opencontainers.image.source="https://github.com/helayoty/fiberd" \

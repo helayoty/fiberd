@@ -24,7 +24,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/helayoty/fiberd/pkg/consumer"
+	"github.com/helayoty/fiberd/sdk/go/consumer"
 
 	"github.com/helayoty/fiberd/examples/knative/activator"
 )

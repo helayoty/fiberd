@@ -29,8 +29,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/helayoty/fiberd/pkg/consumer"
 	"github.com/helayoty/fiberd/pkg/endpoint"
+	"github.com/helayoty/fiberd/sdk/go/consumer"
 )
 
 // Revision is one function: a grant on a home and a session name.

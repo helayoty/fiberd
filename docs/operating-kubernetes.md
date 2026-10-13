@@ -112,7 +112,7 @@ spec:
       limits: { cpu: "4", memory: 1536Mi }
 ```
 
-This creates one Pod, `web-grant`, whose fiberd can run up to ten fibers from one [warm](glossary.md#warm) template. `/app/web-zygote` stands for your template, built as [zygote/README.md](../zygote/README.md) shows and added to the image. Replace the image, digest and resource values with measurements from the workload.
+This creates one Pod, `web-grant`, whose fiberd can run up to ten fibers from one [warm](glossary.md#warm) template. `/app/web-zygote` stands for your template, built as [sdk/c/README.md](../sdk/c/README.md) shows and added to the image. Replace the image, digest and resource values with measurements from the workload.
 
 ## Security checklist
 

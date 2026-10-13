@@ -19,7 +19,7 @@ import (
 	"google.golang.org/protobuf/types/known/emptypb"
 
 	grantv1 "github.com/helayoty/fiberd/api/grant/v1"
-	"github.com/helayoty/fiberd/pkg/consumer"
+	"github.com/helayoty/fiberd/sdk/go/consumer"
 )
 
 // fakeHome is a scriptable home. Clone and Park run the hooks a case sets,

@@ -33,12 +33,12 @@ import (
 	"google.golang.org/protobuf/types/known/emptypb"
 
 	grantv1 "github.com/helayoty/fiberd/api/grant/v1"
-	"github.com/helayoty/fiberd/pkg/consumer"
 	"github.com/helayoty/fiberd/pkg/core"
 	"github.com/helayoty/fiberd/pkg/core/coretest"
 	"github.com/helayoty/fiberd/pkg/grant"
 	"github.com/helayoty/fiberd/pkg/rpc"
 	"github.com/helayoty/fiberd/pkg/runtime/stub"
+	"github.com/helayoty/fiberd/sdk/go/consumer"
 
 	fshim "github.com/helayoty/fiberd/examples/kata/shim"
 )

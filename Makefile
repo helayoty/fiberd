@@ -191,10 +191,10 @@ proto-check: proto proto-lint ## fail if generated code is out of date (CI)
 
 zygote: ## build bin/refzygote, the reference zygote, with TLS for handoff grants
 	@mkdir -p $(BIN)
-	$(CC) $(ZYGOTE_CFLAGS) $(ZYGOTE_LDFLAGS) -Wall -Wextra -pthread -DFZ_TLS -o $(BIN)/refzygote zygote/refzygote.c zygote/libfiberzygote.c -lssl -lcrypto
+	$(CC) $(ZYGOTE_CFLAGS) $(ZYGOTE_LDFLAGS) -Wall -Wextra -pthread -DFZ_TLS -o $(BIN)/refzygote sdk/c/refzygote.c sdk/c/libfiberzygote.c -lssl -lcrypto
 
 fuzz: ## fuzz the zygote's parsers (libFuzzer) and the handoff parser (go test -fuzz), FUZZTIME seconds each
-	FUZZTIME=$(FUZZTIME) FUZZ_OUT=$(BIN)/fuzz zygote/fuzz/run.sh
+	FUZZTIME=$(FUZZTIME) FUZZ_OUT=$(BIN)/fuzz sdk/c/fuzz/run.sh
 	$(GO) test -run='^$$' -fuzz=FuzzServerName -fuzztime=$(FUZZTIME)s ./pkg/handoff/
 
 ## Linux-only work runs in the dev container (hack/dev): privileged,
