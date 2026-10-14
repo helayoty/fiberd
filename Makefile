@@ -226,9 +226,13 @@ zygote: ## build bin/refzygote, the reference zygote, with TLS for handoff grant
 	@mkdir -p $(BIN)
 	$(CC) $(ZYGOTE_CFLAGS) $(ZYGOTE_LDFLAGS) -Wall -Wextra -pthread -DFZ_TLS -o $(BIN)/refzygote sdk/c/template/refzygote.c sdk/c/template/libfiberzygote.c -lssl -lcrypto
 
-fuzz: ## fuzz the zygote's parsers (libFuzzer) and the handoff parser (go test -fuzz), FUZZTIME seconds each
+fuzz: ## fuzz the zygote's parsers (libFuzzer) and the handoff parser (go test -fuzz), FUZZTIME seconds each, in the dev container on macOS
+ifeq ($(shell uname -s),Darwin)
+	hack/dev/run.sh make fuzz FUZZTIME=$(FUZZTIME)
+else
 	FUZZTIME=$(FUZZTIME) FUZZ_OUT=$(BIN)/fuzz sdk/c/template/fuzz/run.sh
 	$(GO) test -run='^$$' -fuzz=FuzzServerName -fuzztime=$(FUZZTIME)s ./pkg/handoff/
+endif
 
 ## The Python SDK (sdk/python). Its extension needs Linux, so it is built
 ## and its unit tests run inside the dev container.
