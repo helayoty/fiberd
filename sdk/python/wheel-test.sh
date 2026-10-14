@@ -17,6 +17,11 @@ esac
 if [ "$(uname -s)" = Linux ]; then
   (cd / && python -c 'from fiberd import _zygote; print("fiberd._zygote", _zygote.__file__)')
 fi
+# Type checkers read the package's hints only with py.typed beside it,
+# and the generated messages' types only from their .pyi.
+for f in py.typed client/_api/grant_pb2.pyi; do
+  [ -f "$pkg/$f" ] || { echo "wheel-test.sh: the wheel has no fiberd/$f" >&2; exit 1; }
+done
 (cd "$src" && find . \( -name '*_test.py' -o -name conftest.py -o -name '_test*.py' \) -print | tar -cf - -T -) |
   tar -C "$pkg" -xf -
 cd "$pkg/.."

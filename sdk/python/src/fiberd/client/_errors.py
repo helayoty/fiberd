@@ -133,7 +133,8 @@ def miss_from_status(raw: bytes) -> grant_pb2.Miss | None:
 
 def miss_from_call(call: object) -> grant_pb2.Miss | None:
     """The Miss detail of a failed call (a grpc.Call or a grpc.aio.AioRpcError), when it carries one."""
-    metadata = call.trailing_metadata() if callable(getattr(call, "trailing_metadata", None)) else None
+    trailing = getattr(call, "trailing_metadata", None)
+    metadata = trailing() if callable(trailing) else None
     for key, value in metadata or ():
         if key == DETAILS_KEY and isinstance(value, bytes):
             try:

@@ -48,6 +48,12 @@ package-dir = { "" = "src" }
 [tool.setuptools.packages.find]
 where = ["src"]
 
+# py.typed marks the package as typed, and the .pyi carries the generated
+# messages' types, which the _pb2 module itself does not.
+[tool.setuptools.package-data]
+fiberd = ["py.typed"]
+"fiberd.client._api" = ["*.pyi"]
+
 # The C sources are in the sdist (MANIFEST.in), never in the wheel.
 [tool.setuptools.exclude-package-data]
 "*" = ["*.c"]
