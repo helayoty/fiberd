@@ -23,23 +23,39 @@ STDLIB=$("$PY" -c 'import sysconfig; print(sysconfig.get_paths()["stdlib"])')
 PURELIB=$("$PY" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')
 ARCH=$(uname -m)
 
-# /lib and /lib64 are symlinks into /usr on a merged-usr image, and the
-# loader's path (/lib/ld-linux-*.so) goes through one.
-for d in lib lib64; do
-  if [ -L "/$d" ] && [ ! -e "$OUT/$d" ]; then ln -s "$(readlink "/$d")" "$OUT/$d"; fi
-done
+# dir_chain makes a directory of this image in the rootfs with each
+# symlinked directory on its way (/lib64 -> usr/lib64 on a merged-usr
+# amd64 image, which the loader's path goes through) kept as a symlink
+# whose target is made first, since mkdir over a symlink with no target
+# yet fails with "File exists".
+dir_chain() {
+  local p="" c t parts
+  IFS=/ read -ra parts <<<"${1#/}"
+  for c in "${parts[@]}"; do
+    p=$p/$c
+    if [ -L "$p" ]; then
+      t=$(readlink "$p")
+      case "$t" in /*) ;; *) t=${p%/*}/$t ;; esac
+      dir_chain "$t"
+      [ -e "$OUT$p" ] || [ -L "$OUT$p" ] || ln -s "$(readlink "$p")" "$OUT$p"
+    else
+      mkdir -p "$OUT$p"
+    fi
+  done
+}
 
 # copy_chain copies a path into the rootfs with every symlink on its way
-# kept as a symlink, so the loader's lookups resolve as they do here.
+# kept as a symlink, so the loader's lookups resolve as they do here and
+# the file lands where the chain ends.
 copy_chain() {
   local p=$1 t
   while [ -L "$p" ]; do
     t=$(readlink "$p")
-    mkdir -p "$OUT$(dirname "$p")"
+    dir_chain "$(dirname "$p")"
     [ -e "$OUT$p" ] || [ -L "$OUT$p" ] || ln -s "$t" "$OUT$p"
     case "$t" in /*) p=$t ;; *) p=$(dirname "$p")/$t ;; esac
   done
-  mkdir -p "$OUT$(dirname "$p")"
+  dir_chain "$(dirname "$p")"
   [ -e "$OUT$p" ] || cp -p "$p" "$OUT$p"
 }
 
