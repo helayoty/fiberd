@@ -29,7 +29,7 @@ if platform.machine() in ("aarch64", "arm64"):
     CFLAGS.append("-mbranch-protection=none")
 LDFLAGS = ["-Wl,-z,relro,-z,now"]
 
-TEST_MODULES = ("conftest", "_testtable")
+TEST_MODULES = ("conftest", "_testtable", "_testhome")
 
 
 class build_py(_build_py):

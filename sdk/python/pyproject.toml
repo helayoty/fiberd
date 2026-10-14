@@ -18,8 +18,9 @@ classifiers = [
 fiberd-template = "fiberd.template._cli:main"
 
 [project.optional-dependencies]
-# fiberd.client, a later stage, adds grpcio here. A template never needs it.
-client = []
+# fiberd.client needs these two and a template never does. The floors are
+# Debian 12's versions, which made the generated messages (make python-proto).
+client = ["grpcio>=1.51", "protobuf>=3.21.12"]
 
 [tool.setuptools]
 package-dir = { "" = "src" }
@@ -37,6 +38,8 @@ python_files = ["*_test.py"]
 [tool.ruff]
 line-length = 160
 src = ["src"]
+# The generated messages are protoc's output, checked by make python-proto-check instead.
+extend-exclude = ["src/fiberd/client/_api"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "TID"]

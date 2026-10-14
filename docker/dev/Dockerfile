@@ -113,10 +113,14 @@ RUN set -eu; cd /tmp; \
     make install_dev >/dev/null; \
     cd /; rm -rf /tmp/openssl.tar.gz "/tmp/openssl-${OPENSSL_VERSION}"
 
-# Python for the template SDK (sdk/python). The headers its extension
-# builds against, setuptools to build it and pytest for its unit tests.
+# Python for the SDK (sdk/python). The headers the template extension
+# builds against, setuptools to build it, pytest for the unit tests, and
+# for fiberd.client Debian's grpcio and protobuf, the protoc of the same
+# protobuf release, which makes the client's messages (make
+# python-proto), and cryptography for the test certificates.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       python3-dev python3-setuptools python3-pytest \
+      python3-grpcio python3-protobuf protobuf-compiler python3-cryptography \
     && rm -rf /var/lib/apt/lists/*
 
 # GOTOOLCHAIN=auto lets the go.mod toolchain line fetch the exact version.
