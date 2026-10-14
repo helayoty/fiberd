@@ -92,7 +92,17 @@ func BuildZygote(dir string) (string, error) {
 // BuildRootfs builds the rootfs the gvisor and runc backends run the
 // reference zygote in (hack/gvisor/rootfs.sh) at dir.
 func BuildRootfs(dir string) error {
-	build := exec.Command(filepath.Join(RepoRoot(), "hack", "gvisor", "rootfs.sh"), dir)
+	return buildRootfs(filepath.Join("hack", "gvisor", "rootfs.sh"), dir)
+}
+
+// BuildPythonRootfs builds that rootfs with CPython and the Python SDK in
+// it (hack/python/rootfs.sh) at dir, for the Python reference template.
+func BuildPythonRootfs(dir string) error {
+	return buildRootfs(filepath.Join("hack", "python", "rootfs.sh"), dir)
+}
+
+func buildRootfs(script, dir string) error {
+	build := exec.Command(filepath.Join(RepoRoot(), script), dir)
 	build.Stderr = os.Stderr
 	if err := build.Run(); err != nil {
 		return fmt.Errorf("build rootfs: %w", err)

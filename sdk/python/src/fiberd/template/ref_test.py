@@ -136,3 +136,81 @@ def test_cli_resolve(monkeypatch, name, f0, f1):
             _cli.resolve(f0)
     else:
         assert _cli.resolve(f0) is getattr(mod, f1)
+
+
+def test_counter_lives_in_the_warm_state(tmp_path):
+    """A park and resume keeps the counter on every backend, so it is the warm state's, not the connection's."""
+    warm = ref.Warm(1)
+    a = ref.State(warm, ft.Fiber("g/1/1", str(tmp_path / "a.sock"), b"", "", {}))
+    b = ref.State(warm, ft.Fiber("g/1/2", str(tmp_path / "b.sock"), b"", "", {}))
+    assert [ref.answer(a, "incr"), ref.answer(b, "incr"), ref.answer(b, "get")] == ["1", "2", "2"]
+
+
+DIRTY = [
+    # the backend, the heap pages touched, the fresh bytes kept
+    ("a fork writes into the warm heap", "fork", 2, 0),
+    ("a restored sandbox allocates, since its heap is already its own", "gvisor", 0, 8192),
+]
+
+
+@table(DIRTY)
+def test_dirty_by_backend(tmp_path, name, f0, f1, f2):
+    warm = ref.Warm(1)
+    st = ref.State(warm, ft.Fiber("g/1/1", str(tmp_path / "ep.sock"), b"", "", {}, backend=f0))
+    assert ref.answer(st, "dirty 8192") == "ok 8192"
+    assert sum(1 for i in range(0, 8192, 4096) if warm.heap[i] != (i >> 12) & 0xFF) == f1
+    assert sum(len(b) for b in warm.grown) == f2
+
+
+class FakeFiber:
+    """A Fiber whose listen, ready and serve are recorded, for on_fiber's ordering."""
+
+    def __init__(self, payload, backend):
+        self.payload = payload
+        self.backend = backend
+        self.calls = []
+
+    def listen(self):
+        self.calls.append("listen")
+        return "srv"
+
+    def ready(self):
+        self.calls.append("ready")
+
+    def serve(self, handler, listener=None):
+        self.calls.append(("serve", listener))
+
+
+ON_FIBER = [
+    # the payload, the backend, the calls wanted, the fd 3 writes wanted
+    ("plain", b"", "fork", ["listen", "ready", ("serve", "srv")], []),
+    ("exit after ready", b'{"exit_after_ready": 1}', "fork", ["listen", "ready"], []),
+    ("ready misuse writes the pipe on a fork", b'{"ready_misuse": 1}', "fork", ["listen", "ready", ("serve", "srv")], [(3, b"x")]),
+    ("ready misuse is nothing on gVisor, which has no pipe", b'{"ready_misuse": 1}', "gvisor", ["listen", "ready", ("serve", "srv")], []),
+]
+
+
+@table(ON_FIBER)
+def test_on_fiber_order(monkeypatch, name, f0, f1, f2, f3):
+    writes = []
+    monkeypatch.setattr(ref.os, "write", lambda fd, data: writes.append((fd, data)))
+    f = FakeFiber(f0, f1)
+    assert ref.on_fiber(ref.Warm(1), f) == 0
+    assert f.calls == f2 and writes == f3
+
+
+def test_reopen_stdio_dups_the_log_over_stdout_and_stderr(tmp_path, monkeypatch):
+    dups = []
+    monkeypatch.setattr(ref.os, "dup2", lambda a, b: dups.append(b))
+    ref.reopen_stdio(str(tmp_path / "zygote.log"))
+    assert dups == [0, 1, 2] and (tmp_path / "zygote.log").exists()
+
+
+def test_main_takes_log_as_a_launcher_passes_it(monkeypatch):
+    """runc appends --log /host/zygote.log to the template command, so the template must take it."""
+    monkeypatch.setattr(ft, "init", lambda: None)
+    monkeypatch.setattr(ft, "serve", lambda on_fiber: 0)
+    seen = []
+    monkeypatch.setattr(ref, "reopen_stdio", lambda path: seen.append(path))
+    assert ref.main(["--heap-mb", "1", "--log", "/host/zygote.log"]) == 0
+    assert seen == ["/host/zygote.log"]

@@ -61,12 +61,40 @@ jobs:
             bin/conform-state-gvisor/private/audit.jsonl
           if-no-files-found: ignore
 
+  conform-gvisor-python:
+    name: conformance C1-C10 against the gvisor backend with the Python reference template (sdk/python)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: make linux-gvisor-check
+      - run: make conform-gvisor-python
+      - name: make the state readable for the upload (written as root inside the container)
+        if: failure()
+        run: sudo chmod -R a+rX bin/conform-state-gvisor-python 2>/dev/null || true
+      - name: keep fiberd's logs and audit trail
+        if: failure()
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: conform-gvisor-python-state
+          path: |
+            bin/conform-state-gvisor-python/**/*.log
+            bin/conform-state-gvisor-python/private/audit.jsonl
+          if-no-files-found: ignore
+
   conform-runc:
     name: conformance C1-C10 against the runc backend (the zygote as a container's init)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: make conform-runc
+
+  conform-runc-python:
+    name: conformance C1-C10 against the runc backend with the Python reference template (sdk/python)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: make conform-runc-python
 
   conform-hyperlight-fake:
     name: conformance C1-C10 against the hyperlight backend over the fake helper (no hypervisor)

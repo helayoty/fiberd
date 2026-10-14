@@ -9,23 +9,21 @@ from fiberd.template import _fence
 from fiberd.template._errors import TemplateError
 
 PARSE = [
-    ("plain", "grant/3/7", _fence.Fence("grant", 3, 7)),
-    ("a grant uid with a slash keeps it", "tenant/grant/3/7", _fence.Fence("tenant/grant", 3, 7)),
-    ("two fields", "grant/3", None),
-    ("an epoch that is no number", "grant/x/7", None),
-    ("an empty grant", "/3/7", None),
+    # the fence, its parts, whether str() gives the fence back
+    ("plain", "grant/3/7", _fence.Fence("grant", 3, 7), True),
+    ("a grant uid with a slash keeps it", "tenant/grant/3/7", _fence.Fence("tenant/grant", 3, 7), True),
+    ("the gVisor footprint probe's fence is served, not refused", "probe", _fence.Fence("probe", 0, 0), False),
+    ("two fields", "grant/3", _fence.Fence("grant/3", 0, 0), False),
+    ("an epoch that is no number", "grant/x/7", _fence.Fence("grant/x/7", 0, 0), False),
+    ("an empty grant", "/3/7", _fence.Fence("/3/7", 0, 0), False),
 ]
 
 
 @table(PARSE)
-def test_parse_fence(name, f0, f1):
-    if f1 is None:
-        with pytest.raises(TemplateError, match="is not grant/epoch/seq"):
-            _fence.parse_fence(f0)
-    else:
-        got = _fence.parse_fence(f0)
-        assert got == f1
-        assert str(got) == f0
+def test_parse_fence(name, f0, f1, f2):
+    got = _fence.parse_fence(f0)
+    assert got == f1
+    assert (str(got) == f0) is f2
 
 
 KINDS = [

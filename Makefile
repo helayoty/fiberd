@@ -44,7 +44,7 @@ CONFORM_DIR ?= $(BIN)
 endif
 
 .PHONY: all build test integration-tests vet lint proto proto-lint proto-check clean \
-        bench zygote fuzz conform-stub conform-signed conform-logs conform-proc conform-proc-python conform-gvisor conform-runc conform-hyperlight-fake conform-hyperlight \
+        bench zygote fuzz conform-stub conform-signed conform-logs conform-proc conform-proc-python conform-gvisor conform-gvisor-python conform-runc conform-runc-python conform-hyperlight-fake conform-hyperlight \
         python-build python-test \
         hyperlight-helper linux-hyperlight-check overcommit kind-up kind-down kind-image conform-kind slurm-up slurm-down conform-slurm example-knative example-knative-kvm example-kata example-substrate \
         registry-start mobility linux-shell linux-check linux-gvisor-check linux-test linux-lint bench-e2e \
@@ -74,8 +74,18 @@ conform-proc-python: ## C1-C10 against the fork runtime with the Python referenc
 conform-gvisor: ## C1-C10 against the gvisor backend (a runsc sandbox per fiber), with a pool of 2 per grant, inside the Linux dev container
 	hack/dev/run.sh env CONFORM_RUNTIME=gvisor CONFORM_SIGNED=1 CONFORM_WARM=2 CONFORM_STATE=$(CONFORM_DIR)/conform-state-gvisor hack/conform/stub.sh run
 
+conform-gvisor-python: ## C1-C10 against the gvisor backend with the Python reference template in a rootfs with CPython (hack/python/rootfs.sh), pooled, inside the Linux dev container
+	hack/dev/run.sh env CONFORM_RUNTIME=gvisor CONFORM_SIGNED=1 CONFORM_WARM=2 CONFORM_W_BUDGET=8388608 CONFORM_ROOTFS_SH=hack/python/rootfs.sh \
+	  CONFORM_GVISOR_ROOTFS=/var/lib/fiberd/gvisor-rootfs-python CONFORM_TEMPLATE="/usr/bin/python3 -m fiberd.template.ref --heap-mb 32" \
+	  CONFORM_STATE=$(CONFORM_DIR)/conform-state-gvisor-python hack/conform/stub.sh run
+
 conform-runc: ## C1-C10 against the runc backend (the zygote as an OCI container's init), inside the Linux dev container
 	hack/dev/run.sh env CONFORM_RUNTIME=runc CONFORM_SIGNED=1 CONFORM_STATE=$(CONFORM_DIR)/conform-state-runc hack/conform/stub.sh run
+
+conform-runc-python: ## C1-C10 against the runc backend with the Python reference template in the same rootfs, inside the Linux dev container
+	hack/dev/run.sh env CONFORM_RUNTIME=runc CONFORM_SIGNED=1 CONFORM_W_BUDGET=8388608 CONFORM_ROOTFS_SH=hack/python/rootfs.sh \
+	  CONFORM_GVISOR_ROOTFS=/var/lib/fiberd/gvisor-rootfs-python CONFORM_TEMPLATE="/usr/bin/python3 -m fiberd.template.ref --heap-mb 32" \
+	  CONFORM_STATE=$(CONFORM_DIR)/conform-state-runc-python hack/conform/stub.sh run
 
 conform-hyperlight-fake: ## C1-C10 against the hyperlight backend over the fake helper (no hypervisor), inside the Linux dev container
 	hack/dev/run.sh env CONFORM_RUNTIME=hyperlight CONFORM_SIGNED=1 CONFORM_STATE=$(CONFORM_DIR)/conform-state-hyperlight hack/conform/stub.sh run

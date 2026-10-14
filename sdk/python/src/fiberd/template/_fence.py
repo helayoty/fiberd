@@ -20,9 +20,15 @@ class Fence:
 
 
 def parse_fence(s: str) -> Fence:
+    """The parts of a fence fiberd handed over, or Fence(s, 0, 0) for one that is not grant/epoch/seq.
+
+    The gVisor backend's footprint probe restores the template under the
+    fence "probe", and the template serves it like any other, so an odd
+    fence is not refused.
+    """
     parts = s.rsplit("/", 2)
     if len(parts) != 3 or not parts[0] or not parts[1].isdigit() or not parts[2].isdigit():
-        raise TemplateError(f"fence {s!r} is not grant/epoch/seq")
+        return Fence(s, 0, 0)
     return Fence(parts[0], int(parts[1]), int(parts[2]))
 
 

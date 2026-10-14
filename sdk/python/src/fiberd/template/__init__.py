@@ -16,6 +16,10 @@ with a Fiber, serves on its endpoint and returns the exit code.
 
     ft.serve(on_fiber)
 
+On gVisor nothing forks. serve() notices the sandbox, checkpoints the
+warm template and runs on_fiber in every sandbox restored from that
+image, so the same template serves on proc, runc and gVisor.
+
 The rules serve() enforces, and why, are in docs/design/sdk.md.
 """
 
@@ -33,7 +37,7 @@ import threading
 import traceback
 from typing import Callable, Optional
 
-from fiberd.template import _fence, _rules
+from fiberd.template import _fence, _gvisor, _rules
 from fiberd.template._errors import TemplateError
 from fiberd.template._fence import Fence
 
@@ -108,7 +112,10 @@ def init() -> None:
         return
     _rules.check_main_thread(threading.current_thread() is threading.main_thread())
     _rules.check_threads_at_init(PROC_SELF)
-    _ext().init(list(sys.orig_argv))
+    # A gVisor fiber is a restored sandbox, not a fork over the zygote's
+    # pages, so there is no layout to pin and the library is not told.
+    if not _gvisor.detect(PROC_SELF):
+        _ext().init(list(sys.orig_argv))
     _inited = True
 
 
@@ -119,12 +126,19 @@ def serve(on_fiber: Callable[[Fiber], int], *, threads: str = "refuse", control_
     threads="warn" turns the one-thread refusal into a warning, for an
     author who stops their pools around clones. Returns when fiberd closes
     the channel.
+
+    On gVisor it runs on_fiber in every sandbox restored from the
+    template's checkpoint instead, and returns when one fails.
     """
     if threads not in ("refuse", "warn"):
         raise ValueError('threads is "refuse" or "warn"')
     _rules.check_gil(getattr(sys, "_is_gil_enabled", lambda: True)())
     _rules.check_main_thread(threading.current_thread() is threading.main_thread())
     _rules.check_init(_inited)
+    if _gvisor.detect(PROC_SELF, control_fd):
+        # A restored sandbox carries every thread and descriptor with it,
+        # so the fork rules below do not apply.
+        return _serve_gvisor(on_fiber)
     _rules.check_threads(PROC_SELF, own_tid=threading.get_native_id(), mode=threads)
     _rules.check_descriptors(PROC_SELF, control_fd=control_fd)
     _flush()
@@ -141,6 +155,16 @@ def _born(on_fiber: Callable[[Fiber], int], fence: str, endpoint: str, payload: 
         _rebuild_environ(env)
         f = Fiber(fence, endpoint, payload, session, env)
         f._incarnate("fork", os.urandom(32))
+    except BaseException:
+        traceback.print_exc()
+        _flush()
+        return 1
+    return _run(on_fiber, f)
+
+
+def _run(on_fiber: Callable[[Fiber], int], f: Fiber) -> int:
+    """on_fiber's return, or what it raised, as the fiber's exit code."""
+    try:
         return _exit_code(on_fiber(f))
     except SystemExit as e:
         return _exit_code(e.code)
@@ -149,6 +173,56 @@ def _born(on_fiber: Callable[[Fiber], int], fence: str, endpoint: str, payload: 
         return 1
     finally:
         _flush()
+
+
+def _serve_gvisor(on_fiber: Callable[[Fiber], int]) -> int:
+    """The gVisor loop, refzygote's gvisor_main. Returns when an incarnation fails, with its exit code.
+
+    The warm-up is done, so the ready marker tells the backend to take
+    the template image from outside while this process blocks in its
+    checkpoint read. That read is where every sandbox restored from the
+    image resumes, and nothing else tells a restored copy from the
+    original. A restored copy takes its identity on fiberd's channel, a
+    pooled one waits there until it is handed out, and a resumed park
+    comes back the same way with kind "resume". Every copy holds the
+    same random state until it reseeds from the seed the identity brings,
+    so that happens before on_fiber runs.
+    """
+    serving: list[Optional[Fiber]] = [None]
+
+    # The template is the sandbox's init, and pid 1 ignores a signal it
+    # has no handler for. SIGUSR1 is the backend asking the fiber to
+    # close its endpoint for a park.
+    def stop(*_: object) -> None:
+        if serving[0] is not None:
+            serving[0].stopping.set()
+
+    signal.signal(signal.SIGUSR1, stop)
+    signal.signal(signal.SIGTERM, stop)
+    _flush()
+    _gvisor.mark_ready(_gvisor.READY_MARKER)
+    print("fiberd.template: warm, waiting for the template checkpoint", file=sys.stderr)
+    _flush()
+    while True:
+        if _gvisor.wait_checkpoint() != "restore":
+            # The original, or a fiber checkpointed in place. Nothing to
+            # serve. The backend ends it, or the template stands by.
+            continue
+        kind, fence, endpoint, payload, seed, session = _ext().gvisor_identity()
+        try:
+            env = _gvisor.fiber_environ(dict(os.environ), fence, endpoint, session)
+            _rebuild_environ(env)
+            f = Fiber(fence, endpoint, payload, session, env, backend="gvisor")
+            f._incarnate(_gvisor.incarnation_kind(kind), seed)
+        except BaseException:
+            traceback.print_exc()
+            _flush()
+            return 1
+        serving[0] = f
+        rc = _run(on_fiber, f)
+        serving[0] = None
+        if rc != 0:
+            return rc
 
 
 def _rebuild_environ(env: dict[str, str]) -> None:
@@ -175,9 +249,14 @@ def _flush() -> None:
 
 
 class Fiber:
-    """What a fiber knows about itself, handed to on_fiber in the child."""
+    """What a fiber knows about itself, handed to on_fiber in the child.
 
-    def __init__(self, fence: str, endpoint: str, payload: bytes, session: str, env: dict[str, str]) -> None:
+    backend is "fork" for a forked fiber (proc, runc) and "gvisor" for a
+    restored sandbox, for the rare author who must tell them apart.
+    """
+
+    def __init__(self, fence: str, endpoint: str, payload: bytes, session: str, env: dict[str, str], *, backend: str = "fork") -> None:
+        self.backend = backend
         self.fence = fence
         self.fence_parts = _fence.parse_fence(fence)
         self.endpoint = endpoint
@@ -213,9 +292,13 @@ class Fiber:
 
     def ready(self) -> None:
         """Tells fiberd the endpoint accepts connections. Once, after listen(). stderr is /dev/null after it."""
-        if not self._ready:
+        if self._ready:
+            return
+        if self.backend == "gvisor":
+            _ext().gvisor_ack()
+        else:
             _ext().fiber_ready()
-            self._ready = True
+        self._ready = True
 
     def serve(self, handler: Callable[[socket.socket], None], *, listener: Optional[socket.socket] = None, poll: float = 0.5) -> None:
         """The accept loop. Listens, reports ready, hands each connection to handler and closes it after.
@@ -223,7 +306,9 @@ class Fiber:
         The fence file is checked before each connection, so a fiber resumed
         from a park is reseeded before it serves. A listener from listen()
         may be passed in when the fiber did work between binding and ready.
-        Returns when the fiber is asked to stop (SIGTERM, or stopping set).
+        Returns when the fiber is asked to stop (SIGTERM, or stopping set,
+        which on gVisor the park's SIGUSR1 does), with the endpoint closed
+        and unlinked.
         """
         if self.kind == "handoff":
             raise TemplateError("a handoff fiber serves accept(), which a later stage adds")
@@ -258,8 +343,11 @@ class Fiber:
         """Reads the fence file fiberd publishes beside the endpoint. A new fence is a resume, and reseeds.
 
         Called by serve() before each connection. An author running their
-        own loop over listen() calls it the same way.
+        own loop over listen() calls it the same way. A gVisor fiber has
+        no fence file, since a resumed sandbox takes a whole identity.
         """
+        if self.backend == "gvisor":
+            return False
         now = _fence.live_fence(_fence.fence_file(self.endpoint, self.kind, self._birth), self.fence)
         if now == self.fence:
             return False

@@ -30,15 +30,19 @@ ft.serve(on_fiber)
 
 `fiberd-template pkg.module:on_fiber` runs a module the same way, with `init()` before the import.
 
-A `Fiber` carries `fence`, `fence_parts`, `endpoint`, `kind` (unix or tcp), `payload`, `session`, `env` and `incarnation`. `listen()` returns a bound socket for an author who runs their own server, `ready()` reports to fiberd once listening, `check_fence()` notices a resume, and `stopping` is set when the fiber is asked to stop. `@ft.on_incarnation` runs a function in every copy of the template, after `random` and OpenSSL are reseeded. The rules `serve()` enforces, and why, are in [docs/design/sdk.md](../../docs/design/sdk.md).
+A `Fiber` carries `fence`, `fence_parts`, `endpoint`, `kind` (unix or tcp), `payload`, `session`, `env`, `incarnation` and `backend` (fork or gvisor). `listen()` returns a bound socket for an author who runs their own server, `ready()` reports to fiberd once listening, `check_fence()` notices a resume, and `stopping` is set when the fiber is asked to stop. `@ft.on_incarnation` runs a function in every copy of the template, after `random` and OpenSSL are reseeded. The rules `serve()` enforces, and why, are in [docs/design/sdk.md](../../docs/design/sdk.md).
 
 ## Build and test
 
 The extension needs Linux and a C toolchain. In the dev container, from the repository root.
 
 ```bash
-make python-test          # build the extension in place and run the unit tests
-make conform-proc-python  # C1-C10 against the reference template, fiberd.template.ref
+make python-test            # build the extension in place and run the unit tests
+make conform-proc-python    # C1-C10 against the reference template, fiberd.template.ref
+make conform-gvisor-python  # the same on gVisor, from a rootfs hack/python/rootfs.sh builds with CPython in it
+make conform-runc-python    # and on runc, from the same rootfs
 ```
+
+The same template serves on proc, runc and gVisor. On runc and gVisor it runs from a root filesystem that holds the interpreter and the package, which `hack/python/rootfs.sh <dir>` builds from the dev image for those runs.
 
 Elsewhere, `pip install -e sdk/python` builds it, and `python3 -m pytest sdk/python` runs the unit tests, which start no process. Wheels come in a later stage.

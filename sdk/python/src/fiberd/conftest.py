@@ -24,7 +24,7 @@ def _refuse(*_args, **_kwargs):
 class _NoExt:
     """The C binding's shape, every call refused."""
 
-    ABI_VERSION = 2
+    ABI_VERSION = 3
 
     def __getattr__(self, name):
         return _refuse

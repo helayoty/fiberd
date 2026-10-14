@@ -933,14 +933,16 @@ func TestClone(t *testing.T) {
 		name       string
 		knobs      knobs
 		payload    []byte
+		session    string
 		spec       bool
 		noPID      bool
 		wantStatus string
 	}{
 		{name: "exit 0", wantStatus: "exit:0"},
 		{name: "payload and a signal", payload: []byte{1, 2, 3}, knobs: knobs{ExitStatus: 137}, wantStatus: "signal:9"},
+		{name: "a session with a space, hex on the channel", session: "conv 42", wantStatus: "exit:0"},
 		{name: "wait says nothing readable", knobs: knobs{BadWaitJSON: true, NoPidFile: true, Fail: map[string]bool{"state": true}}, noPID: true, wantStatus: "exit:?"},
-		{name: "template that polls the spec environment", payload: []byte{1, 2, 3}, knobs: knobs{NoToken: true}, spec: true, wantStatus: "exit:0"},
+		{name: "template that polls the spec environment", payload: []byte{1, 2, 3}, session: "conv 42", knobs: knobs{NoToken: true}, spec: true, wantStatus: "exit:0"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -948,7 +950,7 @@ func TestClone(t *testing.T) {
 			ep := filepath.Join(workDir, "ep.sock")
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			fb, err := b.Clone(ctx, w.ID, backend.FiberSpec{Fence: "g/1-1", Endpoint: ep, CgroupFD: -1, Deadline: 2 * time.Second, Payload: tc.payload})
+			fb, err := b.Clone(ctx, w.ID, backend.FiberSpec{Fence: "g/1-1", Endpoint: ep, CgroupFD: -1, Deadline: 2 * time.Second, Payload: tc.payload, Session: tc.session})
 			if err != nil {
 				t.Fatalf("Clone: %v", err)
 			}
@@ -972,7 +974,7 @@ func TestClone(t *testing.T) {
 			}
 			token, records := f.channelOf(fc)
 			if tc.spec {
-				for _, want := range []string{`"FIBERD_FENCE=g/1-1"`, `"FIBERD_ENDPOINT=/host/ep.sock"`, `"FIBERD_PAYLOAD=010203"`} {
+				for _, want := range []string{`"FIBERD_FENCE=g/1-1"`, `"FIBERD_ENDPOINT=/host/ep.sock"`, `"FIBERD_PAYLOAD=010203"`, `"FIBERD_SESSION=conv 42"`} {
 					if !strings.Contains(string(cfgJSON), want) {
 						t.Fatalf("bundle lacks %s:\n%s", want, cfgJSON)
 					}
@@ -981,7 +983,7 @@ func TestClone(t *testing.T) {
 					t.Fatalf("a template that polls the spec was handed %v on the channel", records)
 				}
 			} else {
-				checkIdentity(t, cfgJSON, token, records, "clone", "g/1-1", "/host/ep.sock", tc.payload)
+				checkIdentity(t, cfgJSON, token, records, "clone", "g/1-1", "/host/ep.sock", tc.payload, tc.session)
 			}
 			tdir := filepath.Join(b.opt.StateDir, "templates", warmCID(t, b, "g"))
 			calls := f.calls()
@@ -1273,7 +1275,7 @@ func TestParkAndResume(t *testing.T) {
 			ep := filepath.Join(workDir, "ep2.sock")
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			fb, err := b.Resume(ctx, backend.ResumeSpec{Dir: dir, Fence: "g/2-1", Endpoint: ep, CgroupFD: -1, Deadline: 2 * time.Second, WarmID: "g", WorkDir: workDir})
+			fb, err := b.Resume(ctx, backend.ResumeSpec{Dir: dir, Fence: "g/2-1", Endpoint: ep, CgroupFD: -1, Deadline: 2 * time.Second, WarmID: "g", WorkDir: workDir, Session: "S"})
 			if err != nil {
 				t.Fatalf("Resume: %v", err)
 			}
@@ -1294,7 +1296,7 @@ func TestParkAndResume(t *testing.T) {
 					t.Fatalf("resumed bundle = %s, channel records %v", cfgJSON, records)
 				}
 			} else {
-				checkIdentity(t, cfgJSON, token, records, "resume", "g/2-1", "/host/ep2.sock", nil)
+				checkIdentity(t, cfgJSON, token, records, "resume", "g/2-1", "/host/ep2.sock", nil, "S")
 			}
 			if err := b.Kill("g/2-1"); err != nil {
 				t.Fatalf("Kill: %v", err)
@@ -1767,14 +1769,14 @@ func isHex(s string, n int) bool {
 
 // checkIdentity checks a late-binding restore: its bundle carries the
 // token the sandbox claimed with and nothing of the fiber, and the one
-// identity record on the channel names the kind, fence, endpoint and
-// payload and carries a fresh seed of seedBytes.
-func checkIdentity(t *testing.T, cfgJSON []byte, token string, records [][]string, kind, fence, endpoint string, payload []byte) {
+// identity record on the channel names the kind, fence, endpoint,
+// payload and session and carries a fresh seed of seedBytes.
+func checkIdentity(t *testing.T, cfgJSON []byte, token string, records [][]string, kind, fence, endpoint string, payload []byte, session string) {
 	t.Helper()
 	if !isHex(token, 2*tokenBytes) || !strings.Contains(string(cfgJSON), `"FIBERD_TOKEN=`+token+`"`) {
 		t.Fatalf("bundle token %q:\n%s", token, cfgJSON)
 	}
-	for _, name := range []string{"FIBERD_FENCE", "FIBERD_ENDPOINT", "FIBERD_PAYLOAD"} {
+	for _, name := range []string{"FIBERD_FENCE", "FIBERD_ENDPOINT", "FIBERD_PAYLOAD", "FIBERD_SESSION"} {
 		if strings.Contains(string(cfgJSON), name) {
 			t.Fatalf("bundle names %s, which belongs on the channel:\n%s", name, cfgJSON)
 		}
@@ -1786,8 +1788,12 @@ func checkIdentity(t *testing.T, cfgJSON []byte, token string, records [][]strin
 	if len(payload) > 0 {
 		ph = hex.EncodeToString(payload)
 	}
+	sh := "-"
+	if session != "" {
+		sh = hex.EncodeToString([]byte(session))
+	}
 	got := records[0]
-	want := []string{"", kind, fence, endpoint, ph, "-", "-", "-", ""}
+	want := []string{"", kind, fence, endpoint, ph, "-", "-", "-", sh, ""}
 	for i := 1; i < identityFields-1; i++ {
 		if got[i] != want[i] {
 			t.Fatalf("identity field %d = %q, want %q (record %v)", i, got[i], want[i], got)
@@ -1938,7 +1944,7 @@ func TestPoolBind(t *testing.T) {
 				}
 			}
 			ep := filepath.Join(workDir, "ep.sock")
-			fb, err := b.Bind(ctx, p.ID, backend.FiberSpec{Fence: "g/1-1", Endpoint: ep, CgroupFD: -1, Deadline: deadline, Payload: []byte{1, 2}})
+			fb, err := b.Bind(ctx, p.ID, backend.FiberSpec{Fence: "g/1-1", Endpoint: ep, CgroupFD: -1, Deadline: deadline, Payload: []byte{1, 2}, Session: "conv 42"})
 			if tc.wantBindErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantBindErr) {
 					t.Fatalf("Bind = %+v, %v, want %q", fb, err, tc.wantBindErr)
@@ -1970,7 +1976,7 @@ func TestPoolBind(t *testing.T) {
 				t.Fatal(err)
 			}
 			_, records = f.channelOf(p.ID)
-			checkIdentity(t, cfgJSON, token, records, "clone", "g/1-1", "/host/ep.sock", []byte{1, 2})
+			checkIdentity(t, cfgJSON, token, records, "clone", "g/1-1", "/host/ep.sock", []byte{1, 2}, "conv 42")
 			b.mu.Lock()
 			pooled, known := len(b.pooled), b.boxes["g/1-1"] != nil
 			b.mu.Unlock()

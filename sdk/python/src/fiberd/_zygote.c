@@ -25,8 +25,8 @@
 
 #include "libfiberzygote.h"
 
-#if FZ_ABI_VERSION != 2
-#error "fiberd._zygote binds FZ_ABI_VERSION 2; rebuild it against this header"
+#if FZ_ABI_VERSION != 3
+#error "fiberd._zygote binds FZ_ABI_VERSION 3; rebuild it against this header"
 #endif
 #ifdef Py_GIL_DISABLED
 #error "fiberd._zygote needs the GIL; the fork rules assume it and abi3 does not cover a free-threaded build"
@@ -174,9 +174,9 @@ static PyObject *py_gvisor_identity(PyObject *self, PyObject *unused) {
     rc = fz_gvisor_identity(&id);
     Py_END_ALLOW_THREADS
     if (rc < 0) return PyErr_SetFromErrno(PyExc_OSError);
-    return Py_BuildValue("(sssy#y#)", id.kind, id.fence, id.endpoint,
+    return Py_BuildValue("(sssy#y#s)", id.kind, id.fence, id.endpoint,
                          (const char *)id.payload, (Py_ssize_t)id.payload_len,
-                         (const char *)id.seed, (Py_ssize_t)id.seed_len);
+                         (const char *)id.seed, (Py_ssize_t)id.seed_len, id.session);
 }
 
 static PyObject *py_gvisor_ack(PyObject *self, PyObject *unused) {
@@ -191,7 +191,7 @@ static PyMethodDef methods[] = {
     {"fiber_ready", py_fiber_ready, METH_NOARGS, "fz_fiber_ready."},
     {"handoff_identity", py_handoff_identity, METH_NOARGS, "fz_handoff_identity as (key_pem, cert_pem, caller), or None."},
     {"accept", py_accept, METH_NOARGS, "fz_accept: the next handed-off connection's descriptor."},
-    {"gvisor_identity", py_gvisor_identity, METH_NOARGS, "fz_gvisor_identity as (kind, fence, endpoint, payload, seed)."},
+    {"gvisor_identity", py_gvisor_identity, METH_NOARGS, "fz_gvisor_identity as (kind, fence, endpoint, payload, seed, session)."},
     {"gvisor_ack", py_gvisor_ack, METH_NOARGS, "fz_gvisor_ack."},
     {NULL, NULL, 0, NULL}
 };

@@ -143,6 +143,10 @@ type ResumeSpec struct {
 	WarmID string
 	// WorkDir is the grant's run directory (WarmSpec.WorkDir).
 	WorkDir string
+	// Session is the name the caller gave the Clone that resumes the
+	// fiber, "" when anonymous. A backend whose resumed fiber takes a
+	// fresh identity hands it over again.
+	Session string
 	// Handoff replaces the handoff channel of a checkpoint taken from a
 	// handoff fiber (FiberSpec.Handoff). It is nil for any other checkpoint.
 	Handoff *os.File

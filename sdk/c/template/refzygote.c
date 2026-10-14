@@ -975,8 +975,12 @@ static int gvisor_main(void) {
             return 122;
         }
         reseed_rngs_from(id.seed, id.seed_len);
+        /* The record the fiber-side commands read, as on_fiber's is under a fork. */
+        fz_fiber_t f = { .fence = id.fence, .endpoint = id.endpoint, .payload = id.payload, .payload_len = id.payload_len, .session = id.session };
+        cur_fiber = &f;
         fprintf(stderr, "refzygote: incarnation %s serving on %s\n", id.fence, id.endpoint);
         int rc = gvisor_serve_once(id.fence, id.endpoint, id.payload, id.payload_len, &counter);
+        cur_fiber = NULL;
         if (rc) return rc;
     }
 }

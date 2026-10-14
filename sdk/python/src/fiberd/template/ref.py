@@ -6,7 +6,7 @@ the integration tests drive both the same way.
 
     ping            -> pong
     dirty <bytes>   -> ok <n>     (writes into the warm heap, which the fiber pays for as W)
-    incr            -> <n>        (a per-fiber counter, state a park and resume must keep)
+    incr            -> <n>        (a counter, state a park and resume must keep)
     get             -> <n>
     fence           -> the fence this incarnation serves under
     pid             -> the fiber's pid
@@ -28,9 +28,14 @@ and the device engine (reserve, devfree) stay with refzygote, which
 answers "err no engine" here. The payload is JSON. "dirty_bytes" is
 written right after ready, "ready_delay_ms" delays the ready report,
 "ready_misuse" misuses the readiness pipe and "exit_after_ready" ends
-the fiber at once, for the runtime's own tests.
+the fiber at once, for the runtime's own tests. --log reopens stdio on a
+file, as a launcher that runs the template as a container's init asks.
 
     python3 -m fiberd.template.ref --heap-mb 32
+
+On gVisor the same template serves as a restored sandbox. There the warm
+heap is already the fiber's own, so "dirty" grows W by allocating fresh
+memory instead, as refzygote does.
 """
 
 from __future__ import annotations
@@ -52,18 +57,33 @@ _ERRNAMES = frozenset({"EROFS", "EACCES", "EPERM", "ENOENT", "ENOSPC", "ECONNREF
 
 
 class Warm:
-    """What the zygote holds for every fiber, the heap it warmed."""
+    """What the zygote holds for every fiber, the heap it warmed.
+
+    The counter lives here rather than on the fiber so a park and resume
+    keeps it on every backend. A fork starts from the zygote's zero, a
+    restored sandbox from the image's.
+    """
 
     def __init__(self, heap_mb: int) -> None:
         self.heap = bytearray(heap_mb << 20)
         for i in range(0, len(self.heap), 4096):
             self.heap[i] = (i >> 12) & 0xFF
+        self.counter = 0
+        self.grown: list[bytearray] = []
 
     def dirty(self, n: int) -> int:
         """Touches n bytes of the heap, a page at a time, as refzygote does."""
         n = min(n, len(self.heap))
         for i in range(0, n, 4096):
             self.heap[i] ^= 1
+        return n
+
+    def grow(self, n: int) -> int:
+        """Allocates and touches n fresh bytes, kept, for a copy whose heap is already its own."""
+        block = bytearray(n)
+        for i in range(0, n, 4096):
+            block[i] = 1
+        self.grown.append(block)
         return n
 
 
@@ -73,7 +93,11 @@ class State:
     def __init__(self, warm: Warm, f: ft.Fiber) -> None:
         self.warm = warm
         self.f = f
-        self.counter = 0
+
+    def dirty(self, n: int) -> int:
+        if self.f.backend == "gvisor":
+            return self.warm.grow(n)
+        return self.warm.dirty(n)
 
 
 def errname(e: int) -> str:
@@ -88,12 +112,12 @@ def answer(st: State, line: str) -> str:
     if cmd == "ping":
         return "pong"
     if cmd == "dirty":
-        return f"ok {st.warm.dirty(int(arg or 0))}"
+        return f"ok {st.dirty(int(arg or 0))}"
     if cmd == "incr":
-        st.counter += 1
-        return str(st.counter)
+        st.warm.counter += 1
+        return str(st.warm.counter)
     if cmd == "get":
-        return str(st.counter)
+        return str(st.warm.counter)
     if cmd == "fence":
         return f.fence
     if cmd == "pid":
@@ -219,11 +243,16 @@ def payload_dict(payload: bytes) -> dict[str, Any]:
 def on_fiber(warm: Warm, f: ft.Fiber) -> int:
     opts = payload_dict(f.payload)
     st = State(warm, f)
-    srv = f.listen()
     # The runtime's tests ask for a late or misused ready report here.
-    if opts.get("ready_delay_ms"):
+    # On gVisor readiness is the endpoint accepting connections, so the
+    # delay comes before the bind, and there is no readiness pipe to
+    # misuse.
+    if opts.get("ready_delay_ms") and f.backend == "gvisor":
         time.sleep(int(opts["ready_delay_ms"]) / 1000)
-    misuse = int(opts.get("ready_misuse", 0))
+    srv = f.listen()
+    if opts.get("ready_delay_ms") and f.backend != "gvisor":
+        time.sleep(int(opts["ready_delay_ms"]) / 1000)
+    misuse = int(opts.get("ready_misuse", 0)) if f.backend != "gvisor" else 0
     if misuse == 1:
         os.write(3, b"x")
     elif misuse == 2:
@@ -232,16 +261,37 @@ def on_fiber(warm: Warm, f: ft.Fiber) -> int:
     if opts.get("exit_after_ready"):
         return 0
     if opts.get("dirty_bytes"):
-        warm.dirty(int(opts["dirty_bytes"]))
+        st.dirty(int(opts["dirty_bytes"]))
     f.serve(lambda conn: handle(conn, st), listener=srv)
     return 0
+
+
+def reopen_stdio(path: str) -> None:
+    """stdin from /dev/null and stdout and stderr appended to path, as refzygote's --log does.
+
+    Done from inside the process, since a template that is a container's
+    init inherits descriptors from outside its mount namespace, which
+    criu cannot map when it checkpoints the zygote's pages.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        stream.flush()
+    log = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_CLOEXEC, 0o644)
+    null = os.open(os.devnull, os.O_RDONLY | os.O_CLOEXEC)
+    os.dup2(null, 0)
+    os.dup2(log, 1)
+    os.dup2(log, 2)
+    os.close(log)
+    os.close(null)
 
 
 def main(argv: list[str] | None = None) -> int:
     ft.init()
     p = argparse.ArgumentParser(prog="fiberd.template.ref", description="the reference Python template")
     p.add_argument("--heap-mb", type=int, default=64, help="MiB to warm once in the zygote (default 64)")
+    p.add_argument("--log", metavar="PATH", help="append stdout and stderr to PATH (a launcher's zygote log)")
     args = p.parse_args(argv)
+    if args.log:
+        reopen_stdio(args.log)
     warm = Warm(args.heap_mb)
     return ft.serve(lambda f: on_fiber(warm, f))
 

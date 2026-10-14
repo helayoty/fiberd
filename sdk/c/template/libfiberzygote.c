@@ -2,9 +2,9 @@
 #define _GNU_SOURCE
 #include "libfiberzygote.h"
 
-/* This file implements ABI version 2, so a header of another version refuses to build it. */
-#if FZ_ABI_VERSION != 2
-#error "libfiberzygote.c implements FZ_ABI_VERSION 2"
+/* This file implements ABI version 3, so a header of another version refuses to build it. */
+#if FZ_ABI_VERSION != 3
+#error "libfiberzygote.c implements FZ_ABI_VERSION 3"
 #endif
 
 #include <dirent.h>
@@ -1766,6 +1766,7 @@ static char gv_record[GVISOR_RECORD_MAX];
 static unsigned char gv_payload[GVISOR_RECORD_MAX / 2];
 static unsigned char gv_seed[GVISOR_SEED];
 static char gv_fence[FENCE_MAX];
+static char gv_session[ENV_VALUE_MAX];
 static char *gv_seed_hex; /* the seed's field in gv_record, zeroed at the ack with gv_seed */
 /* The token this process last claimed with. The spec environment can
  * still show the previous restore's for a moment after a restore
@@ -1799,10 +1800,10 @@ static int spec_token(char *out, size_t n) {
 /* gv_parse_identity splits the 'i' record in rec into id. -1 with errno
  * EPROTO when it is malformed, and id is left untouched. */
 static int gv_parse_identity(char *rec, size_t n, fz_gvisor_identity_t *id) {
-    const char *fields[9];
+    const char *fields[10];
     char *p = rec + 1, *end = rec + n;
     if (n < 2 || rec[0] != 'i' || end[-1] != 0) { errno = EPROTO; return -1; }
-    for (int i = 0; i < 9; i++) {
+    for (int i = 0; i < 10; i++) {
         if (p >= end) { errno = EPROTO; return -1; }
         fields[i] = p;
         p += strlen(p) + 1;
@@ -1810,9 +1811,18 @@ static int gv_parse_identity(char *rec, size_t n, fz_gvisor_identity_t *id) {
     if (p != end || !*fields[2] || strlen(fields[2]) >= sizeof gv_fence || !*fields[3]) { errno = EPROTO; return -1; }
     size_t plen = 0;
     if (strcmp(fields[4], "-") != 0) plen = unhex(fields[4], gv_payload, sizeof gv_payload);
-    if (unhex(fields[8], gv_seed, sizeof gv_seed) != GVISOR_SEED) { errno = EPROTO; return -1; }
+    /* The session is bounded and NUL-free as on the CLONE line, since it
+     * becomes an environment value. */
+    size_t slen = 0;
+    if (strcmp(fields[8], "-") != 0) {
+        if (strlen(fields[8]) / 2 >= sizeof gv_session) { errno = EPROTO; return -1; }
+        slen = unhex(fields[8], (unsigned char *)gv_session, sizeof gv_session - 1);
+        if (memchr(gv_session, 0, slen)) { errno = EPROTO; return -1; }
+    }
+    if (unhex(fields[9], gv_seed, sizeof gv_seed) != GVISOR_SEED) { errno = EPROTO; return -1; }
+    gv_session[slen] = 0;
     memcpy(gv_fence, fields[2], strlen(fields[2]) + 1);
-    gv_seed_hex = (char *)fields[8];
+    gv_seed_hex = (char *)fields[9];
     id->kind = fields[1];
     id->fence = gv_fence;
     id->endpoint = fields[3];
@@ -1820,6 +1830,7 @@ static int gv_parse_identity(char *rec, size_t n, fz_gvisor_identity_t *id) {
     id->payload_len = plen;
     id->seed = gv_seed;
     id->seed_len = GVISOR_SEED;
+    id->session = gv_session;
     return 0;
 }
 

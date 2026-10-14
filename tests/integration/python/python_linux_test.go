@@ -1,15 +1,19 @@
 //go:build linux && integration
 
-// Package pythontest runs fiberd's host runtime on the proc backend with
-// the Python template SDK (sdk/python). It builds the fiberd._zygote
-// extension in place, runs the reference template fiberd.template.ref as
-// the zygote and drives clones through core.Runtime, as the proc suite
-// does with refzygote. It runs as root in the dev container (make
-// integration-tests) and skips where python3 is missing.
+// Package pythontest runs fiberd's host runtime with the Python template
+// SDK (sdk/python) on every backend that forks or restores a process: proc,
+// runc and gVisor. It builds the fiberd._zygote extension in place, runs
+// the reference template fiberd.template.ref as the zygote (proc) or as
+// the container's or sandbox's init from a rootfs that holds CPython and
+// the SDK (runc, gVisor), and drives clones through core.Runtime as the
+// backends' own suites do with refzygote. It runs as root in the dev
+// container (make integration-tests) and skips where python3 is missing.
+// A backend whose tool is missing is left out.
 package pythontest
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -17,7 +21,9 @@ import (
 	"testing"
 	"time"
 
+	gvisorbackend "github.com/helayoty/fiberd/pkg/backend/gvisor"
 	procbackend "github.com/helayoty/fiberd/pkg/backend/proc"
+	runcbackend "github.com/helayoty/fiberd/pkg/backend/runc"
 	"github.com/helayoty/fiberd/pkg/core"
 	fiberendpoint "github.com/helayoty/fiberd/pkg/endpoint"
 	"github.com/helayoty/fiberd/pkg/runtime/host"
@@ -33,7 +39,30 @@ var (
 	python string
 	// testdata holds the templates that break a rule each.
 	testdata string
+	// rootfs is the root filesystem with CPython and the SDK the runc and
+	// gVisor backends run the template from, "" when neither is here.
+	rootfs string
+	// work is where the rootfs and the backends' state live. Not tmpfs,
+	// since gVisor's images are memory there.
+	work = "/var/lib/fiberd-test/python"
 )
+
+// backend is one way of running the Python reference template.
+type backend struct {
+	name string
+	// template is the reference template's command line there.
+	template string
+	// pathEnv is what the fiber answers for "getenv PATH". A forked fiber
+	// is scrubbed to its FIBERD_ entries, a sandbox keeps its spec's.
+	pathEnv string
+	// pooled says the backend restores sandboxes ahead of a clone.
+	pooled bool
+	// open opens the host runtime over the backend with the template.
+	open func(t *testing.T, template string) core.Runtime
+}
+
+// backends is every backend this host can run, proc first.
+var backends []backend
 
 func TestMain(m *testing.M) {
 	cgRoot = testenv.RequireCgroupRoot("python")
@@ -60,37 +89,84 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 	testdata, _ = filepath.Abs("testdata")
+	backends = []backend{{name: "proc", template: python + " -m fiberd.template.ref --heap-mb 8", pathEnv: "-", open: openProc}}
+	_, haveRunc := exec.LookPath("runc")
+	_, haveRunsc := exec.LookPath("runsc")
+	if haveRunc == nil || haveRunsc == nil {
+		_ = os.RemoveAll(work)
+		rootfs = filepath.Join(work, "rootfs")
+		if err := testenv.BuildPythonRootfs(rootfs); err != nil {
+			fmt.Fprintf(os.Stderr, "python tests: %v\n", err)
+			os.Exit(1)
+		}
+		const inRootfs = "/usr/bin/python3 -m fiberd.template.ref --heap-mb 8"
+		if haveRunc == nil {
+			backends = append(backends, backend{name: "runc", template: inRootfs, pathEnv: "-", open: openRunc})
+		}
+		if haveRunsc == nil {
+			backends = append(backends, backend{name: "gvisor", template: inRootfs, pathEnv: "/bin:/usr/bin", pooled: true, open: openGvisor})
+		}
+	}
 	code := m.Run()
 	_ = os.RemoveAll(dir)
+	_ = os.RemoveAll(work)
 	os.Exit(code)
-}
-
-// refTemplate is the reference template's command line.
-func refTemplate() string {
-	return python + " -m fiberd.template.ref --heap-mb 8"
 }
 
 // newRuntime opens the host runtime over the fork backend with the given
 // template command line, as the proc suite does.
 func newRuntime(t *testing.T, template string) core.Runtime {
 	t.Helper()
-	run := filepath.Join("/tmp", fmt.Sprintf("fzpy-%d-%d", os.Getpid(), time.Now().UnixNano()%1_000_000))
-	rt, err := host.New(host.Config{
-		Backend:    procbackend.New(procbackend.Options{}),
-		Templates:  map[string]string{"default": template},
-		CgroupRoot: filepath.Join(cgRoot, fmt.Sprintf("py%d-%d", os.Getpid(), time.Now().UnixNano()%1_000_000)),
-		RunDir:     run,
-	})
+	return openProc(t, template)
+}
+
+// unique names a runtime's cgroup, state and run directory.
+func unique(prefix string) string {
+	return fmt.Sprintf("%s%d-%d", prefix, os.Getpid(), time.Now().UnixNano()%1_000_000)
+}
+
+func openProc(t *testing.T, template string) core.Runtime {
+	t.Helper()
+	name := unique("py")
+	return open(t, name, host.Config{Backend: procbackend.New(procbackend.Options{}), Templates: map[string]string{"default": template},
+		CgroupRoot: filepath.Join(cgRoot, name), RunDir: filepath.Join("/tmp", "fz-"+name)})
+}
+
+func openRunc(t *testing.T, template string) core.Runtime {
+	t.Helper()
+	name := unique("pyrc")
+	be, err := runcbackend.New(runcbackend.Options{Rootfs: rootfs, StateDir: filepath.Join(work, name)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	runDirs[rt] = run
+	return open(t, name, host.Config{Backend: be, Templates: map[string]string{"default": template},
+		CgroupRoot: filepath.Join(cgRoot, name), RunDir: filepath.Join("/tmp", "fz-"+name), DeltaDir: filepath.Join(work, name, "deltas")})
+}
+
+func openGvisor(t *testing.T, template string) core.Runtime {
+	t.Helper()
+	name := unique("pygv")
+	return open(t, name, host.Config{Backend: gvisorbackend.New(gvisorbackend.Options{Rootfs: rootfs, StateDir: filepath.Join(work, name)}),
+		Templates:  map[string]string{"default": template},
+		CgroupRoot: filepath.Join(cgRoot, name), RunDir: filepath.Join("/tmp", "fz-"+name), DeltaDir: filepath.Join(work, name, "deltas")})
+}
+
+func open(t *testing.T, name string, cfg host.Config) core.Runtime {
+	t.Helper()
+	rt, err := host.New(cfg)
+	if errors.Is(err, host.ErrNoTier) {
+		t.Skipf("%s not usable here: %v", name, err)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	runDirs[rt] = cfg.RunDir
 	t.Cleanup(func() {
 		rt.Close()
 		if t.Failed() {
-			t.Log(zygoteLogs(run))
+			t.Log(zygoteLogs(cfg.RunDir))
 		}
-		_ = os.RemoveAll(run)
+		_ = os.RemoveAll(cfg.RunDir)
 	})
 	return rt
 }
@@ -110,7 +186,7 @@ func zygoteLogs(run string) string {
 // prepare warms a grant on rt and returns it.
 func prepare(t *testing.T, rt core.Runtime, uid string) core.Grant {
 	t.Helper()
-	g := core.Grant{UID: uid, TemplateDigest: "sha256:pyref", WBudgetBytes: 64 << 20}
+	g := core.Grant{UID: uid, TemplateDigest: "sha256:pyref", FiberMax: 4, WBudgetBytes: 64 << 20}
 	if err := rt.PrepareTemplate(context.Background(), g); err != nil {
 		t.Fatalf("prepare: %v", err)
 	}
@@ -121,7 +197,7 @@ func prepare(t *testing.T, rt core.Runtime, uid string) core.Grant {
 func clone(t *testing.T, rt core.Runtime, g core.Grant, seq uint64, session string, payload []byte) core.FiberHandle {
 	t.Helper()
 	h, err := rt.Clone(context.Background(), core.CloneSpec{Grant: g, Fence: core.Fence{GrantUID: g.UID, Epoch: 1, Seq: seq},
-		Deadline: 5 * time.Second, Session: session, Payload: payload})
+		Deadline: 20 * time.Second, Session: session, Payload: payload})
 	if err != nil {
 		t.Fatalf("clone %d: %v", seq, err)
 	}

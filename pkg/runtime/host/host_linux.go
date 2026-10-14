@@ -1769,7 +1769,7 @@ func (r *Runtime) resume(ctx context.Context, spec core.CloneSpec) (core.FiberHa
 	r.mu.Unlock()
 	refused := r.pidsHits(gcg)
 	fb, err := r.be.Resume(ctx, backend.ResumeSpec{Dir: dir, Fence: f.id, Endpoint: bind, CgroupFD: int(lfd.Fd()), Deadline: spec.Deadline,
-		WarmID: spec.Grant.UID, WorkDir: workDir, Handoff: fiberEnd})
+		WarmID: spec.Grant.UID, WorkDir: workDir, Session: spec.Session, Handoff: fiberEnd})
 	if err != nil {
 		err = r.pidsPressure(gcg, refused, spec.Grant.UID, err)
 		r.mu.Lock()

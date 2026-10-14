@@ -10,8 +10,10 @@
 # JWTs with the issuer's key. Otherwise grants are protobuf JSON through
 # the insecure development verifier.
 #
-# CONFORM_TEMPLATE replaces the template command of the proc runtime, for
-# another language's reference template (make conform-proc-python), and
+# CONFORM_TEMPLATE replaces the template command of the proc, gvisor or
+# runc runtime, for another language's reference template (make
+# conform-proc-python), CONFORM_ROOTFS_SH the script that builds the
+# rootfs gvisor and runc run it in (hack/python/rootfs.sh), and
 # CONFORM_W_BUDGET the W budget C6 minds, since a fiber of a template with
 # a runtime dirties more at birth than the suite's 1 MiB default.
 #
@@ -34,6 +36,7 @@ W_BUDGET=${CONFORM_W_BUDGET:-1048576}
 LOG=$STATE/fiberd.log
 ISSUER_URL="http://$ISSUER_ADDR"
 GVISOR_ROOTFS=${CONFORM_GVISOR_ROOTFS:-/var/lib/fiberd/gvisor-rootfs}
+ROOTFS_SH=${CONFORM_ROOTFS_SH:-hack/gvisor/rootfs.sh}
 CGROOT=${FIBERD_CGROUP_ROOT:-/sys/fs/cgroup/fiberd}
 # The engine-loss hook (C9) reaches the zygote through its cgroup leaf:
 # fork backends only. --device-mb gives the reference zygote a simulated
@@ -48,10 +51,10 @@ if [ "$RUNTIME" = proc ]; then
   ENGINE_HOOK=(-engine-kill-cmd "$0 engine-kill \$1")
 elif [ "$RUNTIME" = gvisor ]; then
   TIER=${CONFORM_TIER:-FIBER_SNAPSHOT}
-  RUNTIME_FLAGS=(-runtime gvisor -gvisor-rootfs "$GVISOR_ROOTFS" -template "default=/bin/refzygote --heap-mb 32 --gvisor")
+  RUNTIME_FLAGS=(-runtime gvisor -gvisor-rootfs "$GVISOR_ROOTFS" -template "default=${CONFORM_TEMPLATE:-/bin/refzygote --heap-mb 32 --gvisor}")
 elif [ "$RUNTIME" = runc ]; then
   TIER=${CONFORM_TIER:-FIBER_CHECKPOINT}
-  RUNTIME_FLAGS=(-runtime runc -runc-rootfs "$GVISOR_ROOTFS" -template "default=/bin/refzygote --heap-mb 32 --device-mb 64")
+  RUNTIME_FLAGS=(-runtime runc -runc-rootfs "$GVISOR_ROOTFS" -template "default=${CONFORM_TEMPLATE:-/bin/refzygote --heap-mb 32 --device-mb 64}")
   ENGINE_HOOK=(-engine-kill-cmd "$0 engine-kill \$1")
 elif [ "$RUNTIME" = hyperlight ]; then
   # CONFORM_HL_HELPER selects the helper: the Rust one where KVM exists,
@@ -148,7 +151,7 @@ case "${1:-}" in
     rm -f bin/grant-conform
     go test -c -tags integration -o bin/grant-conform ./tests/e2e/conform
     if [ "$RUNTIME" = proc ] && [ -z "${CONFORM_TEMPLATE:-}" ]; then make -s zygote; fi
-    if [ "$RUNTIME" = gvisor ] || [ "$RUNTIME" = runc ]; then hack/gvisor/rootfs.sh "$GVISOR_ROOTFS" >/dev/null; fi
+    if [ "$RUNTIME" = gvisor ] || [ "$RUNTIME" = runc ]; then "$ROOTFS_SH" "$GVISOR_ROOTFS" >/dev/null; fi
     if [ "$RUNTIME" = hyperlight ] && [ -z "${CONFORM_HL_HELPER:-}" ]; then
       go build -o bin/fakehelper ./hack/hyperlight/fakehelper; echo "fake guest" > bin/fake-guest.bin
     fi

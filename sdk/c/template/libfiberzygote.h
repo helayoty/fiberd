@@ -140,8 +140,9 @@
 #ifndef FIBERZYGOTE_H
 #define FIBERZYGOTE_H
 
-/* The ABI this header describes, which every binding checks at build time. */
-#define FZ_ABI_VERSION 2
+/* The ABI this header describes, which every binding checks at build time.
+ * 3 added session to fz_gvisor_identity_t. */
+#define FZ_ABI_VERSION 3
 
 #include <stddef.h>
 
@@ -252,8 +253,12 @@ int fz_accept(void);
  *
  *   sandbox -> fiberd  't' <token> NUL
  *   fiberd  -> sandbox 'i' <generation> NUL <kind> NUL <fence> NUL <endpoint> NUL <payload-hex|-> NUL
- *                      <key PEM|-> NUL <cert PEM|-> NUL <caller|-> NUL <seed-hex> NUL
+ *                      <key PEM|-> NUL <cert PEM|-> NUL <caller|-> NUL <session-hex|-> NUL <seed-hex> NUL
  *   sandbox -> fiberd  'a' <fence> NUL
+ *
+ * The session is hex so a name may hold any character, "-" for an
+ * anonymous fiber, and at most 1023 bytes decoded with no NUL in them,
+ * as on the CLONE line.
  */
 typedef struct {
     const char *kind;             /* "clone" (from the template image) or "resume" (from a park) */
@@ -263,6 +268,7 @@ typedef struct {
     size_t payload_len;
     const unsigned char *seed;    /* 32 bytes of fresh entropy from the host */
     size_t seed_len;
+    const char *session;          /* the session the caller named, "" for an anonymous fiber */
 } fz_gvisor_identity_t;
 
 /* Blocks for this sandbox's identity, valid until the next call.
