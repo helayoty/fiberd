@@ -63,7 +63,7 @@ Each refusal is a `TemplateError` whose message names the rule and the fix, and 
 ## Security notes and known gaps
 
 - The string hash seed is set at interpreter start and shared by every fiber of a template, the prefork trade-off every Python server makes.
-- A CPython 3.11 fiber dirties about 2.5 MiB at birth before it does any work, since every reference count it touches copies a warm page, and the kernel charges its page tables. A grant's W budget must leave room for that, and the Python conformance run sets 8 MiB where the C one sets 1 MiB. Immortal objects in 3.12 lower it, and the numbers are measured, not assumed.
+- A CPython fiber dirties about 2 MiB at birth before it does any work, since every reference count it touches copies a warm page. Measured on proc, it is 2.1 MiB on 3.11, 1.8 MiB on 3.12 and 2.3 MiB on 3.13. A grant's W budget must leave room for that, and the Python conformance run sets 8 MiB where the C one sets 1 MiB.
 - A `threads="warn"` template can deadlock a fiber, and the SDK cannot tell.
 - The Python client checks the handoff pin after the handshake, not during it as Go does, since `ssl` has no hook there. No data is sent before the check. A Python handoff fiber checks its caller's pin after the handshake too, so any certificate under the home's CA completes one before it is closed. The grant token is never stored, logged or shown by a repr, and nothing in the client reads the environment.
 - A regular file open at `serve()` is closed in the fiber while its Python object thinks it is open.

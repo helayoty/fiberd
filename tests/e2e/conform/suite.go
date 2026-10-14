@@ -73,8 +73,8 @@ type Driver struct {
 	// Timeout bounds each case (default 15s); Restart gets twice that.
 	Timeout time.Duration
 	// WBudget is the w_budget_bytes C6 minds (default 1 MiB). A template
-	// with a runtime dirties more at birth (a CPython 3.11 fiber about
-	// 2.5 MiB, from reference counts on the pages it touches), so its
+	// with a runtime dirties more at birth (a CPython fiber about 2 MiB,
+	// from reference counts on the pages it touches), so its
 	// run sets a budget that fiber fits under. The over-budget fiber
 	// dirties four times it.
 	WBudget uint64
