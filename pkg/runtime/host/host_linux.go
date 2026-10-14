@@ -4,6 +4,7 @@ package host
 
 import (
 	"context"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -180,6 +181,9 @@ func New(cfg Config) (*Runtime, error) {
 	}
 	if cfg.Handoff != nil && len(cfg.HandoffKey) < 32 {
 		return nil, errors.New("host: Handoff needs a HandoffKey of at least 32 bytes")
+	}
+	if len(cfg.HandoffCA) > 0 && !x509.NewCertPool().AppendCertsFromPEM(cfg.HandoffCA) {
+		return nil, errors.New("host: HandoffCA holds no certificate")
 	}
 	if cfg.RunDir == "" {
 		cfg.RunDir = "/run/fiberd"

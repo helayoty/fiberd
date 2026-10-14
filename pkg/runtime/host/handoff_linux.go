@@ -94,18 +94,27 @@ func (r *Runtime) forgetIdentity(grantUID string) {
 	r.mu.Unlock()
 }
 
+// noHandoffCA is the fourth field of the identity message on a home
+// that has no client CA bundle, a plaintext one. The fiber's library
+// reads it as no bundle.
+const noHandoffCA = "-"
+
 // identityMessage frames an identity the way fz_handoff_identity parses
-// it. That is the tag, then the key PEM, the certificate PEM and the
-// caller thumbprint, each ended by a NUL.
-func identityMessage(id handoff.Identity, caller string) ([]byte, error) {
-	for _, f := range []struct{ name, v string }{{"key", string(id.KeyPEM)}, {"certificate", string(id.CertPEM)}, {"caller", caller}} {
+// it. That is the tag, then the key PEM, the certificate PEM, the
+// caller thumbprint and the home's client CA bundle (or "-" without
+// one), each ended by a NUL.
+func identityMessage(id handoff.Identity, caller string, ca []byte) ([]byte, error) {
+	if len(ca) == 0 {
+		ca = []byte(noHandoffCA)
+	}
+	for _, f := range []struct{ name, v string }{{"key", string(id.KeyPEM)}, {"certificate", string(id.CertPEM)}, {"caller", caller}, {"CA bundle", string(ca)}} {
 		if f.v == "" || strings.ContainsRune(f.v, 0) {
 			return nil, fmt.Errorf("host: handoff identity %s is empty or holds a NUL", f.name)
 		}
 	}
 	var b bytes.Buffer
 	b.WriteByte(identityTag)
-	for _, v := range [][]byte{id.KeyPEM, id.CertPEM, []byte(caller)} {
+	for _, v := range [][]byte{id.KeyPEM, id.CertPEM, []byte(caller), ca} {
 		b.Write(v)
 		b.WriteByte(0)
 	}
@@ -124,7 +133,7 @@ func (r *Runtime) sendIdentity(ch *os.File, grantUID string) error {
 	if !ok {
 		return fmt.Errorf("host: no handoff identity prepared for grant %s", grantUID)
 	}
-	msg, err := identityMessage(had.id, had.caller)
+	msg, err := identityMessage(had.id, had.caller, r.cfg.HandoffCA)
 	if err != nil {
 		return err
 	}

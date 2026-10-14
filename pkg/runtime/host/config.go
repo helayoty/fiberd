@@ -75,6 +75,13 @@ type Config struct {
 	// move sessions between them share it. Required, at least 32 bytes,
 	// when Handoff is set.
 	HandoffKey []byte
+	// HandoffCA is the PEM bundle every caller's certificate chains to,
+	// the API's -client-ca. It rides in each handoff fiber's identity
+	// message, so a fiber whose TLS library cannot accept an arbitrary
+	// chain and pin afterwards (the Python SDK) verifies its caller
+	// against it. Empty on a plaintext home, whose handoff fibers are
+	// then sent no trust anchor.
+	HandoffCA []byte
 	// HomeID names this home in published deltas, so a home that will not
 	// pull a session can tell the caller where it is (Miss.preferred_home).
 	HomeID string

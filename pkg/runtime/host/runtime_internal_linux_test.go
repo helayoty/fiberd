@@ -24,6 +24,7 @@ import (
 	"github.com/helayoty/fiberd/pkg/endpoint"
 	"github.com/helayoty/fiberd/pkg/handoff"
 	"github.com/helayoty/fiberd/pkg/sys/cgroup"
+	"github.com/helayoty/fiberd/pkg/tlsconf/tlsconftest"
 )
 
 const mib = 1 << 20
@@ -56,6 +57,9 @@ func TestNewRefusals(t *testing.T) {
 		{name: "a handoff router without a key", cfg: func(t *testing.T) Config {
 			return Config{Backend: newFakeBackend(core.TierWarm), CgroupRoot: "/x", Handoff: handoffRouter(), HandoffKey: make([]byte, 16)}
 		}, want: "HandoffKey of at least 32 bytes"},
+		{name: "a CA bundle with no certificate in it", cfg: func(t *testing.T) Config {
+			return Config{Backend: newFakeBackend(core.TierWarm), CgroupRoot: "/x", Handoff: handoffRouter(), HandoffKey: handoffKey, HandoffCA: []byte("not pem")}
+		}, want: "HandoffCA holds no certificate"},
 		{name: "a cgroup root that cannot be made", cfg: func(t *testing.T) Config {
 			f := filepath.Join(t.TempDir(), "file")
 			if err := os.WriteFile(f, nil, 0o644); err != nil {
@@ -671,8 +675,10 @@ func TestClone(t *testing.T) {
 					t.Fatalf("memory.max = %s", limit(t, leaf, "memory.max"))
 				}
 			}},
-		{name: "a handoff fiber: identity queued on its channel, routed through the router", be: func() backend.Backend { return newSandboxBackend(core.TierSnapshot) },
-			mod:   func(c *Config) { c.Handoff, c.HandoffKey = handoffRouter(), handoffKey },
+		{name: "a handoff fiber: identity and the home's CA bundle queued on its channel, routed through the router", be: func() backend.Backend { return newSandboxBackend(core.TierSnapshot) },
+			mod: func(c *Config) {
+				c.Handoff, c.HandoffKey, c.HandoffCA = handoffRouter(), handoffKey, tlsconftest.NewCA(t, "ca").CertPEM()
+			},
 			grant: handoffG, prepare: true, spec: core.CloneSpec{Grant: handoffG, Fence: fence},
 			check: func(t *testing.T, r *Runtime, be backend.Backend, h core.FiberHandle) {
 				sb := be.(*sandboxBackend)
@@ -681,9 +687,9 @@ func TestClone(t *testing.T) {
 					t.Fatalf("fiber spec = %+v, %d pairs made by the backend", ff.spec, sb.pairs.Load())
 				}
 				id := r.identities["g1"]
-				want, _ := identityMessage(id.id, "x5t")
-				if !bytes.Equal(ff.identity, want) {
-					t.Fatalf("identity read by the fiber = %q", ff.identity)
+				want, _ := identityMessage(id.id, "x5t", r.cfg.HandoffCA)
+				if !bytes.Equal(ff.identity, want) || !bytes.HasSuffix(ff.identity, append(r.cfg.HandoffCA, 0)) {
+					t.Fatalf("identity read by the fiber = %q, want it to end with the CA bundle", ff.identity)
 				}
 				if h.Endpoint != "tcp://10.0.0.1:443" {
 					t.Fatalf("handle endpoint = %s, want the router's", h.Endpoint)

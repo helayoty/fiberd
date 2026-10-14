@@ -18,7 +18,7 @@ sequenceDiagram
   participant A as fiberd
   participant F as Fiber
   C->>A: Clone (mTLS)
-  A->>F: channel message 1, the grant's key, certificate and caller thumbprint
+  A->>F: channel message 1, the grant's key, certificate, caller thumbprint and the home's CA bundle
   A-->>C: handoff address, routing key, server key pin
   C->>A: TCP connect, ClientHello with SNI <routing key>.fiberd
   A->>A: MSG_PEEK the ClientHello, look up the key
@@ -32,7 +32,7 @@ sequenceDiagram
 - **Limits.** At most 1024 connections wait for their ClientHello at once, and at most 32 of them from one source IP. Beyond either limit a new connection is closed at once.
 - **Passing the socket.** Each handoff fiber has a `SOCK_SEQPACKET` pair to fiberd. The fiber's end sits at fd 4 (`FIBERD_HANDOFF_FD`). A [backend](../glossary.md#backend) whose fibers live in their own network namespace makes the pair there, so the fiber's checkpoint can carry it. fiberd sends each socket with `SCM_RIGHTS` without blocking, then closes its own copy. If the fiber is not accepting and its queue is full, the connection is closed rather than queued in fiberd. The fiber takes sockets with `fz_accept()` from libfiberzygote, which fails once fiberd closes its end at [release](../glossary.md#release).
 - **Identity.** Each grant has one Ed25519 key. Its seed is HKDF-SHA256 of the home's handoff key (`-handoff-key`) and the grant UID. The self-signed certificate has fixed fields, so every home that shares the handoff key derives the same certificate. [Clone](../glossary.md#clone) returns the SHA-256 pin of its public key as `server_key_sha256`.
-- **Key delivery.** Before the fiber is born, fiberd queues one message on the fiber's channel. It holds the key, the certificate and the caller thumbprint. libfiberzygote reads it in the child before any application code runs and exposes it with `fz_handoff_identity()`. The key is never a file, and the [zygote](../glossary.md#zygote) never sees it, so it never lands in a [template](../glossary.md#template) checkpoint.
+- **Key delivery.** Before the fiber is born, fiberd queues one message on the fiber's channel. It holds the key, the certificate, the caller thumbprint and the home's client CA bundle (`-client-ca`). The bundle is for a TLS library that must verify a chain before it can pin the caller, such as Python's ([sdk.md](sdk.md)). libfiberzygote reads it in the child before any application code runs and exposes it with `fz_handoff_identity()`. The key is never a file, and the [zygote](../glossary.md#zygote) never sees it, so it never lands in a [template](../glossary.md#template) checkpoint.
 - **Resume keeps the key.** A resumed fiber already holds its identity in restored memory and is sent none. The checkpoint marks the channel as external, and the restore gives the fiber a fresh pair end at the same fd. The resumed fiber gets a new routing key and, on another home, that home's handoff address. Its pin is unchanged, because the key derives from the grant.
 - **Reference template.** `sdk/c/template/refzygote.c` built with `-DFZ_TLS` serves TLS 1.3 with OpenSSL 3 and accepts only the bound caller certificate. It mixes fresh `getrandom` bytes into OpenSSL before every handshake, drops a handshake that stalls for 5 s, and turns session resumption off. A build without TLS refuses to start handoff fibers.
 

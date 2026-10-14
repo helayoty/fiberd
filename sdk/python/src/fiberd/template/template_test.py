@@ -19,7 +19,7 @@ from fiberd.template import _rules
 class FakeExt:
     """The C binding as a recorder."""
 
-    ABI_VERSION = 3
+    ABI_VERSION = 4
 
     def __init__(self):
         self.calls = []
@@ -34,6 +34,10 @@ class FakeExt:
 
     def fiber_ready(self):
         self.calls.append(("ready",))
+
+    def handoff_identity(self):
+        self.calls.append(("identity",))
+        return ("-----BEGIN PRIVATE KEY-----\nk\n-----END PRIVATE KEY-----\n", "cert", "x5t", "ca")
 
 
 def one_thread_proc(tmp_path):
@@ -53,6 +57,23 @@ def test_init_passes_orig_argv_and_runs_once(tmp_path, monkeypatch):
     ft.init()
     assert ext.calls == [("init", ["python3", "-m", "agent"])]
     assert ft._inited
+
+
+OFF_LINUX = [
+    # the platform, the call
+    ("init on macOS", "darwin", "init"),
+    ("serve on macOS", "darwin", "serve"),
+    ("init on Windows", "win32", "init"),
+]
+
+
+@table(OFF_LINUX)
+def test_off_linux_is_an_import_error_naming_linux(tmp_path, monkeypatch, name, f0, f1):
+    """The design's promise, which the macOS CI job runs for real. fiberd.client stays importable there."""
+    monkeypatch.setattr(ft.sys, "platform", f0)
+    monkeypatch.setattr(ft, "PROC_SELF", str(tmp_path / "no-proc"))
+    with pytest.raises(ImportError, match="Linux only"):
+        ft.init() if f1 == "init" else ft.serve(lambda f: 0)
 
 
 SERVE_REFUSALS = [
@@ -113,6 +134,44 @@ def test_born_hands_the_fiber_its_record(monkeypatch):
     assert (f.payload, f.session, f.env) == (b'{"task":1}', "conv 42", env)
     assert f.incarnation.kind == "fork" and f.incarnation.generation == 1
     assert not f.stopping.is_set() and f.identity is None
+
+
+BORN_IDENTITY = [
+    # the environment, whether the library is asked, the identity wanted
+    ("a unix fiber has none", {"FIBERD_ENDPOINT": "/run/g/2-5.sock"}, False, None),
+    ("a handoff fiber takes the library's", {"FIBERD_HANDOFF_FD": "4"}, True, ("x5t", "ca")),
+]
+
+
+@table(BORN_IDENTITY)
+def test_born_takes_the_handoff_identity_off_the_library(monkeypatch, name, f0, f1, f2):
+    ext = FakeExt()
+    monkeypatch.setattr(ft, "_ext", lambda: ext)
+    monkeypatch.setattr(ft, "_rebuild_environ", lambda env: None)
+    seen = {}
+
+    def on_fiber(f):
+        seen["fiber"] = f
+        return 0
+
+    assert ft._born(on_fiber, "g/2/5", "handoff" if f1 else "/run/g/2-5.sock", b"", "", f0) == 0
+    f = seen["fiber"]
+    assert (("identity",) in ext.calls) is f1
+    if f2 is None:
+        assert f.identity is None and f.kind == "unix"
+        return
+    assert f.kind == "handoff" and f._handoff_fd == 4
+    assert (f.identity.caller, f.identity.ca_pem) == f2
+    assert f.identity.key_pem.startswith("-----BEGIN PRIVATE KEY-----") and "PRIVATE" not in repr(f.identity)
+
+
+def test_born_refuses_a_handoff_channel_without_an_identity(monkeypatch, capsys):
+    ext = FakeExt()
+    ext.handoff_identity = lambda: None
+    monkeypatch.setattr(ft, "_ext", lambda: ext)
+    monkeypatch.setattr(ft, "_rebuild_environ", lambda env: None)
+    assert ft._born(lambda f: 0, "g/1/1", "handoff", b"", "", {"FIBERD_HANDOFF_FD": "4"}) == 1
+    assert "holds no identity" in capsys.readouterr().err
 
 
 def test_incarnation_reseeds_and_runs_hooks_in_order():

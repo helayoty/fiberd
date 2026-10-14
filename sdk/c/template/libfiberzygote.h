@@ -117,7 +117,7 @@
  * On a fresh handoff fiber's channel the first message, queued by the
  * fiberd before the CLONE, is the grant's TLS identity.
  *
- *   fiberd -> fiber   'k' <key PEM> NUL <cert PEM> NUL <caller> NUL
+ *   fiberd -> fiber   'k' <key PEM> NUL <cert PEM> NUL <caller> NUL <CA bundle PEM|-> NUL
  *
  * The library reads it in the child before the application runs (see
  * fz_handoff_identity). Every message after it carries one connected
@@ -125,7 +125,9 @@
  * checkpoint keeps the identity it was born with and is sent no new one.
  * The identity is never a file. Every grant's fibers run as fiberd's
  * user, so no file mode would keep one grant's fibers out of another's
- * key.
+ * key. The CA bundle is the one the home's API verifies callers against,
+ * for a TLS library that must verify a chain before it can pin the
+ * caller, and "-" from a plaintext home, which has none.
  *
  * An engine zygote, one that owns device state its fibers use over IPC,
  * adds these lines, unsolicited, from any thread.
@@ -141,8 +143,9 @@
 #define FIBERZYGOTE_H
 
 /* The ABI this header describes, which every binding checks at build time.
- * 3 added session to fz_gvisor_identity_t. */
-#define FZ_ABI_VERSION 3
+ * 3 added session to fz_gvisor_identity_t. 4 added ca_pem to
+ * fz_identity_t. */
+#define FZ_ABI_VERSION 4
 
 #include <stddef.h>
 
@@ -224,11 +227,15 @@ void fz_fiber_ready(void);
  * fiber's memory, never the zygote's, so no key ends up in a template
  * checkpoint. key_pem and cert_pem are the grant's PKCS #8 private key
  * and self-signed certificate. caller is the thumbprint (x5t#S256,
- * base64url) of the one client certificate the fiber may accept. */
+ * base64url) of the one client certificate the fiber may accept. ca_pem
+ * is the bundle that certificate chains to, the home's client CA, for a
+ * TLS library that verifies a chain before it can pin, and "" when the
+ * home runs in plaintext and has none. */
 typedef struct {
     const char *key_pem;
     const char *cert_pem;
     const char *caller;
+    const char *ca_pem;
 } fz_identity_t;
 
 /* The identity of the fiber calling, valid for its lifetime. A restored

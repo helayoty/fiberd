@@ -17,28 +17,33 @@ import (
 )
 
 // TestIdentityMessage checks that the one message a fresh handoff fiber reads
-// before any connection is the tag, then the key, the certificate and
-// the caller, each ended by a NUL, as libfiberzygote parses it. A field
-// that is empty or holds a NUL cannot be framed.
+// before any connection is the tag, then the key, the certificate, the
+// caller and the home's client CA bundle, each ended by a NUL, as
+// libfiberzygote parses it. A home without a bundle sends "-" in its
+// place. A field that is empty or holds a NUL cannot be framed.
 func TestIdentityMessage(t *testing.T) {
 	id := handoff.Identity{KeyPEM: []byte("-----BEGIN PRIVATE KEY-----\nk\n-----END PRIVATE KEY-----\n"), CertPEM: []byte("-----BEGIN CERTIFICATE-----\nc\n-----END CERTIFICATE-----\n")}
+	ca := []byte("-----BEGIN CERTIFICATE-----\na\n-----END CERTIFICATE-----\n")
 	cases := []struct {
 		name   string
 		id     handoff.Identity
 		caller string
+		ca     []byte
 		// fields, when set, are what the message must carry in order.
 		// Otherwise framing must fail.
 		fields [][]byte
 	}{
-		{name: "key, certificate, caller", id: id, caller: "x5t", fields: [][]byte{id.KeyPEM, id.CertPEM, []byte("x5t")}},
-		{name: "no caller", id: id},
-		{name: "no key", id: handoff.Identity{CertPEM: id.CertPEM}, caller: "x5t"},
-		{name: "no certificate", id: handoff.Identity{KeyPEM: id.KeyPEM}, caller: "x5t"},
-		{name: "NUL in a field", id: id, caller: "x\x00t"},
+		{name: "key, certificate, caller, CA bundle", id: id, caller: "x5t", ca: ca, fields: [][]byte{id.KeyPEM, id.CertPEM, []byte("x5t"), ca}},
+		{name: "no CA bundle is sent as -", id: id, caller: "x5t", fields: [][]byte{id.KeyPEM, id.CertPEM, []byte("x5t"), []byte("-")}},
+		{name: "no caller", id: id, ca: ca},
+		{name: "no key", id: handoff.Identity{CertPEM: id.CertPEM}, caller: "x5t", ca: ca},
+		{name: "no certificate", id: handoff.Identity{KeyPEM: id.KeyPEM}, caller: "x5t", ca: ca},
+		{name: "NUL in a field", id: id, caller: "x\x00t", ca: ca},
+		{name: "NUL in the CA bundle", id: id, caller: "x5t", ca: []byte("a\x00b")},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			msg, err := identityMessage(tc.id, tc.caller)
+			msg, err := identityMessage(tc.id, tc.caller, tc.ca)
 			if tc.fields == nil {
 				if err == nil {
 					t.Fatalf("framed %q, want an error", msg)
@@ -200,7 +205,7 @@ func TestSendIdentity(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			r := &Runtime{cfg: Config{HandoffKey: handoffKey}}
+			r := &Runtime{cfg: Config{HandoffKey: handoffKey, HandoffCA: []byte("-----BEGIN CERTIFICATE-----\na\n-----END CERTIFICATE-----\n")}}
 			if tc.prepared {
 				if err := r.prepareIdentity("g1", tc.caller); err != nil {
 					t.Fatal(err)
@@ -231,9 +236,12 @@ func TestSendIdentity(t *testing.T) {
 				t.Fatal(err)
 			}
 			msg, passed := recvHandoff(t, fds[1])
-			want, _ := identityMessage(r.identities["g1"].id, "x5t")
+			want, _ := identityMessage(r.identities["g1"].id, "x5t", r.cfg.HandoffCA)
 			if !bytes.Equal(msg, want) || len(passed) != 0 {
 				t.Fatalf("the fiber read %q with %d fds, want the identity message alone", msg, len(passed))
+			}
+			if !bytes.HasSuffix(msg, append(r.cfg.HandoffCA, 0)) {
+				t.Fatalf("the message %q does not end with the home's CA bundle", msg)
 			}
 		})
 	}

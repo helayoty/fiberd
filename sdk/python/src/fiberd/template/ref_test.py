@@ -165,9 +165,10 @@ def test_dirty_by_backend(tmp_path, name, f0, f1, f2):
 class FakeFiber:
     """A Fiber whose listen, ready and serve are recorded, for on_fiber's ordering."""
 
-    def __init__(self, payload, backend):
+    def __init__(self, payload, backend, kind="unix"):
         self.payload = payload
         self.backend = backend
+        self.kind = kind
         self.calls = []
 
     def listen(self):
@@ -182,21 +183,22 @@ class FakeFiber:
 
 
 ON_FIBER = [
-    # the payload, the backend, the calls wanted, the fd 3 writes wanted
-    ("plain", b"", "fork", ["listen", "ready", ("serve", "srv")], []),
-    ("exit after ready", b'{"exit_after_ready": 1}', "fork", ["listen", "ready"], []),
-    ("ready misuse writes the pipe on a fork", b'{"ready_misuse": 1}', "fork", ["listen", "ready", ("serve", "srv")], [(3, b"x")]),
-    ("ready misuse is nothing on gVisor, which has no pipe", b'{"ready_misuse": 1}', "gvisor", ["listen", "ready", ("serve", "srv")], []),
+    # the payload, the backend, the endpoint kind, the calls wanted, the fd 3 writes wanted
+    ("plain", b"", "fork", "unix", ["listen", "ready", ("serve", "srv")], []),
+    ("exit after ready", b'{"exit_after_ready": 1}', "fork", "unix", ["listen", "ready"], []),
+    ("ready misuse writes the pipe on a fork", b'{"ready_misuse": 1}', "fork", "unix", ["listen", "ready", ("serve", "srv")], [(3, b"x")]),
+    ("ready misuse is nothing on gVisor, which has no pipe", b'{"ready_misuse": 1}', "gvisor", "unix", ["listen", "ready", ("serve", "srv")], []),
+    ("a handoff fiber listens on nothing", b"", "fork", "handoff", ["ready", ("serve", None)], []),
 ]
 
 
 @table(ON_FIBER)
-def test_on_fiber_order(monkeypatch, name, f0, f1, f2, f3):
+def test_on_fiber_order(monkeypatch, name, f0, f1, f2, f3, f4):
     writes = []
     monkeypatch.setattr(ref.os, "write", lambda fd, data: writes.append((fd, data)))
-    f = FakeFiber(f0, f1)
+    f = FakeFiber(f0, f1, f2)
     assert ref.on_fiber(ref.Warm(1), f) == 0
-    assert f.calls == f2 and writes == f3
+    assert f.calls == f3 and writes == f4
 
 
 def test_reopen_stdio_dups_the_log_over_stdout_and_stderr(tmp_path, monkeypatch):

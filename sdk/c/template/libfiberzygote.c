@@ -2,9 +2,9 @@
 #define _GNU_SOURCE
 #include "libfiberzygote.h"
 
-/* This file implements ABI version 3, so a header of another version refuses to build it. */
-#if FZ_ABI_VERSION != 3
-#error "libfiberzygote.c implements FZ_ABI_VERSION 3"
+/* This file implements ABI version 4, so a header of another version refuses to build it. */
+#if FZ_ABI_VERSION != 4
+#error "libfiberzygote.c implements FZ_ABI_VERSION 4"
 #endif
 
 #include <dirent.h>
@@ -36,6 +36,22 @@
 #include <endian.h>
 #include <stddef.h>
 
+/* clone3 as the kernel headers of 5.3 and later spell it, for a build
+ * against older ones (manylinux_2_28 ships 4.18's). The number is the
+ * same on every architecture, and struct clone_args is the 5.7 layout,
+ * which the kernel takes by its size. A kernel without clone3 still
+ * answers ENOSYS and gets the fallback to clone (see do_clone). */
+#ifndef __NR_clone3
+#define __NR_clone3 435
+#endif
+#ifndef SYS_clone3
+#define SYS_clone3 __NR_clone3
+#endif
+#ifndef CLONE_ARGS_SIZE_VER0
+struct clone_args {
+    __aligned_u64 flags, pidfd, child_tid, parent_tid, exit_signal, stack, stack_size, tls, set_tid, set_tid_size, cgroup;
+};
+#endif
 #ifndef CLONE_INTO_CGROUP
 #define CLONE_INTO_CGROUP 0x200000000ULL
 #endif
@@ -977,9 +993,6 @@ static int deny_nested_userns;
 #elif defined(__aarch64__)
 #define FZ_AUDIT_ARCH AUDIT_ARCH_AARCH64
 #endif
-#ifndef __NR_clone3
-#define __NR_clone3 435
-#endif
 #if __BYTE_ORDER == __LITTLE_ENDIAN
 #define FZ_ARG_LO(i) (offsetof(struct seccomp_data, args) + 8 * (i))
 #else
@@ -1047,9 +1060,11 @@ static int userns_filter(void) {
 static int handoff_fd = -1;
 
 /* The grant's identity, as fiberd's first message on the channel
- * delivers it, 'k' then three NUL-ended fields. It lives in the fiber's
- * memory (the child's copy of the page), never the zygote's. */
-#define IDENTITY_MAX 8192
+ * delivers it, 'k' then four NUL-ended fields. It lives in the fiber's
+ * memory (the child's copy of the page), never the zygote's. The bound
+ * leaves room for a CA bundle of several certificates, and only the
+ * pages the message touches are ever copied. */
+#define IDENTITY_MAX 65536
 static char identity_buf[IDENTITY_MAX];
 static fz_identity_t identity;
 static int have_identity;
@@ -1073,9 +1088,9 @@ static int read_identity(int fd, const char **why) {
     if (r == 0) { *why = "channel closed before the identity arrived"; return -1; }
     if (mh.msg_flags & MSG_TRUNC) { *why = "identity message too long"; return -1; }
     if (r < 2 || identity_buf[0] != 'k' || identity_buf[r - 1] != 0) { *why = "first message is not the identity"; return -1; }
-    const char *fields[3];
+    const char *fields[4];
     char *p = identity_buf + 1, *end = identity_buf + r;
-    for (int i = 0; i < 3; i++) {
+    for (int i = 0; i < 4; i++) {
         if (p >= end || !*p) { *why = "identity message has an empty field"; return -1; }
         fields[i] = p;
         p += strlen(p) + 1;
@@ -1084,6 +1099,8 @@ static int read_identity(int fd, const char **why) {
     identity.key_pem = fields[0];
     identity.cert_pem = fields[1];
     identity.caller = fields[2];
+    /* A plaintext home has no client CA bundle and sends "-". */
+    identity.ca_pem = strcmp(fields[3], "-") == 0 ? "" : fields[3];
     have_identity = 1;
     return 0;
 }

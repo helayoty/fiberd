@@ -25,25 +25,28 @@ The rules serve() enforces, and why, are in docs/design/sdk.md.
 
 from __future__ import annotations
 
+import asyncio
 import functools
 import gc
 import os
 import random
+import select
 import signal
 import socket
 import ssl
 import sys
 import threading
 import traceback
-from typing import Callable, Optional
+from typing import Any, AsyncIterator, Awaitable, Callable, Optional
 
-from fiberd.template import _fence, _gvisor, _rules
+from fiberd.template import _fence, _gvisor, _handoff, _rules
 from fiberd.template._errors import TemplateError
 from fiberd.template._fence import Fence
 
 __all__ = [
     "Fence",
     "Fiber",
+    "Identity",
     "Incarnation",
     "TemplateError",
     "init",
@@ -60,8 +63,15 @@ _randoms: list[random.Random] = []
 _generation = 0
 
 
+def _require_linux() -> None:
+    """A template runs on Linux only. Off it the refusal is an ImportError that says so, before any /proc is read."""
+    if sys.platform != "linux":
+        raise ImportError(f"fiberd.template runs a template on Linux only, and this is {sys.platform}. fiberd.client works here")
+
+
 def _ext():
     """The C binding, imported when first needed so the pure parts work without it."""
+    _require_linux()
     try:
         from fiberd import _zygote
     except ImportError as e:
@@ -88,6 +98,27 @@ class Incarnation:
         return f"Incarnation(kind={self.kind!r}, generation={self.generation}, fence={self.fence!r})"
 
 
+class Identity:
+    """A handoff fiber's TLS identity, the grant's key and certificate, the caller it accepts and the home's CA bundle.
+
+    caller is the thumbprint (x5t#S256) of the one client certificate the
+    fiber serves. ca_pem is the bundle that certificate chains to, empty
+    when the home runs in plaintext and sent none. The key is never a
+    file on disk and never shown by repr.
+    """
+
+    __slots__ = ("key_pem", "cert_pem", "caller", "ca_pem")
+
+    def __init__(self, key_pem: str, cert_pem: str, caller: str, ca_pem: str) -> None:
+        self.key_pem = key_pem
+        self.cert_pem = cert_pem
+        self.caller = caller
+        self.ca_pem = ca_pem
+
+    def __repr__(self) -> str:
+        return f"Identity(caller={self.caller!r})"
+
+
 def on_incarnation(fn: Callable[[Incarnation], None]) -> Callable[[Incarnation], None]:
     """Registers fn to run in every new incarnation, after the reseed and before anything serves."""
     _hooks.append(fn)
@@ -110,6 +141,7 @@ def init() -> None:
     global _inited
     if _inited:
         return
+    _require_linux()
     _rules.check_main_thread(threading.current_thread() is threading.main_thread())
     _rules.check_threads_at_init(PROC_SELF)
     # A gVisor fiber is a restored sandbox, not a fork over the zygote's
@@ -132,6 +164,7 @@ def serve(on_fiber: Callable[[Fiber], int], *, threads: str = "refuse", control_
     """
     if threads not in ("refuse", "warn"):
         raise ValueError('threads is "refuse" or "warn"')
+    _require_linux()
     _rules.check_gil(getattr(sys, "_is_gil_enabled", lambda: True)())
     _rules.check_main_thread(threading.current_thread() is threading.main_thread())
     _rules.check_init(_inited)
@@ -153,7 +186,7 @@ def _born(on_fiber: Callable[[Fiber], int], fence: str, endpoint: str, payload: 
     """The first Python in a fiber, after the C trampoline restored the interpreter."""
     try:
         _rebuild_environ(env)
-        f = Fiber(fence, endpoint, payload, session, env)
+        f = Fiber(fence, endpoint, payload, session, env, identity=_identity(env))
         f._incarnate("fork", os.urandom(32))
     except BaseException:
         traceback.print_exc()
@@ -162,10 +195,23 @@ def _born(on_fiber: Callable[[Fiber], int], fence: str, endpoint: str, payload: 
     return _run(on_fiber, f)
 
 
-def _run(on_fiber: Callable[[Fiber], int], f: Fiber) -> int:
-    """on_fiber's return, or what it raised, as the fiber's exit code."""
+def _identity(env: dict[str, str]) -> Optional[Identity]:
+    """The grant's TLS identity the library read off the channel, for a fiber fiberd gave a handoff channel."""
+    if "FIBERD_HANDOFF_FD" not in env:
+        return None
+    rec = _ext().handoff_identity()
+    if rec is None:
+        raise TemplateError("fiberd named a handoff channel but the library holds no identity for it")
+    return Identity(*rec)
+
+
+def _run(on_fiber: Callable[[Fiber], Any], f: Fiber) -> int:
+    """on_fiber's return, or what it raised, as the fiber's exit code. An async on_fiber runs under a loop born here, in the fiber."""
     try:
-        return _exit_code(on_fiber(f))
+        rc = on_fiber(f)
+        if asyncio.iscoroutine(rc):
+            rc = asyncio.run(rc)
+        return _exit_code(rc)
     except SystemExit as e:
         return _exit_code(e.code)
     except BaseException:
@@ -255,7 +301,8 @@ class Fiber:
     restored sandbox, for the rare author who must tell them apart.
     """
 
-    def __init__(self, fence: str, endpoint: str, payload: bytes, session: str, env: dict[str, str], *, backend: str = "fork") -> None:
+    def __init__(self, fence: str, endpoint: str, payload: bytes, session: str, env: dict[str, str], *, backend: str = "fork",
+                 identity: Optional[Identity] = None) -> None:
         self.backend = backend
         self.fence = fence
         self.fence_parts = _fence.parse_fence(fence)
@@ -266,9 +313,14 @@ class Fiber:
         self.env = dict(env)
         self.incarnation: Optional[Incarnation] = None
         self.stopping = threading.Event()
-        self.identity = None
+        self.identity = identity
         self._birth = self.fence_parts
         self._ready = False
+        # The handoff channel, which the SDK waits on and never hands out.
+        self._handoff_fd = int(env["FIBERD_HANDOFF_FD"]) if self.kind == "handoff" else -1
+        # The identity sealed in a memfd, held for the fiber's lifetime, and the context over it.
+        self._identity_fd = -1
+        self._tls: Optional[ssl.SSLContext] = None
 
     def listen(self) -> socket.socket:
         """A bound, listening socket for a unix or tcp endpoint, as fiberd spelled it."""
@@ -286,7 +338,7 @@ class Fiber:
             s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             s.bind(path)
         else:
-            raise TemplateError("a handoff fiber does not listen, it serves accept(), which a later stage adds")
+            raise TemplateError("a handoff fiber does not listen. fiberd accepts for it, and it serves accept() or serve()")
         s.listen(16)
         return s
 
@@ -309,9 +361,16 @@ class Fiber:
         Returns when the fiber is asked to stop (SIGTERM, or stopping set,
         which on gVisor the park's SIGUSR1 does), with the endpoint closed
         and unlinked.
+
+        A handoff fiber listens on nothing. Each connection fiberd passes
+        down the channel reaches handler as an ssl.SSLSocket, TLS already
+        terminated under the grant's identity with the caller pinned, as
+        accept() returns it, and the loop ends when fiberd closes the
+        channel at release.
         """
         if self.kind == "handoff":
-            raise TemplateError("a handoff fiber serves accept(), which a later stage adds")
+            self._serve_handoff(handler, poll)
+            return
         srv = listener if listener is not None else self.listen()
         try:
             srv.settimeout(poll)
@@ -336,8 +395,170 @@ class Fiber:
                 except OSError:
                     pass
 
-    def accept(self) -> socket.socket:
-        raise TemplateError("handoff fibers come in a later stage of the SDK")
+    def _serve_handoff(self, handler: Callable[[socket.socket], None], poll: float) -> None:
+        """serve() for a handoff fiber. Waits on the channel, so stopping is noticed between connections as the other loop does."""
+        ctx = self._tls_context()
+        previous = signal.signal(signal.SIGTERM, lambda *_: self.stopping.set())
+        self.ready()
+        try:
+            while not self.stopping.is_set():
+                readable, _, _ = select.select([self._handoff_fd], [], [], poll)
+                if not readable:
+                    continue
+                try:
+                    fd = _ext().accept()
+                except ConnectionResetError:
+                    return
+                self.check_fence()
+                conn = self._terminate(ctx, fd)
+                if conn is None:
+                    continue
+                try:
+                    handler(conn)
+                finally:
+                    conn.close()
+        finally:
+            signal.signal(signal.SIGTERM, previous)
+
+    def accept(self, *, handshake_timeout: float = _handoff.HANDSHAKE_TIMEOUT) -> ssl.SSLSocket:
+        """The next handed-off connection, as an ssl.SSLSocket with TLS terminated under the grant's identity.
+
+        The caller's certificate must chain to the home's CA bundle and be
+        the one the grant is bound to. Any other connection is closed before
+        an application byte is read or written, and the next is waited for.
+        Blocks. Raises ConnectionResetError once fiberd closes the channel,
+        which it does at release.
+        """
+        ctx = self._tls_context()
+        while True:
+            conn = self._terminate(ctx, _ext().accept(), handshake_timeout)
+            if conn is not None:
+                return conn
+
+    def _tls_context(self) -> ssl.SSLContext:
+        """The server context, built once from the identity sealed in a memfd for the fiber's lifetime."""
+        if self._tls is not None:
+            return self._tls
+        if self.kind != "handoff":
+            raise TemplateError(f"only a handoff fiber accepts handed-off connections, and this one serves {self.endpoint!r}")
+        if self.identity is None:
+            raise TemplateError("this handoff fiber holds no identity")
+        self._identity_fd = _handoff.seal_identity(self.identity.key_pem, self.identity.cert_pem)
+        self._tls = _handoff.server_context(self._identity_fd, self.identity.ca_pem)
+        return self._tls
+
+    def _terminate(self, ctx: ssl.SSLContext, fd: int, handshake_timeout: float = _handoff.HANDSHAKE_TIMEOUT) -> Optional[ssl.SSLSocket]:
+        """TLS over one handed-off descriptor, or None, with it closed, when the handshake fails or the caller is not the grant's."""
+        assert self.identity is not None
+        raw = socket.socket(fileno=fd)
+        raw.settimeout(handshake_timeout)
+        try:
+            conn = ctx.wrap_socket(raw, server_side=True)
+        except (OSError, ValueError):
+            raw.close()
+            return None
+        if not _handoff.pinned(conn.getpeercert(binary_form=True), self.identity.caller):
+            conn.close()
+            return None
+        conn.settimeout(None)
+        return conn
+
+    async def serve_async(self, handler: Callable[[asyncio.StreamReader, asyncio.StreamWriter], Awaitable[None]], *,
+                          listener: Optional[socket.socket] = None, poll: float = 0.5) -> None:
+        """serve() for an async on_fiber. handler(reader, writer) runs as a task per connection and the writer is closed after it.
+
+        A unix or tcp endpoint is served by asyncio.start_unix_server or
+        start_server over listen(). A handoff fiber is served from
+        connections(). The loop ends as serve()'s does.
+        """
+        loop = asyncio.get_running_loop()
+
+        async def one(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            try:
+                await handler(reader, writer)
+            finally:
+                writer.close()
+
+        loop.add_signal_handler(signal.SIGTERM, self.stopping.set)
+        try:
+            if self.kind == "handoff":
+                self._tls_context()
+                self.ready()
+                tasks: set[asyncio.Task[None]] = set()
+                async for reader, writer in self.connections(poll=poll):
+                    task = loop.create_task(one(reader, writer))
+                    tasks.add(task)
+                    task.add_done_callback(tasks.discard)
+                return
+            srv = listener if listener is not None else self.listen()
+
+            async def checked(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+                self.check_fence()
+                await one(reader, writer)
+
+            start = asyncio.start_unix_server if self.kind == "unix" else asyncio.start_server
+            server = await start(checked, sock=srv)
+            try:
+                self.ready()
+                while not self.stopping.is_set():
+                    await asyncio.sleep(poll)
+            finally:
+                server.close()
+                if self.kind == "unix":
+                    try:
+                        os.unlink(_fence.unix_path(self.endpoint))
+                    except OSError:
+                        pass
+        finally:
+            loop.remove_signal_handler(signal.SIGTERM)
+
+    async def connections(self, *, poll: float = 0.5,
+                          handshake_timeout: float = _handoff.HANDSHAKE_TIMEOUT) -> AsyncIterator[tuple[asyncio.StreamReader, asyncio.StreamWriter]]:
+        """accept() for an async on_fiber. Yields (reader, writer) per handed-off connection, TLS terminated in the loop with the caller pinned.
+
+        The loop waits on the handoff channel, so other tasks run between
+        connections. Call ready() first, as before accept(). Ends when
+        fiberd closes the channel or the fiber is asked to stop.
+        """
+        ctx = self._tls_context()
+        loop = asyncio.get_running_loop()
+        while not self.stopping.is_set():
+            arrived = loop.create_future()
+            loop.add_reader(self._handoff_fd, lambda: arrived.done() or arrived.set_result(None))
+            try:
+                await asyncio.wait({arrived}, timeout=poll)
+            finally:
+                loop.remove_reader(self._handoff_fd)
+            if not arrived.done():
+                continue
+            try:
+                fd = _ext().accept()
+            except ConnectionResetError:
+                return
+            self.check_fence()
+            conn = await self._terminate_async(ctx, fd, handshake_timeout)
+            if conn is not None:
+                yield conn
+
+    async def _terminate_async(self, ctx: ssl.SSLContext, fd: int,
+                               handshake_timeout: float) -> Optional[tuple[asyncio.StreamReader, asyncio.StreamWriter]]:
+        """_terminate under the running loop. The handshake runs in the loop, and the pin is checked before the pair is handed out."""
+        assert self.identity is not None
+        loop = asyncio.get_running_loop()
+        raw = socket.socket(fileno=fd)
+        reader = asyncio.StreamReader(loop=loop)
+        protocol = asyncio.StreamReaderProtocol(reader, loop=loop)
+        try:
+            transport, _ = await loop.connect_accepted_socket(lambda: protocol, raw, ssl=ctx, ssl_handshake_timeout=handshake_timeout)
+        except (OSError, ValueError, asyncio.TimeoutError):
+            raw.close()
+            return None
+        ssl_object = transport.get_extra_info("ssl_object")
+        peer = ssl_object.getpeercert(binary_form=True) if ssl_object is not None else None
+        if not _handoff.pinned(peer, self.identity.caller):
+            transport.close()
+            return None
+        return reader, asyncio.StreamWriter(transport, protocol, reader, loop)
 
     def check_fence(self) -> bool:
         """Reads the fence file fiberd publishes beside the endpoint. A new fence is a resume, and reseeds.
