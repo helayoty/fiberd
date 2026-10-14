@@ -540,7 +540,7 @@ class Fiber:
         loop = asyncio.get_running_loop()
         while not self.stopping.is_set():
             arrived = loop.create_future()
-            loop.add_reader(self._handoff_fd, lambda: arrived.done() or arrived.set_result(None))
+            loop.add_reader(self._handoff_fd, lambda fut=arrived: fut.done() or fut.set_result(None))
             try:
                 await asyncio.wait({arrived}, timeout=poll)
             finally:

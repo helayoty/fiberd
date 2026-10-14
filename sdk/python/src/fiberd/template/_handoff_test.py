@@ -248,7 +248,8 @@ def start_clients(world, tmp_path, ext, which):
     for i, pair in enumerate(which):
         a, b = socket.socketpair()
         ext.queue.append(a.detach())
-        th = threading.Thread(target=lambda i=i, pair=pair, fd=b.detach(): results.__setitem__(i, client(pair, tmp_path, fd)), daemon=True)
+        fd = b.detach()
+        th = threading.Thread(target=lambda i=i, pair=pair, fd=fd: results.__setitem__(i, client(pair, tmp_path, fd)), daemon=True)
         th.start()
         threads.append(th)
     return threads, results
@@ -299,7 +300,7 @@ def test_accept_serves_the_bound_caller_only(world, tmp_path, monkeypatch, name,
     join(threads)
     assert served == [b"ping\n"] * sum(f1)
     assert [r == ("reply", b"pong\n") for r in results] == f1
-    assert all(refused(r) for r, ok in zip(results, f1) if not ok), "a refused caller saw no application byte"
+    assert all(refused(r) for r, ok in zip(results, f1, strict=True) if not ok), "a refused caller saw no application byte"
     assert ext.calls == [], "accept() does not report ready, the author does"
 
 
