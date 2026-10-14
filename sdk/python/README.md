@@ -2,6 +2,14 @@
 
 The Python SDK. `fiberd.template` is for code that runs inside a [fiber](../../docs/glossary.md#fiber), such as an AI agent. `fiberd.client` is for callers of fiberd, such as the activator that asks for one.
 
+## Install
+
+```bash
+pip install fiberd
+```
+
+The wheels are for CPython 3.10 or later on Linux, x86_64 or aarch64, with glibc 2.28 or later. Anywhere else pip builds the sdist. On Linux that needs a C compiler and the Python headers. Off Linux it builds without the extension. There `fiberd.client` works and `fiberd.template` raises `ImportError` when used.
+
 ## Template
 
 A template warms up once and forks a fiber for every [Clone](../../docs/glossary.md#clone). Call `init()` first, do the warm-up, then `serve(on_fiber)`.
@@ -74,8 +82,9 @@ make python-test            # build the extension in place and run the unit test
 make conform-proc-python    # C1-C10 against the reference template, fiberd.template.ref
 make conform-gvisor-python  # the same on gVisor, from a rootfs hack/python/rootfs.sh builds with CPython in it
 make conform-runc-python    # and on runc, from the same rootfs
+make python-dist            # the sdist, a wheel built from it, and the unit tests against that wheel
 ```
 
 The same template serves on proc, runc and gVisor. On runc and gVisor it runs from a root filesystem that holds the interpreter and the package, which `hack/python/rootfs.sh <dir>` builds from the dev image for those runs.
 
-Elsewhere, `pip install -e 'sdk/python[client]' cryptography` builds it with what the client's tests import, and `python3 -m pytest sdk/python` runs the unit tests, which start no process. Wheels come in a later stage.
+Elsewhere, `pip install -e 'sdk/python[client]' cryptography` builds it with what the client's tests import, and `python3 -m pytest sdk/python` runs the unit tests, which start no process.

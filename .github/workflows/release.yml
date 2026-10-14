@@ -37,6 +37,7 @@ jobs:
     timeout-minutes: 5
     outputs:
       version: ${{ steps.version.outputs.version }}
+      python-version: ${{ steps.version.outputs.python-version }}
       prerelease: ${{ steps.version.outputs.prerelease }}
       image-tags: ${{ steps.version.outputs.image-tags }}
       new-tag: ${{ steps.version.outputs.new-tag }}
@@ -86,6 +87,18 @@ jobs:
           fi
           version=${TAG#v}
           echo "version=$version" >> "$GITHUB_OUTPUT"
+          # PyPI takes the PEP 440 form, so v2.0.0-rc.1 is 2.0.0rc1, and a
+          # pre-release suffix it cannot express is refused here.
+          pyversion=$version
+          if [[ -n "$pre" ]]; then
+            if [[ ! "$pre" =~ ^-(alpha|beta|rc)\.?(0|[1-9][0-9]*)$ ]]; then
+              echo "a pre-release tag looks like v2.0.0-rc.1, -beta.1 or -alpha.1, which PyPI can express" >&2
+              exit 1
+            fi
+            case ${BASH_REMATCH[1]} in alpha) kind=a ;; beta) kind=b ;; *) kind=rc ;; esac
+            pyversion=${version%"$pre"}$kind${BASH_REMATCH[2]}
+          fi
+          echo "python-version=$pyversion" >> "$GITHUB_OUTPUT"
           # Every release tags the image with its exact version. A final release
           # also moves MAJOR.MINOR, MAJOR and latest. MAJOR is skipped for 0.x,
           # which promises no stability. A pre-release moves none of them.
@@ -131,9 +144,78 @@ jobs:
     needs: validate-tag
     uses: ./.github/workflows/fuzz.yml
 
+  # The Python SDK. The sdist is built once and each wheel is built from
+  # it, so PyPI and the release assets carry one sdist and its wheels.
+  python-sdist:
+    name: build the Python sdist
+    needs: [validate-tag, ci, integration, conformance, examples, fuzz]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: build the sdist
+        env:
+          FIBERD_PYTHON_VERSION: ${{ needs.validate-tag.outputs.python-version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # PyPI shows the README, so its relative links point at the tag.
+          sed -i -E "s|\]\(([^)#:][^):]*)\)|](https://github.com/$GITHUB_REPOSITORY/blob/$TAG/sdk/python/\1)|g" sdk/python/README.md
+          python -m pip install build==1.6.1
+          python -m build --sdist --outdir "$RUNNER_TEMP/sdist" sdk/python
+          ls "$RUNNER_TEMP/sdist/fiberd-$FIBERD_PYTHON_VERSION.tar.gz"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: python-sdist
+          path: ${{ runner.temp }}/sdist/
+          if-no-files-found: error
+          retention-days: 7
+
+  python-wheels:
+    name: build the Python wheel ${{ matrix.arch }}
+    needs: [validate-tag, python-sdist]
+    # cibuildwheel builds natively, in the manylinux_2_28 image of each
+    # architecture, and tests the wheel (sdk/python/pyproject.toml).
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: python-sdist
+          path: ${{ runner.temp }}/sdist
+      - uses: pypa/cibuildwheel@b3395e271a35f73dad77f21802abe9b986dfe299 # v4.3.1
+        with:
+          package-dir: ${{ runner.temp }}/sdist/fiberd-${{ needs.validate-tag.outputs.python-version }}.tar.gz
+          output-dir: ${{ runner.temp }}/wheelhouse
+      # CRIU restores trap on a signed return address on a FEAT_FPAC CPU.
+      - if: matrix.arch == 'aarch64'
+        run: hack/python/pac.sh "$RUNNER_TEMP"/wheelhouse/*.whl
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: python-wheel-${{ matrix.arch }}
+          path: ${{ runner.temp }}/wheelhouse/*.whl
+          if-no-files-found: error
+          retention-days: 7
+
   build-assets:
     name: build release archives
-    needs: [validate-tag, ci, integration, conformance, examples, fuzz]
+    needs: [validate-tag, ci, integration, conformance, examples, fuzz, python-sdist, python-wheels]
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
@@ -148,6 +230,13 @@ jobs:
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
+      # The Python sdist and wheels join the archives under SHA256SUMS and
+      # the provenance attestation.
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: python-*
+          path: ${{ runner.temp }}/python
+          merge-multiple: true
       - name: install syft
         env:
           SYFT_VERSION: 1.52.0
@@ -233,7 +322,8 @@ jobs:
             pack "libfiberzygote_${VERSION}_linux_${arch}.tar.gz" "$lib"
           done
           rm -rf "$lib"
-          (cd "$dist" && sha256sum -- *.tar.gz *.spdx.json > SHA256SUMS)
+          cp "$RUNNER_TEMP"/python/fiberd-*.tar.gz "$RUNNER_TEMP"/python/fiberd-*.whl "$dist/"
+          (cd "$dist" && sha256sum -- *.tar.gz *.whl *.spdx.json > SHA256SUMS)
       - name: attest archive provenance
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
@@ -433,6 +523,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
           VERSION: ${{ needs.validate-tag.outputs.version }}
+          PYTHON_VERSION: ${{ needs.validate-tag.outputs.python-version }}
           IMAGE_DIGEST: ${{ needs.publish-image.outputs.digest }}
         run: |
           set -euo pipefail
@@ -443,6 +534,10 @@ jobs:
           \`${IMAGE}:${VERSION}\`
 
           Digest: \`${IMAGE_DIGEST}\`
+
+          ## Python SDK
+
+          \`pip install 'fiberd[client]==${PYTHON_VERSION}'\`
 
           ## Verify
 
@@ -468,9 +563,35 @@ jobs:
           # A pre-release never becomes the repository's latest release.
           makeLatest: ${{ needs.validate-tag.outputs.prerelease == 'true' && 'false' || 'legacy' }}
 
+  # PyPI comes last, since an upload can never be replaced. A failure here
+  # leaves the GitHub release published, and re-running this job finishes
+  # the release. Trusted publishing, so no token is stored. The publisher
+  # on PyPI names this repository, release.yml and the pypi environment.
+  publish-pypi:
+    name: publish to PyPI
+    needs: [validate-tag, python-sdist, python-wheels, publish-release]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment:
+      name: pypi
+      url: https://pypi.org/project/fiberd/${{ needs.validate-tag.outputs.python-version }}/
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: python-*
+          path: dist
+          merge-multiple: true
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          packages-dir: dist/
+          attestations: true
+
   cleanup:
     name: clean up a failed or cancelled release
-    needs: [validate-tag, ci, integration, conformance, examples, fuzz, build-assets, build-image, release-draft, publish-image, publish-release]
+    needs: [validate-tag, ci, integration, conformance, examples, fuzz, python-sdist, python-wheels, build-assets, build-image, release-draft, publish-image, publish-release, publish-pypi]
     if: >-
       always() && needs.validate-tag.result == 'success' &&
       (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled'))

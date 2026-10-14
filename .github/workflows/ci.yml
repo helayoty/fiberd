@@ -1,9 +1,9 @@
 name: ci
 
-# Lint, proto, unit tests and the image build. The integration suites,
-# conformance, the examples and fuzzing are workflows of their own
-# (integration.yml, conformance.yml, examples.yml, fuzz.yml) with the
-# same triggers, and the release calls all five.
+# Lint, proto, unit tests, the image build and the Python packages. The
+# integration suites, conformance, the examples and fuzzing are workflows
+# of their own (integration.yml, conformance.yml, examples.yml, fuzz.yml)
+# with the same triggers, and the release calls all five.
 on:
   push:
     branches: [main]
@@ -103,3 +103,33 @@ jobs:
         run: sudo apt-get install -y --no-install-recommends protobuf-compiler libprotobuf-dev
       - if: runner.os == 'Linux'
         run: make python-proto-check
+
+  python-dist:
+    name: "python SDK packaging (${{ matrix.runner }}): the sdist, and the abi3 wheel cibuildwheel builds from it and tests, not published"
+    strategy:
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      # The wheel is built from the sdist, as the release builds it, so a
+      # file the sdist misses fails here.
+      - id: sdist
+        name: build the sdist
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install build==1.6.1
+          python -m build --sdist --outdir dist sdk/python
+          echo "path=$(ls dist/fiberd-*.tar.gz)" >> "$GITHUB_OUTPUT"
+      - uses: pypa/cibuildwheel@b3395e271a35f73dad77f21802abe9b986dfe299 # v4.3.1
+        with:
+          package-dir: ${{ steps.sdist.outputs.path }}
+          output-dir: wheelhouse
+      # CRIU restores trap on a signed return address on a FEAT_FPAC CPU.
+      - if: runner.arch == 'ARM64'
+        run: hack/python/pac.sh wheelhouse/*.whl

@@ -4,15 +4,35 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fiberd"
-version = "0.2.0.dev0"
+# setup.py sets it from the release tag, or 0.0.0.dev0+local without one.
+dynamic = ["version"]
 description = "The fiberd SDK. fiberd.template for code that runs inside a fiber, fiberd.client for callers of fiberd."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
+authors = [{ name = "Heba Elayoty" }]
 classifiers = [
-  "Programming Language :: Python :: 3",
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
   "Operating System :: POSIX :: Linux",
+  "Operating System :: MacOS",
+  "Programming Language :: C",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: Implementation :: CPython",
+  "Topic :: System :: Distributed Computing",
 ]
+
+[project.urls]
+Homepage = "https://github.com/helayoty/fiberd"
+Documentation = "https://github.com/helayoty/fiberd/blob/main/sdk/python/README.md"
+Source = "https://github.com/helayoty/fiberd/tree/main/sdk/python"
+Issues = "https://github.com/helayoty/fiberd/issues"
+Changelog = "https://github.com/helayoty/fiberd/releases"
 
 [project.scripts]
 fiberd-template = "fiberd.template._cli:main"
@@ -28,8 +48,23 @@ package-dir = { "" = "src" }
 [tool.setuptools.packages.find]
 where = ["src"]
 
+# The C sources are in the sdist (MANIFEST.in), never in the wheel.
+[tool.setuptools.exclude-package-data]
+"*" = ["*.c"]
+
 [tool.distutils.bdist_wheel]
 py-limited-api = "cp310"
+
+# One cp310-abi3 wheel per architecture, built from the sdist on a native
+# runner and tested on 3.10, 3.12 and 3.13 (cibuildwheel reuses the abi3
+# wheel for the later two). musl comes later, if asked.
+[tool.cibuildwheel]
+build = ["cp310-manylinux_*", "cp312-manylinux_*", "cp313-manylinux_*"]
+manylinux-x86_64-image = "manylinux_2_28"
+manylinux-aarch64-image = "manylinux_2_28"
+test-extras = ["client"]
+test-requires = ["pytest", "cryptography"]
+test-command = "sh {project}/wheel-test.sh {project}"
 
 [tool.pytest.ini_options]
 testpaths = ["src"]

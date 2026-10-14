@@ -117,9 +117,10 @@ RUN set -eu; cd /tmp; \
 # builds against, setuptools to build it, pytest for the unit tests, and
 # for fiberd.client Debian's grpcio and protobuf, the protoc of the same
 # protobuf release, which makes the client's messages (make
-# python-proto), and cryptography for the test certificates.
+# python-proto), and cryptography for the test certificates. wheel and
+# venv build the sdist's wheel and install it offline (make python-dist).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      python3-dev python3-setuptools python3-pytest \
+      python3-dev python3-setuptools python3-pytest python3-wheel python3-venv \
       python3-grpcio python3-protobuf protobuf-compiler libprotobuf-dev python3-cryptography \
     && rm -rf /var/lib/apt/lists/*
 

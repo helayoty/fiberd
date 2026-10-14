@@ -61,6 +61,12 @@ The image `ghcr.io/helayoty/fiberd:<version>` holds fiberd, criu and the zygote 
 gh attestation verify oci://ghcr.io/helayoty/fiberd:0.1.0 -R helayoty/fiberd
 ```
 
+Releases after v0.1.0 also publish the [Python SDK](sdk/python/README.md) to PyPI. Its sdist and wheels are release assets too, under the same `SHA256SUMS` and provenance.
+
+```bash
+pip install 'fiberd[client]'
+```
+
 ## Start
 
 ```bash
