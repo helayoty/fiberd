@@ -24,19 +24,13 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     if (rc == 0) {
         /* Four fields, each non-empty and NUL-ended, back to back after
          * the 'k', and together they are the whole message. The fourth
-         * is the CA bundle, which "-" from a plaintext home turns into
-         * no bundle at all. */
+         * is the caller's certificate, taken as it is. */
         if (!have_identity || identity.key_pem != identity_buf + 1) abort();
         if (identity.cert_pem != identity.key_pem + strlen(identity.key_pem) + 1) abort();
         if (identity.caller != identity.cert_pem + strlen(identity.cert_pem) + 1) abort();
-        const char *ca_field = identity.caller + strlen(identity.caller) + 1;
-        if (!*identity.key_pem || !*identity.cert_pem || !*identity.caller || !*ca_field) abort();
-        if (strcmp(ca_field, "-") == 0) {
-            if (identity.ca_pem[0]) abort();
-        } else if (identity.ca_pem != ca_field) {
-            abort();
-        }
-        size_t end = (size_t)(ca_field - identity_buf) + strlen(ca_field) + 1;
+        if (identity.caller_pem != identity.caller + strlen(identity.caller) + 1) abort();
+        if (!*identity.key_pem || !*identity.cert_pem || !*identity.caller || !*identity.caller_pem) abort();
+        size_t end = (size_t)(identity.caller_pem - identity_buf) + strlen(identity.caller_pem) + 1;
         if (end != size) abort();
     } else if (!why) {
         abort();

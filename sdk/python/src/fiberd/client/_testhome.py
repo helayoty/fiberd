@@ -83,9 +83,10 @@ class Home:
     tier_gap: str = ""
     # bound_to is the PEM certificate the grant is bound to. Another caller is Unauthenticated.
     bound_to: bytes = b""
-    # routing_key and server_key_sha256 make every clone a handoff fiber.
+    # routing_key, server_key_sha256 and server_cert make every clone a handoff fiber.
     routing_key: str = ""
     server_key_sha256: str = ""
+    server_cert: bytes = b""
     endpoint: str = "unix:///run/fiberd/g1.sock"
     status_interval: float = 0.02
     last_clone: grant_pb2.CloneRequest | None = None
@@ -136,6 +137,7 @@ class Home:
                 kind=kind,
                 routing_key=self.routing_key,
                 server_key_sha256=self.server_key_sha256,
+                server_cert=self.server_cert,
             )
 
     def _running(self, fiber_id: str, context: grpc.ServicerContext) -> _Line:

@@ -24,7 +24,6 @@ import (
 	"github.com/helayoty/fiberd/pkg/endpoint"
 	"github.com/helayoty/fiberd/pkg/handoff"
 	"github.com/helayoty/fiberd/pkg/sys/cgroup"
-	"github.com/helayoty/fiberd/pkg/tlsconf/tlsconftest"
 )
 
 const mib = 1 << 20
@@ -57,9 +56,6 @@ func TestNewRefusals(t *testing.T) {
 		{name: "a handoff router without a key", cfg: func(t *testing.T) Config {
 			return Config{Backend: newFakeBackend(core.TierWarm), CgroupRoot: "/x", Handoff: handoffRouter(), HandoffKey: make([]byte, 16)}
 		}, want: "HandoffKey of at least 32 bytes"},
-		{name: "a CA bundle with no certificate in it", cfg: func(t *testing.T) Config {
-			return Config{Backend: newFakeBackend(core.TierWarm), CgroupRoot: "/x", Handoff: handoffRouter(), HandoffKey: handoffKey, HandoffCA: []byte("not pem")}
-		}, want: "HandoffCA holds no certificate"},
 		{name: "a cgroup root that cannot be made", cfg: func(t *testing.T) Config {
 			f := filepath.Join(t.TempDir(), "file")
 			if err := os.WriteFile(f, nil, 0o644); err != nil {
@@ -675,11 +671,9 @@ func TestClone(t *testing.T) {
 					t.Fatalf("memory.max = %s", limit(t, leaf, "memory.max"))
 				}
 			}},
-		{name: "a handoff fiber: identity and the home's CA bundle queued on its channel, routed through the router", be: func() backend.Backend { return newSandboxBackend(core.TierSnapshot) },
-			mod: func(c *Config) {
-				c.Handoff, c.HandoffKey, c.HandoffCA = handoffRouter(), handoffKey, tlsconftest.NewCA(t, "ca").CertPEM()
-			},
-			grant: handoffG, prepare: true, spec: core.CloneSpec{Grant: handoffG, Fence: fence},
+		{name: "a handoff fiber: identity and the caller's certificate queued on its channel, routed through the router", be: func() backend.Backend { return newSandboxBackend(core.TierSnapshot) },
+			mod:   func(c *Config) { c.Handoff, c.HandoffKey = handoffRouter(), handoffKey },
+			grant: handoffG, prepare: true, spec: core.CloneSpec{Grant: handoffG, Fence: fence, CallerCert: callerDER},
 			check: func(t *testing.T, r *Runtime, be backend.Backend, h core.FiberHandle) {
 				sb := be.(*sandboxBackend)
 				ff := sb.fiber("g1/1/1")
@@ -687,17 +681,17 @@ func TestClone(t *testing.T) {
 					t.Fatalf("fiber spec = %+v, %d pairs made by the backend", ff.spec, sb.pairs.Load())
 				}
 				id := r.identities["g1"]
-				want, _ := identityMessage(id.id, "x5t", r.cfg.HandoffCA)
-				if !bytes.Equal(ff.identity, want) || !bytes.HasSuffix(ff.identity, append(r.cfg.HandoffCA, 0)) {
-					t.Fatalf("identity read by the fiber = %q, want it to end with the CA bundle", ff.identity)
+				want, _ := identityMessage(id.id, "x5t", callerDER)
+				if !bytes.Equal(ff.identity, want) || !bytes.HasSuffix(ff.identity, append(callerPEM, 0)) {
+					t.Fatalf("identity read by the fiber = %q, want it to end with the caller's certificate", ff.identity)
 				}
 				if h.Endpoint != "tcp://10.0.0.1:443" {
 					t.Fatalf("handle endpoint = %s, want the router's", h.Endpoint)
 				}
-				key, pin, ok := r.HandoffRoute(h.ID)
+				key, pin, cert, ok := r.HandoffRoute(h.ID)
 				rkey, _ := r.cfg.Handoff.Key(h.ID)
-				if !ok || key == "" || key != rkey || pin != id.id.KeySHA256 {
-					t.Fatalf("HandoffRoute = %q %q %v", key, pin, ok)
+				if !ok || key == "" || key != rkey || pin != id.id.KeySHA256 || !bytes.Equal(cert, id.id.Cert) {
+					t.Fatalf("HandoffRoute = %q %q %q %v", key, pin, cert, ok)
 				}
 			}},
 		{name: "a handoff fiber whose channel the host makes", be: func() backend.Backend {
@@ -706,7 +700,7 @@ func TestClone(t *testing.T) {
 				handoffMixin
 			}{newFakeBackend(core.TierWarm), handoffMixin{true}}
 		}, mod: func(c *Config) { c.Handoff, c.HandoffKey = handoffRouter(), handoffKey },
-			grant: handoffG, prepare: true, spec: core.CloneSpec{Grant: handoffG, Fence: fence},
+			grant: handoffG, prepare: true, spec: core.CloneSpec{Grant: handoffG, Fence: fence, CallerCert: callerDER},
 			check: func(t *testing.T, r *Runtime, be backend.Backend, h core.FiberHandle) {
 				ff := be.(interface{ fiber(string) *fakeFiber }).fiber("g1/1/1")
 				if ff.handoff < 0 || len(ff.identity) == 0 || ff.identity[0] != identityTag {
@@ -718,7 +712,7 @@ func TestClone(t *testing.T) {
 			sb.err = errors.New("fake: netns gone")
 			return sb
 		}, mod: func(c *Config) { c.Handoff, c.HandoffKey = handoffRouter(), handoffKey },
-			grant: handoffG, prepare: true, spec: core.CloneSpec{Grant: handoffG, Fence: fence}, errText: "handoff channel: fake: netns gone",
+			grant: handoffG, prepare: true, spec: core.CloneSpec{Grant: handoffG, Fence: fence, CallerCert: callerDER}, errText: "handoff channel: fake: netns gone",
 			check: func(t *testing.T, r *Runtime, _ backend.Backend, _ core.FiberHandle) {
 				if r.root.Child("g1").Child("f-1-1").Exists() {
 					t.Fatal("the leaf was left behind")
@@ -734,8 +728,16 @@ func TestClone(t *testing.T) {
 			spec: func() core.CloneSpec {
 				g := handoffG
 				g.CallerThumbprint = ""
-				return core.CloneSpec{Grant: g, Fence: fence}
+				return core.CloneSpec{Grant: g, Fence: fence, CallerCert: callerDER}
 			}(), errText: "caller is empty",
+			check: func(t *testing.T, r *Runtime, _ backend.Backend, _ core.FiberHandle) {
+				if r.root.Child("g1").Child("f-1-1").Exists() || len(r.fibers) != 0 {
+					t.Fatal("the leaf or the record was left behind")
+				}
+			}},
+		{name: "a handoff clone without the caller's certificate has no identity to send", be: func() backend.Backend { return newSandboxBackend(core.TierSnapshot) },
+			mod:   func(c *Config) { c.Handoff, c.HandoffKey = handoffRouter(), handoffKey },
+			grant: handoffG, prepare: true, spec: core.CloneSpec{Grant: handoffG, Fence: fence}, errText: "no caller certificate",
 			check: func(t *testing.T, r *Runtime, _ backend.Backend, _ core.FiberHandle) {
 				if r.root.Child("g1").Child("f-1-1").Exists() || len(r.fibers) != 0 {
 					t.Fatal("the leaf or the record was left behind")
@@ -803,7 +805,7 @@ func TestClone(t *testing.T) {
 			sb.cloneErr = errors.New("fake: restore failed")
 			return sb
 		}, mod: func(c *Config) { c.Handoff, c.HandoffKey = handoffRouter(), handoffKey },
-			grant: handoffG, prepare: true, spec: core.CloneSpec{Grant: handoffG, Fence: fence}, errText: "restore failed",
+			grant: handoffG, prepare: true, spec: core.CloneSpec{Grant: handoffG, Fence: fence, CallerCert: callerDER}, errText: "restore failed",
 			check: func(t *testing.T, r *Runtime, _ backend.Backend, _ core.FiberHandle) {
 				if r.root.Child("g1").Child("f-1-1").Exists() || len(r.fibers) != 0 {
 					t.Fatal("the leaf or the record was left behind")

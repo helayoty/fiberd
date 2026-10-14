@@ -1,6 +1,7 @@
 package rpc_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -64,6 +65,9 @@ func TestCallerInterceptors(t *testing.T) {
 				c, ok := rpc.CallerFrom(ctx)
 				if ok != (tc.want != "") || c.Thumbprint != tc.want {
 					t.Fatalf("%s: caller = %+v, %v, want %q", via, c, ok, tc.want)
+				}
+				if ok && !bytes.Equal(c.Cert, leaf.Cert.Raw) {
+					t.Fatalf("%s: caller cert is not the leaf's DER", via)
 				}
 			}
 			_, err := rpc.CallerInterceptor()(tc.ctx, nil, nil, func(ctx context.Context, _ any) (any, error) {

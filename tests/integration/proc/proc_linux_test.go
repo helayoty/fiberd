@@ -246,7 +246,7 @@ func talk(t *testing.T, endpoint, line string) string {
 // as the caller's TLS client, presenting cert.
 func handOff(t *testing.T, rt core.Runtime, fiberID string, cert tls.Certificate) net.Conn {
 	t.Helper()
-	key, pin, ok := rt.(core.HandoffRouter).HandoffRoute(fiberID)
+	key, pin, _, ok := rt.(core.HandoffRouter).HandoffRoute(fiberID)
 	if !ok || pin == "" {
 		t.Fatalf("no handoff route for %s", fiberID)
 	}
@@ -435,19 +435,19 @@ func TestParkResumeKeepsState(t *testing.T) {
 			if tc.refused != nil {
 				refused = func(h core.FiberHandle) { tc.refused(t, rt, h) }
 			}
-			parkResumeKeepsState(t, rt, tc.mode, tc.callerX5t, func(h core.FiberHandle, line string) string { return tc.say(t, rt, h, line) }, refused, tc.fenceFile)
+			parkResumeKeepsState(t, rt, tc.mode, tc.callerX5t, caller.Certificate[0], func(h core.FiberHandle, line string) string { return tc.say(t, rt, h, line) }, refused, tc.fenceFile)
 		})
 	}
 }
 
-func parkResumeKeepsState(t *testing.T, rt core.Runtime, mode core.EndpointMode, callerX5t string, say func(core.FiberHandle, string) string, refused func(core.FiberHandle), fenceFile func(core.FiberHandle) string) {
+func parkResumeKeepsState(t *testing.T, rt core.Runtime, mode core.EndpointMode, callerX5t string, callerDER []byte, say func(core.FiberHandle, string) string, refused func(core.FiberHandle), fenceFile func(core.FiberHandle) string) {
 	ctx := context.Background()
 	g := core.Grant{UID: "g5", TemplateDigest: "sha256:ref", WBudgetBytes: 64 << 20, CallerThumbprint: callerX5t, Policy: core.Policy{EndpointMode: mode}}
 	if err := rt.PrepareTemplate(ctx, g); err != nil {
 		t.Fatal(err)
 	}
 	f1 := core.Fence{GrantUID: "g5", Epoch: 1, Seq: 1}
-	h1, err := rt.Clone(ctx, core.CloneSpec{Grant: g, Fence: f1, Deadline: 2 * time.Second})
+	h1, err := rt.Clone(ctx, core.CloneSpec{Grant: g, Fence: f1, Deadline: 2 * time.Second, CallerCert: callerDER})
 	if err != nil {
 		t.Fatal(err)
 	}

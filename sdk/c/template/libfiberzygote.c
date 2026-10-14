@@ -3,8 +3,8 @@
 #include "libfiberzygote.h"
 
 /* This file implements ABI version 4, so a header of another version refuses to build it. */
-#if FZ_ABI_VERSION != 4
-#error "libfiberzygote.c implements FZ_ABI_VERSION 4"
+#if FZ_ABI_VERSION != 5
+#error "libfiberzygote.c implements FZ_ABI_VERSION 5"
 #endif
 
 #include <dirent.h>
@@ -1062,7 +1062,7 @@ static int handoff_fd = -1;
 /* The grant's identity, as fiberd's first message on the channel
  * delivers it, 'k' then four NUL-ended fields. It lives in the fiber's
  * memory (the child's copy of the page), never the zygote's. The bound
- * leaves room for a CA bundle of several certificates, and only the
+ * leaves room for a caller certificate of any key size, and only the
  * pages the message touches are ever copied. */
 #define IDENTITY_MAX 65536
 static char identity_buf[IDENTITY_MAX];
@@ -1099,8 +1099,7 @@ static int read_identity(int fd, const char **why) {
     identity.key_pem = fields[0];
     identity.cert_pem = fields[1];
     identity.caller = fields[2];
-    /* A plaintext home has no client CA bundle and sends "-". */
-    identity.ca_pem = strcmp(fields[3], "-") == 0 ? "" : fields[3];
+    identity.caller_pem = fields[3];
     have_identity = 1;
     return 0;
 }

@@ -71,7 +71,7 @@ The response contains these fields.
 - `endpoint` is what callers dial, as returned.
 - `fence` is the same fence as three fields, the grant, fiberd's [epoch](glossary.md#epoch) and the sequence.
 - `kind` is `CREATE`, `ATTACH` or `RESUME`.
-- `routing_key` and `server_key_sha256` are set only for a `HANDOFF` fiber. The routing key names the fiber to the home's handoff listener. The key hash is what the caller pins the fiber's TLS key to.
+- `routing_key`, `server_key_sha256` and `server_cert` are set only for a `HANDOFF` fiber. The routing key names the fiber to the home's handoff listener. The key hash is what a caller pins the fiber's TLS key to, and `server_cert` is the fiber's certificate as DER, for a caller that pins the certificate instead.
 
 The action depends on the session.
 
@@ -161,9 +161,9 @@ For a `HANDOFF` fiber, `endpoint` is the home's handoff listener, the same `tcp:
 
 - It sends `<routing_key>.fiberd` as the TLS server name.
 - It presents the certificate the grant is bound to.
-- It accepts the server only if the base64url SHA-256 of its public key (SubjectPublicKeyInfo) equals `server_key_sha256`.
+- It accepts the server only if it presents `server_cert`, or, for a caller that pins keys, only if the base64url SHA-256 of its public key (SubjectPublicKeyInfo) equals `server_key_sha256`. The two name the same certificate.
 
-The home closes the connection without a reply if the server name is unknown, the fiber has ended, or no ClientHello arrives within 1 second. The fiber refuses any client certificate other than the grant's. In Go, `client.Fiber.DialHandoff` does all of this, and in Python `fiberd.client.Fiber.dial_handoff`, which checks the pin after the handshake and before any byte is sent. A resumed session keeps its server key, on this home and on any home that shares the handoff key, but it gets a new routing key. Use the one from the latest Clone. fiberd's side is in [handoff.md](design/handoff.md).
+The home closes the connection without a reply if the server name is unknown, the fiber has ended, or no ClientHello arrives within 1 second. The fiber refuses any client certificate other than the grant's. In Go, `client.Fiber.DialHandoff` does all of this and pins the key during the handshake. In Python, `fiberd.client.Fiber.dial_handoff` trusts `server_cert` alone during the handshake and checks the key pin after it, before any byte is sent. A resumed session keeps its server key, on this home and on any home that shares the handoff key, but it gets a new routing key. Use the one from the latest Clone. fiberd's side is in [handoff.md](design/handoff.md).
 
 ## Outcomes
 

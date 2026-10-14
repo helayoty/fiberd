@@ -56,9 +56,9 @@
  * TLS 1.3 on the connections fiberd passes it through fz_accept(),
  * instead of a listener of its own. It serves the grant's identity
  * (fz_handoff_identity(), sent down the channel at birth, never a file)
- * and accepts only the client certificate whose x5t#S256 that identity
- * names. That needs a build with -DFZ_TLS and OpenSSL 3. Without it a
- * handoff fiber refuses to start.
+ * and fails the handshake for any client certificate but the one whose
+ * x5t#S256 that identity names. That needs a build with -DFZ_TLS and
+ * OpenSSL 3. Without it a handoff fiber refuses to start.
  *
  * The clone payload, if any, is JSON with an optional "dirty_bytes": the
  * fiber dirties that much right after reporting ready, which is how
@@ -539,9 +539,34 @@ static void conn_close(conn_t *c) {
 static SSL_CTX *tls_ctx;
 static const char *tls_caller;
 
-/* The caller's certificate is self-signed. What makes it trusted is the
- * pin checked after the handshake, so chain verification accepts it. */
-static int tls_any_chain(int ok, X509_STORE_CTX *x) { (void)ok; (void)x; return 1; }
+/* tls_is_caller reports whether x is the grant's caller (RFC 8705
+ * x5t#S256, the base64url SHA-256 of its DER). */
+static int tls_is_caller(X509 *x) {
+    unsigned char md[EVP_MAX_MD_SIZE];
+    unsigned int mdn = 0;
+    if (X509_digest(x, EVP_sha256(), md, &mdn) != 1) return 0;
+    char b64[4 * ((EVP_MAX_MD_SIZE + 2) / 3) + 1];
+    int n = EVP_EncodeBlock((unsigned char *)b64, md, (int)mdn);
+    while (n > 0 && b64[n - 1] == '=') n--;
+    b64[n] = 0;
+    for (int i = 0; i < n; i++) { if (b64[i] == '+') b64[i] = '-'; else if (b64[i] == '/') b64[i] = '_'; }
+    return strcmp(b64, tls_caller) == 0;
+}
+
+/* The caller's certificate is self-signed, or issued by a CA the fiber
+ * has no store for. What makes it trusted is the pin, so the verify
+ * callback checks the leaf against it inside the handshake and fails
+ * the handshake for any other certificate, sending the client an alert
+ * before it is ever served. Whatever chain the client sent above the
+ * leaf is ignored. */
+static int tls_verify_leaf(int ok, X509_STORE_CTX *x) {
+    (void)ok;
+    if (X509_STORE_CTX_get_error_depth(x) != 0) return 1;
+    X509 *leaf = X509_STORE_CTX_get0_cert(x);
+    if (leaf && tls_is_caller(leaf)) return 1;
+    X509_STORE_CTX_set_error(x, X509_V_ERR_APPLICATION_VERIFICATION);
+    return 0;
+}
 
 /* pem_cert and pem_key parse one PEM block from memory. */
 static X509 *pem_cert(const char *pem) {
@@ -568,7 +593,7 @@ static const char *tls_load(void) {
     SSL_CTX *ctx = SSL_CTX_new(TLS_server_method());
     if (!ctx) return "SSL_CTX_new failed";
     SSL_CTX_set_min_proto_version(ctx, TLS1_3_VERSION);
-    SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT, tls_any_chain);
+    SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT, tls_verify_leaf);
     /* No resumption, so every connection presents the caller's certificate. */
     SSL_CTX_set_session_cache_mode(ctx, SSL_SESS_CACHE_OFF);
     SSL_CTX_set_options(ctx, SSL_OP_NO_TICKET);
@@ -590,22 +615,14 @@ static const char *tls_load(void) {
     return NULL;
 }
 
-/* tls_caller_ok reports whether the peer's certificate is the grant's
- * caller (RFC 8705 x5t#S256, the base64url SHA-256 of its DER). */
+/* tls_caller_ok is the second look, after the handshake, at the
+ * certificate tls_verify_leaf already pinned. */
 static int tls_caller_ok(SSL *s) {
     X509 *peer = SSL_get1_peer_certificate(s);
     if (!peer) return 0;
-    unsigned char md[EVP_MAX_MD_SIZE];
-    unsigned int mdn = 0;
-    int ok = X509_digest(peer, EVP_sha256(), md, &mdn) == 1;
+    int ok = tls_is_caller(peer);
     X509_free(peer);
-    if (!ok) return 0;
-    char b64[4 * ((EVP_MAX_MD_SIZE + 2) / 3) + 1];
-    int n = EVP_EncodeBlock((unsigned char *)b64, md, (int)mdn);
-    while (n > 0 && b64[n - 1] == '=') n--;
-    b64[n] = 0;
-    for (int i = 0; i < n; i++) { if (b64[i] == '+') b64[i] = '-'; else if (b64[i] == '/') b64[i] = '_'; }
-    return strcmp(b64, tls_caller) == 0;
+    return ok;
 }
 
 /* tls_reseed mixes fresh kernel entropy, and the host's seed when there
@@ -624,9 +641,9 @@ static int tls_reseed(const unsigned char *host, size_t hn) {
     return 0;
 }
 
-/* tls_start runs the handshake on c and checks the caller, after a
- * reseed of its own (see tls_reseed). A caller that stalls the handshake
- * is dropped after 5 s. */
+/* tls_start runs the handshake on c, which pins the caller, and looks
+ * at the caller once more, after a reseed of its own (see tls_reseed).
+ * A caller that stalls the handshake is dropped after 5 s. */
 static int tls_start(conn_t *c) {
     if (tls_reseed(NULL, 0) < 0) return -1;
     struct timeval tv = { .tv_sec = 5 }, none = { 0 };

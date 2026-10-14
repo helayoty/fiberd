@@ -64,20 +64,22 @@ class CloneRequest(_message.Message):
     def __init__(self, grant_jwt: _Optional[str] = ..., session: _Optional[str] = ..., deadline: _Optional[_Union[_timestamp_pb2.Timestamp, _Mapping]] = ..., payload: _Optional[bytes] = ...) -> None: ...
 
 class CloneResponse(_message.Message):
-    __slots__ = ["endpoint", "fence", "fiber_id", "kind", "routing_key", "server_key_sha256"]
+    __slots__ = ["endpoint", "fence", "fiber_id", "kind", "routing_key", "server_cert", "server_key_sha256"]
     ENDPOINT_FIELD_NUMBER: _ClassVar[int]
     FENCE_FIELD_NUMBER: _ClassVar[int]
     FIBER_ID_FIELD_NUMBER: _ClassVar[int]
     KIND_FIELD_NUMBER: _ClassVar[int]
     ROUTING_KEY_FIELD_NUMBER: _ClassVar[int]
+    SERVER_CERT_FIELD_NUMBER: _ClassVar[int]
     SERVER_KEY_SHA256_FIELD_NUMBER: _ClassVar[int]
     endpoint: str
     fence: Fence
     fiber_id: str
     kind: CloneKind
     routing_key: str
+    server_cert: bytes
     server_key_sha256: str
-    def __init__(self, fiber_id: _Optional[str] = ..., endpoint: _Optional[str] = ..., fence: _Optional[_Union[Fence, _Mapping]] = ..., kind: _Optional[_Union[CloneKind, str]] = ..., routing_key: _Optional[str] = ..., server_key_sha256: _Optional[str] = ...) -> None: ...
+    def __init__(self, fiber_id: _Optional[str] = ..., endpoint: _Optional[str] = ..., fence: _Optional[_Union[Fence, _Mapping]] = ..., kind: _Optional[_Union[CloneKind, str]] = ..., routing_key: _Optional[str] = ..., server_key_sha256: _Optional[str] = ..., server_cert: _Optional[bytes] = ...) -> None: ...
 
 class DeviceBudget(_message.Message):
     __slots__ = ["bytes"]

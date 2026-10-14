@@ -855,11 +855,14 @@ type CloneResponse struct {
 	Kind     CloneKind              `protobuf:"varint,4,opt,name=kind,proto3,enum=fiberd.grant.v1.CloneKind" json:"kind,omitempty"`
 	// Set when the grant's endpoint mode is HANDOFF. The caller opens TLS
 	// to endpoint with server name "<routing_key>.fiberd", presents the
-	// grant's client certificate, and accepts only a server key whose
-	// SubjectPublicKeyInfo hashes (SHA-256, base64url) to
-	// server_key_sha256.
+	// grant's client certificate, and accepts only the fiber's own
+	// certificate. server_cert is that certificate as DER, for a TLS
+	// library that pins a certificate during the handshake, and
+	// server_key_sha256 is the hash (SHA-256, base64url) of its
+	// SubjectPublicKeyInfo, for one that pins a key.
 	RoutingKey      string `protobuf:"bytes,5,opt,name=routing_key,json=routingKey,proto3" json:"routing_key,omitempty"`
 	ServerKeySha256 string `protobuf:"bytes,6,opt,name=server_key_sha256,json=serverKeySha256,proto3" json:"server_key_sha256,omitempty"`
+	ServerCert      []byte `protobuf:"bytes,7,opt,name=server_cert,json=serverCert,proto3" json:"server_cert,omitempty"`
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
 }
@@ -934,6 +937,13 @@ func (x *CloneResponse) GetServerKeySha256() string {
 		return x.ServerKeySha256
 	}
 	return ""
+}
+
+func (x *CloneResponse) GetServerCert() []byte {
+	if x != nil {
+		return x.ServerCert
+	}
+	return nil
 }
 
 // Miss is attached to every miss error as a google.rpc.Status detail.
@@ -1245,7 +1255,7 @@ const file_grant_v1_grant_proto_rawDesc = "" +
 	"\tgrant_jwt\x18\x01 \x01(\tR\bgrantJwt\x12\x18\n" +
 	"\asession\x18\x02 \x01(\tR\asession\x126\n" +
 	"\bdeadline\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\bdeadline\x12\x18\n" +
-	"\apayload\x18\x04 \x01(\fR\apayload\"\xf1\x01\n" +
+	"\apayload\x18\x04 \x01(\fR\apayload\"\x92\x02\n" +
 	"\rCloneResponse\x12\x19\n" +
 	"\bfiber_id\x18\x01 \x01(\tR\afiberId\x12\x1a\n" +
 	"\bendpoint\x18\x02 \x01(\tR\bendpoint\x12,\n" +
@@ -1253,7 +1263,9 @@ const file_grant_v1_grant_proto_rawDesc = "" +
 	"\x04kind\x18\x04 \x01(\x0e2\x1a.fiberd.grant.v1.CloneKindR\x04kind\x12\x1f\n" +
 	"\vrouting_key\x18\x05 \x01(\tR\n" +
 	"routingKey\x12*\n" +
-	"\x11server_key_sha256\x18\x06 \x01(\tR\x0fserverKeySha256\"\x98\x01\n" +
+	"\x11server_key_sha256\x18\x06 \x01(\tR\x0fserverKeySha256\x12\x1f\n" +
+	"\vserver_cert\x18\a \x01(\fR\n" +
+	"serverCert\"\x98\x01\n" +
 	"\x04Miss\x12-\n" +
 	"\x04code\x18\x01 \x01(\x0e2\x19.fiberd.grant.v1.MissCodeR\x04code\x12\"\n" +
 	"\rretry_after_s\x18\x02 \x01(\rR\vretryAfterS\x12\x16\n" +

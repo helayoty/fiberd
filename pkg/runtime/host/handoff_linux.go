@@ -4,6 +4,7 @@ package host
 
 import (
 	"bytes"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"os"
@@ -94,27 +95,24 @@ func (r *Runtime) forgetIdentity(grantUID string) {
 	r.mu.Unlock()
 }
 
-// noHandoffCA is the fourth field of the identity message on a home
-// that has no client CA bundle, a plaintext one. The fiber's library
-// reads it as no bundle.
-const noHandoffCA = "-"
-
 // identityMessage frames an identity the way fz_handoff_identity parses
 // it. That is the tag, then the key PEM, the certificate PEM, the
-// caller thumbprint and the home's client CA bundle (or "-" without
-// one), each ended by a NUL.
-func identityMessage(id handoff.Identity, caller string, ca []byte) ([]byte, error) {
-	if len(ca) == 0 {
-		ca = []byte(noHandoffCA)
+// caller thumbprint and the caller's certificate as PEM, each ended by
+// a NUL. callerCert is the DER the clone arrived under, which the
+// thumbprint is of. A fiber pins that one certificate in its handshake.
+func identityMessage(id handoff.Identity, caller string, callerCert []byte) ([]byte, error) {
+	if len(callerCert) == 0 {
+		return nil, errors.New("host: handoff identity has no caller certificate, which only a clone over mutual TLS carries")
 	}
-	for _, f := range []struct{ name, v string }{{"key", string(id.KeyPEM)}, {"certificate", string(id.CertPEM)}, {"caller", caller}, {"CA bundle", string(ca)}} {
+	callerPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: callerCert})
+	for _, f := range []struct{ name, v string }{{"key", string(id.KeyPEM)}, {"certificate", string(id.CertPEM)}, {"caller", caller}} {
 		if f.v == "" || strings.ContainsRune(f.v, 0) {
 			return nil, fmt.Errorf("host: handoff identity %s is empty or holds a NUL", f.name)
 		}
 	}
 	var b bytes.Buffer
 	b.WriteByte(identityTag)
-	for _, v := range [][]byte{id.KeyPEM, id.CertPEM, []byte(caller), ca} {
+	for _, v := range [][]byte{id.KeyPEM, id.CertPEM, []byte(caller), callerPEM} {
 		b.Write(v)
 		b.WriteByte(0)
 	}
@@ -123,17 +121,18 @@ func identityMessage(id handoff.Identity, caller string, ca []byte) ([]byte, err
 
 // sendIdentity queues a fresh handoff fiber's grant identity on the
 // host's end of its channel before the fiber is born, so it is the first
-// thing fz_accept reads. A resumed fiber holds it in memory and gets none.
-// The key is never a file, because fibers of every grant run as the
-// fiberd's user and no file mode would keep grants apart.
-func (r *Runtime) sendIdentity(ch *os.File, grantUID string) error {
+// thing fz_accept reads, with callerCert as the one certificate the
+// fiber accepts. A resumed fiber holds it in memory and gets none. The
+// key is never a file, because fibers of every grant run as the fiberd's
+// user and no file mode would keep grants apart.
+func (r *Runtime) sendIdentity(ch *os.File, grantUID string, callerCert []byte) error {
 	r.mu.Lock()
 	had, ok := r.identities[grantUID]
 	r.mu.Unlock()
 	if !ok {
 		return fmt.Errorf("host: no handoff identity prepared for grant %s", grantUID)
 	}
-	msg, err := identityMessage(had.id, had.caller, r.cfg.HandoffCA)
+	msg, err := identityMessage(had.id, had.caller, callerCert)
 	if err != nil {
 		return err
 	}
@@ -176,10 +175,11 @@ func (r *Runtime) unroute(f *fiber) {
 func (r *Runtime) HandsOff() bool { return r.canHandoff() }
 
 // HandoffRoute implements core.HandoffRouter. It returns a handoff
-// fiber's routing key and the pin of the key it serves TLS with.
-func (r *Runtime) HandoffRoute(fiberID string) (key, pin string, ok bool) {
+// fiber's routing key, the pin of the key it serves TLS with and the
+// certificate it presents.
+func (r *Runtime) HandoffRoute(fiberID string) (key, pin string, cert []byte, ok bool) {
 	if r.cfg.Handoff == nil {
-		return "", "", false
+		return "", "", nil, false
 	}
 	r.mu.Lock()
 	f, known := r.fibers[fiberID]
@@ -189,10 +189,10 @@ func (r *Runtime) HandoffRoute(fiberID string) (key, pin string, ok bool) {
 	}
 	r.mu.Unlock()
 	if !known || f.handoff == nil {
-		return "", "", false
+		return "", "", nil, false
 	}
 	key, ok = r.cfg.Handoff.Key(fiberID)
-	return key, id.id.KeySHA256, ok
+	return key, id.id.KeySHA256, id.id.Cert, ok
 }
 
 // Deliver passes a connected socket to a handoff fiber, which serves it

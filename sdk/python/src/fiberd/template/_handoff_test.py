@@ -1,4 +1,4 @@
-"""A handoff fiber's TLS: the sealed identity, the chain check, the pinned caller, accept(), serve() and the async twins, with no process started.
+"""A handoff fiber's TLS: the sealed identity, the caller pinned in the handshake, accept(), serve() and the async twins, with no process started.
 
 The certificates come from cryptography, as the client's tests do, so
 the module is skipped where it is missing. The TLS clients run in
@@ -107,8 +107,9 @@ class World:
         self.stranger = issue("stranger", issue("stranger ca", ca=True))
         self.server = grant_identity()
 
-    def identity(self, ca_pem=None) -> ft.Identity:
-        return ft.Identity(self.server.key_pem, self.server.cert_pem, self.caller.thumbprint, self.ca.cert_pem if ca_pem is None else ca_pem)
+    def identity(self, caller_pem=None) -> ft.Identity:
+        """The identity fiberd sends, bound to the caller, with its certificate unless caller_pem replaces it."""
+        return ft.Identity(self.server.key_pem, self.server.cert_pem, self.caller.thumbprint, self.caller.cert_pem if caller_pem is None else caller_pem)
 
 
 @pytest.fixture(scope="module")
@@ -168,9 +169,10 @@ def test_seal_identity_is_sealed_and_not_a_file_on_disk(world):
 
 
 CONTEXT_REFUSALS = [
-    # the CA bundle, the identity PEM, the message wanted
-    ("no CA bundle names -client-ca", "", "good", "-client-ca"),
-    ("a CA bundle that is not PEM", "not pem", "good", "does not parse"),
+    # the caller certificate, the identity PEM, the message wanted
+    ("no caller certificate", "", "good", "no caller certificate"),
+    ("a caller certificate that is not PEM", "not pem", "good", "does not parse"),
+    ("a caller certificate that is not the bound caller's", "other", "good", "not the caller the grant is bound to"),
     ("an identity that does not load", "good", "garbage", "do not load"),
 ]
 
@@ -178,14 +180,27 @@ CONTEXT_REFUSALS = [
 @linux_only
 @table(CONTEXT_REFUSALS)
 def test_server_context_refusals(world, name, f0, f1, f2):
-    ca = world.ca.cert_pem if f0 == "good" else f0
+    caller_pem = {"good": world.caller.cert_pem, "other": world.other.cert_pem}.get(f0, f0)
     fd = _handoff.seal_identity(world.server.key_pem, world.server.cert_pem) if f1 == "good" else _handoff.seal_identity("garbage", "garbage")
     try:
         with pytest.raises(ft.TemplateError, match=f2) as e:
-            _handoff.server_context(fd, ca)
+            _handoff.server_context(fd, world.caller.thumbprint, caller_pem)
         assert "PRIVATE KEY" not in str(e.value) and world.server.key_pem.splitlines()[1] not in str(e.value)
     finally:
         os.close(fd)
+
+
+@linux_only
+def test_server_context_trusts_the_caller_certificate_alone(world):
+    fd = _handoff.seal_identity(world.server.key_pem, world.server.cert_pem)
+    try:
+        ctx = _handoff.server_context(fd, world.caller.thumbprint, world.caller.cert_pem)
+    finally:
+        os.close(fd)
+    assert ctx.verify_mode == ssl.CERT_REQUIRED and ctx.minimum_version == ssl.TLSVersion.TLSv1_3
+    assert ctx.verify_flags & ssl.VERIFY_X509_PARTIAL_CHAIN, "a leaf is the trust anchor only with partial chains allowed"
+    stats = ctx.cert_store_stats()
+    assert (stats["x509"], stats["x509_ca"]) == (1, 0), "the bound caller's leaf is the one certificate in the store, no CA"
 
 
 # ---- accept() and serve() over socket pairs ------------------------------
@@ -194,7 +209,7 @@ def test_server_context_refusals(world, name, f0, f1, f2):
 class HandoffExt:
     """The C binding of a handoff fiber: accept() hands out the server ends queued, then the channel's close."""
 
-    ABI_VERSION = 4
+    ABI_VERSION = 5
 
     def __init__(self):
         self.calls = []
@@ -209,8 +224,14 @@ class HandoffExt:
         return self.queue.pop(0)
 
 
-def client(pair, tmp_path, fd, line=b"ping\n"):
-    """A TLS client over fd presenting pair (or nothing), which sends line and reads the reply. What happened, as a tuple."""
+def client(pair, tmp_path, fd, line=b"ping\n", served=True):
+    """A TLS client over fd presenting pair (or nothing), which sends line and reads the reply. What happened, as a tuple.
+
+    In TLS 1.3 the client's handshake ends with its Finished, before the
+    fiber has looked at the certificate, so a caller that expects to be
+    refused reads first. The fiber's verdict is then an alert from its
+    failed handshake, or a bare close after one that succeeded.
+    """
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     ctx.minimum_version = ssl.TLSVersion.TLSv1_3
     ctx.check_hostname = False
@@ -225,8 +246,11 @@ def client(pair, tmp_path, fd, line=b"ping\n"):
         raw.close()
         return ("handshake refused", type(e).__name__)
     try:
-        tls.sendall(line)
+        if served:
+            tls.sendall(line)
         reply = tls.recv(64)
+    except ssl.SSLError as e:
+        return ("alert", e.reason)
     except OSError as e:
         return ("closed", type(e).__name__)
     finally:
@@ -241,15 +265,20 @@ def handoff_fiber(world, ext, monkeypatch, channel, identity=None):
     return f
 
 
-def start_clients(world, tmp_path, ext, which):
-    """One socket pair per caller in which, the server ends queued for accept() and the clients started. The threads and their results."""
+def start_clients(world, tmp_path, ext, which, served=None):
+    """One socket pair per caller in which, the server ends queued for accept() and the clients started. The threads and their results.
+
+    served says per caller whether it expects a reply. The others read
+    first, for the fiber's verdict.
+    """
     results = [None] * len(which)
     threads = []
     for i, pair in enumerate(which):
         a, b = socket.socketpair()
         ext.queue.append(a.detach())
         fd = b.detach()
-        th = threading.Thread(target=lambda i=i, pair=pair, fd=fd: results.__setitem__(i, client(pair, tmp_path, fd)), daemon=True)
+        ok = served[i] if served is not None else True
+        th = threading.Thread(target=lambda i=i, pair=pair, fd=fd, ok=ok: results.__setitem__(i, client(pair, tmp_path, fd, served=ok)), daemon=True)
         th.start()
         threads.append(th)
     return threads, results
@@ -262,19 +291,33 @@ def join(threads):
 
 
 CALLERS = [
-    # the callers in order, and which of them are served. In TLS 1.3 a
-    # refused caller's handshake may end on its side before the server's
-    # alert lands, so it sees either the refusal or the close, and never
-    # a reply.
+    # the callers in order, and which of them are served. Every refusal
+    # is the fiber's handshake failing, which the caller sees as an alert
+    # and never as a close after a handshake that succeeded, so only the
+    # served callers reach the thumbprint check.
     ("the bound caller", ["caller"], [True]),
-    ("another certificate under the CA is closed before a byte", ["other", "caller"], [False, True]),
+    ("another certificate under the CA fails the handshake", ["other", "caller"], [False, True]),
     ("a certificate outside the CA fails the handshake", ["stranger", "caller"], [False, True]),
     ("no certificate fails the handshake", [None, "caller"], [False, True]),
 ]
 
 
 def refused(result):
-    return result[0] in ("handshake refused", "closed")
+    """Whether the result is the fiber's handshake alert, not a reply and not a bare close after a handshake."""
+    return result[0] in ("handshake refused", "alert")
+
+
+def spy_pinned(monkeypatch):
+    """The peers the post-handshake thumbprint check sees, which a caller refused in the handshake never reaches."""
+    seen = []
+    real = _handoff.pinned
+
+    def pinned(peer_der, caller):
+        seen.append(peer_der)
+        return real(peer_der, caller)
+
+    monkeypatch.setattr(_handoff, "pinned", pinned)
+    return seen
 
 
 @linux_only
@@ -283,7 +326,8 @@ def test_accept_serves_the_bound_caller_only(world, tmp_path, monkeypatch, name,
     ext = HandoffExt()
     ch, host_end = socket.socketpair()
     f = handoff_fiber(world, ext, monkeypatch, ch)
-    threads, results = start_clients(world, tmp_path, ext, [getattr(world, w) if w else None for w in f0])
+    checked = spy_pinned(monkeypatch)
+    threads, results = start_clients(world, tmp_path, ext, [getattr(world, w) if w else None for w in f0], served=f1)
     # fiberd's end: one message per connection, then the close at release.
     host_end.sendall(b"\0" * len(f0))
     host_end.close()
@@ -300,7 +344,8 @@ def test_accept_serves_the_bound_caller_only(world, tmp_path, monkeypatch, name,
     join(threads)
     assert served == [b"ping\n"] * sum(f1)
     assert [r == ("reply", b"pong\n") for r in results] == f1
-    assert all(refused(r) for r, ok in zip(results, f1, strict=True) if not ok), "a refused caller saw no application byte"
+    assert all(refused(r) for r, ok in zip(results, f1, strict=True) if not ok), f"a refused caller sees the fiber's alert, not {results}"
+    assert len(checked) == sum(f1), "a refused caller failed the handshake itself and never reached the thumbprint check"
     assert ext.calls == [], "accept() does not report ready, the author does"
 
 
@@ -387,14 +432,21 @@ CONTEXT_FIBERS = [
     # the fiber's environment, its identity, the refusal
     ("a unix fiber has nothing to accept", {}, "ident", "only a handoff fiber"),
     ("a handoff fiber without an identity", {"FIBERD_HANDOFF_FD": "4"}, None, "holds no identity"),
-    ("a plaintext home sent no CA bundle", {"FIBERD_HANDOFF_FD": "4"}, "no ca", "-client-ca"),
+    ("an identity without the caller's certificate", {"FIBERD_HANDOFF_FD": "4"}, "no caller cert", "no caller certificate"),
+    ("an identity with another caller's certificate", {"FIBERD_HANDOFF_FD": "4"}, "other caller", "not the caller the grant is bound to"),
 ]
 
 
 @table(CONTEXT_FIBERS)
 def test_accept_refusals(world, monkeypatch, name, f0, f1, f2):
     monkeypatch.setattr(ft, "_ext", lambda: HandoffExt())
-    identity = {"ident": world.identity(), None: None, "no ca": world.identity(ca_pem="")}[f1]
+    identities = {
+        "ident": world.identity(),
+        None: None,
+        "no caller cert": world.identity(caller_pem=""),
+        "other caller": world.identity(caller_pem=world.other.cert_pem),
+    }
+    identity = identities[f1]
     f = ft.Fiber("g/1/1", "/tmp/ep.sock", b"", "", f0, identity=identity)
     with pytest.raises(ft.TemplateError, match=f2):
         f.accept()
@@ -407,7 +459,7 @@ def test_serve_handoff_reports_ready_checks_the_fence_and_ends_with_the_channel(
     ch, host_end = socket.socketpair()
     f = handoff_fiber(world, ext, monkeypatch, ch)
     f._incarnate("fork", os.urandom(32))
-    threads, results = start_clients(world, tmp_path, ext, [world.other, world.caller])
+    threads, results = start_clients(world, tmp_path, ext, [world.other, world.caller], served=[False, True])
     # fiberd's end: one message per connection, then the close at release.
     host_end.sendall(b"\0\0")
     host_end.close()
@@ -494,7 +546,8 @@ def test_connections_yields_the_bound_caller_only(world, tmp_path, monkeypatch):
     ext = HandoffExt()
     ch, host_end = socket.socketpair()
     f = handoff_fiber(world, ext, monkeypatch, ch)
-    threads, results = start_clients(world, tmp_path, ext, [world.stranger, world.other, world.caller])
+    checked = spy_pinned(monkeypatch)
+    threads, results = start_clients(world, tmp_path, ext, [world.stranger, world.other, world.caller], served=[False, False, True])
     host_end.sendall(b"\0\0\0")
     host_end.close()
     served = []
@@ -511,7 +564,8 @@ def test_connections_yields_the_bound_caller_only(world, tmp_path, monkeypatch):
     assert ft._run(on_fiber, f) == 0
     join(threads)
     assert served == [b"ping\n"]
-    assert refused(results[0]) and refused(results[1]) and results[2] == ("reply", b"pong\n")
+    assert refused(results[0]) and refused(results[1]) and results[2] == ("reply", b"pong\n"), f"refused callers see the alert under asyncio too: {results}"
+    assert len(checked) == 1, "the stranger and the other caller failed the handshake itself, before the thumbprint check"
     assert ext.calls == [("ready",)]
 
 

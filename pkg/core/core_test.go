@@ -54,8 +54,8 @@ type fakeRuntime struct {
 
 func (f fakeRuntime) HandsOff() bool { return f.routes }
 
-func (f fakeRuntime) HandoffRoute(fiberID string) (string, string, bool) {
-	return "rk-" + fiberID, "pin", f.routes
+func (f fakeRuntime) HandoffRoute(fiberID string) (string, string, []byte, bool) {
+	return "rk-" + fiberID, "pin", []byte("cert"), f.routes
 }
 
 func (f fakeRuntime) Tier() core.Tier                                   { return f.tier }
@@ -300,8 +300,8 @@ func TestCloneOutcomes(t *testing.T) {
 			if code != tc.want {
 				t.Fatalf("Clone code = %d, want %d (err %v)", code, tc.want, err)
 			}
-			if resp.RoutingKey != tc.wantRoute || (tc.wantRoute != "") != (resp.ServerKeySHA256 != "") {
-				t.Fatalf("route = %q pin %q, want %q", resp.RoutingKey, resp.ServerKeySHA256, tc.wantRoute)
+			if resp.RoutingKey != tc.wantRoute || (tc.wantRoute != "") != (resp.ServerKeySHA256 != "") || (tc.wantRoute != "") != (len(resp.ServerCert) != 0) {
+				t.Fatalf("route = %q pin %q cert %q, want %q", resp.RoutingKey, resp.ServerKeySHA256, resp.ServerCert, tc.wantRoute)
 			}
 			if st, _ := coretest.GrantStatus(a.Ledger, tc.token); st.Running != tc.running {
 				t.Fatalf("running = %d after clone, want %d", st.Running, tc.running)

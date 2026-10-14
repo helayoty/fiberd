@@ -530,13 +530,6 @@ func RunContext(ctx context.Context, c *Config, newHome HomeFactory) error {
 			if pc.HandoffKey, err = c.loadHandoffKey(); err != nil {
 				return err
 			}
-			// Handoff fibers verify their caller against the same bundle
-			// the API does. A plaintext home has none to give.
-			if c.API.TLS.ClientCA != "" {
-				if pc.HandoffCA, err = os.ReadFile(c.API.TLS.ClientCA); err != nil {
-					return fmt.Errorf("-client-ca: %w", err)
-				}
-			}
 			if handoffLn, err = net.Listen("tcp", c.Handoff.Listen); err != nil {
 				return fmt.Errorf("-handoff-listen %s: %w", c.Handoff.Listen, err)
 			}

@@ -19,8 +19,9 @@ type CloneRequest struct {
 	Deadline time.Duration // hard budget for the runtime work
 	Payload  []byte        // opaque, size-capped, delivered as data, never config
 	// CallerThumbprint is the x5t#S256 of the client certificate the
-	// request arrived over.
+	// request arrived over, and CallerCert is that certificate as DER.
 	CallerThumbprint string
+	CallerCert       []byte
 }
 
 type CloneResponse struct {
@@ -28,11 +29,12 @@ type CloneResponse struct {
 	Endpoint string
 	Fence    Fence
 	Kind     Action
-	// RoutingKey and ServerKeySHA256 are set for a handoff fiber. They are
-	// the TLS server name to send to Endpoint and the pin of the key the
-	// fiber must present.
+	// RoutingKey, ServerKeySHA256 and ServerCert are set for a handoff
+	// fiber. They are the TLS server name to send to Endpoint, the pin of
+	// the key the fiber must present and the fiber's certificate as DER.
 	RoutingKey      string
 	ServerKeySHA256 string
+	ServerCert      []byte
 }
 
 // StatusCode is the transport-agnostic outcome. pkg/rpc maps it to gRPC
@@ -314,7 +316,7 @@ func (a *Core) Clone(ctx context.Context, req CloneRequest) (CloneResponse, Stat
 			deadline = resume
 		}
 	}
-	spec := CloneSpec{Grant: g, Source: SourceZygote, Fence: fence, Deadline: deadline, Payload: req.Payload, Session: req.Session}
+	spec := CloneSpec{Grant: g, Source: SourceZygote, Fence: fence, Deadline: deadline, Payload: req.Payload, Session: req.Session, CallerCert: req.CallerCert}
 	if act == ActResume {
 		spec.Source, spec.Ref = SourceDelta, ref
 	}
@@ -420,8 +422,8 @@ func (a *Core) commitHeld(commit func(Session) bool, s Session) (committed bool,
 // routed adds what a caller needs to reach a handoff fiber.
 func (a *Core) routed(r CloneResponse) CloneResponse {
 	if hr, ok := a.Runtime.(HandoffRouter); ok {
-		if key, pin, ok := hr.HandoffRoute(r.FiberID); ok {
-			r.RoutingKey, r.ServerKeySHA256 = key, pin
+		if key, pin, cert, ok := hr.HandoffRoute(r.FiberID); ok {
+			r.RoutingKey, r.ServerKeySHA256, r.ServerCert = key, pin, cert
 		}
 	}
 	return r

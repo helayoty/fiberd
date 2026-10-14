@@ -19,7 +19,7 @@ from fiberd.template import _rules
 class FakeExt:
     """The C binding as a recorder."""
 
-    ABI_VERSION = 4
+    ABI_VERSION = 5
 
     def __init__(self):
         self.calls = []
@@ -37,7 +37,7 @@ class FakeExt:
 
     def handoff_identity(self):
         self.calls.append(("identity",))
-        return ("-----BEGIN PRIVATE KEY-----\nk\n-----END PRIVATE KEY-----\n", "cert", "x5t", "ca")
+        return ("-----BEGIN PRIVATE KEY-----\nk\n-----END PRIVATE KEY-----\n", "cert", "x5t", "caller cert")
 
 
 def one_thread_proc(tmp_path):
@@ -139,7 +139,7 @@ def test_born_hands_the_fiber_its_record(monkeypatch):
 BORN_IDENTITY = [
     # the environment, whether the library is asked, the identity wanted
     ("a unix fiber has none", {"FIBERD_ENDPOINT": "/run/g/2-5.sock"}, False, None),
-    ("a handoff fiber takes the library's", {"FIBERD_HANDOFF_FD": "4"}, True, ("x5t", "ca")),
+    ("a handoff fiber takes the library's", {"FIBERD_HANDOFF_FD": "4"}, True, ("x5t", "caller cert")),
 ]
 
 
@@ -161,7 +161,7 @@ def test_born_takes_the_handoff_identity_off_the_library(monkeypatch, name, f0, 
         assert f.identity is None and f.kind == "unix"
         return
     assert f.kind == "handoff" and f._handoff_fd == 4
-    assert (f.identity.caller, f.identity.ca_pem) == f2
+    assert (f.identity.caller, f.identity.caller_pem) == f2
     assert f.identity.key_pem.startswith("-----BEGIN PRIVATE KEY-----") and "PRIVATE" not in repr(f.identity)
 
 

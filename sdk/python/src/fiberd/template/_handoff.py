@@ -2,10 +2,12 @@
 
 ssl.SSLContext.load_cert_chain takes paths, so the key and certificate are
 written to a sealed memfd and loaded through /proc/self/fd. The key is
-never a file on disk. The caller is pinned after the handshake by the
-thumbprint of its certificate (RFC 8705 x5t#S256), which the chain check
-against the home's CA bundle comes before, since the stdlib cannot accept
-an arbitrary chain the way refzygote does.
+never a file on disk. The caller's certificate, the one the clone arrived
+under, is the context's only trust anchor, with VERIFY_X509_PARTIAL_CHAIN
+so OpenSSL takes a leaf as one. Any other certificate fails the
+handshake, with or without the home's CA behind it. The thumbprint of the
+peer (RFC 8705 x5t#S256) is checked again after the handshake, against
+the caller the grant is bound to.
 """
 
 from __future__ import annotations
@@ -14,7 +16,9 @@ import base64
 import fcntl
 import hashlib
 import os
+import socket
 import ssl
+from typing import Optional
 
 from fiberd.template._errors import TemplateError
 
@@ -34,7 +38,9 @@ def thumbprint(der: bytes) -> str:
 
 def pinned(peer_der: bytes | None, caller: str) -> bool:
     """Whether the peer presented the one certificate the grant is bound to."""
-    return bool(peer_der) and bool(caller) and thumbprint(peer_der) == caller
+    if not peer_der or not caller:
+        return False
+    return thumbprint(peer_der) == caller
 
 
 def seal_identity(key_pem: str, cert_pem: str, name: str = "fiberd-identity") -> int:
@@ -59,23 +65,84 @@ def identity_path(fd: int) -> str:
     return f"/proc/self/fd/{fd}"
 
 
-def server_context(identity_fd: int, ca_pem: str) -> ssl.SSLContext:
-    """The TLS 1.3 server context of a handoff fiber. The caller must chain to ca_pem, and resumption is off, so every connection presents it."""
-    if not ca_pem:
-        raise TemplateError(
-            "the home sent no CA bundle with the handoff identity, so this fiber cannot verify its caller. "
-            "A handoff fiber checks the caller's certificate against the home's -client-ca, which a home started "
-            "with -insecure-plaintext does not have"
-        )
-    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+class HandshakeObject(ssl.SSLObject):
+    """The SSL object of an asyncio handshake over a handoff connection.
+
+    When the handshake fails, OpenSSL queues its alert in the outgoing
+    BIO, and asyncio discards that with the connection, so the caller
+    would see a bare close. The alert is taken here, as it is raised,
+    for the fiber to send itself (see send_alert).
+    """
+
+    outgoing: Optional[ssl.MemoryBIO] = None
+
+    def do_handshake(self) -> None:
+        try:
+            super().do_handshake()
+        except (ssl.SSLWantReadError, ssl.SSLWantWriteError):
+            raise
+        except ssl.SSLError:
+            ctx = self.context
+            if isinstance(ctx, ServerContext) and self.outgoing is not None:
+                ctx.alert = self.outgoing.read()
+            raise
+
+
+class ServerContext(ssl.SSLContext):
+    """The context of a handoff fiber. Its asyncio handshakes keep their alert (HandshakeObject), one at a time per fiber."""
+
+    sslobject_class = HandshakeObject
+    alert: bytes = b""
+
+    def wrap_bio(self, incoming: ssl.MemoryBIO, outgoing: ssl.MemoryBIO, server_side: bool = False,
+                 server_hostname: Optional[str] = None, session: Optional[ssl.SSLSession] = None) -> ssl.SSLObject:
+        obj = super().wrap_bio(incoming, outgoing, server_side, server_hostname, session)
+        if isinstance(obj, HandshakeObject):
+            obj.outgoing = outgoing
+        return obj
+
+
+def send_alert(ctx: ServerContext, sock: socket.socket) -> None:
+    """Sends the alert the last asyncio handshake kept on sock, a duplicate of the connection asyncio closed, and closes it.
+
+    A caller that stalled the handshake left none, and nothing is sent.
+    """
+    alert, ctx.alert = ctx.alert, b""
+    try:
+        if alert:
+            sock.send(alert)
+    except OSError:
+        pass
+    finally:
+        sock.close()
+
+
+def server_context(identity_fd: int, caller: str, caller_pem: str) -> ServerContext:
+    """The TLS 1.3 server context of a handoff fiber.
+
+    caller_pem, the certificate of the caller the grant is bound to, is
+    the one trust anchor, so only that certificate completes a handshake.
+    It must be the certificate caller is the thumbprint of. Resumption is
+    off, so every connection presents it.
+    """
+    if not caller_pem:
+        raise TemplateError("the home sent no caller certificate with the handoff identity, so this fiber cannot pin its caller")
+    try:
+        caller_der = ssl.PEM_cert_to_DER_cert(caller_pem)
+    except ValueError as e:
+        raise TemplateError(f"the caller certificate the home sent with the handoff identity does not parse ({e})") from e
+    if thumbprint(caller_der) != caller:
+        raise TemplateError("the caller certificate the home sent with the handoff identity is not the caller the grant is bound to")
+    ctx = ServerContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.minimum_version = ssl.TLSVersion.TLSv1_3
     ctx.verify_mode = ssl.CERT_REQUIRED
+    ctx.verify_flags |= ssl.VERIFY_X509_PARTIAL_CHAIN
     ctx.options |= ssl.OP_NO_TICKET
     ctx.num_tickets = 0
     try:
-        ctx.load_verify_locations(cadata=ca_pem)
+        ctx.load_verify_locations(cadata=caller_pem)
     except (ssl.SSLError, ValueError) as e:
-        raise TemplateError(f"the CA bundle the home sent with the handoff identity does not parse ({e})") from e
+        raise TemplateError(f"the caller certificate the home sent with the handoff identity does not load ({e})") from e
     try:
         ctx.load_cert_chain(identity_path(identity_fd))
     except (ssl.SSLError, OSError) as e:

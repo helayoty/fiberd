@@ -101,6 +101,9 @@ type Caller struct {
 	// Thumbprint is the base64url SHA-256 of the DER certificate, the
 	// value of a grant's cnf x5t#S256 claim.
 	Thumbprint string
+	// Cert is the DER certificate itself, the one a handoff fiber of a
+	// grant bound to this caller is told to accept.
+	Cert []byte
 }
 
 // CallerOf names the peer from its verified chain, whose leaf comes first.
@@ -108,7 +111,7 @@ func CallerOf(chain []*x509.Certificate) (Caller, bool) {
 	if len(chain) == 0 {
 		return Caller{}, false
 	}
-	return Caller{Thumbprint: Thumbprint(chain[0])}, true
+	return Caller{Thumbprint: Thumbprint(chain[0]), Cert: chain[0].Raw}, true
 }
 
 // Thumbprint is the RFC 8705 x5t#S256 of a certificate.

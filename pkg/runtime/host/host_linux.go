@@ -4,7 +4,6 @@ package host
 
 import (
 	"context"
-	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -181,9 +180,6 @@ func New(cfg Config) (*Runtime, error) {
 	}
 	if cfg.Handoff != nil && len(cfg.HandoffKey) < 32 {
 		return nil, errors.New("host: Handoff needs a HandoffKey of at least 32 bytes")
-	}
-	if len(cfg.HandoffCA) > 0 && !x509.NewCertPool().AppendCertsFromPEM(cfg.HandoffCA) {
-		return nil, errors.New("host: HandoffCA holds no certificate")
 	}
 	if cfg.RunDir == "" {
 		cfg.RunDir = "/run/fiberd"
@@ -1335,8 +1331,9 @@ func (r *Runtime) start(ctx context.Context, z *warm, spec core.CloneSpec, p *po
 		if err == nil {
 			defer func() { _ = fiberEnd.Close() }()
 			// The grant's TLS identity waits in the channel for the
-			// fiber to be born. It is never a file.
-			if err = r.sendIdentity(hostEnd, spec.Grant.UID); err != nil {
+			// fiber to be born, with the caller it serves. It is never
+			// a file.
+			if err = r.sendIdentity(hostEnd, spec.Grant.UID, spec.CallerCert); err != nil {
 				_ = hostEnd.Close()
 			}
 		}

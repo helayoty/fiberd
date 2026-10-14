@@ -63,6 +63,10 @@ type CloneSpec struct {
 	Deadline time.Duration // hard budget: exceeding it is an error, not a late fiber
 	Payload  []byte        // opaque data handed to the fiber at birth
 	Session  string        // the session the caller named, "" for an anonymous fiber
+	// CallerCert is the DER certificate the clone arrived under, the one
+	// a fresh handoff fiber is told to accept. A resumed fiber holds its
+	// caller already and ignores it.
+	CallerCert []byte
 }
 
 // FiberHandle is what the runtime knows about a running fiber. Endpoint is
@@ -77,10 +81,11 @@ type FiberHandle struct {
 // connections to fibers (endpoint mode handoff). HandsOff reports whether
 // this home can, given its backend and configuration. HandoffRoute
 // returns a handoff fiber's routing key, which the caller sends as the
-// TLS server name, and the pin of the key the fiber serves with.
+// TLS server name, the pin of the key the fiber serves with and the DER
+// certificate it presents.
 type HandoffRouter interface {
 	HandsOff() bool
-	HandoffRoute(fiberID string) (routingKey, serverKeySHA256 string, ok bool)
+	HandoffRoute(fiberID string) (routingKey, serverKeySHA256 string, serverCert []byte, ok bool)
 }
 
 // FiberStats is the runtime's measurement of one fiber. WUsedBytes is the

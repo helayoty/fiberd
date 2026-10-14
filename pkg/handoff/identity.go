@@ -22,6 +22,7 @@ const Suffix = ".fiberd"
 // Identity is the TLS identity a grant's handoff fibers serve with.
 type Identity struct {
 	CertPEM []byte // self-signed, for *.fiberd
+	Cert    []byte // the same certificate as DER, CloneResponse server_cert
 	KeyPEM  []byte // PKCS #8 Ed25519 private key
 	// KeySHA256 is the base64url SHA-256 of the certificate's
 	// SubjectPublicKeyInfo. Callers pin it (CloneResponse
@@ -69,6 +70,7 @@ func Derive(master []byte, grantUID string) (Identity, error) {
 	}
 	return Identity{
 		CertPEM:   pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
+		Cert:      der,
 		KeyPEM:    pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: pk}),
 		KeySHA256: KeyPin(spki),
 	}, nil

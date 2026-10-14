@@ -190,7 +190,7 @@ func callerCert(t *testing.T) (tls.Certificate, string) {
 // a fresh pair goes to the fiber, the other is the caller's TLS client.
 func handOff(t *testing.T, rt core.Runtime, fiberID string, cert tls.Certificate) net.Conn {
 	t.Helper()
-	key, pin, ok := rt.(core.HandoffRouter).HandoffRoute(fiberID)
+	key, pin, _, ok := rt.(core.HandoffRouter).HandoffRoute(fiberID)
 	if !ok || pin == "" {
 		t.Fatalf("no handoff route for %s", fiberID)
 	}
@@ -439,7 +439,7 @@ func TestEndpointFamilies(t *testing.T) {
 			if err := hm.rt.PrepareTemplate(ctx, g); err != nil {
 				t.Fatal(err)
 			}
-			h, err := hm.rt.Clone(ctx, core.CloneSpec{Grant: g, Fence: core.Fence{GrantUID: g.UID, Epoch: 1, Seq: 1}, Deadline: 2 * time.Second})
+			h, err := hm.rt.Clone(ctx, core.CloneSpec{Grant: g, Fence: core.Fence{GrantUID: g.UID, Epoch: 1, Seq: 1}, Deadline: 2 * time.Second, CallerCert: caller.Certificate[0]})
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -100,21 +100,21 @@ class Incarnation:
 
 
 class Identity:
-    """A handoff fiber's TLS identity, the grant's key and certificate, the caller it accepts and the home's CA bundle.
+    """A handoff fiber's TLS identity, the grant's key and certificate, and the one caller it accepts.
 
     caller is the thumbprint (x5t#S256) of the one client certificate the
-    fiber serves. ca_pem is the bundle that certificate chains to, empty
-    when the home runs in plaintext and sent none. The key is never a
-    file on disk and never shown by repr.
+    fiber serves, and caller_pem is that certificate, the one the clone
+    arrived under. The key is never a file on disk and never shown by
+    repr.
     """
 
-    __slots__ = ("key_pem", "cert_pem", "caller", "ca_pem")
+    __slots__ = ("key_pem", "cert_pem", "caller", "caller_pem")
 
-    def __init__(self, key_pem: str, cert_pem: str, caller: str, ca_pem: str) -> None:
+    def __init__(self, key_pem: str, cert_pem: str, caller: str, caller_pem: str) -> None:
         self.key_pem = key_pem
         self.cert_pem = cert_pem
         self.caller = caller
-        self.ca_pem = ca_pem
+        self.caller_pem = caller_pem
 
     def __repr__(self) -> str:
         return f"Identity(caller={self.caller!r})"
@@ -321,7 +321,7 @@ class Fiber:
         self._handoff_fd = int(env["FIBERD_HANDOFF_FD"]) if self.kind == "handoff" else -1
         # The identity sealed in a memfd, held for the fiber's lifetime, and the context over it.
         self._identity_fd = -1
-        self._tls: Optional[ssl.SSLContext] = None
+        self._tls: Optional[_handoff.ServerContext] = None
 
     def listen(self) -> socket.socket:
         """A bound, listening socket for a unix or tcp endpoint, as fiberd spelled it."""
@@ -365,9 +365,9 @@ class Fiber:
 
         A handoff fiber listens on nothing. Each connection fiberd passes
         down the channel reaches handler as an ssl.SSLSocket, TLS already
-        terminated under the grant's identity with the caller pinned, as
-        accept() returns it, and the loop ends when fiberd closes the
-        channel at release.
+        terminated under the grant's identity with the caller's certificate
+        pinned, as accept() returns it, and the loop ends when fiberd
+        closes the channel at release.
         """
         if self.kind == "handoff":
             self._serve_handoff(handler, poll)
@@ -437,9 +437,8 @@ class Fiber:
     def accept(self, *, handshake_timeout: float = _handoff.HANDSHAKE_TIMEOUT, poll: float = 0.5) -> ssl.SSLSocket:
         """The next handed-off connection, as an ssl.SSLSocket with TLS terminated under the grant's identity.
 
-        The caller's certificate must chain to the home's CA bundle and be
-        the one the grant is bound to. Any other connection is closed before
-        an application byte is read or written, and the next is waited for.
+        Only the certificate the grant is bound to completes the handshake.
+        Any other connection fails it, and the next is waited for.
         Blocks. Raises ConnectionResetError once fiberd closes the channel,
         which it does at release, and once the fiber is asked to stop
         (stopping set, which a SIGTERM handler such as serve()'s does),
@@ -451,7 +450,7 @@ class Fiber:
             if conn is not None:
                 return conn
 
-    def _tls_context(self) -> ssl.SSLContext:
+    def _tls_context(self) -> _handoff.ServerContext:
         """The server context, built once from the identity sealed in a memfd for the fiber's lifetime."""
         if self._tls is not None:
             return self._tls
@@ -460,11 +459,15 @@ class Fiber:
         if self.identity is None:
             raise TemplateError("this handoff fiber holds no identity")
         self._identity_fd = _handoff.seal_identity(self.identity.key_pem, self.identity.cert_pem)
-        self._tls = _handoff.server_context(self._identity_fd, self.identity.ca_pem)
+        self._tls = _handoff.server_context(self._identity_fd, self.identity.caller, self.identity.caller_pem)
         return self._tls
 
     def _terminate(self, ctx: ssl.SSLContext, fd: int, handshake_timeout: float = _handoff.HANDSHAKE_TIMEOUT) -> Optional[ssl.SSLSocket]:
-        """TLS over one handed-off descriptor, or None, with it closed, when the handshake fails or the caller is not the grant's."""
+        """TLS over one handed-off descriptor, or None, with it closed, when the handshake fails or the caller is not the grant's.
+
+        The handshake admits the bound caller's certificate alone. The
+        thumbprint check after it is the second look.
+        """
         assert self.identity is not None
         raw = socket.socket(fileno=fd)
         raw.settimeout(handshake_timeout)
@@ -512,8 +515,10 @@ class Fiber:
                 self.check_fence()
                 await one(reader, writer)
 
-            start = asyncio.start_unix_server if self.kind == "unix" else asyncio.start_server
-            server = await start(checked, sock=srv)
+            if self.kind == "unix":
+                server = await asyncio.start_unix_server(checked, sock=srv)
+            else:
+                server = await asyncio.start_server(checked, sock=srv)
             try:
                 self.ready()
                 while not self.stopping.is_set():
@@ -556,19 +561,28 @@ class Fiber:
             if conn is not None:
                 yield conn
 
-    async def _terminate_async(self, ctx: ssl.SSLContext, fd: int,
+    async def _terminate_async(self, ctx: _handoff.ServerContext, fd: int,
                                handshake_timeout: float) -> Optional[tuple[asyncio.StreamReader, asyncio.StreamWriter]]:
-        """_terminate under the running loop. The handshake runs in the loop, and the pin is checked before the pair is handed out."""
+        """_terminate under the running loop. The handshake runs in the loop, and the thumbprint is checked again before the pair is handed out.
+
+        asyncio closes a connection whose handshake failed without the
+        alert OpenSSL queued, so the caller would see a bare close. The
+        alert goes out on a duplicate of the descriptor instead, as it
+        does from the blocking handshake.
+        """
         assert self.identity is not None
         loop = asyncio.get_running_loop()
         raw = socket.socket(fileno=fd)
+        keep = socket.socket(fileno=os.dup(fd))
         reader = asyncio.StreamReader(loop=loop)
         protocol = asyncio.StreamReaderProtocol(reader, loop=loop)
         try:
             transport, _ = await loop.connect_accepted_socket(lambda: protocol, raw, ssl=ctx, ssl_handshake_timeout=handshake_timeout)
         except (OSError, ValueError, asyncio.TimeoutError):
+            _handoff.send_alert(ctx, keep)
             raw.close()
             return None
+        keep.close()
         ssl_object = transport.get_extra_info("ssl_object")
         peer = ssl_object.getpeercert(binary_form=True) if ssl_object is not None else None
         if not _handoff.pinned(peer, self.identity.caller):
