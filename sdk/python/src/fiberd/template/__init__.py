@@ -26,6 +26,7 @@ The rules serve() enforces, and why, are in docs/design/sdk.md.
 from __future__ import annotations
 
 import asyncio
+import errno
 import functools
 import gc
 import os
@@ -401,12 +402,9 @@ class Fiber:
         previous = signal.signal(signal.SIGTERM, lambda *_: self.stopping.set())
         self.ready()
         try:
-            while not self.stopping.is_set():
-                readable, _, _ = select.select([self._handoff_fd], [], [], poll)
-                if not readable:
-                    continue
+            while True:
                 try:
-                    fd = _ext().accept()
+                    fd = self._next_handoff(poll)
                 except ConnectionResetError:
                     return
                 self.check_fence()
@@ -420,18 +418,36 @@ class Fiber:
         finally:
             signal.signal(signal.SIGTERM, previous)
 
-    def accept(self, *, handshake_timeout: float = _handoff.HANDSHAKE_TIMEOUT) -> ssl.SSLSocket:
+    def _next_handoff(self, poll: float) -> int:
+        """The next descriptor off the handoff channel.
+
+        The library's accept retries through signals, so a Python handler
+        that sets stopping would not be seen until a connection came. The
+        wait is done here instead, in poll slices with stopping checked
+        between them, and the library is called once the channel is
+        readable. Raises ConnectionResetError when fiberd closed the
+        channel, and the same when the fiber is asked to stop.
+        """
+        while not self.stopping.is_set():
+            readable, _, _ = select.select([self._handoff_fd], [], [], poll)
+            if readable:
+                return _ext().accept()
+        raise ConnectionResetError(errno.ECONNRESET, "the fiber was asked to stop")
+
+    def accept(self, *, handshake_timeout: float = _handoff.HANDSHAKE_TIMEOUT, poll: float = 0.5) -> ssl.SSLSocket:
         """The next handed-off connection, as an ssl.SSLSocket with TLS terminated under the grant's identity.
 
         The caller's certificate must chain to the home's CA bundle and be
         the one the grant is bound to. Any other connection is closed before
         an application byte is read or written, and the next is waited for.
         Blocks. Raises ConnectionResetError once fiberd closes the channel,
-        which it does at release.
+        which it does at release, and once the fiber is asked to stop
+        (stopping set, which a SIGTERM handler such as serve()'s does),
+        noticed within poll seconds.
         """
         ctx = self._tls_context()
         while True:
-            conn = self._terminate(ctx, _ext().accept(), handshake_timeout)
+            conn = self._terminate(ctx, self._next_handoff(poll), handshake_timeout)
             if conn is not None:
                 return conn
 

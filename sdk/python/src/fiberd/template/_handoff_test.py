@@ -11,9 +11,11 @@ import asyncio
 import datetime
 import fcntl
 import os
+import signal
 import socket
 import ssl
 import threading
+import time
 
 import pytest
 
@@ -278,9 +280,12 @@ def refused(result):
 @table(CALLERS)
 def test_accept_serves_the_bound_caller_only(world, tmp_path, monkeypatch, name, f0, f1):
     ext = HandoffExt()
-    ch, _ = socket.socketpair()
+    ch, host_end = socket.socketpair()
     f = handoff_fiber(world, ext, monkeypatch, ch)
     threads, results = start_clients(world, tmp_path, ext, [getattr(world, w) if w else None for w in f0])
+    # fiberd's end: one message per connection, then the close at release.
+    host_end.sendall(b"\0" * len(f0))
+    host_end.close()
     served = []
     for _ in range(sum(f1)):
         conn = f.accept()
@@ -296,6 +301,61 @@ def test_accept_serves_the_bound_caller_only(world, tmp_path, monkeypatch, name,
     assert [r == ("reply", b"pong\n") for r in results] == f1
     assert all(refused(r) for r, ok in zip(results, f1) if not ok), "a refused caller saw no application byte"
     assert ext.calls == [], "accept() does not report ready, the author does"
+
+
+class BlockingExt(HandoffExt):
+    """The binding as fz_accept behaves: it blocks on the channel until a message or its close, through any interruption."""
+
+    def __init__(self, channel):
+        super().__init__()
+        self.channel = channel
+
+    def accept(self):
+        self.calls.append(("accept",))
+        if not self.channel.recv(1):
+            raise ConnectionResetError(104, "fiberd closed the channel")
+        return self.queue.pop(0)
+
+
+# The time accept() has to notice the stop, and when the channel closes
+# behind it, so code that notices nothing fails the bound instead of
+# hanging the suite.
+STOP_BOUND = 1.5
+STOP_RELEASE = 3.0
+
+STOPS = [
+    # how the fiber is asked to stop, 0.1s into accept()
+    ("stopping set", lambda f: f.stopping.set()),
+    ("SIGTERM under the handler serve() installs", lambda f: signal.pthread_kill(threading.main_thread().ident, signal.SIGTERM)),
+]
+
+
+@linux_only
+@table(STOPS)
+def test_accept_returns_when_the_fiber_is_asked_to_stop(world, monkeypatch, name, f0):
+    """accept() with no connection in sight ends, as it does at release, once the fiber is asked to stop."""
+    ch, host_end = socket.socketpair()
+    ext = BlockingExt(ch)
+    f = handoff_fiber(world, ext, monkeypatch, ch)
+    previous = signal.signal(signal.SIGTERM, lambda *_: f.stopping.set())
+    stop = threading.Timer(0.1, f0, [f])
+    release = threading.Timer(STOP_RELEASE, host_end.close)
+    try:
+        stop.start()
+        release.start()
+        started = time.monotonic()
+        with pytest.raises(ConnectionResetError):
+            f.accept()
+        took = time.monotonic() - started
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+        stop.cancel()
+        release.cancel()
+        stop.join()
+        host_end.close()
+    assert took < STOP_BOUND, f"accept() took {took:.2f}s to notice the stop"
+    assert f.stopping.is_set()
+    assert ext.calls == [], "fz_accept is called only once the channel is readable"
 
 
 def target(fd):
