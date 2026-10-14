@@ -314,7 +314,7 @@ func (a *Core) Clone(ctx context.Context, req CloneRequest) (CloneResponse, Stat
 			deadline = resume
 		}
 	}
-	spec := CloneSpec{Grant: g, Source: SourceZygote, Fence: fence, Deadline: deadline, Payload: req.Payload}
+	spec := CloneSpec{Grant: g, Source: SourceZygote, Fence: fence, Deadline: deadline, Payload: req.Payload, Session: req.Session}
 	if act == ActResume {
 		spec.Source, spec.Ref = SourceDelta, ref
 	}

@@ -45,10 +45,18 @@ import (
 // newHost opens the host runtime over the fork backend, as fiberd
 // -runtime proc does. A fiber that cannot get its namespaces or drop its
 // privileges is refused. A caller may pass its own fork backend, such as a
-// timed one for the benchmarks.
+// timed one for the benchmarks. Deltas and the template cache default to
+// this suite's own directories, never to fiberd's under /var/lib/fiberd,
+// which another suite running beside this one would share.
 func newHost(c host.Config) (core.Runtime, error) {
 	if c.Backend == nil {
 		c.Backend = procbackend.New(procbackend.Options{})
+	}
+	if c.DeltaDir == "" {
+		c.DeltaDir = filepath.Join(suiteDir, "deltas")
+	}
+	if c.TemplateCache == "" {
+		c.TemplateCache = filepath.Join(suiteDir, "templates")
 	}
 	c.FiberHide = append(c.FiberHide, hiddenDir)
 	if c.Handoff == nil {
@@ -69,6 +77,9 @@ func newHost(c host.Config) (core.Runtime, error) {
 var (
 	zygoteBin string
 	cgRoot    string
+	// suiteDir holds the zygote build and the deltas and template cache
+	// every runtime of this suite shares, removed when the suite ends.
+	suiteDir string
 	// hiddenDir holds a secret fiberd can read and no fiber may.
 	hiddenDir string
 	// deltaKeys are the keys every test home signs, trusts and seals
@@ -100,8 +111,11 @@ func TestZygoteBuildFlags(t *testing.T) {
 }
 
 func TestMain(m *testing.M) {
-	// First, before anything that must not run twice, since Narrow
-	// re-executes the binary (see TestRegistryTemplateNarrowedCaps).
+	// A mount namespace of this suite's own, before the first runtime
+	// binds a restore root the suites running beside it would see.
+	testenv.OwnMountNamespace()
+	// Before anything that must not run twice, since Narrow re-executes
+	// the binary (see TestRegistryTemplateNarrowedCaps).
 	if os.Getenv(narrowEnv) != "" {
 		if err := caps.Narrow(caps.Proc); err != nil {
 			fmt.Fprintf(os.Stderr, "skipping proc tests: cannot narrow the capability bounding set: %v\n", err)
@@ -109,10 +123,11 @@ func TestMain(m *testing.M) {
 		}
 	}
 	cgRoot = testenv.RequireCgroupRoot("proc")
-	dir, err := os.MkdirTemp("", "refzygote")
+	dir, err := os.MkdirTemp("", "fzproc")
 	if err != nil {
 		panic(err)
 	}
+	suiteDir = dir
 	if zygoteBin, err = testenv.BuildZygote(dir); err != nil {
 		fmt.Fprintf(os.Stderr, "skipping proc tests: %v\n", err)
 		os.Exit(0)

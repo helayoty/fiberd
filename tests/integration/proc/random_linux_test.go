@@ -72,9 +72,11 @@ func TestRandomPerIncarnation(t *testing.T) {
 		}},
 		{name: "two resumes of one park", draw: resumeTwice},
 		// A fiber that binds tcp itself has no socket to find its fence
-		// file beside. It reads the file named by its birth fence.
+		// file beside. It reads the file named by its birth fence. The
+		// ports sit below the kernel's ephemeral range (32768 and up), which
+		// any suite's listener or dial may be holding.
 		{name: "two resumes of one park on a tcp endpoint", draw: resumeTwice,
-			runtime: func(t *testing.T) core.Runtime { return tcpRuntime(t, fiberendpoint.Inet4, "127.0.0.1", 41010, 41013) }},
+			runtime: func(t *testing.T) core.Runtime { return tcpRuntime(t, fiberendpoint.Inet4, "127.0.0.1", 21010, 21013) }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

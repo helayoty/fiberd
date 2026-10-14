@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fiberd"
+version = "0.2.0.dev0"
+description = "The fiberd SDK. fiberd.template for code that runs inside a fiber, fiberd.client for callers of fiberd."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Operating System :: POSIX :: Linux",
+]
+
+[project.scripts]
+fiberd-template = "fiberd.template._cli:main"
+
+[project.optional-dependencies]
+# fiberd.client needs these two and a template never does. The floors are
+# Debian 12's versions, which made the generated messages (make python-proto).
+client = ["grpcio>=1.51", "protobuf>=3.21.12"]
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.distutils.bdist_wheel]
+py-limited-api = "cp310"
+
+[tool.pytest.ini_options]
+testpaths = ["src"]
+python_files = ["*_test.py"]
+
+[tool.ruff]
+line-length = 160
+src = ["src"]
+# The generated messages are protoc's output, checked by make python-proto-check instead.
+extend-exclude = ["src/fiberd/client/_api"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "TID"]
+
+# A unit test starts no process. The conftest makes the calls raise, and
+# this keeps them out of the test sources to begin with.
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"subprocess".msg = "a unit test starts no process; the harness is tests/integration/python"
+"os.fork".msg = "a unit test forks nothing; the harness is tests/integration/python"
+"os.posix_spawn".msg = "a unit test starts no process"
+"os.system".msg = "a unit test starts no process"
+
+[tool.ruff.lint.per-file-ignores]
+"!*_test.py" = ["TID251"]

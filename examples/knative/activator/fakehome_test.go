@@ -19,7 +19,7 @@ import (
 	"google.golang.org/protobuf/types/known/emptypb"
 
 	grantv1 "github.com/helayoty/fiberd/api/grant/v1"
-	"github.com/helayoty/fiberd/pkg/consumer"
+	"github.com/helayoty/fiberd/sdk/go/client"
 )
 
 // fakeHome is a scriptable home. Clone and Park run the hooks a case sets,
@@ -93,7 +93,7 @@ func (h *fakeHome) waitPark(t *testing.T) string {
 
 // startFake serves h over an in-memory connection and returns a client
 // of it.
-func startFake(t *testing.T, h *fakeHome) *consumer.Client {
+func startFake(t *testing.T, h *fakeHome) *client.Client {
 	t.Helper()
 	h.parks = make(chan string, 64)
 	lis := bufconn.Listen(1 << 20)
@@ -107,7 +107,7 @@ func startFake(t *testing.T, h *fakeHome) *consumer.Client {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := consumer.New(conn)
+	c := client.New(conn)
 	t.Cleanup(func() { _ = c.Close() })
 	return c
 }

@@ -11,7 +11,7 @@
  * Built by the tests in tests/integration/proc (see prepare_linux_test.go), linked
  * with the library like refzygote. */
 #define _GNU_SOURCE
-#include "../../../../zygote/libfiberzygote.h"
+#include "../../../../sdk/c/template/libfiberzygote.h"
 
 #include <pthread.h>
 #include <stdio.h>

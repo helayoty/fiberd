@@ -203,8 +203,8 @@ jobs:
           # Ship the zygote library that templates link, as source and as a
           # static library per Linux architecture.
           lib="$(mktemp -d)"
-          cp zygote/libfiberzygote.c zygote/libfiberzygote.h LICENSE NOTICE "$lib/"
-          readme zygote/README.md zygote/ "$lib/README.md"
+          cp sdk/c/template/libfiberzygote.c sdk/c/template/libfiberzygote.h LICENSE NOTICE "$lib/"
+          readme sdk/c/template/README.md sdk/c/template/ "$lib/README.md"
           pack "libfiberzygote_${VERSION}_src.tar.gz" "$lib"
           rm "$lib/libfiberzygote.c"
           # Built on Debian 12 (glibc 2.36), so the archive links on older glibc too.
@@ -225,7 +225,7 @@ jobs:
                 mkdir "/out/$arch"
                 "$cc" -D_FORTIFY_SOURCE=3 -O2 -fstack-protector-strong -fstack-clash-protection -fPIC \
                   -Wformat=2 -Werror=format-security -Wall -Wextra -pthread $flags -ffile-prefix-map=/src=. \
-                  -c zygote/libfiberzygote.c -o /tmp/libfiberzygote.o
+                  -c sdk/c/template/libfiberzygote.c -o /tmp/libfiberzygote.o
                 "$ar" rcsD "/out/$arch/libfiberzygote.a" /tmp/libfiberzygote.o
               done'
           for arch in amd64 arm64; do

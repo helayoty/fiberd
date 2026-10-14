@@ -1,7 +1,7 @@
 //go:build linux
 
 // Package proc is the fork backend. It runs one zygote per grant, linked
-// with zygote/libfiberzygote, which forks fibers on request over a
+// with sdk/c/template/libfiberzygote, which forks fibers on request over a
 // socketpair inherited as fd 3. CRIU checkpoints them. It is the reference
 // backend that the conformance suite runs against.
 //
@@ -11,7 +11,7 @@
 //	host   -> zygote HIDE <dir> | DROP <path> | RUNDIR <parent> <own>   (any number)
 //	host   -> zygote PREPARE mntns|none                                 (ends the setup)
 //	zygote -> host   READY
-//	host   -> zygote CLONE <fence> <endpoint> <deadline_ms> <payload-hex|-> [opt,opt...]   + SCM_RIGHTS cgroup fd [, handoff channel]
+//	host   -> zygote CLONE <fence> <endpoint> <deadline_ms> <payload-hex|-> <session-hex|-> [opt,opt...]   + SCM_RIGHTS cgroup fd [, handoff channel]
 //	zygote -> host   CLONED <fence> <pid>  |  ERROR <fence> <text>
 //	zygote -> host   EXITED <pid> exit:<n>|signal:<name>
 //
@@ -24,8 +24,9 @@
 // zygote's environment. A launcher's fibers get no mount namespace, so
 // its zygote is started without the variable and sent PREPARE none and
 // nothing else.
-// CLONE options are any of pidns, mntns, nocaps and handoff,
-// comma-separated. With none the field is empty and the line ends in a
+// The session is hex so a name may hold any character, and "-" for an
+// anonymous fiber. CLONE options are any of pidns, mntns, nocaps and
+// handoff, comma-separated. With none the field is empty and the line ends in a
 // space. The host queues the grant's TLS identity as the handoff channel's
 // first message. A child that cannot get every confinement it asked for
 // ends before it runs, and the zygote sends ERROR. A zygote that could not
@@ -1290,6 +1291,10 @@ func (b *Backend) Clone(ctx context.Context, warmID string, spec backend.FiberSp
 	if len(spec.Payload) > 0 {
 		payload = hex.EncodeToString(spec.Payload)
 	}
+	session := "-"
+	if spec.Session != "" {
+		session = hex.EncodeToString([]byte(spec.Session))
+	}
 	// A launcher's fibers already live in its container's mount
 	// namespace, which holds none of fiberd's paths. They keep the
 	// container's capabilities, because CRIU will not dump a fiber without
@@ -1311,7 +1316,7 @@ func (b *Backend) Clone(ctx context.Context, warmID string, spec backend.FiberSp
 		// mount; a tcp endpoint is the same address inside and out.
 		endpoint = b.opt.Launcher.Endpoint(z.spec, endpoint)
 	}
-	msg := fmt.Sprintf("CLONE %s %s %d %s %s\n", spec.Fence, endpoint, deadline, payload, opt)
+	msg := fmt.Sprintf("CLONE %s %s %d %s %s %s\n", spec.Fence, endpoint, deadline, payload, session, opt)
 	reply := make(chan cloneResult, 1)
 	z.pmu.Lock()
 	z.pend[spec.Fence] = &pending{ch: reply, handoff: spec.Handoff != nil}

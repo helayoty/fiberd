@@ -35,10 +35,10 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"github.com/helayoty/fiberd/pkg/consumer"
 	"github.com/helayoty/fiberd/pkg/core"
 	fiberendpoint "github.com/helayoty/fiberd/pkg/endpoint"
 	"github.com/helayoty/fiberd/pkg/runtime/host"
+	"github.com/helayoty/fiberd/sdk/go/client"
 
 	ateompb "github.com/helayoty/fiberd/examples/substrate/proto/ateom"
 )
@@ -63,7 +63,7 @@ type Router interface {
 
 // Config wires the herder.
 type Config struct {
-	Client *consumer.Client
+	Client *client.Client
 	Grants Grants
 	// Host names the delta registry fiberd publishes to; ExportDelta
 	// and ImportDelta work there.
@@ -90,7 +90,7 @@ type actor struct {
 	uid      string
 	tmpl     Template
 	grant    core.Grant
-	fiber    consumer.Fiber
+	fiber    client.Fiber
 	started  time.Time
 	spec     *ateompb.WorkloadSpec
 	sampleAt time.Time
@@ -104,7 +104,7 @@ type Service struct {
 	lifecycle sync.Mutex // Run, Checkpoint, Restore and Terminate serialise
 	mu        sync.Mutex // active, stats, draining
 	active    *actor
-	stats     map[string]consumer.Status
+	stats     map[string]client.Status
 	draining  bool
 }
 
@@ -118,13 +118,13 @@ func New(cfg Config) *Service {
 	if cfg.Probe == nil {
 		cfg.Probe = httpProbe
 	}
-	return &Service{cfg: cfg, stats: map[string]consumer.Status{}}
+	return &Service{cfg: cfg, stats: map[string]client.Status{}}
 }
 
 // Run keeps the stats current from fiberd's Watch stream until ctx ends.
 func (s *Service) Run(ctx context.Context) {
 	for ctx.Err() == nil {
-		err := s.cfg.Client.Watch(ctx, func(st consumer.Status) {
+		err := s.cfg.Client.Watch(ctx, func(st client.Status) {
 			s.mu.Lock()
 			s.stats[st.GrantUID] = st
 			if s.active != nil && s.active.grant.UID == st.GrantUID {
@@ -177,7 +177,7 @@ func (s *Service) RunWorkload(ctx context.Context, req *ateompb.RunWorkloadReque
 		return nil, err
 	}
 	tmpl := Template{req.GetActorTemplateAtespace(), req.GetActorTemplateName()}
-	a, err := s.start(ctx, tmpl, req.GetAtespace(), req.GetActorName(), req.GetActorUid(), uint64(req.GetMemoryBytes()), req.GetSpec(), consumer.Create)
+	a, err := s.start(ctx, tmpl, req.GetAtespace(), req.GetActorName(), req.GetActorUid(), uint64(req.GetMemoryBytes()), req.GetSpec(), client.Create)
 	if err != nil {
 		return nil, err
 	}
@@ -207,7 +207,7 @@ func (s *Service) RestoreWorkload(ctx context.Context, req *ateompb.RestoreWorkl
 	if err := host.ImportDelta(ctx, s.cfg.Host, g, req.GetActorUid(), dir); err != nil {
 		return nil, status.Errorf(codes.FailedPrecondition, "import snapshot from %s: %v", dir, err)
 	}
-	a, err := s.start(ctx, tmpl, req.GetAtespace(), req.GetActorName(), req.GetActorUid(), uint64(req.GetMemoryBytes()), req.GetSpec(), consumer.Resume)
+	a, err := s.start(ctx, tmpl, req.GetAtespace(), req.GetActorName(), req.GetActorUid(), uint64(req.GetMemoryBytes()), req.GetSpec(), client.Resume)
 	if err != nil {
 		return nil, err
 	}
@@ -233,7 +233,7 @@ func (s *Service) canStart(uid string) error {
 // start clones the actor's session and expects it to be served the given
 // way: a Run must create, a Restore must resume. Anything else is a
 // state this herder did not expect and the fiber is let go.
-func (s *Service) start(ctx context.Context, tmpl Template, atespace, name, uid string, memory uint64, spec *ateompb.WorkloadSpec, want consumer.Kind) (*actor, error) {
+func (s *Service) start(ctx context.Context, tmpl Template, atespace, name, uid string, memory uint64, spec *ateompb.WorkloadSpec, want client.Kind) (*actor, error) {
 	jwt, g, err := s.cfg.Grants.Grant(ctx, tmpl, memory)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "grant for %s: %v", tmpl.Digest(), err)
@@ -244,7 +244,7 @@ func (s *Service) start(ctx context.Context, tmpl Template, atespace, name, uid 
 		return nil, toStatus(err)
 	}
 	if f.Kind != want {
-		_ = s.cfg.Client.Release(ctx, f.ID, want == consumer.Resume)
+		_ = s.cfg.Client.Release(ctx, f.ID, want == client.Resume)
 		return nil, status.Errorf(codes.Internal, "clone of %s served %s, want %s", uid, f.Kind, want)
 	}
 	if err := s.ready(ctx, f.Endpoint, spec); err != nil {
@@ -341,7 +341,7 @@ func (s *Service) TerminateWorkload(ctx context.Context, req *ateompb.TerminateW
 	if s.cfg.Router != nil {
 		s.cfg.Router.Deactivate(a.ref[0], a.ref[1])
 	}
-	if err := s.cfg.Client.Release(ctx, a.fiber.ID, true); err != nil && !consumer.NotFound(err) {
+	if err := s.cfg.Client.Release(ctx, a.fiber.ID, true); err != nil && !client.NotFound(err) {
 		return nil, toStatus(err)
 	}
 	s.mu.Lock()
@@ -402,9 +402,9 @@ func (s *Service) sampleLocked(a *actor) (*ateompb.WorkloadStatsSample, bool) {
 // router parks on: a miss is ResourceExhausted (capacity) or Unavailable
 // (control plane), a tier gap is FailedPrecondition.
 func toStatus(err error) error {
-	var shed *consumer.Shed
-	var def *consumer.Deferred
-	var gap *consumer.TierGap
+	var shed *client.Shed
+	var def *client.Deferred
+	var gap *client.TierGap
 	switch {
 	case errors.As(err, &shed):
 		return status.Errorf(codes.Unavailable, "%v", err)

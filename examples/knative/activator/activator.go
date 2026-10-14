@@ -29,8 +29,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/helayoty/fiberd/pkg/consumer"
 	"github.com/helayoty/fiberd/pkg/endpoint"
+	"github.com/helayoty/fiberd/sdk/go/client"
 )
 
 // Revision is one function: a grant on a home and a session name.
@@ -61,7 +61,7 @@ type Config struct {
 type slot struct {
 	session string
 	mu      sync.Mutex
-	fiber   *consumer.Fiber
+	fiber   *client.Fiber
 	lastUse time.Time
 	inUse   int
 }
@@ -73,18 +73,18 @@ type revision struct {
 
 type Activator struct {
 	cfg    Config
-	client *consumer.Client
+	client *client.Client
 	revs   map[string]*revision
 }
 
-func New(client *consumer.Client, cfg Config) (*Activator, error) {
+func New(c *client.Client, cfg Config) (*Activator, error) {
 	if cfg.CloneDeadline <= 0 {
 		cfg.CloneDeadline = 5 * time.Second
 	}
 	if cfg.Dial == nil {
 		cfg.Dial = endpoint.Dial
 	}
-	a := &Activator{cfg: cfg, client: client, revs: map[string]*revision{}}
+	a := &Activator{cfg: cfg, client: c, revs: map[string]*revision{}}
 	for _, r := range cfg.Revisions {
 		if r.Name == "" || r.Grant == "" {
 			return nil, errors.New("activator: a revision needs a name and a grant")
@@ -145,7 +145,7 @@ func (a *Activator) parkIdle(ctx context.Context, now time.Time) {
 				pctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 				err := a.client.Park(pctx, f.ID, false)
 				cancel()
-				if err != nil && !consumer.NotFound(err) {
+				if err != nil && !client.NotFound(err) {
 					log.Printf("activator: park %s (%s): %v", s.session, f.ID, err)
 				} else {
 					log.Printf("activator: parked %s (%s) after %s idle", s.session, f.Fence, a.cfg.Idle)
@@ -215,14 +215,14 @@ func (a *Activator) pick(rv *revision) *slot {
 // acquire returns a serving fiber for the revision, cloning (or
 // resuming) one when the chosen slot has none. A request served by a
 // fiber the activator already holds is an attach.
-func (a *Activator) acquire(ctx context.Context, rv *revision) (*slot, consumer.Fiber, error) {
+func (a *Activator) acquire(ctx context.Context, rv *revision) (*slot, client.Fiber, error) {
 	s := a.pick(rv)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.fiber == nil {
 		f, err := a.client.Clone(ctx, rv.Grant, s.session, a.cfg.CloneDeadline, nil)
 		if err != nil {
-			return nil, consumer.Fiber{}, err
+			return nil, client.Fiber{}, err
 		}
 		log.Printf("activator: %s %s -> %s (%s)", f.Kind, s.session, f.Endpoint, f.Fence)
 		s.fiber = &f
@@ -238,7 +238,7 @@ func (a *Activator) acquire(ctx context.Context, rv *revision) (*slot, consumer.
 }
 
 // Attach marks a request served by a fiber the activator already held.
-const Attach = consumer.Attach
+const Attach = client.Attach
 
 func (a *Activator) release(s *slot, gone bool) {
 	s.mu.Lock()
@@ -278,9 +278,9 @@ func (a *Activator) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // miss maps the consumer's typed errors to what a caller in front of
 // Knative expects.
 func (a *Activator) miss(w http.ResponseWriter, err error) {
-	var shed *consumer.Shed
-	var def *consumer.Deferred
-	var gap *consumer.TierGap
+	var shed *client.Shed
+	var def *client.Deferred
+	var gap *client.TierGap
 	switch {
 	case errors.As(err, &shed):
 		w.Header().Set("Retry-After", strconv.Itoa(int(shed.RetryAfter/time.Second)))
@@ -300,7 +300,7 @@ func (a *Activator) miss(w http.ResponseWriter, err error) {
 // proxyLine: the request body (first line) goes to the fiber as one
 // protocol line, the reply comes back as the response body. GET with no
 // body pings. Reports whether the fiber turned out to be gone.
-func (a *Activator) proxyLine(w http.ResponseWriter, r *http.Request, f consumer.Fiber) bool {
+func (a *Activator) proxyLine(w http.ResponseWriter, r *http.Request, f client.Fiber) bool {
 	line := "ping"
 	if r.Body != nil {
 		b, _ := io.ReadAll(io.LimitReader(r.Body, 4096))
@@ -333,7 +333,7 @@ func (a *Activator) proxyLine(w http.ResponseWriter, r *http.Request, f consumer
 
 // proxyHTTP forwards the request to a guest that serves HTTP on its
 // endpoint.
-func (a *Activator) proxyHTTP(w http.ResponseWriter, r *http.Request, f consumer.Fiber, path string) bool {
+func (a *Activator) proxyHTTP(w http.ResponseWriter, r *http.Request, f client.Fiber, path string) bool {
 	gone := false
 	// Each request gets its own transport, so it must not keep the
 	// connection. An idle one would hold a socket and two goroutines for good.

@@ -20,7 +20,7 @@ import (
 	"github.com/containerd/plugin"
 	"github.com/containerd/plugin/registry"
 
-	"github.com/helayoty/fiberd/pkg/consumer"
+	"github.com/helayoty/fiberd/sdk/go/client"
 )
 
 // RuntimeName is the runtime_type containerd's config names.
@@ -133,7 +133,7 @@ func (m Manager) Stop(ctx context.Context, id string) (shim.StopStatus, error) {
 		if json.Unmarshal(raw, &st) == nil && st.FiberID != "" {
 			cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 			defer cancel()
-			if c, err := consumer.Dial(cctx, st.Home); err == nil {
+			if c, err := client.Dial(cctx, st.Home); err == nil {
 				if st.OnStop == "park" {
 					_ = c.Park(cctx, st.FiberID, false)
 				} else {

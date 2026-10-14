@@ -20,7 +20,7 @@ REG_NAME=${COMPARE_REGISTRY:-compare-registry}
 REG_PORT=${COMPARE_REGISTRY_PORT:-5002}
 RUNSC_RELEASE=${RUNSC_RELEASE:-20260817.0}
 # Each binary's sha512, copied from gVisor's .sha512 files for the
-# release above (runsc's as docker/criu/Dockerfile pins them), so a
+# release above (runsc's as docker/dev/Dockerfile pins them), so a
 # changed download fails instead of being checked against itself.
 RUNSC_SHA512_X86_64=84936438d583ec976800f464e75a83e1515f0890b451b9b4db219c4472b54ca9b106a6772ee683f1e64cce2128871d7637b14d800591f8451b8137f6c39fb2ef
 RUNSC_SHA512_AARCH64=6394fd161a4af0dc9a2c29f75c3016d05275a55744f124e12023fa7666a9f161c68d6ce3803ad49205c6a7b5bee0ad2ccf48edff340db344fdafec678c788aa4

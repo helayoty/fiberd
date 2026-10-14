@@ -13,17 +13,17 @@ import (
 	"google.golang.org/grpc/test/bufconn"
 	"google.golang.org/protobuf/encoding/protojson"
 
-	"github.com/helayoty/fiberd/pkg/consumer"
 	"github.com/helayoty/fiberd/pkg/core"
 	"github.com/helayoty/fiberd/pkg/grant"
 	"github.com/helayoty/fiberd/pkg/rpc"
 	"github.com/helayoty/fiberd/pkg/runtime/stub"
+	"github.com/helayoty/fiberd/sdk/go/client"
 )
 
 // stubHome: fiberd over the in-memory runtime, reached through
-// the consumer client, as the kata example tests do.
+// the Go client, as the kata example tests do.
 // The returned stop takes fiberd's server down while the client stays.
-func stubHome(t *testing.T) (*core.Core, *consumer.Client, func()) {
+func stubHome(t *testing.T) (*core.Core, *client.Client, func()) {
 	t.Helper()
 	ag := &core.Core{
 		NodeID: "worker-1", Ledger: core.NewLedger(1), RateLimit: core.NewRateLimit(1000, 256<<20),
@@ -43,7 +43,7 @@ func stubHome(t *testing.T) (*core.Core, *consumer.Client, func()) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return ag, consumer.New(conn), gs.Stop
+	return ag, client.New(conn), gs.Stop
 }
 
 // jsonGrants mints development (unsigned) grants, one per template.
@@ -88,7 +88,7 @@ type worker struct {
 	core   *core.Core
 	svc    *Service
 	router *recordingRouter
-	client *consumer.Client
+	client *client.Client
 	grants *jsonGrants
 	stop   func() // takes fiberd's server down
 }
@@ -97,11 +97,11 @@ type worker struct {
 // config before New.
 func newWorker(t *testing.T, fiberMax int, mod func(*Config)) *worker {
 	t.Helper()
-	ag, client, stop := stubHome(t)
+	ag, c, stop := stubHome(t)
 	router := &recordingRouter{active: map[string]string{}}
 	grants := &jsonGrants{t: t, fiberMax: fiberMax, minted: map[string]core.Grant{}}
 	cfg := Config{
-		Client: client, Grants: grants,
+		Client: c, Grants: grants,
 		Router: router, Paths: Paths{Base: t.TempDir()},
 		Probe: func(context.Context, string, string) error { return nil },
 	}
@@ -112,7 +112,7 @@ func newWorker(t *testing.T, fiberMax int, mod func(*Config)) *worker {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	go s.Run(ctx)
-	return &worker{core: ag, svc: s, router: router, client: client, grants: grants, stop: stop}
+	return &worker{core: ag, svc: s, router: router, client: c, grants: grants, stop: stop}
 }
 
 func runReq(uid string) *ateompbRun {
@@ -282,9 +282,9 @@ func TestToStatus(t *testing.T) {
 		err  error
 		want codes.Code
 	}{
-		{name: "shed is unavailable", err: &consumer.Shed{RetryAfter: time.Second}, want: codes.Unavailable},
-		{name: "deferred is resource exhausted", err: &consumer.Deferred{Reason: "full"}, want: codes.ResourceExhausted},
-		{name: "a tier gap is a failed precondition", err: &consumer.TierGap{Reason: "warm only"}, want: codes.FailedPrecondition},
+		{name: "shed is unavailable", err: &client.Shed{RetryAfter: time.Second}, want: codes.Unavailable},
+		{name: "deferred is resource exhausted", err: &client.Deferred{Reason: "full"}, want: codes.ResourceExhausted},
+		{name: "a tier gap is a failed precondition", err: &client.TierGap{Reason: "warm only"}, want: codes.FailedPrecondition},
 		{name: "a gRPC status passes through", err: status.Error(codes.NotFound, "x"), want: codes.NotFound},
 		{name: "anything else is internal", err: context.DeadlineExceeded, want: codes.Internal},
 	}

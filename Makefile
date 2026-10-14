@@ -44,7 +44,8 @@ CONFORM_DIR ?= $(BIN)
 endif
 
 .PHONY: all build test integration-tests vet lint proto proto-lint proto-check clean \
-        bench zygote fuzz conform-stub conform-signed conform-logs conform-proc conform-gvisor conform-runc conform-hyperlight-fake conform-hyperlight \
+        bench zygote fuzz conform-stub conform-signed conform-logs conform-proc conform-proc-python conform-gvisor conform-gvisor-python conform-runc conform-runc-python conform-hyperlight-fake conform-hyperlight \
+        python-build python-test python-proto python-proto-check \
         hyperlight-helper linux-hyperlight-check overcommit kind-up kind-down kind-image conform-kind slurm-up slurm-down conform-slurm example-knative example-knative-kvm example-kata example-substrate \
         registry-start mobility linux-shell linux-check linux-gvisor-check linux-test linux-lint bench-e2e \
         compare-phase0 compare-phase1 compare-phase2 compare-phase3 compare-phase4 compare-down
@@ -66,11 +67,25 @@ conform-signed: ## same, over real signed grants: grant-issuer serve + -verifier
 conform-proc: ## C1-C10 against the fork runtime with real cgroups, inside the Linux dev container
 	hack/dev/run.sh env CONFORM_RUNTIME=proc CONFORM_SIGNED=1 CONFORM_STATE=$(CONFORM_DIR)/conform-state-proc hack/conform/stub.sh run
 
+conform-proc-python: ## C1-C10 against the fork runtime with the Python reference template (sdk/python), inside the Linux dev container
+	hack/dev/run.sh sh -ec 'hack/python/build.sh; env CONFORM_RUNTIME=proc CONFORM_SIGNED=1 CONFORM_W_BUDGET=8388608 \
+	  CONFORM_TEMPLATE="$$PWD/hack/python/template.sh --heap-mb 32" CONFORM_STATE=$(CONFORM_DIR)/conform-state-proc-python hack/conform/stub.sh run'
+
 conform-gvisor: ## C1-C10 against the gvisor backend (a runsc sandbox per fiber), with a pool of 2 per grant, inside the Linux dev container
 	hack/dev/run.sh env CONFORM_RUNTIME=gvisor CONFORM_SIGNED=1 CONFORM_WARM=2 CONFORM_STATE=$(CONFORM_DIR)/conform-state-gvisor hack/conform/stub.sh run
 
+conform-gvisor-python: ## C1-C10 against the gvisor backend with the Python reference template in a rootfs with CPython (hack/python/rootfs.sh), pooled, inside the Linux dev container
+	hack/dev/run.sh env CONFORM_RUNTIME=gvisor CONFORM_SIGNED=1 CONFORM_WARM=2 CONFORM_W_BUDGET=8388608 CONFORM_ROOTFS_SH=hack/python/rootfs.sh \
+	  CONFORM_GVISOR_ROOTFS=/var/lib/fiberd/gvisor-rootfs-python CONFORM_TEMPLATE="/usr/bin/python3 -m fiberd.template.ref --heap-mb 32" \
+	  CONFORM_STATE=$(CONFORM_DIR)/conform-state-gvisor-python hack/conform/stub.sh run
+
 conform-runc: ## C1-C10 against the runc backend (the zygote as an OCI container's init), inside the Linux dev container
 	hack/dev/run.sh env CONFORM_RUNTIME=runc CONFORM_SIGNED=1 CONFORM_STATE=$(CONFORM_DIR)/conform-state-runc hack/conform/stub.sh run
+
+conform-runc-python: ## C1-C10 against the runc backend with the Python reference template in the same rootfs, inside the Linux dev container
+	hack/dev/run.sh env CONFORM_RUNTIME=runc CONFORM_SIGNED=1 CONFORM_W_BUDGET=8388608 CONFORM_ROOTFS_SH=hack/python/rootfs.sh \
+	  CONFORM_GVISOR_ROOTFS=/var/lib/fiberd/gvisor-rootfs-python CONFORM_TEMPLATE="/usr/bin/python3 -m fiberd.template.ref --heap-mb 32" \
+	  CONFORM_STATE=$(CONFORM_DIR)/conform-state-runc-python hack/conform/stub.sh run
 
 conform-hyperlight-fake: ## C1-C10 against the hyperlight backend over the fake helper (no hypervisor), inside the Linux dev container
 	hack/dev/run.sh env CONFORM_RUNTIME=hyperlight CONFORM_SIGNED=1 CONFORM_STATE=$(CONFORM_DIR)/conform-state-hyperlight hack/conform/stub.sh run
@@ -186,16 +201,43 @@ proto-check: proto proto-lint ## fail if generated code is out of date (CI)
 	@git diff --exit-code -- api/ || \
 	  (echo "generated proto code is stale: run 'make proto' and commit" && exit 1)
 
+# The Python messages (sdk/python/src/fiberd/client/_api) come from the
+# same proto through protoc 3.21, the protobuf-compiler package of
+# Debian 12 and Ubuntu 24.04, which the dev image and the CI runner
+# share, since every generator version prints differently and CI
+# compares the files.
+PROTOC          ?= protoc
+PYTHON_API_DIR  := sdk/python/src/fiberd/client/_api
+PYTHON_PROTOC   := $(PROTOC) -I api/grant/v1 grant.proto
+
+python-proto: ## regenerate the Python messages from api/grant/v1/grant.proto, inside the dev container
+	hack/dev/run.sh $(PYTHON_PROTOC) --python_out=$(PYTHON_API_DIR) --pyi_out=$(PYTHON_API_DIR)
+
+python-proto-check: ## fail if the Python messages are out of date (CI, with protobuf-compiler installed), generated to a scratch directory and compared
+	@tmp=$$(mktemp -d) && $(PYTHON_PROTOC) --python_out=$$tmp --pyi_out=$$tmp && \
+	  diff -u $(PYTHON_API_DIR)/grant_pb2.py $$tmp/grant_pb2.py && diff -u $(PYTHON_API_DIR)/grant_pb2.pyi $$tmp/grant_pb2.pyi; \
+	  code=$$?; rm -rf $$tmp; \
+	  [ $$code -eq 0 ] || (echo "the Python messages are stale: run 'make python-proto' and commit" && exit 1)
+
 ## The zygote library and the reference workload.
 ## Linux only (clone3, close_range); build them inside the dev container.
 
 zygote: ## build bin/refzygote, the reference zygote, with TLS for handoff grants
 	@mkdir -p $(BIN)
-	$(CC) $(ZYGOTE_CFLAGS) $(ZYGOTE_LDFLAGS) -Wall -Wextra -pthread -DFZ_TLS -o $(BIN)/refzygote zygote/refzygote.c zygote/libfiberzygote.c -lssl -lcrypto
+	$(CC) $(ZYGOTE_CFLAGS) $(ZYGOTE_LDFLAGS) -Wall -Wextra -pthread -DFZ_TLS -o $(BIN)/refzygote sdk/c/template/refzygote.c sdk/c/template/libfiberzygote.c -lssl -lcrypto
 
 fuzz: ## fuzz the zygote's parsers (libFuzzer) and the handoff parser (go test -fuzz), FUZZTIME seconds each
-	FUZZTIME=$(FUZZTIME) FUZZ_OUT=$(BIN)/fuzz zygote/fuzz/run.sh
+	FUZZTIME=$(FUZZTIME) FUZZ_OUT=$(BIN)/fuzz sdk/c/template/fuzz/run.sh
 	$(GO) test -run='^$$' -fuzz=FuzzServerName -fuzztime=$(FUZZTIME)s ./pkg/handoff/
+
+## The Python SDK (sdk/python). Its extension needs Linux, so it is built
+## and its unit tests run inside the dev container.
+
+python-build: ## build the fiberd._zygote extension in place (sdk/python/src/fiberd), inside the dev container
+	hack/dev/run.sh hack/python/build.sh
+
+python-test: ## the Python unit tests (pytest, no process started), after the build, inside the dev container
+	hack/dev/run.sh sh -ec 'hack/python/build.sh; cd sdk/python && PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q -p no:cacheprovider'
 
 ## Linux-only work runs in the dev container (hack/dev): privileged,
 ## private cgroup namespace, criu installed. Needs Docker.

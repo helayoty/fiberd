@@ -1,7 +1,7 @@
 # The worker image a Substrate WorkerPool runs. It holds ateom-fiberd,
 # runsc, and the rootfs every actor's sandbox runs in, with the reference
 # workload in HTTP mode as the actor. It builds from fiberd's dev image
-# (docker/criu), which has the toolchain, runsc and the PAC-free OpenSSL
+# (docker/dev), which has the toolchain, runsc and the PAC-free OpenSSL
 # the rootfs needs. The runtime layer is bookworm-slim.
 #
 #   docker build -t ateom-fiberd:dev -f docker/substrate/Dockerfile .   (from the repo root)

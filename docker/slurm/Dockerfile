@@ -1,7 +1,7 @@
 # A one-node Slurm cluster with fiberd inside. It holds Debian's slurm-wlm,
 # munge, criu, fiberd-slurm, and fiberd's reference issuer, zygote,
 # conformance and storm binaries. It builds from fiberd's dev image
-# (docker/criu), which has the toolchain and criu 4.1.1. The runtime layer
+# (docker/dev), which has the toolchain and criu 4.1.1. The runtime layer
 # is bookworm-slim.
 #
 #   docker build -t fiberd:slurm -f docker/slurm/Dockerfile .   (from the repo root)
@@ -18,7 +18,7 @@ COPY . .
 # Go binaries are static and reproducible. The reference zygote is built
 # with TLS (-DFZ_TLS) so it can serve handoff grants, with ZYGOTE_CFLAGS and
 # ZYGOTE_LDFLAGS from the Makefile. On aarch64 it is built without PAC
-# branch protection (see docker/criu/Dockerfile).
+# branch protection (see docker/dev/Dockerfile).
 # fiberd is built with the fiberd_testhooks tag, since the conformance run
 # drives the test-only admin controls (-admin-unsafe). The release image
 # (docker/fiberd) is built without it.
@@ -31,7 +31,7 @@ RUN set -eu; mkdir -p /out; \
     flags=""; if [ "$(uname -m)" = aarch64 ]; then flags="-mbranch-protection=none"; fi; \
     gcc -D_FORTIFY_SOURCE=3 -O2 -fstack-protector-strong -fstack-clash-protection -fPIE -Wformat=2 -Werror=format-security \
       -pie -Wl,-z,relro,-z,now -Wall -Wextra -pthread $flags -DFZ_TLS -o /out/refzygote \
-      zygote/refzygote.c zygote/libfiberzygote.c -lssl -lcrypto
+      sdk/c/template/refzygote.c sdk/c/template/libfiberzygote.c -lssl -lcrypto
 
 FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587
 LABEL org.opencontainers.image.source="https://github.com/helayoty/fiberd" \
@@ -51,6 +51,7 @@ COPY --from=build --chmod=0755 /out/ /usr/local/bin/
 COPY examples/slurm/docker/slurm.conf.in /etc/slurm/slurm.conf.in
 COPY examples/slurm/docker/cgroup.conf /etc/slurm/cgroup.conf
 COPY --chmod=0755 examples/slurm/docker/entrypoint.sh /usr/local/bin/slurm-entrypoint
+COPY --chmod=0755 examples/slurm/docker/cgroup-setup.sh /usr/local/bin/slurm-cgroup-setup
 COPY --chmod=0755 examples/slurm/prolog/fiberd-prolog.sh /usr/local/bin/fiberd-prolog.sh
 COPY --chmod=0755 examples/slurm/prolog/fiberd-job.sh /usr/local/bin/fiberd-job.sh
 # No USER on purpose. The entrypoint starts the Slurm daemons and carves

@@ -113,6 +113,9 @@ func newRuntime(t *testing.T, root, name, template string, be func(state string)
 		CgroupRoot: filepath.Join(root, name),
 		RunDir:     filepath.Join("/tmp", "fz-"+name),
 		DeltaDir:   filepath.Join(state, "deltas"),
+		// This suite's own store, not /var/lib/fiberd/templates, which
+		// another suite running beside this one would share.
+		TemplateCache: filepath.Join(work, "templates"),
 	}
 	for _, mod := range mods {
 		mod(&cfg)

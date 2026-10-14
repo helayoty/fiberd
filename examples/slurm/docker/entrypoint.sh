@@ -26,19 +26,19 @@ sed -e "s/@NODE@/$NODE/g" -e "s/@CPUS@/$CPUS/g" -e "s/@MEM@/$MEM/g" \
 
 # slurmd's cgroup/v2 plugin (IgnoreSystemd=yes) builds its hierarchy in
 # /sys/fs/cgroup/system.slice/slurmstepd.scope and needs cpuset, cpu,
-# memory and pids enabled for system.slice's children. Without systemd we
-# set that up by hand: this shell moves into a leaf, the controllers are
-# enabled on the root and on system.slice, and slurmd starts in a leaf of
-# system.slice (a cgroup with processes may not enable controllers for
-# its children, so none of them may hold a process).
+# memory and pids enabled for system.slice's children. Without systemd,
+# slurm-cgroup-setup (docker/cgroup-setup.sh) does that by hand. It moves
+# every process out of the root into a leaf first, since a cgroup with
+# processes may not enable controllers for its children, and it stops
+# this script with the controller and the error when one stays disabled.
+# slurmd then starts in its own leaf of system.slice.
 SLURMD_CG=/sys/fs/cgroup/system.slice/slurmd
-if [ -w /sys/fs/cgroup/cgroup.subtree_control ]; then
-  mkdir -p /sys/fs/cgroup/init /sys/fs/cgroup/system.slice "$SLURMD_CG"
-  echo $$ > /sys/fs/cgroup/init/cgroup.procs 2>/dev/null || true
-  for c in cpuset cpu memory pids; do
-    echo "+$c" > /sys/fs/cgroup/cgroup.subtree_control 2>/dev/null || true
-    echo "+$c" > /sys/fs/cgroup/system.slice/cgroup.subtree_control 2>/dev/null || true
-  done
+if [ "$PROCTRACK" = proctrack/cgroup ]; then
+  if ! [ -w /sys/fs/cgroup/cgroup.subtree_control ]; then
+    echo "SLURM_CGROUP=v2 needs a writable cgroup root (run with --privileged --cgroupns=private) or SLURM_CGROUP=none" >&2
+    exit 1
+  fi
+  slurm-cgroup-setup /sys/fs/cgroup cpuset cpu memory pids
 fi
 mkdir -p /var/run/slurm
 
@@ -50,13 +50,19 @@ chmod 0400 /etc/munge/munge.key
 runuser -u munge -- /usr/sbin/munged
 
 /usr/sbin/slurmctld -D >/var/log/slurm/slurmctld.out 2>&1 &
-( [ -d "$SLURMD_CG" ] && echo $BASHPID > "$SLURMD_CG/cgroup.procs" 2>/dev/null
+( if [ "$PROCTRACK" = proctrack/cgroup ]; then echo $BASHPID > "$SLURMD_CG/cgroup.procs"; fi
   exec /usr/sbin/slurmd -D >/var/log/slurm/slurmd.out 2>&1 ) &
+up=0
 for _ in $(seq 1 60); do
-  if sinfo -h -o '%T' 2>/dev/null | grep -qE '^(idle|mixed|allocated)$'; then break; fi
+  if sinfo -h -o '%T' 2>/dev/null | grep -qE '^(idle|mixed|allocated)$'; then up=1; break; fi
   sleep 1
 done
 sinfo || true
+if [ "$up" != 1 ]; then
+  echo "slurm node $NODE did not come up, slurmd said:" >&2
+  tail -20 /var/log/slurm/slurmd.out /var/log/slurm/slurmd.log >&2 2>/dev/null || true
+  exit 1
+fi
 echo "slurm up on $NODE ($CPUS CPUs, $MEM MiB, $PROCTRACK, $TASK)"
 if [ $# -gt 0 ]; then exec "$@"; fi
 exec sleep infinity

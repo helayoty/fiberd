@@ -45,15 +45,20 @@ wait_for() { # wait_for <seconds> <description> <cmd...>
   return 1
 }
 
+# up builds the image and starts a fresh container from it. A container
+# left from an earlier run is replaced, never reused, since it may be
+# broken (a node stuck in unknown, an older image).
 up() {
-  if ! docker ps --format '{{.Names}}' | grep -qx "$NAME"; then
-    hack/dev/run.sh true # the builder stage is the dev image
-    docker build -t "$IMAGE" -f docker/slurm/Dockerfile .
-    docker rm -f "$NAME" >/dev/null 2>&1 || true
-    docker run -d --name "$NAME" --hostname "$NODE" --privileged --cgroupns=private \
-      --tmpfs /run --tmpfs /tmp:exec -p "$PORT:8484" "$IMAGE" >/dev/null
+  hack/dev/run.sh true # the builder stage is the dev image
+  docker build -t "$IMAGE" -f docker/slurm/Dockerfile .
+  down
+  docker run -d --name "$NAME" --hostname "$NODE" --privileged --cgroupns=private \
+    --tmpfs /run --tmpfs /tmp:exec -p "$PORT:8484" "$IMAGE" >/dev/null
+  if ! wait_for 90 "slurm node idle" sh -c "docker exec $NAME sinfo -h -o %T | grep -qE '^(idle|mixed|allocated)$'"; then
+    echo "--- $NAME said:" >&2
+    docker logs --tail 30 "$NAME" >&2 || true
+    return 1
   fi
-  wait_for 90 "slurm node idle" sh -c "docker exec $NAME sinfo -h -o %T | grep -qE '^(idle|mixed|allocated)$'"
   dexec sinfo
 }
 

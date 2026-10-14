@@ -96,6 +96,9 @@ type FiberSpec struct {
 	CgroupFD int // the fiber's leaf; -1 when the host has none
 	Deadline time.Duration
 	Payload  []byte
+	// Session is the name the caller gave the Clone, "" for an anonymous
+	// fiber. The fiber learns it at birth.
+	Session string
 	// OwnPIDNS asks for the fiber to be the init of its own pid namespace
 	// so its checkpoint restores anywhere. Backends that always isolate
 	// ignore it.
@@ -140,6 +143,10 @@ type ResumeSpec struct {
 	WarmID string
 	// WorkDir is the grant's run directory (WarmSpec.WorkDir).
 	WorkDir string
+	// Session is the name the caller gave the Clone that resumes the
+	// fiber, "" when anonymous. A backend whose resumed fiber takes a
+	// fresh identity hands it over again.
+	Session string
 	// Handoff replaces the handoff channel of a checkpoint taken from a
 	// handoff fiber (FiberSpec.Handoff). It is nil for any other checkpoint.
 	Handoff *os.File

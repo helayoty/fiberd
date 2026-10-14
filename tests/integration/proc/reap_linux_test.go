@@ -79,8 +79,8 @@ func TestReadyThenExitInsideBoundedWait(t *testing.T) {
 			dir := t.TempDir()
 			uc, rd := rawZygote(t, dir)
 			hex := func(s string) string { return fmt.Sprintf("%x", s) }
-			lines := "CLONE b " + filepath.Join(dir, "b.sock") + " 3000 " + hex(fmt.Sprintf(`{"ready_delay_ms": %d, "exit_after_ready": 1}`, tc.delayMS)) + "\n" +
-				"CLONE a " + filepath.Join(dir, "a.sock") + " 3000 " + hex(`{"ready_misuse": 2}`) + "\n"
+			lines := "CLONE b " + filepath.Join(dir, "b.sock") + " 3000 " + hex(fmt.Sprintf(`{"ready_delay_ms": %d, "exit_after_ready": 1}`, tc.delayMS)) + " -\n" +
+				"CLONE a " + filepath.Join(dir, "a.sock") + " 3000 " + hex(`{"ready_misuse": 2}`) + " -\n"
 			if _, err := uc.Write([]byte(lines)); err != nil {
 				t.Fatal(err)
 			}

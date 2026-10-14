@@ -48,7 +48,9 @@ func restoreArgs(dir string, extra []string) []string {
 }
 
 // readPidfile reads the pid criu wrote, and false while the file is
-// missing or not yet a whole pid.
+// missing or not yet a whole pid. criu creates the file and writes the
+// pid in one write with no newline, so a reader sees no file, an empty
+// file or the whole pid, never a prefix of it.
 func readPidfile(path string) (int, bool) {
 	b, err := os.ReadFile(path)
 	if err != nil {

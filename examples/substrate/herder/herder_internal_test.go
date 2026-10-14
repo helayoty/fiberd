@@ -19,8 +19,8 @@ import (
 	"google.golang.org/protobuf/types/known/emptypb"
 
 	grantv1 "github.com/helayoty/fiberd/api/grant/v1"
-	"github.com/helayoty/fiberd/pkg/consumer"
 	"github.com/helayoty/fiberd/pkg/core"
+	"github.com/helayoty/fiberd/sdk/go/client"
 )
 
 var errNoGrant = errors.New("no grant for this template")
@@ -94,7 +94,7 @@ func TestStartFailures(t *testing.T) {
 			after: func(t *testing.T, w *worker) {
 				jwt, _, _ := w.grants.Grant(ctx, counter, 16<<20)
 				f, err := w.client.Clone(ctx, jwt, "a1", time.Second, nil)
-				if err != nil || f.Kind != consumer.Create {
+				if err != nil || f.Kind != client.Create {
 					t.Fatalf("clone after = %v %v, want a fresh session", f.Kind, err)
 				}
 			}},
@@ -256,7 +256,7 @@ func TestStats(t *testing.T) {
 	cases := []struct {
 		name     string
 		active   *actor
-		stats    map[string]consumer.Status
+		stats    map[string]client.Status
 		sampleAt time.Time
 		code     codes.Code            // GetWorkloadStats for a1
 		reason   ateompbNoSampleReason // GetActiveWorkloadStats, when it has no sample
@@ -266,10 +266,10 @@ func TestStats(t *testing.T) {
 		{name: "an actor fiberd has not reported on yet", active: running(),
 			code: codes.FailedPrecondition, reason: notMeasurableYet},
 		{name: "a report for the grant but none since this actor started", active: running(),
-			stats: map[string]consumer.Status{"g-counter": {GrantUID: "g-counter", WUsedBytes: 7}},
+			stats: map[string]client.Status{"g-counter": {GrantUID: "g-counter", WUsedBytes: 7}},
 			code:  codes.FailedPrecondition, reason: notMeasurableYet},
 		{name: "a reported actor: its grant's W", active: running(), sampleAt: at,
-			stats: map[string]consumer.Status{"g-counter": {GrantUID: "g-counter", WUsedBytes: 7}},
+			stats: map[string]client.Status{"g-counter": {GrantUID: "g-counter", WUsedBytes: 7}},
 			want: &ateompbStatsSample{Atespace: "team-a", ActorName: "counter-a1", ActorUid: "a1",
 				ActorTemplateAtespace: "team-a", ActorTemplateName: "counter", Source: sourceCgroup,
 				MemoryCurrentBytes: 7, MemoryWorkingSetBytes: 7, ObservedAtUnixNano: at.UnixNano()}},
@@ -353,7 +353,7 @@ func TestRunReconnects(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			s := New(Config{Client: consumer.New(conn)})
+			s := New(Config{Client: client.New(conn)})
 			ctx, cancel := context.WithCancel(context.Background())
 			done := make(chan struct{})
 			go func() { s.Run(ctx); close(done) }()

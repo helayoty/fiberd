@@ -30,12 +30,12 @@ import (
 	"github.com/helayoty/fiberd/pkg/backend"
 	gvisorbackend "github.com/helayoty/fiberd/pkg/backend/gvisor"
 	procbackend "github.com/helayoty/fiberd/pkg/backend/proc"
-	"github.com/helayoty/fiberd/pkg/consumer"
 	"github.com/helayoty/fiberd/pkg/core"
 	"github.com/helayoty/fiberd/pkg/grant"
 	fhome "github.com/helayoty/fiberd/pkg/home"
 	"github.com/helayoty/fiberd/pkg/rpc"
 	"github.com/helayoty/fiberd/pkg/runtime/host"
+	"github.com/helayoty/fiberd/sdk/go/client"
 
 	"github.com/helayoty/fiberd/examples/substrate/herder"
 	subhome "github.com/helayoty/fiberd/examples/substrate/home"
@@ -111,7 +111,7 @@ var procZygote = sync.OnceValues(func() (string, error) {
 	if runtime.GOARCH == "arm64" {
 		args = append(args, "-mbranch-protection=none")
 	}
-	build := exec.Command("gcc", append(args, "-o", bin, "../../../zygote/refzygote.c", "../../../zygote/libfiberzygote.c")...)
+	build := exec.Command("gcc", append(args, "-o", bin, "../../../sdk/c/template/refzygote.c", "../../../sdk/c/template/libfiberzygote.c")...)
 	build.Stderr = os.Stderr
 	if err := build.Run(); err != nil {
 		return "", fmt.Errorf("gcc: %w", err)
@@ -222,7 +222,7 @@ func newWorker(t *testing.T, name string, bc backendCase, cgRoot, base string) *
 	if err != nil {
 		t.Fatal(err)
 	}
-	client := consumer.New(conn)
+	c := client.New(conn)
 
 	ing, err := ingress.New(ingress.Config{})
 	if err != nil {
@@ -232,7 +232,7 @@ func newWorker(t *testing.T, name string, bc backendCase, cgRoot, base string) *
 	t.Cleanup(isrv2.Close)
 
 	paths := herder.Paths{Base: base}
-	svc := herder.New(herder.Config{Client: client, Grants: h, Router: ing, Paths: paths,
+	svc := herder.New(herder.Config{Client: c, Grants: h, Router: ing, Paths: paths,
 		Host: host.Config{DeltaRegistry: hc.DeltaRegistry, DeltaKeys: hc.DeltaKeys, HomeID: name}})
 	go svc.Run(ctx)
 	return &worker{svc: svc, home: h, ingress: isrv2, paths: paths}

@@ -62,6 +62,7 @@ type CloneSpec struct {
 	Fence    Fence
 	Deadline time.Duration // hard budget: exceeding it is an error, not a late fiber
 	Payload  []byte        // opaque data handed to the fiber at birth
+	Session  string        // the session the caller named, "" for an anonymous fiber
 }
 
 // FiberHandle is what the runtime knows about a running fiber. Endpoint is

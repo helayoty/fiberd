@@ -27,10 +27,10 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
-	"github.com/helayoty/fiberd/pkg/consumer"
 	"github.com/helayoty/fiberd/pkg/core"
 	"github.com/helayoty/fiberd/pkg/endpoint"
 	"github.com/helayoty/fiberd/pkg/grant"
+	"github.com/helayoty/fiberd/sdk/go/client"
 )
 
 type opts struct {
@@ -85,7 +85,7 @@ func run(o opts) error {
 	if err != nil {
 		return fmt.Errorf("dial %s: %w", o.target, err)
 	}
-	c := consumer.New(conn)
+	c := client.New(conn)
 	defer func() { _ = c.Close() }()
 
 	f, err := c.Clone(ctx, tok, o.session, 30*time.Second, nil)
@@ -118,7 +118,7 @@ func run(o opts) error {
 	if err != nil {
 		return fmt.Errorf("clone after park: %w", err)
 	}
-	if r.Kind != consumer.Resume {
+	if r.Kind != client.Resume {
 		return fmt.Errorf("clone after park is %s, want RESUME", r.Kind)
 	}
 	fmt.Printf("sessioncheck: resume -> %s %s\n", r.ID, r.Endpoint)

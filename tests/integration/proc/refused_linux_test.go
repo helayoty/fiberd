@@ -216,7 +216,7 @@ func TestRefusedNamespacesRefuseClone(t *testing.T) {
 			// each one more clone of it.
 			seen := 0
 			for _, fence := range []string{"gr/1-1", "gr/1-2"} {
-				line := fmt.Sprintf("CLONE %s %s/%s.sock 2000 - %s", fence, dir, strings.ReplaceAll(fence, "/", "-"), tc.opts)
+				line := fmt.Sprintf("CLONE %s %s/%s.sock 2000 - - %s", fence, dir, strings.ReplaceAll(fence, "/", "-"), tc.opts)
 				if _, err := uc.Write([]byte(line + "\n")); err != nil {
 					t.Fatal(err)
 				}

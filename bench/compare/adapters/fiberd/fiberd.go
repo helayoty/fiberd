@@ -26,10 +26,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/helayoty/fiberd/pkg/consumer"
 	"github.com/helayoty/fiberd/pkg/core"
 	"github.com/helayoty/fiberd/pkg/endpoint"
 	"github.com/helayoty/fiberd/pkg/grant"
+	"github.com/helayoty/fiberd/sdk/go/client"
 
 	"github.com/helayoty/fiberd/bench/compare"
 )
@@ -69,13 +69,13 @@ type Options struct {
 	// Mint overrides minting, for tests. Nil mints from IssuerKey.
 	Mint func() (string, error)
 	// Client overrides the dialed client, for tests.
-	Client *consumer.Client
+	Client *client.Client
 }
 
 // Adapter implements compare.Adapter.
 type Adapter struct {
 	o      Options
-	client *consumer.Client
+	client *client.Client
 	token  string
 	uid    string
 }
@@ -106,7 +106,7 @@ func New(ctx context.Context, o Options) (*Adapter, error) {
 	}
 	a.token = tok
 	if a.client == nil {
-		a.client, err = consumer.Dial(ctx, o.Target)
+		a.client, err = client.Dial(ctx, o.Target)
 		if err != nil {
 			return nil, err
 		}
@@ -179,7 +179,7 @@ func (a *Adapter) Refill(ctx context.Context) error {
 	defer cancel()
 	var pooled uint32
 	full := false
-	err := a.client.Watch(wctx, func(s consumer.Status) {
+	err := a.client.Watch(wctx, func(s client.Status) {
 		if s.GrantUID != a.uid {
 			return
 		}
@@ -208,7 +208,7 @@ func (a *Adapter) Activate(ctx context.Context, id string) (compare.Handle, erro
 	return a.handle(f, id)
 }
 
-func (a *Adapter) handle(f consumer.Fiber, id string) (compare.Handle, error) {
+func (a *Adapter) handle(f client.Fiber, id string) (compare.Handle, error) {
 	ep, err := endpoint.Parse(f.Endpoint)
 	if err != nil {
 		return compare.Handle{}, err
@@ -237,7 +237,7 @@ func (a *Adapter) Ready(ctx context.Context, h compare.Handle) (compare.Handle, 
 // Release ends the fiber and discards its session's state.
 func (a *Adapter) Release(ctx context.Context, h compare.Handle) error {
 	err := a.client.Release(ctx, h.ID, true)
-	if consumer.NotFound(err) {
+	if client.NotFound(err) {
 		return nil
 	}
 	return err
@@ -255,7 +255,7 @@ func (a *Adapter) Resume(ctx context.Context, h compare.Handle) (compare.Handle,
 	if err != nil {
 		return compare.Handle{}, fmt.Errorf("clone after park: %w", err)
 	}
-	if f.Kind != consumer.Resume {
+	if f.Kind != client.Resume {
 		_ = a.client.Release(ctx, f.ID, true)
 		return compare.Handle{}, fmt.Errorf("clone after park is %s, want RESUME", f.Kind)
 	}

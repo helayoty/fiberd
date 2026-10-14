@@ -38,6 +38,7 @@ var (
 	engineCmd  = flag.String("engine-kill-cmd", "", "hook: $1 = grant uid; end the grant's warm template instance (its engine) as a crash would")
 	scopeCmd   = flag.String("scope-cmd", "", "hook: the home's scope is lost while it runs (namespace, DRA claim); it must revoke every fence")
 	caseTO     = flag.Duration("case-timeout", 15*time.Second, "per-case timeout")
+	wBudget    = flag.Uint64("w-budget", 1<<20, "w_budget_bytes for C6: a fiber of the template must fit under it, and the over-budget one dirties four times it")
 	tlsCA      = flag.String("tls-ca", "", "PEM CA bundle the target's certificate chains to (mutual TLS; empty dials plaintext)")
 	tlsCert    = flag.String("tls-cert", "", "PEM client certificate presented to the target")
 	tlsKey     = flag.String("tls-key", "", "PEM private key of -tls-cert")
@@ -69,7 +70,7 @@ func TestConformance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	d := Driver{Target: *target, TargetTier: tier, NodeID: *nodeID, Template: *template, FiberWarm: *fiberWarm, Isolation: iso, Timeout: *caseTO}
+	d := Driver{Target: *target, TargetTier: tier, NodeID: *nodeID, Template: *template, FiberWarm: *fiberWarm, Isolation: iso, Timeout: *caseTO, WBudget: *wBudget}
 	if d.TLS, err = tlsconf.Client(*tlsCA, *tlsCert, *tlsKey); err != nil {
 		t.Fatal(err)
 	}

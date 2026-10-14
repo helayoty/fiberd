@@ -16,7 +16,7 @@ mkdir -p "$OUT"/{bin,proc,dev,tmp,host,fiberd/channel}
 # flag keeps our own objects clean on a toolchain that defaults to PAC.
 # Debian's libcrypto carries PAC in its arm64 assembly, so the dev image
 # builds OpenSSL without it under /usr/local/openssl-nopac
-# (docker/criu/Dockerfile) and the zygote links that one. On aarch64 it is
+# (docker/dev/Dockerfile) and the zygote links that one. On aarch64 it is
 # required. Elsewhere the system OpenSSL is a fallback.
 ARCH=$(uname -m)
 SSL=${FIBERD_OPENSSL:-/usr/local/openssl-nopac}
@@ -24,7 +24,7 @@ FLAGS=""
 if [ -d "$SSL/lib" ]; then
   FLAGS="-I$SSL/include -L$SSL/lib"
 elif [ "$ARCH" = aarch64 ]; then
-  echo "rootfs.sh: no PAC-free OpenSSL at $SSL; rebuild the dev image (docker/criu/Dockerfile)" >&2
+  echo "rootfs.sh: no PAC-free OpenSSL at $SSL; rebuild the dev image (docker/dev/Dockerfile)" >&2
   exit 1
 fi
 if [ "$ARCH" = aarch64 ]; then FLAGS="$FLAGS -mbranch-protection=none"; fi
@@ -34,7 +34,7 @@ if [ "$ARCH" = aarch64 ]; then FLAGS="$FLAGS -mbranch-protection=none"; fi
 # -static-pie in place of -pie so the binary stays self-contained.
 # shellcheck disable=SC2086  # $FLAGS is a list
 gcc -static-pie -D_FORTIFY_SOURCE=3 -O2 -fstack-protector-strong -fstack-clash-protection -fPIE -Wformat=2 -Werror=format-security \
-  -Wl,-z,relro,-z,now -Wall -pthread $FLAGS -DFZ_TLS -o "$OUT/bin/refzygote" zygote/refzygote.c zygote/libfiberzygote.c -lssl -lcrypto -ldl 2>&1 | grep -v "requires at runtime the shared libraries\|^/usr/bin/ld: .*in function" >&2 || true
+  -Wl,-z,relro,-z,now -Wall -pthread $FLAGS -DFZ_TLS -o "$OUT/bin/refzygote" sdk/c/template/refzygote.c sdk/c/template/libfiberzygote.c -lssl -lcrypto -ldl 2>&1 | grep -v "requires at runtime the shared libraries\|^/usr/bin/ld: .*in function" >&2 || true
 [ -x "$OUT/bin/refzygote" ] || { echo "rootfs.sh: refzygote did not build" >&2; exit 1; }
 if [ "$ARCH" = aarch64 ]; then
   command -v objdump >/dev/null || { echo "rootfs.sh: objdump is needed to check $OUT/bin/refzygote for PAC" >&2; exit 1; }

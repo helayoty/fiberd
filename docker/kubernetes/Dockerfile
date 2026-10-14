@@ -34,7 +34,7 @@ RUN if ! command -v criu >/dev/null 2>&1; then \
       && CRIU_VERSION="${CRIU_VERSION}" sh /tmp/fiberd-criu/install-criu.sh; \
     fi \
     && rm -rf /tmp/fiberd-criu
-# gVisor's runsc for the gvisor runtime, as docker/criu/Dockerfile installs
+# gVisor's runsc for the gvisor runtime, as docker/dev/Dockerfile installs
 # it: the same pinned release, each binary checked against the sha512 from
 # gVisor's runsc.sha512. The dev image already has it.
 ARG RUNSC_RELEASE=20260817.0
@@ -58,7 +58,7 @@ COPY . .
 # they receive, with ZYGOTE_CFLAGS and ZYGOTE_LDFLAGS from the Makefile. On
 # aarch64 it is built without PAC branch protection, because a process
 # restored from a checkpoint keeps stale PAC keys (see
-# docker/criu/Dockerfile).
+# docker/dev/Dockerfile).
 # fiberd is built with the fiberd_testhooks tag, since kind conformance
 # drives the test-only admin controls (-admin-unsafe). The release image
 # (docker/fiberd) is built without it.
@@ -76,7 +76,7 @@ RUN set -eu; mkdir -p /out; \
     flags=""; if [ "$(uname -m)" = aarch64 ]; then flags="-mbranch-protection=none"; fi; \
     gcc -D_FORTIFY_SOURCE=3 -O2 -fstack-protector-strong -fstack-clash-protection -fPIE -Wformat=2 -Werror=format-security \
       -pie -Wl,-z,relro,-z,now -Wall -Wextra -pthread $flags -DFZ_TLS -o /out/refzygote \
-      zygote/refzygote.c zygote/libfiberzygote.c -lssl -lcrypto
+      sdk/c/template/refzygote.c sdk/c/template/libfiberzygote.c -lssl -lcrypto
 
 FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587
 # The release workflow adds version, revision, created and title labels.

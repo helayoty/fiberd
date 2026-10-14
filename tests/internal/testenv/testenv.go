@@ -14,9 +14,45 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"syscall"
 	"testing"
 	"time"
 )
+
+// mntnsEnv marks a test binary already running in a mount namespace of
+// its own, so the re-exec happens once.
+const mntnsEnv = "FIBERD_TEST_MNTNS"
+
+// OwnMountNamespace re-executes the test binary in a private mount
+// namespace, so the restore roots and binds one suite mounts never reach
+// the fibers another suite forks beside it. The proc backend binds / at
+// /tmp/fiberd-root-<pid> while a runtime is open, and a fiber forked
+// meanwhile by another suite's zygote copies that bind into its own
+// namespace, where criu records it at park and then cannot restore it
+// once the bind is gone. unshare execs in place, so the pid and the
+// standard streams go test holds stay the same. Call it first in
+// TestMain. Without unshare, or outside the container, the suite goes
+// on in the namespace it has.
+func OwnMountNamespace() {
+	if os.Getenv(mntnsEnv) != "" {
+		return
+	}
+	unshare, err := exec.LookPath("unshare")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "testenv: no unshare, so this suite shares its mount namespace: %v\n", err)
+		return
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "testenv: own executable: %v\n", err)
+		return
+	}
+	args := append([]string{"unshare", "--mount", "--propagation", "private", exe}, os.Args[1:]...)
+	env := append(os.Environ(), mntnsEnv+"=1")
+	if err := syscall.Exec(unshare, args, env); err != nil {
+		fmt.Fprintf(os.Stderr, "testenv: unshare the mount namespace: %v\n", err)
+	}
+}
 
 // CgroupRoot is the cgroup subtree the dev container delegates to the
 // tests, $FIBERD_CGROUP_ROOT or its default.
@@ -78,7 +114,7 @@ func ZygoteBuildFlags(goarch string) []string {
 // into dir and returns the binary's path.
 func BuildZygote(dir string) (string, error) {
 	bin := filepath.Join(dir, "refzygote")
-	zygote := filepath.Join(RepoRoot(), "zygote")
+	zygote := filepath.Join(RepoRoot(), "sdk", "c", "template")
 	args := append(ZygoteBuildFlags(runtime.GOARCH), "-pthread", "-DFZ_TLS", "-o", bin,
 		filepath.Join(zygote, "refzygote.c"), filepath.Join(zygote, "libfiberzygote.c"), "-lssl", "-lcrypto")
 	build := exec.Command("gcc", args...)
@@ -92,7 +128,17 @@ func BuildZygote(dir string) (string, error) {
 // BuildRootfs builds the rootfs the gvisor and runc backends run the
 // reference zygote in (hack/gvisor/rootfs.sh) at dir.
 func BuildRootfs(dir string) error {
-	build := exec.Command(filepath.Join(RepoRoot(), "hack", "gvisor", "rootfs.sh"), dir)
+	return buildRootfs(filepath.Join("hack", "gvisor", "rootfs.sh"), dir)
+}
+
+// BuildPythonRootfs builds that rootfs with CPython and the Python SDK in
+// it (hack/python/rootfs.sh) at dir, for the Python reference template.
+func BuildPythonRootfs(dir string) error {
+	return buildRootfs(filepath.Join("hack", "python", "rootfs.sh"), dir)
+}
+
+func buildRootfs(script, dir string) error {
+	build := exec.Command(filepath.Join(RepoRoot(), script), dir)
 	build.Stderr = os.Stderr
 	if err := build.Run(); err != nil {
 		return fmt.Errorf("build rootfs: %w", err)

@@ -13,7 +13,7 @@ import (
 	"google.golang.org/protobuf/types/known/emptypb"
 
 	grantv1 "github.com/helayoty/fiberd/api/grant/v1"
-	"github.com/helayoty/fiberd/pkg/consumer"
+	"github.com/helayoty/fiberd/sdk/go/client"
 )
 
 // fakeHome is a Fibers server on a TCP port. It records what the shim
@@ -46,9 +46,9 @@ func newFakeHome(t *testing.T) *fakeHome {
 }
 
 // client dials the home as the shim's default DialHome would.
-func (h *fakeHome) client(t *testing.T) *consumer.Client {
+func (h *fakeHome) client(t *testing.T) *client.Client {
 	t.Helper()
-	c, err := consumer.Dial(context.Background(), h.addr)
+	c, err := client.Dial(context.Background(), h.addr)
 	if err != nil {
 		t.Fatal(err)
 	}
