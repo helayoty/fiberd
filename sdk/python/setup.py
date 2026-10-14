@@ -44,7 +44,9 @@ ext_modules = []
 if sys.platform == "linux":
     ext_modules.append(Extension(
         "fiberd._zygote",
-        sources=[os.path.join(HERE, "src", "fiberd", "_zygote.c"), os.path.join(C_DIR, "libfiberzygote.c")],
+        # Relative and inside the package, since setuptools refuses absolute
+        # sources in a wheel. _libfiberzygote.c includes the library source.
+        sources=["src/fiberd/_zygote.c", "src/fiberd/_libfiberzygote.c"],
         include_dirs=[C_DIR],
         define_macros=[("Py_LIMITED_API", "0x030A0000")],
         py_limited_api=True,
@@ -52,4 +54,5 @@ if sys.platform == "linux":
         extra_link_args=LDFLAGS,
     ))
 
+os.chdir(HERE)
 setup(ext_modules=ext_modules, cmdclass={"build_py": build_py})
