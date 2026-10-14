@@ -65,6 +65,9 @@ type backend struct {
 var backends []backend
 
 func TestMain(m *testing.M) {
+	// A mount namespace of this suite's own, so the proc suite's restore
+	// root never lands in a fiber forked here.
+	testenv.OwnMountNamespace()
 	cgRoot = testenv.RequireCgroupRoot("python")
 	interp, err := exec.LookPath("python3")
 	if err != nil {
@@ -140,7 +143,7 @@ func openRunc(t *testing.T, template string) core.Runtime {
 		t.Fatal(err)
 	}
 	return open(t, name, host.Config{Backend: be, Templates: map[string]string{"default": template},
-		CgroupRoot: filepath.Join(cgRoot, name), RunDir: filepath.Join("/tmp", "fz-"+name), DeltaDir: filepath.Join(work, name, "deltas")})
+		CgroupRoot: filepath.Join(cgRoot, name), RunDir: filepath.Join("/tmp", "fz-"+name)})
 }
 
 func openGvisor(t *testing.T, template string) core.Runtime {
@@ -148,11 +151,17 @@ func openGvisor(t *testing.T, template string) core.Runtime {
 	name := unique("pygv")
 	return open(t, name, host.Config{Backend: gvisorbackend.New(gvisorbackend.Options{Rootfs: rootfs, StateDir: filepath.Join(work, name)}),
 		Templates:  map[string]string{"default": template},
-		CgroupRoot: filepath.Join(cgRoot, name), RunDir: filepath.Join("/tmp", "fz-"+name), DeltaDir: filepath.Join(work, name, "deltas")})
+		CgroupRoot: filepath.Join(cgRoot, name), RunDir: filepath.Join("/tmp", "fz-"+name)})
 }
 
+// open opens the host runtime over cfg with the deltas and the template
+// cache under this suite's own work directory, never fiberd's defaults
+// under /var/lib/fiberd, which another suite running beside this one
+// would share.
 func open(t *testing.T, name string, cfg host.Config) core.Runtime {
 	t.Helper()
+	cfg.DeltaDir = filepath.Join(work, name, "deltas")
+	cfg.TemplateCache = filepath.Join(work, name, "templates")
 	rt, err := host.New(cfg)
 	if errors.Is(err, host.ErrNoTier) {
 		t.Skipf("%s not usable here: %v", name, err)

@@ -74,8 +74,8 @@ func serveHome(t *testing.T, withTLS bool) *pyHome {
 	} else {
 		// Not t.TempDir(), whose path carries the test's name, since gRPC
 		// splits a unix: target on commas.
-		dir, err := os.MkdirTemp("", "fzpyc")
-		if err != nil {
+		var dir string
+		if dir, err = os.MkdirTemp("", "fzpyc"); err != nil {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { _ = os.RemoveAll(dir) })
@@ -84,7 +84,7 @@ func serveHome(t *testing.T, withTLS bool) *pyHome {
 		h.addr = "unix:" + sock
 	}
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("listen: %v", err)
 	}
 	if h.addr == "" {
 		h.addr = lis.Addr().String()

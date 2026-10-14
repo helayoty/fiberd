@@ -136,11 +136,12 @@ func TestPooledRevocation(t *testing.T) {
 		{name: "a restart sweeps the previous life", revoke: func(t *testing.T, _ *host.Runtime, name string) {
 			state := filepath.Join(work, name)
 			r2, err := host.New(host.Config{
-				Backend:    gvisorbackend.New(gvisorbackend.Options{Rootfs: rootfs, StateDir: state}),
-				Templates:  map[string]string{"default": "/bin/refzygote --heap-mb 32 --gvisor"},
-				CgroupRoot: filepath.Join(cgRoot, name),
-				RunDir:     filepath.Join("/tmp", "fz-"+name),
-				DeltaDir:   filepath.Join(state, "deltas"),
+				Backend:       gvisorbackend.New(gvisorbackend.Options{Rootfs: rootfs, StateDir: state}),
+				Templates:     map[string]string{"default": "/bin/refzygote --heap-mb 32 --gvisor"},
+				CgroupRoot:    filepath.Join(cgRoot, name),
+				RunDir:        filepath.Join("/tmp", "fz-"+name),
+				DeltaDir:      filepath.Join(state, "deltas"),
+				TemplateCache: filepath.Join(work, "templates"),
 			})
 			if err != nil {
 				t.Fatalf("New over the old root: %v", err)

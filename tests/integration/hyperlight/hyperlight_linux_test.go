@@ -56,6 +56,9 @@ func newRuntime(t *testing.T) core.Runtime {
 		CgroupRoot: filepath.Join(cgRoot, name),
 		RunDir:     filepath.Join("/tmp", "fz-"+name),
 		DeltaDir:   filepath.Join(t.TempDir(), "deltas"),
+		// The test's own store, not /var/lib/fiberd/templates, which
+		// another suite running beside this one would share.
+		TemplateCache: filepath.Join(t.TempDir(), "templates"),
 	})
 	if err != nil {
 		t.Fatal(err)

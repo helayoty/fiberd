@@ -71,8 +71,10 @@ func TestRelayedTCPOverProc(t *testing.T) {
 		relayed bool
 		lo, hi  int
 	}{
-		{name: "direct: the zygote binds the port", lo: 44000, hi: 44003},
-		{name: "relayed: the zygote binds a unix socket, fiberd the port", relayed: true, lo: 44010, hi: 44013},
+		// Below the kernel's ephemeral range (32768 and up), which any
+		// suite's listener or dial may be holding.
+		{name: "direct: the zygote binds the port", lo: 21020, hi: 21023},
+		{name: "relayed: the zygote binds a unix socket, fiberd the port", relayed: true, lo: 21030, hi: 21033},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

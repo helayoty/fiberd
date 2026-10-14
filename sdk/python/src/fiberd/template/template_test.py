@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import os
+import pathlib
 import random
+import shutil
 import socket
+import tempfile
 
 import pytest
 
@@ -152,8 +155,18 @@ def test_check_fence(tmp_path, name, f0, f1, f2):
     assert f.check_fence() is False, "seen once"
 
 
-def test_listen_unix(tmp_path):
-    ep = str(tmp_path / "ep.sock")
+@pytest.fixture
+def sock_dir():
+    """A short directory for unix sockets, since tmp_path on macOS overruns sun_path (104 bytes there)."""
+    d = tempfile.mkdtemp(prefix="fz", dir="/tmp")
+    try:
+        yield pathlib.Path(d)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_listen_unix(sock_dir):
+    ep = str(sock_dir / "ep.sock")
     f = ft.Fiber("g/1/1", "unix://" + ep, b"", "", {})
     with f.listen() as s:
         assert s.family == socket.AF_UNIX and os.path.exists(ep)
@@ -166,17 +179,17 @@ def test_listen_handoff_refused():
         f.listen()
 
 
-def test_serve_loop_reports_ready_checks_the_fence_and_hands_connections_over(tmp_path, monkeypatch):
+def test_serve_loop_reports_ready_checks_the_fence_and_hands_connections_over(sock_dir, monkeypatch):
     ext = FakeExt()
     monkeypatch.setattr(ft, "_ext", lambda: ext)
-    ep = str(tmp_path / "ep.sock")
+    ep = str(sock_dir / "ep.sock")
     f = ft.Fiber("g/1/1", ep, b"", "", {})
     f._incarnate("fork", os.urandom(32))
     srv = f.listen()
     client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     client.connect(ep)
     client.sendall(b"hi\n")
-    (tmp_path / "ep.sock.fence").write_text("g/1/2\n")
+    (sock_dir / "ep.sock.fence").write_text("g/1/2\n")
     served = []
 
     def handler(conn):
@@ -267,9 +280,9 @@ def test_serve_on_gvisor_ends_with_a_failed_incarnation(tmp_path, monkeypatch):
     assert ft.serve(lambda f: 1 / 0) == 1
 
 
-def test_usr1_stops_the_serving_fiber_on_gvisor(tmp_path, monkeypatch):
+def test_usr1_stops_the_serving_fiber_on_gvisor(tmp_path, sock_dir, monkeypatch):
     """The park's SIGUSR1 sets stopping on the fiber serving now, and serve() unlinks its endpoint on the way out."""
-    ep = str(tmp_path / "1-1.sock")
+    ep = str(sock_dir / "1-1.sock")
     ext = FakeGvisorExt([("clone", "g/1/1", ep, b"", os.urandom(32), "")])
     monkeypatch.setattr(ft, "_ext", lambda: ext)
     monkeypatch.setattr(ft, "_inited", True)

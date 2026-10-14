@@ -14,9 +14,45 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"syscall"
 	"testing"
 	"time"
 )
+
+// mntnsEnv marks a test binary already running in a mount namespace of
+// its own, so the re-exec happens once.
+const mntnsEnv = "FIBERD_TEST_MNTNS"
+
+// OwnMountNamespace re-executes the test binary in a private mount
+// namespace, so the restore roots and binds one suite mounts never reach
+// the fibers another suite forks beside it. The proc backend binds / at
+// /tmp/fiberd-root-<pid> while a runtime is open, and a fiber forked
+// meanwhile by another suite's zygote copies that bind into its own
+// namespace, where criu records it at park and then cannot restore it
+// once the bind is gone. unshare execs in place, so the pid and the
+// standard streams go test holds stay the same. Call it first in
+// TestMain. Without unshare, or outside the container, the suite goes
+// on in the namespace it has.
+func OwnMountNamespace() {
+	if os.Getenv(mntnsEnv) != "" {
+		return
+	}
+	unshare, err := exec.LookPath("unshare")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "testenv: no unshare, so this suite shares its mount namespace: %v\n", err)
+		return
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "testenv: own executable: %v\n", err)
+		return
+	}
+	args := append([]string{"unshare", "--mount", "--propagation", "private", exe}, os.Args[1:]...)
+	env := append(os.Environ(), mntnsEnv+"=1")
+	if err := syscall.Exec(unshare, args, env); err != nil {
+		fmt.Fprintf(os.Stderr, "testenv: unshare the mount namespace: %v\n", err)
+	}
+}
 
 // CgroupRoot is the cgroup subtree the dev container delegates to the
 // tests, $FIBERD_CGROUP_ROOT or its default.
