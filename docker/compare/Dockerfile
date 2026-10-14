@@ -21,7 +21,7 @@
 # counter takes ZYGOTE_CFLAGS and ZYGOTE_LDFLAGS from the Makefile, with
 # -static-pie in place of -pie for the static build. On aarch64 it is built
 # without PAC branch protection, since a restored process keeps stale PAC
-# keys (see docker/criu/Dockerfile). crictl is checked against its
+# keys (see docker/dev/Dockerfile). crictl is checked against its
 # published sha256.
 ARG BUILD_IMAGE=fiberd-dev:local
 ARG BASE_IMAGE=fiberd:kind
@@ -33,7 +33,7 @@ ENV CGO_ENABLED=0 GOFLAGS=-trimpath
 RUN set -eu; mkdir -p /out; flags=""; \
     if [ "$(uname -m)" = aarch64 ]; then flags="-mbranch-protection=none"; fi; \
     cflags="-D_FORTIFY_SOURCE=3 -O2 -fstack-protector-strong -fstack-clash-protection -fPIE -Wformat=2 -Werror=format-security -Wall -Wextra -pthread $flags"; \
-    src="bench/compare/workload/counter.c sdk/c/libfiberzygote.c"; \
+    src="bench/compare/workload/counter.c sdk/c/template/libfiberzygote.c"; \
     gcc $cflags -pie -Wl,-z,relro,-z,now -o /out/counter $src; \
     gcc $cflags -static-pie -Wl,-z,relro,-z,now -o /out/counter-static $src; \
     { /out/counter-static --help 2>&1 || true; } | grep -q usage; \

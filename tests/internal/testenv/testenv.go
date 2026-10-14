@@ -78,7 +78,7 @@ func ZygoteBuildFlags(goarch string) []string {
 // into dir and returns the binary's path.
 func BuildZygote(dir string) (string, error) {
 	bin := filepath.Join(dir, "refzygote")
-	zygote := filepath.Join(RepoRoot(), "sdk", "c")
+	zygote := filepath.Join(RepoRoot(), "sdk", "c", "template")
 	args := append(ZygoteBuildFlags(runtime.GOARCH), "-pthread", "-DFZ_TLS", "-o", bin,
 		filepath.Join(zygote, "refzygote.c"), filepath.Join(zygote, "libfiberzygote.c"), "-lssl", "-lcrypto")
 	build := exec.Command("gcc", args...)

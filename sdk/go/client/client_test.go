@@ -1,4 +1,4 @@
-package consumer_test
+package client_test
 
 import (
 	"bufio"
@@ -25,13 +25,13 @@ import (
 	"github.com/helayoty/fiberd/pkg/runtime/stub"
 	"github.com/helayoty/fiberd/pkg/tlsconf"
 	"github.com/helayoty/fiberd/pkg/tlsconf/tlsconftest"
-	"github.com/helayoty/fiberd/sdk/go/consumer"
+	"github.com/helayoty/fiberd/sdk/go/client"
 )
 
 type home struct {
 	core   *core.Core
 	health *core.SourceHealth
-	client *consumer.Client
+	client *client.Client
 }
 
 func newHome(t *testing.T, tier core.Tier) *home {
@@ -55,7 +55,7 @@ func newHome(t *testing.T, tier core.Tier) *home {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := consumer.New(conn)
+	c := client.New(conn)
 	t.Cleanup(func() { _ = c.Close() })
 	return &home{core: ag, health: health, client: c}
 }
@@ -77,27 +77,27 @@ func TestCloneAttachParkResume(t *testing.T) {
 	ctx := context.Background()
 	g := jsonGrant(t, core.Grant{UID: "g1", Audience: "node-a", Tenant: "acme", FiberMax: 2})
 
-	var first, last consumer.Fiber // the session's first and latest clone
-	clone := func() (*consumer.Fiber, error) {
+	var first, last client.Fiber // the session's first and latest clone
+	clone := func() (*client.Fiber, error) {
 		f, err := h.client.Clone(ctx, g, "S", time.Second, nil)
 		return &f, err
 	}
-	park := func() (*consumer.Fiber, error) { return nil, h.client.Park(ctx, first.ID, true) }
-	release := func(discard bool) func() (*consumer.Fiber, error) {
-		return func() (*consumer.Fiber, error) { return nil, h.client.Release(ctx, last.ID, discard) }
+	park := func() (*client.Fiber, error) { return nil, h.client.Park(ctx, first.ID, true) }
+	release := func(discard bool) func() (*client.Fiber, error) {
+		return func() (*client.Fiber, error) { return nil, h.client.Release(ctx, last.ID, discard) }
 	}
 	steps := []struct {
 		name         string
-		op           func() (*consumer.Fiber, error) // nil fiber means not a clone
-		wantKind     consumer.Kind
+		op           func() (*client.Fiber, error) // nil fiber means not a clone
+		wantKind     client.Kind
 		wantSeq      uint64
 		sameFiber    bool // the clone serves the first clone's fiber
 		wantNotFound bool
 	}{
-		{name: "the first clone of a session creates under fence 1", op: clone, wantKind: consumer.Create, wantSeq: 1},
-		{name: "a second clone attaches to the same fiber", op: clone, wantKind: consumer.Attach, wantSeq: 1, sameFiber: true},
+		{name: "the first clone of a session creates under fence 1", op: clone, wantKind: client.Create, wantSeq: 1},
+		{name: "a second clone attaches to the same fiber", op: clone, wantKind: client.Attach, wantSeq: 1, sameFiber: true},
 		{name: "the fiber parks", op: park},
-		{name: "the parked session resumes under fence 2", op: clone, wantKind: consumer.Resume, wantSeq: 2},
+		{name: "the parked session resumes under fence 2", op: clone, wantKind: client.Resume, wantSeq: 2},
 		{name: "the resumed fiber releases", op: release(true)},
 		{name: "releasing it twice is NotFound", op: release(false), wantNotFound: true},
 	}
@@ -105,7 +105,7 @@ func TestCloneAttachParkResume(t *testing.T) {
 		t.Run(st.name, func(t *testing.T) {
 			f, err := st.op()
 			if st.wantNotFound {
-				if !consumer.NotFound(err) {
+				if !client.NotFound(err) {
 					t.Fatalf("err = %v, want NotFound", err)
 				}
 				return
@@ -144,18 +144,18 @@ func TestMissesAreTyped(t *testing.T) {
 	}{
 		{name: "a full grant with the issuer reachable is *Deferred from the issuer", tier: core.TierCheckpoint, full: true,
 			want: func(err error) bool {
-				var def *consumer.Deferred
+				var def *client.Deferred
 				return errors.As(err, &def) && def.Issuer == "https://issuer.test"
 			}},
 		{name: "a full grant with the issuer unreachable is *Shed with retry 2s", tier: core.TierCheckpoint, full: true, issuerDown: true,
 			want: func(err error) bool {
-				var shed *consumer.Shed
+				var shed *client.Shed
 				// The home's reason, not one the client assumes.
 				return errors.As(err, &shed) && shed.RetryAfter == 2*time.Second && strings.Contains(shed.Reason, "fibers.max")
 			}},
 		{name: "min_tier above the home is *TierGap, not a miss", tier: core.TierWarm, minTier: core.TierCheckpoint,
 			want: func(err error) bool {
-				var gap *consumer.TierGap
+				var gap *client.TierGap
 				return errors.As(err, &gap)
 			}},
 	}
@@ -202,8 +202,8 @@ func TestWatchStreamsStatus(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			seen := make(chan consumer.Status, 8)
-			go func() { _ = h.client.Watch(ctx, func(s consumer.Status) { seen <- s }) }()
+			seen := make(chan client.Status, 8)
+			go func() { _ = h.client.Watch(ctx, func(s client.Status) { seen <- s }) }()
 			deadline := time.After(3 * time.Second)
 			for {
 				select {
@@ -279,36 +279,36 @@ func TestDialHandoff(t *testing.T) {
 			}()
 		}
 	}()
-	routed := consumer.Fiber{ID: "g1/1/1", Endpoint: "tcp://" + l.Addr().String(), RoutingKey: "k", ServerKeySHA256: id.KeySHA256}
+	routed := client.Fiber{ID: "g1/1/1", Endpoint: "tcp://" + l.Addr().String(), RoutingKey: "k", ServerKeySHA256: id.KeySHA256}
 
 	cases := []struct {
 		name  string
-		fiber func() consumer.Fiber
+		fiber func() client.Fiber
 		cert  tls.Certificate
 		want  string
 		// wantErr is the expected error. Unset with want empty, any error passes.
 		wantErr error
 	}{
-		{name: "routed by key, caller accepted, key pinned", fiber: func() consumer.Fiber { return routed }, cert: caller, want: "k.fiberd hi\n"},
+		{name: "routed by key, caller accepted, key pinned", fiber: func() client.Fiber { return routed }, cert: caller, want: "k.fiberd hi\n"},
 		{
 			name:    "a direct fiber has no route",
-			fiber:   func() consumer.Fiber { f := routed; f.RoutingKey = ""; return f },
+			fiber:   func() client.Fiber { f := routed; f.RoutingKey = ""; return f },
 			cert:    caller,
-			wantErr: consumer.ErrNotHandoff,
+			wantErr: client.ErrNotHandoff,
 		},
 		{
 			name:    "a handoff endpoint must be tcp",
-			fiber:   func() consumer.Fiber { f := routed; f.Endpoint = "unix:///tmp/x.sock"; return f },
+			fiber:   func() client.Fiber { f := routed; f.Endpoint = "unix:///tmp/x.sock"; return f },
 			cert:    caller,
-			wantErr: consumer.ErrNotHandoff,
+			wantErr: client.ErrNotHandoff,
 		},
 		{
 			name:    "a fiber holding another key is refused",
-			fiber:   func() consumer.Fiber { f := routed; f.ServerKeySHA256 = other.KeySHA256; return f },
+			fiber:   func() client.Fiber { f := routed; f.ServerKeySHA256 = other.KeySHA256; return f },
 			cert:    caller,
 			wantErr: handoff.ErrKeyMismatch,
 		},
-		{name: "the fiber refuses another caller", fiber: func() consumer.Fiber { return routed }, cert: stranger},
+		{name: "the fiber refuses another caller", fiber: func() client.Fiber { return routed }, cert: stranger},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

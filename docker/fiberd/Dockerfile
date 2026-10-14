@@ -37,7 +37,7 @@ COPY . .
 # into PIE templates and shared objects alike, and no link flags, since an
 # archive is not linked. On aarch64 it is built without PAC branch
 # protection, because a process restored from a checkpoint keeps stale PAC
-# keys (see docker/criu/Dockerfile).
+# keys (see docker/dev/Dockerfile).
 ENV CGO_ENABLED=0 GOFLAGS=-trimpath
 ARG VERSION=""
 RUN set -eu; mkdir -p /out/bin /out/lib /out/doc; \
@@ -47,7 +47,7 @@ RUN set -eu; mkdir -p /out/bin /out/lib /out/doc; \
     flags=""; if [ "$(uname -m)" = aarch64 ]; then flags="-mbranch-protection=none"; fi; \
     gcc -D_FORTIFY_SOURCE=3 -O2 -fstack-protector-strong -fstack-clash-protection -fPIC -Wformat=2 -Werror=format-security \
       -Wall -Wextra -pthread $flags -ffile-prefix-map="$PWD"=. \
-      -c sdk/c/libfiberzygote.c -o /tmp/libfiberzygote.o; \
+      -c sdk/c/template/libfiberzygote.c -o /tmp/libfiberzygote.o; \
     ar rcsD /out/lib/libfiberzygote.a /tmp/libfiberzygote.o
 
 FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587
@@ -63,7 +63,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=build --chmod=0755 /usr/local/sbin/criu /usr/local/sbin/criu
 COPY --from=build --chmod=0755 /out/bin/fiberd /usr/local/bin/fiberd
 COPY --from=build --chmod=0644 /out/lib/libfiberzygote.a /usr/local/lib/libfiberzygote.a
-COPY --chmod=0644 sdk/c/libfiberzygote.h /usr/local/include/libfiberzygote.h
+COPY --chmod=0644 sdk/c/template/libfiberzygote.h /usr/local/include/libfiberzygote.h
 COPY --from=build /usr/share/doc/criu /usr/share/doc/criu
 COPY --from=build /out/doc /usr/share/doc/fiberd
 # No USER on purpose. fiberd creates namespaces and cgroups and runs criu,

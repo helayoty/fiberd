@@ -19,7 +19,7 @@ import (
 	"google.golang.org/protobuf/types/known/emptypb"
 
 	grantv1 "github.com/helayoty/fiberd/api/grant/v1"
-	"github.com/helayoty/fiberd/sdk/go/consumer"
+	"github.com/helayoty/fiberd/sdk/go/client"
 
 	"github.com/helayoty/fiberd/bench/compare"
 )
@@ -123,7 +123,7 @@ func counter(t *testing.T, network string) string {
 	return "tcp://" + ln.Addr().String()
 }
 
-func serve(t *testing.T, h *home) *consumer.Client {
+func serve(t *testing.T, h *home) *client.Client {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -137,7 +137,7 @@ func serve(t *testing.T, h *home) *consumer.Client {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return consumer.New(conn)
+	return client.New(conn)
 }
 
 func TestAdapter(t *testing.T) {

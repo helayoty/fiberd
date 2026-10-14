@@ -45,7 +45,7 @@ Read in this order, and look up any term in the [glossary](docs/glossary.md).
 
 ## Install
 
-Each release has an archive per platform, named `fiberd_<version>_<os>_<arch>.tar.gz`, for linux or darwin on amd64 or arm64. The libfiberzygote archives hold the [zygote library](sdk/c/README.md). Check the checksum and provenance before you unpack.
+Each release has an archive per platform, named `fiberd_<version>_<os>_<arch>.tar.gz`, for linux or darwin on amd64 or arm64. The libfiberzygote archives hold the [zygote library](sdk/c/template/README.md). Check the checksum and provenance before you unpack.
 
 ```bash
 gh release download v0.1.0 -R helayoty/fiberd -p fiberd_0.1.0_linux_amd64.tar.gz -p SHA256SUMS
@@ -69,7 +69,7 @@ make conform-stub   # the conformance suite on the in-memory runtime, on any OS
 make conform-proc   # the same on real fibers, in the Linux dev container (hack/dev)
 ```
 
-The [quickstart](docs/quickstart.md) walks through each call. To write your own template, read [sdk/c/README.md](sdk/c/README.md) for C or [sdk/python/README.md](sdk/python/README.md) for Python, and [the zygote design](docs/design/zygote.md).
+The [quickstart](docs/quickstart.md) walks through each call. To write your own template, read [sdk/c/template/README.md](sdk/c/template/README.md) for C or [sdk/python/README.md](sdk/python/README.md) for Python, and [the zygote design](docs/design/zygote.md).
 
 ## Examples
 

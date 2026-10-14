@@ -21,11 +21,11 @@
  * "get", "ping"), which is what the Hyperlight helper speaks, so proc can
  * be measured under both framings in one run.
  *
- * Build (Linux): gcc <ZYGOTE_CFLAGS> -o counter counter.c ../../../sdk/c/libfiberzygote.c
+ * Build (Linux): gcc <ZYGOTE_CFLAGS> -o counter counter.c ../../../sdk/c/template/libfiberzygote.c
  * The Firecracker guest and the gVisor rootfs take -static-pie.
  */
 #define _GNU_SOURCE
-#include "../../../sdk/c/libfiberzygote.h"
+#include "../../../sdk/c/template/libfiberzygote.h"
 
 #include <arpa/inet.h>
 #include <errno.h>

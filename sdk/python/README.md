@@ -11,12 +11,17 @@ import json
 import fiberd.template as ft
 
 ft.init()                                # first line, before any thread
-model = load_model()                     # the warm-up, paid once
 
-def on_fiber(f: ft.Fiber) -> int:        # runs in the fiber, a fork of the warm process
+# Your own slow setup goes here (imports, model weights, config). It runs
+# once, and every fiber is a fork of this process, born with it loaded.
+with open("prompts.json") as fp:
+    prompts = json.load(fp)
+
+def on_fiber(f: ft.Fiber) -> int:        # runs in the fiber
     task = json.loads(f.payload)         # the bytes the caller sent with the Clone
     def handle(conn):
-        conn.sendall(model.answer(task, conn.recv(4096)))
+        question = conn.recv(4096).decode()
+        conn.sendall(f"{prompts[task['kind']]} {question}".encode())
     f.serve(handle)                      # listens on f.endpoint, reports ready, hands each connection over
     return 0
 

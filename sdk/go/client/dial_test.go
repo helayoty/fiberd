@@ -1,4 +1,4 @@
-package consumer_test
+package client_test
 
 import (
 	"context"
@@ -19,7 +19,7 @@ import (
 	"github.com/helayoty/fiberd/pkg/runtime/stub"
 	"github.com/helayoty/fiberd/pkg/tlsconf"
 	"github.com/helayoty/fiberd/pkg/tlsconf/tlsconftest"
-	"github.com/helayoty/fiberd/sdk/go/consumer"
+	"github.com/helayoty/fiberd/sdk/go/client"
 )
 
 // boundVerifier is the insecure JSON verifier with every grant bound to
@@ -75,23 +75,23 @@ func TestDial(t *testing.T) {
 
 	cases := []struct {
 		name     string
-		dial     func(ctx context.Context) (*consumer.Client, error)
+		dial     func(ctx context.Context) (*client.Client, error)
 		wantDial string // substring of a dial error
 		wantCode codes.Code
 	}{
-		{name: "plaintext dial clones", dial: func(ctx context.Context) (*consumer.Client, error) { return consumer.Dial(ctx, plainAddr) }},
+		{name: "plaintext dial clones", dial: func(ctx context.Context) (*client.Client, error) { return client.Dial(ctx, plainAddr) }},
 		{name: "the bound caller clones over mutual TLS",
-			dial: func(ctx context.Context) (*consumer.Client, error) {
-				return consumer.DialTLS(ctx, tlsAddr, clientCfg(owner))
+			dial: func(ctx context.Context) (*client.Client, error) {
+				return client.DialTLS(ctx, tlsAddr, clientCfg(owner))
 			}},
 		{name: "another caller over mutual TLS is Unauthenticated",
-			dial: func(ctx context.Context) (*consumer.Client, error) {
-				return consumer.DialTLS(ctx, tlsAddr, clientCfg(other))
+			dial: func(ctx context.Context) (*client.Client, error) {
+				return client.DialTLS(ctx, tlsAddr, clientCfg(other))
 			},
 			wantCode: codes.Unauthenticated},
-		{name: "plaintext to a TLS home fails the call", dial: func(ctx context.Context) (*consumer.Client, error) { return consumer.Dial(ctx, tlsAddr) },
+		{name: "plaintext to a TLS home fails the call", dial: func(ctx context.Context) (*client.Client, error) { return client.Dial(ctx, tlsAddr) },
 			wantCode: codes.Unavailable},
-		{name: "a target that is not a URL fails to dial", dial: func(ctx context.Context) (*consumer.Client, error) { return consumer.Dial(ctx, "%zz") },
+		{name: "a target that is not a URL fails to dial", dial: func(ctx context.Context) (*client.Client, error) { return client.Dial(ctx, "%zz") },
 			wantDial: "invalid URL escape"},
 	}
 	for _, tc := range cases {
@@ -136,7 +136,7 @@ func TestWatchEnds(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			addr, gs := tcpHome(t, grant.InsecureJSONVerifier{}, nil)
-			c, err := consumer.Dial(context.Background(), addr)
+			c, err := client.Dial(context.Background(), addr)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -155,7 +155,7 @@ func TestWatchEnds(t *testing.T) {
 			seen := make(chan struct{}, 1)
 			done := make(chan error, 1)
 			go func() {
-				done <- c.Watch(watchCtx, func(consumer.Status) {
+				done <- c.Watch(watchCtx, func(client.Status) {
 					select {
 					case seen <- struct{}{}:
 					default:
@@ -189,13 +189,13 @@ func TestText(t *testing.T) {
 		got  string
 		want string
 	}{
-		{name: "shed says why and when to retry", got: (&consumer.Shed{RetryAfter: 2 * time.Second, Reason: "grant g is at pids.max"}).Error(),
+		{name: "shed says why and when to retry", got: (&client.Shed{RetryAfter: 2 * time.Second, Reason: "grant g is at pids.max"}).Error(),
 			want: "shed: grant g is at pids.max, retry after 2s"},
-		{name: "deferred says why", got: (&consumer.Deferred{Reason: "grant full"}).Error(), want: "deferred: grant full"},
-		{name: "deferred names where the session lives", got: (&consumer.Deferred{Reason: "too large", PreferredHome: "home-b"}).Error(),
+		{name: "deferred says why", got: (&client.Deferred{Reason: "grant full"}).Error(), want: "deferred: grant full"},
+		{name: "deferred names where the session lives", got: (&client.Deferred{Reason: "too large", PreferredHome: "home-b"}).Error(),
 			want: "deferred: too large (session lives on home-b)"},
-		{name: "a tier gap says why", got: (&consumer.TierGap{Reason: "needs CHECKPOINT"}).Error(), want: "tier gap: needs CHECKPOINT"},
-		{name: "a fence is grant, epoch and seq", got: consumer.Fence{GrantUID: "g1", Epoch: 3, Seq: 7}.String(), want: "g1/3/7"},
+		{name: "a tier gap says why", got: (&client.TierGap{Reason: "needs CHECKPOINT"}).Error(), want: "tier gap: needs CHECKPOINT"},
+		{name: "a fence is grant, epoch and seq", got: client.Fence{GrantUID: "g1", Epoch: 3, Seq: 7}.String(), want: "g1/3/7"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

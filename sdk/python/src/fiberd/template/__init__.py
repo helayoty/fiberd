@@ -1,4 +1,4 @@
-"""fiberd.template: the Python template SDK, over libfiberzygote (sdk/c).
+"""fiberd.template: the Python template SDK, over libfiberzygote (sdk/c/template).
 
 A template warms up once and forks a fiber for every Clone. Call init()
 first, do the warm-up, then serve(on_fiber). on_fiber runs in the child

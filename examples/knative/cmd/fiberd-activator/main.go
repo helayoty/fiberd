@@ -24,7 +24,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/helayoty/fiberd/sdk/go/consumer"
+	"github.com/helayoty/fiberd/sdk/go/client"
 
 	"github.com/helayoty/fiberd/examples/knative/activator"
 )
@@ -114,12 +114,12 @@ func run(ctx context.Context, args []string, out io.Writer, ready func(net.Addr)
 	if err := fs.Parse(args); err != nil {
 		return usageError{err}
 	}
-	client, err := consumer.Dial(ctx, *home)
+	c, err := client.Dial(ctx, *home)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = client.Close() }()
-	act, err := activator.New(client, activator.Config{Revisions: revs, Idle: *idle, CloneDeadline: *deadline})
+	defer func() { _ = c.Close() }()
+	act, err := activator.New(c, activator.Config{Revisions: revs, Idle: *idle, CloneDeadline: *deadline})
 	if err != nil {
 		return err
 	}

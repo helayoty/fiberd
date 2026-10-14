@@ -18,7 +18,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	grantv1 "github.com/helayoty/fiberd/api/grant/v1"
-	"github.com/helayoty/fiberd/sdk/go/consumer"
+	"github.com/helayoty/fiberd/sdk/go/client"
 
 	"github.com/helayoty/fiberd/examples/knative/activator"
 )
@@ -34,11 +34,11 @@ func serve(act http.Handler, method, target, body string) *httptest.ResponseReco
 	return rec
 }
 
-// newActivator builds an activator over client and runs its idle parker
+// newActivator builds an activator over c and runs its idle parker
 // for the length of the test.
-func newActivator(t *testing.T, client *consumer.Client, cfg activator.Config) *activator.Activator {
+func newActivator(t *testing.T, c *client.Client, cfg activator.Config) *activator.Activator {
 	t.Helper()
-	act, err := activator.New(client, cfg)
+	act, err := activator.New(c, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,8 +106,8 @@ func TestNew(t *testing.T) {
 			if tc.tcp {
 				home.endpoint = tcpLineGuest(t, newLineGuest())
 			}
-			client := startFake(t, home)
-			act, err := activator.New(client, activator.Config{Revisions: tc.revs, Dial: tc.dial})
+			c := startFake(t, home)
+			act, err := activator.New(c, activator.Config{Revisions: tc.revs, Dial: tc.dial})
 			if tc.wantErr != "" {
 				if act != nil || err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 					t.Fatalf("New = %v, %v, want error with %q", act, err, tc.wantErr)

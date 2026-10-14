@@ -84,7 +84,7 @@ The grant is `TRUSTED` because proc fibers share the host kernel, and a home ref
 
 ## Write your own template
 
-A template is your program linked with libfiberzygote, in C or through the Python SDK. [sdk/c/README.md](../sdk/c/README.md) and [sdk/python/README.md](../sdk/python/README.md) each build one, and [design/zygote.md](design/zygote.md) is the contract it must keep. Point `-template` at it instead of refzygote.
+A template is your program linked with libfiberzygote, in C or through the Python SDK. [sdk/c/template/README.md](../sdk/c/template/README.md) and [sdk/python/README.md](../sdk/python/README.md) each build one, and [design/zygote.md](design/zygote.md) is the contract it must keep. Point `-template` at it instead of refzygote.
 
 ## Conformance
 

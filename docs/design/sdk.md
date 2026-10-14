@@ -4,7 +4,7 @@ This doc explains the SDK under `sdk/`, the two edges other people's code touche
 
 ## Purpose
 
-A [template](../glossary.md#template) author writes code that runs inside a [fiber](../glossary.md#fiber), and a caller writes code that asks for one. `sdk/c` is the template side's C ABI, `libfiberzygote.h`, which `FZ_ABI_VERSION` names and every binding checks at build time. `sdk/go/consumer` is the Go client. `sdk/python` binds the C library as a CPython extension, `fiberd._zygote`, built against the limited API so one wheel serves every CPython from 3.10, and puts `fiberd.template` over it. The extension is compiled with the same hardening flags as the Makefile's `ZYGOTE_CFLAGS`, so a Python template's library is as hardened as refzygote.
+A [template](../glossary.md#template) author writes code that runs inside a [fiber](../glossary.md#fiber), and a caller writes code that asks for one. `sdk/c/template` is the template side's C ABI, `libfiberzygote.h`, which `FZ_ABI_VERSION` names and every binding checks at build time. `sdk/go/client` is the Go client. `sdk/python` binds the C library as a CPython extension, `fiberd._zygote`, built against the limited API so one wheel serves every CPython from 3.10, and puts `fiberd.template` over it. The extension is compiled with the same hardening flags as the Makefile's `ZYGOTE_CFLAGS`, so a Python template's library is as hardened as refzygote.
 
 ## How it works
 

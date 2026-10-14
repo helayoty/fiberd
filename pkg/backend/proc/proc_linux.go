@@ -1,7 +1,7 @@
 //go:build linux
 
 // Package proc is the fork backend. It runs one zygote per grant, linked
-// with sdk/c/libfiberzygote, which forks fibers on request over a
+// with sdk/c/template/libfiberzygote, which forks fibers on request over a
 // socketpair inherited as fd 3. CRIU checkpoints them. It is the reference
 // backend that the conformance suite runs against.
 //

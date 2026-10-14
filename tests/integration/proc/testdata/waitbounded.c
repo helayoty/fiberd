@@ -9,7 +9,7 @@
  * Prints "<alive|reaped|error> <milliseconds taken>". Built by the tests
  * in tests/integration/proc (see reap_linux_test.go). The library is included as
  * source so a static function can be called. */
-#include "../../../../sdk/c/libfiberzygote.c"
+#include "../../../../sdk/c/template/libfiberzygote.c"
 
 int main(int argc, char **argv) {
     if (argc != 2) {

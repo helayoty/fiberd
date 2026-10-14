@@ -1,4 +1,4 @@
-// Package consumer is the grant protocol from the caller's side: a client
+// Package client is the grant protocol from the caller's side: a client
 // for Clone, Park, Release and Watch that turns the two miss outcomes
 // into typed errors a consumer branches on. A consumer (a Knative
 // activator, a container shim, a virtual node) calls Clone with the
@@ -6,7 +6,7 @@
 // (create the thing the slow way, or route to the home that holds the
 // session's state), on SHED it waits retry_after and tries again.
 // Nothing here knows which home it talks to.
-package consumer
+package client
 
 import (
 	"context"

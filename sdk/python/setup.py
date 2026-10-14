@@ -1,4 +1,4 @@
-"""The one extension, fiberd._zygote, over sdk/c/libfiberzygote.c.
+"""The one extension, fiberd._zygote, over sdk/c/template/libfiberzygote.c.
 
 The extension is built against the limited API (abi3, CPython 3.10 and
 later) and compiled with the Makefile's ZYGOTE_CFLAGS, with -fPIC in place
@@ -17,7 +17,7 @@ from setuptools import Extension, setup
 from setuptools.command.build_py import build_py as _build_py
 
 HERE = os.path.abspath(os.path.dirname(__file__))
-C_DIR = os.path.normpath(os.path.join(HERE, "..", "c"))
+C_DIR = os.path.normpath(os.path.join(HERE, "..", "c", "template"))
 
 # Mirrors ZYGOTE_CFLAGS and ZYGOTE_LDFLAGS in the Makefile. The -U comes
 # first because the interpreter's own flags may define _FORTIFY_SOURCE.

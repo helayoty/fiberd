@@ -1,4 +1,4 @@
-/* _zygote is the CPython binding of libfiberzygote (sdk/c), the one part
+/* _zygote is the CPython binding of libfiberzygote (sdk/c/template), the one part
  * of fiberd.template that must be C. It is built against the limited API
  * so one wheel serves every CPython from 3.10, and compiled together with
  * libfiberzygote.c under the Makefile's ZYGOTE_CFLAGS (see setup.py).

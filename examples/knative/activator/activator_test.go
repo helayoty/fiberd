@@ -23,7 +23,7 @@ import (
 	"github.com/helayoty/fiberd/pkg/grant"
 	"github.com/helayoty/fiberd/pkg/rpc"
 	"github.com/helayoty/fiberd/pkg/runtime/stub"
-	"github.com/helayoty/fiberd/sdk/go/consumer"
+	"github.com/helayoty/fiberd/sdk/go/client"
 
 	"github.com/helayoty/fiberd/examples/knative/activator"
 )
@@ -34,7 +34,7 @@ import (
 type world struct {
 	core   *core.Core
 	health *core.SourceHealth
-	client *consumer.Client
+	client *client.Client
 	mu     sync.Mutex
 	guests map[string]*guest
 }
@@ -103,7 +103,7 @@ func newWorld(t *testing.T) *world {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := consumer.New(conn)
+	c := client.New(conn)
 	t.Cleanup(func() { _ = c.Close() })
 	return &world{core: ag, health: health, client: c, guests: map[string]*guest{}}
 }

@@ -5,11 +5,11 @@
 # Exits non-zero when any harness crashes, and leaves the crashing input
 # under $FUZZ_OUT/crashes/ (default bin/fuzz/crashes/).
 #
-#   sdk/c/fuzz/run.sh                     build and run every harness
-#   sdk/c/fuzz/run.sh build               build only
-#   FUZZTIME=10 sdk/c/fuzz/run.sh fuzz_rundir fuzz_control
+#   sdk/c/template/fuzz/run.sh                     build and run every harness
+#   sdk/c/template/fuzz/run.sh build               build only
+#   FUZZTIME=10 sdk/c/template/fuzz/run.sh fuzz_rundir fuzz_control
 set -euo pipefail
-cd "$(dirname "$0")/../../.."
+cd "$(dirname "$0")/../../../.."
 
 CLANG=${CLANG:-clang}
 OUT=${FUZZ_OUT:-bin/fuzz}
@@ -30,9 +30,9 @@ for h in "${harnesses[@]}"; do
   extra=()
   # The reference workload includes only refzygote.c; the library is a
   # second translation unit beside it.
-  [ "$h" = fuzz_refzygote ] && extra=(sdk/c/libfiberzygote.c)
+  [ "$h" = fuzz_refzygote ] && extra=(sdk/c/template/libfiberzygote.c)
   # shellcheck disable=SC2086  # $CFLAGS is a list
-  if ! $CLANG $CFLAGS -o "$OUT/$h" "sdk/c/fuzz/$h.c" "${extra[@]}"; then
+  if ! $CLANG $CFLAGS -o "$OUT/$h" "sdk/c/template/fuzz/$h.c" "${extra[@]}"; then
     echo "run.sh: $h did not build; is libFuzzer installed (libclang-rt-<N>-dev)?" >&2
     exit 1
   fi
@@ -57,7 +57,7 @@ for h in "${harnesses[@]}"; do
   mkdir -p "$OUT/corpus/$h"
   if ! "$OUT/$h" -max_total_time="$FUZZTIME" -timeout=10 -rss_limit_mb=2048 \
       -max_len="$(max_len "$h")" -artifact_prefix="$OUT/crashes/$h-" \
-      "$OUT/corpus/$h" "sdk/c/fuzz/corpus/$h" 2>&1 | tee "$OUT/$h.log" | grep -E '^(#[0-9]+\s+(DONE|INITED)|==|SUMMARY|Test unit written|MS: )' ; then
+      "$OUT/corpus/$h" "sdk/c/template/fuzz/corpus/$h" 2>&1 | tee "$OUT/$h.log" | grep -E '^(#[0-9]+\s+(DONE|INITED)|==|SUMMARY|Test unit written|MS: )' ; then
     failed+=("$h")
   fi
 done

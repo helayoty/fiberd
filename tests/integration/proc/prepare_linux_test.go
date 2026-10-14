@@ -28,7 +28,7 @@ func earlyThread(t *testing.T) string {
 	t.Helper()
 	earlyThreadOnce.Do(func() {
 		earlyThreadBin = filepath.Join(filepath.Dir(zygoteBin), "earlythread")
-		build := exec.Command("gcc", "-O2", "-pthread", "-o", earlyThreadBin, "testdata/earlythread.c", filepath.Join(testenv.RepoRoot(), "sdk", "c", "libfiberzygote.c"))
+		build := exec.Command("gcc", "-O2", "-pthread", "-o", earlyThreadBin, "testdata/earlythread.c", filepath.Join(testenv.RepoRoot(), "sdk", "c", "template", "libfiberzygote.c"))
 		if out, err := build.CombinedOutput(); err != nil {
 			earlyThreadErr = fmt.Errorf("%w: %s", err, out)
 		}

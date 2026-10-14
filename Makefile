@@ -196,10 +196,10 @@ proto-check: proto proto-lint ## fail if generated code is out of date (CI)
 
 zygote: ## build bin/refzygote, the reference zygote, with TLS for handoff grants
 	@mkdir -p $(BIN)
-	$(CC) $(ZYGOTE_CFLAGS) $(ZYGOTE_LDFLAGS) -Wall -Wextra -pthread -DFZ_TLS -o $(BIN)/refzygote sdk/c/refzygote.c sdk/c/libfiberzygote.c -lssl -lcrypto
+	$(CC) $(ZYGOTE_CFLAGS) $(ZYGOTE_LDFLAGS) -Wall -Wextra -pthread -DFZ_TLS -o $(BIN)/refzygote sdk/c/template/refzygote.c sdk/c/template/libfiberzygote.c -lssl -lcrypto
 
 fuzz: ## fuzz the zygote's parsers (libFuzzer) and the handoff parser (go test -fuzz), FUZZTIME seconds each
-	FUZZTIME=$(FUZZTIME) FUZZ_OUT=$(BIN)/fuzz sdk/c/fuzz/run.sh
+	FUZZTIME=$(FUZZTIME) FUZZ_OUT=$(BIN)/fuzz sdk/c/template/fuzz/run.sh
 	$(GO) test -run='^$$' -fuzz=FuzzServerName -fuzztime=$(FUZZTIME)s ./pkg/handoff/
 
 ## The Python SDK (sdk/python). Its extension needs Linux, so it is built

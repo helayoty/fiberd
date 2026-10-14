@@ -358,7 +358,7 @@ var deviceBinds = []string{"null", "zero", "full", "random", "urandom", "tty"}
 // are capabilities over the namespace's own resources only. SYS_ADMIN
 // for clone3 into a pid namespace and the mounts, SYS_RESOURCE for the
 // zygote to cap nested user namespaces at init (it drops it before
-// serving, see sdk/c/libfiberzygote.c), and the rest as runc's defaults
+// serving, see sdk/c/template/libfiberzygote.c), and the rest as runc's defaults
 // for an init that forks and signals children.
 var containerCaps = []string{"CAP_SYS_ADMIN", "CAP_KILL", "CAP_SETPCAP", "CAP_SETUID", "CAP_SETGID", "CAP_SYS_PTRACE",
 	"CAP_DAC_OVERRIDE", "CAP_CHOWN", "CAP_FOWNER", "CAP_SYS_RESOURCE"}
@@ -918,7 +918,7 @@ func (l *launcher) Endpoint(spec backend.WarmSpec, hostPath string) string {
 // Restored brings its loopback up. Its user namespace is new too, a
 // sibling of the container's, so the fiber's own seccomp filter is what
 // keeps nested user namespaces denied after a resume (see
-// sdk/c/libfiberzygote.c). The dump skips the network lock, which needs
+// sdk/c/template/libfiberzygote.c). The dump skips the network lock, which needs
 // iptables and only guards TCP peers. A fiber's endpoints are unix sockets.
 var (
 	emptyNet = []string{"--empty-ns", "net"}

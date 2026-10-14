@@ -51,7 +51,7 @@ func checkpointZygote(ctx context.Context, o BuildOptions, imagesDir string) err
 		_ = cmd.Process.Kill()
 		<-waited
 	}()
-	// fiberd speaks first (sdk/c/libfiberzygote.h). A zygote that
+	// fiberd speaks first (sdk/c/template/libfiberzygote.h). A zygote that
 	// exited already fails the write, and is reported below as such.
 	_, _ = parent.Write([]byte("PREPARE none\n"))
 	if err := awaitReady(ctx, parent, waited, o.ReadyTimeout); err != nil {

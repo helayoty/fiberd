@@ -1,6 +1,6 @@
 #!/bin/sh
 # Build and install criu from the release tarball GitHub serves for the
-# tag, with one upstream patch (see docker/criu/Dockerfile). The tarball
+# tag, with one upstream patch (see docker/dev/Dockerfile). The tarball
 # is verified against a pinned sha256 before it is unpacked. Another
 # version needs CRIU_SHA256 set beside CRIU_VERSION. criu is GPL-2.0, so
 # its license, the patch and where the source came from go to

@@ -42,7 +42,7 @@ import (
 	"google.golang.org/protobuf/types/known/emptypb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	"github.com/helayoty/fiberd/sdk/go/consumer"
+	"github.com/helayoty/fiberd/sdk/go/client"
 )
 
 // Annotation keys.
@@ -102,8 +102,8 @@ type container struct {
 	home       string
 	session    string
 	onStop     string
-	fiber      *consumer.Fiber
-	client     *consumer.Client
+	fiber      *client.Fiber
+	client     *client.Client
 
 	status     task.Status
 	exitStatus uint32
@@ -114,7 +114,7 @@ type container struct {
 // Service is the task service.
 type Service struct {
 	// DialHome connects to a home by address; tests inject one.
-	DialHome func(ctx context.Context, addr string) (*consumer.Client, error)
+	DialHome func(ctx context.Context, addr string) (*client.Client, error)
 
 	pid       int
 	publisher shim.Publisher
@@ -123,7 +123,7 @@ type Service struct {
 
 	mu         sync.Mutex
 	containers map[string]*container
-	homes      map[string]*consumer.Client
+	homes      map[string]*client.Client
 }
 
 var (
@@ -136,13 +136,13 @@ var (
 func NewService(ctx context.Context, publisher shim.Publisher, sd shutdown.Service) *Service {
 	ns, _ := namespaces.Namespace(ctx)
 	s := &Service{
-		DialHome:   consumer.Dial,
+		DialHome:   client.Dial,
 		pid:        os.Getpid(),
 		publisher:  publisher,
 		sd:         sd,
 		ns:         ns,
 		containers: map[string]*container{},
-		homes:      map[string]*consumer.Client{},
+		homes:      map[string]*client.Client{},
 	}
 	if sd != nil {
 		sd.RegisterCallback(func(context.Context) error {
@@ -177,7 +177,7 @@ func (s *Service) publish(ctx context.Context, e any) {
 	_ = s.publisher.Publish(pctx, runtime.GetTopic(e), e)
 }
 
-func (s *Service) home(ctx context.Context, addr string) (*consumer.Client, error) {
+func (s *Service) home(ctx context.Context, addr string) (*client.Client, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if c, ok := s.homes[addr]; ok {
@@ -232,15 +232,15 @@ func (s *Service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 		if c.onStop == "" {
 			c.onStop = "release"
 		}
-		client, err := s.home(ctx, c.home)
+		hc, err := s.home(ctx, c.home)
 		if err != nil {
 			return nil, errgrpc.ToGRPC(fmt.Errorf("home %s: %w", c.home, err))
 		}
-		f, err := client.Clone(ctx, grant, c.session, 5*time.Second, []byte(an[AnnotPayload]))
+		f, err := hc.Clone(ctx, grant, c.session, 5*time.Second, []byte(an[AnnotPayload]))
 		if err != nil {
 			return nil, errgrpc.ToGRPC(classify(err))
 		}
-		c.fiber, c.client = &f, client
+		c.fiber, c.client = &f, hc
 		st, _ := json.Marshal(State{Home: c.home, FiberID: f.ID, Session: c.session, OnStop: c.onStop})
 		_ = os.WriteFile(filepath.Join(r.Bundle, StateFile), st, 0o600)
 		s.log(ctx, c, fmt.Sprintf("fiber %s %s session=%s endpoint=%s fence=%s", f.ID, f.Kind, c.session, f.Endpoint, f.Fence))
@@ -257,9 +257,9 @@ func (s *Service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 // error space: a miss is ResourceExhausted / Unavailable, a tier gap is
 // FailedPrecondition.
 func classify(err error) error {
-	var shed *consumer.Shed
-	var def *consumer.Deferred
-	var gap *consumer.TierGap
+	var shed *client.Shed
+	var def *client.Deferred
+	var gap *client.TierGap
 	switch {
 	case errors.As(err, &shed):
 		return fmt.Errorf("%w: %w", errdefs.ErrUnavailable, err)
@@ -319,16 +319,16 @@ func (s *Service) stop(ctx context.Context, c *container, status uint32) {
 	c.status = task.Status_STOPPED
 	c.exitStatus = status
 	c.exitedAt = time.Now()
-	fiber, client, onStop := c.fiber, c.client, c.onStop
+	fiber, hc, onStop := c.fiber, c.client, c.onStop
 	s.mu.Unlock()
-	if fiber != nil && client != nil {
+	if fiber != nil && hc != nil {
 		var err error
 		if onStop == "park" {
-			err = client.Park(ctx, fiber.ID, false)
+			err = hc.Park(ctx, fiber.ID, false)
 		} else {
-			err = client.Release(ctx, fiber.ID, false)
+			err = hc.Release(ctx, fiber.ID, false)
 		}
-		if err != nil && !consumer.NotFound(err) {
+		if err != nil && !client.NotFound(err) {
 			s.log(ctx, c, fmt.Sprintf("%s %s: %v", onStop, fiber.ID, err))
 		}
 	}

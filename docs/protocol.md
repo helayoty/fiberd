@@ -163,7 +163,7 @@ For a `HANDOFF` fiber, `endpoint` is the home's handoff listener, the same `tcp:
 - It presents the certificate the grant is bound to.
 - It accepts the server only if the base64url SHA-256 of its public key (SubjectPublicKeyInfo) equals `server_key_sha256`.
 
-The home closes the connection without a reply if the server name is unknown, the fiber has ended, or no ClientHello arrives within 1 second. The fiber refuses any client certificate other than the grant's. In Go, `consumer.Fiber.DialHandoff` does all of this. A resumed session keeps its server key, on this home and on any home that shares the handoff key, but it gets a new routing key. Use the one from the latest Clone. fiberd's side is in [handoff.md](design/handoff.md).
+The home closes the connection without a reply if the server name is unknown, the fiber has ended, or no ClientHello arrives within 1 second. The fiber refuses any client certificate other than the grant's. In Go, `client.Fiber.DialHandoff` does all of this. A resumed session keeps its server key, on this home and on any home that shares the handoff key, but it gets a new routing key. Use the one from the latest Clone. fiberd's side is in [handoff.md](design/handoff.md).
 
 ## Outcomes
 

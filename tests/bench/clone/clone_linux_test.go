@@ -21,7 +21,7 @@ import (
 	"github.com/helayoty/fiberd/pkg/grant"
 	"github.com/helayoty/fiberd/pkg/rpc"
 	"github.com/helayoty/fiberd/pkg/runtime/host"
-	"github.com/helayoty/fiberd/sdk/go/consumer"
+	"github.com/helayoty/fiberd/sdk/go/client"
 	"github.com/helayoty/fiberd/tests/internal/testenv"
 )
 
@@ -64,7 +64,7 @@ func TestE2ECloneNumbers(t *testing.T) {
 			h := newE2EHome(t, cgRoot, zygoteBin, !tc.noStore)
 			ctx := context.Background()
 			tok := h.mint(t, tc.durability)
-			clone := func() (consumer.Fiber, time.Duration, error) {
+			clone := func() (client.Fiber, time.Duration, error) {
 				start := time.Now()
 				f, err := h.client.Clone(ctx, tok, "", 5*time.Second, nil)
 				return f, time.Since(start), err
@@ -254,7 +254,7 @@ const benchNode = "bench-node"
 
 // e2eHome is one fiberd home behind a gRPC listener, with its own issuer.
 type e2eHome struct {
-	client *consumer.Client
+	client *client.Client
 	issuer *grant.Issuer
 	clock  *stageClock
 }
@@ -326,7 +326,7 @@ func newE2EHome(t *testing.T, cgRoot, zygoteBin string, store bool) *e2eHome {
 	gs := rpc.NewGRPCServer(&rpc.Server{Core: ag, Issuer: srv.URL, RetryAfter: time.Second})
 	go func() { _ = gs.Serve(lis) }()
 	t.Cleanup(gs.Stop)
-	c, err := consumer.Dial(ctx, lis.Addr().String())
+	c, err := client.Dial(ctx, lis.Addr().String())
 	if err != nil {
 		t.Fatal(err)
 	}

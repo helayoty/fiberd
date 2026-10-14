@@ -90,7 +90,7 @@ jobs:
           python-version: "3.12"
       - run: python -m pip install ruff pytest
       - run: ruff check sdk/python
-      # On Linux this compiles fiberd._zygote against sdk/c with the
+      # On Linux this compiles fiberd._zygote against sdk/c/template with the
       # hardening flags. Off Linux the package has no extension.
       - run: python -m pip install -e sdk/python
       - run: python -m pytest -q sdk/python

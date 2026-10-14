@@ -31,7 +31,7 @@ import (
 	"github.com/helayoty/fiberd/pkg/grant"
 	fhome "github.com/helayoty/fiberd/pkg/home"
 	"github.com/helayoty/fiberd/pkg/runtime/host"
-	"github.com/helayoty/fiberd/sdk/go/consumer"
+	"github.com/helayoty/fiberd/sdk/go/client"
 
 	"github.com/helayoty/fiberd/examples/substrate/capacity"
 	"github.com/helayoty/fiberd/examples/substrate/herder"
@@ -177,11 +177,11 @@ func run(ctx context.Context, podUID, listen, credBundle, trustBundle, clientID,
 	if err := waitTCP(ctx, fiberdAddr, 60*time.Second, fiberdErr); err != nil {
 		return fmt.Errorf("fiberd did not come up: %w", err)
 	}
-	client, err := consumer.Dial(ctx, fiberdAddr)
+	fc, err := client.Dial(ctx, fiberdAddr)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = client.Close() }()
+	defer func() { _ = fc.Close() }()
 
 	// The ingress atenet-router dials.
 	ing, err := ingress.New(ingress.Config{CredentialBundle: credBundle, TrustBundle: trustBundle, AllowedClientID: clientID})
@@ -208,7 +208,7 @@ func run(ctx context.Context, podUID, listen, credBundle, trustBundle, clientID,
 
 	// The herder atelet drives.
 	svc := herder.New(herder.Config{
-		Client: client, Grants: h, Router: ing, Paths: paths,
+		Client: fc, Grants: h, Router: ing, Paths: paths,
 		Host: host.Config{DeltaRegistry: registry, DeltaKeys: deltaKeys, HomeID: podUID},
 	})
 	go svc.Run(ctx)

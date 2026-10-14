@@ -38,7 +38,7 @@ import (
 	"github.com/helayoty/fiberd/pkg/grant"
 	"github.com/helayoty/fiberd/pkg/rpc"
 	"github.com/helayoty/fiberd/pkg/runtime/stub"
-	"github.com/helayoty/fiberd/sdk/go/consumer"
+	"github.com/helayoty/fiberd/sdk/go/client"
 
 	fshim "github.com/helayoty/fiberd/examples/kata/shim"
 )
@@ -122,7 +122,7 @@ func (s *shutdownStub) runCallbacks(t *testing.T) {
 
 type home struct {
 	core   *core.Core
-	client *consumer.Client
+	client *client.Client
 }
 
 func newHome(t *testing.T) *home {
@@ -145,10 +145,10 @@ func newHome(t *testing.T) *home {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &home{core: ag, client: consumer.New(conn)}
+	return &home{core: ag, client: client.New(conn)}
 }
 
-func (h *home) dial(context.Context, string) (*consumer.Client, error) { return h.client, nil }
+func (h *home) dial(context.Context, string) (*client.Client, error) { return h.client, nil }
 
 func jsonGrant(t *testing.T, g core.Grant) string {
 	t.Helper()
@@ -182,7 +182,7 @@ func rawBundle(t *testing.T, config string) string {
 	return dir
 }
 
-func newService(t *testing.T, dial func(context.Context, string) (*consumer.Client, error)) (*fshim.Service, *publisher, *shutdownStub) {
+func newService(t *testing.T, dial func(context.Context, string) (*client.Client, error)) (*fshim.Service, *publisher, *shutdownStub) {
 	t.Helper()
 	pub := &publisher{}
 	sd := newShutdownStub()
@@ -375,7 +375,7 @@ func TestCreateMisses(t *testing.T) {
 	h := newHome(t)
 	fake := newFakeHome(t)
 	fakeClient := fake.client(t)
-	s, _, _ := newService(t, func(_ context.Context, addr string) (*consumer.Client, error) {
+	s, _, _ := newService(t, func(_ context.Context, addr string) (*client.Client, error) {
 		switch addr {
 		case fshim.DefaultHome:
 			return h.client, nil
@@ -498,14 +498,14 @@ func TestCreateRecordsTheFiber(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := newFakeHome(t)
-			client := fake.client(t)
+			hc := fake.client(t)
 			var mu sync.Mutex
 			var dials []string
-			s, pub, _ := newService(t, func(_ context.Context, addr string) (*consumer.Client, error) {
+			s, pub, _ := newService(t, func(_ context.Context, addr string) (*client.Client, error) {
 				mu.Lock()
 				dials = append(dials, addr)
 				mu.Unlock()
-				return client, nil
+				return hc, nil
 			})
 			ctx := context.Background()
 			bundles := make([]string, tc.n)
@@ -647,8 +647,8 @@ func TestStopEndsTheFiber(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := newFakeHome(t)
 			fake.script(nil, tc.stopErr)
-			client := fake.client(t)
-			s, pub, _ := newService(t, func(context.Context, string) (*consumer.Client, error) { return client, nil })
+			hc := fake.client(t)
+			s, pub, _ := newService(t, func(context.Context, string) (*client.Client, error) { return hc, nil })
 			ctx := context.Background()
 			b := bundle(t, appAnnotations(map[string]string{fshim.AnnotOnStop: tc.onStop}))
 			if _, err := s.Create(ctx, &taskAPI.CreateTaskRequest{ID: "c1", Bundle: b}); err != nil {
@@ -788,8 +788,8 @@ func TestRefusals(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := newFakeHome(t)
-			client := fake.client(t)
-			s, _, _ := newService(t, func(context.Context, string) (*consumer.Client, error) { return client, nil })
+			hc := fake.client(t)
+			s, _, _ := newService(t, func(context.Context, string) (*client.Client, error) { return hc, nil })
 			ctx := context.Background()
 			if _, err := s.Create(ctx, &taskAPI.CreateTaskRequest{ID: "c1", Bundle: bundle(t, appAnnotations(nil))}); err != nil {
 				t.Fatal(err)
@@ -937,7 +937,7 @@ func TestShutdownClosesConnections(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := newFakeHome(t)
-			client, err := consumer.Dial(context.Background(), fake.addr)
+			hc, err := client.Dial(context.Background(), fake.addr)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -949,13 +949,13 @@ func TestShutdownClosesConnections(t *testing.T) {
 			} else {
 				s = fshim.NewService(context.Background(), pub, sd)
 			}
-			s.DialHome = func(context.Context, string) (*consumer.Client, error) { return client, nil }
+			s.DialHome = func(context.Context, string) (*client.Client, error) { return hc, nil }
 			ctx := context.Background()
 			if _, err := s.Create(ctx, &taskAPI.CreateTaskRequest{ID: "c1", Bundle: bundle(t, appAnnotations(nil))}); err != nil {
 				t.Fatal(err)
 			}
 			sd.runCallbacks(t)
-			if _, err := client.Clone(ctx, "grant-jwt", "s", time.Second, nil); status.Code(err) != codes.Canceled {
+			if _, err := hc.Clone(ctx, "grant-jwt", "s", time.Second, nil); status.Code(err) != codes.Canceled {
 				t.Fatalf("clone on the home connection after shutdown = %v, want it closed", err)
 			}
 			pub.mu.Lock()
@@ -1115,8 +1115,8 @@ func TestStdoutNamesTheFiber(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := newFakeHome(t)
 			fake.script(nil, tc.stopErr)
-			client := fake.client(t)
-			s, _, _ := newService(t, func(context.Context, string) (*consumer.Client, error) { return client, nil })
+			hc := fake.client(t)
+			s, _, _ := newService(t, func(context.Context, string) (*client.Client, error) { return hc, nil })
 			stdout := filepath.Join(t.TempDir(), "stdout")
 			lines := fifoLines(t, stdout)
 			ctx := context.Background()

@@ -1,4 +1,4 @@
-"""The reference Python template, the twin of sdk/c/refzygote.c.
+"""The reference Python template, the twin of sdk/c/template/refzygote.c.
 
 It warms a heap of --heap-mb MiB once, and every fiber serves the line
 protocol refzygote speaks on its endpoint, so the conformance suite and
