@@ -97,8 +97,9 @@ jobs:
       - run: python -m pip install -e "sdk/python[client]"
       - run: python -m pytest -q sdk/python
       # Ubuntu's protobuf-compiler is the 3.21 protoc the dev image
-      # generates fiberd.client's messages with (make python-proto).
+      # generates fiberd.client's messages with (make python-proto), and
+      # libprotobuf-dev holds the well-known types grant.proto imports.
       - if: runner.os == 'Linux'
-        run: sudo apt-get install -y --no-install-recommends protobuf-compiler
+        run: sudo apt-get install -y --no-install-recommends protobuf-compiler libprotobuf-dev
       - if: runner.os == 'Linux'
         run: make python-proto-check

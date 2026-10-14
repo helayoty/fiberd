@@ -120,7 +120,7 @@ RUN set -eu; cd /tmp; \
 # python-proto), and cryptography for the test certificates.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       python3-dev python3-setuptools python3-pytest \
-      python3-grpcio python3-protobuf protobuf-compiler python3-cryptography \
+      python3-grpcio python3-protobuf protobuf-compiler libprotobuf-dev python3-cryptography \
     && rm -rf /var/lib/apt/lists/*
 
 # GOTOOLCHAIN=auto lets the go.mod toolchain line fetch the exact version.
