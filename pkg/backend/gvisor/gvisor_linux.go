@@ -54,7 +54,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -101,12 +100,8 @@ const (
 	// runsc requires a restore's mounts to match the checkpoint's.
 	channelMount = "/fiberd/channel"
 	poolSocket   = "pool.sock"
-	// tokenBytes is the size of a restore's one-shot token, seedBytes
-	// what each identity carries as fresh entropy.
+	// tokenBytes is the size of a restore's one-shot token.
 	tokenBytes = 16
-	seedBytes  = 32
-	// recordMax bounds one channel record. A payload rides in it as hex.
-	recordMax = 64 << 10
 	// claimWait is how long an accepted connection has to send its
 	// claim. A template claims right after it connects. unclaimedMax
 	// bounds the connections a warm instance holds while they have not,
@@ -1058,49 +1053,9 @@ func (b *Backend) Unwarm(id string) {
 	}
 }
 
-// A channel record is one packet: its kind byte, then every field ended
-// by NUL. The sandbox claims with 't' and its token, the backend hands
-// out identity with 'i', and the sandbox acks with 'a' and the fence once
-// its endpoint is bound.
-//
-//	t token
-//	i generation kind fence endpoint payload-hex|- key-PEM|- cert-PEM|- caller|- session-hex|- seed-hex
-//	a fence
-//
-// The session is hex so a name may hold any character, and "-" for an
-// anonymous fiber, as on the CLONE line.
-const (
-	recClaim    = 't'
-	recIdentity = 'i'
-	recAck      = 'a'
-	// identityFields is how many fields an 'i' record carries.
-	identityFields = 10
-)
-
-// record builds one channel record.
-func record(kind byte, fields ...string) []byte {
-	var buf bytes.Buffer
-	buf.WriteByte(kind)
-	for _, f := range fields {
-		buf.WriteString(f)
-		buf.WriteByte(0)
-	}
-	return buf.Bytes()
-}
-
-// parseRecord takes one record apart. It is refused when it is empty or
-// a field is not NUL-ended.
-func parseRecord(data []byte) (kind byte, fields []string, ok bool) {
-	if len(data) < 2 || data[len(data)-1] != 0 {
-		return 0, nil, false
-	}
-	parts := bytes.Split(data[1:len(data)-1], []byte{0})
-	fields = make([]string, len(parts))
-	for i, p := range parts {
-		fields[i] = string(p)
-	}
-	return data[0], fields, true
-}
+// The channel speaks backend's records. The sandbox claims with 't' and
+// its token, the backend hands out the incarnation with 'i', and the
+// sandbox acks with 'a' and the fence once its endpoint is bound.
 
 // servePool accepts the connections of sandboxes restored under w and
 // reads each claim in a goroutine of its own. At most unclaimedMax are
@@ -1149,8 +1104,8 @@ func (b *Backend) claim(w *warm, conn net.Conn) {
 		_ = conn.Close()
 		return
 	}
-	kind, fields, ok := parseRecord(buf[:n])
-	if !ok || kind != recClaim || len(fields) != 1 {
+	kind, fields, ok := backend.ParseRecord(buf[:n])
+	if !ok || kind != backend.RecordClaim || len(fields) != 1 {
 		_ = conn.Close()
 		return
 	}
@@ -1374,28 +1329,21 @@ func (b *Backend) bind(ctx context.Context, x *box, conn net.Conn, kind, fence, 
 }
 
 func (b *Backend) handOut(ctx context.Context, x *box, conn net.Conn, kind, fence, endpoint string, payload []byte, session string, generation int) (backend.Fiber, error) {
-	// The template refuses a record whose generation is not 1 or more
-	// and exits, which would show as a missing ack. Refuse it by name.
-	if generation < 1 {
-		return backend.Fiber{}, fmt.Errorf("gvisor: %s: generation %d is not an incarnation", fence, generation)
-	}
-	seed := make([]byte, seedBytes)
+	seed := make([]byte, backend.SeedBytes)
 	if _, err := rand.Read(seed); err != nil {
 		return backend.Fiber{}, fmt.Errorf("gvisor: seed: %w", err)
 	}
-	ph := "-"
-	if len(payload) > 0 {
-		ph = hex.EncodeToString(payload)
-	}
-	sh := "-"
-	if session != "" {
-		sh = hex.EncodeToString([]byte(session))
-	}
 	// The generation is the host's count of the fiber's lineage: 1 for a
 	// sandbox restored from the template image, the parked one's plus one
-	// for a resume. The backend passes it on as given.
-	rec := record(recIdentity, strconv.Itoa(generation), kind, fence, endpoint, ph, "-", "-", "-", sh, hex.EncodeToString(seed))
+	// for a resume. The backend passes it on as given, and a record the
+	// template would refuse (a generation under 1) is refused here by
+	// name rather than shown as a missing ack. No sandbox serves handoff,
+	// so the identity fields stay empty.
+	rec, err := backend.Incarnation{Generation: generation, Kind: kind, Fence: fence, Endpoint: endpoint, Payload: payload, Session: session, Seed: seed}.Record()
 	clear(seed)
+	if err != nil {
+		return backend.Fiber{}, fmt.Errorf("gvisor: %w", err)
+	}
 	// The context ending cuts the write and the read short.
 	stop := context.AfterFunc(ctx, func() { _ = conn.SetDeadline(time.Now()) })
 	defer stop()
@@ -1412,8 +1360,8 @@ func (b *Backend) handOut(ctx context.Context, x *box, conn net.Conn, kind, fenc
 		}
 		return backend.Fiber{}, fmt.Errorf("gvisor: %s: no ack: %w", fence, err)
 	}
-	k, fields, ok := parseRecord(buf[:n])
-	if !ok || k != recAck || len(fields) != 1 || fields[0] != fence {
+	k, fields, ok := backend.ParseRecord(buf[:n])
+	if !ok || k != backend.RecordAck || len(fields) != 1 || fields[0] != fence {
 		return backend.Fiber{}, fmt.Errorf("gvisor: %s: ack names %q", fence, buf[:n])
 	}
 	if err := waitEndpoint(ctx, x.endpoint, x.done); err != nil {

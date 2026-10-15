@@ -48,7 +48,7 @@ func TestExitRightAfterCloneIsReported(t *testing.T) {
 				ctx, cancel = context.WithTimeout(context.Background(), tc.deadline)
 			}
 			defer cancel()
-			fb, err := b.Clone(ctx, w.ID, backend.FiberSpec{Fence: fence, Endpoint: filepath.Join(workDir, "ep.sock"), CgroupFD: -1, Deadline: time.Second})
+			fb, err := b.Clone(ctx, w.ID, backend.FiberSpec{Generation: 1, Fence: fence, Endpoint: filepath.Join(workDir, "ep.sock"), CgroupFD: -1, Deadline: time.Second})
 			if !errors.Is(err, tc.wantErr) {
 				t.Fatalf("Clone: err = %v, want %v", err, tc.wantErr)
 			}
@@ -270,7 +270,7 @@ func TestExitLandsOnTheReportingZygotesFiber(t *testing.T) {
 			for i := range fences {
 				w, _, workDir := f.warmFor(t, b, "g"+strconv.Itoa(i+1), tc.scripts[i], pid)
 				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				_, err := b.Clone(ctx, w.ID, backend.FiberSpec{Fence: fences[i], Endpoint: filepath.Join(workDir, "ep.sock"), CgroupFD: -1, Deadline: time.Second})
+				_, err := b.Clone(ctx, w.ID, backend.FiberSpec{Generation: 1, Fence: fences[i], Endpoint: filepath.Join(workDir, "ep.sock"), CgroupFD: -1, Deadline: time.Second})
 				cancel()
 				if err != nil {
 					t.Fatalf("clone %s: %v", fences[i], err)

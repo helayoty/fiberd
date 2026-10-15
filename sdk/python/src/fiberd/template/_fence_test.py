@@ -27,16 +27,16 @@ def test_parse_fence(name, f0, f1, f2):
 
 
 KINDS = [
-    ("a unix path", "/run/fiberd/g/1-1.sock", False, "unix"),
-    ("a unix url", "unix:///run/fiberd/g/1-1.sock", False, "unix"),
-    ("tcp", "tcp://10.0.0.1:9000", False, "tcp"),
-    ("a handoff channel in the environment wins", "/run/fiberd/g/1-1.sock", True, "handoff"),
+    ("a unix path", "/run/fiberd/g/1-1.sock", "unix"),
+    ("a unix url", "unix:///run/fiberd/g/1-1.sock", "unix"),
+    ("tcp", "tcp://10.0.0.1:9000", "tcp"),
+    ("the handoff endpoint", "handoff", "handoff"),
 ]
 
 
 @table(KINDS)
-def test_endpoint_kind(name, f0, f1, f2):
-    assert _fence.endpoint_kind(f0, f1) == f2
+def test_endpoint_kind(name, f0, f1):
+    assert _fence.endpoint_kind(f0) == f1
 
 
 TCP = [

@@ -202,8 +202,8 @@ static int plain_main(int port) {
 
 /* ---- zygote mode -------------------------------------------------------- */
 
-static int on_fiber(const fz_fiber_t *f) {
-    reseed_rngs(NULL, 0);
+static int on_fiber(const fz_incarnation_t *f) {
+    reseed_rngs(f->seed, f->seed_len);
     int s = listen_endpoint(f->endpoint);
     if (s < 0) { fprintf(stderr, "counter %s: listen %s: %s\n", f->fence, f->endpoint, strerror(errno)); return 4; }
     fz_fiber_ready();
@@ -238,7 +238,7 @@ static int gvisor_main(void) {
         if (!wait_checkpoint()) continue;
         /* A sandbox restored from the image. Its identity and a fresh
          * seed come on fiberd's channel, see refzygote. */
-        fz_gvisor_identity_t id;
+        fz_incarnation_t id;
         if (fz_gvisor_identity(&id) < 0) { fprintf(stderr, "counter: restored without an identity: %s\n", strerror(errno)); return 122; }
         reseed_rngs(id.seed, id.seed_len);
         int s = listen_endpoint(id.endpoint);

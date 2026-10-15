@@ -44,7 +44,7 @@ done
 max_len() {
   case $1 in
     fuzz_recv_line|fuzz_control) echo 70000 ;; # MAX_LINE is 65536
-    fuzz_identity) echo 70000 ;;               # IDENTITY_MAX is 65536
+    fuzz_identity) echo 70000 ;;               # RECORD_MAX is 65536
     fuzz_procfiles) echo 20000 ;;              # lock_sys buffers 8192
     *) echo 4096 ;;
   esac

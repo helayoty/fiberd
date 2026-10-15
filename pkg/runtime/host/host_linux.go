@@ -160,9 +160,13 @@ type fiber struct {
 	overW      bool   // killed by the host for exceeding its W budget
 	ready      bool   // the backend has answered: before that, W is a restore in flight, not the fiber's
 	pooled     bool   // handed out of the pool, in the leaf it was restored in
-	// handoff is the host's end of a handoff fiber's channel. It is nil
-	// for a fiber reached directly.
-	handoff *os.File
+	// channel is the host's end of a handoff fiber's channel, which the
+	// backend made and carried its incarnation record at birth, and the
+	// host passes connections over. It is nil for every other fiber.
+	// handoff says the fiber serves those connections rather than an
+	// endpoint.
+	channel *os.File
+	handoff bool
 	// relay is the tcp listener in front of a fiber that serves a unix
 	// socket on a tcp home. It is nil for every other fiber.
 	relay *relay
@@ -1077,9 +1081,9 @@ func (r *Runtime) finish(f *fiber, reason, detail string) {
 		_ = os.Remove(p)
 	}
 	r.freeSocket(f.sock, f.id)
-	if f.handoff != nil {
-		r.unroute(f)
-		_ = f.handoff.Close()
+	r.unroute(f)
+	if f.channel != nil {
+		_ = f.channel.Close()
 	}
 	// The leaf may still be tearing down, so retry briefly.
 	_ = removeSoon(f.cg)
@@ -1336,17 +1340,15 @@ func (r *Runtime) start(ctx context.Context, z *warm, spec core.CloneSpec, p *po
 		return core.FiberHandle{}, err
 	}
 	url, bind, port := "", handoffEndpoint, 0
-	var hostEnd, fiberEnd *os.File
-	if spec.Grant.Policy.EndpointMode == core.EndpointHandoff {
-		hostEnd, fiberEnd, err = r.handoffPair(spec.Grant.UID)
-		if err == nil {
-			defer func() { _ = fiberEnd.Close() }()
-			// The grant's TLS identity waits in the channel for the
-			// fiber to be born, with the caller it serves. It is never
-			// a file.
-			if err = r.sendIdentity(hostEnd, spec.Grant.UID, spec.CallerCert); err != nil {
-				_ = hostEnd.Close()
-			}
+	handoff := spec.Grant.Policy.EndpointMode == core.EndpointHandoff
+	var identity *backend.Identity
+	if handoff {
+		// The record the backend queues for the fiber carries the
+		// grant's TLS identity, with the caller it serves.
+		if !r.canHandoff() {
+			err = fmt.Errorf("%w: grant %s on backend %s", ErrNoHandoff, spec.Grant.UID, r.be.Name())
+		} else {
+			identity, err = r.identityFor(spec.Grant.UID, spec.CallerCert)
 		}
 	} else {
 		url, bind, port, err = r.mintEndpoint(spec.Fence)
@@ -1360,9 +1362,6 @@ func (r *Runtime) start(ctx context.Context, z *warm, spec core.CloneSpec, p *po
 		sock = bind // a unix socket, served directly or behind the relay
 		if err := r.claimSocket(sock, spec.Fence.String()); err != nil {
 			r.freePort(port, spec.Fence.String())
-			if hostEnd != nil {
-				_ = hostEnd.Close()
-			}
 			giveUp()
 			return core.FiberHandle{}, err
 		}
@@ -1380,7 +1379,7 @@ func (r *Runtime) start(ctx context.Context, z *warm, spec core.CloneSpec, p *po
 	// image, starts its lineage at generation 1.
 	f := &fiber{id: spec.Fence.String(), grantUID: spec.Grant.UID, cg: leaf, endpoint: url, port: port, sock: sock, birth: spec.Fence.String(),
 		generation: 1, budget: spec.Grant.WBudgetBytes, devMax: spec.Grant.DeviceBudget.Bytes,
-		quota: deltaQuota(spec.Grant), handoff: hostEnd, relay: rl, done: make(chan struct{}), pooled: p != nil}
+		quota: deltaQuota(spec.Grant), handoff: handoff, relay: rl, done: make(chan struct{}), pooled: p != nil}
 	// Registered before the backend answers so an exit that races the
 	// reply is not lost.
 	r.mu.Lock()
@@ -1388,7 +1387,7 @@ func (r *Runtime) start(ctx context.Context, z *warm, spec core.CloneSpec, p *po
 	r.mu.Unlock()
 	fspec := backend.FiberSpec{
 		Fence: f.id, Endpoint: bind, CgroupFD: int(lfd.Fd()), Deadline: spec.Deadline,
-		Payload: spec.Payload, Session: spec.Session, Generation: f.generation, OwnPIDNS: true, Handoff: fiberEnd,
+		Payload: spec.Payload, Session: spec.Session, Generation: f.generation, OwnPIDNS: true, Identity: identity,
 	}
 	var fb backend.Fiber
 	if p != nil {
@@ -1411,9 +1410,6 @@ func (r *Runtime) start(ctx context.Context, z *warm, spec core.CloneSpec, p *po
 		}
 		r.freeSocket(sock, f.id)
 		r.freePort(port, f.id)
-		if hostEnd != nil {
-			_ = hostEnd.Close()
-		}
 		if p != nil || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 			// The backend kills a sandbox it could not bind or start in
 			// time, reporting a pooled one's end under its pooled id, and
@@ -1425,6 +1421,11 @@ func (r *Runtime) start(ctx context.Context, z *warm, spec core.CloneSpec, p *po
 		}
 		return core.FiberHandle{}, err
 	}
+	// The host's end of the fiber's channel is the host's from here, and
+	// finish closes it with the fiber.
+	r.mu.Lock()
+	f.channel = fb.Channel
+	r.mu.Unlock()
 	ep, err := r.route(f)
 	if err != nil {
 		_ = r.Release(ctx, f.id, false)
@@ -1533,7 +1534,7 @@ func (r *Runtime) Park(ctx context.Context, fiberID string, sync bool) (string, 
 	// gives it back. An async park's fiber is gone, so the ref goes back
 	// with any error, and the ledger parks the session rather than count a
 	// dead fiber.
-	m := manifest{Fence: f.id, GrantUID: f.grantUID, Birth: f.birth, Endpoint: ep, Handoff: f.handoff != nil, Backend: r.be.Name(),
+	m := manifest{Fence: f.id, GrantUID: f.grantUID, Birth: f.birth, Endpoint: ep, Handoff: f.handoff, Backend: r.be.Name(),
 		Generation: f.generation, WUsed: w, ParkedAt: time.Now().UTC().Format(time.RFC3339Nano)}
 	if f.relay != nil {
 		m.Relay = f.relay.sock
@@ -1653,25 +1654,24 @@ func (r *Runtime) resume(ctx context.Context, spec core.CloneSpec) (core.FiberHa
 	defer func() { _ = lfd.Close() }()
 	workDir := filepath.Join(r.cfg.RunDir, spec.Grant.UID)
 	_ = os.MkdirAll(workDir, 0o755)
-	// A handoff fiber gets a new channel in place of its parked one. Any
-	// other restored listener serves on its parked endpoint. That is a unix
+	// Every fiber of a channel backend gets a new channel in place of its
+	// parked one (below). A handoff fiber serves on it. Any other
+	// restored listener serves on its parked endpoint. That is a unix
 	// socket that binds its path again, or the tcp port, which must still
 	// be this fiber's (or free) on this home.
 	var parked endpoint.Endpoint
-	var hostEnd, fiberEnd *os.File
 	if m.Handoff {
 		// The restored fiber holds its identity in memory. The pin is
 		// recorded here for HandoffRoute, and the new channel carries
 		// only connections.
+		if !r.canHandoff() {
+			_ = rmdir(leaf)
+			return core.FiberHandle{}, fmt.Errorf("%w: grant %s on backend %s", ErrNoHandoff, spec.Grant.UID, r.be.Name())
+		}
 		if err := r.prepareIdentity(spec.Grant.UID, spec.Grant.CallerThumbprint); err != nil {
 			_ = rmdir(leaf)
 			return core.FiberHandle{}, err
 		}
-		if hostEnd, fiberEnd, err = r.handoffPair(spec.Grant.UID); err != nil {
-			_ = rmdir(leaf)
-			return core.FiberHandle{}, err
-		}
-		defer func() { _ = fiberEnd.Close() }()
 	} else {
 		if parked, err = endpoint.Parse(m.Endpoint); err != nil {
 			_ = rmdir(leaf)
@@ -1779,16 +1779,18 @@ func (r *Runtime) resume(ctx context.Context, spec core.CloneSpec) (core.FiberHa
 		}
 	}
 	// The resumed fiber is the next generation of the parked one's
-	// lineage, whichever home parked it.
+	// lineage, whichever home parked it. A handoff fiber gets a fresh
+	// channel from the backend in place of its parked one, with no
+	// record on it yet.
 	f := &fiber{id: spec.Fence.String(), grantUID: spec.Grant.UID, cg: leaf, port: port, sock: sock, birth: birth.String(), fenceFn: fenceFn,
 		generation: m.Generation + 1, endpoint: served, budget: spec.Grant.WBudgetBytes, devMax: spec.Grant.DeviceBudget.Bytes,
-		quota: deltaQuota(spec.Grant), handoff: hostEnd, relay: rl, done: make(chan struct{})}
+		quota: deltaQuota(spec.Grant), handoff: m.Handoff, relay: rl, done: make(chan struct{})}
 	r.mu.Lock()
 	r.fibers[f.id] = f
 	r.mu.Unlock()
 	refused := r.pidsHits(gcg)
 	fb, err := r.be.Resume(ctx, backend.ResumeSpec{Dir: dir, Fence: f.id, Endpoint: bind, CgroupFD: int(lfd.Fd()), Deadline: spec.Deadline,
-		WarmID: spec.Grant.UID, WorkDir: workDir, Session: spec.Session, Generation: f.generation, Handoff: fiberEnd})
+		WarmID: spec.Grant.UID, WorkDir: workDir, Session: spec.Session, Generation: f.generation, Handoff: m.Handoff})
 	if err != nil {
 		err = r.pidsPressure(gcg, refused, spec.Grant.UID, err)
 		r.mu.Lock()
@@ -1801,9 +1803,6 @@ func (r *Runtime) resume(ctx context.Context, spec core.CloneSpec) (core.FiberHa
 		}
 		r.freeSocket(sock, f.id)
 		r.freePort(port, f.id)
-		if hostEnd != nil {
-			_ = hostEnd.Close()
-		}
 		_ = leaf.Kill()
 		_ = rmdir(leaf)
 		// Nothing serves on the socket a failed restore may have bound,
@@ -1814,6 +1813,9 @@ func (r *Runtime) resume(ctx context.Context, spec core.CloneSpec) (core.FiberHa
 		_ = os.Remove(fenceFn)
 		return core.FiberHandle{}, err
 	}
+	r.mu.Lock()
+	f.channel = fb.Channel
+	r.mu.Unlock()
 	ep, err := r.route(f)
 	if err != nil {
 		_ = r.Release(ctx, f.id, false)

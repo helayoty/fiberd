@@ -44,6 +44,18 @@ func fakeArgv(script string, pid int) []string {
 
 // impossiblePID is a number no process on this host can have, so a test
 // that goes wrong can never signal a real one.
+// channelOf keeps the host's end of a handoff fiber's channel, which
+// the backend hands back from Clone and Resume, until the test ends,
+// and says whether there was one.
+func channelOf(t *testing.T, fb backend.Fiber) bool {
+	t.Helper()
+	if fb.Channel == nil {
+		return false
+	}
+	t.Cleanup(func() { _ = fb.Channel.Close() })
+	return true
+}
+
 func impossiblePID(t *testing.T) int {
 	t.Helper()
 	b, err := os.ReadFile("/proc/sys/kernel/pid_max")
@@ -86,6 +98,10 @@ type fakeZygote struct {
 
 	mu   sync.Mutex
 	recv []string
+	// channel is the fiber's end of the last channel a CLONE passed, the
+	// last descriptor on the line, kept so a test can read the record
+	// the backend queued on it. -1 before the first.
+	channel int
 }
 
 func (s *fakeSpawner) spawn(cmd *exec.Cmd) (process, error) {
@@ -112,7 +128,7 @@ func (s *fakeSpawner) spawn(cmd *exec.Cmd) (process, error) {
 		exeSHA = hex.EncodeToString(sum[:])
 	}
 	s.mu.Lock()
-	z := &fakeZygote{cmd: cmd, script: cmd.Args[1], zpid: cmd.Args[2], pid: s.base + len(s.runs), ctl: conn.(*net.UnixConn), exeSHA: exeSHA,
+	z := &fakeZygote{cmd: cmd, script: cmd.Args[1], zpid: cmd.Args[2], pid: s.base + len(s.runs), ctl: conn.(*net.UnixConn), exeSHA: exeSHA, channel: -1,
 		gate: make(chan struct{}), done: make(chan struct{}), notify: make(chan struct{}, 1)}
 	s.runs = append(s.runs, z)
 	s.mu.Unlock()
@@ -245,13 +261,14 @@ func (z *fakeZygote) serve() {
 		}
 	}
 	for {
-		line, nfds, err := recvLine(z.ctl)
+		line, fds, err := recvLine(z.ctl)
 		if err != nil {
 			return // fiberd closed the socket, or killed the zygote
 		}
 		z.record(strings.TrimSuffix(line, "\n"))
-		if nfds > 0 {
-			z.record(fmt.Sprintf("FDS %d", nfds))
+		if len(fds) > 0 {
+			z.record(fmt.Sprintf("FDS %d", len(fds)))
+			z.keepChannel(fds)
 		}
 		fields := strings.Fields(line)
 		if len(fields) == 0 {
@@ -330,23 +347,20 @@ func (z *fakeZygote) readSetup() ([]string, bool) {
 // recvLine reads one line a byte at a time, as libfiberzygote's recv_line
 // does, so the descriptors passed with a message are counted against the
 // line they came with. The fds are closed.
-func recvLine(c *net.UnixConn) (line string, nfds int, err error) {
+func recvLine(c *net.UnixConn) (line string, fds []int, err error) {
 	var sb strings.Builder
 	buf := make([]byte, 1)
 	oob := make([]byte, 256)
 	for {
 		n, oobn, _, _, err := c.ReadMsgUnix(buf, oob)
 		if err != nil {
-			return "", 0, err
+			return "", nil, err
 		}
 		if oobn > 0 {
 			if msgs, err := syscall.ParseSocketControlMessage(oob[:oobn]); err == nil {
 				for _, m := range msgs {
-					fds, _ := syscall.ParseUnixRights(&m)
-					for _, fd := range fds {
-						_ = syscall.Close(fd)
-					}
-					nfds += len(fds)
+					got, _ := syscall.ParseUnixRights(&m)
+					fds = append(fds, got...)
 				}
 			}
 		}
@@ -355,9 +369,45 @@ func recvLine(c *net.UnixConn) (line string, nfds int, err error) {
 		}
 		sb.WriteByte(buf[0])
 		if buf[0] == '\n' {
-			return sb.String(), nfds, nil
+			return sb.String(), fds, nil
 		}
 	}
+}
+
+// keepChannel keeps the last descriptor a line passed, the fiber's end
+// of its channel, in place of the one kept before, and closes the rest.
+func (z *fakeZygote) keepChannel(fds []int) {
+	z.mu.Lock()
+	defer z.mu.Unlock()
+	for _, fd := range fds[:len(fds)-1] {
+		_ = syscall.Close(fd)
+	}
+	if z.channel >= 0 {
+		_ = syscall.Close(z.channel)
+	}
+	z.channel = fds[len(fds)-1]
+}
+
+// recordOn reads the record the backend queued on the channel the last
+// CLONE passed the fake zygote, off the fiber's end as the library does.
+func recordOn(t *testing.T, z *fakeZygote) backend.Incarnation {
+	t.Helper()
+	z.mu.Lock()
+	fd := z.channel
+	z.mu.Unlock()
+	if fd < 0 {
+		t.Fatal("no channel was passed with the CLONE")
+	}
+	buf := make([]byte, backend.RecordMax)
+	n, _, _, _, err := syscall.Recvmsg(fd, buf, nil, syscall.MSG_DONTWAIT)
+	if err != nil {
+		t.Fatalf("read the record off the channel: %v", err)
+	}
+	inc, err := backend.ParseIncarnation(buf[:n])
+	if err != nil {
+		t.Fatalf("record on the channel: %v", err)
+	}
+	return inc
 }
 
 // criuKnobs say how the fake criu answers, so a table case can hold them.

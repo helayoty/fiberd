@@ -33,7 +33,7 @@ flowchart TD
 
 fiberd re-executes with its keep set unless `-all-caps`. One that holds more but lacks SETPCAP refuses to start rather than run with everything.
 
-**netns.** A unix socket belongs to the namespace it was created in, and criu finds only the sockets of the namespaces it dumps. `Do` locks an OS thread, enters the network namespace of a pid with `setns`, runs a function and returns. A thread that cannot return is left locked to a goroutine that ends, so the runtime discards it instead of handing it to other goroutines. `Socketpair` makes a [handoff](../glossary.md#handoff) channel there, and `LoopbackUp` brings `lo` up in a namespace criu created empty.
+**netns.** A unix socket belongs to the namespace it was created in, and criu finds only the sockets of the namespaces it dumps. `Do` locks an OS thread, enters the network namespace of a pid with `setns`, runs a function and returns. A thread that cannot return is left locked to a goroutine that ends, so the runtime discards it instead of handing it to other goroutines. `Socketpair` makes a fiber's channel there, and `LoopbackUp` brings `lo` up in a namespace criu created empty.
 
 ## Security notes and known gaps
 

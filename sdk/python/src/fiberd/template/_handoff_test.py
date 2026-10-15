@@ -260,7 +260,7 @@ def client(pair, tmp_path, fd, line=b"ping\n", served=True):
 
 def handoff_fiber(world, ext, monkeypatch, channel, identity=None):
     monkeypatch.setattr(ft, "_ext", lambda: ext)
-    f = ft.Fiber("g/1/1", "handoff", b"", "", {"FIBERD_HANDOFF_FD": str(channel.fileno())}, identity=world.identity() if identity is None else identity)
+    f = ft.Fiber("g/1/1", "handoff", b"", "", {"FIBERD_CHANNEL_FD": str(channel.fileno())}, identity=world.identity() if identity is None else identity)
     assert f.kind == "handoff"
     return f
 
@@ -429,11 +429,11 @@ def test_tls_context_is_built_once_and_the_key_stays_in_a_memfd(world, monkeypat
 
 
 CONTEXT_FIBERS = [
-    # the fiber's environment, its identity, the refusal
-    ("a unix fiber has nothing to accept", {}, "ident", "only a handoff fiber"),
-    ("a handoff fiber without an identity", {"FIBERD_HANDOFF_FD": "4"}, None, "holds no identity"),
-    ("an identity without the caller's certificate", {"FIBERD_HANDOFF_FD": "4"}, "no caller cert", "no caller certificate"),
-    ("an identity with another caller's certificate", {"FIBERD_HANDOFF_FD": "4"}, "other caller", "not the caller the grant is bound to"),
+    # the fiber's endpoint, its identity, the refusal
+    ("a unix fiber has nothing to accept", "/tmp/ep.sock", "ident", "only a handoff fiber"),
+    ("a handoff fiber without an identity", "handoff", None, "holds no identity"),
+    ("an identity without the caller's certificate", "handoff", "no caller cert", "no caller certificate"),
+    ("an identity with another caller's certificate", "handoff", "other caller", "not the caller the grant is bound to"),
 ]
 
 
@@ -447,7 +447,7 @@ def test_accept_refusals(world, monkeypatch, name, f0, f1, f2):
         "other caller": world.identity(caller_pem=world.other.cert_pem),
     }
     identity = identities[f1]
-    f = ft.Fiber("g/1/1", "/tmp/ep.sock", b"", "", f0, identity=identity)
+    f = ft.Fiber("g/1/1", f0, b"", "", {"FIBERD_CHANNEL_FD": "4"}, identity=identity)
     with pytest.raises(ft.TemplateError, match=f2):
         f.accept()
     assert f._identity_fd == -1, "a refused identity is never sealed, so no memfd is left open"

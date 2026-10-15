@@ -18,6 +18,8 @@ import (
 	"time"
 
 	"go.uber.org/goleak"
+
+	"github.com/helayoty/fiberd/pkg/backend"
 )
 
 // TestMain fails the package when a test leaves a goroutine behind, such
@@ -518,24 +520,24 @@ func (f *fakeRunsc) dialPool(x *fakeSandbox, host, sock string, k knobs) {
 	}
 	conn, err := net.Dial("unixpacket", sock)
 	if err == nil {
-		_, err = conn.Write(record(recClaim, token))
+		_, err = conn.Write(backend.Record(backend.RecordClaim, token))
 	}
 	if err != nil {
 		f.endWith(x.cid, 122)
 		return
 	}
 	defer func() { _ = conn.Close() }()
-	buf := make([]byte, recordMax)
+	buf := make([]byte, backend.RecordMax)
 	n, err := conn.Read(buf)
 	if err != nil {
 		f.endWith(x.cid, 122)
 		return
 	}
-	kind, fields, ok := parseRecord(buf[:n])
+	kind, fields, ok := backend.ParseRecord(buf[:n])
 	f.mu.Lock()
 	x.records = append(x.records, fields)
 	f.mu.Unlock()
-	if !ok || kind != recIdentity || len(fields) != identityFields {
+	if !ok || kind != backend.RecordIncarnation || len(fields) != backend.IncarnationFields {
 		f.endWith(x.cid, 122)
 		return
 	}
@@ -553,7 +555,7 @@ func (f *fakeRunsc) dialPool(x *fakeSandbox, host, sock string, k knobs) {
 	if k.BadAck {
 		fence += "-other"
 	}
-	_, _ = conn.Write(record(recAck, fence))
+	_, _ = conn.Write(backend.Record(backend.RecordAck, fence))
 }
 
 // endSandbox ends the sandbox for cid, if it runs. Its process dies by

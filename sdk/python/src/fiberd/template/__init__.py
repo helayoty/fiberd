@@ -92,8 +92,9 @@ class Incarnation:
     whichever home resumes it. A template that counts its own
     incarnations can tell a missed one from the number.
 
-    seed is the entropy this incarnation was reseeded from, zeroed once the
-    on_incarnation hooks have run, and never shown by repr.
+    seed is the 32 bytes of entropy the host sent on the incarnation
+    record, which the generators were reseeded from. It is zeroed once
+    the on_incarnation hooks have run, and never shown by repr.
     """
 
     __slots__ = ("kind", "generation", "fence", "seed")
@@ -192,27 +193,25 @@ def serve(on_fiber: Callable[[Fiber], int], *, threads: str = "refuse", control_
     return _ext().serve(functools.partial(_born, on_fiber), control_fd)
 
 
-def _born(on_fiber: Callable[[Fiber], int], fence: str, endpoint: str, payload: bytes, session: str, env: dict[str, str], generation: int, kind: str) -> int:
-    """The first Python in a fiber, after the C trampoline restored the interpreter. generation and kind are the library's record."""
+def _born(on_fiber: Callable[[Fiber], int], fence: str, endpoint: str, payload: bytes, session: str, env: dict[str, str],
+          generation: int, kind: str, seed: bytearray, identity: Optional[tuple[str, str, str, str]]) -> int:
+    """The first Python in a fiber, after the C trampoline restored the interpreter.
+
+    Everything but env is the incarnation record the library read off the
+    fiber's channel. The seed is the host's 32 bytes, and identity is a
+    handoff fiber's TLS identity, None on any other fiber.
+    """
     try:
         _rebuild_environ(env)
-        f = Fiber(fence, endpoint, payload, session, env, identity=_identity(env))
-        f._incarnate(kind, generation, os.urandom(32))
+        f = Fiber(fence, endpoint, payload, session, env, identity=Identity(*identity) if identity is not None else None)
+        if f.kind == "handoff" and f.identity is None:
+            raise TemplateError("fiberd named a handoff fiber but its record holds no identity")
+        f._incarnate(kind, generation, seed)
     except BaseException:
         traceback.print_exc()
         _flush()
         return 1
     return _run(on_fiber, f)
-
-
-def _identity(env: dict[str, str]) -> Optional[Identity]:
-    """The grant's TLS identity the library read off the channel, for a fiber fiberd gave a handoff channel."""
-    if "FIBERD_HANDOFF_FD" not in env:
-        return None
-    rec = _ext().handoff_identity()
-    if rec is None:
-        raise TemplateError("fiberd named a handoff channel but the library holds no identity for it")
-    return Identity(*rec)
 
 
 def _run(on_fiber: Callable[[Fiber], Any], f: Fiber) -> int:
@@ -317,7 +316,7 @@ class Fiber:
         self.fence = fence
         self.fence_parts = _fence.parse_fence(fence)
         self.endpoint = endpoint
-        self.kind = _fence.endpoint_kind(endpoint, "FIBERD_HANDOFF_FD" in env)
+        self.kind = _fence.endpoint_kind(endpoint)
         self.payload = payload
         self.session = session
         self.env = dict(env)
@@ -326,8 +325,9 @@ class Fiber:
         self.identity = identity
         self._birth = self.fence_parts
         self._ready = False
-        # The handoff channel, which the SDK waits on and never hands out.
-        self._handoff_fd = int(env["FIBERD_HANDOFF_FD"]) if self.kind == "handoff" else -1
+        # The fiber's channel to fiberd, which the SDK waits on for a
+        # handoff fiber's connections and never hands out.
+        self._channel_fd = int(env.get("FIBERD_CHANNEL_FD", "-1"))
         # The identity sealed in a memfd, held for the fiber's lifetime, and the context over it.
         self._identity_fd = -1
         self._tls: Optional[_handoff.ServerContext] = None
@@ -438,7 +438,7 @@ class Fiber:
         channel, and the same when the fiber is asked to stop.
         """
         while not self.stopping.is_set():
-            readable, _, _ = select.select([self._handoff_fd], [], [], poll)
+            readable, _, _ = select.select([self._channel_fd], [], [], poll)
             if readable:
                 return _ext().accept()
         raise ConnectionResetError(errno.ECONNRESET, "the fiber was asked to stop")
@@ -556,11 +556,11 @@ class Fiber:
         loop = asyncio.get_running_loop()
         while not self.stopping.is_set():
             arrived = loop.create_future()
-            loop.add_reader(self._handoff_fd, lambda fut=arrived: fut.done() or fut.set_result(None))
+            loop.add_reader(self._channel_fd, lambda fut=arrived: fut.done() or fut.set_result(None))
             try:
                 await asyncio.wait({arrived}, timeout=poll)
             finally:
-                loop.remove_reader(self._handoff_fd)
+                loop.remove_reader(self._channel_fd)
             if not arrived.done():
                 continue
             try:
@@ -622,9 +622,13 @@ class Fiber:
         self._incarnate("resume", parked + 1, os.urandom(32))
         return True
 
-    def _incarnate(self, kind: str, generation: int, seed: bytes) -> None:
-        """Reseeds every generator and runs the hooks, once per copy of the template. generation is fiberd's count."""
-        inc = Incarnation(kind, generation, self.fence, bytearray(seed))
+    def _incarnate(self, kind: str, generation: int, seed: bytes | bytearray) -> None:
+        """Reseeds every generator and runs the hooks, once per copy of the template. generation is fiberd's count.
+
+        A bytearray is kept as it is, so the one copy the library's
+        binding made is the one zeroed after the hooks.
+        """
+        inc = Incarnation(kind, generation, self.fence, seed if isinstance(seed, bytearray) else bytearray(seed))
         self.incarnation = inc
         # Each generator gets the seed with fresh kernel entropy of its own,
         # so no two draw the same sequence. OpenSSL's DRBG is reseeded on

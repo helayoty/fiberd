@@ -60,10 +60,11 @@ func cloneRef(t *testing.T, be *procbackend.Backend, w backend.Warm, dir, fence 
 	ep := filepath.Join(dir, strings.ReplaceAll(fence, "/", "-")+".sock")
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	f, err := be.Clone(ctx, w.ID, backend.FiberSpec{Fence: fence, Endpoint: ep, CgroupFD: fd, Deadline: 2 * time.Second, OwnPIDNS: true})
+	f, err := be.Clone(ctx, w.ID, backend.FiberSpec{Generation: 1, Fence: fence, Endpoint: ep, CgroupFD: fd, Deadline: 2 * time.Second, OwnPIDNS: true})
 	if err != nil {
 		t.Fatalf("clone %s: %v", fence, err)
 	}
+	t.Cleanup(func() { _ = f.Channel.Close() })
 	if got := talk(t, ep, "ping"); got != "pong" {
 		t.Fatalf("ping = %q", got)
 	}
@@ -406,7 +407,10 @@ func resumeOn(t *testing.T, be *procbackend.Backend, dir, workDir string) error 
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_, err := be.Resume(ctx, backend.ResumeSpec{Dir: dir, Fence: "g/2-1", Endpoint: filepath.Join(workDir, "ep.sock"), CgroupFD: -1, WarmID: "g", WorkDir: workDir})
+	f, err := be.Resume(ctx, backend.ResumeSpec{Dir: dir, Fence: "g/2-1", Endpoint: filepath.Join(workDir, "ep.sock"), CgroupFD: -1, WarmID: "g", WorkDir: workDir})
+	if err == nil {
+		t.Cleanup(func() { _ = f.Channel.Close() })
+	}
 	return err
 }
 

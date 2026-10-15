@@ -109,17 +109,25 @@ type FiberSpec struct {
 	// so its checkpoint restores anywhere. Backends that always isolate
 	// ignore it.
 	OwnPIDNS bool
-	// Handoff, when set, is the fiber's end of a SOCK_SEQPACKET pair the
-	// host passes connections over. The fiber serves those instead of
-	// Endpoint. Only a Handoffer is given one. The backend does not keep
-	// it, and the caller closes it after Clone.
-	Handoff *os.File
+	// Identity is a handoff fiber's TLS identity, which rides on its
+	// incarnation record, and the fiber then serves the connections the
+	// host passes over its channel instead of Endpoint. nil for every
+	// other fiber. Only a Handoffer is given one.
+	Identity *Identity
 }
 
 // Fiber is a running fiber.
 type Fiber struct {
 	ID  string
 	PID int // root process; 0 when the backend has no process per fiber
+	// Channel is the host's end of a handoff fiber's channel, on a
+	// Handoffer. The backend made the pair where the fiber's checkpoint
+	// can carry it, queued the incarnation record on it before the fiber
+	// was born (none at a resume) and handed the fiber the other end.
+	// The host owns this end from here, passes connections over it and
+	// closes it when the fiber ends. nil for every other fiber, whose
+	// channel both sides close once the record is read.
+	Channel *os.File
 	// Footprint is what the fiber's leaf counted on the backend's W
 	// counter just before the fiber took its identity, for a backend
 	// whose fibers carry a fixed footprint. The host subtracts it from
@@ -156,9 +164,9 @@ type ResumeSpec struct {
 	// Generation is the parked fiber's generation plus one, read from
 	// the park's manifest (FiberSpec.Generation).
 	Generation int
-	// Handoff replaces the handoff channel of a checkpoint taken from a
-	// handoff fiber (FiberSpec.Handoff). It is nil for any other checkpoint.
-	Handoff *os.File
+	// Handoff says the checkpoint's fiber serves handoff, so it holds a
+	// channel the restore replaces with a fresh one (Fiber.Channel).
+	Handoff bool
 }
 
 // EndpointSchemer is implemented by backends that can serve fibers on
@@ -170,9 +178,11 @@ type EndpointSchemer interface {
 	EndpointSchemes() []string
 }
 
-// Handoffer is implemented by backends whose fibers can serve
-// connections the host passes them (FiberSpec.Handoff), across park and
-// resume. The host refuses a handoff grant on any other backend.
+// Handoffer is implemented by backends whose fibers read their
+// incarnation record off a channel at birth, and whose handoff fibers
+// (FiberSpec.Identity) keep that channel (Fiber.Channel) across park and
+// resume for the connections the host passes them. The host refuses a
+// handoff grant on any other backend.
 type Handoffer interface {
 	Handoff() bool
 }
@@ -247,19 +257,6 @@ type Backend interface {
 // grants. A backend that does not implement it does not isolate.
 type Isolator interface {
 	IsolatesTenants() bool
-}
-
-// ChannelMaker is implemented by backends whose fibers live in a network
-// namespace of their own. criu finds only the sockets of the namespaces
-// it dumps, so a pair the host made in its own namespace cannot be
-// checkpointed with the fiber. The host asks such a backend for every
-// pair it shares with a fiber. Other backends share the host's namespace,
-// and plain socketpair(2) does.
-type ChannelMaker interface {
-	// Socketpair makes a close-on-exec AF_UNIX pair of the given type
-	// (SOCK_SEQPACKET for a handoff channel) for a fiber of the warm
-	// instance.
-	Socketpair(warmID string, typ int) ([2]int, error)
 }
 
 // IDMapper is implemented by backends whose warm instance and fibers run

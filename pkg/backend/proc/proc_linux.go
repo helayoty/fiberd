@@ -11,7 +11,7 @@
 //	host   -> zygote HIDE <dir> | DROP <path> | RUNDIR <parent> <own>   (any number)
 //	host   -> zygote PREPARE mntns|none                                 (ends the setup)
 //	zygote -> host   READY
-//	host   -> zygote CLONE <fence> <endpoint> <deadline_ms> <payload-hex|-> <session-hex|-> [opt,opt...]   + SCM_RIGHTS cgroup fd [, handoff channel]
+//	host   -> zygote CLONE <fence> <endpoint> <deadline_ms> <payload-hex|-> <session-hex|-> [opt,opt...]   + SCM_RIGHTS cgroup fd, channel
 //	zygote -> host   CLONED <fence> <pid>  |  ERROR <fence> <text>
 //	zygote -> host   EXITED <pid> exit:<n>|signal:<name>
 //
@@ -25,10 +25,11 @@
 // its zygote is started without the variable and sent PREPARE none and
 // nothing else.
 // The session is hex so a name may hold any character, and "-" for an
-// anonymous fiber. CLONE options are any of pidns, mntns, nocaps and
-// handoff, comma-separated. With none the field is empty and the line ends in a
-// space. The host queues the grant's TLS identity as the handoff channel's
-// first message. A child that cannot get every confinement it asked for
+// anonymous fiber. CLONE options are any of pidns, mntns and nocaps,
+// comma-separated. With none the field is empty and the line ends in a
+// space. The last descriptor on the line is the fiber's channel, which
+// the host queued the fiber's incarnation record on before the line
+// (backend.Incarnation). A child that cannot get every confinement it asked for
 // ends before it runs, and the zygote sends ERROR. A zygote that could not
 // prepare its namespace sends ERROR ? with the reason instead of READY and
 // ends, and Warm fails with that reason. Every fiber of a plain proc grant
@@ -134,9 +135,9 @@ type Launcher interface {
 	// makes a pair there and hands the instance its end over boot, so the
 	// instance can be checkpointed holding it. Returning boot keeps it.
 	Channel(ctx context.Context, spec backend.WarmSpec, cmd *exec.Cmd, boot *net.UnixConn) (*net.UnixConn, error)
-	// Socketpair makes a unix pair the instance's fibers can be
-	// checkpointed with (backend.ChannelMaker). pid is the instance as
-	// the host sees it.
+	// Socketpair makes a unix pair a fiber forked from the instance can
+	// be checkpointed with, its channel. pid is the instance as the host
+	// sees it.
 	Socketpair(spec backend.WarmSpec, pid int, typ int) ([2]int, error)
 	// PID is the zygote process itself (the container's init) once
 	// Command has started, as the host sees it.
@@ -527,7 +528,7 @@ type fiber struct {
 	zpid     int // as the zygote reported it (its own pid namespace); 0 for restored trees
 	warmID   string
 	restored *criu.Restored
-	handoff  bool // holds a handoff channel at handoffFD
+	handoff  bool // serves handoff, so it holds its channel at channelFD
 	// runDir is where the fiber's mount namespace binds its grant's run
 	// directory (RUNDIR). The path is fixed at birth and survives every
 	// park and resume, while the host directory behind it is the resuming
@@ -536,9 +537,10 @@ type fiber struct {
 	runDir string
 }
 
-// handoffFD is where libfiberzygote keeps a handoff fiber's channel
-// (FZ_HANDOFF_FD).
-const handoffFD = 4
+// channelFD is where libfiberzygote keeps a fiber's channel
+// (FZ_CHANNEL_FD). Every fiber reads its record off it, and a handoff
+// fiber keeps it.
+const channelFD = 4
 
 // runDirFile, in a checkpoint of a fiber whose run directory was
 // narrowed, records the mount point of its grant's directory in the
@@ -621,25 +623,19 @@ func (b *Backend) Tier() core.Tier { return b.tier }
 // a listening tcp socket on its port like any other.
 func (b *Backend) EndpointSchemes() []string { return []string{"unix", "tcp"} }
 
-// Handoff implements backend.Handoffer. libfiberzygote keeps the channel
-// at a fixed descriptor, and criu treats it as external.
+// Handoff implements backend.Handoffer. libfiberzygote keeps a handoff
+// fiber's channel at a fixed descriptor, and criu treats it as external.
 func (b *Backend) Handoff() bool { return true }
 
-// Socketpair implements backend.ChannelMaker. Without a launcher the
-// fibers share the host's network namespace and any pair will do. With
-// one, the launcher makes the pair where the fiber's checkpoint can
-// carry it, which needs the instance to be up.
-func (b *Backend) Socketpair(warmID string, typ int) ([2]int, error) {
+// clonePair makes the channel of a fiber forked from z. Without a
+// launcher the fibers share the host's network namespace and any pair
+// will do. With one, the launcher makes the pair where the fiber's
+// checkpoint can carry it.
+func (b *Backend) clonePair(z *zygote) func(typ int) ([2]int, error) {
 	if b.opt.Launcher == nil {
-		return syscall.Socketpair(syscall.AF_UNIX, typ|syscall.SOCK_CLOEXEC, 0)
+		return nil
 	}
-	b.mu.Lock()
-	z, ok := b.zygotes[warmID]
-	b.mu.Unlock()
-	if !ok {
-		return [2]int{-1, -1}, fmt.Errorf("%s: no warm instance %q to make a channel for", b.Name(), warmID)
-	}
-	return b.opt.Launcher.Socketpair(z.spec, z.pid, typ)
+	return func(typ int) ([2]int, error) { return b.opt.Launcher.Socketpair(z.spec, z.pid, typ) }
 }
 
 // Warm execs the zygote inside the given cgroup with the control
@@ -1276,7 +1272,21 @@ func (b *Backend) finish(f *fiber, status string) {
 	b.exits <- backend.Exit{FiberID: f.id, Status: status}
 }
 
-// Clone sends CLONE with the leaf cgroup fd and waits for CLONED.
+// fiberEndpoint is endpoint as a fiber of z binds it. A unix path under
+// the run directory is seen at the launcher's mount, and a tcp endpoint
+// is the same address inside and out.
+func (b *Backend) fiberEndpoint(z *zygote, endpoint string) string {
+	if b.opt.Launcher != nil && !strings.Contains(endpoint, "://") {
+		return b.opt.Launcher.Endpoint(z.spec, endpoint)
+	}
+	return endpoint
+}
+
+// Clone makes the fiber's channel with its record queued, sends CLONE
+// with the leaf cgroup fd and the fiber's end of the channel, and waits
+// for CLONED. A handoff fiber's host end comes back in the Fiber. Any
+// other fiber reads its record and closes the channel, and so does the
+// backend here.
 func (b *Backend) Clone(ctx context.Context, warmID string, spec backend.FiberSpec) (backend.Fiber, error) {
 	b.mu.Lock()
 	z, ok := b.zygotes[warmID]
@@ -1307,40 +1317,39 @@ func (b *Backend) Clone(ctx context.Context, warmID string, spec backend.FiberSp
 	if b.opt.Launcher == nil {
 		opts = append(opts, "mntns", "nocaps")
 	}
-	if spec.Handoff != nil {
-		opts = append(opts, "handoff")
-	}
 	opt := strings.Join(opts, ",")
-	endpoint := spec.Endpoint
-	if b.opt.Launcher != nil && !strings.Contains(endpoint, "://") {
-		// A unix path under the run directory is seen at the launcher's
-		// mount; a tcp endpoint is the same address inside and out.
-		endpoint = b.opt.Launcher.Endpoint(z.spec, endpoint)
+	endpoint := b.fiberEndpoint(z, spec.Endpoint)
+	// The fiber's record waits on its channel for it to be born. A fork
+	// of the warm instance, with the endpoint as the fiber sees it, and
+	// a handoff fiber's TLS identity when it has one.
+	inc := backend.Incarnation{Generation: spec.Generation, Kind: "fork", Fence: spec.Fence, Endpoint: endpoint, Payload: spec.Payload, Session: spec.Session, Identity: spec.Identity}
+	hostEnd, fiberEnd, err := backend.Channel(b.clonePair(z), inc)
+	if err != nil {
+		return backend.Fiber{}, fmt.Errorf("%s: %s: %w", b.Name(), spec.Fence, err)
 	}
+	defer func() { _ = fiberEnd.Close() }()
 	msg := fmt.Sprintf("CLONE %s %s %d %s %s %s\n", spec.Fence, endpoint, deadline, payload, session, opt)
 	reply := make(chan cloneResult, 1)
 	z.pmu.Lock()
-	z.pend[spec.Fence] = &pending{ch: reply, handoff: spec.Handoff != nil}
+	z.pend[spec.Fence] = &pending{ch: reply, handoff: spec.Identity != nil}
 	z.pmu.Unlock()
 	abandon := func() { b.abandon(z, spec.Fence, reply) }
+	// The channel is the last descriptor, after the cgroup's when the
+	// host has one.
 	var fds []int
 	if spec.CgroupFD >= 0 {
 		fds = append(fds, spec.CgroupFD)
 	}
-	if spec.Handoff != nil {
-		fds = append(fds, int(spec.Handoff.Fd()))
-	}
-	var rights []byte
-	if len(fds) > 0 {
-		rights = syscall.UnixRights(fds...)
-	}
-	if _, _, err := z.ctl.WriteMsgUnix([]byte(msg), rights, nil); err != nil {
+	fds = append(fds, int(fiberEnd.Fd()))
+	if _, _, err := z.ctl.WriteMsgUnix([]byte(msg), syscall.UnixRights(fds...), nil); err != nil {
 		abandon()
+		_ = hostEnd.Close()
 		return backend.Fiber{}, fmt.Errorf("proc: send CLONE: %w", err)
 	}
 	select {
 	case res := <-reply:
 		if res.err != nil {
+			_ = hostEnd.Close()
 			return backend.Fiber{}, res.err
 		}
 		// The reader registered f under the zygote's pid. The host's pid
@@ -1354,13 +1363,19 @@ func (b *Backend) Clone(ctx context.Context, warmID string, spec backend.FiberSp
 			f.pid = pid
 		}
 		b.mu.Unlock()
-		return backend.Fiber{ID: f.id, PID: pid}, nil
+		if spec.Identity == nil {
+			_ = hostEnd.Close()
+			hostEnd = nil
+		}
+		return backend.Fiber{ID: f.id, PID: pid, Channel: hostEnd}, nil
 	case <-ctx.Done():
 		// The zygote enforces the same deadline and kills the child.
 		abandon()
+		_ = hostEnd.Close()
 		return backend.Fiber{}, ctx.Err()
 	case <-z.gone:
 		abandon()
+		_ = hostEnd.Close()
 		return backend.Fiber{}, fmt.Errorf("%w: zygote exited", ErrZygote)
 	}
 }
@@ -1419,7 +1434,7 @@ func (b *Backend) Park(ctx context.Context, fiberID string, spec backend.ParkSpe
 	}
 	if f.handoff {
 		// The channel's peer is the host's end, outside the dumped tree.
-		ino, err := socketInode(b.opt.procRoot, pid, handoffFD)
+		ino, err := socketInode(b.opt.procRoot, pid, channelFD)
 		if err != nil {
 			return fmt.Errorf("proc: handoff channel of %s: %w", fiberID, err)
 		}
@@ -1511,6 +1526,7 @@ func (b *Backend) Resume(ctx context.Context, spec backend.ResumeSpec) (backend.
 	// gone tells the launcher the tree it prepared for never came up, or
 	// has exited.
 	gone := func() {}
+	var wspec backend.WarmSpec
 	if b.opt.Launcher != nil {
 		// The tree was dumped inside a container of this grant; it is
 		// restored with that container's root and mounts.
@@ -1519,7 +1535,7 @@ func (b *Backend) Resume(ctx context.Context, spec backend.ResumeSpec) (backend.
 			workDir = filepath.Dir(spec.Endpoint)
 		}
 		var err error
-		wspec := backend.WarmSpec{GrantUID: spec.WarmID, WorkDir: workDir}
+		wspec = backend.WarmSpec{GrantUID: spec.WarmID, WorkDir: workDir}
 		if extra, err = b.opt.Launcher.RestoreExtra(wspec, spec.Dir); err != nil {
 			return backend.Fiber{}, err
 		}
@@ -1544,22 +1560,52 @@ func (b *Backend) Resume(ctx context.Context, spec backend.ResumeSpec) (backend.
 			extra = append(extra, more...)
 		}
 	}
-	inherit, files, err := handoffInherit(spec.Dir, spec.Handoff)
+	// A restored handoff fiber takes a fresh channel in place of its
+	// parked one, at the same descriptor, made where its next checkpoint
+	// can carry it. A resume brings no record on it yet.
+	var hostEnd, fiberEnd *os.File
+	if spec.Handoff {
+		var pair func(typ int) ([2]int, error)
+		if b.opt.Launcher != nil {
+			b.mu.Lock()
+			z, ok := b.zygotes[spec.WarmID]
+			b.mu.Unlock()
+			if !ok {
+				gone()
+				return backend.Fiber{}, fmt.Errorf("%s: no warm instance %q to make a channel for", b.Name(), spec.WarmID)
+			}
+			pair = b.clonePair(z)
+		}
+		var err error
+		if hostEnd, fiberEnd, err = backend.Channel(pair, backend.Incarnation{}); err != nil {
+			gone()
+			return backend.Fiber{}, fmt.Errorf("%s: %s: %w", b.Name(), spec.Fence, err)
+		}
+		defer func() { _ = fiberEnd.Close() }()
+	}
+	closeHost := func() {
+		if hostEnd != nil {
+			_ = hostEnd.Close()
+		}
+	}
+	inherit, files, err := handoffInherit(spec.Dir, fiberEnd)
 	if err != nil {
+		closeHost()
 		gone()
 		return backend.Fiber{}, err
 	}
 	res, err := b.criu.RestoreWith(rctx, spec.Dir, spec.CgroupFD, append(extra, inherit...), files)
 	if err != nil {
+		closeHost()
 		gone()
 		return backend.Fiber{}, err
 	}
 	if b.opt.Launcher != nil {
-		if err := b.opt.Launcher.Restored(backend.WarmSpec{GrantUID: spec.WarmID, WorkDir: spec.WorkDir}, res.PID); err != nil {
+		if err := b.opt.Launcher.Restored(wspec, res.PID); err != nil {
 			log.Printf("%s: restored %s: %v", b.Name(), spec.Fence, err)
 		}
 	}
-	f := &fiber{id: spec.Fence, pid: res.PID, restored: res, warmID: spec.WarmID, handoff: spec.Handoff != nil, runDir: runDir}
+	f := &fiber{id: spec.Fence, pid: res.PID, restored: res, warmID: spec.WarmID, handoff: spec.Handoff, runDir: runDir}
 	b.mu.Lock()
 	b.fibers[f.id] = f
 	b.mu.Unlock()
@@ -1572,7 +1618,7 @@ func (b *Backend) Resume(ctx context.Context, spec backend.ResumeSpec) (backend.
 		b.finish(f, status)
 		gone()
 	}()
-	return backend.Fiber{ID: f.id, PID: f.pid}, nil
+	return backend.Fiber{ID: f.id, PID: f.pid, Channel: hostEnd}, nil
 }
 
 // Kill ends the fiber's root process; the exit is reported like any other.
@@ -1653,7 +1699,7 @@ func (b *Backend) Merge(dir string, parent backend.Parent) error {
 
 var (
 	_ backend.Backend          = (*Backend)(nil)
-	_ backend.ChannelMaker     = (*Backend)(nil)
+	_ backend.Handoffer        = (*Backend)(nil)
 	_ backend.SelfCheckpointer = (*Backend)(nil)
 	_ backend.DeltaCodec       = (*Backend)(nil)
 	_ backend.DeviceReporter   = (*Backend)(nil)

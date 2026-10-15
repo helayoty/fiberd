@@ -216,10 +216,7 @@ func TestRefusedNamespacesRefuseClone(t *testing.T) {
 			// each one more clone of it.
 			seen := 0
 			for _, fence := range []string{"gr/1-1", "gr/1-2"} {
-				line := fmt.Sprintf("CLONE %s %s/%s.sock 2000 - - %s", fence, dir, strings.ReplaceAll(fence, "/", "-"), tc.opts)
-				if _, err := uc.Write([]byte(line + "\n")); err != nil {
-					t.Fatal(err)
-				}
+				sendClone(t, uc, fmt.Sprintf("CLONE %s %s/%s.sock 2000 - - %s", fence, dir, strings.ReplaceAll(fence, "/", "-"), tc.opts))
 				got := readLine(t, uc, rd)
 				if !strings.HasPrefix(got, "ERROR "+fence+" ") || !strings.Contains(got, tc.wantErr) {
 					t.Fatalf("reply to %s = %q, want it refused with an error mentioning %q", fence, got, tc.wantErr)

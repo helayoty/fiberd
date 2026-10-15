@@ -15,14 +15,15 @@ sequenceDiagram
   participant B as Backend
   L->>H: Clone(grant, fence)
   H->>H: leaf f-epoch-seq, memory.max, oom.group, pids.max
-  H->>H: endpoint, or handoff channel with the grant's identity
+  H->>H: endpoint, and for a handoff fiber the grant's identity for its record
   H->>H: register the fiber before the backend answers
   alt a pooled sandbox waits
     H->>B: Bind(pooled id, endpoint)
   else
-    H->>B: Clone(warm id, leaf fd, endpoint)
+    H->>B: Clone(warm id, leaf fd, endpoint, identity)
   end
-  B-->>H: ready
+  B->>B: the fiber's channel, its record queued
+  B-->>H: ready, the host's end of the channel
   H-->>L: handle (fiber id, endpoint)
 ```
 

@@ -18,7 +18,7 @@ sequenceDiagram
   participant A as fiberd
   participant F as Fiber
   C->>A: Clone (mTLS)
-  A->>F: channel message 1, the grant's key, certificate, caller thumbprint and caller certificate
+  A->>F: the incarnation record, with the grant's key, certificate, caller thumbprint and caller certificate
   A-->>C: handoff address, routing key, server certificate and key pin
   C->>A: TCP connect, ClientHello with SNI <routing key>.fiberd
   A->>A: MSG_PEEK the ClientHello, look up the key

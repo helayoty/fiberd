@@ -1840,8 +1840,9 @@ func isHex(s string, n int) bool {
 
 // checkIdentity checks a late-binding restore: its bundle carries the
 // token the sandbox claimed with and nothing of the fiber, and the one
-// identity record on the channel names the generation, kind, fence,
-// endpoint, payload and session and carries a fresh seed of seedBytes.
+// incarnation record on the channel names the generation, kind, fence,
+// endpoint, payload and session, carries no identity (no sandbox serves
+// handoff) and a fresh seed of backend.SeedBytes.
 func checkIdentity(t *testing.T, cfgJSON []byte, token string, records [][]string, generation int, kind, fence, endpoint string, payload []byte, session string) {
 	t.Helper()
 	if !isHex(token, 2*tokenBytes) || !strings.Contains(string(cfgJSON), `"FIBERD_TOKEN=`+token+`"`) {
@@ -1852,8 +1853,8 @@ func checkIdentity(t *testing.T, cfgJSON []byte, token string, records [][]strin
 			t.Fatalf("bundle names %s, which belongs on the channel:\n%s", name, cfgJSON)
 		}
 	}
-	if len(records) != 1 || len(records[0]) != identityFields {
-		t.Fatalf("channel records = %v, want one identity of %d fields", records, identityFields)
+	if len(records) != 1 || len(records[0]) != backend.IncarnationFields {
+		t.Fatalf("channel records = %v, want one identity of %d fields", records, backend.IncarnationFields)
 	}
 	ph := "-"
 	if len(payload) > 0 {
@@ -1864,14 +1865,14 @@ func checkIdentity(t *testing.T, cfgJSON []byte, token string, records [][]strin
 		sh = hex.EncodeToString([]byte(session))
 	}
 	got := records[0]
-	want := []string{strconv.Itoa(generation), kind, fence, endpoint, ph, "-", "-", "-", sh, ""}
-	for i := 0; i < identityFields-1; i++ {
+	want := []string{strconv.Itoa(generation), kind, fence, endpoint, ph, sh, "-", "-", "-", "-", ""}
+	for i := 0; i < backend.IncarnationFields-1; i++ {
 		if got[i] != want[i] {
 			t.Fatalf("identity field %d = %q, want %q (record %v)", i, got[i], want[i], got)
 		}
 	}
-	if !isHex(got[identityFields-1], 2*seedBytes) {
-		t.Fatalf("identity seed = %q, want %d hex characters", got[identityFields-1], 2*seedBytes)
+	if !isHex(got[backend.IncarnationFields-1], 2*backend.SeedBytes) {
+		t.Fatalf("identity seed = %q, want %d hex characters", got[backend.IncarnationFields-1], 2*backend.SeedBytes)
 	}
 }
 
@@ -2005,7 +2006,7 @@ func TestPoolBind(t *testing.T) {
 				sock := poolSocketOf(t, b, "g")
 				var claim []byte
 				if tc.repeat {
-					claim = record(recClaim, token)
+					claim = backend.Record(backend.RecordClaim, token)
 				}
 				if !claimClosed(t, sock, claim, 2*claimWait) {
 					t.Fatal("the backend kept the connection")
@@ -2462,7 +2463,7 @@ func TestHandOutGeneration(t *testing.T) {
 				t.Fatalf("hand-out: %v", err)
 			}
 			_, records := f.channelOf(cid)
-			if len(records) != 1 || len(records[0]) != identityFields {
+			if len(records) != 1 || len(records[0]) != backend.IncarnationFields {
 				t.Fatalf("channel records = %v, want one identity", records)
 			}
 			if got := records[0][0]; got != strconv.Itoa(tc.generation) {

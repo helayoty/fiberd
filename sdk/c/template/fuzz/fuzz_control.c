@@ -56,7 +56,7 @@ int fz_fuzz_mkdir(const char *path, mode_t mode) {
     return -1;
 }
 
-static int on_fiber(const fz_fiber_t *f) {
+static int on_fiber(const fz_incarnation_t *f) {
     (void)f;
     abort(); /* never born */
 }

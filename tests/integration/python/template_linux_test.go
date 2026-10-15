@@ -186,6 +186,22 @@ func TestRandomPerIncarnation(t *testing.T) {
 			}
 		})
 	}
+	t.Run("proc siblings reseed from the seeds on their own records", func(t *testing.T) {
+		// The hook sees the record's seed, 32 bytes from the host that
+		// differ between siblings. Before the record, the SDK drew its
+		// own and the host sent none to a forked fiber.
+		rt := newRuntime(t, python+" "+testdata+"/hooked.py")
+		g := prepare(t, rt, "grnd")
+		a := clone(t, rt, g, 1, "", nil)
+		b := clone(t, rt, g, 2, "", nil)
+		sa, sb := talk(t, a.Endpoint, "seeds"), talk(t, b.Endpoint, "seeds")
+		if len(sa) != 64 || len(sb) != 64 || sa == sb {
+			t.Fatalf("seeds = %q and %q, want 64 hex characters each and unlike each other", sa, sb)
+		}
+		if _, err := hex.DecodeString(sa + sb); err != nil {
+			t.Fatalf("seeds = %q and %q: %v", sa, sb, err)
+		}
+	})
 	t.Run("proc hook sees the fork and then the resume", func(t *testing.T) {
 		rt := newRuntime(t, python+" "+testdata+"/hooked.py")
 		if rt.Tier() < core.TierCheckpoint {

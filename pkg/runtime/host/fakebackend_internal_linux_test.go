@@ -37,11 +37,11 @@ type fakeFiber struct {
 	spec   backend.FiberSpec
 	resume *backend.ResumeSpec
 	alive  bool
-	// identity is the message the fiber read from its handoff channel
-	// before any connection, nil when none was queued.
+	// identity is the record the fiber read from its channel before
+	// any connection, nil when none was queued (a resume).
 	identity []byte
-	// handoff is the fiber's end of its handoff channel, kept open past
-	// Clone (the runtime closes its copy), or -1.
+	// handoff is the fiber's end of its channel, kept open for a
+	// handoff fiber's life, or -1 once a direct fiber read its record.
 	handoff int
 	// ln is the unix listener a serving fake fiber answers on (serve).
 	ln net.Listener
@@ -78,6 +78,12 @@ type fakeBackend struct {
 	// parkNoDir makes Park succeed without making its directory, as a
 	// backend that dumped nothing would.
 	parkNoDir bool
+	// channels makes every fiber take a channel, as a Handoffer's do,
+	// with its record queued by the fake. pairs counts them, and
+	// channelErr refuses to make one.
+	channels   bool
+	channelErr error
+	pairs      atomic.Int32
 	// parkDangling makes Park leave a dangling symlink in its directory,
 	// which no fsync can open.
 	parkDangling bool
@@ -133,22 +139,48 @@ func (b *fakeBackend) eventLog() []string {
 	return append([]string(nil), b.events...)
 }
 
-// takeHandoff keeps the fiber's end of a handoff channel open and reads
-// the identity message queued on it, if any.
-func takeHandoff(f *os.File) (fd int, identity []byte) {
-	if f == nil {
-		return -1, nil
+// channel makes a fiber's channel as a Handoffer does, the record for
+// spec queued on it (none when spec names no fence, a resume), reads
+// the record back off the fiber's end as the library would, and returns
+// the host's end with the fiber's end and the record. A direct fiber
+// reads its record and both ends close, as the library and the backend
+// do, so only a handoff fiber keeps a channel. The fiber's end is -1 on
+// a backend whose fibers take none.
+func (b *fakeBackend) channel(spec backend.FiberSpec, handoff bool) (host *os.File, fd int, identity []byte, err error) {
+	if !b.channels {
+		return nil, -1, nil, nil
 	}
-	fd, err := syscall.Dup(int(f.Fd()))
+	if b.channelErr != nil {
+		return nil, -1, nil, b.channelErr
+	}
+	inc := backend.Incarnation{Generation: spec.Generation, Kind: "fork", Fence: spec.Fence, Endpoint: spec.Endpoint, Payload: spec.Payload, Session: spec.Session, Identity: spec.Identity}
+	host, fiber, err := backend.Channel(nil, inc)
 	if err != nil {
-		return -1, nil
+		return nil, -1, nil, err
+	}
+	b.pairs.Add(1)
+	fd = int(fiber.Fd())
+	// Keep the descriptor past the *os.File, as the fiber keeps its end.
+	fd, err = syscall.Dup(fd)
+	_ = fiber.Close()
+	if err != nil {
+		_ = host.Close()
+		return nil, -1, nil, err
+	}
+	if spec.Fence == "" {
+		return host, fd, nil, nil
 	}
 	buf := make([]byte, 64<<10)
 	n, _, _, _, err := syscall.Recvmsg(fd, buf, nil, syscall.MSG_DONTWAIT)
 	if err != nil || n == 0 {
-		return fd, nil
+		return host, fd, nil, nil
 	}
-	return fd, buf[:n]
+	if !handoff {
+		_ = syscall.Close(fd)
+		_ = host.Close()
+		return nil, -1, buf[:n], nil
+	}
+	return host, fd, buf[:n], nil
 }
 
 func (b *fakeBackend) Clone(_ context.Context, warmID string, spec backend.FiberSpec) (backend.Fiber, error) {
@@ -170,10 +202,16 @@ func (b *fakeBackend) Clone(_ context.Context, warmID string, spec backend.Fiber
 	if err != nil {
 		return backend.Fiber{}, err
 	}
-	fd, identity := takeHandoff(spec.Handoff)
+	host, fd, identity, err := b.channel(spec, spec.Identity != nil)
+	if err != nil {
+		if ln != nil {
+			_ = ln.Close()
+		}
+		return backend.Fiber{}, err
+	}
 	b.nextPID++
 	b.fibers[spec.Fence] = &fakeFiber{spec: spec, alive: true, identity: identity, handoff: fd, ln: ln}
-	return backend.Fiber{ID: spec.Fence, PID: b.nextPID, Footprint: b.footprint}, nil
+	return backend.Fiber{ID: spec.Fence, PID: b.nextPID, Footprint: b.footprint, Channel: host}, nil
 }
 
 // listen serves a fake fiber's unix endpoint when serve is set.
@@ -275,11 +313,21 @@ func (b *fakeBackend) Resume(_ context.Context, spec backend.ResumeSpec) (backen
 	if err != nil {
 		return backend.Fiber{}, err
 	}
-	fd, identity := takeHandoff(spec.Handoff)
+	// A handoff resume's channel carries no record.
+	host, fd, identity := (*os.File)(nil), -1, []byte(nil)
+	if spec.Handoff {
+		host, fd, identity, err = b.channel(backend.FiberSpec{}, true)
+	}
+	if err != nil {
+		if ln != nil {
+			_ = ln.Close()
+		}
+		return backend.Fiber{}, err
+	}
 	rs := spec
 	b.nextPID++
 	b.fibers[spec.Fence] = &fakeFiber{resume: &rs, alive: true, identity: identity, handoff: fd, ln: ln}
-	return backend.Fiber{ID: spec.Fence, PID: b.nextPID, Footprint: b.footprint}, nil
+	return backend.Fiber{ID: spec.Fence, PID: b.nextPID, Footprint: b.footprint, Channel: host}, nil
 }
 
 func (b *fakeBackend) Kill(fiberID string) error {
@@ -549,9 +597,12 @@ func (m *poolMixin) Bind(_ context.Context, pooledID string, spec backend.FiberS
 	if err != nil {
 		return backend.Fiber{}, err
 	}
-	fd, identity := takeHandoff(spec.Handoff)
+	host, fd, identity, err := m.fb.channel(spec, spec.Identity != nil)
+	if err != nil {
+		return backend.Fiber{}, err
+	}
 	m.fb.fibers[spec.Fence] = &fakeFiber{spec: spec, alive: true, identity: identity, handoff: fd, ln: ln}
-	return backend.Fiber{ID: spec.Fence, PID: p.pid, Footprint: m.fb.footprint}, nil
+	return backend.Fiber{ID: spec.Fence, PID: p.pid, Footprint: m.fb.footprint, Channel: host}, nil
 }
 
 func (m *poolMixin) Discard(pooledID string) {
@@ -596,22 +647,11 @@ type isolatorMixin struct{ isolates bool }
 
 func (m isolatorMixin) IsolatesTenants() bool { return m.isolates }
 
+// handoffMixin says the backend's fibers take a channel. The fake it
+// wraps must make them (channels), so a test composing it sets that.
 type handoffMixin struct{ handoff bool }
 
 func (m handoffMixin) Handoff() bool { return m.handoff }
-
-type channelMixin struct {
-	err   error
-	pairs atomic.Int32
-}
-
-func (m *channelMixin) Socketpair(_ string, typ int) ([2]int, error) {
-	if m.err != nil {
-		return [2]int{}, m.err
-	}
-	m.pairs.Add(1)
-	return syscall.Socketpair(syscall.AF_UNIX, typ|syscall.SOCK_CLOEXEC, 0)
-}
 
 type idMapperMixin struct {
 	uid uint32
@@ -816,15 +856,16 @@ type sandboxBackend struct {
 	*deviceMixin
 	isolatorMixin
 	handoffMixin
-	*channelMixin
 	schemesMixin
 	platformMixin
 	deadlineMixin
 }
 
 func newSandboxBackend(tier core.Tier) *sandboxBackend {
-	return &sandboxBackend{fakeBackend: newFakeBackend(tier), wReporterMixin: &wReporterMixin{}, deviceMixin: &deviceMixin{},
-		isolatorMixin: isolatorMixin{true}, handoffMixin: handoffMixin{true}, channelMixin: &channelMixin{},
+	fb := newFakeBackend(tier)
+	fb.channels = true
+	return &sandboxBackend{fakeBackend: fb, wReporterMixin: &wReporterMixin{}, deviceMixin: &deviceMixin{},
+		isolatorMixin: isolatorMixin{true}, handoffMixin: handoffMixin{true},
 		schemesMixin: schemesMixin{[]string{"unix", "tcp"}}}
 }
 
@@ -1179,7 +1220,6 @@ var (
 	_ backend.DeviceReporter   = (*sandboxBackend)(nil)
 	_ backend.Isolator         = (*sandboxBackend)(nil)
 	_ backend.Handoffer        = (*sandboxBackend)(nil)
-	_ backend.ChannelMaker     = (*sandboxBackend)(nil)
 	_ backend.EndpointSchemer  = (*sandboxBackend)(nil)
 	_ backend.Platformer       = (*sandboxBackend)(nil)
 	_ backend.DeadlineAdvisor  = (*sandboxBackend)(nil)

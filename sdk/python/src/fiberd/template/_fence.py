@@ -32,9 +32,9 @@ def parse_fence(s: str) -> Fence:
     return Fence(parts[0], int(parts[1]), int(parts[2]))
 
 
-def endpoint_kind(endpoint: str, handoff: bool) -> str:
-    """unix, tcp or handoff, as fiberd spells the endpoint and the environment names a handoff channel."""
-    if handoff:
+def endpoint_kind(endpoint: str) -> str:
+    """unix, tcp or handoff, as fiberd spells the endpoint. A handoff fiber's endpoint is the word "handoff", since it binds nothing."""
+    if endpoint == "handoff":
         return "handoff"
     if endpoint.startswith("tcp://"):
         return "tcp"

@@ -16,10 +16,15 @@
  *                                 a park/resume, see phase 6)
  *   get             -> <n>
  *   random          -> <n>       (libc random(), reseeded in every new
- *                                 incarnation: at the fork, after a
- *                                 restore, and when the fence changes
- *                                 under a resumed fiber, so no two
- *                                 copies draw the same sequence)
+ *                                 incarnation: at the fork and after a
+ *                                 restore from the record's seed mixed
+ *                                 with the kernel's, and when the fence
+ *                                 changes under a resumed fiber, so no
+ *                                 two copies draw the same sequence)
+ *   seed            -> <hex>     (the record's 32-byte seed, kept only
+ *                                 when the payload set "keep_seed", for
+ *                                 the runtime's own tests; "-" otherwise,
+ *                                 since the library zeroes it at ready)
  *   getrandom       -> <hex>     (8 bytes straight from getrandom(2):
  *                                 shows whether the kernel's entropy is
  *                                 fresh in a copy, with no template
@@ -54,12 +59,12 @@
  *                      holds path, else the errno's name (proves which
  *                      host controls sit under a read-only mount)
  *
- * A handoff fiber (FIBERD_HANDOFF_FD set) serves the same protocol inside
- * TLS 1.3 on the connections fiberd passes it through fz_accept(),
- * instead of a listener of its own. It serves the grant's identity
- * (fz_handoff_identity(), sent down the channel at birth, never a file)
- * and fails the handshake for any client certificate but the one whose
- * x5t#S256 that identity names. That needs a build with -DFZ_TLS and
+ * A handoff fiber (its record carries an identity) serves the same
+ * protocol inside TLS 1.3 on the connections fiberd passes it through
+ * fz_accept(), instead of a listener of its own. It serves the grant's
+ * identity (on the record at birth, never a file) and fails the
+ * handshake for any client certificate but the one whose x5t#S256 that
+ * identity names. That needs a build with -DFZ_TLS and
  * OpenSSL 3. Without it a handoff fiber refuses to start.
  *
  * The clone payload, if any, is JSON with an optional "dirty_bytes": the
@@ -67,7 +72,9 @@
  * conformance case C6 drives a fiber over its W budget; and an optional
  * "device_bytes", reserved from the engine the same way. Two keys are
  * for the runtime's own tests. "ready_delay_ms" delays the ready report,
- * for a fiber that misses its deadline. "ready_misuse" makes a fiber
+ * for a fiber that misses its deadline. "keep_seed" keeps a copy of the
+ * record's seed for the "seed" command, which the tests use to see that
+ * siblings get seeds of their own and that no seed is logged. "ready_misuse" makes a fiber
  * misuse the readiness pipe at fd 3 the way a buggy workload would. 1
  * writes a stray byte on it before reporting, 2 closes it and never
  * reports, and 3 calls fz_report, which must fail in a fiber. The zygote
@@ -99,8 +106,8 @@
  * --gvisor runs the same workload as the init process of a gVisor sandbox
  * (fiberd's gvisor backend). There is no fork: after init the process
  * triggers its own checkpoint through /proc/gvisor/checkpoint; every fiber
- * is a sandbox restored from that image, which learns its fence, endpoint,
- * payload and a fresh seed on fiberd's channel (fz_gvisor_identity),
+ * is a sandbox restored from that image, which learns its record, fence,
+ * endpoint, payload and a fresh seed, on fiberd's channel (fz_gvisor_identity),
  * serves on /host (the grant's run directory, bind-mounted), closes its
  * endpoint on SIGUSR1 so the sandbox can be checkpointed, and re-binds
  * under the next fence when restored again. --http applies there too.
@@ -274,7 +281,10 @@ static void engine_start(size_t mb) {
 
 static const char *cur_endpoint; /* this fiber's endpoint, for the fence file */
 static const char *cur_fence;
-static const fz_fiber_t *cur_fiber; /* this fiber's record, for session and payload */
+static const fz_incarnation_t *cur_fiber; /* this fiber's record, for session and payload */
+/* The record's seed in hex, kept only under the "keep_seed" payload key
+ * for the tests, since the library zeroes the record's copy at ready. */
+static char kept_seed[2 * 32 + 1];
 /* The generation this process serves as. It is the record's at birth
  * (fiberd's count), and a resume on proc or runc, which brings no record
  * yet, is the parked one's plus one. */
@@ -611,8 +621,7 @@ static EVP_PKEY *pem_key(const char *pem) {
     return k;
 }
 
-static const char *tls_load(void) {
-    const fz_identity_t *id = fz_handoff_identity();
+static const char *tls_load(const fz_identity_t *id) {
     if (!id) return "no handoff identity";
     if (!id->caller[0]) return "identity names no caller";
     tls_caller = id->caller;
@@ -686,11 +695,11 @@ static int tls_start(conn_t *c) {
 #endif
 
 /* reseed_rngs_from gives every generator this template owns a fresh seed
- * from the kernel, mixed with the host's seed when there is one (a
- * gVisor incarnation gets 32 bytes on its channel). It runs once per
- * incarnation: in the child at the fork, after a restore returns
- * (gVisor), and when a resumed fiber sees a new fence (CRIU keeps the
- * pid and the parked RNG state, so nothing else marks the copy). Both
+ * from the kernel, mixed with the host's seed when there is one (every
+ * incarnation record carries 32 bytes). It runs once per incarnation:
+ * in the child at the fork, after a restore returns (gVisor), and when a
+ * resumed fiber sees a new fence (CRIU keeps the pid and the parked RNG
+ * state, so nothing else marks the copy, and no seed comes yet). Both
  * libc generators are seeded, since rand() keeps its own state on some
  * libcs. OpenSSL's DRBGs are reseeded once they exist, which is in a
  * handoff fiber; tls_start does it again per handshake. */
@@ -735,6 +744,7 @@ static int serve_client(conn_t *c, const char *fence, unsigned long *counter) {
         else if (strcmp(line, "fence") == 0) { char fb[128]; snprintf(out, sizeof out, "%s\n", live_fence(fb, sizeof fb, fence)); }
         else if (strcmp(line, "pid") == 0) snprintf(out, sizeof out, "%d\n", (int)getpid());
         else if (strcmp(line, "random") == 0) snprintf(out, sizeof out, "%ld\n", random());
+        else if (strcmp(line, "seed") == 0) snprintf(out, sizeof out, "%s\n", kept_seed[0] ? kept_seed : "-");
         else if (strcmp(line, "getrandom") == 0) {
             unsigned char b[8];
             if (getrandom(b, sizeof b, 0) != (ssize_t)sizeof b) errname(errno, out, sizeof out);
@@ -856,20 +866,22 @@ static int listen_endpoint(const char *ep) {
     return s;
 }
 
-static int on_fiber(const fz_fiber_t *f) {
+static int on_fiber(const fz_incarnation_t *f) {
     cur_endpoint = f->endpoint;
     cur_fence = f->fence;
     cur_fiber = f;
     cur_generation = f->generation;
     /* This fiber's random() would otherwise replay the zygote's
      * sequence, the same in every sibling. The library leaves reseeding
-     * to the template (see fz_on_fiber). */
+     * to the template (see fz_on_fiber), and hands it the host's seed. */
     snprintf(seen_fence, sizeof seen_fence, "%s", f->fence);
-    reseed_rngs();
-    int handoff = getenv("FIBERD_HANDOFF_FD") != NULL;
+    reseed_rngs_from(f->seed, f->seed_len);
+    if (payload_num(f->payload, f->payload_len, "\"keep_seed\"") && f->seed_len == 32)
+        for (size_t i = 0; i < f->seed_len; i++) snprintf(kept_seed + 2 * i, 3, "%02x", f->seed[i]);
+    int handoff = f->identity != NULL;
     if (handoff) {
 #ifdef FZ_TLS
-        const char *why = tls_load();
+        const char *why = tls_load(f->identity);
 #else
         const char *why = "built without TLS (-DFZ_TLS)";
 #endif
@@ -1016,16 +1028,14 @@ static int gvisor_main(void) {
          * until it is handed one. Every sandbox restored from one image
          * holds the same RNG state, so reseed from the seed it brings
          * before anything draws from it. */
-        fz_gvisor_identity_t id;
+        fz_incarnation_t id;
         if (fz_gvisor_identity(&id) < 0) {
             fprintf(stderr, "refzygote: restored without an identity: %s\n", strerror(errno));
             return 122;
         }
         reseed_rngs_from(id.seed, id.seed_len);
         /* The record the fiber-side commands read, as on_fiber's is under a fork. */
-        fz_fiber_t f = { .fence = id.fence, .endpoint = id.endpoint, .payload = id.payload, .payload_len = id.payload_len, .session = id.session,
-                         .generation = id.generation, .kind = id.kind };
-        cur_fiber = &f;
+        cur_fiber = &id;
         cur_generation = id.generation;
         fprintf(stderr, "refzygote: incarnation %s serving on %s\n", id.fence, id.endpoint);
         int rc = gvisor_serve_once(id.fence, id.endpoint, id.payload, id.payload_len, &counter);

@@ -12,7 +12,9 @@
  * PyOS_AfterFork_Child, which reinitialises the GIL and the runtime
  * locks, resets the main thread and runs every os.register_at_fork
  * after_in_child hook, and only then calls the Python callback with the
- * fiber's record and the C environ, which the scrub has replaced.
+ * fiber's record (its seed as a bytearray the SDK zeroes after the
+ * hooks, its identity as a tuple or None) and the C environ, which the
+ * scrub has replaced.
  * Everything else, the rules, the incarnation hooks and the accept loop,
  * is fiberd.template. */
 #define PY_SSIZE_T_CLEAN
@@ -25,8 +27,8 @@
 
 #include "libfiberzygote.h"
 
-#if FZ_ABI_VERSION != 6
-#error "fiberd._zygote binds FZ_ABI_VERSION 6; rebuild it against this header"
+#if FZ_ABI_VERSION != 7
+#error "fiberd._zygote binds FZ_ABI_VERSION 7; rebuild it against this header"
 #endif
 #ifdef Py_GIL_DISABLED
 #error "fiberd._zygote needs the GIL; the fork rules assume it and abi3 does not cover a free-threaded build"
@@ -58,21 +60,38 @@ static PyObject *environ_dict(void) {
     return d;
 }
 
+/* identity_tuple is a record's handoff identity as (key_pem, cert_pem,
+ * caller, caller_pem), or None on a fiber that has none. */
+static PyObject *identity_tuple(const fz_identity_t *id) {
+    if (!id) Py_RETURN_NONE;
+    return Py_BuildValue("(ssss)", id->key_pem, id->cert_pem, id->caller, id->caller_pem);
+}
+
+/* seed_bytearray is a record's seed as a bytearray, which the SDK zeroes
+ * once the incarnation hooks have run. */
+static PyObject *seed_bytearray(const fz_incarnation_t *f) {
+    return PyByteArray_FromStringAndSize((const char *)f->seed, (Py_ssize_t)f->seed_len);
+}
+
 /* trampoline runs in the child before any Python. Its return value is the
  * fiber's exit code, as the library ends the process with it. A callback
  * that raised is a fiber that failed to start, written to stderr, which
  * is still the zygote's log until the fiber reports ready. */
-static int trampoline(const fz_fiber_t *f) {
+static int trampoline(const fz_incarnation_t *f) {
     PyEval_RestoreThread(serve_ts);
     PyOS_AfterFork_Child();
     PyObject *env = environ_dict();
+    PyObject *seed = seed_bytearray(f);
+    PyObject *identity = identity_tuple(f->identity);
     PyObject *res = NULL;
-    if (env) {
-        res = PyObject_CallFunction(on_fiber_cb, "ssy#sOIs", f->fence, f->endpoint,
+    if (env && seed && identity) {
+        res = PyObject_CallFunction(on_fiber_cb, "ssy#sOIsOO", f->fence, f->endpoint,
                                     (const char *)f->payload, (Py_ssize_t)f->payload_len, f->session, env,
-                                    f->generation, f->kind);
-        Py_DECREF(env);
+                                    f->generation, f->kind, seed, identity);
     }
+    Py_XDECREF(env);
+    Py_XDECREF(seed);
+    Py_XDECREF(identity);
     int rc = 1;
     if (!res) {
         PyErr_Print();
@@ -150,13 +169,6 @@ static PyObject *py_fiber_ready(PyObject *self, PyObject *unused) {
     Py_RETURN_NONE;
 }
 
-static PyObject *py_handoff_identity(PyObject *self, PyObject *unused) {
-    (void)self; (void)unused;
-    const fz_identity_t *id = fz_handoff_identity();
-    if (!id) Py_RETURN_NONE;
-    return Py_BuildValue("(ssss)", id->key_pem, id->cert_pem, id->caller, id->caller_pem);
-}
-
 static PyObject *py_accept(PyObject *self, PyObject *unused) {
     (void)self; (void)unused;
     int fd;
@@ -169,15 +181,18 @@ static PyObject *py_accept(PyObject *self, PyObject *unused) {
 
 static PyObject *py_gvisor_identity(PyObject *self, PyObject *unused) {
     (void)self; (void)unused;
-    fz_gvisor_identity_t id;
+    fz_incarnation_t id;
     int rc;
     Py_BEGIN_ALLOW_THREADS
     rc = fz_gvisor_identity(&id);
     Py_END_ALLOW_THREADS
     if (rc < 0) return PyErr_SetFromErrno(PyExc_OSError);
-    return Py_BuildValue("(sssy#y#sI)", id.kind, id.fence, id.endpoint,
-                         (const char *)id.payload, (Py_ssize_t)id.payload_len,
-                         (const char *)id.seed, (Py_ssize_t)id.seed_len, id.session, id.generation);
+    PyObject *seed = seed_bytearray(&id);
+    if (!seed) return NULL;
+    PyObject *out = Py_BuildValue("(sssy#OsI)", id.kind, id.fence, id.endpoint,
+                                  (const char *)id.payload, (Py_ssize_t)id.payload_len, seed, id.session, id.generation);
+    Py_DECREF(seed);
+    return out;
 }
 
 static PyObject *py_gvisor_ack(PyObject *self, PyObject *unused) {
@@ -188,9 +203,8 @@ static PyObject *py_gvisor_ack(PyObject *self, PyObject *unused) {
 
 static PyMethodDef methods[] = {
     {"init", py_init, METH_O, "init(argv): fz_init, which re-execs argv once with address-space randomisation off."},
-    {"serve", py_serve, METH_VARARGS, "serve(on_fiber, ctl_fd=3): fz_serve with the fork hooks; on_fiber(fence, endpoint, payload, session, env, generation, kind) runs in each child."},
-    {"fiber_ready", py_fiber_ready, METH_NOARGS, "fz_fiber_ready."},
-    {"handoff_identity", py_handoff_identity, METH_NOARGS, "fz_handoff_identity as (key_pem, cert_pem, caller, caller_pem), or None."},
+    {"serve", py_serve, METH_VARARGS, "serve(on_fiber, ctl_fd=3): fz_serve with the fork hooks; on_fiber(fence, endpoint, payload, session, env, generation, kind, seed, identity) runs in each child."},
+    {"fiber_ready", py_fiber_ready, METH_NOARGS, "fz_fiber_ready, which zeroes the library's copy of the seed."},
     {"accept", py_accept, METH_NOARGS, "fz_accept: the next handed-off connection's descriptor."},
     {"gvisor_identity", py_gvisor_identity, METH_NOARGS, "fz_gvisor_identity as (kind, fence, endpoint, payload, seed, session, generation)."},
     {"gvisor_ack", py_gvisor_ack, METH_NOARGS, "fz_gvisor_ack."},
@@ -206,7 +220,7 @@ PyMODINIT_FUNC PyInit__zygote(void) {
     PyObject *m = PyModule_Create(&module);
     if (!m) return NULL;
     if (PyModule_AddIntConstant(m, "ABI_VERSION", FZ_ABI_VERSION) < 0 ||
-        PyModule_AddIntConstant(m, "HANDOFF_FD", FZ_HANDOFF_FD) < 0) {
+        PyModule_AddIntConstant(m, "CHANNEL_FD", FZ_CHANNEL_FD) < 0) {
         Py_DECREF(m);
         return NULL;
     }

@@ -389,7 +389,7 @@ func TestResume(t *testing.T) {
 				cb := f.be.(*codecBackend)
 				ff := cb.fiber("g1/2/1")
 				if ff == nil || ff.resume == nil || ff.resume.Dir != ref || ff.resume.Endpoint != sock || ff.resume.WarmID != "g1" ||
-					ff.resume.WorkDir != filepath.Join(f.r.cfg.RunDir, "g1") || ff.resume.CgroupFD < 0 || ff.resume.Handoff != nil {
+					ff.resume.WorkDir != filepath.Join(f.r.cfg.RunDir, "g1") || ff.resume.CgroupFD < 0 || ff.resume.Handoff {
 					t.Fatalf("resume spec = %+v", ff)
 				}
 				parent := shaOf("zygote pages of g1")
@@ -507,7 +507,7 @@ func TestResume(t *testing.T) {
 					t.Fatal("parking a released fiber must fail")
 				}
 			}},
-		{name: "a handoff delta gets a fresh channel and no identity message", be: func() backend.Backend { return newSandboxBackend(core.TierSnapshot) }, grant: handoffG,
+		{name: "a handoff delta gets a fresh channel and no record", be: func() backend.Backend { return newSandboxBackend(core.TierSnapshot) }, grant: handoffG,
 			mod: func(c *Config) { c.Handoff, c.HandoffKey = handoffRouter(), handoffKey }, ref: parkFirst,
 			check: func(t *testing.T, f *parkFixture, ref string, h core.FiberHandle) {
 				if m := readManifest(t, ref); !m.Handoff {
@@ -515,8 +515,14 @@ func TestResume(t *testing.T) {
 				}
 				sb := f.be.(*sandboxBackend)
 				ff := sb.fiber("g1/2/1")
-				if ff.resume.Endpoint != handoffEndpoint || ff.resume.Handoff == nil || ff.handoff < 0 || ff.identity != nil {
+				if ff.resume.Endpoint != handoffEndpoint || !ff.resume.Handoff || ff.handoff < 0 || ff.identity != nil {
 					t.Fatalf("resume = %+v, identity %q", ff.resume, ff.identity)
+				}
+				f.r.mu.Lock()
+				ch := f.r.fibers["g1/2/1"].channel
+				f.r.mu.Unlock()
+				if ch == nil {
+					t.Fatal("the host holds no end of the resumed fiber's channel")
 				}
 				if h.Endpoint != "tcp://10.0.0.1:443" {
 					t.Fatalf("handle endpoint = %s", h.Endpoint)
@@ -532,7 +538,7 @@ func TestResume(t *testing.T) {
 			ref: func(t *testing.T, f *parkFixture) string {
 				return manifestOnly(t, f, manifest{Fence: "g1/1/1", Backend: "fake", Handoff: true}, nil)
 			},
-			errText: "handoff",
+			errText: "hand connections",
 			check: func(t *testing.T, f *parkFixture, _ string, _ core.FiberHandle) {
 				if f.r.root.Child("g1").Child("f-2-1").Exists() {
 					t.Fatal("the leaf was left behind")
@@ -586,7 +592,7 @@ func TestResume(t *testing.T) {
 			return sb
 		}, grant: g, mod: func(c *Config) { c.Handoff, c.HandoffKey = handoffRouter(), handoffKey },
 			ref: func(t *testing.T, f *parkFixture) string {
-				f.be.(*sandboxBackend).err = errors.New("fake: netns gone")
+				f.be.(*sandboxBackend).channelErr = errors.New("fake: netns gone")
 				return manifestOnly(t, f, manifest{Fence: "g1/1/1", Backend: "fake", Handoff: true}, nil)
 			},
 			errText: "netns gone",

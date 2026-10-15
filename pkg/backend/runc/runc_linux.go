@@ -920,6 +920,8 @@ func (l *launcher) Endpoint(spec backend.WarmSpec, hostPath string) string {
 // keeps nested user namespaces denied after a resume (see
 // sdk/c/template/libfiberzygote.c). The dump skips the network lock, which needs
 // iptables and only guards TCP peers. A fiber's endpoints are unix sockets.
+// A fiber's channel is a socket pair it holds both ends of, so a dump
+// carries it whole and a restore remakes it inside the fresh namespace.
 var (
 	emptyNet = []string{"--empty-ns", "net"}
 	netExtra = append(append([]string{}, emptyNet...), "--network-lock", "skip")
