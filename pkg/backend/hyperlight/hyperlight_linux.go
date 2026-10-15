@@ -236,7 +236,11 @@ func (b *Backend) Platform() artifact.Platform {
 	return b.facts.platform()
 }
 
-func (b *Backend) DefaultDeadlines() (time.Duration, time.Duration) {
+// DefaultDeadlines are fixed for every warm instance. The helper opens a
+// sandbox from a snapshot it holds in memory, so its cost does not grow
+// with the template as a gVisor restore does, and nothing is measured
+// at warm to size them from.
+func (b *Backend) DefaultDeadlines(string) (time.Duration, time.Duration) {
 	return createDeadline, resumeDeadline
 }
 

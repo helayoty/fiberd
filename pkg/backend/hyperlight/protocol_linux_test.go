@@ -94,7 +94,7 @@ func TestSurface(t *testing.T) {
 			}
 		}},
 		{name: "the deadlines", check: func(t *testing.T) {
-			if c, r := be.DefaultDeadlines(); c != 500*time.Millisecond || r != 2*time.Second {
+			if c, r := be.DefaultDeadlines(""); c != 500*time.Millisecond || r != 2*time.Second {
 				t.Fatalf("DefaultDeadlines = %s, %s", c, r)
 			}
 		}},

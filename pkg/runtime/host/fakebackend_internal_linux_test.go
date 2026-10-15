@@ -625,9 +625,19 @@ type platformMixin struct{ p artifact.Platform }
 
 func (m platformMixin) Platform() artifact.Platform { return m.p }
 
-type deadlineMixin struct{ create, resume time.Duration }
+// deadlineMixin advises create and resume, or what byWarm holds for the
+// warm instance asked about, as a backend that measured it at warm.
+type deadlineMixin struct {
+	create, resume time.Duration
+	byWarm         map[string][2]time.Duration
+}
 
-func (m deadlineMixin) DefaultDeadlines() (time.Duration, time.Duration) { return m.create, m.resume }
+func (m deadlineMixin) DefaultDeadlines(warmID string) (time.Duration, time.Duration) {
+	if d, ok := m.byWarm[warmID]; ok {
+		return d[0], d[1]
+	}
+	return m.create, m.resume
+}
 
 type schemesMixin struct{ schemes []string }
 

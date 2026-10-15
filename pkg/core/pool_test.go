@@ -29,6 +29,9 @@ type fakePool struct {
 	// overtake, when set, makes the first fill end while a refill pass
 	// is between grants.
 	overtake *overtake
+	// advice is the create deadline advised per grant, a second for a
+	// grant not in it.
+	advice map[string]time.Duration
 }
 
 // overtake stages a fill that ends while a refill pass is between
@@ -148,8 +151,11 @@ func (p *fakePool) Pooled(uid string) int {
 func (p *fakePool) PooledExits() <-chan string { return p.exits }
 
 // DefaultDeadlines gives a fill the second a restore takes, as a
-// snapshot runtime advises.
-func (p *fakePool) DefaultDeadlines() (time.Duration, time.Duration) {
+// snapshot runtime advises, or what advice holds for the grant.
+func (p *fakePool) DefaultDeadlines(uid string) (time.Duration, time.Duration) {
+	if d, ok := p.advice[uid]; ok {
+		return d, 2 * time.Second
+	}
 	return time.Second, 2 * time.Second
 }
 
@@ -505,12 +511,13 @@ func TestEpochBumpKeepsPool(t *testing.T) {
 
 // TestRefillOneAtATime checks that the refill loop restores one sandbox
 // ahead at a time for the whole home, that the grants take turns, that
-// a fill gets four create deadlines, and that a fill which yielded to a
-// clone is held before it is tried again.
+// a fill gets four of its own grant's create deadline, and that a fill
+// which yielded to a clone is held before it is tried again.
 func TestRefillOneAtATime(t *testing.T) {
 	cases := []struct {
 		name     string
 		grants   []core.Grant
+		advice   map[string]time.Duration
 		gate     bool
 		overtake bool
 		yields   int
@@ -535,6 +542,18 @@ func TestRefillOneAtATime(t *testing.T) {
 				waitUntil(t, 5*time.Second, "one pooled", func() bool { return p.Pooled("g1") == 1 })
 				if d := p.fillCalls()[0].deadline; d != 4*time.Second {
 					t.Fatalf("fill deadline = %s, want 4s (four times the create deadline)", d)
+				}
+			}},
+		{name: "a fill gets four of its own grant's create deadline", advice: map[string]time.Duration{"g2": 2 * time.Second},
+			grants: []core.Grant{{UID: "g1", FiberMax: 1, FiberWarm: 1}, {UID: "g2", FiberMax: 1, FiberWarm: 1}},
+			check: func(t *testing.T, p *fakePool) {
+				waitUntil(t, 5*time.Second, "both pooled", func() bool { return p.Pooled("g1") == 1 && p.Pooled("g2") == 1 })
+				got := map[string]time.Duration{}
+				for _, c := range p.fillCalls() {
+					got[c.uid] = c.deadline
+				}
+				if got["g1"] != 4*time.Second || got["g2"] != 8*time.Second {
+					t.Fatalf("fill deadlines = %v, want g1 4s and g2 8s (four times each grant's own create deadline)", got)
 				}
 			}},
 		{name: "the grants take turns",
@@ -589,6 +608,7 @@ func TestRefillOneAtATime(t *testing.T) {
 			a := newCore(t, "up", core.TierSnapshot, tc.grants...)
 			p := newFakePool(core.TierSnapshot)
 			p.yields = tc.yields
+			p.advice = tc.advice
 			if tc.gate {
 				p.gate = make(chan struct{})
 			}

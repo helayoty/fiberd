@@ -63,7 +63,7 @@ The request has exactly four fields.
 - `deadline` is an optional absolute timestamp for runtime work.
 - `payload` is up to 4096 opaque bytes for the new fiber ([Clone](glossary.md#clone)).
 
-If `deadline` is absent, the runtime supplies a default. The core defaults are 50 milliseconds for CREATE and 2 seconds for RESUME. A deadline already in the past is invalid. The payload is data for the prepared template and is never interpreted as workload configuration by the core.
+If `deadline` is absent, the runtime supplies a default. The core defaults are 50 milliseconds for CREATE and 2 seconds for RESUME. A backend whose clone is a restore raises them per grant, from the restore it timed when the grant's template warmed ([backends.md](design/backends.md)). A deadline already in the past is invalid. The payload is data for the prepared template and is never interpreted as workload configuration by the core.
 
 The response contains these fields.
 

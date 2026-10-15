@@ -509,12 +509,19 @@ func (r *Runtime) Tier() core.Tier { return r.tier }
 // CgroupRoot is where the runtime carves grant and fiber cgroups.
 func (r *Runtime) CgroupRoot() string { return r.cfg.CgroupRoot }
 
-// DefaultDeadlines implements core.DeadlineAdvisor from the backend.
-func (r *Runtime) DefaultDeadlines() (create, resume time.Duration) {
-	if adv, ok := r.be.(backend.DeadlineAdvisor); ok {
-		return adv.DefaultDeadlines()
+// DefaultDeadlines implements core.DeadlineAdvisor from the backend, for
+// the grant's warm instance. A grant with none warm asks for no
+// instance, which the backend answers with its floors.
+func (r *Runtime) DefaultDeadlines(grantUID string) (create, resume time.Duration) {
+	adv, ok := r.be.(backend.DeadlineAdvisor)
+	if !ok {
+		return 0, 0
 	}
-	return 0, 0
+	id := ""
+	if z := r.warmOf(grantUID); z != nil {
+		id = z.id
+	}
+	return adv.DefaultDeadlines(id)
 }
 
 // overhead is the fixed per-fiber footprint for a grant's fibers, added

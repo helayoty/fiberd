@@ -206,7 +206,7 @@ func (a *Core) refillPass(ctx context.Context) time.Time {
 
 // fill restores one sandbox for the grant and settles the loop's state.
 func (a *Core) fill(ctx context.Context, p Pooler, g Grant) {
-	create, _ := a.deadlines()
+	create, _ := a.deadlines(g.UID)
 	deadline := fillDeadlineFactor * create
 	fctx, cancel := context.WithTimeout(ctx, deadline)
 	err := p.Fill(fctx, g, deadline)

@@ -73,8 +73,22 @@ const (
 	runscPlatform = "systrap"
 	directIO      = "--direct"
 
+	// The deadlines a clone or resume without one of its own gets.
+	// createDeadline and resumeDeadline are the floors. A warm instance
+	// whose footprint probe took longer raises them to deadlineFactor
+	// times what the probe took (DefaultDeadlines), so a larger template
+	// on a slower host is not held to a number sized for a small one.
+	// The probe restores alone, right after the checkpoint, while a
+	// clone shares the CPUs with up to one sibling restore per CPU and
+	// the pool fill it cut short, and a busy host (a CI runner, four
+	// grants' pools filling at once) has stretched restores to two or
+	// three times the probe's. Four covers that. deadlineCap bounds a
+	// pathological probe (a host swapping, or at a load many times its
+	// CPUs), so no clone waits without end for a default it never set.
 	createDeadline = 500 * time.Millisecond
 	resumeDeadline = 2 * time.Second
+	deadlineFactor = 4
+	deadlineCap    = 5 * time.Second
 	readyMarker    = "warm.ready"
 	// closeWait bounds Close's wait for its reapers, hit only when runsc
 	// itself is wedged.
@@ -195,6 +209,11 @@ type warm struct {
 	// the pool socket. Its fibers are restored the old way and Pool
 	// refuses.
 	noPool bool
+	// restoreTook is how long the footprint probe took to restore from
+	// the image and serve, what a clone of this instance does, and 0
+	// when the probe measured nothing. Written before the instance is
+	// published in b.warms, and read under b.mu after.
+	restoreTook time.Duration
 }
 
 type box struct {
@@ -280,8 +299,25 @@ func (b *Backend) Platform() artifact.Platform {
 	return artifact.Platform{Kernel: "gvisor-" + b.version, Libc: "rootfs-" + filepath.Base(b.opt.Rootfs)}
 }
 
-func (b *Backend) DefaultDeadlines() (time.Duration, time.Duration) {
-	return createDeadline, resumeDeadline
+// DefaultDeadlines sizes the deadlines of a clone or resume without one
+// of its own from what the footprint probe measured for the warm
+// instance. They are the floors, raised to deadlineFactor times the
+// probe's restore and capped at deadlineCap. An instance whose probe
+// measured nothing, or one this backend does not have, gets the floors.
+func (b *Backend) DefaultDeadlines(warmID string) (create, resume time.Duration) {
+	var took time.Duration
+	b.mu.Lock()
+	if w := b.warms[warmID]; w != nil {
+		took = w.restoreTook
+	}
+	b.mu.Unlock()
+	return sizeDeadline(took, createDeadline), sizeDeadline(took, resumeDeadline)
+}
+
+// sizeDeadline is the floor or deadlineFactor times the measured restore,
+// whichever is larger, and never more than deadlineCap.
+func sizeDeadline(measured, floor time.Duration) time.Duration {
+	return min(max(floor, deadlineFactor*measured), deadlineCap)
 }
 
 // FiberOverheadBytes is 0, so the host measures the warm template
@@ -749,6 +785,10 @@ func (b *Backend) Warm(ctx context.Context, sp backend.WarmSpec) (backend.Warm, 
 	if w.noPool {
 		log.Printf("gvisor: template of %s takes its identity from the spec environment and never dials the pool socket, so it has no pool", w.id)
 	}
+	if w.restoreTook > 0 {
+		log.Printf("gvisor: template of %s restored and served in %s, default deadlines create=%s resume=%s", w.id, w.restoreTook.Round(time.Millisecond),
+			sizeDeadline(w.restoreTook, createDeadline), sizeDeadline(w.restoreTook, resumeDeadline))
+	}
 	b.mu.Lock()
 	b.warms[w.id] = w
 	b.mu.Unlock()
@@ -764,7 +804,10 @@ func (b *Backend) Warm(ctx context.Context, sp backend.WarmSpec) (backend.Warm, 
 // is also where late binding is detected. Its spec carries a token and
 // the probe's fence and endpoint both, so whichever the template does
 // first, dial or serve, says how it takes its identity, and it is
-// measured serving either way.
+// measured serving either way. The probe is also timed, from the
+// restore to serving, which is what a clone does and what sizes the
+// instance's default deadlines (DefaultDeadlines). It gets deadlineCap,
+// since a template that takes longer cannot be born under any default.
 func (b *Backend) probeFootprint(ctx context.Context, w *warm, cgroupFD int) (shmem, total uint64) {
 	if cgroupFD < 0 {
 		log.Printf("gvisor: footprint probe: no cgroup")
@@ -772,8 +815,9 @@ func (b *Backend) probeFootprint(ctx context.Context, w *warm, cgroupFD int) (sh
 	x := &box{id: "probe", cid: w.cid + "-probe", bundle: filepath.Join(w.dir, "probe-bundle"), probe: true, workDir: w.workDir, done: make(chan struct{})}
 	x.endpoint = filepath.Join(w.workDir, "probe.sock")
 	env := []string{"FIBERD_FENCE=probe", "FIBERD_ENDPOINT=/host/probe.sock"}
-	pctx, cancel := context.WithTimeout(ctx, resumeDeadline)
+	pctx, cancel := context.WithTimeout(ctx, deadlineCap)
 	defer cancel()
+	t0 := time.Now()
 	if err := b.restore(pctx, w, x, w.images, w.argv, env, cgroupFD); err != nil {
 		log.Printf("gvisor: footprint probe: %v", err)
 		return 0, 0
@@ -796,6 +840,7 @@ func (b *Backend) probeFootprint(ctx context.Context, w *warm, cgroupFD int) (sh
 			return 0, 0
 		}
 	}
+	w.restoreTook = time.Since(t0)
 	if cgroupFD < 0 {
 		return 0, 0
 	}

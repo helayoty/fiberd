@@ -85,9 +85,11 @@ const sweepEvery = 5 * time.Second
 
 // DeadlineAdvisor is implemented by runtimes whose create or resume is
 // slower than a process fork: what a Clone without an explicit deadline
-// is given. The caller's own deadline is always honoured as is.
+// is given, for the grant named, since a runtime may size it from what
+// it measured when the grant's template warmed. The caller's own
+// deadline is always honoured as is.
 type DeadlineAdvisor interface {
-	DefaultDeadlines() (create, resume time.Duration)
+	DefaultDeadlines(grantUID string) (create, resume time.Duration)
 }
 
 // ScopeClaim is one fact a home asserts about where it runs: the
@@ -310,7 +312,7 @@ func (a *Core) Clone(ctx context.Context, req CloneRequest) (CloneResponse, Stat
 	// 5. Runtime: the one fork or restore call, under a hard deadline.
 	deadline := req.Deadline
 	if deadline <= 0 {
-		create, resume := a.deadlines()
+		create, resume := a.deadlines(g.UID)
 		deadline = create
 		if act == ActResume {
 			deadline = resume
@@ -397,12 +399,12 @@ func (a *Core) Clone(ctx context.Context, req CloneRequest) (CloneResponse, Stat
 	return a.routed(CloneResponse{FiberID: h.ID, Endpoint: h.Endpoint, Fence: fence, Kind: act}), OK, nil
 }
 
-// deadlines are what a Clone without its own deadline gets, and what a
-// pool fill gets.
-func (a *Core) deadlines() (create, resume time.Duration) {
+// deadlines are what a Clone of the grant without its own deadline gets,
+// and what a pool fill for it gets.
+func (a *Core) deadlines(grantUID string) (create, resume time.Duration) {
 	create, resume = DefaultCreateDeadline, DefaultResumeDeadline
 	if adv, ok := a.Runtime.(DeadlineAdvisor); ok {
-		if c, r := adv.DefaultDeadlines(); c > 0 && r > 0 {
+		if c, r := adv.DefaultDeadlines(grantUID); c > 0 && r > 0 {
 			create, resume = c, r
 		}
 	}
