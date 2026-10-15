@@ -68,7 +68,7 @@ An `UNTRUSTED` grant, the default, is admitted only on a backend that isolates t
 - Every proc and runc fiber is born in its own cgroup leaf and pid namespace. A proc fiber also gets a private mount namespace with fiberd's private paths covered, the run directory narrowed to its own grant's, and `/sys` and the host controls under `/proc` read-only. Confinement fails closed ([zygote.md](design/zygote.md)).
 - proc fibers run as uid 0 with every capability dropped under `no_new_privs`.
 - runc fibers are an unprivileged host uid in a per-grant user namespace, whose ids come from a pool far above ordinary users', with a loopback-only network namespace and nested user namespaces denied ([user-namespaces.md](design/user-namespaces.md)).
-- A template must reseed its random generators in every new run, at the fork, after a restore and when its fence changes ([zygote.md](design/zygote.md), [sdk/c/template/README.md](../sdk/c/template/README.md)).
+- A template must reseed its random generators in every new run, at the fork, after a restore and when its fence changes ([zygote.md](design/zygote.md), [sdk/c/template/README.md](../sdk/c/template/README.md)). Every CRIU dump fiberd takes zeroes the `getrandom` state a glibc of 2.41 or later keeps in user memory, so `getrandom` never replays a parked keystream ([backends.md](design/backends.md)).
 
 ## fiberd privileges
 

@@ -24,6 +24,9 @@ type Options struct {
 	// Commander runs criu. Nil runs the binary Bin names, so a test can
 	// stand in for criu without a process.
 	Commander Commander
+	// Proc is where the dumped tree's /proc is read (its droppable
+	// mappings, see droppable.go). "" is /proc.
+	Proc string
 }
 
 // Commander is how the package runs criu. Output runs a check or a dump
@@ -48,6 +51,13 @@ func (o Options) bin() string {
 		return o.Bin
 	}
 	return "criu"
+}
+
+func (o Options) proc() string {
+	if o.Proc != "" {
+		return o.Proc
+	}
+	return "/proc"
 }
 
 func (o Options) commander() Commander {
@@ -101,10 +111,20 @@ func (o Options) Available(ctx context.Context) error {
 // images are durable). Otherwise criu kills it as the dump completes.
 // extra holds more criu arguments, for example "--external",
 // "unix[<inode>]" to allow a socket whose peer lives outside the dumped
-// tree (the zygote's control channel at build time).
+// tree (the zygote's control channel at build time). The images come
+// back with the tree's droppable pages zeroed (droppable.go), so no
+// restore inherits its getrandom keystream.
 func (o Options) DumpWith(ctx context.Context, pid int, dir string, leaveRunning bool, extra []string) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
+	}
+	// Read while the tree runs. The libc maps a state page and never
+	// unmaps it, so a read after a --leave-running dump sees every page
+	// the dump could hold. A dump that kills the tree leaves only the
+	// read before it.
+	mappings, err := droppableMappings(o.proc(), pid)
+	if err != nil {
+		return fmt.Errorf("criu dump pid %d: %w", pid, err)
 	}
 	args := []string{"dump", "--no-default-config",
 		"-t", strconv.Itoa(pid), "-D", dir,
@@ -117,6 +137,14 @@ func (o Options) DumpWith(ctx context.Context, pid int, dir string, leaveRunning
 	out, err := o.commander().Output(ctx, args)
 	if err != nil {
 		return fmt.Errorf("criu dump pid %d: %w: %s%s", pid, err, strings.TrimSpace(string(out)), logTail(filepath.Join(dir, "dump.log")))
+	}
+	if leaveRunning {
+		if mappings, err = droppableMappings(o.proc(), pid); err != nil {
+			return fmt.Errorf("criu dump pid %d: %w", pid, err)
+		}
+	}
+	if _, err := scrubDroppable(dir, mappings); err != nil {
+		return fmt.Errorf("criu dump pid %d: droppable pages: %w", pid, err)
 	}
 	return nil
 }
