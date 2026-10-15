@@ -22,6 +22,7 @@ type fakeCriu struct {
 	calls    [][]string
 	out      []byte // what Output prints
 	err      error  // what Output returns
+	version  string // what `criu --version` prints, "Version: 4.2.1" when empty
 	startErr error  // what Start returns
 	pidfile  string // what Start writes to the restore pid file, "" for nothing
 	exited   bool   // the restore has ended by the time Start returns
@@ -35,6 +36,12 @@ func (f *fakeCriu) Output(ctx context.Context, args []string) ([]byte, error) {
 	f.calls = append(f.calls, args)
 	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+	if len(args) == 1 && args[0] == "--version" {
+		if f.version == "" {
+			return []byte("Version: 4.2.1\n"), nil
+		}
+		return []byte(f.version), nil
 	}
 	return f.out, f.err
 }
@@ -135,26 +142,38 @@ func wantErrorWith(t *testing.T, what string, err error, want, notWant []string)
 	}
 }
 
-// TestAvailable checks that `criu check` passing is availability, its output
-// comes back on failure, and the context reaches the command.
+// TestAvailable checks that a criu of at least MinVersion whose `criu
+// check` passes is availability, that an older or unreadable version is
+// refused before the check runs, that the check's output comes back on
+// failure, and that the context reaches the command.
 func TestAvailable(t *testing.T) {
+	version := []string{"--version"}
+	check := []string{"check", "--no-default-config"}
 	cases := []struct {
 		name      string
+		version   string // what `criu --version` prints, "" for 4.2.1
 		out       string
 		err       error
 		cancelled bool   // the context is already done
 		wantErr   string // substring of the error, "" for success
 		wantIs    error
+		wantCalls [][]string
 	}{
-		{name: "check passes"},
+		{name: "check passes", wantCalls: [][]string{version, check}},
+		{name: "4.2.0 is the floor", version: "Version: 4.2\n", wantCalls: [][]string{version, check}},
+		{name: "a later major", version: "Version: 5.0.1\nGitID: v5.0.1\n", wantCalls: [][]string{version, check}},
+		{name: "4.1.1 is refused before the check", version: "Version: 4.1.1\n",
+			wantErr: "criu 4.1 is older than 4.2", wantCalls: [][]string{version}},
+		{name: "3.19 is refused", version: "Version: 3.19\n", wantErr: "criu 3.19 is older than 4.2", wantCalls: [][]string{version}},
+		{name: "no version line", version: "criu, built from source\n", wantErr: "printed no version", wantCalls: [][]string{version}},
 		{name: "check fails with its output", out: "Error (cr-check.c:1): no mnt_id\n", err: errors.New("exit status 1"),
-			wantErr: "criu check: exit status 1: Error (cr-check.c:1): no mnt_id"},
-		{name: "binary missing", err: fs.ErrNotExist, wantIs: fs.ErrNotExist},
-		{name: "a finished context", cancelled: true, wantIs: context.Canceled},
+			wantErr: "criu check: exit status 1: Error (cr-check.c:1): no mnt_id", wantCalls: [][]string{version, check}},
+		{name: "binary missing", err: fs.ErrNotExist, wantIs: fs.ErrNotExist, wantCalls: [][]string{version, check}},
+		{name: "a finished context", cancelled: true, wantIs: context.Canceled, wantCalls: [][]string{version}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			fake := &fakeCriu{out: []byte(tc.out), err: tc.err}
+			fake := &fakeCriu{version: tc.version, out: []byte(tc.out), err: tc.err}
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			if tc.cancelled {
@@ -170,8 +189,8 @@ func TestAvailable(t *testing.T) {
 			if tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)) {
 				t.Fatalf("Available = %v, want an error containing %q", err, tc.wantErr)
 			}
-			if want := [][]string{{"check", "--no-default-config"}}; !slices.EqualFunc(fake.calls, want, slices.Equal) {
-				t.Fatalf("criu ran with %q, want %q", fake.calls, want)
+			if !slices.EqualFunc(fake.calls, tc.wantCalls, slices.Equal) {
+				t.Fatalf("criu ran with %q, want %q", fake.calls, tc.wantCalls)
 			}
 		})
 	}
@@ -230,7 +249,7 @@ func TestDumpWith(t *testing.T) {
 			if tc.cancelled {
 				cancel()
 			}
-			err := criu.Options{Commander: fake, Proc: t.TempDir()}.DumpWith(ctx, tc.pid, dir, tc.leaveRunning, tc.extra)
+			err := criu.Options{Commander: fake}.DumpWith(ctx, tc.pid, dir, tc.leaveRunning, tc.extra)
 			if tc.wantIs != nil && !errors.Is(err, tc.wantIs) {
 				t.Fatalf("DumpWith = %v, want %v", err, tc.wantIs)
 			}

@@ -26,13 +26,23 @@ import (
 func fakeCriu(t *testing.T, args, body, dir, out string) string {
 	t.Helper()
 	body = strings.NewReplacer("DIR", dir, "OUT", out).Replace(body)
-	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > '" + args + "'\n" + body + "\n"
+	// It is criu 4.2.1 unless the body answers --version itself first.
+	script := "#!/bin/sh\n" + versionLine(body) + "printf '%s\\n' \"$@\" > '" + args + "'\n" + body + "\n"
 	path := filepath.Join(t.TempDir(), "criu")
 	mustWrite(t, path, []byte(script))
 	if err := os.Chmod(path, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	return path
+}
+
+// versionLine answers `criu --version` as 4.2.1, unless body starts with
+// its own answer.
+func versionLine(body string) string {
+	if strings.HasPrefix(body, "[ \"$1\" = --version ]") {
+		return ""
+	}
+	return "[ \"$1\" = --version ] && { echo 'Version: 4.2.1'; exit 0; }\n"
 }
 
 // recordedArgs reads the argument list a fake criu wrote.
@@ -75,6 +85,8 @@ func TestCriuCheckAndDump(t *testing.T) {
 		{name: "check fails with its output", body: "echo 'Error (cr-check.c:1): no mnt_id'; exit 1",
 			wantArgs: []string{"check", "--no-default-config"},
 			wantErr:  "criu check: exit status 1: Error (cr-check.c:1): no mnt_id"},
+		{name: "a criu older than 4.2 is refused before the check", body: "[ \"$1\" = --version ] && { echo 'Version: 4.1.1'; exit 0; }\nexit 0",
+			wantArgs: []string{"--version"}, wantErr: "criu 4.1 is older than 4.2"},
 		{name: "binary missing", wantIs: fs.ErrNotExist},
 		{name: "dump arguments reach criu and stderr comes back", dump: true, body: "echo nope >&2; exit 3",
 			wantArgs: []string{"dump", "--no-default-config", "-t", "7", "-D", "DIR", "--ext-unix-sk", "--manage-cgroups=ignore",

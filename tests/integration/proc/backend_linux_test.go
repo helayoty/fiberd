@@ -328,8 +328,8 @@ func TestParkNamesOwnMounts(t *testing.T) {
 	}
 }
 
-// recordingCriu stands in for criu through Options.Commander. It passes
-// check, records every call and starts restores that hold until the test
+// recordingCriu stands in for criu through Options.Commander. It is
+// criu 4.2.1, passes check, records every call and starts restores that hold until the test
 // ends, so what the backend mounts around a restore can be checked
 // without a tree to restore.
 type recordingCriu struct {
@@ -339,6 +339,9 @@ type recordingCriu struct {
 
 func (r *recordingCriu) Output(_ context.Context, args []string) ([]byte, error) {
 	r.calls = append(r.calls, strings.Join(args, " "))
+	if len(args) == 1 && args[0] == "--version" {
+		return []byte("Version: 4.2.1\n"), nil
+	}
 	return nil, nil
 }
 
