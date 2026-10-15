@@ -362,6 +362,7 @@ func recvLine(c *net.UnixConn) (line string, nfds int, err error) {
 
 // criuKnobs say how the fake criu answers, so a table case can hold them.
 type criuKnobs struct {
+	version     string // what --version prints, "Version: 4.2.1" when empty
 	checkErr    error  // what check fails with
 	dumpErr     error  // what dump fails with
 	dumpErrOnce bool   // and only the first dump
@@ -389,6 +390,11 @@ func (f *fakeCriu) Output(ctx context.Context, args []string) ([]byte, error) {
 		return nil, err
 	}
 	switch args[0] {
+	case "--version":
+		if f.version == "" {
+			return []byte("Version: 4.2.1\n"), nil
+		}
+		return []byte(f.version), nil
 	case "check":
 		if f.checkErr != nil {
 			return []byte("Error (criu/cr-check.c): a feature is missing"), f.checkErr

@@ -30,19 +30,22 @@ import (
 func TestBackendFacts(t *testing.T) {
 	cases := []struct {
 		name     string
+		version  string
 		checkErr error
 		launcher Launcher
 		wantName string
 		wantTier core.Tier
+		wantLast string // the last thing criu was asked
 	}{
-		{name: "criu passes", wantName: "proc", wantTier: core.TierCheckpoint},
-		{name: "criu check fails", checkErr: errors.New("exit status 1"), wantName: "proc", wantTier: core.TierWarm},
-		{name: "a launcher names the backend", launcher: &fakeLauncher{}, wantName: "fake", wantTier: core.TierCheckpoint},
+		{name: "criu passes", wantName: "proc", wantTier: core.TierCheckpoint, wantLast: "check --no-default-config"},
+		{name: "criu check fails", checkErr: errors.New("exit status 1"), wantName: "proc", wantTier: core.TierWarm, wantLast: "check --no-default-config"},
+		{name: "a criu older than 4.2 parks nothing", version: "Version: 4.1.1\n", wantName: "proc", wantTier: core.TierWarm, wantLast: "--version"},
+		{name: "a launcher names the backend", launcher: &fakeLauncher{}, wantName: "fake", wantTier: core.TierCheckpoint, wantLast: "check --no-default-config"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newFakes(t)
-			f.criu.checkErr = tc.checkErr
+			f.criu.version, f.criu.checkErr = tc.version, tc.checkErr
 			b := f.open(t, Options{Launcher: tc.launcher})
 			if b.Name() != tc.wantName || b.Tier() != tc.wantTier {
 				t.Fatalf("Name=%s Tier=%s, want %s %s", b.Name(), b.Tier(), tc.wantName, tc.wantTier)
@@ -53,8 +56,8 @@ func TestBackendFacts(t *testing.T) {
 			if got := strings.Join(b.EndpointSchemes(), ","); got != "unix,tcp" {
 				t.Fatalf("EndpointSchemes = %s, want unix,tcp", got)
 			}
-			if got := f.criu.last(t); got != "check --no-default-config" {
-				t.Fatalf("criu was asked %q, want check", got)
+			if got := f.criu.last(t); got != tc.wantLast {
+				t.Fatalf("criu was asked %q last, want %q", got, tc.wantLast)
 			}
 		})
 	}

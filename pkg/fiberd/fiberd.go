@@ -208,7 +208,7 @@ func (c *Config) Bind(fs *flag.FlagSet) {
 	fs.DurationVar(&c.Trust.JWKSMaxStale, "jwks-max-stale", time.Hour, "refuse to verify when the key set is older than this (set to the lease TTL)")
 	fs.DurationVar(&c.Trust.MaxLease, "max-lease", 0, "-verifier=jwks: refuse grants signed for longer than this (exp - iat) or without a lease (0 accepts any)")
 
-	fs.StringVar(&c.Runtime.Name, "runtime", "stub", "runtime: stub (in-memory), or a sandbox backend on the host runtime: proc (fork zygote + criu from PATH; park/resume is offered when `criu check` passes), runc (the zygote as an OCI container's init), gvisor (runsc sandbox per fiber), hyperlight (micro-VM snapshots through a helper process)")
+	fs.StringVar(&c.Runtime.Name, "runtime", "stub", "runtime: stub (in-memory), or a sandbox backend on the host runtime: proc (fork zygote + criu from PATH; park/resume is offered with criu 4.2 or later whose `criu check` passes), runc (the zygote as an OCI container's init), gvisor (runsc sandbox per fiber), hyperlight (micro-VM snapshots through a helper process)")
 	fs.StringVar(&c.Runtime.StubTier, "runtime-tier", "FIBER_CHECKPOINT", "tier the stub runtime advertises (stub only)")
 	c.Runtime.Templates = map[string]string{}
 	fs.Func("template", "proc: digest=path [args] mapping a template digest to a zygote command (repeatable; key `default` catches the rest)",

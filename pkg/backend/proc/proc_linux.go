@@ -572,8 +572,9 @@ type handoffRecord struct {
 	Inode string `json:"inode"`
 }
 
-// New opens the backend. It offers FIBER_CHECKPOINT when `criu check`
-// passes and FIBER_WARM otherwise.
+// New opens the backend. It offers FIBER_CHECKPOINT with a criu of at
+// least criu.MinVersion whose `criu check` passes, and FIBER_WARM
+// otherwise.
 func New(o Options) backend.Backend { return NewBackend(o) }
 
 // NewBackend is New with the concrete type, for launchers that wrap it.
@@ -591,7 +592,7 @@ func NewBackend(o Options) *Backend {
 	if o.procRoot == "" {
 		o.procRoot = "/proc"
 	}
-	b := &Backend{opt: o, criu: criu.Options{Bin: o.CRIU, Wrap: o.CRIUWrap, Commander: o.Commander, Proc: o.procRoot}, tier: core.TierWarm, defaultRoot: defaultRoot,
+	b := &Backend{opt: o, criu: criu.Options{Bin: o.CRIU, Wrap: o.CRIUWrap, Commander: o.Commander}, tier: core.TierWarm, defaultRoot: defaultRoot,
 		zygotes: map[string]*zygote{}, fibers: map[string]*fiber{}, byPID: map[pidKey]*fiber{},
 		exits: make(chan backend.Exit, 1024)}
 	if o.Launcher == nil {

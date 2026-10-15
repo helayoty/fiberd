@@ -24,9 +24,6 @@ type Options struct {
 	// Commander runs criu. Nil runs the binary Bin names, so a test can
 	// stand in for criu without a process.
 	Commander Commander
-	// Proc is where the dumped tree's /proc is read (its droppable
-	// mappings, see droppable.go). "" is /proc.
-	Proc string
 }
 
 // Commander is how the package runs criu. Output runs a check or a dump
@@ -51,13 +48,6 @@ func (o Options) bin() string {
 		return o.Bin
 	}
 	return "criu"
-}
-
-func (o Options) proc() string {
-	if o.Proc != "" {
-		return o.Proc
-	}
-	return "/proc"
 }
 
 func (o Options) commander() Commander {
@@ -97,13 +87,50 @@ func (p cmdProcess) Pid() int    { return p.cmd.Process.Pid }
 func (p cmdProcess) Kill() error { return p.cmd.Process.Kill() }
 func (p cmdProcess) Wait() error { return p.cmd.Wait() }
 
-// Available reports whether criu is installed and `criu check` passes.
+// MinVersion is the oldest criu fiberd parks with. Older ones dump glibc's
+// getrandom state page (2.41 and later) and restore it as plain memory,
+// so every copy resumed from one park continues one keystream, and on
+// recent kernels the dump of that page fails outright.
+var MinVersion = [2]int{4, 2}
+
+// Available reports whether criu is installed, at least MinVersion, and
+// `criu check` passes.
 func (o Options) Available(ctx context.Context) error {
-	out, err := o.commander().Output(ctx, []string{"check", "--no-default-config"})
+	out, err := o.commander().Output(ctx, []string{"--version"})
+	if err != nil {
+		return fmt.Errorf("criu --version: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	v, ok := parseVersion(out)
+	if !ok {
+		return fmt.Errorf("criu --version printed no version: %q", strings.TrimSpace(string(out)))
+	}
+	if v[0] < MinVersion[0] || v[0] == MinVersion[0] && v[1] < MinVersion[1] {
+		return fmt.Errorf("criu %d.%d is older than %d.%d, which fiberd needs so a resume never replays getrandom", v[0], v[1], MinVersion[0], MinVersion[1])
+	}
+	out, err = o.commander().Output(ctx, []string{"check", "--no-default-config"})
 	if err != nil {
 		return fmt.Errorf("criu check: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+// parseVersion reads major and minor from `criu --version`, whose first
+// line is "Version: 4.2.1".
+func parseVersion(out []byte) ([2]int, bool) {
+	for _, line := range strings.Split(string(out), "\n") {
+		rest, ok := strings.CutPrefix(strings.TrimSpace(line), "Version:")
+		if !ok {
+			continue
+		}
+		parts := strings.SplitN(strings.TrimSpace(rest), ".", 3)
+		if len(parts) < 2 {
+			return [2]int{}, false
+		}
+		major, err1 := strconv.Atoi(parts[0])
+		minor, err2 := strconv.Atoi(parts[1])
+		return [2]int{major, minor}, err1 == nil && err2 == nil
+	}
+	return [2]int{}, false
 }
 
 // DumpWith checkpoints the tree rooted at pid into dir. With leaveRunning
@@ -111,20 +138,10 @@ func (o Options) Available(ctx context.Context) error {
 // images are durable). Otherwise criu kills it as the dump completes.
 // extra holds more criu arguments, for example "--external",
 // "unix[<inode>]" to allow a socket whose peer lives outside the dumped
-// tree (the zygote's control channel at build time). The images come
-// back with the tree's droppable pages zeroed (droppable.go), so no
-// restore inherits its getrandom keystream.
+// tree (the zygote's control channel at build time).
 func (o Options) DumpWith(ctx context.Context, pid int, dir string, leaveRunning bool, extra []string) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
-	}
-	// Read while the tree runs. The libc maps a state page and never
-	// unmaps it, so a read after a --leave-running dump sees every page
-	// the dump could hold. A dump that kills the tree leaves only the
-	// read before it.
-	mappings, err := droppableMappings(o.proc(), pid)
-	if err != nil {
-		return fmt.Errorf("criu dump pid %d: %w", pid, err)
 	}
 	args := []string{"dump", "--no-default-config",
 		"-t", strconv.Itoa(pid), "-D", dir,
@@ -137,14 +154,6 @@ func (o Options) DumpWith(ctx context.Context, pid int, dir string, leaveRunning
 	out, err := o.commander().Output(ctx, args)
 	if err != nil {
 		return fmt.Errorf("criu dump pid %d: %w: %s%s", pid, err, strings.TrimSpace(string(out)), logTail(filepath.Join(dir, "dump.log")))
-	}
-	if leaveRunning {
-		if mappings, err = droppableMappings(o.proc(), pid); err != nil {
-			return fmt.Errorf("criu dump pid %d: %w", pid, err)
-		}
-	}
-	if _, err := scrubDroppable(dir, mappings); err != nil {
-		return fmt.Errorf("criu dump pid %d: droppable pages: %w", pid, err)
 	}
 	return nil
 }
