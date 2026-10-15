@@ -1,0 +1,43 @@
+{
+  "name": "@fiberd/client",
+  "version": "0.1.0",
+  "description": "Node.js client for the fiberd grant protocol",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/helayoty/fiberd.git",
+    "directory": "sdk/typescript"
+  },
+  "type": "commonjs",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": ["dist", "LICENSE", "NOTICE"],
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && tsc -p tsconfig.test.json && node --test .test-build/*.test.js",
+    "test:package": "node scripts/package-test.cjs",
+    "proto": "make -C ../.. typescript-proto",
+    "proto:check": "make -C ../.. typescript-proto-check",
+    "prepack": "npm run build && node scripts/licenses.cjs"
+  },
+  "dependencies": {
+    "@bufbuild/protobuf": "^2.16.0",
+    "@grpc/grpc-js": "^1.14.6"
+  },
+  "devDependencies": {
+    "@peculiar/x509": "^2.1.0",
+    "@types/node": "^22.17.0",
+    "reflect-metadata": "^0.2.2",
+    "ts-proto": "2.13.0",
+    "typescript": "7.0.2"
+  }
+}

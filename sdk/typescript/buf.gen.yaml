@@ -1,0 +1,16 @@
+version: v2
+plugins:
+  - local: sdk/typescript/node_modules/.bin/protoc-gen-ts_proto
+    out: sdk/typescript/src/generated
+    opt:
+      - outputServices=grpc-js
+      - env=node
+      - forceLong=bigint
+      - useDate=false
+      - esModuleInterop=true
+      - outputJsonMethods=false
+      - exportCommonSymbols=false
+      - importSuffix=.js
+inputs:
+  - directory: api
+  - directory: sdk/typescript/proto

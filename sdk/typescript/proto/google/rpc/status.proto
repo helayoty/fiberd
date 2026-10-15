@@ -1,0 +1,12 @@
+// The standard error envelope carried in grpc-status-details-bin.
+// Kept here because the grant API imports neither google.rpc.Status nor Any.
+syntax = "proto3";
+package google.rpc;
+
+import "google/protobuf/any.proto";
+
+message Status {
+  int32 code = 1;
+  string message = 2;
+  repeated google.protobuf.Any details = 3;
+}
