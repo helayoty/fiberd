@@ -70,7 +70,7 @@ OFF_LINUX = [
 @table(OFF_LINUX)
 def test_off_linux_is_an_import_error_naming_linux(tmp_path, monkeypatch, name, f0, f1):
     """The design's promise, which the macOS CI job runs for real. fiberd.client stays importable there."""
-    monkeypatch.setattr(ft.sys, "platform", f0)
+    monkeypatch.setattr(ft, "_PLATFORM", f0)
     monkeypatch.setattr(ft, "PROC_SELF", str(tmp_path / "no-proc"))
     with pytest.raises(ImportError, match="Linux only"):
         ft.init() if f1 == "init" else ft.serve(lambda f: 0)

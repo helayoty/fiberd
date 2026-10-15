@@ -64,10 +64,15 @@ _randoms: list[random.Random] = []
 _generation = 0
 
 
+# The platform a template refuses off, read once. The unit tests set it to
+# run the Linux paths over fakes on any host.
+_PLATFORM = sys.platform
+
+
 def _require_linux() -> None:
     """A template runs on Linux only. Off it the refusal is an ImportError that says so, before any /proc is read."""
-    if sys.platform != "linux":
-        raise ImportError(f"fiberd.template runs a template on Linux only, and this is {sys.platform}. fiberd.client works here")
+    if _PLATFORM != "linux":
+        raise ImportError(f"fiberd.template runs a template on Linux only, and this is {_PLATFORM}. fiberd.client works here")
 
 
 def _ext():
