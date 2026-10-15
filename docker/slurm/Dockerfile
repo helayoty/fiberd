@@ -1,7 +1,7 @@
 # A one-node Slurm cluster with fiberd inside. It holds Debian's slurm-wlm,
 # munge, criu, fiberd-slurm, and fiberd's reference issuer, zygote,
 # conformance and storm binaries. It builds from fiberd's dev image
-# (docker/dev), which has the toolchain and criu 4.1.1. The runtime layer
+# (docker/dev), which has the toolchain and criu 4.2.1. The runtime layer
 # is bookworm-slim.
 #
 #   docker build -t fiberd:slurm -f docker/slurm/Dockerfile .   (from the repo root)

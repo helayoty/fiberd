@@ -24,9 +24,11 @@ import (
 // keystream. That covers every getrandom caller, the template's own
 // reseed, Python's os.urandom, secrets and uuid4 and OpenSSL's seeding
 // among them. criu 4.2 skips the pages and restores the mapping as
-// droppable. For an older criu the dump zeroes them here. A zeroed
-// state carries generation 0, which the kernel never issues, so the
-// first getrandom in each restored copy reseeds from the kernel.
+// droppable, and the images ship 4.2.1. For a host's own older criu the
+// dump zeroes them here. A zeroed state carries generation 0, which the
+// kernel never issues, so the first getrandom in each restored copy
+// reseeds from the kernel. What zeroing cannot give back is the wipe on
+// fork an older criu's restore loses with the mapping's flags.
 //
 // The mappings are read from /proc/<pid>/smaps of every process in the
 // tree, where the kernel flags them "dp". The pages of each one are then
@@ -228,7 +230,7 @@ func scrubPages(pm *Pagemap, dps []droppable) (int, error) {
 		if e.Flags&PEPresent == 0 {
 			continue
 		}
-		for i := uint64(0); i < uint64(e.NrPages); i++ {
+		for i := uint64(0); i < e.NrPages; i++ {
 			if !inDroppable(e.VAddr+i*PageSize, dps) {
 				continue
 			}
@@ -244,7 +246,7 @@ func scrubPages(pm *Pagemap, dps []droppable) (int, error) {
 			}
 			zeroed++
 		}
-		off += uint64(e.NrPages) * PageSize
+		off += e.NrPages * PageSize
 	}
 	if pages != nil {
 		if err := pages.Sync(); err != nil {

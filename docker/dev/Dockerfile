@@ -11,7 +11,7 @@
 # without pointer authentication (PAC). Trixie and sid turn PAC on for
 # arm64. A process restored by gVisor keeps stale PAC keys and dies with
 # SIGILL on CPUs with FEAT_FPAC (Apple silicon), so every park and resume
-# in a sandbox would fail. CRIU puts the keys back (criu 4.1.1 restores
+# in a sandbox would fail. CRIU puts the keys back (criu 4.2.1 restores
 # NT_ARM_PACA_KEYS), so the proc and runc backends do not mind. Bookworm's
 # own criu 3.17 cannot read the 6.17 kernel on GitHub's runners, so criu
 # is built from source below.
@@ -38,26 +38,27 @@ LABEL org.opencontainers.image.source="https://github.com/helayoty/fiberd" \
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 ARG DEBIAN_FRONTEND=noninteractive
-# libclang-rt-14-dev holds libFuzzer's runtime for `make fuzz`. The last
-# line is what the PAC-free CPython below links (zlib1g-dev and uuid-dev
-# are already in the base).
+# libclang-rt-14-dev holds libFuzzer's runtime for `make fuzz`. criu 4.2
+# generates its image code through protoc (protobuf-compiler) with the
+# protobuf-c plugin. The last line is what the PAC-free CPython below
+# links (zlib1g-dev and uuid-dev are already in the base).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      gcc make pkg-config patch libssl-dev clang lld libclang-rt-14-dev \
+      gcc make pkg-config libssl-dev clang lld libclang-rt-14-dev \
       runc \
       curl ca-certificates jq procps iproute2 strace \
-      libprotobuf-c-dev protobuf-c-compiler libprotobuf-dev python3-protobuf \
+      libprotobuf-c-dev protobuf-c-compiler protobuf-compiler libprotobuf-dev python3-protobuf \
       libnl-3-dev libnet1-dev libcap-dev libbsd-dev uuid-dev libaio-dev \
       libbz2-dev liblzma-dev libffi-dev libsqlite3-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# criu 4.1.1 from source (binary only) plus upstream commit 4b7398595 from
-# 4.2. On Linux 6.16 and later, 4.1.1 cannot park a fiber with a tcp
-# endpoint because it reads SO_PASSCRED and SO_PASSSEC on every socket. The
-# commit limits those reads to the families that have them. 4.2.1 is not
-# used because its restore segfaults with these images on arm64 and amd64.
-# install-criu.sh pins the tarball's sha256.
-ARG CRIU_VERSION=4.1.1
-COPY hack/dev/install-criu.sh hack/dev/criu-4b7398595-passcred-families.patch /tmp/fiberd-criu/
+# criu 4.2.1 from source (binary only). It reads SO_PASSCRED and
+# SO_PASSSEC only on the socket families that have them, so a fiber with
+# a tcp endpoint parks on Linux 6.16 and later. It leaves glibc's droppable
+# getrandom state pages out of a dump and restores their mapping
+# droppable, so a resumed fiber that forks does not share a keystream
+# with its child. install-criu.sh pins the tarball's sha256.
+ARG CRIU_VERSION=4.2.1
+COPY hack/dev/install-criu.sh /tmp/fiberd-criu/
 RUN CRIU_VERSION="${CRIU_VERSION}" sh /tmp/fiberd-criu/install-criu.sh \
     && rm -rf /tmp/fiberd-criu
 
@@ -134,6 +135,8 @@ RUN set -eu; cd /tmp; \
 # rootfs scripts compile against this one (gcc --sysroot) and the
 # PAC-free CPython runs on it, so every object a sandbox restores comes
 # from here. On aarch64 the build fails if the base ever carries PAC.
+# Absolute links, such as amd64's /lib64/ld-linux-x86-64.so.2, are pointed
+# into the sysroot, or they would pair the live loader with this libc.
 RUN set -eu; sysroot=/usr/local/sysroot-nopac; triplet=$(gcc -print-multiarch); \
     mkdir -p "$sysroot/usr/lib" "$sysroot/usr/lib64"; ln -s usr/lib "$sysroot/lib"; ln -s usr/lib64 "$sysroot/lib64"; \
     for p in libc6 libc6-dev linux-libc-dev libcrypt1 libcrypt-dev libgcc-s1 \
@@ -141,6 +144,9 @@ RUN set -eu; sysroot=/usr/local/sysroot-nopac; triplet=$(gcc -print-multiarch); 
              libsqlite3-0 libsqlite3-dev libuuid1 uuid-dev; do dpkg -L "$p"; done \
       | while read -r f; do if [ -L "$f" ] || [ -f "$f" ]; then echo "$f"; fi; done \
       | tar -cf - --no-recursion -T - | tar -C "$sysroot" --keep-directory-symlink -xf -; \
+    find "$sysroot" -type l -lname '/*' | while read -r l; do ln -sfn "$sysroot$(readlink "$l")" "$l"; done; \
+    out=$(find "$sysroot" -type l -lname '/*' ! -lname "$sysroot/*"); \
+    [ -z "$out" ] || { echo "links leave the sysroot: $out" >&2; exit 1; }; \
     if [ "$(uname -m)" = aarch64 ]; then \
       for f in "$sysroot/lib/$triplet/libc.so.6" "$sysroot/usr/lib/$triplet/libc.a"; do \
         n=$(objdump -d "$f" | awk '$3 ~ /^(pac|aut|reta|bra|blra)/ {n++} END{print n+0}'); \

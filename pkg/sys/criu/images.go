@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -22,7 +23,11 @@ import (
 //
 //	pagemap-<pid>.img  8-byte header (two magics), then size-prefixed
 //	                   protobuf messages: a head {pages_id} followed by
-//	                   entries {vaddr, nr_pages, flags}
+//	                   entries {vaddr, nr_pages, flags}. criu 4.2 moved
+//	                   nr_pages from field 2 (uint32, now compat_nr_pages,
+//	                   which it writes as 0) to field 5 (uint64). A reader
+//	                   takes field 5 when present, and a writer sets both,
+//	                   so a criu of either age reads what fiberd writes.
 //	pages-<id>.img     the pages of every PRESENT entry, back to back, in
 //	                   pagemap order
 //
@@ -45,7 +50,7 @@ const (
 // PagemapEntry is one run of pages.
 type PagemapEntry struct {
 	VAddr   uint64
-	NrPages uint32
+	NrPages uint64
 	Flags   uint32
 }
 
@@ -94,7 +99,11 @@ func ReadPagemap(path string) (*Pagemap, error) {
 			first = false
 			continue
 		}
-		pm.Entries = append(pm.Entries, PagemapEntry{VAddr: fields[1], NrPages: uint32(fields[2]), Flags: uint32(fields[4])})
+		nr, ok := fields[5] // criu 4.2 and later
+		if !ok {
+			nr = fields[2] // older criu, or an image written here
+		}
+		pm.Entries = append(pm.Entries, PagemapEntry{VAddr: fields[1], NrPages: nr, Flags: uint32(fields[4])})
 	}
 	return pm, nil
 }
@@ -157,7 +166,7 @@ func writePagemap(pm *Pagemap) error {
 	}
 	writeMsg([2]uint64{1, uint64(pm.PagesID)})
 	for _, e := range pm.Entries {
-		writeMsg([2]uint64{1, e.VAddr}, [2]uint64{2, uint64(e.NrPages)}, [2]uint64{4, uint64(e.Flags)})
+		writeMsg([2]uint64{1, e.VAddr}, [2]uint64{2, min(e.NrPages, math.MaxUint32)}, [2]uint64{4, uint64(e.Flags)}, [2]uint64{5, e.NrPages})
 	}
 	return os.WriteFile(pm.Path, out.Bytes(), 0o600)
 }
@@ -248,7 +257,7 @@ func LoadParent(dir string) (*Parent, error) {
 			if e.Flags&PEPresent == 0 {
 				continue
 			}
-			for i := uint64(0); i < uint64(e.NrPages); i++ {
+			for i := uint64(0); i < e.NrPages; i++ {
 				if off+PageSize > uint64(len(data)) {
 					p.Close()
 					return nil, fmt.Errorf("criu: parent pages file %s shorter than its pagemap", pm.PagesFile())
@@ -365,7 +374,7 @@ func ComputeDelta(dir string, parent *Parent) (DeltaInfo, error) {
 				entries = append(entries, e)
 				continue
 			}
-			for i := uint64(0); i < uint64(e.NrPages); i++ {
+			for i := uint64(0); i < e.NrPages; i++ {
 				va := e.VAddr + i*PageSize
 				if _, err := io.ReadFull(rd, page); err != nil {
 					return fail(fmt.Errorf("criu: pages file %s shorter than its pagemap: %w", pm.PagesFile(), err))
@@ -380,7 +389,7 @@ func ComputeDelta(dir string, parent *Parent) (DeltaInfo, error) {
 					}
 					info.KeptPages++
 				}
-				if n := len(entries); n > 0 && entries[n-1].Flags == flags && entries[n-1].VAddr+uint64(entries[n-1].NrPages)*PageSize == va {
+				if n := len(entries); n > 0 && entries[n-1].Flags == flags && entries[n-1].VAddr+entries[n-1].NrPages*PageSize == va {
 					entries[n-1].NrPages++
 				} else {
 					entries = append(entries, PagemapEntry{VAddr: va, NrPages: 1, Flags: flags})
@@ -468,7 +477,7 @@ func MergeDelta(dir string, parent *Parent) error {
 			case e.Flags&PEPresent != 0:
 				// Page by page, so a short read (a truncated delta) and a
 				// failed write (a full disk) are told apart.
-				for j := uint64(0); j < uint64(e.NrPages); j++ {
+				for j := uint64(0); j < e.NrPages; j++ {
 					if _, err := io.ReadFull(rd, page); err != nil {
 						return fail(fmt.Errorf("criu: delta pages file %s shorter than its pagemap: %w", pm.PagesFile(), err))
 					}
@@ -477,7 +486,7 @@ func MergeDelta(dir string, parent *Parent) error {
 					}
 				}
 			case e.Flags&PEParent != 0:
-				for j := uint64(0); j < uint64(e.NrPages); j++ {
+				for j := uint64(0); j < e.NrPages; j++ {
 					pp, ok := parent.page(e.VAddr + j*PageSize)
 					if !ok {
 						return fail(fmt.Errorf("criu: parent lacks page %#x needed by the delta", e.VAddr+j*PageSize))

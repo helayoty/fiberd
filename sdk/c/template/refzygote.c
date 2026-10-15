@@ -407,6 +407,26 @@ static void unshare_errno(char *out, size_t n) {
     if (WEXITSTATUS(st) == 0) snprintf(out, n, "ok\n"); else errname(WEXITSTATUS(st), out, n);
 }
 
+/* getrandom_fork draws once, forks, and writes what this process and the
+ * child then each draw, "<parent> <child>". A restored copy whose
+ * getrandom state page lost its wipe on fork answers the same twice. */
+static void getrandom_fork(char *out, size_t n) {
+    unsigned char p[8], c[8];
+    int fds[2];
+    if (getrandom(p, sizeof p, 0) != (ssize_t)sizeof p || pipe(fds) < 0) { errname(errno, out, n); return; }
+    pid_t pid = fork();
+    if (pid < 0) { errname(errno, out, n); close(fds[0]); close(fds[1]); return; }
+    if (pid == 0) _exit(getrandom(c, sizeof c, 0) == (ssize_t)sizeof c && write(fds[1], c, sizeof c) == (ssize_t)sizeof c ? 0 : 1);
+    close(fds[1]);
+    ssize_t got = read(fds[0], c, sizeof c);
+    close(fds[0]);
+    int st = 0;
+    if (waitpid(pid, &st, 0) < 0 || !WIFEXITED(st) || WEXITSTATUS(st) != 0 || got != (ssize_t)sizeof c) { errname(EIO, out, n); return; }
+    if (getrandom(p, sizeof p, 0) != (ssize_t)sizeof p) { errname(errno, out, n); return; }
+    snprintf(out, n, "%02x%02x%02x%02x%02x%02x%02x%02x %02x%02x%02x%02x%02x%02x%02x%02x\n",
+             p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]);
+}
+
 /* mount_errno writes what mounting a fresh instance of fstype at a
  * scratch directory under /tmp answers. A mount that succeeds is undone
  * at once. The probe for a filesystem a fiber must not be able to mount. */
@@ -713,6 +733,7 @@ static int serve_client(conn_t *c, const char *fence, unsigned long *counter) {
             if (getrandom(b, sizeof b, 0) != (ssize_t)sizeof b) errname(errno, out, sizeof out);
             else snprintf(out, sizeof out, "%02x%02x%02x%02x%02x%02x%02x%02x\n", b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]);
         }
+        else if (strcmp(line, "getrandom fork") == 0) getrandom_fork(out, sizeof out);
         else if (strcmp(line, "rss") == 0) {
             /* resident bytes as this process's kernel sees them */
             long size = 0, pages = 0; FILE *sm = fopen("/proc/self/statm", "r");

@@ -67,7 +67,7 @@ sequenceDiagram
 
 **Fork safety.** The raw clone copies one thread and runs no atfork handlers, so a lock another thread held at that instant stays held in the copy, malloc's and stdio's included. Between the clone and `on_fiber` the library allocates nothing, takes no lock and uses no stdio, and the fiber's environment is built in the parent before the clone. It reseeds no random generator either, since `srandom` takes a lock. A template reseeds its own from `getrandom` in every new run, libc's `random()` included. That is in `on_fiber`, after a gVisor restore returns with the seed `fz_gvisor_identity` brings, and when its fence file changes after a CRIU resume ([runtime-host.md](runtime-host.md)), as refzygote's `reseed_rngs` does ([sdk/c/template/README.md](../../sdk/c/template/README.md)).
 
-**arm64.** Build the whole program with `-mbranch-protection=none`. A process gVisor restores keeps stale pointer-authentication keys, so a return address signed before the checkpoint fails to authenticate. CRIU 4.1.1 puts the keys back, so proc and runc restores do not trap.
+**arm64.** Build the whole program with `-mbranch-protection=none`. A process gVisor restores keeps stale pointer-authentication keys, so a return address signed before the checkpoint fails to authenticate. CRIU 4.2.1 puts the keys back, so proc and runc restores do not trap.
 
 **Hardening.** Every build uses `-D_FORTIFY_SOURCE=3 -fstack-protector-strong -fstack-clash-protection -fPIE -Wformat=2 -Werror=format-security` with `-pie -Wl,-z,relro,-z,now`, and `make fuzz` runs seven libFuzzer harnesses over the library's parsers and the reference workload under ASan and UBSan.
 

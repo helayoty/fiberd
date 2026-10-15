@@ -18,13 +18,13 @@ FROM ${DEV_IMAGE} AS build
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 USER root
 ARG DEBIAN_FRONTEND=noninteractive
-ARG CRIU_VERSION=4.1.1
+ARG CRIU_VERSION=4.2.1
 # The dev image already has criu. The plain Go image builds it here.
-COPY hack/dev/install-criu.sh hack/dev/criu-4b7398595-passcred-families.patch /tmp/fiberd-criu/
+COPY hack/dev/install-criu.sh /tmp/fiberd-criu/
 RUN if ! command -v criu >/dev/null 2>&1; then \
       apt-get update && apt-get install -y --no-install-recommends \
-        gcc make pkg-config patch curl ca-certificates \
-        libprotobuf-c-dev protobuf-c-compiler libprotobuf-dev python3-protobuf \
+        gcc make pkg-config curl ca-certificates \
+        libprotobuf-c-dev protobuf-c-compiler protobuf-compiler libprotobuf-dev python3-protobuf \
         libnl-3-dev libnet1-dev libcap-dev libbsd-dev uuid-dev libaio-dev \
       && rm -rf /var/lib/apt/lists/* \
       && CRIU_VERSION="${CRIU_VERSION}" sh /tmp/fiberd-criu/install-criu.sh; \
