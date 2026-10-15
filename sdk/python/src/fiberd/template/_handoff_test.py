@@ -209,7 +209,7 @@ def test_server_context_trusts_the_caller_certificate_alone(world):
 class HandoffExt:
     """The C binding of a handoff fiber: accept() hands out the server ends queued, then the channel's close."""
 
-    ABI_VERSION = 5
+    ABI_VERSION = 6
 
     def __init__(self):
         self.calls = []
@@ -459,7 +459,7 @@ def test_serve_handoff_reports_ready_checks_the_fence_and_ends_with_the_channel(
     ext = HandoffExt()
     ch, host_end = socket.socketpair()
     f = handoff_fiber(world, ext, monkeypatch, ch)
-    f._incarnate("fork", os.urandom(32))
+    f._incarnate("fork", 1, os.urandom(32))
     threads, results = start_clients(world, tmp_path, ext, [world.other, world.caller], served=[False, True])
     # fiberd's end: one message per connection, then the close at release.
     host_end.sendall(b"\0\0")
@@ -511,7 +511,7 @@ def test_serve_async_unix_reports_ready_checks_the_fence_and_unlinks(sock_dir, m
     monkeypatch.setattr(ft, "_ext", lambda: ext)
     ep = os.path.join(sock_dir, "ep.sock")
     f = ft.Fiber("g/1/1", ep, b"", "", {})
-    f._incarnate("fork", os.urandom(32))
+    f._incarnate("fork", 1, os.urandom(32))
     with open(ep + ".fence", "w") as fh:
         fh.write("g/1/2\n")
     served = []

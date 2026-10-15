@@ -61,7 +61,6 @@ PROC_SELF = "/proc/self"
 _inited = False
 _hooks: list[Callable[[Incarnation], None]] = []
 _randoms: list[random.Random] = []
-_generation = 0
 
 
 # The platform a template refuses off, read once. The unit tests set it to
@@ -87,6 +86,11 @@ def _ext():
 
 class Incarnation:
     """One run of a copy of the template. kind is fork, resume or restore.
+
+    generation is fiberd's count of the lineage. A fork or a restore of
+    the template is 1, a resume is the parked generation plus one, on
+    whichever home resumes it. A template that counts its own
+    incarnations can tell a missed one from the number.
 
     seed is the entropy this incarnation was reseeded from, zeroed once the
     on_incarnation hooks have run, and never shown by repr.
@@ -188,12 +192,12 @@ def serve(on_fiber: Callable[[Fiber], int], *, threads: str = "refuse", control_
     return _ext().serve(functools.partial(_born, on_fiber), control_fd)
 
 
-def _born(on_fiber: Callable[[Fiber], int], fence: str, endpoint: str, payload: bytes, session: str, env: dict[str, str]) -> int:
-    """The first Python in a fiber, after the C trampoline restored the interpreter."""
+def _born(on_fiber: Callable[[Fiber], int], fence: str, endpoint: str, payload: bytes, session: str, env: dict[str, str], generation: int, kind: str) -> int:
+    """The first Python in a fiber, after the C trampoline restored the interpreter. generation and kind are the library's record."""
     try:
         _rebuild_environ(env)
         f = Fiber(fence, endpoint, payload, session, env, identity=_identity(env))
-        f._incarnate("fork", os.urandom(32))
+        f._incarnate(kind, generation, os.urandom(32))
     except BaseException:
         traceback.print_exc()
         _flush()
@@ -260,12 +264,12 @@ def _serve_gvisor(on_fiber: Callable[[Fiber], int]) -> int:
             # The original, or a fiber checkpointed in place. Nothing to
             # serve. The backend ends it, or the template stands by.
             continue
-        kind, fence, endpoint, payload, seed, session = _ext().gvisor_identity()
+        kind, fence, endpoint, payload, seed, session, generation = _ext().gvisor_identity()
         try:
             env = _gvisor.fiber_environ(dict(os.environ), fence, endpoint, session)
             _rebuild_environ(env)
             f = Fiber(fence, endpoint, payload, session, env, backend="gvisor")
-            f._incarnate(_gvisor.incarnation_kind(kind), seed)
+            f._incarnate(_gvisor.incarnation_kind(kind), generation, seed)
         except BaseException:
             traceback.print_exc()
             _flush()
@@ -611,14 +615,16 @@ class Fiber:
             return False
         self.fence = now
         self.fence_parts = _fence.parse_fence(now)
-        self._incarnate("resume", os.urandom(32))
+        # A resume is the parked generation plus one, which is fiberd's
+        # count as long as this process saw every incarnation. A proc or
+        # runc resume brings no record of its own yet.
+        parked = self.incarnation.generation if self.incarnation is not None else 0
+        self._incarnate("resume", parked + 1, os.urandom(32))
         return True
 
-    def _incarnate(self, kind: str, seed: bytes) -> None:
-        """Reseeds every generator and runs the hooks, once per copy of the template."""
-        global _generation
-        _generation += 1
-        inc = Incarnation(kind, _generation, self.fence, bytearray(seed))
+    def _incarnate(self, kind: str, generation: int, seed: bytes) -> None:
+        """Reseeds every generator and runs the hooks, once per copy of the template. generation is fiberd's count."""
+        inc = Incarnation(kind, generation, self.fence, bytearray(seed))
         self.incarnation = inc
         # Each generator gets the seed with fresh kernel entropy of its own,
         # so no two draw the same sequence. OpenSSL's DRBG is reseeded on

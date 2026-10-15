@@ -2,9 +2,9 @@
 #define _GNU_SOURCE
 #include "libfiberzygote.h"
 
-/* This file implements ABI version 4, so a header of another version refuses to build it. */
-#if FZ_ABI_VERSION != 5
-#error "libfiberzygote.c implements FZ_ABI_VERSION 5"
+/* This file implements ABI version 6, so a header of another version refuses to build it. */
+#if FZ_ABI_VERSION != 6
+#error "libfiberzygote.c implements FZ_ABI_VERSION 6"
 #endif
 
 #include <dirent.h>
@@ -34,6 +34,7 @@
 #include <linux/sched.h>
 #include <linux/seccomp.h>
 #include <endian.h>
+#include <limits.h>
 #include <stddef.h>
 
 /* clone3 as the kernel headers of 5.3 and later spell it, for a build
@@ -1232,8 +1233,10 @@ static void scrub_and_run(int ready_w, int handoff, const char *fence, const cha
     }
     if (cf.nocaps && drop_caps() < 0) _exit(EX_CAPS);
 
+    /* A fork of the warm template starts a lineage. */
     fz_fiber_t f = { .fence = fence, .endpoint = endpoint,
-                     .payload = payload, .payload_len = payload_len, .session = session };
+                     .payload = payload, .payload_len = payload_len, .session = session,
+                     .generation = 1, .kind = "fork" };
     _exit(on_fiber(&f) & 0xff);
 }
 
@@ -1813,6 +1816,20 @@ static int spec_token(char *out, size_t n) {
     return 0;
 }
 
+/* parse_generation reads a generation as the record carries it: decimal
+ * digits only, 1 or more, within unsigned. 0 when it is not one. */
+static unsigned parse_generation(const char *s) {
+    if (!*s || *s == '0') return 0; /* no zero, no leading zero */
+    unsigned long v = 0;
+    for (; *s; s++) {
+        if (*s < '0' || *s > '9') return 0;
+        unsigned d = (unsigned)(*s - '0');
+        if (v > (UINT_MAX - d) / 10) return 0;
+        v = v * 10 + d;
+    }
+    return (unsigned)v;
+}
+
 /* gv_parse_identity splits the 'i' record in rec into id. -1 with errno
  * EPROTO when it is malformed, and id is left untouched. */
 static int gv_parse_identity(char *rec, size_t n, fz_gvisor_identity_t *id) {
@@ -1825,6 +1842,8 @@ static int gv_parse_identity(char *rec, size_t n, fz_gvisor_identity_t *id) {
         p += strlen(p) + 1;
     }
     if (p != end || !*fields[2] || strlen(fields[2]) >= sizeof gv_fence || !*fields[3]) { errno = EPROTO; return -1; }
+    unsigned generation = parse_generation(fields[0]);
+    if (!generation) { errno = EPROTO; return -1; }
     size_t plen = 0;
     if (strcmp(fields[4], "-") != 0) plen = unhex(fields[4], gv_payload, sizeof gv_payload);
     /* The session is bounded and NUL-free as on the CLONE line, since it
@@ -1840,6 +1859,7 @@ static int gv_parse_identity(char *rec, size_t n, fz_gvisor_identity_t *id) {
     memcpy(gv_fence, fields[2], strlen(fields[2]) + 1);
     gv_seed_hex = (char *)fields[9];
     id->kind = fields[1];
+    id->generation = generation;
     id->fence = gv_fence;
     id->endpoint = fields[3];
     id->payload = gv_payload;

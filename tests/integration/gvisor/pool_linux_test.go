@@ -79,7 +79,7 @@ func TestPooledHandOut(t *testing.T) {
 				fence := fmt.Sprintf("pool/1-%d", i+1)
 				ep := filepath.Join(workDir, fmt.Sprintf("p%d.sock", i))
 				t0 := time.Now()
-				fb, err := b.Bind(ctx, p.ID, backend.FiberSpec{Fence: fence, Endpoint: ep, CgroupFD: -1, Deadline: 5 * time.Second})
+				fb, err := b.Bind(ctx, p.ID, backend.FiberSpec{Fence: fence, Endpoint: ep, CgroupFD: -1, Deadline: 5 * time.Second, Generation: 1})
 				if err != nil {
 					t.Fatalf("Bind %s: %v", p.ID, err)
 				}
@@ -98,7 +98,7 @@ func TestPooledHandOut(t *testing.T) {
 			}
 			// An on-demand sibling draws differently too.
 			ep := filepath.Join(workDir, "od.sock")
-			if _, err := b.Clone(ctx, w.ID, backend.FiberSpec{Fence: "pool/1-9", Endpoint: ep, CgroupFD: -1, Deadline: 10 * time.Second}); err != nil {
+			if _, err := b.Clone(ctx, w.ID, backend.FiberSpec{Fence: "pool/1-9", Endpoint: ep, CgroupFD: -1, Deadline: 10 * time.Second, Generation: 1}); err != nil {
 				t.Fatalf("Clone: %v", err)
 			}
 			if r := talk(t, "unix://"+ep, "random"); seen[r] {

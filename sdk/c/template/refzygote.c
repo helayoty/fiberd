@@ -30,6 +30,8 @@
  *                                 birth fence in memory)
  *   getenv <NAME>   -> value or "-" (proves the scrub: only FIBERD_* exist)
  *   session         -> the session the caller named, or "-"
+ *   generation      -> fiberd's count of this fiber's lineage (1 at
+ *                      birth, the parked one plus one after a resume)
  *   payload         -> the birth payload in hex (up to 127 bytes), or "-"
  *   status <Key>    -> that field of /proc/self/status, or "-"
  *                      (CapEff and NoNewPrivs prove the privilege drop)
@@ -273,6 +275,10 @@ static void engine_start(size_t mb) {
 static const char *cur_endpoint; /* this fiber's endpoint, for the fence file */
 static const char *cur_fence;
 static const fz_fiber_t *cur_fiber; /* this fiber's record, for session and payload */
+/* The generation this process serves as. It is the record's at birth
+ * (fiberd's count), and a resume on proc or runc, which brings no record
+ * yet, is the parked one's plus one. */
+static unsigned cur_generation;
 
 /* The fence this incarnation lives under: the one fiberd published
  * after a resume (the fence in memory is the birth fence, stale then),
@@ -713,6 +719,7 @@ static void reseed_if_new_fence(const char *fallback) {
     const char *now = live_fence(fb, sizeof fb, fallback);
     if (strcmp(now, seen_fence) == 0) return;
     snprintf(seen_fence, sizeof seen_fence, "%s", now);
+    cur_generation++;
     reseed_rngs();
 }
 
@@ -742,6 +749,7 @@ static int serve_client(conn_t *c, const char *fence, unsigned long *counter) {
         }
         else if (strncmp(line, "getenv ", 7) == 0) { const char *v = getenv(line + 7); snprintf(out, sizeof out, "%s\n", v ? v : "-"); }
         else if (strcmp(line, "session") == 0) snprintf(out, sizeof out, "%s\n", cur_fiber && cur_fiber->session[0] ? cur_fiber->session : "-");
+        else if (strcmp(line, "generation") == 0) snprintf(out, sizeof out, "%u\n", cur_generation);
         else if (strcmp(line, "payload") == 0) {
             size_t n = cur_fiber ? cur_fiber->payload_len : 0;
             if (n == 0 || 2 * n + 2 > sizeof out) snprintf(out, sizeof out, "-\n");
@@ -852,6 +860,7 @@ static int on_fiber(const fz_fiber_t *f) {
     cur_endpoint = f->endpoint;
     cur_fence = f->fence;
     cur_fiber = f;
+    cur_generation = f->generation;
     /* This fiber's random() would otherwise replay the zygote's
      * sequence, the same in every sibling. The library leaves reseeding
      * to the template (see fz_on_fiber). */
@@ -1014,8 +1023,10 @@ static int gvisor_main(void) {
         }
         reseed_rngs_from(id.seed, id.seed_len);
         /* The record the fiber-side commands read, as on_fiber's is under a fork. */
-        fz_fiber_t f = { .fence = id.fence, .endpoint = id.endpoint, .payload = id.payload, .payload_len = id.payload_len, .session = id.session };
+        fz_fiber_t f = { .fence = id.fence, .endpoint = id.endpoint, .payload = id.payload, .payload_len = id.payload_len, .session = id.session,
+                         .generation = id.generation, .kind = id.kind };
         cur_fiber = &f;
+        cur_generation = id.generation;
         fprintf(stderr, "refzygote: incarnation %s serving on %s\n", id.fence, id.endpoint);
         int rc = gvisor_serve_once(id.fence, id.endpoint, id.payload, id.payload_len, &counter);
         cur_fiber = NULL;

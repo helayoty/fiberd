@@ -99,6 +99,12 @@ type FiberSpec struct {
 	// Session is the name the caller gave the Clone, "" for an anonymous
 	// fiber. The fiber learns it at birth.
 	Session string
+	// Generation is the fiber's place in its lineage, which the host
+	// counts. A fiber born from the warm instance, forked or restored
+	// from its image, is 1. A fiber resumed from a park is the parked
+	// one's plus one (ResumeSpec). A backend that tells its fibers who
+	// they are hands the number over with the identity.
+	Generation int
 	// OwnPIDNS asks for the fiber to be the init of its own pid namespace
 	// so its checkpoint restores anywhere. Backends that always isolate
 	// ignore it.
@@ -147,6 +153,9 @@ type ResumeSpec struct {
 	// fiber, "" when anonymous. A backend whose resumed fiber takes a
 	// fresh identity hands it over again.
 	Session string
+	// Generation is the parked fiber's generation plus one, read from
+	// the park's manifest (FiberSpec.Generation).
+	Generation int
 	// Handoff replaces the handoff channel of a checkpoint taken from a
 	// handoff fiber (FiberSpec.Handoff). It is nil for any other checkpoint.
 	Handoff *os.File

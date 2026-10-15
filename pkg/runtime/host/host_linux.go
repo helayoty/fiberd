@@ -146,16 +146,20 @@ type fiber struct {
 	sock     string // the unix socket path the backend serves under the run directory, "" for none
 	birth    string // the fence the fiber was born under, which it holds in memory across resumes
 	fenceFn  string // where a resumed fiber's new fence is published, "" for a fresh one
-	budget   uint64 // w_budget_bytes; 0 = unlimited
-	devMax   uint64 // device_budget bytes; 0 = none
-	quota    uint64 // the grant's parked-delta bytes on this home (0 = none)
-	base     uint64 // the leaf's own count before the hand-out, subtracted from W (0 = the template's probe)
-	overWhy  string // why the host killed it, for the exit's detail
-	released bool   // Release or Park in progress: do not report the exit
-	parked   bool   // the end in progress is a park: the port stays with the delta
-	overW    bool   // killed by the host for exceeding its W budget
-	ready    bool   // the backend has answered: before that, W is a restore in flight, not the fiber's
-	pooled   bool   // handed out of the pool, in the leaf it was restored in
+	// generation counts the fiber's lineage: 1 when born from the warm
+	// instance, the parked generation plus one when resumed. A park
+	// writes it into the manifest, so the count survives a move.
+	generation int
+	budget     uint64 // w_budget_bytes; 0 = unlimited
+	devMax     uint64 // device_budget bytes; 0 = none
+	quota      uint64 // the grant's parked-delta bytes on this home (0 = none)
+	base       uint64 // the leaf's own count before the hand-out, subtracted from W (0 = the template's probe)
+	overWhy    string // why the host killed it, for the exit's detail
+	released   bool   // Release or Park in progress: do not report the exit
+	parked     bool   // the end in progress is a park: the port stays with the delta
+	overW      bool   // killed by the host for exceeding its W budget
+	ready      bool   // the backend has answered: before that, W is a restore in flight, not the fiber's
+	pooled     bool   // handed out of the pool, in the leaf it was restored in
 	// handoff is the host's end of a handoff fiber's channel. It is nil
 	// for a fiber reached directly.
 	handoff *os.File
@@ -1372,8 +1376,10 @@ func (r *Runtime) start(ctx context.Context, z *warm, spec core.CloneSpec, p *po
 			return core.FiberHandle{}, err
 		}
 	}
+	// A fiber born from the warm instance, forked or restored from its
+	// image, starts its lineage at generation 1.
 	f := &fiber{id: spec.Fence.String(), grantUID: spec.Grant.UID, cg: leaf, endpoint: url, port: port, sock: sock, birth: spec.Fence.String(),
-		budget: spec.Grant.WBudgetBytes, devMax: spec.Grant.DeviceBudget.Bytes,
+		generation: 1, budget: spec.Grant.WBudgetBytes, devMax: spec.Grant.DeviceBudget.Bytes,
 		quota: deltaQuota(spec.Grant), handoff: hostEnd, relay: rl, done: make(chan struct{}), pooled: p != nil}
 	// Registered before the backend answers so an exit that races the
 	// reply is not lost.
@@ -1382,7 +1388,7 @@ func (r *Runtime) start(ctx context.Context, z *warm, spec core.CloneSpec, p *po
 	r.mu.Unlock()
 	fspec := backend.FiberSpec{
 		Fence: f.id, Endpoint: bind, CgroupFD: int(lfd.Fd()), Deadline: spec.Deadline,
-		Payload: spec.Payload, Session: spec.Session, OwnPIDNS: true, Handoff: fiberEnd,
+		Payload: spec.Payload, Session: spec.Session, Generation: f.generation, OwnPIDNS: true, Handoff: fiberEnd,
 	}
 	var fb backend.Fiber
 	if p != nil {
@@ -1449,6 +1455,9 @@ type manifest struct {
 	Relay    string `json:"relay_socket,omitempty"`
 	Template string `json:"template_digest"`
 	Backend  string `json:"backend"`
+	// Generation is the parked fiber's place in its lineage. A resume of
+	// this park is the next one, on this home or another.
+	Generation int `json:"generation"`
 	// WBytes is what the park costs to move: the delta's bytes when the
 	// checkpoint is a delta, else the full image bytes.
 	WBytes uint64 `json:"w_bytes"`
@@ -1525,7 +1534,7 @@ func (r *Runtime) Park(ctx context.Context, fiberID string, sync bool) (string, 
 	// with any error, and the ledger parks the session rather than count a
 	// dead fiber.
 	m := manifest{Fence: f.id, GrantUID: f.grantUID, Birth: f.birth, Endpoint: ep, Handoff: f.handoff != nil, Backend: r.be.Name(),
-		WUsed: w, ParkedAt: time.Now().UTC().Format(time.RFC3339Nano)}
+		Generation: f.generation, WUsed: w, ParkedAt: time.Now().UTC().Format(time.RFC3339Nano)}
 	if f.relay != nil {
 		m.Relay = f.relay.sock
 	}
@@ -1769,15 +1778,17 @@ func (r *Runtime) resume(ctx context.Context, spec core.CloneSpec) (core.FiberHa
 			return core.FiberHandle{}, err
 		}
 	}
+	// The resumed fiber is the next generation of the parked one's
+	// lineage, whichever home parked it.
 	f := &fiber{id: spec.Fence.String(), grantUID: spec.Grant.UID, cg: leaf, port: port, sock: sock, birth: birth.String(), fenceFn: fenceFn,
-		endpoint: served, budget: spec.Grant.WBudgetBytes, devMax: spec.Grant.DeviceBudget.Bytes,
+		generation: m.Generation + 1, endpoint: served, budget: spec.Grant.WBudgetBytes, devMax: spec.Grant.DeviceBudget.Bytes,
 		quota: deltaQuota(spec.Grant), handoff: hostEnd, relay: rl, done: make(chan struct{})}
 	r.mu.Lock()
 	r.fibers[f.id] = f
 	r.mu.Unlock()
 	refused := r.pidsHits(gcg)
 	fb, err := r.be.Resume(ctx, backend.ResumeSpec{Dir: dir, Fence: f.id, Endpoint: bind, CgroupFD: int(lfd.Fd()), Deadline: spec.Deadline,
-		WarmID: spec.Grant.UID, WorkDir: workDir, Session: spec.Session, Handoff: fiberEnd})
+		WarmID: spec.Grant.UID, WorkDir: workDir, Session: spec.Session, Generation: f.generation, Handoff: fiberEnd})
 	if err != nil {
 		err = r.pidsPressure(gcg, refused, spec.Grant.UID, err)
 		r.mu.Lock()

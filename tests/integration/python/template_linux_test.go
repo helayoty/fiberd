@@ -5,6 +5,7 @@ package pythontest
 import (
 	"context"
 	"encoding/hex"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -64,13 +65,27 @@ func TestReferenceTemplate(t *testing.T) {
 // getrandom rows are os.urandom, which secrets and uuid4 read. A glibc
 // of 2.41 or later answers it from a vDSO state page in user memory,
 // which a CRIU park drops (pkg/sys/criu), or every resume would replay
-// one keystream.
+// one keystream. Every incarnation also names its generation, the host's
+// count of its lineage: a fork, a restore or a pooled hand-out is 1, a
+// resume is the parked generation plus one, and a resume of a resumed
+// park is 3. On gVisor the number is the identity record's, which the
+// old record carried as a constant. On proc and runc a resume brings
+// no record yet, and the SDK counts the parked generation plus one.
 func TestRandomPerIncarnation(t *testing.T) {
 	ctx := context.Background()
 	type draw func(t *testing.T, rt core.Runtime, g core.Grant, cmd string) (a, b string)
+	// generationIs asks the fiber at endpoint for its generation.
+	generationIs := func(t *testing.T, endpoint string, want int) {
+		t.Helper()
+		if got := talk(t, endpoint, "generation"); got != strconv.Itoa(want) {
+			t.Fatalf("generation = %q, want %d", got, want)
+		}
+	}
 	siblings := func(t *testing.T, rt core.Runtime, g core.Grant, cmd string) (string, string) {
 		a := clone(t, rt, g, 1, "", nil)
 		b := clone(t, rt, g, 2, "", nil)
+		generationIs(t, a.Endpoint, 1)
+		generationIs(t, b.Endpoint, 1)
 		return talk(t, a.Endpoint, cmd), talk(t, b.Endpoint, cmd)
 	}
 	pooled := func(t *testing.T, rt core.Runtime, g core.Grant, cmd string) (string, string) {
@@ -86,38 +101,57 @@ func TestRandomPerIncarnation(t *testing.T) {
 		if !a.Pooled || !b.Pooled {
 			t.Fatalf("pooled = %v and %v, want both hand-outs from the pool", a.Pooled, b.Pooled)
 		}
+		generationIs(t, a.Endpoint, 1)
+		generationIs(t, b.Endpoint, 1)
 		return talk(t, a.Endpoint, cmd), talk(t, b.Endpoint, cmd)
 	}
-	resumes := func(t *testing.T, rt core.Runtime, g core.Grant, cmd string) (string, string) {
-		if rt.Tier() < core.TierCheckpoint {
-			t.Skip("no park and resume here")
-		}
-		h, err := rt.Clone(ctx, core.CloneSpec{Grant: g, Fence: core.Fence{GrantUID: g.UID, Epoch: 1, Seq: 1}, Deadline: 20 * time.Second})
-		if err != nil {
-			t.Fatalf("clone: %v", err)
-		}
-		talk(t, h.Endpoint, cmd) // the parked image holds a sequence in progress
-		ref, err := rt.Park(ctx, h.ID, true)
-		if err != nil {
-			t.Fatalf("park: %v", err)
-		}
-		var out []string
-		for seq := uint64(2); seq <= 3; seq++ {
-			h2, err := rt.Clone(ctx, core.CloneSpec{Grant: g, Source: core.SourceDelta, Ref: ref, Fence: core.Fence{GrantUID: g.UID, Epoch: 1, Seq: seq}, Deadline: 30 * time.Second})
+	// resumes parks one fiber and resumes it twice, or with chained
+	// parks the first resume and resumes that park for the second.
+	resumes := func(chained bool) draw {
+		return func(t *testing.T, rt core.Runtime, g core.Grant, cmd string) (string, string) {
+			if rt.Tier() < core.TierCheckpoint {
+				t.Skip("no park and resume here")
+			}
+			h, err := rt.Clone(ctx, core.CloneSpec{Grant: g, Fence: core.Fence{GrantUID: g.UID, Epoch: 1, Seq: 1}, Deadline: 20 * time.Second})
 			if err != nil {
-				t.Fatalf("resume %d: %v", seq, err)
+				t.Fatalf("clone: %v", err)
 			}
-			out = append(out, talk(t, h2.Endpoint, cmd))
-			if got := talk(t, h2.Endpoint, "fence"); got != h2.ID {
-				t.Fatalf("resume %d: fence = %q, want %q", seq, got, h2.ID)
+			talk(t, h.Endpoint, cmd) // the parked image holds a sequence in progress
+			ref, err := rt.Park(ctx, h.ID, true)
+			if err != nil {
+				t.Fatalf("park: %v", err)
 			}
-			// A resumed sandbox binds the parked socket path, so the
-			// first is released (the delta kept) before the second.
-			if err := rt.Release(ctx, h2.ID, false); err != nil {
-				t.Fatalf("release %s: %v", h2.ID, err)
+			var out []string
+			for seq := uint64(2); seq <= 3; seq++ {
+				h2, err := rt.Clone(ctx, core.CloneSpec{Grant: g, Source: core.SourceDelta, Ref: ref, Fence: core.Fence{GrantUID: g.UID, Epoch: 1, Seq: seq}, Deadline: 30 * time.Second})
+				if err != nil {
+					t.Fatalf("resume %d: %v", seq, err)
+				}
+				out = append(out, talk(t, h2.Endpoint, cmd))
+				if got := talk(t, h2.Endpoint, "fence"); got != h2.ID {
+					t.Fatalf("resume %d: fence = %q, want %q", seq, got, h2.ID)
+				}
+				// Both resumes of one park are 2. A resume of the first
+				// resume's park is 3.
+				want := 2
+				if chained {
+					want = int(seq)
+				}
+				generationIs(t, h2.Endpoint, want)
+				if chained && seq == 2 {
+					if ref, err = rt.Park(ctx, h2.ID, true); err != nil {
+						t.Fatalf("park %s: %v", h2.ID, err)
+					}
+					continue
+				}
+				// A resumed sandbox binds the parked socket path, so the
+				// first is released (the delta kept) before the second.
+				if err := rt.Release(ctx, h2.ID, false); err != nil {
+					t.Fatalf("release %s: %v", h2.ID, err)
+				}
 			}
+			return out[0], out[1]
 		}
-		return out[0], out[1]
 	}
 	cases := []struct {
 		name   string
@@ -129,8 +163,10 @@ func TestRandomPerIncarnation(t *testing.T) {
 		{name: "two clones, getrandom", cmd: "getrandom", draw: siblings},
 		{name: "two pooled hand-outs, random", cmd: "random", pooled: true, draw: pooled},
 		{name: "two pooled hand-outs, getrandom", cmd: "getrandom", pooled: true, draw: pooled},
-		{name: "two resumes of one park, random", cmd: "random", draw: resumes},
-		{name: "two resumes of one park, getrandom", cmd: "getrandom", draw: resumes},
+		{name: "two resumes of one park, random", cmd: "random", draw: resumes(false)},
+		{name: "two resumes of one park, getrandom", cmd: "getrandom", draw: resumes(false)},
+		{name: "a resume of a resumed park, random", cmd: "random", draw: resumes(true)},
+		{name: "a resume of a resumed park, getrandom", cmd: "getrandom", draw: resumes(true)},
 	}
 	for _, be := range backends {
 		t.Run(be.name, func(t *testing.T) {

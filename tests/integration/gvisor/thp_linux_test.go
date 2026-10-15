@@ -61,7 +61,7 @@ func TestSandboxTHP(t *testing.T) {
 				t.Fatalf("Warm: %v", err)
 			}
 			fd := cgroupLeaf(t)
-			fb, err := b.Clone(ctx, w.ID, backend.FiberSpec{Fence: "thp/1-1", Endpoint: filepath.Join(workDir, "f.sock"), CgroupFD: fd, Deadline: 10 * time.Second})
+			fb, err := b.Clone(ctx, w.ID, backend.FiberSpec{Fence: "thp/1-1", Endpoint: filepath.Join(workDir, "f.sock"), CgroupFD: fd, Deadline: 10 * time.Second, Generation: 1})
 			if err != nil {
 				t.Fatalf("Clone: %v", err)
 			}

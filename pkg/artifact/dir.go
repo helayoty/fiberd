@@ -41,6 +41,9 @@ const (
 	AnnotationFence   = "io.fiberd.fence"
 	AnnotationGrant   = "io.fiberd.grant_uid"
 	AnnotationSession = "io.fiberd.session"
+	// AnnotationGeneration is the parked fiber's generation, so a home
+	// that claims the delta resumes it as the next one of its lineage.
+	AnnotationGeneration = "io.fiberd.generation"
 )
 
 // PushDir uploads every regular file in dir (logs excluded) as the

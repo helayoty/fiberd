@@ -1293,3 +1293,94 @@ func TestResumeW(t *testing.T) {
 		})
 	}
 }
+
+// TestGeneration checks the host's count of a lineage. A clone is
+// generation 1. A park writes the fiber's generation into its manifest,
+// and a resume of that park is the parked generation plus one, which
+// the backend is told. Two resumes of one park are the same generation,
+// and a resume of a resumed park counts on. On the old host no count
+// existed: the backend was told nothing and the manifest held nothing,
+// so a template saw a constant.
+func TestGeneration(t *testing.T) {
+	g := core.Grant{UID: "g1", TemplateDigest: "sha256:tmpl", FiberMax: 2, WBudgetBytes: 64 * mib}
+	cases := []struct {
+		name string
+		// steps after the clone. "park" parks the latest fiber, "resume"
+		// resumes the latest park, "again" releases the latest fiber and
+		// resumes the first park once more.
+		steps []string
+		// want is the generation of every fiber in the order they were
+		// born, as the backend was told it. wantParked is what each park's
+		// manifest records, in park order.
+		want       []int
+		wantParked []int
+	}{
+		{name: "a clone starts its lineage at 1", want: []int{1}},
+		{name: "a resume is the parked generation plus one", steps: []string{"park", "resume"}, want: []int{1, 2}, wantParked: []int{1}},
+		{name: "a resume of a resumed park counts on", steps: []string{"park", "resume", "park", "resume"}, want: []int{1, 2, 3}, wantParked: []int{1, 2}},
+		{name: "a second resume of one park is the same generation", steps: []string{"park", "resume", "again"}, want: []int{1, 2, 2}, wantParked: []int{1}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			f := newParkFixture(t, newCodecBackend(core.TierCheckpoint), g, nil)
+			cb := f.be.(*codecBackend)
+			fibers := []string{f.h.ID}
+			var refs []string
+			resume := func(ref string) {
+				fence := core.Fence{GrantUID: "g1", Epoch: 1, Seq: uint64(len(fibers) + 1)}
+				h, err := f.r.Clone(ctx, core.CloneSpec{Grant: g, Source: core.SourceDelta, Ref: ref, Fence: fence, Deadline: time.Second, CallerCert: callerDER})
+				if err != nil {
+					t.Fatalf("resume %s from %s: %v", fence, ref, err)
+				}
+				fibers = append(fibers, h.ID)
+			}
+			for _, step := range tc.steps {
+				switch step {
+				case "park":
+					ref, err := f.r.Park(ctx, fibers[len(fibers)-1], false)
+					if err != nil {
+						t.Fatalf("park %s: %v", fibers[len(fibers)-1], err)
+					}
+					refs = append(refs, ref)
+				case "resume":
+					resume(refs[len(refs)-1])
+				case "again":
+					if err := f.r.Release(ctx, fibers[len(fibers)-1], false); err != nil {
+						t.Fatalf("release: %v", err)
+					}
+					resume(refs[0])
+				}
+			}
+			var got []int
+			for i, id := range fibers {
+				ff := cb.fiber(id)
+				if ff == nil {
+					t.Fatalf("the backend has no record of %s", id)
+				}
+				switch {
+				case i == 0:
+					got = append(got, ff.spec.Generation)
+				case ff.resume == nil:
+					t.Fatalf("%s was not resumed", id)
+				default:
+					got = append(got, ff.resume.Generation)
+				}
+			}
+			if fmt.Sprint(got) != fmt.Sprint(tc.want) {
+				t.Fatalf("the backend was told generations %v, want %v", got, tc.want)
+			}
+			var parked []int
+			for _, ref := range refs {
+				var m manifest
+				if err := readJSON(filepath.Join(ref, "manifest.json"), &m); err != nil {
+					t.Fatal(err)
+				}
+				parked = append(parked, m.Generation)
+			}
+			if fmt.Sprint(parked) != fmt.Sprint(tc.wantParked) {
+				t.Fatalf("the manifests record generations %v, want %v", parked, tc.wantParked)
+			}
+		})
+	}
+}

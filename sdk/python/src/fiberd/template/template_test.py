@@ -19,7 +19,7 @@ from fiberd.template import _rules
 class FakeExt:
     """The C binding as a recorder."""
 
-    ABI_VERSION = 5
+    ABI_VERSION = 6
 
     def __init__(self):
         self.calls = []
@@ -115,7 +115,7 @@ BORN = [
 @table(BORN)
 def test_born_exit_code(monkeypatch, name, f0, f1):
     monkeypatch.setattr(ft, "_rebuild_environ", lambda env: None)
-    assert ft._born(f0, "g/1/1", "/tmp/ep.sock", b"", "", {}) == f1
+    assert ft._born(f0, "g/1/1", "/tmp/ep.sock", b"", "", {}, 1, "fork") == f1
 
 
 def test_born_hands_the_fiber_its_record(monkeypatch):
@@ -127,7 +127,7 @@ def test_born_hands_the_fiber_its_record(monkeypatch):
         return 0
 
     env = {"FIBERD_FENCE": "g/2/5", "FIBERD_ENDPOINT": "/run/g/2-5.sock", "FIBERD_SESSION": "conv 42"}
-    assert ft._born(on_fiber, "g/2/5", "/run/g/2-5.sock", b'{"task":1}', "conv 42", env) == 0
+    assert ft._born(on_fiber, "g/2/5", "/run/g/2-5.sock", b'{"task":1}', "conv 42", env, 1, "fork") == 0
     f = seen["fiber"]
     assert seen["env"] == env
     assert (f.fence, f.fence_parts, f.endpoint, f.kind) == ("g/2/5", ft.Fence("g", 2, 5), "/run/g/2-5.sock", "unix")
@@ -154,7 +154,7 @@ def test_born_takes_the_handoff_identity_off_the_library(monkeypatch, name, f0, 
         seen["fiber"] = f
         return 0
 
-    assert ft._born(on_fiber, "g/2/5", "handoff" if f1 else "/run/g/2-5.sock", b"", "", f0) == 0
+    assert ft._born(on_fiber, "g/2/5", "handoff" if f1 else "/run/g/2-5.sock", b"", "", f0, 1, "fork") == 0
     f = seen["fiber"]
     assert (("identity",) in ext.calls) is f1
     if f2 is None:
@@ -170,7 +170,7 @@ def test_born_refuses_a_handoff_channel_without_an_identity(monkeypatch, capsys)
     ext.handoff_identity = lambda: None
     monkeypatch.setattr(ft, "_ext", lambda: ext)
     monkeypatch.setattr(ft, "_rebuild_environ", lambda env: None)
-    assert ft._born(lambda f: 0, "g/1/1", "handoff", b"", "", {"FIBERD_HANDOFF_FD": "4"}) == 1
+    assert ft._born(lambda f: 0, "g/1/1", "handoff", b"", "", {"FIBERD_HANDOFF_FD": "4"}, 1, "fork") == 1
     assert "holds no identity" in capsys.readouterr().err
 
 
@@ -182,8 +182,8 @@ def test_incarnation_reseeds_and_runs_hooks_in_order():
     random.seed(1)
     before = (random.getrandbits(32), rng.getrandbits(32))
     f = ft.Fiber("g/1/1", "/tmp/ep.sock", b"", "", {})
-    f._incarnate("fork", b"\x07" * 32)
-    assert [s[:3] for s in seen] == [("a", "fork", 1), ("b", "fork", 1)]
+    f._incarnate("fork", 4, b"\x07" * 32)
+    assert [s[:3] for s in seen] == [("a", "fork", 4), ("b", "fork", 4)], "the generation is the one given, not a count of this process"
     assert all(s[3] == b"\x07" * 32 for s in seen), "the hooks see the seed"
     assert bytes(f.incarnation.seed) == bytes(32), "zeroed once the hooks ran"
     assert "seed" not in repr(f.incarnation) and "07" not in repr(f.incarnation)
@@ -206,11 +206,11 @@ def test_check_fence(tmp_path, name, f0, f1, f2):
     if f0 is not None:
         (tmp_path / "ep.sock.fence").write_text(f0)
     f = ft.Fiber("g/1/1", ep, b"", "", {})
-    f._incarnate("fork", os.urandom(32))
+    f._incarnate("fork", 4, os.urandom(32))
     assert f.check_fence() == f1
     assert f.fence == f2 and f.fence_parts == ft._fence.parse_fence(f2)
     assert f.incarnation.kind == ("resume" if f1 else "fork")
-    assert f.incarnation.generation == (2 if f1 else 1)
+    assert f.incarnation.generation == (5 if f1 else 4), "a resume is the parked generation plus one, not a count of this process"
     assert f.check_fence() is False, "seen once"
 
 
@@ -243,7 +243,7 @@ def test_serve_loop_reports_ready_checks_the_fence_and_hands_connections_over(so
     monkeypatch.setattr(ft, "_ext", lambda: ext)
     ep = str(sock_dir / "ep.sock")
     f = ft.Fiber("g/1/1", ep, b"", "", {})
-    f._incarnate("fork", os.urandom(32))
+    f._incarnate("fork", 1, os.urandom(32))
     srv = f.listen()
     client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     client.connect(ep)
@@ -301,8 +301,8 @@ def test_serve_on_gvisor_runs_every_restore(tmp_path, monkeypatch):
     """The loop: mark ready, wait, skip the original's "resume", take the identity on each "restore", reseed and run on_fiber."""
     seed1, seed2 = os.urandom(32), os.urandom(32)
     ext = FakeGvisorExt([
-        ("clone", "g/1/1", "/host/1-1.sock", b'{"task":1}', seed1, "conv 42"),
-        ("resume", "g/1/2", "/host/1-2.sock", b"", seed2, ""),
+        ("clone", "g/1/1", "/host/1-1.sock", b'{"task":1}', seed1, "conv 42", 1),
+        ("resume", "g/1/2", "/host/1-2.sock", b"", seed2, "", 3),
     ])
     monkeypatch.setattr(ft, "_ext", lambda: ext)
     monkeypatch.setattr(ft, "_inited", True)
@@ -321,7 +321,7 @@ def test_serve_on_gvisor_runs_every_restore(tmp_path, monkeypatch):
     assert ft.serve(on_fiber) == 7
     assert (tmp_path / "warm.ready").exists(), "the backend takes the template image once the marker is there"
     assert ext.calls == [("identity",), ("ack",), ("identity",), ("ack",)], "one identity and one ack per restore, and no fork hooks"
-    assert seen == [("restore", 1, "g/1/1", seed1), ("resume", 2, "g/1/2", seed2)], "the host seed reaches the hooks, and the kinds are the record's"
+    assert seen == [("restore", 1, "g/1/1", seed1), ("resume", 3, "g/1/2", seed2)], "seed, generation and kind reach the hooks from the record"
     a, b = fibers
     assert (a.backend, a.fence, a.endpoint, a.kind, a.payload, a.session) == ("gvisor", "g/1/1", "/host/1-1.sock", "unix", b'{"task":1}', "conv 42")
     assert a.env["FIBERD_FENCE"] == "g/1/1" and a.env["FIBERD_SESSION"] == "conv 42"
@@ -331,7 +331,7 @@ def test_serve_on_gvisor_runs_every_restore(tmp_path, monkeypatch):
 
 
 def test_serve_on_gvisor_ends_with_a_failed_incarnation(tmp_path, monkeypatch):
-    ext = FakeGvisorExt([("clone", "g/1/1", "/host/1-1.sock", b"", os.urandom(32), "")])
+    ext = FakeGvisorExt([("clone", "g/1/1", "/host/1-1.sock", b"", os.urandom(32), "", 1)])
     monkeypatch.setattr(ft, "_ext", lambda: ext)
     monkeypatch.setattr(ft, "_inited", True)
     monkeypatch.setattr(ft, "PROC_SELF", one_thread_proc(tmp_path))
@@ -342,7 +342,7 @@ def test_serve_on_gvisor_ends_with_a_failed_incarnation(tmp_path, monkeypatch):
 def test_usr1_stops_the_serving_fiber_on_gvisor(tmp_path, sock_dir, monkeypatch):
     """The park's SIGUSR1 sets stopping on the fiber serving now, and serve() unlinks its endpoint on the way out."""
     ep = str(sock_dir / "1-1.sock")
-    ext = FakeGvisorExt([("clone", "g/1/1", ep, b"", os.urandom(32), "")])
+    ext = FakeGvisorExt([("clone", "g/1/1", ep, b"", os.urandom(32), "", 1)])
     monkeypatch.setattr(ft, "_ext", lambda: ext)
     monkeypatch.setattr(ft, "_inited", True)
     monkeypatch.setattr(ft, "PROC_SELF", one_thread_proc(tmp_path))
@@ -366,7 +366,7 @@ def test_usr1_stops_the_serving_fiber_on_gvisor(tmp_path, sock_dir, monkeypatch)
 
 def test_serve_on_gvisor_serves_the_footprint_probe(tmp_path, monkeypatch):
     """The backend measures a restored sandbox under the fence "probe", which is not grant/epoch/seq and is served all the same."""
-    ext = FakeGvisorExt([("clone", "probe", "/host/probe.sock", b"", os.urandom(32), "")])
+    ext = FakeGvisorExt([("clone", "probe", "/host/probe.sock", b"", os.urandom(32), "", 1)])
     monkeypatch.setattr(ft, "_ext", lambda: ext)
     monkeypatch.setattr(ft, "_inited", True)
     monkeypatch.setattr(ft, "PROC_SELF", one_thread_proc(tmp_path))

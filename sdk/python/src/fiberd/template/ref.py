@@ -15,6 +15,7 @@ the integration tests drive both the same way.
     rss             -> resident bytes
     getenv <NAME>   -> the value, or "-" (proves the scrub)
     session         -> the session the caller named, or "-"
+    generation      -> fiberd's count of this fiber's lineage, 1 at birth and the parked one plus one after a resume
     payload         -> the birth payload in hex (up to 127 bytes), or "-"
     status <Key>    -> that field of /proc/self/status, or "-"
     read <path>     -> the file's first line, or "-"
@@ -120,6 +121,8 @@ def answer(st: State, line: str) -> str:
         return str(st.warm.counter)
     if cmd == "fence":
         return f.fence
+    if cmd == "generation":
+        return str(f.incarnation.generation) if f.incarnation is not None else "-"
     if cmd == "pid":
         return str(os.getpid())
     if cmd == "random":

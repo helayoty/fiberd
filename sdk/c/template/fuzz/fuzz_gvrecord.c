@@ -17,6 +17,11 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     errno = 0;
     int rc = gv_parse_identity(rec, size, &id);
     if (rc == 0) {
+        /* The generation is the decimal in the first field, 1 or more. */
+        if (id.generation == 0) abort();
+        char gen[16];
+        snprintf(gen, sizeof gen, "%u", id.generation);
+        if (strcmp(gen, rec + 1) != 0) abort();
         /* The fence is a copy, non-empty and shorter than FENCE_MAX. */
         if (id.fence != gv_fence || !*id.fence || strlen(id.fence) >= FENCE_MAX) abort();
         /* The seed is exactly 32 decoded bytes, from a hex field in the record. */

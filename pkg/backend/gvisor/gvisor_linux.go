@@ -54,6 +54,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -835,7 +836,7 @@ func (b *Backend) probeFootprint(ctx context.Context, w *warm, cgroupFD int) (sh
 	case conn == nil:
 		w.noPool = true
 	default:
-		if _, err := b.bind(pctx, x, conn, "clone", "probe", "/host/probe.sock", nil, ""); err != nil {
+		if _, err := b.bind(pctx, x, conn, "clone", "probe", "/host/probe.sock", nil, "", 1); err != nil {
 			log.Printf("gvisor: footprint probe did not serve: %v", err)
 			return 0, 0
 		}
@@ -1354,13 +1355,13 @@ func (b *Backend) awaitClaim(ctx context.Context, w *warm, x *box) (net.Conn, er
 // bind hands x its identity and a fresh seed on conn, then waits for an
 // ack naming the fence and for the endpoint to accept. Anything else
 // kills the sandbox. The seed never touches a file or a log.
-func (b *Backend) bind(ctx context.Context, x *box, conn net.Conn, kind, fence, endpoint string, payload []byte, session string) (backend.Fiber, error) {
+func (b *Backend) bind(ctx context.Context, x *box, conn net.Conn, kind, fence, endpoint string, payload []byte, session string, generation int) (backend.Fiber, error) {
 	// Held in x while the hand-out runs, so the reaper closes it, and
 	// ends the wait for the ack, should the sandbox die meanwhile.
 	b.mu.Lock()
 	x.conn = conn
 	b.mu.Unlock()
-	fiber, err := b.handOut(ctx, x, conn, kind, fence, endpoint, payload, session)
+	fiber, err := b.handOut(ctx, x, conn, kind, fence, endpoint, payload, session, generation)
 	b.mu.Lock()
 	x.conn = nil
 	b.mu.Unlock()
@@ -1372,7 +1373,12 @@ func (b *Backend) bind(ctx context.Context, x *box, conn net.Conn, kind, fence, 
 	return fiber, nil
 }
 
-func (b *Backend) handOut(ctx context.Context, x *box, conn net.Conn, kind, fence, endpoint string, payload []byte, session string) (backend.Fiber, error) {
+func (b *Backend) handOut(ctx context.Context, x *box, conn net.Conn, kind, fence, endpoint string, payload []byte, session string, generation int) (backend.Fiber, error) {
+	// The template refuses a record whose generation is not 1 or more
+	// and exits, which would show as a missing ack. Refuse it by name.
+	if generation < 1 {
+		return backend.Fiber{}, fmt.Errorf("gvisor: %s: generation %d is not an incarnation", fence, generation)
+	}
 	seed := make([]byte, seedBytes)
 	if _, err := rand.Read(seed); err != nil {
 		return backend.Fiber{}, fmt.Errorf("gvisor: seed: %w", err)
@@ -1385,14 +1391,10 @@ func (b *Backend) handOut(ctx context.Context, x *box, conn net.Conn, kind, fenc
 	if session != "" {
 		sh = hex.EncodeToString([]byte(session))
 	}
-	// The generation counts the copies of the template this sandbox is.
-	// A restore of the template image is the second. A park's lineage
-	// is not counted here.
-	gen := "2"
-	if kind == "resume" {
-		gen = "0"
-	}
-	rec := record(recIdentity, gen, kind, fence, endpoint, ph, "-", "-", "-", sh, hex.EncodeToString(seed))
+	// The generation is the host's count of the fiber's lineage: 1 for a
+	// sandbox restored from the template image, the parked one's plus one
+	// for a resume. The backend passes it on as given.
+	rec := record(recIdentity, strconv.Itoa(generation), kind, fence, endpoint, ph, "-", "-", "-", sh, hex.EncodeToString(seed))
 	clear(seed)
 	// The context ending cuts the write and the read short.
 	stop := context.AfterFunc(ctx, func() { _ = conn.SetDeadline(time.Now()) })
@@ -1432,7 +1434,7 @@ func sandboxEndpoint(workDir, endpoint string) (string, error) {
 // start restores an image as a new sandbox serving endpoint, under the
 // deadline when one is given. The identity goes over the channel, or in
 // the spec environment for a template that never dials.
-func (b *Backend) start(ctx context.Context, w *warm, images string, argv []string, kind, fence, endpoint string, payload []byte, session string, cgroupFD int, deadline time.Duration) (backend.Fiber, error) {
+func (b *Backend) start(ctx context.Context, w *warm, images string, argv []string, kind, fence, endpoint string, payload []byte, session string, generation int, cgroupFD int, deadline time.Duration) (backend.Fiber, error) {
 	if deadline > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, deadline)
@@ -1476,7 +1478,7 @@ func (b *Backend) start(ctx context.Context, w *warm, images string, argv []stri
 	// Restored, with every page of the image read, and waiting on the
 	// channel for an identity it has not been given.
 	base := leafW(cgroupFD)
-	fiber, err := b.bind(ctx, x, conn, kind, fence, inside, payload, session)
+	fiber, err := b.bind(ctx, x, conn, kind, fence, inside, payload, session, generation)
 	if err != nil {
 		return backend.Fiber{}, fmt.Errorf("%w (%s)", err, leafDiag(cgroupFD))
 	}
@@ -1527,7 +1529,7 @@ func (b *Backend) Clone(ctx context.Context, warmID string, sp backend.FiberSpec
 	if !ok {
 		return backend.Fiber{}, fmt.Errorf("gvisor: no warm template %q", warmID)
 	}
-	return b.start(ctx, w, w.images, w.argv, "clone", sp.Fence, sp.Endpoint, sp.Payload, sp.Session, sp.CgroupFD, sp.Deadline)
+	return b.start(ctx, w, w.images, w.argv, "clone", sp.Fence, sp.Endpoint, sp.Payload, sp.Session, sp.Generation, sp.CgroupFD, sp.Deadline)
 }
 
 // Pool restores a sandbox with no identity, which waits for Bind. A
@@ -1590,7 +1592,7 @@ func (b *Backend) Bind(ctx context.Context, pooledID string, sp backend.FiberSpe
 	_ = os.Remove(sp.Endpoint)
 	// Idle in the pool since its restore, so this is its settled footprint.
 	base := leafW(sp.CgroupFD)
-	if _, err := b.bind(ctx, x, conn, "clone", sp.Fence, inside, sp.Payload, sp.Session); err != nil {
+	if _, err := b.bind(ctx, x, conn, "clone", sp.Fence, inside, sp.Payload, sp.Session, sp.Generation); err != nil {
 		return backend.Fiber{}, fmt.Errorf("%w (%s)", err, leafDiag(sp.CgroupFD))
 	}
 	// The sandbox is the fiber from here on, unless the reaper took it
@@ -1691,7 +1693,7 @@ func (b *Backend) Resume(ctx context.Context, sp backend.ResumeSpec) (backend.Fi
 	case !parked && w.template != "":
 		return backend.Fiber{}, fmt.Errorf("gvisor: park image was taken without a template at %s, which warm instance %q binds here", backend.TemplateMount, sp.WarmID)
 	}
-	return b.start(ctx, w, sp.Dir, s.Process.Args, "resume", sp.Fence, sp.Endpoint, nil, sp.Session, sp.CgroupFD, sp.Deadline)
+	return b.start(ctx, w, sp.Dir, s.Process.Args, "resume", sp.Fence, sp.Endpoint, nil, sp.Session, sp.Generation, sp.CgroupFD, sp.Deadline)
 }
 
 func (b *Backend) Kill(fiberID string) error {

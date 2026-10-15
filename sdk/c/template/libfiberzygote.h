@@ -144,11 +144,18 @@
 
 /* The ABI this header describes, which every binding checks at build time.
  * 3 added session to fz_gvisor_identity_t. 4 added a fourth field to
- * fz_identity_t, which 5 made the caller's certificate (caller_pem). */
-#define FZ_ABI_VERSION 5
+ * fz_identity_t, which 5 made the caller's certificate (caller_pem). 6
+ * added generation and kind to fz_fiber_t and generation to
+ * fz_gvisor_identity_t. */
+#define FZ_ABI_VERSION 6
 
 #include <stddef.h>
 
+/* A fiber's generation is fiberd's count of its lineage. A fiber born
+ * from the warm template, forked or restored from its image, is 1. A
+ * fiber resumed from a park is the parked one's plus one, on whichever
+ * home resumes it. A template that counts its own incarnations can tell
+ * a missed one from the number. */
 typedef struct {
     const char *fence;            /* the fiber's identity, "grant/epoch/seq" */
     const char *endpoint;         /* unix socket path or tcp://host:port the fiber serves on,
@@ -156,6 +163,8 @@ typedef struct {
     const unsigned char *payload; /* opaque data delivered at birth */
     size_t payload_len;
     const char *session;          /* the session the caller named, "" for an anonymous fiber */
+    unsigned generation;          /* 1: a fork of the warm template starts a lineage */
+    const char *kind;             /* "fork" */
 } fz_fiber_t;
 
 /* Runs in the CHILD after the scrub. Serve on f->endpoint, call
@@ -265,10 +274,12 @@ int fz_accept(void);
  *
  * The session is hex so a name may hold any character, "-" for an
  * anonymous fiber, and at most 1023 bytes decoded with no NUL in them,
- * as on the CLONE line.
+ * as on the CLONE line. The generation is decimal, 1 or more, as
+ * fz_fiber_t describes it.
  */
 typedef struct {
     const char *kind;             /* "clone" (from the template image) or "resume" (from a park) */
+    unsigned generation;          /* fiberd's count of the lineage: 1 for a clone, the parked one's plus one for a resume */
     const char *fence;
     const char *endpoint;         /* the unix socket path to serve, under /host */
     const unsigned char *payload; /* opaque data delivered at birth */
