@@ -117,14 +117,8 @@ def send_alert(ctx: ServerContext, sock: socket.socket) -> None:
         sock.close()
 
 
-def server_context(identity_fd: int, caller: str, caller_pem: str) -> ServerContext:
-    """The TLS 1.3 server context of a handoff fiber.
-
-    caller_pem, the certificate of the caller the grant is bound to, is
-    the one trust anchor, so only that certificate completes a handshake.
-    It must be the certificate caller is the thumbprint of. Resumption is
-    off, so every connection presents it.
-    """
+def check_caller(caller: str, caller_pem: str) -> None:
+    """Refuses a caller certificate that is missing, unparsable, or not the one caller is the thumbprint of."""
     if not caller_pem:
         raise TemplateError("the home sent no caller certificate with the handoff identity, so this fiber cannot pin its caller")
     try:
@@ -133,6 +127,16 @@ def server_context(identity_fd: int, caller: str, caller_pem: str) -> ServerCont
         raise TemplateError(f"the caller certificate the home sent with the handoff identity does not parse ({e})") from e
     if thumbprint(caller_der) != caller:
         raise TemplateError("the caller certificate the home sent with the handoff identity is not the caller the grant is bound to")
+
+
+def server_context(identity_fd: int, caller: str, caller_pem: str) -> ServerContext:
+    """The TLS 1.3 server context of a handoff fiber.
+
+    caller_pem, the certificate of the caller the grant is bound to, is
+    the one trust anchor, so only that certificate completes a handshake.
+    Resumption is off, so every connection presents it.
+    """
+    check_caller(caller, caller_pem)
     ctx = ServerContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.minimum_version = ssl.TLSVersion.TLSv1_3
     ctx.verify_mode = ssl.CERT_REQUIRED

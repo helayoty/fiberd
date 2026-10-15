@@ -463,6 +463,8 @@ class Fiber:
             raise TemplateError(f"only a handoff fiber accepts handed-off connections, and this one serves {self.endpoint!r}")
         if self.identity is None:
             raise TemplateError("this handoff fiber holds no identity")
+        # Checked before the key is sealed, so a refused identity leaves no memfd behind.
+        _handoff.check_caller(self.identity.caller, self.identity.caller_pem)
         self._identity_fd = _handoff.seal_identity(self.identity.key_pem, self.identity.cert_pem)
         self._tls = _handoff.server_context(self._identity_fd, self.identity.caller, self.identity.caller_pem)
         return self._tls

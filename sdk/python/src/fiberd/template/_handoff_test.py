@@ -450,6 +450,7 @@ def test_accept_refusals(world, monkeypatch, name, f0, f1, f2):
     f = ft.Fiber("g/1/1", "/tmp/ep.sock", b"", "", f0, identity=identity)
     with pytest.raises(ft.TemplateError, match=f2):
         f.accept()
+    assert f._identity_fd == -1, "a refused identity is never sealed, so no memfd is left open"
 
 
 @linux_only
