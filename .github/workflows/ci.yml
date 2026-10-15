@@ -78,16 +78,19 @@ jobs:
       - run: make test TESTFLAGS=-cover
 
   python:
-    name: "python SDK (${{ matrix.os }}, non-root): ruff, the extension built in tree on Linux, pytest unit, the client's messages up to date"
+    name: "python SDK (${{ matrix.os }}, CPython ${{ matrix.python }}, non-root): ruff, the extension built in tree on Linux, pytest unit, the client's messages up to date"
     strategy:
       matrix:
         os: [ubuntu-24.04, macos-15]
+        # The two CPythons the SDK supports. setup-python resolves them
+        # from actions/python-versions, which lists 3.15.0 for both runners.
+        python: ["3.14", "3.15"]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python }}
       # cryptography makes the client tests' certificates in process.
       - run: python -m pip install ruff pytest cryptography
       - run: ruff check sdk/python
@@ -115,9 +118,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.12"
+          python-version: "3.14"
       # The wheel is built from the sdist, as the release builds it, so a
-      # file the sdist misses fails here.
+      # file the sdist misses fails here. cibuildwheel 4.3.1 builds it
+      # under CPython 3.14 and tests it under 3.14 and 3.15.0
+      # (sdk/python/pyproject.toml).
       - id: sdist
         name: build the sdist
         shell: bash

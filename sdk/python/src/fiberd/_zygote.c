@@ -1,6 +1,6 @@
 /* _zygote is the CPython binding of libfiberzygote (sdk/c/template), the one part
  * of fiberd.template that must be C. It is built against the limited API
- * so one wheel serves every CPython from 3.10, and compiled together with
+ * so one wheel serves every CPython from 3.14, and compiled together with
  * libfiberzygote.c under the Makefile's ZYGOTE_CFLAGS (see setup.py).
  *
  * What it does that Python cannot. The library forks a fiber with a raw
@@ -16,7 +16,7 @@
  * Everything else, the rules, the incarnation hooks and the accept loop,
  * is fiberd.template. */
 #define PY_SSIZE_T_CLEAN
-#define Py_LIMITED_API 0x030A0000
+#define Py_LIMITED_API 0x030E0000
 #include <Python.h>
 
 #include <errno.h>

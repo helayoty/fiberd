@@ -11,18 +11,29 @@ cd "$(dirname "$0")/../.."
 OUT=${1:?rootfs directory}
 mkdir -p "$OUT"/{bin,proc,dev,tmp,host,fiberd/channel}
 # The binary must be free of pointer authentication on aarch64: a process
-# restored from a checkpoint keeps stale PAC keys and traps on a CPU with
-# FEAT_FPAC. The dev image is Debian bookworm, whose libc has none, and the
-# flag keeps our own objects clean on a toolchain that defaults to PAC.
-# Debian's libcrypto carries PAC in its arm64 assembly, so the dev image
-# builds OpenSSL without it under /usr/local/openssl-nopac
-# (docker/dev/Dockerfile) and the zygote links that one. On aarch64 it is
-# required. Elsewhere the system OpenSSL is a fallback.
+# gVisor restores from a checkpoint keeps stale PAC keys and traps on a
+# CPU with FEAT_FPAC. The dev image keeps bookworm's glibc, which has
+# none, as a sysroot under /usr/local/sysroot-nopac, since the live glibc
+# is sid's and signed, and the flag keeps our own objects clean on a
+# toolchain that defaults to PAC. Debian's libcrypto carries PAC in its
+# arm64 assembly, so the dev image builds OpenSSL without it under
+# /usr/local/openssl-nopac (docker/dev/Dockerfile) and the zygote links
+# that one. On aarch64 both are required. Elsewhere the system glibc and
+# OpenSSL are a fallback.
 ARCH=$(uname -m)
 SSL=${FIBERD_OPENSSL:-/usr/local/openssl-nopac}
+SYSROOT=${FIBERD_SYSROOT:-/usr/local/sysroot-nopac}
 FLAGS=""
+if [ -d "$SYSROOT/usr/include" ]; then
+  # -B as well, since Debian's gcc also searches its own install-relative
+  # paths, which lead back to the live libc.
+  FLAGS="--sysroot=$SYSROOT -B$SYSROOT/usr/lib/$(gcc -print-multiarch)"
+elif [ "$ARCH" = aarch64 ]; then
+  echo "rootfs.sh: no PAC-free sysroot at $SYSROOT; rebuild the dev image (docker/dev/Dockerfile)" >&2
+  exit 1
+fi
 if [ -d "$SSL/lib" ]; then
-  FLAGS="-I$SSL/include -L$SSL/lib"
+  FLAGS="$FLAGS -I$SSL/include -L$SSL/lib"
 elif [ "$ARCH" = aarch64 ]; then
   echo "rootfs.sh: no PAC-free OpenSSL at $SSL; rebuild the dev image (docker/dev/Dockerfile)" >&2
   exit 1

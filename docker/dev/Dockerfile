@@ -8,32 +8,46 @@
 # reason.
 #
 # The base is Debian 12 (bookworm) because its arm64 userland is built
-# without pointer authentication (PAC). Trixie turns PAC on for arm64. A
-# process restored from a checkpoint (CRIU or gVisor) keeps stale PAC keys
-# and dies with SIGILL on CPUs with FEAT_FPAC (Apple silicon), so every park
-# and resume would fail. Bookworm's own criu 3.17 cannot read the 6.17
-# kernel on GitHub's runners, so criu is built from source below.
+# without pointer authentication (PAC). Trixie and sid turn PAC on for
+# arm64. A process restored by gVisor keeps stale PAC keys and dies with
+# SIGILL on CPUs with FEAT_FPAC (Apple silicon), so every park and resume
+# in a sandbox would fail. CRIU puts the keys back (criu 4.1.1 restores
+# NT_ARM_PACA_KEYS), so the proc and runc backends do not mind. Bookworm's
+# own criu 3.17 cannot read the 6.17 kernel on GitHub's runners, so criu
+# is built from source below.
+#
+# The Python SDK needs CPython 3.14, which bookworm lacks, so the
+# interpreter and its packages come from a pinned snapshot of sid. That
+# moves glibc and a few libraries to sid's PAC-signed builds. Before it
+# does, a copy of bookworm's glibc and the libraries CPython needs is kept
+# at /usr/local/sysroot-nopac, and a PAC-free CPython is built against it
+# at /usr/local/python-nopac. The rootfs scripts build and run against
+# those two, so what a sandbox restores stays free of PAC.
 #
 # The base image is pinned by digest. Refresh it with
 # `docker buildx imagetools inspect golang:1.26-bookworm`. Every download
 # below is checked against a pinned sha256 or sha512. Debian packages come
-# from the base's snapshot of the archive, so a newer base digest is the
-# upgrade and `apt-get upgrade` is not run.
+# from the base's snapshot of the archive or from the sid snapshot named
+# below, so a newer base digest or snapshot is the upgrade and `apt-get
+# upgrade` is not run.
 FROM golang:1.26-bookworm@sha256:dc9ad6c05acc7a88e5b71bde60a5fe3bd4b9f0db209011711b464107438a8107
 
 LABEL org.opencontainers.image.source="https://github.com/helayoty/fiberd" \
-      org.opencontainers.image.description="fiberd Linux development workbench: Go, criu, runsc, Rust and cargo-hyperlight" \
+      org.opencontainers.image.description="fiberd Linux development workbench: Go, criu, runsc, Rust, cargo-hyperlight and CPython 3.14" \
       org.opencontainers.image.licenses="Apache-2.0"
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 ARG DEBIAN_FRONTEND=noninteractive
-# libclang-rt-14-dev holds libFuzzer's runtime for `make fuzz`.
+# libclang-rt-14-dev holds libFuzzer's runtime for `make fuzz`. The last
+# line is what the PAC-free CPython below links (zlib1g-dev and uuid-dev
+# are already in the base).
 RUN apt-get update && apt-get install -y --no-install-recommends \
       gcc make pkg-config patch libssl-dev clang lld libclang-rt-14-dev \
       runc \
       curl ca-certificates jq procps iproute2 strace \
       libprotobuf-c-dev protobuf-c-compiler libprotobuf-dev python3-protobuf \
       libnl-3-dev libnet1-dev libcap-dev libbsd-dev uuid-dev libaio-dev \
+      libbz2-dev liblzma-dev libffi-dev libsqlite3-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # criu 4.1.1 from source (binary only) plus upstream commit 4b7398595 from
@@ -113,16 +127,84 @@ RUN set -eu; cd /tmp; \
     make install_dev >/dev/null; \
     cd /; rm -rf /tmp/openssl.tar.gz "/tmp/openssl-${OPENSSL_VERSION}"
 
-# Python for the SDK (sdk/python). The headers the template extension
-# builds against, setuptools to build it, pytest for the unit tests, and
-# for fiberd.client Debian's grpcio and protobuf, the protoc of the same
+# A PAC-free sysroot: bookworm's glibc, static and shared, with its
+# headers, and the libraries the CPython below links, copied as the
+# packages lay them out (merged /usr, so /lib is a symlink here too). The
+# sid snapshot below replaces the live copies with PAC-signed builds. The
+# rootfs scripts compile against this one (gcc --sysroot) and the
+# PAC-free CPython runs on it, so every object a sandbox restores comes
+# from here. On aarch64 the build fails if the base ever carries PAC.
+RUN set -eu; sysroot=/usr/local/sysroot-nopac; triplet=$(gcc -print-multiarch); \
+    mkdir -p "$sysroot/usr/lib" "$sysroot/usr/lib64"; ln -s usr/lib "$sysroot/lib"; ln -s usr/lib64 "$sysroot/lib64"; \
+    for p in libc6 libc6-dev linux-libc-dev libcrypt1 libcrypt-dev libgcc-s1 \
+             zlib1g zlib1g-dev libbz2-1.0 libbz2-dev liblzma5 liblzma-dev libffi8 libffi-dev \
+             libsqlite3-0 libsqlite3-dev libuuid1 uuid-dev; do dpkg -L "$p"; done \
+      | while read -r f; do if [ -L "$f" ] || [ -f "$f" ]; then echo "$f"; fi; done \
+      | tar -cf - --no-recursion -T - | tar -C "$sysroot" --keep-directory-symlink -xf -; \
+    if [ "$(uname -m)" = aarch64 ]; then \
+      for f in "$sysroot/lib/$triplet/libc.so.6" "$sysroot/usr/lib/$triplet/libc.a"; do \
+        n=$(objdump -d "$f" | awk '$3 ~ /^(pac|aut|reta|bra|blra)/ {n++} END{print n+0}'); \
+        [ "$n" = 0 ] || { echo "$n PAC instructions in $f; the base is no longer PAC-free" >&2; exit 1; }; \
+      done; \
+    fi
+
+# A PAC-free CPython for the rootfs the gvisor and runc backends run the
+# Python reference template in (hack/python/rootfs.sh). Built from the
+# python.org tarball, checked against the sha256 python.org publishes
+# beside it, against the sysroot above with -mbranch-protection=none on
+# aarch64, with its loader and library path pointing into the sysroot, so
+# it runs on bookworm's glibc here and in a sandbox. Its _ssl links the
+# PAC-free OpenSSL. The interpreter remembers its compiler, so an
+# extension it builds (setup.py) is built against the sysroot too. The
+# -B is needed as well as --sysroot, since Debian's gcc also searches
+# its own install-relative paths, which lead back to the live libc. No
+# pip, no tests, no debug info.
+ARG PYTHON_VERSION=3.14.8
+ARG PYTHON_SHA256=a65b20a728f169f4e66ae143f40b1bd3d33c38d770251663f627c9767b79b210
+RUN set -eu; cd /tmp; \
+    curl -fsSL "https://www.python.org/ftp/python/${PYTHON_VERSION}/Python-${PYTHON_VERSION}.tgz" -o python.tgz; \
+    echo "${PYTHON_SHA256}  python.tgz" | sha256sum -c - >/dev/null; \
+    tar xzf python.tgz; cd "Python-${PYTHON_VERSION}"; \
+    sysroot=/usr/local/sysroot-nopac; triplet=$(gcc -print-multiarch); ld=$(echo "$sysroot/lib/$triplet"/ld-linux-*.so.*); \
+    flags=""; [ "$(uname -m)" != aarch64 ] || flags="-mbranch-protection=none"; \
+    ./configure --prefix=/usr/local/python-nopac --with-openssl=/usr/local/openssl-nopac \
+      --without-ensurepip --disable-test-modules \
+      CC="gcc --sysroot=$sysroot -B$sysroot/usr/lib/$triplet" OPT="-DNDEBUG -O2 -Wall" CFLAGS="$flags" \
+      LDFLAGS="-Wl,-rpath,$sysroot/lib/$triplet -Wl,--disable-new-dtags -Wl,--dynamic-linker=$ld" >/dev/null; \
+    make -j"$(nproc)" >/dev/null; \
+    make install >/dev/null; \
+    cd /; rm -rf /tmp/python.tgz "/tmp/Python-${PYTHON_VERSION}"; \
+    rm -rf /usr/local/python-nopac/lib/python3.14/config-*/libpython3.14.a; \
+    /usr/local/python-nopac/bin/python3.14 -c 'import ssl, _ctypes, _socket, select, zlib; print(ssl.OPENSSL_VERSION)'
+
+# Python for the SDK (sdk/python), from a snapshot of sid pinned by date,
+# since bookworm stops at 3.11 and the SDK supports 3.14 and 3.15. sid is
+# pinned below bookworm, so only what is asked for here, and what that
+# needs, comes from it. The headers the template extension builds
+# against, setuptools to build it, pytest for the unit tests, and for
+# fiberd.client Debian's grpcio and protobuf, the protoc of the same
 # protobuf release, which makes the client's messages (make
-# python-proto), and cryptography for the test certificates. wheel and
-# venv build the sdist's wheel and install it offline (make python-dist).
-RUN apt-get update && apt-get install -y --no-install-recommends \
-      python3-dev python3-setuptools python3-pytest python3-wheel python3-venv \
-      python3-grpcio python3-protobuf protobuf-compiler libprotobuf-dev python3-cryptography \
-    && rm -rf /var/lib/apt/lists/*
+# python-proto), and cryptography for the test certificates. wheel, venv
+# and pip's wheel build the sdist's wheel and install it offline (make
+# python-dist). The snapshot's Release files are past their date, hence
+# check-valid-until=no.
+#
+# The interpreter needs sid's libssl3t64, which replaces bookworm's
+# libssl3 and depends on openssl-provider-legacy. That provider ships
+# legacy.so, a file libssl3 still owns when dpkg unpacks it, and only
+# libssl3t64 declares the replacement, so dpkg refuses. The provider goes
+# first, allowed to take the file over, and libssl3 leaves with the rest.
+ARG DEBIAN_SID_SNAPSHOT=20261013T203804Z
+RUN set -eu; \
+    echo "deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/${DEBIAN_SID_SNAPSHOT} sid main" > /etc/apt/sources.list.d/sid.list; \
+    printf 'Package: *\nPin: release a=unstable\nPin-Priority: 100\n' > /etc/apt/preferences.d/sid; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends -t sid -o Dpkg::Options::=--force-overwrite openssl-provider-legacy; \
+    apt-get install -y --no-install-recommends -t sid \
+      python3-dev python3-setuptools python3-pytest python3-wheel python3-venv python3-pip-whl \
+      python3-grpcio python3-protobuf protobuf-compiler libprotobuf-dev python3-cryptography; \
+    rm -rf /var/lib/apt/lists/*; \
+    python3 -c 'import sys, grpc, google.protobuf, cryptography; print(sys.version)'
 
 # GOTOOLCHAIN=auto lets the go.mod toolchain line fetch the exact version.
 ENV GOTOOLCHAIN=auto \

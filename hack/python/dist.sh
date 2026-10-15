@@ -23,13 +23,24 @@ sdist=$(echo "$out"/fiberd-*.tar.gz)
 tar -C "$work/sdist" -xzf "$sdist"
 src=$(echo "$work"/sdist/fiberd-*)
 
+# sid's crti.o and crtn.o sign _init and _fini, which would put four PAC
+# instructions into our extension, so the link takes the dev image's
+# PAC-free sysroot (docker/dev/Dockerfile) when it has one. -B puts its
+# start files ahead of the -L the interpreter's sysconfig adds, which
+# gcc searches for them too. setuptools reads LDSHARED from the
+# environment.
+sysroot=${FIBERD_SYSROOT:-/usr/local/sysroot-nopac}
+if [ -d "$sysroot/usr/include" ]; then
+  LDSHARED="$(python3 -c 'import sysconfig; print(sysconfig.get_config_var("LDSHARED"))') --sysroot=$sysroot -B$sysroot/usr/lib/$(gcc -print-multiarch)"
+  export LDSHARED
+fi
 python3 -m venv --system-site-packages "$work/venv"
 export PATH="$work/venv/bin:$PATH"
 pip wheel -q --no-index --no-build-isolation --no-deps -w "$out" "$sdist"
 wheel=$(echo "$out"/fiberd-*.whl)
 case "$wheel" in
-  *-cp310-abi3-linux_*.whl) ;;
-  *) echo "dist.sh: $wheel is not a cp310-abi3 wheel" >&2; exit 1 ;;
+  *-cp314-abi3-linux_*.whl) ;;
+  *) echo "dist.sh: $wheel is not a cp314-abi3 wheel" >&2; exit 1 ;;
 esac
 names=$(python3 -m zipfile -l "$wheel")
 grep -q 'fiberd/_zygote.abi3.so' <<<"$names" || { echo "dist.sh: no fiberd/_zygote.abi3.so in $wheel" >&2; exit 1; }

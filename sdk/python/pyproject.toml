@@ -1,5 +1,6 @@
 [build-system]
-requires = ["setuptools>=64"]
+# 77 reads the license as an SPDX expression.
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,8 +9,8 @@ name = "fiberd"
 dynamic = ["version"]
 description = "The fiberd SDK. fiberd.template for code that runs inside a fiber, fiberd.client for callers of fiberd."
 readme = "README.md"
-requires-python = ">=3.10"
-license = { text = "Apache-2.0" }
+requires-python = ">=3.14"
+license = "Apache-2.0"
 authors = [{ name = "Heba Elayoty" }]
 classifiers = [
   "Development Status :: 3 - Alpha",
@@ -19,10 +20,8 @@ classifiers = [
   "Programming Language :: C",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3 :: Only",
-  "Programming Language :: Python :: 3.10",
-  "Programming Language :: Python :: 3.11",
-  "Programming Language :: Python :: 3.12",
-  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Programming Language :: Python :: 3.15",
   "Programming Language :: Python :: Implementation :: CPython",
   "Topic :: System :: Distributed Computing",
 ]
@@ -39,7 +38,8 @@ fiberd-template = "fiberd.template._cli:main"
 
 [project.optional-dependencies]
 # fiberd.client needs these two and a template never does. The floors are
-# Debian 12's versions, which made the generated messages (make python-proto).
+# Debian sid's versions for CPython 3.14, which made the generated
+# messages (make python-proto). Both have 3.15 wheels on PyPI.
 client = ["grpcio>=1.51", "protobuf>=3.21.12"]
 
 [tool.setuptools]
@@ -59,13 +59,13 @@ fiberd = ["py.typed"]
 "*" = ["*.c"]
 
 [tool.distutils.bdist_wheel]
-py-limited-api = "cp310"
+py-limited-api = "cp314"
 
-# One cp310-abi3 wheel per architecture, built from the sdist on a native
-# runner and tested on 3.10, 3.12 and 3.13 (cibuildwheel reuses the abi3
-# wheel for the later two). musl comes later, if asked.
+# One cp314-abi3 wheel per architecture, built from the sdist on a native
+# runner and tested on 3.14 and 3.15 (cibuildwheel reuses the abi3 wheel
+# for 3.15). musl comes later, if asked.
 [tool.cibuildwheel]
-build = ["cp310-manylinux_*", "cp312-manylinux_*", "cp313-manylinux_*"]
+build = ["cp314-manylinux_*", "cp315-manylinux_*"]
 manylinux-x86_64-image = "manylinux_2_28"
 manylinux-aarch64-image = "manylinux_2_28"
 test-extras = ["client"]

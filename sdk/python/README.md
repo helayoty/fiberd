@@ -8,7 +8,7 @@ The Python SDK. `fiberd.template` is for code that runs inside a [fiber](../../d
 pip install fiberd
 ```
 
-The wheels are for CPython 3.10 or later on Linux, x86_64 or aarch64, with glibc 2.28 or later. Anywhere else pip builds the sdist. On Linux that needs a C compiler and the Python headers. Off Linux it builds without the extension. There `fiberd.client` works and `fiberd.template` raises `ImportError` when used.
+The wheels are for CPython 3.14 or later on Linux, x86_64 or aarch64, with glibc 2.28 or later. Anywhere else pip builds the sdist. On Linux that needs a C compiler and the Python headers. Off Linux it builds without the extension. There `fiberd.client` works and `fiberd.template` raises `ImportError` when used.
 
 ## Template
 

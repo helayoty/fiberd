@@ -1,6 +1,6 @@
 """The one extension, fiberd._zygote, over sdk/c/template/libfiberzygote.c.
 
-The extension is built against the limited API (abi3, CPython 3.10 and
+The extension is built against the limited API (abi3, CPython 3.14 and
 later) and compiled with the Makefile's ZYGOTE_CFLAGS, with -fPIC in place
 of -fPIE since it is a shared object. Off Linux there is no extension, and
 fiberd.template says so when it is used. The unit tests beside the sources
@@ -95,7 +95,7 @@ if sys.platform == "linux":
         # sources in a wheel. _libfiberzygote.c includes the library source.
         sources=["src/fiberd/_zygote.c", "src/fiberd/_libfiberzygote.c"],
         include_dirs=[C_DIR],
-        define_macros=[("Py_LIMITED_API", "0x030A0000")],
+        define_macros=[("Py_LIMITED_API", "0x030E0000")],
         py_limited_api=True,
         extra_compile_args=CFLAGS,
         extra_link_args=LDFLAGS,

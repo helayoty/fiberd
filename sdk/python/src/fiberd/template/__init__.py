@@ -166,7 +166,7 @@ def serve(on_fiber: Callable[[Fiber], int], *, threads: str = "refuse", control_
     if threads not in ("refuse", "warn"):
         raise ValueError('threads is "refuse" or "warn"')
     _require_linux()
-    _rules.check_gil(getattr(sys, "_is_gil_enabled", lambda: True)())
+    _rules.check_gil(sys._is_gil_enabled())
     _rules.check_main_thread(threading.current_thread() is threading.main_thread())
     _rules.check_init(_inited)
     if _gvisor.detect(PROC_SELF, control_fd):
