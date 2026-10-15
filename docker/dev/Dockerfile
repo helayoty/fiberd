@@ -129,7 +129,7 @@ RUN set -eu; cd /tmp; \
     cd /; rm -rf /tmp/openssl.tar.gz "/tmp/openssl-${OPENSSL_VERSION}"
 
 # A PAC-free sysroot: bookworm's glibc, static and shared, with its
-# headers, and the libraries the CPython below links, copied as the
+# headers, OpenSSL, and the libraries the CPython below links, copied as the
 # packages lay them out (merged /usr, so /lib is a symlink here too). The
 # sid snapshot below replaces the live copies with PAC-signed builds. The
 # rootfs scripts compile against this one (gcc --sysroot) and the
@@ -141,7 +141,7 @@ RUN set -eu; sysroot=/usr/local/sysroot-nopac; triplet=$(gcc -print-multiarch); 
     mkdir -p "$sysroot/usr/lib" "$sysroot/usr/lib64"; ln -s usr/lib "$sysroot/lib"; ln -s usr/lib64 "$sysroot/lib64"; \
     for p in libc6 libc6-dev linux-libc-dev libcrypt1 libcrypt-dev libgcc-s1 \
              zlib1g zlib1g-dev libbz2-1.0 libbz2-dev liblzma5 liblzma-dev libffi8 libffi-dev \
-             libsqlite3-0 libsqlite3-dev libuuid1 uuid-dev; do dpkg -L "$p"; done \
+             libsqlite3-0 libsqlite3-dev libuuid1 uuid-dev libssl3 libssl-dev; do dpkg -L "$p"; done \
       | while read -r f; do if [ -L "$f" ] || [ -f "$f" ]; then echo "$f"; fi; done \
       | tar -cf - --no-recursion -T - | tar -C "$sysroot" --keep-directory-symlink -xf -; \
     find "$sysroot" -type l -lname '/*' | while read -r l; do ln -sfn "$sysroot$(readlink "$l")" "$l"; done; \

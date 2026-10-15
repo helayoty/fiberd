@@ -38,6 +38,8 @@ COPY . .
 # archive is not linked. On aarch64 it is built without PAC branch
 # protection, because a process restored from a checkpoint keeps stale PAC
 # keys (see docker/dev/Dockerfile).
+# With the dev image the C is compiled against its Debian 12 sysroot,
+# since the dev image's live glibc is newer than this runtime base.
 ENV CGO_ENABLED=0 GOFLAGS=-trimpath
 ARG VERSION=""
 RUN set -eu; mkdir -p /out/bin /out/lib /out/doc; \
@@ -45,7 +47,9 @@ RUN set -eu; mkdir -p /out/bin /out/lib /out/doc; \
     hack/release/third-party-notices.sh ./cmd/fiberd > /out/doc/THIRD_PARTY_NOTICES; \
     cp LICENSE NOTICE /out/doc/; \
     flags=""; if [ "$(uname -m)" = aarch64 ]; then flags="-mbranch-protection=none"; fi; \
-    gcc -D_FORTIFY_SOURCE=3 -O2 -fstack-protector-strong -fstack-clash-protection -fPIC -Wformat=2 -Werror=format-security \
+    sysroot=/usr/local/sysroot-nopac; sr=""; \
+    [ ! -d "$sysroot/usr/include" ] || sr="--sysroot=$sysroot -B$sysroot/usr/lib/$(gcc -print-multiarch)"; \
+    gcc $sr -D_FORTIFY_SOURCE=3 -O2 -fstack-protector-strong -fstack-clash-protection -fPIC -Wformat=2 -Werror=format-security \
       -Wall -Wextra -pthread $flags -ffile-prefix-map="$PWD"=. \
       -c sdk/c/template/libfiberzygote.c -o /tmp/libfiberzygote.o; \
     ar rcsD /out/lib/libfiberzygote.a /tmp/libfiberzygote.o
