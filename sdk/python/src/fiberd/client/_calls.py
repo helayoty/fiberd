@@ -46,6 +46,7 @@ def fiber_from(r: grant_pb2.CloneResponse, session: str | None, home: str) -> Fi
         home=home,
         routing_key=r.routing_key,
         server_key_sha256=r.server_key_sha256,
+        server_cert=r.server_cert,
     )
 
 

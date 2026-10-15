@@ -1,25 +1,45 @@
 [build-system]
-requires = ["setuptools>=64"]
+# 77 reads the license as an SPDX expression.
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "fiberd"
-version = "0.2.0.dev0"
+# setup.py sets it from the release tag, or 0.0.0.dev0+local without one.
+dynamic = ["version"]
 description = "The fiberd SDK. fiberd.template for code that runs inside a fiber, fiberd.client for callers of fiberd."
 readme = "README.md"
-requires-python = ">=3.10"
-license = { text = "Apache-2.0" }
+requires-python = ">=3.14"
+license = "Apache-2.0"
+authors = [{ name = "Heba Elayoty" }]
 classifiers = [
-  "Programming Language :: Python :: 3",
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
   "Operating System :: POSIX :: Linux",
+  "Operating System :: MacOS",
+  "Programming Language :: C",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.14",
+  "Programming Language :: Python :: 3.15",
+  "Programming Language :: Python :: Implementation :: CPython",
+  "Topic :: System :: Distributed Computing",
 ]
+
+[project.urls]
+Homepage = "https://github.com/helayoty/fiberd"
+Documentation = "https://github.com/helayoty/fiberd/blob/main/sdk/python/README.md"
+Source = "https://github.com/helayoty/fiberd/tree/main/sdk/python"
+Issues = "https://github.com/helayoty/fiberd/issues"
+Changelog = "https://github.com/helayoty/fiberd/releases"
 
 [project.scripts]
 fiberd-template = "fiberd.template._cli:main"
 
 [project.optional-dependencies]
 # fiberd.client needs these two and a template never does. The floors are
-# Debian 12's versions, which made the generated messages (make python-proto).
+# Debian sid's versions for CPython 3.14, which made the generated
+# messages (make python-proto). Both have 3.15 wheels on PyPI.
 client = ["grpcio>=1.51", "protobuf>=3.21.12"]
 
 [tool.setuptools]
@@ -28,8 +48,29 @@ package-dir = { "" = "src" }
 [tool.setuptools.packages.find]
 where = ["src"]
 
+# py.typed marks the package as typed, and the .pyi carries the generated
+# messages' types, which the _pb2 module itself does not.
+[tool.setuptools.package-data]
+fiberd = ["py.typed"]
+"fiberd.client._api" = ["*.pyi"]
+
+# The C sources are in the sdist (MANIFEST.in), never in the wheel.
+[tool.setuptools.exclude-package-data]
+"*" = ["*.c"]
+
 [tool.distutils.bdist_wheel]
-py-limited-api = "cp310"
+py-limited-api = "cp314"
+
+# One cp314-abi3 wheel per architecture, built from the sdist on a native
+# runner and tested on 3.14 and 3.15 (cibuildwheel reuses the abi3 wheel
+# for 3.15). musl comes later, if asked.
+[tool.cibuildwheel]
+build = ["cp314-manylinux_*", "cp315-manylinux_*"]
+manylinux-x86_64-image = "manylinux_2_28"
+manylinux-aarch64-image = "manylinux_2_28"
+test-extras = ["client"]
+test-requires = ["pytest", "cryptography"]
+test-command = "sh {project}/wheel-test.sh {project}"
 
 [tool.pytest.ini_options]
 testpaths = ["src"]

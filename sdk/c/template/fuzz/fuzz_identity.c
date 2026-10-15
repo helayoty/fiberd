@@ -1,6 +1,6 @@
 /* fuzz_identity delivers one message on a handoff fiber's channel, as the
-  * fiberd queues it before the CLONE, and lets read_identity take it apart
- * ('k' then three NUL-ended fields), with descriptors it must not keep.
+ * fiberd queues it before the CLONE, and lets read_identity take it apart
+ * ('k' then four NUL-ended fields), with descriptors it must not keep.
  *
  * The input is [descriptor count][message bytes]. An empty message is a
  * closed channel instead. */
@@ -22,13 +22,15 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     const char *why = NULL;
     int rc = read_identity(s[0], &why);
     if (rc == 0) {
-        /* Three fields, each non-empty and NUL-ended, back to back after
-         * the 'k', and together they are the whole message. */
+        /* Four fields, each non-empty and NUL-ended, back to back after
+         * the 'k', and together they are the whole message. The fourth
+         * is the caller's certificate, taken as it is. */
         if (!have_identity || identity.key_pem != identity_buf + 1) abort();
         if (identity.cert_pem != identity.key_pem + strlen(identity.key_pem) + 1) abort();
         if (identity.caller != identity.cert_pem + strlen(identity.cert_pem) + 1) abort();
-        if (!*identity.key_pem || !*identity.cert_pem || !*identity.caller) abort();
-        size_t end = (size_t)(identity.caller - identity_buf) + strlen(identity.caller) + 1;
+        if (identity.caller_pem != identity.caller + strlen(identity.caller) + 1) abort();
+        if (!*identity.key_pem || !*identity.cert_pem || !*identity.caller || !*identity.caller_pem) abort();
+        size_t end = (size_t)(identity.caller_pem - identity_buf) + strlen(identity.caller_pem) + 1;
         if (end != size) abort();
     } else if (!why) {
         abort();

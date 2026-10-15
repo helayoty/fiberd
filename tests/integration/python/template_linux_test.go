@@ -60,16 +60,20 @@ func TestReferenceTemplate(t *testing.T) {
 // restored from one image, two pooled sandboxes handed out, and two
 // fibers resumed from one park. On proc the fence file beside the
 // endpoint is what a resumed fiber notices, and the on_incarnation hook
-// records the fork and then the resume under the new fence.
+// records the fork and then the resume under the new fence. The
+// getrandom rows are os.urandom, which secrets and uuid4 read. A glibc
+// of 2.41 or later answers it from a vDSO state page in user memory,
+// which a CRIU park drops (pkg/sys/criu), or every resume would replay
+// one keystream.
 func TestRandomPerIncarnation(t *testing.T) {
 	ctx := context.Background()
-	type draw func(t *testing.T, rt core.Runtime, g core.Grant) (a, b string)
-	siblings := func(t *testing.T, rt core.Runtime, g core.Grant) (string, string) {
+	type draw func(t *testing.T, rt core.Runtime, g core.Grant, cmd string) (a, b string)
+	siblings := func(t *testing.T, rt core.Runtime, g core.Grant, cmd string) (string, string) {
 		a := clone(t, rt, g, 1, "", nil)
 		b := clone(t, rt, g, 2, "", nil)
-		return talk(t, a.Endpoint, "random"), talk(t, b.Endpoint, "random")
+		return talk(t, a.Endpoint, cmd), talk(t, b.Endpoint, cmd)
 	}
-	pooled := func(t *testing.T, rt core.Runtime, g core.Grant) (string, string) {
+	pooled := func(t *testing.T, rt core.Runtime, g core.Grant, cmd string) (string, string) {
 		for i := 0; i < 2; i++ {
 			if err := rt.(interface {
 				Fill(context.Context, core.Grant, time.Duration) error
@@ -82,9 +86,9 @@ func TestRandomPerIncarnation(t *testing.T) {
 		if !a.Pooled || !b.Pooled {
 			t.Fatalf("pooled = %v and %v, want both hand-outs from the pool", a.Pooled, b.Pooled)
 		}
-		return talk(t, a.Endpoint, "random"), talk(t, b.Endpoint, "random")
+		return talk(t, a.Endpoint, cmd), talk(t, b.Endpoint, cmd)
 	}
-	resumes := func(t *testing.T, rt core.Runtime, g core.Grant) (string, string) {
+	resumes := func(t *testing.T, rt core.Runtime, g core.Grant, cmd string) (string, string) {
 		if rt.Tier() < core.TierCheckpoint {
 			t.Skip("no park and resume here")
 		}
@@ -92,7 +96,7 @@ func TestRandomPerIncarnation(t *testing.T) {
 		if err != nil {
 			t.Fatalf("clone: %v", err)
 		}
-		talk(t, h.Endpoint, "random") // the parked image holds a sequence in progress
+		talk(t, h.Endpoint, cmd) // the parked image holds a sequence in progress
 		ref, err := rt.Park(ctx, h.ID, true)
 		if err != nil {
 			t.Fatalf("park: %v", err)
@@ -103,7 +107,7 @@ func TestRandomPerIncarnation(t *testing.T) {
 			if err != nil {
 				t.Fatalf("resume %d: %v", seq, err)
 			}
-			out = append(out, talk(t, h2.Endpoint, "random"))
+			out = append(out, talk(t, h2.Endpoint, cmd))
 			if got := talk(t, h2.Endpoint, "fence"); got != h2.ID {
 				t.Fatalf("resume %d: fence = %q, want %q", seq, got, h2.ID)
 			}
@@ -117,12 +121,16 @@ func TestRandomPerIncarnation(t *testing.T) {
 	}
 	cases := []struct {
 		name   string
-		pooled bool // needs a backend that pools
+		cmd    string // what each incarnation is asked first
+		pooled bool   // needs a backend that pools
 		draw   draw
 	}{
-		{name: "two clones", draw: siblings},
-		{name: "two pooled hand-outs", pooled: true, draw: pooled},
-		{name: "two resumes of one park", draw: resumes},
+		{name: "two clones, random", cmd: "random", draw: siblings},
+		{name: "two clones, getrandom", cmd: "getrandom", draw: siblings},
+		{name: "two pooled hand-outs, random", cmd: "random", pooled: true, draw: pooled},
+		{name: "two pooled hand-outs, getrandom", cmd: "getrandom", pooled: true, draw: pooled},
+		{name: "two resumes of one park, random", cmd: "random", draw: resumes},
+		{name: "two resumes of one park, getrandom", cmd: "getrandom", draw: resumes},
 	}
 	for _, be := range backends {
 		t.Run(be.name, func(t *testing.T) {
@@ -133,11 +141,11 @@ func TestRandomPerIncarnation(t *testing.T) {
 				t.Run(tc.name, func(t *testing.T) {
 					rt := be.open(t, be.template)
 					g := prepare(t, rt, "grnd")
-					a, b := tc.draw(t, rt, g)
+					a, b := tc.draw(t, rt, g, tc.cmd)
 					if a == b {
-						t.Fatalf("both incarnations answered random = %q, want different values", a)
+						t.Fatalf("both incarnations answered %s = %q, want different values", tc.cmd, a)
 					}
-					t.Logf("random: %s and %s", a, b)
+					t.Logf("%s: %s and %s", tc.cmd, a, b)
 				})
 			}
 		})

@@ -54,6 +54,9 @@ func TestDerive(t *testing.T) {
 			if got := KeyPin(cert.RawSubjectPublicKeyInfo); got != id.KeySHA256 {
 				t.Fatalf("pin %s, certificate key hashes to %s", id.KeySHA256, got)
 			}
+			if !bytes.Equal(id.Cert, cert.Raw) {
+				t.Fatal("Cert is not the DER of CertPEM")
+			}
 			if pair.Leaf != nil && !bytes.Equal(pair.Leaf.Raw, cert.Raw) {
 				t.Fatal("key pair leaf differs from the certificate")
 			}

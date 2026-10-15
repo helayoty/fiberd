@@ -66,7 +66,7 @@ func (s *Server) Clone(ctx context.Context, req *grantv1.CloneRequest) (*grantv1
 		Payload:  req.GetPayload(),
 	}
 	if c, ok := CallerFrom(ctx); ok {
-		creq.CallerThumbprint = c.Thumbprint
+		creq.CallerThumbprint, creq.CallerCert = c.Thumbprint, c.Cert
 	}
 	resp, code, err := s.Core.Clone(ctx, creq)
 	if code != core.OK {
@@ -79,6 +79,7 @@ func (s *Server) Clone(ctx context.Context, req *grantv1.CloneRequest) (*grantv1
 		Kind:            kindToProto(resp.Kind),
 		RoutingKey:      resp.RoutingKey,
 		ServerKeySha256: resp.ServerKeySHA256,
+		ServerCert:      resp.ServerCert,
 	}, nil
 }
 

@@ -1,6 +1,7 @@
 package tlsconf_test
 
 import (
+	"bytes"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -240,6 +241,13 @@ func TestCallerOf(t *testing.T) {
 			c, ok := tlsconf.CallerOf(tc.chain)
 			if ok != tc.wantOK || c.Thumbprint != tc.want {
 				t.Fatalf("CallerOf = %+v, %v, want %q, %v", c, ok, tc.want, tc.wantOK)
+			}
+			var wantCert []byte
+			if tc.wantOK {
+				wantCert = tc.chain[0].Raw
+			}
+			if !bytes.Equal(c.Cert, wantCert) {
+				t.Fatalf("CallerOf cert = %d bytes, want the leaf's %d", len(c.Cert), len(wantCert))
 			}
 		})
 	}

@@ -18,7 +18,7 @@ NAME=${FIBERD_DEV_NAME:-fiberd-dev}
 # a label on the image, so the check does not depend on clocks or on how
 # this host's `date` parses timestamps.
 want=$(cat docker/dev/Dockerfile hack/dev/entrypoint.sh hack/dev/install-criu.sh \
-  hack/dev/criu-4b7398595-passcred-families.patch | shasum -a 256 | cut -c1-16)
+  | shasum -a 256 | cut -c1-16)
 have=$(docker image inspect -f '{{index .Config.Labels "io.fiberd.dev.hash"}}' "$IMAGE" 2>/dev/null || true)
 if [ "$want" != "$have" ]; then
   docker build -t "$IMAGE" -f docker/dev/Dockerfile --label "io.fiberd.dev.hash=$want" . >&2

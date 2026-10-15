@@ -42,7 +42,7 @@ func varints(fields ...[2]uint64) []byte {
 
 // entryMsg is the pagemap entry message for e.
 func entryMsg(e criu.PagemapEntry) []byte {
-	return varints([2]uint64{1, e.VAddr}, [2]uint64{2, uint64(e.NrPages)}, [2]uint64{4, uint64(e.Flags)})
+	return varints([2]uint64{1, e.VAddr}, [2]uint64{2, e.NrPages}, [2]uint64{4, uint64(e.Flags)})
 }
 
 // pagemapImage encodes a whole pagemap image, header, head and entries.
@@ -99,15 +99,15 @@ func mustMkdir(t *testing.T, path string) {
 }
 
 // present and lazy are the entry shapes the tests use.
-func present(addr uint64, n uint32) criu.PagemapEntry {
+func present(addr uint64, n uint64) criu.PagemapEntry {
 	return criu.PagemapEntry{VAddr: addr, NrPages: n, Flags: criu.PEPresent}
 }
 
-func lazy(addr uint64, n uint32) criu.PagemapEntry {
+func lazy(addr uint64, n uint64) criu.PagemapEntry {
 	return criu.PagemapEntry{VAddr: addr, NrPages: n, Flags: criu.PELazy}
 }
 
-func inParent(addr uint64, n uint32) criu.PagemapEntry {
+func inParent(addr uint64, n uint64) criu.PagemapEntry {
 	return criu.PagemapEntry{VAddr: addr, NrPages: n, Flags: criu.PEParent}
 }
 
@@ -127,7 +127,7 @@ var bufferPages = int(1 << 20 / criu.PageSize)
 
 // bulk is a checkpoint of n present pages from addr on, all filled with b.
 func bulk(pid int, addr uint64, n int, b byte) checkpoint {
-	c := checkpoint{pid: pid, entries: []criu.PagemapEntry{present(addr, uint32(n))}}
+	c := checkpoint{pid: pid, entries: []criu.PagemapEntry{present(addr, uint64(n))}}
 	for range n {
 		c.pages = append(c.pages, page(b))
 	}
@@ -179,6 +179,16 @@ func TestReadPagemap(t *testing.T) {
 					[]byte{0x4d, 1, 2, 3, 4},             // field 9, fixed32
 					varints([2]uint64{1, 0x1000}, [2]uint64{2, 1}, [2]uint64{4, criu.PEPresent})[4:]))),
 			pagesID: 3, entries: []criu.PagemapEntry{present(0x1000, 1)}},
+		// criu 4.2 writes nr_pages in field 5 and leaves field 2, its
+		// compat_nr_pages, at 0. Reading field 2 alone saw every page
+		// run as empty: a park kept no pages and its resume died in
+		// criu's premap loop.
+		{name: "criu 4.2 entry, nr_pages in field 5 and field 2 zero",
+			image:   slices.Concat(header, varints([2]uint64{1, 3}), varints([2]uint64{1, 0x1000}, [2]uint64{2, 0}, [2]uint64{4, criu.PEPresent}, [2]uint64{5, 3})),
+			pagesID: 3, entries: []criu.PagemapEntry{present(0x1000, 3)}},
+		{name: "both fields set, field 5 wins",
+			image:   slices.Concat(header, varints([2]uint64{1, 3}), varints([2]uint64{1, 0x1000}, [2]uint64{2, 1}, [2]uint64{4, criu.PEPresent}, [2]uint64{5, 1 << 33})),
+			pagesID: 3, entries: []criu.PagemapEntry{present(0x1000, 1<<33)}},
 		{name: "an empty head reads as pages id 0", image: slices.Concat(header, sized(nil))},
 		{name: "missing file", wantIs: fs.ErrNotExist},
 		{name: "short header", image: header[:5], wantErr: "short header"},
@@ -605,7 +615,7 @@ func TestMergeDelta(t *testing.T) {
 		{name: "disk full while a kept page is copied", linux: true, setup: func(t *testing.T, dir string, p *criu.Parent) {
 			// The pages file is whole. Only the write fails, and the
 			// error must not blame the delta for being short.
-			delta(t, dir, p.SHA256(), []string{"pagemap-5.img"}, []criu.PagemapEntry{present(va(1), uint32(bufferPages+1))}, bytes.Repeat(page('q'), bufferPages+1))
+			delta(t, dir, p.SHA256(), []string{"pagemap-5.img"}, []criu.PagemapEntry{present(va(1), uint64(bufferPages+1))}, bytes.Repeat(page('q'), bufferPages+1))
 			linkFull(t, filepath.Join(dir, "pages-5.img.tmp"))
 		}, wantIs: syscall.ENOSPC, wantNot: "shorter"},
 		{name: "disk full when a parent page is flushed", linux: true, setup: func(t *testing.T, dir string, p *criu.Parent) {

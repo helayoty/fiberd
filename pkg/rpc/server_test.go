@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -482,6 +483,77 @@ func TestFenceFromProto(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := rpc.FenceFromProto(tc.in); got != tc.want {
 				t.Fatalf("FenceFromProto = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+// routingRuntime is the stub with a handoff route for every fiber, so the
+// Clone response carries what a caller pins. It keeps the last spec.
+type routingRuntime struct {
+	*stub.Runtime
+	mu   sync.Mutex
+	last core.CloneSpec
+}
+
+func (r *routingRuntime) Clone(ctx context.Context, spec core.CloneSpec) (core.FiberHandle, error) {
+	r.mu.Lock()
+	r.last = spec
+	r.mu.Unlock()
+	return r.Runtime.Clone(ctx, spec)
+}
+
+func (r *routingRuntime) HandsOff() bool { return true }
+
+func (r *routingRuntime) HandoffRoute(fiberID string) (string, string, []byte, bool) {
+	return "rk-" + fiberID, "pin", []byte("fiber cert"), true
+}
+
+// TestCloneCarriesTheCertificates pins that the caller's certificate
+// goes from the TLS peer to the runtime, so a fresh handoff fiber can pin
+// it, and that the fiber's certificate comes back beside its key pin. A
+// plaintext request carries no caller, so a bound grant is refused before
+// any fiber is made.
+func TestCloneCarriesTheCertificates(t *testing.T) {
+	owner := tlsconf.Caller{Thumbprint: "owner-x5t", Cert: []byte("owner der")}
+	cases := []struct {
+		name   string
+		caller *tlsconf.Caller
+		want   codes.Code
+	}{
+		{name: "over mutual TLS the caller's certificate reaches the runtime and the fiber's comes back", caller: &owner, want: codes.OK},
+		{name: "in plaintext a bound grant has no caller to pin and is refused", want: codes.Unauthenticated},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rt := &routingRuntime{Runtime: stub.New()}
+			h := newHarness(t, core.TierCheckpoint, func(a *core.Core) {
+				a.Runtime = rt
+				a.Verify = boundVerifier{thumbprint: owner.Thumbprint}
+			})
+			ctx := context.Background()
+			if tc.caller != nil {
+				ctx = rpc.WithCaller(ctx, *tc.caller)
+			}
+			g := jsonGrant(t, core.Grant{UID: "g1", Audience: "node-a", Tenant: "acme", Policy: core.Policy{EndpointMode: core.EndpointHandoff}})
+			r, err := h.server.Clone(ctx, &grantv1.CloneRequest{GrantJwt: g})
+			if status.Code(err) != tc.want {
+				t.Fatalf("Clone = %v, want %v", err, tc.want)
+			}
+			rt.mu.Lock()
+			last := rt.last
+			rt.mu.Unlock()
+			if tc.want != codes.OK {
+				if last.Grant.UID != "" {
+					t.Fatalf("the runtime was asked to clone %+v", last)
+				}
+				return
+			}
+			if string(last.CallerCert) != "owner der" {
+				t.Fatalf("spec.CallerCert = %q, want the caller's DER", last.CallerCert)
+			}
+			if r.GetRoutingKey() == "" || r.GetServerKeySha256() != "pin" || string(r.GetServerCert()) != "fiber cert" {
+				t.Fatalf("response = %+v, want the route, the pin and the fiber's certificate", r)
 			}
 		})
 	}

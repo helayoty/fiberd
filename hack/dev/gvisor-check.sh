@@ -17,9 +17,14 @@ fail=0
 ok()   { printf 'ok    %s\n' "$*"; }
 warn() { printf 'WARN  %s\n' "$*"; }
 bad()  { printf 'FAIL  %s\n' "$*"; fail=1; }
-# The restore probes run this host's /bin/sh inside the sandbox, so the
-# host's userland must be restorable: on aarch64 that means no pointer
-# authentication (see docker/dev/Dockerfile for why the image is bookworm).
+# The restore probes run this host's /bin/sh inside the sandbox, so what
+# goes in with it must be restorable: on aarch64 that means no pointer
+# authentication. The dev image's live glibc is sid's and signed, so the
+# libraries come from its PAC-free sysroot when it has one, and the C
+# helper is compiled against it (see docker/dev/Dockerfile).
+SYSROOT=${FIBERD_SYSROOT:-/usr/local/sysroot-nopac}
+SYSROOT_FLAG=""
+[ ! -d "$SYSROOT/usr/include" ] || SYSROOT_FLAG="--sysroot=$SYSROOT -B$SYSROOT/usr/lib/$(gcc -print-multiarch)"
 
 command -v runsc >/dev/null || { bad "runsc not installed"; exit 1; }
 ok "runsc $(runsc --version | head -1)"
@@ -30,7 +35,10 @@ HOSTDIR=$W/host    # bind-mounted into every sandbox at /host
 ROOTFS=$W/rootfs   # a minimal rootfs: sh + a few tools + their libraries
 mkdir -p "$ROOT" "$HOSTDIR" "$ROOTFS"/{bin,proc,dev,host,tmp}
 for t in sh sleep echo cat tr grep; do cp "$(command -v $t)" "$ROOTFS/bin/"; done
-for f in $(ldd /bin/sh /usr/bin/tr /usr/bin/grep | awk '/=>/ {print $3} /ld-linux|ld-musl/ {print $1}' | sort -u); do mkdir -p "$ROOTFS$(dirname "$f")"; cp "$f" "$ROOTFS$f"; done
+for f in $(ldd /bin/sh /usr/bin/tr /usr/bin/grep | awk '/=>/ {print $3} /ld-linux|ld-musl/ {print $1}' | sort -u); do
+  mkdir -p "$ROOTFS$(dirname "$f")"
+  if [ -e "$SYSROOT$f" ]; then cp "$SYSROOT$f" "$ROOTFS$f"; else cp "$f" "$ROOTFS$f"; fi
+done
 # A tiny unix-socket server/client for the endpoint probe.
 cat >"$W/uds.c" <<'EOF'
 #include <stdio.h>
@@ -52,7 +60,8 @@ int main(int argc, char **argv) {
   char b[16]; int n = read(s, b, sizeof b); write(1, b, n > 0 ? n : 0); return 0;
 }
 EOF
-gcc -static -O2 -o "$ROOTFS/bin/uds" "$W/uds.c" 2>/dev/null || cp "$(gcc -O2 -o "$W/uds" "$W/uds.c" && echo "$W/uds")" "$ROOTFS/bin/uds"
+# shellcheck disable=SC2086  # $SYSROOT_FLAG is two flags or nothing
+gcc $SYSROOT_FLAG -static -O2 -o "$ROOTFS/bin/uds" "$W/uds.c" 2>/dev/null || cp "$(gcc $SYSROOT_FLAG -O2 -o "$W/uds" "$W/uds.c" && echo "$W/uds")" "$ROOTFS/bin/uds"
 
 RUNSC="runsc --root=$ROOT --platform=systrap --network=none --ignore-cgroups --host-uds=all --overlay2=none --debug-log=$W/ --log-format=text"
 

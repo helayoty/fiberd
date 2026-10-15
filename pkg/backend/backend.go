@@ -284,9 +284,11 @@ type Prober interface {
 
 // DeadlineAdvisor is implemented by backends whose fork or restore is
 // slower than a process fork: what a Clone without an explicit deadline
-// gets. Zero keeps fiberd's defaults.
+// gets, for the warm instance named, which a backend may size from what
+// it measured at warm. An instance the backend does not have gets its
+// floors. Zero keeps fiberd's defaults.
 type DeadlineAdvisor interface {
-	DefaultDeadlines() (create, resume time.Duration)
+	DefaultDeadlines(warmID string) (create, resume time.Duration)
 }
 
 // Overheader is implemented by backends whose fiber carries a fixed

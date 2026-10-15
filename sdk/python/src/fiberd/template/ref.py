@@ -249,7 +249,9 @@ def on_fiber(warm: Warm, f: ft.Fiber) -> int:
     # misuse.
     if opts.get("ready_delay_ms") and f.backend == "gvisor":
         time.sleep(int(opts["ready_delay_ms"]) / 1000)
-    srv = f.listen()
+    # A handoff fiber listens on nothing. fiberd passes it connections,
+    # which serve() terminates TLS on with the grant's identity.
+    srv = f.listen() if f.kind != "handoff" else None
     if opts.get("ready_delay_ms") and f.backend != "gvisor":
         time.sleep(int(opts["ready_delay_ms"]) / 1000)
     misuse = int(opts.get("ready_misuse", 0)) if f.backend != "gvisor" else 0

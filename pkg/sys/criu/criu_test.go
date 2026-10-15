@@ -230,7 +230,7 @@ func TestDumpWith(t *testing.T) {
 			if tc.cancelled {
 				cancel()
 			}
-			err := criu.Options{Commander: fake}.DumpWith(ctx, tc.pid, dir, tc.leaveRunning, tc.extra)
+			err := criu.Options{Commander: fake, Proc: t.TempDir()}.DumpWith(ctx, tc.pid, dir, tc.leaveRunning, tc.extra)
 			if tc.wantIs != nil && !errors.Is(err, tc.wantIs) {
 				t.Fatalf("DumpWith = %v, want %v", err, tc.wantIs)
 			}

@@ -45,7 +45,7 @@ endif
 
 .PHONY: all build test integration-tests vet lint proto proto-lint proto-check clean \
         bench zygote fuzz conform-stub conform-signed conform-logs conform-proc conform-proc-python conform-gvisor conform-gvisor-python conform-runc conform-runc-python conform-hyperlight-fake conform-hyperlight \
-        python-build python-test python-proto python-proto-check \
+        python-build python-test python-dist python-proto python-proto-check \
         hyperlight-helper linux-hyperlight-check overcommit kind-up kind-down kind-image conform-kind slurm-up slurm-down conform-slurm example-knative example-knative-kvm example-kata example-substrate \
         registry-start mobility linux-shell linux-check linux-gvisor-check linux-test linux-lint bench-e2e \
         compare-phase0 compare-phase1 compare-phase2 compare-phase3 compare-phase4 compare-down
@@ -226,9 +226,13 @@ zygote: ## build bin/refzygote, the reference zygote, with TLS for handoff grant
 	@mkdir -p $(BIN)
 	$(CC) $(ZYGOTE_CFLAGS) $(ZYGOTE_LDFLAGS) -Wall -Wextra -pthread -DFZ_TLS -o $(BIN)/refzygote sdk/c/template/refzygote.c sdk/c/template/libfiberzygote.c -lssl -lcrypto
 
-fuzz: ## fuzz the zygote's parsers (libFuzzer) and the handoff parser (go test -fuzz), FUZZTIME seconds each
+fuzz: ## fuzz the zygote's parsers (libFuzzer) and the handoff parser (go test -fuzz), FUZZTIME seconds each, in the dev container on macOS
+ifeq ($(shell uname -s),Darwin)
+	hack/dev/run.sh make fuzz FUZZTIME=$(FUZZTIME)
+else
 	FUZZTIME=$(FUZZTIME) FUZZ_OUT=$(BIN)/fuzz sdk/c/template/fuzz/run.sh
 	$(GO) test -run='^$$' -fuzz=FuzzServerName -fuzztime=$(FUZZTIME)s ./pkg/handoff/
+endif
 
 ## The Python SDK (sdk/python). Its extension needs Linux, so it is built
 ## and its unit tests run inside the dev container.
@@ -238,6 +242,9 @@ python-build: ## build the fiberd._zygote extension in place (sdk/python/src/fib
 
 python-test: ## the Python unit tests (pytest, no process started), after the build, inside the dev container
 	hack/dev/run.sh sh -ec 'hack/python/build.sh; cd sdk/python && PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q -p no:cacheprovider'
+
+python-dist: ## build the sdist and a wheel from it, then run the unit tests against the installed wheel, offline in the dev container, keeping nothing
+	hack/dev/run.sh hack/python/dist.sh
 
 ## Linux-only work runs in the dev container (hack/dev): privileged,
 ## private cgroup namespace, criu installed. Needs Docker.

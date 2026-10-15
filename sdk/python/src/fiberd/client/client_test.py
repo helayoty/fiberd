@@ -122,9 +122,9 @@ def test_clone_request(home, client, name, f0, f1):
 
 
 def test_handoff_fields(home, client):
-    home.routing_key, home.server_key_sha256 = "k", "PIN"
+    home.routing_key, home.server_key_sha256, home.server_cert = "k", "PIN", b"CERT"
     f = client.clone(TOKEN)
-    assert (f.routing_key, f.server_key_sha256, f.handoff) == ("k", "PIN", True)
+    assert (f.routing_key, f.server_key_sha256, f.server_cert, f.handoff) == ("k", "PIN", b"CERT", True)
 
 
 @pytest.fixture(scope="module")

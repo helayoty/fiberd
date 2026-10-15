@@ -6,7 +6,7 @@
 # locally and never released. The release publishes the plain fiberd image
 # from docker/fiberd/Dockerfile. Local builds can start from
 # fiberd-dev:local. Without it the build starts from the plain Go image and
-# installs the same patched criu and the same pinned runsc.
+# installs the same criu and the same pinned runsc.
 #
 #   docker build -t fiberd:kind -f docker/kubernetes/Dockerfile .   (from the repo root)
 #
@@ -21,14 +21,14 @@ FROM ${DEV_IMAGE} AS build
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 USER root
 ARG DEBIAN_FRONTEND=noninteractive
-ARG CRIU_VERSION=4.1.1
+ARG CRIU_VERSION=4.2.1
 # The dev image already has criu and these build dependencies. The plain Go
 # image gets them here.
-COPY hack/dev/install-criu.sh hack/dev/criu-4b7398595-passcred-families.patch /tmp/fiberd-criu/
+COPY hack/dev/install-criu.sh /tmp/fiberd-criu/
 RUN if ! command -v criu >/dev/null 2>&1; then \
       apt-get update && apt-get install -y --no-install-recommends \
-        gcc make pkg-config patch libssl-dev curl ca-certificates \
-        libprotobuf-c-dev protobuf-c-compiler libprotobuf-dev python3-protobuf \
+        gcc make pkg-config libssl-dev curl ca-certificates \
+        libprotobuf-c-dev protobuf-c-compiler protobuf-compiler libprotobuf-dev python3-protobuf \
         libnl-3-dev libnet1-dev libcap-dev libbsd-dev uuid-dev libaio-dev \
       && rm -rf /var/lib/apt/lists/* \
       && CRIU_VERSION="${CRIU_VERSION}" sh /tmp/fiberd-criu/install-criu.sh; \
@@ -66,6 +66,8 @@ COPY . .
 # static refzygote built by hack/gvisor/rootfs.sh with the same flags,
 # PAC-free on aarch64 (the PAC-free OpenSSL comes from the dev image; a
 # plain Go image build on aarch64 fails there, see the script).
+# With the dev image the C is compiled against its Debian 12 sysroot,
+# since the dev image's live glibc is newer than this runtime base.
 ENV CGO_ENABLED=0 GOFLAGS=-trimpath
 RUN set -eu; mkdir -p /out; \
     ldflags="-s -w -buildid="; \
@@ -74,9 +76,13 @@ RUN set -eu; mkdir -p /out; \
     go test -c -tags integration -ldflags "$ldflags" -o /out/grant-conform ./tests/e2e/conform; \
     (cd examples/kubernetes && go build -tags fiberd_testhooks -ldflags "$ldflags" -o /out/ ./cmd/...); \
     flags=""; if [ "$(uname -m)" = aarch64 ]; then flags="-mbranch-protection=none"; fi; \
-    gcc -D_FORTIFY_SOURCE=3 -O2 -fstack-protector-strong -fstack-clash-protection -fPIE -Wformat=2 -Werror=format-security \
+    sysroot=/usr/local/sysroot-nopac; sr=""; \
+    [ ! -d "$sysroot/usr/include" ] || sr="--sysroot=$sysroot -B$sysroot/usr/lib/$(gcc -print-multiarch)"; \
+    gcc $sr -D_FORTIFY_SOURCE=3 -O2 -fstack-protector-strong -fstack-clash-protection -fPIE -Wformat=2 -Werror=format-security \
       -pie -Wl,-z,relro,-z,now -Wall -Wextra -pthread $flags -DFZ_TLS -o /out/refzygote \
-      sdk/c/template/refzygote.c sdk/c/template/libfiberzygote.c -lssl -lcrypto
+      sdk/c/template/refzygote.c sdk/c/template/libfiberzygote.c -lssl -lcrypto; \
+    need=$(objdump -T /out/refzygote | grep -o "GLIBC_2\.[0-9]*" | sort -t. -k2 -n | tail -1); \
+    [ "${need#GLIBC_2.}" -le 36 ] || { echo "refzygote needs $need, newer than the bookworm runtime" >&2; exit 1; }
 
 FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587
 # The release workflow adds version, revision, created and title labels.

@@ -43,7 +43,7 @@ func newParkFixture(t *testing.T, be backend.Backend, g core.Grant, mod func(*Co
 		t.Fatalf("PrepareTemplate: %v", err)
 	}
 	fence := core.Fence{GrantUID: g.UID, Epoch: 1, Seq: 1}
-	h, err := r.Clone(ctx, core.CloneSpec{Grant: g, Fence: fence})
+	h, err := r.Clone(ctx, core.CloneSpec{Grant: g, Fence: fence, CallerCert: callerDER})
 	if err != nil {
 		t.Fatalf("Clone: %v", err)
 	}
@@ -521,7 +521,7 @@ func TestResume(t *testing.T) {
 				if h.Endpoint != "tcp://10.0.0.1:443" {
 					t.Fatalf("handle endpoint = %s", h.Endpoint)
 				}
-				if _, pin, ok := f.r.HandoffRoute(h.ID); !ok || pin == "" {
+				if _, pin, cert, ok := f.r.HandoffRoute(h.ID); !ok || pin == "" || len(cert) == 0 {
 					t.Fatal("the resumed fiber is not routed")
 				}
 				if sb.pairs.Load() != 2 {

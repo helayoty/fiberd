@@ -249,7 +249,7 @@ func TestNewPlatform(t *testing.T) {
 // interfaces, and the answer without them.
 func TestBackendFacts(t *testing.T) {
 	sb := newSandboxBackend(core.TierSnapshot)
-	sb.deadlineMixin = deadlineMixin{3 * time.Second, 9 * time.Second}
+	sb.deadlineMixin = deadlineMixin{create: 3 * time.Second, resume: 9 * time.Second}
 	sb.used, sb.capacity, sb.reported = 25, 100, true
 	noDevice := newSandboxBackend(core.TierSnapshot)
 	noDevice.capacity, noDevice.reported = 0, true
@@ -279,7 +279,7 @@ func TestBackendFacts(t *testing.T) {
 			if got := r.IsolatesTenants(); got != tc.isolates {
 				t.Fatalf("IsolatesTenants = %v, want %v", got, tc.isolates)
 			}
-			if c, rs := r.DefaultDeadlines(); c != tc.create || rs != tc.resume {
+			if c, rs := r.DefaultDeadlines("g1"); c != tc.create || rs != tc.resume {
 				t.Fatalf("DefaultDeadlines = %s %s, want %s %s", c, rs, tc.create, tc.resume)
 			}
 			if got := r.OffersDevice("g1", "gpu"); got != tc.offersDevice {
@@ -570,6 +570,47 @@ func TestPrepareTemplate(t *testing.T) {
 	}
 }
 
+// TestDefaultDeadlinesPerGrant checks that the runtime asks the backend
+// about the grant's own warm instance: the backend's floors before the
+// grant's template is warm, what the backend measured for that instance
+// once it is, the floors for another grant, and the floors again once
+// the template is dropped.
+func TestDefaultDeadlinesPerGrant(t *testing.T) {
+	g := core.Grant{UID: "g1", TemplateDigest: "sha256:tmpl"}
+	cases := []struct {
+		name   string
+		warm   bool   // g1's template is warm
+		drop   bool   // and dropped again
+		ask    string // the grant asked about
+		create time.Duration
+		resume time.Duration
+	}{
+		{name: "the floors before the template is warm", ask: "g1", create: 500 * time.Millisecond, resume: 2 * time.Second},
+		{name: "what the backend measured for the warm instance", warm: true, ask: "g1", create: 3 * time.Second, resume: 6 * time.Second},
+		{name: "the floors for another grant", warm: true, ask: "g2", create: 500 * time.Millisecond, resume: 2 * time.Second},
+		{name: "the floors once the template is dropped", warm: true, drop: true, ask: "g1", create: 500 * time.Millisecond, resume: 2 * time.Second},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sb := newSandboxBackend(core.TierSnapshot)
+			sb.deadlineMixin = deadlineMixin{create: 500 * time.Millisecond, resume: 2 * time.Second,
+				byWarm: map[string][2]time.Duration{"g1": {3 * time.Second, 6 * time.Second}}}
+			r := newTestRuntime(t, sb, nil)
+			if tc.warm {
+				if err := r.PrepareTemplate(context.Background(), g); err != nil {
+					t.Fatalf("PrepareTemplate: %v", err)
+				}
+			}
+			if tc.drop {
+				r.DropTemplate(g.UID)
+			}
+			if c, rs := r.DefaultDeadlines(tc.ask); c != tc.create || rs != tc.resume {
+				t.Fatalf("DefaultDeadlines(%s) = %s %s, want %s %s", tc.ask, c, rs, tc.create, tc.resume)
+			}
+		})
+	}
+}
+
 // tcpPolicy serves fibers on 127.0.0.1 with two ports.
 var tcpPolicy = endpoint.Policy{Family: endpoint.Inet4, Host: "127.0.0.1", PortMin: 20000, PortMax: 20001}
 
@@ -671,9 +712,9 @@ func TestClone(t *testing.T) {
 					t.Fatalf("memory.max = %s", limit(t, leaf, "memory.max"))
 				}
 			}},
-		{name: "a handoff fiber: identity queued on its channel, routed through the router", be: func() backend.Backend { return newSandboxBackend(core.TierSnapshot) },
+		{name: "a handoff fiber: identity and the caller's certificate queued on its channel, routed through the router", be: func() backend.Backend { return newSandboxBackend(core.TierSnapshot) },
 			mod:   func(c *Config) { c.Handoff, c.HandoffKey = handoffRouter(), handoffKey },
-			grant: handoffG, prepare: true, spec: core.CloneSpec{Grant: handoffG, Fence: fence},
+			grant: handoffG, prepare: true, spec: core.CloneSpec{Grant: handoffG, Fence: fence, CallerCert: callerDER},
 			check: func(t *testing.T, r *Runtime, be backend.Backend, h core.FiberHandle) {
 				sb := be.(*sandboxBackend)
 				ff := sb.fiber("g1/1/1")
@@ -681,17 +722,17 @@ func TestClone(t *testing.T) {
 					t.Fatalf("fiber spec = %+v, %d pairs made by the backend", ff.spec, sb.pairs.Load())
 				}
 				id := r.identities["g1"]
-				want, _ := identityMessage(id.id, "x5t")
-				if !bytes.Equal(ff.identity, want) {
-					t.Fatalf("identity read by the fiber = %q", ff.identity)
+				want, _ := identityMessage(id.id, "x5t", callerDER)
+				if !bytes.Equal(ff.identity, want) || !bytes.HasSuffix(ff.identity, append(callerPEM, 0)) {
+					t.Fatalf("identity read by the fiber = %q, want it to end with the caller's certificate", ff.identity)
 				}
 				if h.Endpoint != "tcp://10.0.0.1:443" {
 					t.Fatalf("handle endpoint = %s, want the router's", h.Endpoint)
 				}
-				key, pin, ok := r.HandoffRoute(h.ID)
+				key, pin, cert, ok := r.HandoffRoute(h.ID)
 				rkey, _ := r.cfg.Handoff.Key(h.ID)
-				if !ok || key == "" || key != rkey || pin != id.id.KeySHA256 {
-					t.Fatalf("HandoffRoute = %q %q %v", key, pin, ok)
+				if !ok || key == "" || key != rkey || pin != id.id.KeySHA256 || !bytes.Equal(cert, id.id.Cert) {
+					t.Fatalf("HandoffRoute = %q %q %q %v", key, pin, cert, ok)
 				}
 			}},
 		{name: "a handoff fiber whose channel the host makes", be: func() backend.Backend {
@@ -700,7 +741,7 @@ func TestClone(t *testing.T) {
 				handoffMixin
 			}{newFakeBackend(core.TierWarm), handoffMixin{true}}
 		}, mod: func(c *Config) { c.Handoff, c.HandoffKey = handoffRouter(), handoffKey },
-			grant: handoffG, prepare: true, spec: core.CloneSpec{Grant: handoffG, Fence: fence},
+			grant: handoffG, prepare: true, spec: core.CloneSpec{Grant: handoffG, Fence: fence, CallerCert: callerDER},
 			check: func(t *testing.T, r *Runtime, be backend.Backend, h core.FiberHandle) {
 				ff := be.(interface{ fiber(string) *fakeFiber }).fiber("g1/1/1")
 				if ff.handoff < 0 || len(ff.identity) == 0 || ff.identity[0] != identityTag {
@@ -712,7 +753,7 @@ func TestClone(t *testing.T) {
 			sb.err = errors.New("fake: netns gone")
 			return sb
 		}, mod: func(c *Config) { c.Handoff, c.HandoffKey = handoffRouter(), handoffKey },
-			grant: handoffG, prepare: true, spec: core.CloneSpec{Grant: handoffG, Fence: fence}, errText: "handoff channel: fake: netns gone",
+			grant: handoffG, prepare: true, spec: core.CloneSpec{Grant: handoffG, Fence: fence, CallerCert: callerDER}, errText: "handoff channel: fake: netns gone",
 			check: func(t *testing.T, r *Runtime, _ backend.Backend, _ core.FiberHandle) {
 				if r.root.Child("g1").Child("f-1-1").Exists() {
 					t.Fatal("the leaf was left behind")
@@ -728,8 +769,16 @@ func TestClone(t *testing.T) {
 			spec: func() core.CloneSpec {
 				g := handoffG
 				g.CallerThumbprint = ""
-				return core.CloneSpec{Grant: g, Fence: fence}
+				return core.CloneSpec{Grant: g, Fence: fence, CallerCert: callerDER}
 			}(), errText: "caller is empty",
+			check: func(t *testing.T, r *Runtime, _ backend.Backend, _ core.FiberHandle) {
+				if r.root.Child("g1").Child("f-1-1").Exists() || len(r.fibers) != 0 {
+					t.Fatal("the leaf or the record was left behind")
+				}
+			}},
+		{name: "a handoff clone without the caller's certificate has no identity to send", be: func() backend.Backend { return newSandboxBackend(core.TierSnapshot) },
+			mod:   func(c *Config) { c.Handoff, c.HandoffKey = handoffRouter(), handoffKey },
+			grant: handoffG, prepare: true, spec: core.CloneSpec{Grant: handoffG, Fence: fence}, errText: "no caller certificate",
 			check: func(t *testing.T, r *Runtime, _ backend.Backend, _ core.FiberHandle) {
 				if r.root.Child("g1").Child("f-1-1").Exists() || len(r.fibers) != 0 {
 					t.Fatal("the leaf or the record was left behind")
@@ -797,7 +846,7 @@ func TestClone(t *testing.T) {
 			sb.cloneErr = errors.New("fake: restore failed")
 			return sb
 		}, mod: func(c *Config) { c.Handoff, c.HandoffKey = handoffRouter(), handoffKey },
-			grant: handoffG, prepare: true, spec: core.CloneSpec{Grant: handoffG, Fence: fence}, errText: "restore failed",
+			grant: handoffG, prepare: true, spec: core.CloneSpec{Grant: handoffG, Fence: fence, CallerCert: callerDER}, errText: "restore failed",
 			check: func(t *testing.T, r *Runtime, _ backend.Backend, _ core.FiberHandle) {
 				if r.root.Child("g1").Child("f-1-1").Exists() || len(r.fibers) != 0 {
 					t.Fatal("the leaf or the record was left behind")

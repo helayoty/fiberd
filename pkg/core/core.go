@@ -19,8 +19,9 @@ type CloneRequest struct {
 	Deadline time.Duration // hard budget for the runtime work
 	Payload  []byte        // opaque, size-capped, delivered as data, never config
 	// CallerThumbprint is the x5t#S256 of the client certificate the
-	// request arrived over.
+	// request arrived over, and CallerCert is that certificate as DER.
 	CallerThumbprint string
+	CallerCert       []byte
 }
 
 type CloneResponse struct {
@@ -28,11 +29,12 @@ type CloneResponse struct {
 	Endpoint string
 	Fence    Fence
 	Kind     Action
-	// RoutingKey and ServerKeySHA256 are set for a handoff fiber. They are
-	// the TLS server name to send to Endpoint and the pin of the key the
-	// fiber must present.
+	// RoutingKey, ServerKeySHA256 and ServerCert are set for a handoff
+	// fiber. They are the TLS server name to send to Endpoint, the pin of
+	// the key the fiber must present and the fiber's certificate as DER.
 	RoutingKey      string
 	ServerKeySHA256 string
+	ServerCert      []byte
 }
 
 // StatusCode is the transport-agnostic outcome. pkg/rpc maps it to gRPC
@@ -83,9 +85,11 @@ const sweepEvery = 5 * time.Second
 
 // DeadlineAdvisor is implemented by runtimes whose create or resume is
 // slower than a process fork: what a Clone without an explicit deadline
-// is given. The caller's own deadline is always honoured as is.
+// is given, for the grant named, since a runtime may size it from what
+// it measured when the grant's template warmed. The caller's own
+// deadline is always honoured as is.
 type DeadlineAdvisor interface {
-	DefaultDeadlines() (create, resume time.Duration)
+	DefaultDeadlines(grantUID string) (create, resume time.Duration)
 }
 
 // ScopeClaim is one fact a home asserts about where it runs: the
@@ -308,13 +312,13 @@ func (a *Core) Clone(ctx context.Context, req CloneRequest) (CloneResponse, Stat
 	// 5. Runtime: the one fork or restore call, under a hard deadline.
 	deadline := req.Deadline
 	if deadline <= 0 {
-		create, resume := a.deadlines()
+		create, resume := a.deadlines(g.UID)
 		deadline = create
 		if act == ActResume {
 			deadline = resume
 		}
 	}
-	spec := CloneSpec{Grant: g, Source: SourceZygote, Fence: fence, Deadline: deadline, Payload: req.Payload, Session: req.Session}
+	spec := CloneSpec{Grant: g, Source: SourceZygote, Fence: fence, Deadline: deadline, Payload: req.Payload, Session: req.Session, CallerCert: req.CallerCert}
 	if act == ActResume {
 		spec.Source, spec.Ref = SourceDelta, ref
 	}
@@ -395,12 +399,12 @@ func (a *Core) Clone(ctx context.Context, req CloneRequest) (CloneResponse, Stat
 	return a.routed(CloneResponse{FiberID: h.ID, Endpoint: h.Endpoint, Fence: fence, Kind: act}), OK, nil
 }
 
-// deadlines are what a Clone without its own deadline gets, and what a
-// pool fill gets.
-func (a *Core) deadlines() (create, resume time.Duration) {
+// deadlines are what a Clone of the grant without its own deadline gets,
+// and what a pool fill for it gets.
+func (a *Core) deadlines(grantUID string) (create, resume time.Duration) {
 	create, resume = DefaultCreateDeadline, DefaultResumeDeadline
 	if adv, ok := a.Runtime.(DeadlineAdvisor); ok {
-		if c, r := adv.DefaultDeadlines(); c > 0 && r > 0 {
+		if c, r := adv.DefaultDeadlines(grantUID); c > 0 && r > 0 {
 			create, resume = c, r
 		}
 	}
@@ -420,8 +424,8 @@ func (a *Core) commitHeld(commit func(Session) bool, s Session) (committed bool,
 // routed adds what a caller needs to reach a handoff fiber.
 func (a *Core) routed(r CloneResponse) CloneResponse {
 	if hr, ok := a.Runtime.(HandoffRouter); ok {
-		if key, pin, ok := hr.HandoffRoute(r.FiberID); ok {
-			r.RoutingKey, r.ServerKeySHA256 = key, pin
+		if key, pin, cert, ok := hr.HandoffRoute(r.FiberID); ok {
+			r.RoutingKey, r.ServerKeySHA256, r.ServerCert = key, pin, cert
 		}
 	}
 	return r

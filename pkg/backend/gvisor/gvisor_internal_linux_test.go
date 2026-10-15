@@ -318,7 +318,7 @@ func TestNew(t *testing.T) {
 			if p.Kernel != "gvisor-"+b.version || p.Libc != "rootfs-"+filepath.Base(opt.Rootfs) {
 				t.Fatalf("Platform = %+v", p)
 			}
-			c, r := b.DefaultDeadlines()
+			c, r := b.DefaultDeadlines("")
 			if b.Name() != "gvisor" || !b.IsolatesTenants() || b.FiberOverheadBytes() != 0 || b.WCounter() != "shmem" ||
 				strings.Join(b.EndpointSchemes(), ",") != "unix" || c != createDeadline || r != resumeDeadline {
 				t.Fatalf("facts: name=%s isolates=%v overhead=%d counter=%s schemes=%v deadlines=%s/%s",
@@ -891,6 +891,76 @@ func TestProbeFootprint(t *testing.T) {
 				if _, err := os.Lstat(left); err == nil {
 					t.Fatalf("%s left behind", left)
 				}
+			}
+		})
+	}
+}
+
+// TestSizeDeadline checks how a measured restore sizes a default deadline:
+// the floor when the scaled measurement is under it, deadlineFactor times
+// the measurement above it, and never more than deadlineCap.
+func TestSizeDeadline(t *testing.T) {
+	cases := []struct {
+		name     string
+		measured time.Duration
+		floor    time.Duration
+		want     time.Duration
+	}{
+		{name: "nothing measured keeps the floor", floor: createDeadline, want: createDeadline},
+		{name: "a quick restore keeps the floor", measured: 100 * time.Millisecond, floor: createDeadline, want: createDeadline},
+		{name: "a restore at the floor's quarter keeps the floor", measured: 125 * time.Millisecond, floor: createDeadline, want: createDeadline},
+		{name: "a slower restore is scaled", measured: 300 * time.Millisecond, floor: createDeadline, want: 1200 * time.Millisecond},
+		{name: "the resume floor is higher", measured: 300 * time.Millisecond, floor: resumeDeadline, want: resumeDeadline},
+		{name: "a slow restore scales the resume too", measured: 800 * time.Millisecond, floor: resumeDeadline, want: 3200 * time.Millisecond},
+		{name: "a pathological restore is capped", measured: 3 * time.Second, floor: createDeadline, want: deadlineCap},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := sizeDeadline(tc.measured, tc.floor); got != tc.want {
+				t.Fatalf("sizeDeadline(%s, %s) = %s, want %s", tc.measured, tc.floor, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestDefaultDeadlines checks that a warm instance's default deadlines
+// come from how long its footprint probe took to restore and serve: the
+// floors for a quick template, more for a slow one, and the floors again
+// for an instance whose probe measured nothing, one that was unwarmed,
+// or one the backend never had.
+func TestDefaultDeadlines(t *testing.T) {
+	cases := []struct {
+		name      string
+		knobs     knobs
+		unwarm    bool
+		id        string // the instance asked about, "" for the warm one
+		createMin time.Duration
+		createMax time.Duration
+		resume    time.Duration
+	}{
+		{name: "a quick template keeps the floors", createMin: createDeadline, createMax: createDeadline, resume: resumeDeadline},
+		{name: "a slow restore raises the create deadline", knobs: knobs{SlowRestore: 200 * time.Millisecond},
+			createMin: 800 * time.Millisecond, createMax: resumeDeadline, resume: resumeDeadline},
+		{name: "a probe that measured nothing keeps the floors", knobs: knobs{Fail: map[string]bool{"restore": true}},
+			createMin: createDeadline, createMax: createDeadline, resume: resumeDeadline},
+		{name: "an unwarmed instance keeps the floors", knobs: knobs{SlowRestore: 200 * time.Millisecond}, unwarm: true,
+			createMin: createDeadline, createMax: createDeadline, resume: resumeDeadline},
+		{name: "an instance the backend never had gets the floors", knobs: knobs{SlowRestore: 200 * time.Millisecond}, id: "other",
+			createMin: createDeadline, createMax: createDeadline, resume: resumeDeadline},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b, _, w, _ := warmed(t, tc.knobs)
+			id := w.ID
+			if tc.id != "" {
+				id = tc.id
+			}
+			if tc.unwarm {
+				b.Unwarm(w.ID)
+			}
+			c, r := b.DefaultDeadlines(id)
+			if c < tc.createMin || c > tc.createMax || r != tc.resume {
+				t.Fatalf("DefaultDeadlines = %s/%s, want create in [%s, %s] and resume %s", c, r, tc.createMin, tc.createMax, tc.resume)
 			}
 		})
 	}

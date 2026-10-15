@@ -1,6 +1,6 @@
 /* _zygote is the CPython binding of libfiberzygote (sdk/c/template), the one part
  * of fiberd.template that must be C. It is built against the limited API
- * so one wheel serves every CPython from 3.10, and compiled together with
+ * so one wheel serves every CPython from 3.14, and compiled together with
  * libfiberzygote.c under the Makefile's ZYGOTE_CFLAGS (see setup.py).
  *
  * What it does that Python cannot. The library forks a fiber with a raw
@@ -16,7 +16,7 @@
  * Everything else, the rules, the incarnation hooks and the accept loop,
  * is fiberd.template. */
 #define PY_SSIZE_T_CLEAN
-#define Py_LIMITED_API 0x030A0000
+#define Py_LIMITED_API 0x030E0000
 #include <Python.h>
 
 #include <errno.h>
@@ -25,8 +25,8 @@
 
 #include "libfiberzygote.h"
 
-#if FZ_ABI_VERSION != 3
-#error "fiberd._zygote binds FZ_ABI_VERSION 3; rebuild it against this header"
+#if FZ_ABI_VERSION != 5
+#error "fiberd._zygote binds FZ_ABI_VERSION 5; rebuild it against this header"
 #endif
 #ifdef Py_GIL_DISABLED
 #error "fiberd._zygote needs the GIL; the fork rules assume it and abi3 does not cover a free-threaded build"
@@ -153,7 +153,7 @@ static PyObject *py_handoff_identity(PyObject *self, PyObject *unused) {
     (void)self; (void)unused;
     const fz_identity_t *id = fz_handoff_identity();
     if (!id) Py_RETURN_NONE;
-    return Py_BuildValue("(sss)", id->key_pem, id->cert_pem, id->caller);
+    return Py_BuildValue("(ssss)", id->key_pem, id->cert_pem, id->caller, id->caller_pem);
 }
 
 static PyObject *py_accept(PyObject *self, PyObject *unused) {
@@ -189,7 +189,7 @@ static PyMethodDef methods[] = {
     {"init", py_init, METH_O, "init(argv): fz_init, which re-execs argv once with address-space randomisation off."},
     {"serve", py_serve, METH_VARARGS, "serve(on_fiber, ctl_fd=3): fz_serve with the fork hooks; on_fiber(fence, endpoint, payload, session, env) runs in each child."},
     {"fiber_ready", py_fiber_ready, METH_NOARGS, "fz_fiber_ready."},
-    {"handoff_identity", py_handoff_identity, METH_NOARGS, "fz_handoff_identity as (key_pem, cert_pem, caller), or None."},
+    {"handoff_identity", py_handoff_identity, METH_NOARGS, "fz_handoff_identity as (key_pem, cert_pem, caller, caller_pem), or None."},
     {"accept", py_accept, METH_NOARGS, "fz_accept: the next handed-off connection's descriptor."},
     {"gvisor_identity", py_gvisor_identity, METH_NOARGS, "fz_gvisor_identity as (kind, fence, endpoint, payload, seed, session)."},
     {"gvisor_ack", py_gvisor_ack, METH_NOARGS, "fz_gvisor_ack."},

@@ -24,39 +24,49 @@ func (r deadlineRuntime) Clone(ctx context.Context, spec core.CloneSpec) (core.F
 	return r.fakeRuntime.Clone(ctx, spec)
 }
 
-// advisedRuntime is a deadlineRuntime that advises its own defaults, like
-// a runtime whose create is slower than a fork.
+// advisedRuntime is a deadlineRuntime that advises its own defaults for
+// one grant, like a runtime whose create is slower than a fork and sized
+// from what it measured when that grant's template warmed. Any other
+// grant gets no advice.
 type advisedRuntime struct {
 	deadlineRuntime
+	grant          string
 	create, resume time.Duration
 }
 
-func (r advisedRuntime) DefaultDeadlines() (time.Duration, time.Duration) { return r.create, r.resume }
+func (r advisedRuntime) DefaultDeadlines(uid string) (time.Duration, time.Duration) {
+	if uid != r.grant {
+		return 0, 0
+	}
+	return r.create, r.resume
+}
 
 // TestCloneDefaultDeadlines checks the deadline the runtime is given. The
 // caller's own deadline is always honoured. Without one, a create gets the
 // create default and a resume the resume default, from the runtime when
-// it advises both, else from the core.
+// it advises both for the clone's grant, else from the core.
 func TestCloneDefaultDeadlines(t *testing.T) {
 	cases := []struct {
 		name     string
 		deadline time.Duration // the request's
-		advise   bool
+		advise   string        // the grant the runtime advises for, "" for none
 		create   time.Duration // advised
 		resume   time.Duration // advised
 		resumeS  bool          // the session is parked, so the clone resumes it
 		want     time.Duration
 	}{
-		{name: "the caller's deadline is honoured over advice", deadline: 300 * time.Millisecond, advise: true, create: 5 * time.Second, resume: 9 * time.Second,
+		{name: "the caller's deadline is honoured over advice", deadline: 300 * time.Millisecond, advise: "g1", create: 5 * time.Second, resume: 9 * time.Second,
 			want: 300 * time.Millisecond},
 		{name: "a create without a deadline gets the core default", want: core.DefaultCreateDeadline},
 		{name: "a resume without a deadline gets the core default", resumeS: true, want: core.DefaultResumeDeadline},
-		{name: "a create without a deadline gets the runtime's advice", advise: true, create: 5 * time.Second, resume: 9 * time.Second,
+		{name: "a create without a deadline gets the runtime's advice for its grant", advise: "g1", create: 5 * time.Second, resume: 9 * time.Second,
 			want: 5 * time.Second},
-		{name: "a resume without a deadline gets the runtime's advice", advise: true, create: 5 * time.Second, resume: 9 * time.Second,
+		{name: "a resume without a deadline gets the runtime's advice for its grant", advise: "g1", create: 5 * time.Second, resume: 9 * time.Second,
 			resumeS: true, want: 9 * time.Second},
-		{name: "advice with a zero create is ignored", advise: true, resume: 9 * time.Second, want: core.DefaultCreateDeadline},
-		{name: "advice with a zero resume is ignored", advise: true, create: 5 * time.Second, resumeS: true, want: core.DefaultResumeDeadline},
+		{name: "advice for another grant is not this grant's", advise: "g2", create: 5 * time.Second, resume: 9 * time.Second,
+			want: core.DefaultCreateDeadline},
+		{name: "advice with a zero create is ignored", advise: "g1", resume: 9 * time.Second, want: core.DefaultCreateDeadline},
+		{name: "advice with a zero resume is ignored", advise: "g1", create: 5 * time.Second, resumeS: true, want: core.DefaultResumeDeadline},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -65,8 +75,8 @@ func TestCloneDefaultDeadlines(t *testing.T) {
 			var spec core.CloneSpec
 			dr := deadlineRuntime{fakeRuntime: fakeRuntime{tier: core.TierCheckpoint, exits: make(chan core.FiberExit, 8)}, spec: &spec}
 			a.Runtime = dr
-			if tc.advise {
-				a.Runtime = advisedRuntime{deadlineRuntime: dr, create: tc.create, resume: tc.resume}
+			if tc.advise != "" {
+				a.Runtime = advisedRuntime{deadlineRuntime: dr, grant: tc.advise, create: tc.create, resume: tc.resume}
 			}
 			wantSource, wantRef := core.SourceZygote, ""
 			if tc.resumeS {

@@ -20,10 +20,12 @@ hack/hyperlight/*/target/
 # go build output of the substrate example worker
 examples/substrate/ateom-fiberd
 
-# the Python SDK's in-place extension build and its caches (sdk/python)
+# the Python SDK's in-place extension build, its packages and caches (sdk/python)
 *.abi3.so
 __pycache__/
 *.egg-info/
 sdk/python/build/
+sdk/python/dist/
+sdk/python/wheelhouse/
 .pytest_cache/
 .ruff_cache/

@@ -168,11 +168,14 @@ message CloneResponse {
   CloneKind kind = 4;
   // Set when the grant's endpoint mode is HANDOFF. The caller opens TLS
   // to endpoint with server name "<routing_key>.fiberd", presents the
-  // grant's client certificate, and accepts only a server key whose
-  // SubjectPublicKeyInfo hashes (SHA-256, base64url) to
-  // server_key_sha256.
+  // grant's client certificate, and accepts only the fiber's own
+  // certificate. server_cert is that certificate as DER, for a TLS
+  // library that pins a certificate during the handshake, and
+  // server_key_sha256 is the hash (SHA-256, base64url) of its
+  // SubjectPublicKeyInfo, for one that pins a key.
   string routing_key = 5;
   string server_key_sha256 = 6;
+  bytes server_cert = 7;
 }
 
 // MissCode is the one thing a caller needs to decide what to do next.

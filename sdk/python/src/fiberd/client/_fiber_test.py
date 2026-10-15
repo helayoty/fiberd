@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import ssl
 import tempfile
 
 import pytest
@@ -59,34 +60,38 @@ def test_dial(name, f0, f1):
 
 def test_dial_refuses_a_handoff_fiber():
     with pytest.raises(ValueError, match="dial_handoff, not dial"):
-        _fiber("tcp://127.0.0.1:1", routing_key="k", server_key_sha256="x").dial()
+        _fiber("tcp://127.0.0.1:1", routing_key="k", server_key_sha256="x", server_cert=b"c").dial()
 
 
 @pytest.fixture(scope="module")
 def handoff():
     """A handoff fiber holding one identity, accepting one caller, and the certificates around it."""
-    identity, other = th.issue("fiber"), th.issue("other-fiber")
+    # A fiber's certificate is for server use, as pkg/handoff issues it, and the client's verification checks that purpose.
+    identity, other = th.issue("fiber", server=True), th.issue("other-fiber", server=True)
     caller, stranger = th.issue("caller"), th.issue("stranger")
     fib = th.HandoffFiber(identity, caller)
     d = tempfile.mkdtemp(prefix="fiberd-client-")
-    routed = _fiber(fib.endpoint, routing_key="k", server_key_sha256=identity.pin)
+    routed = _fiber(fib.endpoint, routing_key="k", server_key_sha256=identity.pin, server_cert=identity.der)
     yield dict(routed=routed, other=other, caller=caller.write(d, "caller"), stranger=stranger.write(d, "stranger"))
     fib.close()
 
 
 HANDOFF = [
-    # how the fiber is changed, who dials, the reply wanted, the error wanted
-    ("routed by key, caller accepted, key pinned", {}, "caller", b"k.fiberd hi\n", None),
+    # how the fiber is changed (OTHER is the other fiber's value), who dials, the reply wanted, the error wanted
+    ("routed by key, caller accepted, certificate and key pinned", {}, "caller", b"k.fiberd hi\n", None),
     ("a direct fiber has no route", dict(routing_key=""), "caller", None, NotHandoff),
     ("a handoff endpoint must be tcp", dict(endpoint="unix:///tmp/x.sock"), "caller", None, NotHandoff),
-    ("a fiber holding another key is refused before a byte is sent", dict(server_key_sha256="OTHER"), "caller", None, KeyMismatch),
+    ("a fiber without a certificate to pin is refused before dialing", dict(server_cert=b""), "caller", None, ValueError),
+    ("a fiber presenting another certificate fails the handshake", dict(server_cert="OTHER"), "caller", None, ssl.SSLCertVerificationError),
+    ("a fiber whose pin names another key is refused before a byte is sent", dict(server_key_sha256="OTHER"), "caller", None, KeyMismatch),
     ("the fiber refuses another caller", {}, "stranger", None, OSError),
 ]
 
 
 @table(HANDOFF)
 def test_dial_handoff(handoff, name, f0, f1, f2, f3):
-    f = dataclasses.replace(handoff["routed"], **({"server_key_sha256": handoff["other"].pin} if f0.get("server_key_sha256") else f0))
+    other = {"server_key_sha256": handoff["other"].pin, "server_cert": handoff["other"].der}
+    f = dataclasses.replace(handoff["routed"], **{k: other[k] if v == "OTHER" else v for k, v in f0.items()})
     cert, key = handoff[f1]
     if f3 is not None:
         with pytest.raises(f3):
