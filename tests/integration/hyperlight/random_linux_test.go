@@ -89,19 +89,27 @@ func newRuntimeOver(t *testing.T, hs helperSpec) (core.Runtime, string) {
 // copies hold the same generator state until Incarnate reseeds each
 // from the 32 bytes its CLONE or RESUME carried. Before that call there
 // was no generator and no identity in the guest, and the fake answered
-// random, generation and kind with "err unknown command".
+// random, generation and kind with "err unknown command". The seed rows
+// ask for the seed itself, which a resume's line carries while its park
+// holds only the clone's keep_seed flag, so each resume must answer its
+// own and never the clone's.
 func TestRandomPerIncarnation(t *testing.T) {
 	ctx := context.Background()
 	cases := []struct {
 		name    string
-		resumed bool // two resumes of one park instead of two clones
-		chained bool // the second resumes a park of the first resume
+		cmd     string // what each incarnation is asked first
+		payload []byte // the clone's payload, which a park carries on
+		hex     int    // hex characters each answer must be, 0 for a number
+		resumed bool   // two resumes of one park instead of two clones
+		chained bool   // the second resumes a park of the first resume
 		gens    [2]int
 		kind    string
 	}{
-		{name: "two clones of the warm snapshot", gens: [2]int{1, 1}, kind: "clone"},
-		{name: "two resumes of one park", resumed: true, gens: [2]int{2, 2}, kind: "resume"},
-		{name: "a resume of a resumed park", resumed: true, chained: true, gens: [2]int{2, 3}, kind: "resume"},
+		{name: "two clones of the warm snapshot", cmd: "random", gens: [2]int{1, 1}, kind: "clone"},
+		{name: "two resumes of one park", cmd: "random", resumed: true, gens: [2]int{2, 2}, kind: "resume"},
+		{name: "a resume of a resumed park", cmd: "random", resumed: true, chained: true, gens: [2]int{2, 3}, kind: "resume"},
+		{name: "two resumes of one park, the seed", cmd: "seed", payload: []byte(`{"keep_seed":1}`), hex: 64, resumed: true, gens: [2]int{2, 2}, kind: "resume"},
+		{name: "a resume of a resumed park, the seed", cmd: "seed", payload: []byte(`{"keep_seed":1}`), hex: 64, resumed: true, chained: true, gens: [2]int{2, 3}, kind: "resume"},
 	}
 	for _, hs := range helpers(t) {
 		for _, tc := range cases {
@@ -111,13 +119,13 @@ func TestRandomPerIncarnation(t *testing.T) {
 				if err := rt.PrepareTemplate(ctx, g); err != nil {
 					t.Fatal(err)
 				}
-				source, ref := core.SourceZygote, ""
+				source, ref, born := core.SourceZygote, "", ""
 				if tc.resumed {
-					h, err := rt.Clone(ctx, core.CloneSpec{Grant: g, Fence: core.Fence{GrantUID: g.UID, Epoch: 1, Seq: 1}, Deadline: 5 * time.Second})
+					h, err := rt.Clone(ctx, core.CloneSpec{Grant: g, Fence: core.Fence{GrantUID: g.UID, Epoch: 1, Seq: 1}, Deadline: 5 * time.Second, Payload: tc.payload})
 					if err != nil {
 						t.Fatalf("clone: %v", err)
 					}
-					talk(t, h.Endpoint, "random")
+					born = talk(t, h.Endpoint, tc.cmd)
 					if ref, err = rt.Park(ctx, h.ID, false); err != nil {
 						t.Fatalf("park: %v", err)
 					}
@@ -129,7 +137,10 @@ func TestRandomPerIncarnation(t *testing.T) {
 					if err != nil {
 						t.Fatalf("incarnation %d: %v", seq, err)
 					}
-					out = append(out, talk(t, h.Endpoint, "random"))
+					out = append(out, talk(t, h.Endpoint, tc.cmd))
+					if tc.resumed && out[len(out)-1] == born {
+						t.Fatalf("incarnation %d answers the clone's %s %q, want its own", seq, tc.cmd, born)
+					}
 					if got := talk(t, h.Endpoint, "fence"); got != h.ID {
 						t.Fatalf("incarnation %d: fence = %q, want %q", seq, got, h.ID)
 					}
@@ -152,12 +163,17 @@ func TestRandomPerIncarnation(t *testing.T) {
 					}
 				}
 				if out[0] == out[1] {
-					t.Fatalf("both incarnations answered random = %q, want different values", out[0])
+					t.Fatalf("both incarnations answered %s = %q, want different values", tc.cmd, out[0])
 				}
-				if _, err := strconv.ParseUint(out[0], 10, 64); err != nil {
-					t.Fatalf("random = %q, want a number", out[0])
+				for _, o := range out {
+					if b, err := hex.DecodeString(o); tc.hex > 0 && (err != nil || 2*len(b) != tc.hex) {
+						t.Fatalf("%s = %q, want %d hex characters", tc.cmd, o, tc.hex)
+					}
+					if _, err := strconv.ParseUint(o, 10, 64); tc.hex == 0 && err != nil {
+						t.Fatalf("%s = %q, want a number", tc.cmd, o)
+					}
 				}
-				t.Logf("random: %s and %s", out[0], out[1])
+				t.Logf("%s: %s and %s", tc.cmd, out[0], out[1])
 			})
 		}
 	}

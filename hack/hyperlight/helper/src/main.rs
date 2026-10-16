@@ -213,11 +213,29 @@ fn log_line(f: &[&str]) -> String {
 /// What a fiber is born as: the kind of copy, the host's generation and
 /// the seed, which the guest takes through `Incarnate` and the helper
 /// then zeroes. The seed's hex is kept only under the payload's
-/// "keep_seed" key, for the tests that look for it in the logs.
+/// "keep_seed" key, for the tests that look for it in the logs. A
+/// resume carries no payload, so its park notes the flag instead.
 struct Birth {
     kind: &'static str,
     generation: u64,
     seed: Vec<u8>,
+    keep_seed: bool,
+}
+
+/// The park's note that its fiber kept its seed: an empty file beside
+/// the snapshot, so a resumed sandbox honours the clone's payload as the
+/// fake does through its state. The flag alone is written, never the seed.
+const KEEP_SEED_NOTE: &str = "keep_seed";
+
+fn note_keep_seed(dir: &Path, keep: bool) -> Result<()> {
+    if keep {
+        File::create(dir.join(KEEP_SEED_NOTE)).context("note keep_seed")?;
+    }
+    Ok(())
+}
+
+fn keep_seed_noted(dir: &Path) -> bool {
+    dir.join(KEEP_SEED_NOTE).is_file()
 }
 
 /// One fiber: a sandbox, its endpoint and its command channel, on its
@@ -229,7 +247,7 @@ fn fiber_thread(ctl: Ctl, fence: String, endpoint: PathBuf, mut sb: MultiUseSand
         thread::sleep(Duration::from_millis(delay));
     }
     // The guest learns who it is before anything can reach it.
-    let kept_seed = (payload_num(&payload, "\"keep_seed\"") > 0).then(|| birth.seed.iter().map(|b| format!("{b:02x}")).collect::<String>());
+    let kept_seed = (birth.keep_seed || payload_num(&payload, "\"keep_seed\"") > 0).then(|| birth.seed.iter().map(|b| format!("{b:02x}")).collect::<String>());
     let took = sb.call::<i64>("Incarnate", (birth.generation as i64, fence.clone(), birth.seed.clone()));
     birth.seed.fill(0);
     match took {
@@ -272,7 +290,7 @@ fn fiber_thread(ctl: Ctl, fence: String, endpoint: PathBuf, mut sb: MultiUseSand
                 serving = false;
                 let _ = std::fs::remove_file(&endpoint);
                 eprintln!("helper: {fence} parking into {}", dir.display());
-                match park(&mut sb, &dir) {
+                match park(&mut sb, &dir, kept_seed.is_some()) {
                     Ok(bytes) => {
                         eprintln!("helper: {fence} parked, {bytes} bytes");
                         ctl.say(format!("PARKED {fence} {bytes}"))
@@ -344,13 +362,15 @@ fn fiber_thread(ctl: Ctl, fence: String, endpoint: PathBuf, mut sb: MultiUseSand
     }
 }
 
-/// Park: snapshot the sandbox and save it as an OCI image layout in dir.
-/// Returns the bytes on disk.
-fn park(sb: &mut MultiUseSandbox, dir: &Path) -> Result<u64> {
+/// Park: snapshot the sandbox and save it as an OCI image layout in dir,
+/// with the keep_seed note when the fiber kept its seed. Returns the
+/// bytes on disk.
+fn park(sb: &mut MultiUseSandbox, dir: &Path, keep_seed: bool) -> Result<u64> {
     std::fs::create_dir_all(dir)?;
     let snap = sb.snapshot().context("snapshot")?;
     let tag = OciTag::new("park").map_err(|e| anyhow!("{e}"))?;
     snap.save(dir, &tag).map_err(|e| anyhow!("save: {e}"))?;
+    note_keep_seed(dir, keep_seed)?;
     Ok(dir_bytes(dir))
 }
 
@@ -401,7 +421,7 @@ fn check(args: &Args) -> Result<()> {
     eprintln!("Incr = {n}, Dirty(1 MiB) = {d}");
     let dir = std::env::temp_dir().join(format!("fiberd-hl-check-{}", std::process::id()));
     let t = Instant::now();
-    let bytes = park(&mut sb, &dir)?;
+    let bytes = park(&mut sb, &dir, false)?;
     eprintln!("park (Snapshot::save): {:?}, {} bytes", t.elapsed(), bytes);
     let t = Instant::now();
     let mut back = from_snapshot(resume_snapshot(&dir)?)?;
@@ -458,17 +478,18 @@ fn main() -> Result<()> {
                         continue;
                     }
                 };
-                let (endpoint, payload, sb, kind) = if f[0] == "CLONE" {
-                    (PathBuf::from(f[2]), if f[4] == "-" { Vec::new() } else { unhex(f[4]) }, from_snapshot(snap.clone()), "clone")
+                let (endpoint, payload, sb, kind, keep_seed) = if f[0] == "CLONE" {
+                    (PathBuf::from(f[2]), if f[4] == "-" { Vec::new() } else { unhex(f[4]) }, from_snapshot(snap.clone()), "clone", false)
                 } else {
-                    (PathBuf::from(f[3]), Vec::new(), resume_snapshot(Path::new(f[2])).and_then(from_snapshot), "resume")
+                    let park = Path::new(f[2]);
+                    (PathBuf::from(f[3]), Vec::new(), resume_snapshot(park).and_then(from_snapshot), "resume", keep_seed_noted(park))
                 };
                 match sb {
                     Ok(sb) => {
                         let (tx, rx) = channel();
                         fibers.insert(fence.clone(), tx);
                         let c = ctl.clone();
-                        let birth = Birth { kind, generation, seed };
+                        let birth = Birth { kind, generation, seed, keep_seed };
                         thread::spawn(move || fiber_thread(c, fence, endpoint, sb, payload, birth, rx));
                     }
                     Err(e) => ctl.say(format!("ERROR {fence} {e:#}")),
@@ -512,6 +533,23 @@ mod tests {
     }
 
     const SEED: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+
+    #[test]
+    fn a_park_notes_the_flag_and_nothing_else() {
+        let cases: &[(&str, bool)] = &[("a fiber that kept its seed", true), ("a fiber that did not", false)];
+        for (name, keep) in cases {
+            let dir = std::env::temp_dir().join(format!("fiberd-hl-note-{}-{keep}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            note_keep_seed(&dir, *keep).unwrap();
+            assert_eq!(keep_seed_noted(&dir), *keep, "{name}");
+            let files: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().collect();
+            assert_eq!(files.len(), usize::from(*keep), "{name}");
+            for f in files {
+                assert!(std::fs::read(f.path()).unwrap().is_empty(), "{name}: the note holds bytes");
+            }
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
+    }
 
     #[test]
     fn the_log_shows_no_seed_and_no_payload() {
