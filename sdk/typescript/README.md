@@ -4,20 +4,13 @@ The TypeScript client for callers of fiberd, with the same calls and typed misse
 
 ## Install
 
-Requires Node.js 22.12 or later. The package is not yet published to npm. From the repository root:
+Requires Node.js 22.12 or later.
 
 ```bash
-npm ci --ignore-scripts --prefix sdk/typescript
-npm pack ./sdk/typescript
+npm install @fiberd/client
 ```
 
-Then, in your application:
-
-```bash
-npm install /path/to/fiberd-client-0.1.0.tgz
-```
-
-The package includes JavaScript and type declarations, and supports both `import` and `require`.
+The package includes JavaScript and type declarations, and supports both `import` and `require`. Every release publishes it with npm provenance, and pre-releases go to the `next` dist-tag (`npm install @fiberd/client@next`). The same tarball is in the release assets under `SHA256SUMS`.
 
 ## Client
 
