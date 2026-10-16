@@ -3,20 +3,20 @@ package herder
 import "path/filepath"
 
 // Paths is the directory tree atelet and a worker's herder share through
-// the hostPath volume mounted at Base (Substrate's ateompath, kept to
-// the same names). atelet dials the herder at SocketPath, prepares an
-// actor's state under ActorDir, ships every regular file directly under
-// CheckpointStateDir after a checkpoint and places a downloaded snapshot
-// under RestoreStateDir before a restore.
+// the hostPath volume mounted at Base (Substrate's nodepath and
+// ateletpath, kept to the same names). atelet dials the herder at
+// SocketPath and prepares an actor's state under ActorDir. It names the
+// actor's checkpoint and restore directories in each call. The herder
+// falls back to CheckpointStateDir and RestoreStateDir when a call names
+// none.
 type Paths struct {
 	// Base is the shared root (Substrate mounts its hostPath there); empty
 	// means DefaultBase.
 	Base string
 }
 
-// DefaultBase is what Substrate's worker Pods mount, named after the
-// first herder.
-const DefaultBase = "/var/lib/ateom-gvisor"
+// DefaultBase is what Substrate's worker Pods mount.
+const DefaultBase = "/var/lib/ate"
 
 func (p Paths) base() string {
 	if p.Base == "" {

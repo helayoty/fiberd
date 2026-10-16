@@ -14,8 +14,8 @@
 // An actor is a session named by its uid; an ActorTemplate is a fiberd
 // template (digest "<atespace>/<name>", resolved through fiberd's
 // -template map) under a grant this Pod mints for itself, sized by the
-// actor's memory limit. One actor per worker, as Substrate's Worker
-// record assumes today. The herder is a consumer: it holds grants and
+// actor's memory limit. One actor per worker, which the worker registers
+// as its capacity. The herder is a consumer: it holds grants and
 // speaks only Clone, Park, Release and Watch.
 package herder
 
@@ -28,6 +28,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -35,6 +36,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/helayoty/fiberd/pkg/artifact"
 	"github.com/helayoty/fiberd/pkg/core"
 	fiberendpoint "github.com/helayoty/fiberd/pkg/endpoint"
 	"github.com/helayoty/fiberd/pkg/runtime/host"
@@ -71,7 +73,8 @@ type Config struct {
 	Paths  Paths
 	Router Router // optional
 	// Probe checks an actor's readiness at its endpoint (default: HTTP
-	// GET of the container's readyz path through the fiber's endpoint).
+	// GET of the container's wakeup probe path through the fiber's
+	// endpoint).
 	Probe         func(ctx context.Context, endpoint, path string) error
 	CloneDeadline time.Duration
 	ReadyTimeout  time.Duration
@@ -86,11 +89,15 @@ type Payload struct {
 }
 
 type actor struct {
-	ref      [2]string // atespace, name
-	uid      string
-	tmpl     Template
-	grant    core.Grant
-	fiber    client.Fiber
+	ref    [2]string // atespace, name
+	uid    string
+	tmpl   Template
+	grant  core.Grant
+	memory uint64 // the actor's memory limit, which sizes its grant
+	fiber  client.Fiber
+	// parked: the session is parked here and no fiber runs it, after an
+	// export that failed and a resume that did not take.
+	parked   bool
 	started  time.Time
 	spec     *ateompb.WorkloadSpec
 	sampleAt time.Time
@@ -185,30 +192,33 @@ func (s *Service) RunWorkload(ctx context.Context, req *ateompb.RunWorkloadReque
 	return &ateompb.RunWorkloadResponse{}, nil
 }
 
-// RestoreWorkload: the snapshot atelet placed under RestoreStateDir
-// becomes this actor's session, resumed.
+// RestoreWorkload: the snapshot atelet placed in the actor's restore
+// directory becomes this actor's session, resumed.
 func (s *Service) RestoreWorkload(ctx context.Context, req *ateompb.RestoreWorkloadRequest) (*ateompb.RestoreWorkloadResponse, error) {
 	s.lifecycle.Lock()
 	defer s.lifecycle.Unlock()
 	if err := s.canStart(req.GetActorUid()); err != nil {
 		return nil, err
 	}
-	switch req.GetScope() {
-	case ateompb.SnapshotScope_SNAPSHOT_SCOPE_FULL:
-	default:
-		return nil, status.Errorf(codes.FailedPrecondition, "fiberd actors restore from SNAPSHOT_SCOPE_FULL snapshots (process memory); %s is not supported", req.GetScope())
+	if req.GetFidelity() != ateompb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY {
+		return nil, status.Errorf(codes.FailedPrecondition, "fiberd actors restore from SNAPSHOT_FIDELITY_MEMORY snapshots (process memory); %s is not supported", req.GetFidelity())
+	}
+	dir, err := s.actorDir(req.GetActorDirs().GetRestoreDir(), s.cfg.Paths.RestoreStateDir(req.GetActorUid()))
+	if err != nil {
+		return nil, err
 	}
 	tmpl := Template{req.GetActorTemplateAtespace(), req.GetActorTemplateName()}
 	_, g, err := s.cfg.Grants.Grant(ctx, tmpl, uint64(req.GetMemoryBytes()))
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "grant for %s: %v", tmpl.Digest(), err)
 	}
-	dir := s.cfg.Paths.RestoreStateDir(req.GetActorUid())
-	if err := host.ImportDelta(ctx, s.cfg.Host, g, req.GetActorUid(), dir); err != nil {
+	im, err := host.ImportDelta(ctx, s.cfg.Host, g, req.GetActorUid(), dir)
+	if err != nil {
 		return nil, status.Errorf(codes.FailedPrecondition, "import snapshot from %s: %v", dir, err)
 	}
 	a, err := s.start(ctx, tmpl, req.GetAtespace(), req.GetActorName(), req.GetActorUid(), uint64(req.GetMemoryBytes()), req.GetSpec(), client.Resume)
 	if err != nil {
+		s.withdraw(ctx, im)
 		return nil, err
 	}
 	log.Printf("herder: restored %s/%s (%s) as fiber %s on %s", a.ref[0], a.ref[1], a.uid, a.fiber.ID, a.fiber.Endpoint)
@@ -251,7 +261,7 @@ func (s *Service) start(ctx context.Context, tmpl Template, atespace, name, uid 
 		_ = s.cfg.Client.Release(ctx, f.ID, true)
 		return nil, status.Errorf(codes.Unavailable, "actor %s not ready: %v", uid, err)
 	}
-	a := &actor{ref: [2]string{atespace, name}, uid: uid, tmpl: tmpl, grant: g, fiber: f, started: time.Now(), spec: spec}
+	a := &actor{ref: [2]string{atespace, name}, uid: uid, tmpl: tmpl, grant: g, memory: memory, fiber: f, started: time.Now(), spec: spec}
 	s.mu.Lock()
 	s.active = a
 	s.mu.Unlock()
@@ -261,11 +271,12 @@ func (s *Service) start(ctx context.Context, tmpl Template, atespace, name, uid 
 	return a, nil
 }
 
-// ready waits for the containers' readyz probes on the fiber's endpoint
+// ready waits for the containers' wakeup probes on the fiber's endpoint
 // (one fiber serves the actor; every container's path is probed there).
+// An empty path is /readyz and a zero timeout is ReadyTimeout.
 func (s *Service) ready(ctx context.Context, endpoint string, spec *ateompb.WorkloadSpec) error {
 	for _, c := range spec.GetContainers() {
-		rz := c.GetReadyz()
+		rz := c.GetWakeupProbe()
 		if rz == nil {
 			continue
 		}
@@ -306,21 +317,32 @@ func (s *Service) CheckpointWorkload(ctx context.Context, req *ateompb.Checkpoin
 	if a == nil || a.uid != req.GetActorUid() {
 		return nil, status.Errorf(codes.NotFound, "actor %s is not executing here", req.GetActorUid())
 	}
-	if req.GetScope() != ateompb.SnapshotScope_SNAPSHOT_SCOPE_FULL {
-		return nil, status.Errorf(codes.FailedPrecondition, "fiberd checkpoints are SNAPSHOT_SCOPE_FULL (process memory); %s is not supported", req.GetScope())
+	if req.GetFidelity() != ateompb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY {
+		return nil, status.Errorf(codes.FailedPrecondition, "fiberd checkpoints are SNAPSHOT_FIDELITY_MEMORY (process memory); %s is not supported", req.GetFidelity())
 	}
-	if s.cfg.Router != nil {
-		s.cfg.Router.Deactivate(a.ref[0], a.ref[1])
+	dir, err := s.actorDir(req.GetActorDirs().GetCheckpointDir(), s.cfg.Paths.CheckpointStateDir(a.uid))
+	if err != nil {
+		return nil, err
 	}
-	if err := s.cfg.Client.Park(ctx, a.fiber.ID, true); err != nil {
+	// A session left parked by an earlier failed export goes straight to
+	// the export.
+	if !a.parked {
 		if s.cfg.Router != nil {
-			s.cfg.Router.Activate(a.ref[0], a.ref[1], a.fiber.Endpoint)
+			s.cfg.Router.Deactivate(a.ref[0], a.ref[1])
 		}
-		return nil, toStatus(err)
+		if err := s.cfg.Client.Park(ctx, a.fiber.ID, true); err != nil {
+			if s.cfg.Router != nil {
+				s.cfg.Router.Activate(a.ref[0], a.ref[1], a.fiber.Endpoint)
+			}
+			return nil, toStatus(err)
+		}
 	}
-	dir := s.cfg.Paths.CheckpointStateDir(a.uid)
 	files, err := host.ExportDelta(ctx, s.cfg.Host, a.grant, a.uid, dir)
 	if err != nil {
+		// The session is parked and its fiber gone. Resume it, so the
+		// actor runs here again. The caller's deadline may be what failed
+		// the export, so the resume does not inherit it.
+		s.resumeAfterExport(context.WithoutCancel(ctx), a)
 		return nil, status.Errorf(codes.Internal, "export parked session %s: %v", a.uid, err)
 	}
 	s.mu.Lock()
@@ -328,6 +350,55 @@ func (s *Service) CheckpointWorkload(ctx context.Context, req *ateompb.Checkpoin
 	s.mu.Unlock()
 	log.Printf("herder: checkpointed %s/%s (%s): %v in %s", a.ref[0], a.ref[1], a.uid, files, dir)
 	return &ateompb.CheckpointWorkloadResponse{SnapshotFiles: files}, nil
+}
+
+// resumeAfterExport brings back an actor whose export failed. It never
+// discards the session, since the parked state is its only copy. A resume
+// that does not take, or a fiber that does not turn ready and is parked
+// again, leaves the actor recorded as parked. A retried checkpoint then
+// exports it, and a terminate discards it.
+func (s *Service) resumeAfterExport(ctx context.Context, a *actor) {
+	park := func(why error) {
+		log.Printf("herder: %s/%s (%s) stays parked: %v", a.ref[0], a.ref[1], a.uid, why)
+		s.mu.Lock()
+		a.parked = true
+		s.mu.Unlock()
+	}
+	jwt, _, err := s.cfg.Grants.Grant(ctx, a.tmpl, a.memory)
+	if err != nil {
+		park(err)
+		return
+	}
+	f, err := s.cfg.Client.Clone(ctx, jwt, a.uid, s.cfg.CloneDeadline, nil)
+	if err != nil {
+		park(err)
+		return
+	}
+	if f.Kind != client.Resume {
+		// The parked state is gone already. This fresh session holds
+		// nothing, so it goes.
+		_ = s.cfg.Client.Release(ctx, f.ID, true)
+		park(fmt.Errorf("clone served %s, not the parked session", f.Kind))
+		return
+	}
+	if err := s.ready(ctx, f.Endpoint, a.spec); err != nil {
+		if perr := s.cfg.Client.Park(ctx, f.ID, true); perr != nil {
+			// Still running, so a terminate releases it as a fiber.
+			log.Printf("herder: %s/%s (%s) not ready after the resume, and parking it again failed: %v", a.ref[0], a.ref[1], a.uid, perr)
+			s.mu.Lock()
+			a.fiber, a.parked = f, false
+			s.mu.Unlock()
+			return
+		}
+		park(err)
+		return
+	}
+	s.mu.Lock()
+	a.fiber, a.parked, a.started, a.sampleAt = f, false, time.Now(), time.Time{}
+	s.mu.Unlock()
+	if s.cfg.Router != nil {
+		s.cfg.Router.Activate(a.ref[0], a.ref[1], f.Endpoint)
+	}
 }
 
 // TerminateWorkload ends the actor and discards its state here.
@@ -341,7 +412,20 @@ func (s *Service) TerminateWorkload(ctx context.Context, req *ateompb.TerminateW
 	if s.cfg.Router != nil {
 		s.cfg.Router.Deactivate(a.ref[0], a.ref[1])
 	}
-	if err := s.cfg.Client.Release(ctx, a.fiber.ID, true); err != nil && !client.NotFound(err) {
+	if a.parked {
+		// No fiber runs the session. Resume it to discard it.
+		jwt, _, err := s.cfg.Grants.Grant(ctx, a.tmpl, a.memory)
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "grant for %s: %v", a.tmpl.Digest(), err)
+		}
+		f, err := s.cfg.Client.Clone(ctx, jwt, a.uid, s.cfg.CloneDeadline, nil)
+		if err != nil {
+			return nil, toStatus(err)
+		}
+		if err := s.cfg.Client.Release(ctx, f.ID, true); err != nil && !client.NotFound(err) {
+			return nil, toStatus(err)
+		}
+	} else if err := s.cfg.Client.Release(ctx, a.fiber.ID, true); err != nil && !client.NotFound(err) {
 		return nil, toStatus(err)
 	}
 	s.mu.Lock()
@@ -349,6 +433,29 @@ func (s *Service) TerminateWorkload(ctx context.Context, req *ateompb.TerminateW
 	s.mu.Unlock()
 	log.Printf("herder: terminated %s/%s (%s)", a.ref[0], a.ref[1], a.uid)
 	return &ateompb.TerminateWorkloadResponse{}, nil
+}
+
+// withdraw deletes an imported session whose start failed, so it does
+// not wait out its TTL in the registry for a later Clone of the name to
+// resume. A tag that no longer holds the imported digest was claimed or
+// parked again since, and is left alone.
+func (s *Service) withdraw(ctx context.Context, im host.Imported) {
+	if im.Ref == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	loc, found, err := artifact.Resolve(ctx, im.Ref)
+	if err != nil {
+		log.Printf("herder: withdraw %s: %v", im.Ref, err)
+		return
+	}
+	if !found || loc.Digest != im.Digest {
+		return
+	}
+	if _, err := artifact.Delete(ctx, im.Ref); err != nil {
+		log.Printf("herder: withdraw %s: %v", im.Ref, err)
+	}
 }
 
 // GetWorkloadStats answers for the actor the caller names: NOT_FOUND
@@ -359,43 +466,62 @@ func (s *Service) GetWorkloadStats(_ context.Context, req *ateompb.GetWorkloadSt
 	if s.active == nil || s.active.uid != req.GetActorUid() {
 		return nil, status.Errorf(codes.NotFound, "actor %s is not executing here", req.GetActorUid())
 	}
-	sample, ok := s.sampleLocked(s.active)
-	if !ok {
+	sample := s.sampleLocked(s.active)
+	if sample.GetSource() == ateompb.StatsSource_STATS_SOURCE_UNSPECIFIED {
 		return nil, status.Error(codes.FailedPrecondition, "no sample yet")
 	}
 	return &ateompb.GetWorkloadStatsResponse{Sample: sample}, nil
 }
 
-// GetActiveWorkloadStats samples whatever executes here, never an error
-// for an ordinary state.
+// GetActiveWorkloadStats samples whatever executes here, never an error.
+// No actor is an empty list. An actor fiberd has not reported on yet is a
+// sample with its identity and no source, which Substrate reads as not
+// measured.
 func (s *Service) GetActiveWorkloadStats(context.Context, *ateompb.GetActiveWorkloadStatsRequest) (*ateompb.GetActiveWorkloadStatsResponse, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.active == nil {
-		return &ateompb.GetActiveWorkloadStatsResponse{Result: &ateompb.GetActiveWorkloadStatsResponse_NoSampleReason{NoSampleReason: ateompb.NoSampleReason_NO_SAMPLE_REASON_NO_WORKLOAD}}, nil
+		return &ateompb.GetActiveWorkloadStatsResponse{}, nil
 	}
-	sample, ok := s.sampleLocked(s.active)
-	if !ok {
-		return &ateompb.GetActiveWorkloadStatsResponse{Result: &ateompb.GetActiveWorkloadStatsResponse_NoSampleReason{NoSampleReason: ateompb.NoSampleReason_NO_SAMPLE_REASON_NOT_MEASURABLE_YET}}, nil
-	}
-	return &ateompb.GetActiveWorkloadStatsResponse{Result: &ateompb.GetActiveWorkloadStatsResponse_Sample{Sample: sample}}, nil
+	return &ateompb.GetActiveWorkloadStatsResponse{Samples: []*ateompb.WorkloadStatsSample{s.sampleLocked(s.active)}}, nil
 }
 
+// SandboxClass is the Substrate sandbox class of every actor here. Each
+// fiber is its own gVisor sandbox.
+const SandboxClass = "gvisor"
+
 // sampleLocked: the actor's W as fiberd last reported it for its
-// grant (one actor per grant here, so the grant's W is the actor's).
-func (s *Service) sampleLocked(a *actor) (*ateompb.WorkloadStatsSample, bool) {
-	st, ok := s.stats[a.grant.UID]
-	if !ok || a.sampleAt.IsZero() {
-		return nil, false
-	}
-	return &ateompb.WorkloadStatsSample{
+// grant (one actor per grant here, so the grant's W is the actor's). An
+// actor with no report since it started has its identity and no source.
+// Its epoch is when it started, since each Run or Restore starts one.
+func (s *Service) sampleLocked(a *actor) *ateompb.WorkloadStatsSample {
+	sample := &ateompb.WorkloadStatsSample{
 		Atespace: a.ref[0], ActorName: a.ref[1], ActorUid: a.uid,
 		ActorTemplateAtespace: a.tmpl.Atespace, ActorTemplateName: a.tmpl.Name,
-		Source:                ateompb.StatsSource_STATS_SOURCE_CGROUP,
-		MemoryCurrentBytes:    st.WUsedBytes,
-		MemoryWorkingSetBytes: st.WUsedBytes,
-		ObservedAtUnixNano:    a.sampleAt.UnixNano(),
-	}, true
+		SandboxClass: SandboxClass, EpochUnixNano: a.started.UnixNano(),
+	}
+	st, ok := s.stats[a.grant.UID]
+	if !ok || a.sampleAt.IsZero() {
+		return sample
+	}
+	sample.Source = ateompb.StatsSource_STATS_SOURCE_CGROUP
+	sample.MemoryCurrentBytes, sample.MemoryWorkingSetBytes = st.WUsedBytes, st.WUsedBytes
+	sample.ObservedAtUnixNano = a.sampleAt.UnixNano()
+	return sample
+}
+
+// actorDir is the directory atelet named for an actor, or fallback when
+// it named none. A named directory must be absolute and under the base
+// atelet shares with this worker, since the herder writes there.
+func (s *Service) actorDir(named, fallback string) (string, error) {
+	if named == "" {
+		return fallback, nil
+	}
+	base := s.cfg.Paths.base()
+	if rel, err := filepath.Rel(base, named); !filepath.IsAbs(named) || err != nil || rel == "." || !filepath.IsLocal(rel) {
+		return "", status.Errorf(codes.InvalidArgument, "actor directory %q is not under %s", named, base)
+	}
+	return filepath.Clean(named), nil
 }
 
 // toStatus maps the consumer's typed errors onto the codes Substrate's

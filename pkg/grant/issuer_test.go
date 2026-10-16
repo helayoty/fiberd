@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/go-jose/go-jose/v4"
+	"github.com/go-jose/go-jose/v4/jwt"
 
 	"github.com/helayoty/fiberd/pkg/core"
 	"github.com/helayoty/fiberd/pkg/grant"
@@ -210,23 +212,38 @@ func TestPeekUID(t *testing.T) {
 	enc := base64.RawURLEncoding.EncodeToString
 	notJSON := enc([]byte(`{"alg":"EdDSA","kid":"k"}`)) + "." + enc([]byte("not json")) + "." + enc([]byte("sig"))
 	hs := enc([]byte(`{"alg":"HS256"}`)) + "." + enc([]byte(`{"jti":"g-1"}`)) + "." + enc([]byte("sig"))
+	// A well-formed token padded past the size limit. Verify refuses it
+	// before parsing, and so must the peek, or the limit is no bound.
+	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.EdDSA, Key: stranger}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	big, err := jwt.Signed(signer).Claims(map[string]any{"jti": "g-1", "pad": strings.Repeat("x", grant.MaxTokenBytes)}).Serialize()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	cases := []struct {
 		name    string
 		token   string
 		want    string
 		wantErr bool
+		wantIs  error // the error wanted, when one in particular is due
 	}{
 		{name: "a token signed by anyone yields its jti", token: forged, want: "g-1"},
 		{name: "garbage fails", token: "not-a-jwt", wantErr: true},
 		{name: "a payload that is not JSON fails", token: notJSON, wantErr: true},
 		{name: "a disallowed algorithm fails", token: hs, wantErr: true},
+		{name: "a token over the size limit fails unparsed", token: big, wantErr: true, wantIs: grant.ErrTokenTooLarge},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := grant.PeekUID(tc.token)
 			if (err != nil) != tc.wantErr || got != tc.want {
 				t.Fatalf("PeekUID = %q, %v, want %q (error %v)", got, err, tc.want, tc.wantErr)
+			}
+			if tc.wantIs != nil && !errors.Is(err, tc.wantIs) {
+				t.Fatalf("PeekUID = %v, want %v", err, tc.wantIs)
 			}
 		})
 	}

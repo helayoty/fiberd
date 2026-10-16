@@ -1,6 +1,7 @@
 package compare
 
 import (
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -22,18 +23,24 @@ func CgroupMemory(dir string) (int64, error) {
 	return n, nil
 }
 
-// FindCgroup walks root for the first directory whose name contains
-// needle. A Pod's cgroup is named after its uid, with the kubelet's
-// cgroup driver deciding whether dashes became underscores, so both
-// spellings are tried.
-func FindCgroup(root, needle string) (string, error) {
-	alt := strings.ReplaceAll(needle, "-", "_")
+// FindCgroup walks root for the cgroup of the Pod with the given uid.
+// The kubelet's cgroup driver names it pod<uid> (cgroupfs) or
+// <parent>-pod<uid>.slice with the uid's dashes as underscores
+// (systemd). Only those exact names match, so one uid never finds
+// another's directory or a slice above it. An empty uid is refused,
+// since it would otherwise match the whole tree.
+func FindCgroup(root, uid string) (string, error) {
+	if uid == "" {
+		return "", errors.New("no pod uid to find a cgroup for")
+	}
+	cgroupfs := "pod" + uid
+	systemd := "-pod" + strings.ReplaceAll(uid, "-", "_") + ".slice"
 	var found string
 	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil || !d.IsDir() {
 			return nil
 		}
-		if strings.Contains(d.Name(), needle) || strings.Contains(d.Name(), alt) {
+		if n := d.Name(); n == cgroupfs || strings.HasSuffix(n, systemd) {
 			found = p
 			return fs.SkipAll
 		}
@@ -43,7 +50,7 @@ func FindCgroup(root, needle string) (string, error) {
 		return "", err
 	}
 	if found == "" {
-		return "", fmt.Errorf("no cgroup under %s for %s", root, needle)
+		return "", fmt.Errorf("no cgroup under %s for %s", root, uid)
 	}
 	return found, nil
 }

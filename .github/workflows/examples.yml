@@ -1,7 +1,8 @@
 name: examples
 
 # The examples end to end: Kubernetes in kind, the Kata-shaped shim,
-# Knative over Hyperlight (KVM) and Slurm in Docker.
+# Knative over Hyperlight (KVM), Slurm in Docker and Agent Substrate in
+# kind.
 on:
   push:
     branches: [main]
@@ -96,3 +97,47 @@ jobs:
         if: failure()
         run: |
           docker exec fiberd-slurm sh -c 'squeue; sinfo; tail -50 /var/log/slurm/slurmd.log; tail -50 /var/log/fiberd-conform.out; tail -50 /var/log/fiberd-storm.out' || true
+
+  example-substrate:
+    name: example - Agent Substrate in kind (actors are fibers, suspended and resumed through Substrate)
+    runs-on: ubuntu-24.04
+    # The run took 7 minutes on a 4-CPU Docker host with warm Go caches. A
+    # cold cache also builds every Substrate image, hence the margin.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          # The cache below holds the Go caches, keyed by Substrate's version.
+          cache: false
+      - name: Substrate version
+        id: substrate
+        run: echo "version=$(sed -n 's/^SUBSTRATE_VERSION=//p' examples/substrate/kind/run.sh)" >> "$GITHUB_OUTPUT"
+      # Substrate's source and the Go caches its ko build fills. Only a new
+      # Substrate version pays the full build.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            bin/substrate-src
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: substrate-${{ steps.substrate.outputs.version }}-${{ runner.os }}-${{ runner.arch }}
+      - run: make example-substrate
+        env:
+          SUBSTRATE_SRC: ${{ github.workspace }}/bin/substrate-src
+          # Substrate's go.mod can need a newer Go than fiberd's. setup-go
+          # pins GOTOOLCHAIN=local, so let go fetch the version it names.
+          GOTOOLCHAIN: auto
+      - name: cluster state on failure
+        if: failure()
+        run: |
+          ctx=kind-fiberd-substrate
+          kubectl --context $ctx get pods -A -o wide || true
+          kubectl --context $ctx -n ate-demo-fiberd get workerpool,deploy -o yaml || true
+          kubectl --context $ctx -n ate-demo-fiberd describe pods || true
+          kubectl --context $ctx -n ate-demo-fiberd logs -l ate.dev/worker-pool=fiberd --all-containers --tail=300 --prefix || true
+          kubectl --context $ctx -n ate-system logs -l app=atelet --all-containers --tail=300 --prefix || true
+          kubectl --context $ctx -n ate-system logs deploy/atenet-router --all-containers --tail=200 --prefix || true
+          kubectl --context $ctx -n ate-system logs deploy/ate-api-server --all-containers --tail=200 --prefix || true
+          kubectl --context $ctx -n ate-system logs deploy/ate-controller --all-containers --tail=200 --prefix || true

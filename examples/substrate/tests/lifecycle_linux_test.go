@@ -253,14 +253,14 @@ func (w *worker) through(t *testing.T, method, actor, path string) (int, string)
 }
 
 func actorReq(uid string) (*ateompb.RunWorkloadRequest, *ateompb.CheckpointWorkloadRequest, *ateompb.RestoreWorkloadRequest, *ateompb.TerminateWorkloadRequest) {
-	spec := &ateompb.WorkloadSpec{Containers: []*ateompb.Container{{Name: "counter", Readyz: &ateompb.Readyz{HttpGet: &ateompb.HTTPGetAction{Path: "/readyz", Port: 80}}}}}
+	spec := &ateompb.WorkloadSpec{Containers: []*ateompb.Container{{Name: "counter", WakeupProbe: &ateompb.WakeupProbe{HttpGet: &ateompb.HttpGetAction{Path: "/readyz", Port: 80}}}}}
 	id := func() (string, string, string, string, string) {
 		return "ate-demo", "counter-" + uid, uid, "ate-demo", "counter"
 	}
 	as, an, au, ta, tn := id()
 	return &ateompb.RunWorkloadRequest{Atespace: as, ActorName: an, ActorUid: au, ActorTemplateAtespace: ta, ActorTemplateName: tn, Spec: spec, MemoryBytes: 64 << 20},
-		&ateompb.CheckpointWorkloadRequest{Atespace: as, ActorName: an, ActorUid: au, ActorTemplateAtespace: ta, ActorTemplateName: tn, Spec: spec, Scope: ateompb.SnapshotScope_SNAPSHOT_SCOPE_FULL, SnapshotUri: "s3://bucket/atespaces/ate-demo/actors/" + uid + "/snapshots/1"},
-		&ateompb.RestoreWorkloadRequest{Atespace: as, ActorName: an, ActorUid: au, ActorTemplateAtespace: ta, ActorTemplateName: tn, Spec: spec, Scope: ateompb.SnapshotScope_SNAPSHOT_SCOPE_FULL, MemoryBytes: 64 << 20},
+		&ateompb.CheckpointWorkloadRequest{Atespace: as, ActorName: an, ActorUid: au, ActorTemplateAtespace: ta, ActorTemplateName: tn, Spec: spec, Fidelity: ateompb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY, SnapshotUri: "s3://bucket/atespaces/ate-demo/actors/" + uid + "/snapshots/1"},
+		&ateompb.RestoreWorkloadRequest{Atespace: as, ActorName: an, ActorUid: au, ActorTemplateAtespace: ta, ActorTemplateName: tn, Spec: spec, Fidelity: ateompb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY, MemoryBytes: 64 << 20},
 		&ateompb.TerminateWorkloadRequest{Atespace: as, ActorName: an, ActorUid: au, ActorTemplateAtespace: ta, ActorTemplateName: tn, Spec: spec}
 }
 
@@ -374,7 +374,7 @@ func lifecycleAcrossWorkers(t *testing.T, bc backendCase, cgRoot string) {
 			t0 := time.Now()
 			if tc.readyz != "" {
 				restore.Spec = &ateompb.WorkloadSpec{Containers: []*ateompb.Container{{Name: "counter",
-					Readyz: &ateompb.Readyz{HttpGet: &ateompb.HTTPGetAction{Path: tc.readyz}, TimeoutSeconds: 1}}}}
+					WakeupProbe: &ateompb.WakeupProbe{HttpGet: &ateompb.HttpGetAction{Path: tc.readyz}, TimeoutSeconds: 1}}}}
 				if _, err := tc.to.svc.RestoreWorkload(ctx, restore); status.Code(err) != codes.Unavailable {
 					t.Fatalf("restore %s with readyz %s = %v, want Unavailable", tc.uid, tc.readyz, err)
 				}

@@ -117,7 +117,7 @@ func newWorker(t *testing.T, fiberMax int, mod func(*Config)) *worker {
 
 func runReq(uid string) *ateompbRun {
 	return &ateompbRun{Atespace: "team-a", ActorName: "counter-" + uid, ActorUid: uid, ActorTemplateAtespace: "team-a", ActorTemplateName: "counter",
-		MemoryBytes: 16 << 20, Spec: &ateompbSpec{Containers: []*ateompbContainer{{Name: "app", Readyz: &ateompbReadyz{HttpGet: &ateompbHTTPGet{Path: "/readyz", Port: 80}}}}}}
+		MemoryBytes: 16 << 20, Spec: &ateompbSpec{Containers: []*ateompbContainer{{Name: "app", WakeupProbe: &ateompbWakeup{HttpGet: &ateompbHTTPGet{Path: "/readyz", Port: 80}}}}}}
 }
 
 func code(err error) codes.Code { return status.Code(err) }
@@ -186,19 +186,19 @@ func TestRunTerminateAndStats(t *testing.T) {
 				time.Sleep(20 * time.Millisecond)
 			}
 		}},
-		{name: "active stats carry a sample", do: func(t *testing.T) error {
+		{name: "active stats carry the actor's measured sample", do: func(t *testing.T) error {
 			resp, err := s.GetActiveWorkloadStats(ctx, &ateompbActiveReq{})
-			if err == nil && resp.GetSample() == nil {
+			if err == nil && (len(resp.GetSamples()) != 1 || resp.GetSamples()[0].GetSource() != sourceCgroup) {
 				t.Fatalf("active stats: %+v", resp)
 			}
 			return err
 		}},
 		{name: "checkpoint of a stranger is NOT_FOUND", want: codes.NotFound, do: func(*testing.T) error {
-			_, err := s.CheckpointWorkload(ctx, &ateompbCkpt{ActorUid: "a2", Scope: scopeFull})
+			_, err := s.CheckpointWorkload(ctx, &ateompbCkpt{ActorUid: "a2", Fidelity: fidelityMemory})
 			return err
 		}},
-		{name: "a DATA checkpoint is refused and leaves the actor running", want: codes.FailedPrecondition, do: func(t *testing.T) error {
-			_, err := s.CheckpointWorkload(ctx, &ateompbCkpt{ActorUid: "a1", Scope: scopeData})
+		{name: "a VOLUMES checkpoint is refused and leaves the actor running", want: codes.FailedPrecondition, do: func(t *testing.T) error {
+			_, err := s.CheckpointWorkload(ctx, &ateompbCkpt{ActorUid: "a1", Fidelity: fidelityVolumes})
 			if _, _, _, ok := s.Active(); !ok {
 				t.Fatal("a refused checkpoint must leave the actor running")
 			}
@@ -214,7 +214,7 @@ func TestRunTerminateAndStats(t *testing.T) {
 			if _, ok := router.active["team-a/counter-a1"]; ok {
 				t.Fatal("router still routes a terminated actor")
 			}
-			if resp, _ := s.GetActiveWorkloadStats(ctx, &ateompbActiveReq{}); resp.GetNoSampleReason() != noWorkload {
+			if resp, _ := s.GetActiveWorkloadStats(ctx, &ateompbActiveReq{}); len(resp.GetSamples()) != 0 {
 				t.Fatalf("active stats after terminate: %+v", resp)
 			}
 			return nil
@@ -248,11 +248,16 @@ func TestMissesMapToSubstrateCodes(t *testing.T) {
 			return err
 		}},
 		{name: "restore without a snapshot on disk: the import fails loudly", want: codes.FailedPrecondition, do: func(*testing.T) error {
-			_, err := s.RestoreWorkload(ctx, &ateompbRestore{ActorUid: "b2", ActorTemplateAtespace: "team-a", ActorTemplateName: "counter", Scope: scopeFull})
+			_, err := s.RestoreWorkload(ctx, &ateompbRestore{ActorUid: "b2", ActorTemplateAtespace: "team-a", ActorTemplateName: "counter", Fidelity: fidelityMemory})
 			return err
 		}},
-		{name: "a DATA_ON_GOLDEN restore is refused", want: codes.FailedPrecondition, do: func(*testing.T) error {
-			_, err := s.RestoreWorkload(ctx, &ateompbRestore{ActorUid: "b2", Scope: scopeDataOnGolden})
+		{name: "a ROOTFS restore is refused", want: codes.FailedPrecondition, do: func(*testing.T) error {
+			_, err := s.RestoreWorkload(ctx, &ateompbRestore{ActorUid: "b2", Fidelity: fidelityRootfs})
+			return err
+		}},
+		{name: "a restore directory outside the shared base is an invalid argument", want: codes.InvalidArgument, do: func(*testing.T) error {
+			_, err := s.RestoreWorkload(ctx, &ateompbRestore{ActorUid: "b2", ActorTemplateName: "counter", Fidelity: fidelityMemory,
+				ActorDirs: &ateompbActorDirs{RestoreDir: "/etc/b2/restore-state"}})
 			return err
 		}},
 		{name: "run without a uid is an invalid argument", want: codes.InvalidArgument, do: func(*testing.T) error {
@@ -260,7 +265,7 @@ func TestMissesMapToSubstrateCodes(t *testing.T) {
 			return err
 		}},
 		{name: "restore without a uid is an invalid argument", want: codes.InvalidArgument, do: func(*testing.T) error {
-			_, err := s.RestoreWorkload(ctx, &ateompbRestore{ActorTemplateName: "counter", Scope: scopeFull})
+			_, err := s.RestoreWorkload(ctx, &ateompbRestore{ActorTemplateName: "counter", Fidelity: fidelityMemory})
 			return err
 		}},
 		{name: "run while draining is unavailable", want: codes.Unavailable, do: func(*testing.T) error {
@@ -269,7 +274,7 @@ func TestMissesMapToSubstrateCodes(t *testing.T) {
 			return err
 		}},
 		{name: "restore while draining is unavailable", want: codes.Unavailable, do: func(*testing.T) error {
-			_, err := s.RestoreWorkload(ctx, &ateompbRestore{ActorUid: "b3", ActorTemplateName: "counter", Scope: scopeFull})
+			_, err := s.RestoreWorkload(ctx, &ateompbRestore{ActorUid: "b3", ActorTemplateName: "counter", Fidelity: fidelityMemory})
 			return err
 		}},
 	}

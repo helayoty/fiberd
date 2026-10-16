@@ -3,8 +3,8 @@
 # WorkerPool of fiberd workers, an actor that is a fiber, driven through
 # Substrate's router and control plane:
 #
-#   1. Substrate's source at the pinned commit (bin/substrate-src, or
-#      SUBSTRATE_SRC), its kind cluster (their script: local registry,
+#   1. Substrate's source at the pinned release tag (bin/substrate-src, or
+#      SUBSTRATE_SRC, which may already hold a clone), its kind cluster (their script: local registry,
 #      feature gates for Pod certificates) and its system (ate-api-server,
 #      atelet, atenet, rustfs, postgres), built with ko;
 #   2. the ateom-fiberd worker image (the herder, runsc and a gVisor
@@ -24,7 +24,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/../../.."
 
-COMMIT=85ce8ed5313f64aa4d8d5fb616ce450abf1e95e0
+# Substrate's release tag. Upstream publishes source tags only, and its
+# images are built from this source, so the tag pins them too.
+SUBSTRATE_VERSION=v0.5.0
 SRC=${SUBSTRATE_SRC:-$PWD/bin/substrate-src}
 export KIND_CLUSTER_NAME=${KIND_CLUSTER_NAME:-fiberd-substrate}
 CTX=kind-$KIND_CLUSTER_NAME
@@ -59,7 +61,8 @@ src() {
     log "cloning agent-substrate/substrate into $SRC"
     git clone --quiet https://github.com/agent-substrate/substrate "$SRC"
   fi
-  (cd "$SRC" && git checkout --quiet "$COMMIT")
+  (cd "$SRC" && { git rev-parse -q --verify "refs/tags/$SUBSTRATE_VERSION" >/dev/null || git fetch --quiet --tags origin; } &&
+    git checkout --quiet "refs/tags/$SUBSTRATE_VERSION")
 }
 
 cluster() {
@@ -84,7 +87,14 @@ system() {
     return 1
   fi
   log "Substrate's system for linux/$arch (ko builds every component; several minutes)"
-  (cd "$SRC" && env -u GOARCH -u GOOS hack/install-ate-kind.sh --deploy-ate-system)
+  # The egress gateway needs a credential provider. Actors here use none,
+  # so the in-cluster one is enough. The install pushes the images ko
+  # cannot build with docker buildx to the registry on localhost:5001,
+  # which only a builder on the host's network reaches. So it uses the
+  # current docker context's own builder, which has the docker driver,
+  # unless BUILDX_BUILDER names another.
+  (cd "$SRC" && env -u GOARCH -u GOOS BUILDX_BUILDER="${BUILDX_BUILDER:-$(docker context show)}" \
+    hack/install-ate-kind.sh --deploy-ate-system --credential-provider='{"name":"k8s.io"}')
 }
 
 image() {
@@ -94,13 +104,9 @@ image() {
   docker push "$IMAGE"
 }
 
-version_label() {
-  "${KC[@]}" get nodes -o jsonpath='{.items[0].metadata.labels.ate\.dev/substrate-version}'
-}
-
 render() { # render <file>
   sed -e "s|\${ATESPACE}|$ATESPACE|g" -e "s|\${POOL}|$POOL|g" -e "s|\${TEMPLATE}|$TEMPLATE|g" \
-      -e "s|\${IMAGE}|$IMAGE|g" -e "s|\${SUBSTRATE_VERSION}|$(version_label)|g" -e "s|\${BUCKET_NAME}|$BUCKET_NAME|g" "$1"
+      -e "s|\${IMAGE}|$IMAGE|g" -e "s|\${BUCKET_NAME}|$BUCKET_NAME|g" "$1"
 }
 
 # keys creates the Secret with the delta signing and seal keys every

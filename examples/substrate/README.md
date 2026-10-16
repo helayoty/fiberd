@@ -17,7 +17,7 @@ This example runs [fiberd](../../docs/glossary.md#fiberd) with `-insecure-plaint
 
 ## Run it
 
-Run it from the repository root. It needs Docker, kubectl, Go and jq, and takes about ten minutes the first time.
+Run it from the repository root. It needs Docker, kubectl, Go and jq, and takes about ten minutes the first time. It builds Substrate v0.5.0 from source, the release `kind/run.sh` pins.
 
 ```bash
 make example-substrate

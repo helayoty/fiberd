@@ -104,7 +104,8 @@ func TestParseArgs(t *testing.T) {
 	substrate := []string{"-pod-uid", "p-1", "-atunnel-listen-address", ":9443", "-atunnel-connect-listen-address", ":8443",
 		"-atunnel-credential-bundle", "/var/run/cred.pem", "-atunnel-trust-bundle", "/var/run/trust.pem",
 		"-atunnel-egress-listen-address", ":15001", "-atunnel-egress-trust-bundle", "/var/run/egress.pem",
-		"-atunnel-client-identity", "spiffe://c/ns/x/sa/router", "-readiness-listen-address", ":8081",
+		"-atunnel-client-identity", "spiffe://c/ns/x/sa/router", "-atunnel-broker-identity", "spiffe://c/ns/x/sa/atelet",
+		"-dns-egress-policy", "EnforceInAtunnel", "-readiness-listen-address", ":8081",
 		"-base-path", "/var/lib/ateom-x", "-otlp-relay-socket", "/run/otlp.sock", "-log-level", "debug", "-version"}
 	cases := []struct {
 		name   string
@@ -113,11 +114,11 @@ func TestParseArgs(t *testing.T) {
 		want   options
 		err    string
 	}{
-		{name: "Substrate's worker arguments", args: substrate, want: options{podUID: "p-1", listen: ":9443",
+		{name: "Substrate's worker arguments", args: substrate, want: options{podUID: "p-1", listen: ":9443", connect: ":8443",
 			credBundle: "/var/run/cred.pem", trustBundle: "/var/run/trust.pem", clientID: "spiffe://c/ns/x/sa/router",
-			readyAddr: ":8081", paths: herder.Paths{Base: "/var/lib/ateom-x"}}},
-		{name: "the defaults, with the pod uid from POD_UID", podEnv: "p-2", want: options{podUID: "p-2", listen: ":443",
-			clientID: ingress.DefaultAllowedClientID, readyAddr: "0.0.0.0:8080", paths: herder.Paths{Base: herder.DefaultBase}}},
+			ateletID: "spiffe://c/ns/x/sa/atelet", readyAddr: ":8081", paths: herder.Paths{Base: "/var/lib/ateom-x"}}},
+		{name: "the defaults, with the pod uid from POD_UID", podEnv: "p-2", want: options{podUID: "p-2", listen: ":443", connect: ":8443",
+			clientID: ingress.DefaultAllowedClientID, ateletID: capacity.AteletID, readyAddr: "0.0.0.0:8080", paths: herder.Paths{Base: herder.DefaultBase}}},
 		{name: "no pod uid", err: "-pod-uid (or POD_UID) is required"},
 		{name: "an unknown flag", args: []string{"-pod-uid", "p", "-no-such-flag"}, err: "no-such-flag"},
 	}
@@ -423,7 +424,7 @@ func TestRunRefuses(t *testing.T) {
 			}
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			err := run(ctx, pod, w.ingress, tc.cred, "", ingress.DefaultAllowedClientID, w.ready, herder.Paths{Base: base})
+			err := run(ctx, options{podUID: pod, listen: w.ingress, connect: "127.0.0.1:0", credBundle: tc.cred, clientID: ingress.DefaultAllowedClientID, ateletID: capacity.AteletID, readyAddr: w.ready, paths: herder.Paths{Base: base}})
 			if tc.fiberdUp {
 				// run cancels what it started on its way out.
 				awaitStopped(t, w.fiberd)
@@ -468,15 +469,15 @@ func httpGet(t *testing.T, url, actor string) (int, string) {
 }
 
 // fakeAtelet is atelet's AteomSupport service on the node's socket. It
-// records the capacity the worker reports.
+// records the registration the worker sends.
 type fakeAtelet struct {
 	ateletpb.UnimplementedAteomSupportServer
-	got chan *ateletpb.WorkerResources
+	got chan *ateletpb.RegisterWorkerRequest
 }
 
-func (a *fakeAtelet) SetWorkerCapacity(_ context.Context, req *ateletpb.SetWorkerCapacityRequest) (*ateletpb.SetWorkerCapacityResponse, error) {
-	a.got <- req.GetCapacity()
-	return &ateletpb.SetWorkerCapacityResponse{}, nil
+func (a *fakeAtelet) RegisterWorker(_ context.Context, req *ateletpb.RegisterWorkerRequest) (*ateletpb.RegisterWorkerResponse, error) {
+	a.got <- req
+	return &ateletpb.RegisterWorkerResponse{}, nil
 }
 
 func serveAtelet(t *testing.T, paths herder.Paths) *fakeAtelet {
@@ -484,7 +485,7 @@ func serveAtelet(t *testing.T, paths herder.Paths) *fakeAtelet {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a := &fakeAtelet{got: make(chan *ateletpb.WorkerResources, 4)}
+	a := &fakeAtelet{got: make(chan *ateletpb.RegisterWorkerRequest, 4)}
 	gs := grpc.NewServer()
 	ateletpb.RegisterAteomSupportServer(gs, a)
 	go func() { _ = gs.Serve(l) }()
@@ -513,7 +514,7 @@ func TestRunServesAWorker(t *testing.T) {
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		done <- run(ctx, "p-1", w.ingress, "", "", ingress.DefaultAllowedClientID, w.ready, herder.Paths{Base: w.base})
+		done <- run(ctx, options{podUID: "p-1", listen: w.ingress, connect: "127.0.0.1:0", clientID: ingress.DefaultAllowedClientID, ateletID: capacity.AteletID, readyAddr: w.ready, paths: herder.Paths{Base: w.base}})
 	}()
 	sock := herder.Paths{Base: w.base}.SocketPath("p-1")
 	for deadline := time.Now().Add(30 * time.Second); !strings.Contains(logs.String(), "serving atelet at "+sock); time.Sleep(20 * time.Millisecond) {
@@ -542,14 +543,14 @@ func TestRunServesAWorker(t *testing.T) {
 		name string
 		do   func(t *testing.T)
 	}{
-		{"the worker reports what it can host to atelet", func(t *testing.T) {
-			// Without this report Substrate places no actor here.
-			want := &ateletpb.WorkerResources{Actors: 1, Resources: &ateletpb.Resources{Limits: []*ateletpb.Limits{
-				{Name: "cpu", Quantity: "1000m"}, {Name: "memory", Quantity: "1073741824"}}}}
+		{"the worker registers what it can host and runs with atelet", func(t *testing.T) {
+			// Without this registration Substrate places no actor here.
+			want := &ateletpb.RegisterWorkerRequest{Capacity: &ateletpb.WorkerResources{Actors: 1, Resources: &ateletpb.Resources{Limits: []*ateletpb.Limits{
+				{Name: "cpu", Quantity: "1000m"}, {Name: "memory", Quantity: "1073741824"}}}}, DefaultRuntime: capacity.Runtime("gvisor")}
 			select {
 			case got := <-support.got:
 				if !proto.Equal(got, want) {
-					t.Fatalf("capacity = %v, want %v", got, want)
+					t.Fatalf("registration = %v, want %v", got, want)
 				}
 			case <-time.After(10 * time.Second):
 				t.Fatalf("the worker never reported its capacity\n%s", logs)
@@ -557,7 +558,7 @@ func TestRunServesAWorker(t *testing.T) {
 		}},
 		{"a fresh worker has no actor", func(t *testing.T) {
 			resp, err := atelet.GetActiveWorkloadStats(ctx, &ateompb.GetActiveWorkloadStatsRequest{})
-			if err != nil || resp.GetNoSampleReason() != ateompb.NoSampleReason_NO_SAMPLE_REASON_NO_WORKLOAD {
+			if err != nil || len(resp.GetSamples()) != 0 {
 				t.Fatalf("active stats = %v, %v, want no workload", resp, err)
 			}
 		}},
@@ -652,7 +653,7 @@ func TestRunLogsListenFailures(t *testing.T) {
 			defer cancel()
 			done := make(chan error, 1)
 			go func() {
-				done <- run(ctx, "p-1", listen, "", "", ingress.DefaultAllowedClientID, w.ready, herder.Paths{Base: w.base})
+				done <- run(ctx, options{podUID: "p-1", listen: listen, connect: "127.0.0.1:0", clientID: ingress.DefaultAllowedClientID, ateletID: capacity.AteletID, readyAddr: w.ready, paths: herder.Paths{Base: w.base}})
 			}()
 			for deadline := time.Now().Add(30 * time.Second); !strings.Contains(logs.String(), "serving atelet") || !strings.Contains(logs.String(), tc.logged); time.Sleep(20 * time.Millisecond) {
 				if time.Now().After(deadline) {

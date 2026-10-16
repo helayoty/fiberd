@@ -69,9 +69,10 @@ func (i *Issuer) Handler() http.Handler {
 
 // PeekUID reads the grant UID (jti) WITHOUT verifying the token. Only for
 // bookkeeping that never trusts the value, such as mapping a removed grant
-// file back to the UID to revoke.
+// file back to the UID to revoke. It bounds the token's size and algorithm
+// as Verify does, before any parsing.
 func PeekUID(token string) (string, error) {
-	tok, err := jwt.ParseSigned(token, AllowedAlgorithms)
+	tok, err := parse(token)
 	if err != nil {
 		return "", err
 	}

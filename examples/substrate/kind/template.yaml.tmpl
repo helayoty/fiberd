@@ -3,8 +3,9 @@
 # a bundle for; the herder does not run it: in this phase the workload is
 # the reference workload inside the worker image's gVisor rootfs, named
 # by the herder's ATEOM_FIBERD_TEMPLATE (the key "${ATESPACE}/${TEMPLATE}"
-# or "default"). Readiness and resources are honoured: the fiber is
-# probed at /readyz and the memory limit becomes the grant's W budget.
+# or "default"). The wakeup probe and resources are honoured: the fiber
+# is probed at /readyz and the memory limit becomes the grant's W budget.
+# Snapshots hold process memory, the only fidelity a fiber has.
 metadata:
   atespace: ${ATESPACE}
   name: ${TEMPLATE}
@@ -14,7 +15,7 @@ workerSelector:
 containers:
 - name: counter
   image: registry.k8s.io/pause:3.10.2@sha256:f548e0e8e3dc1896ca956272154dde3314e8cc4fde0a57577ee9fa1c63f5baf4
-  readyz:
+  wakeupProbe:
     httpGet:
       path: /readyz
       port: 80
@@ -24,10 +25,9 @@ resources:
     quantity: "1"
   - name: memory
     quantity: 256Mi
-snapshotsConfig:
-  onPause: SNAPSHOT_CONTENT_SCOPE_FULL
-  onCommit: SNAPSHOT_CONTENT_SCOPE_FULL
+snapshotConfig:
+  preferredFidelity: SNAPSHOT_FIDELITY_MEMORY
   storageLocation: gs://${BUCKET_NAME}/${ATESPACE}/
 sandboxConfig:
-  sandboxClass: SANDBOX_CLASS_GVISOR
+  sandboxClass: gvisor
   configName: gvisor-default

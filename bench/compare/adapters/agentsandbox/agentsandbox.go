@@ -380,6 +380,9 @@ func (a *Adapter) podUID(ctx context.Context, sandbox string) (string, error) {
 	if err := a.o.Kube.Get(ctx, "/api/v1/namespaces/"+a.o.Namespace+"/pods/"+sandbox, &p); err != nil {
 		return "", err
 	}
+	if p.Metadata.UID == "" {
+		return "", fmt.Errorf("agentsandbox: pod %s has no uid", sandbox)
+	}
 	return p.Metadata.UID, nil
 }
 

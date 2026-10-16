@@ -35,29 +35,44 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
-type SetWorkerCapacityRequest struct {
+type RegisterWorkerRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// What the worker can supply, in the same vocabulary the control plane
-	// records and an ActorTemplate asks in.
-	Capacity      *WorkerResources `protobuf:"bytes,1,opt,name=capacity,proto3" json:"capacity,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	// What the worker can supply. atelet converts it to the control plane's
+	// WorkerResources when forwarding.
+	//
+	// +k8s:required
+	Capacity *WorkerResources `protobuf:"bytes,1,opt,name=capacity,proto3" json:"capacity,omitempty"`
+	// Runtime that new and cold-booted actors start under.
+	// Snapshots matching default_runtime can also warm-boot on this worker.
+	// atelet converts it to the control plane's SandboxRuntime when forwarding.
+	//
+	// +k8s:required
+	DefaultRuntime *SandboxRuntime `protobuf:"bytes,2,opt,name=default_runtime,json=defaultRuntime,proto3" json:"default_runtime,omitempty"`
+	// Additional runtimes (excluding default_runtime) that this worker can
+	// restore snapshots from right now.
+	//
+	// +k8s:optional
+	// +k8s:maxItems=32
+	// +k8s:listType=atomic
+	RestorableRuntimes []*SandboxRuntime `protobuf:"bytes,3,rep,name=restorable_runtimes,json=restorableRuntimes,proto3" json:"restorable_runtimes,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
-func (x *SetWorkerCapacityRequest) Reset() {
-	*x = SetWorkerCapacityRequest{}
+func (x *RegisterWorkerRequest) Reset() {
+	*x = RegisterWorkerRequest{}
 	mi := &file_atelet_atelet_proto_msgTypes[0]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *SetWorkerCapacityRequest) String() string {
+func (x *RegisterWorkerRequest) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*SetWorkerCapacityRequest) ProtoMessage() {}
+func (*RegisterWorkerRequest) ProtoMessage() {}
 
-func (x *SetWorkerCapacityRequest) ProtoReflect() protoreflect.Message {
+func (x *RegisterWorkerRequest) ProtoReflect() protoreflect.Message {
 	mi := &file_atelet_atelet_proto_msgTypes[0]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -69,38 +84,68 @@ func (x *SetWorkerCapacityRequest) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use SetWorkerCapacityRequest.ProtoReflect.Descriptor instead.
-func (*SetWorkerCapacityRequest) Descriptor() ([]byte, []int) {
+// Deprecated: Use RegisterWorkerRequest.ProtoReflect.Descriptor instead.
+func (*RegisterWorkerRequest) Descriptor() ([]byte, []int) {
 	return file_atelet_atelet_proto_rawDescGZIP(), []int{0}
 }
 
-func (x *SetWorkerCapacityRequest) GetCapacity() *WorkerResources {
+func (x *RegisterWorkerRequest) GetCapacity() *WorkerResources {
 	if x != nil {
 		return x.Capacity
 	}
 	return nil
 }
 
-type SetWorkerCapacityResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
+func (x *RegisterWorkerRequest) GetDefaultRuntime() *SandboxRuntime {
+	if x != nil {
+		return x.DefaultRuntime
+	}
+	return nil
+}
+
+func (x *RegisterWorkerRequest) GetRestorableRuntimes() []*SandboxRuntime {
+	if x != nil {
+		return x.RestorableRuntimes
+	}
+	return nil
+}
+
+// SandboxRuntime describes a sandbox runtime and its compatibility identity as
+// reported by a worker. It mirrors the control plane's SandboxRuntime and is
+// validated by the same rules.
+type SandboxRuntime struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// e.g. "gvisor", "microvm"
+	//
+	// +k8s:required
+	// +k8s:maxLength=63
+	// +k8s:customValidation # gvisor or microvm
+	SandboxClass string `protobuf:"bytes,1,opt,name=sandbox_class,json=sandboxClass,proto3" json:"sandbox_class,omitempty"`
+	// Primary compatibility version stamped onto an actor's snapshot when a
+	// checkpoint is taken on this runtime. Snapshots matching `version`
+	// can warm-boot on this runtime.
+	// TODO: Add support for additional compatibility versions.
+	//
+	// +k8s:required
+	Version       *VersionedSandboxCompat `protobuf:"bytes,2,opt,name=version,proto3" json:"version,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *SetWorkerCapacityResponse) Reset() {
-	*x = SetWorkerCapacityResponse{}
+func (x *SandboxRuntime) Reset() {
+	*x = SandboxRuntime{}
 	mi := &file_atelet_atelet_proto_msgTypes[1]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *SetWorkerCapacityResponse) String() string {
+func (x *SandboxRuntime) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*SetWorkerCapacityResponse) ProtoMessage() {}
+func (*SandboxRuntime) ProtoMessage() {}
 
-func (x *SetWorkerCapacityResponse) ProtoReflect() protoreflect.Message {
+func (x *SandboxRuntime) ProtoReflect() protoreflect.Message {
 	mi := &file_atelet_atelet_proto_msgTypes[1]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -112,21 +157,173 @@ func (x *SetWorkerCapacityResponse) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use SetWorkerCapacityResponse.ProtoReflect.Descriptor instead.
-func (*SetWorkerCapacityResponse) Descriptor() ([]byte, []int) {
+// Deprecated: Use SandboxRuntime.ProtoReflect.Descriptor instead.
+func (*SandboxRuntime) Descriptor() ([]byte, []int) {
 	return file_atelet_atelet_proto_rawDescGZIP(), []int{1}
 }
 
-// ateapi.WorkerResources.
+func (x *SandboxRuntime) GetSandboxClass() string {
+	if x != nil {
+		return x.SandboxClass
+	}
+	return ""
+}
+
+func (x *SandboxRuntime) GetVersion() *VersionedSandboxCompat {
+	if x != nil {
+		return x.Version
+	}
+	return nil
+}
+
+// VersionedSandboxCompat holds the compatibility schema version and the
+// key-value compatibility attributes for a SandboxRuntime.
+type VersionedSandboxCompat struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Compatibility schema version (e.g. "v1") defining which runtime and
+	// hardware attributes are recorded and how they are computed.
+	//
+	// +k8s:required
+	// +k8s:maxLength=64
+	SchemaVersion string `protobuf:"bytes,1,opt,name=schema_version,json=schemaVersion,proto3" json:"schema_version,omitempty"`
+	// Key-value compatibility attributes defined by this schema version, covering
+	// both runtime assets (e.g. "gvisor_asset_hash") and effective guest hardware
+	// features after masking (e.g. "architecture", "cpu_features").
+	// Matched against a snapshot under the same schema_version: every attribute
+	// on the snapshot must be present on the worker with an equal value; keys
+	// only the worker has are ignored. Bump schema_version when a key's meaning
+	// changes or older snapshots must no longer match.
+	// Order as sent does not matter: ate-api-server sorts attributes by key
+	// before recording them.
+	//
+	// +k8s:required
+	// +k8s:maxItems=32
+	// +k8s:listType=map
+	// +k8s:listMapKey=key
+	Attributes    []*AttributeEntry `protobuf:"bytes,2,rep,name=attributes,proto3" json:"attributes,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *VersionedSandboxCompat) Reset() {
+	*x = VersionedSandboxCompat{}
+	mi := &file_atelet_atelet_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *VersionedSandboxCompat) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*VersionedSandboxCompat) ProtoMessage() {}
+
+func (x *VersionedSandboxCompat) ProtoReflect() protoreflect.Message {
+	mi := &file_atelet_atelet_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use VersionedSandboxCompat.ProtoReflect.Descriptor instead.
+func (*VersionedSandboxCompat) Descriptor() ([]byte, []int) {
+	return file_atelet_atelet_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *VersionedSandboxCompat) GetSchemaVersion() string {
+	if x != nil {
+		return x.SchemaVersion
+	}
+	return ""
+}
+
+func (x *VersionedSandboxCompat) GetAttributes() []*AttributeEntry {
+	if x != nil {
+		return x.Attributes
+	}
+	return nil
+}
+
+// AttributeEntry is a single key-value compatibility attribute.
+type AttributeEntry struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Attribute name (e.g. "architecture", "cpu_features", "gvisor_asset_hash").
+	//
+	// +k8s:required
+	// +k8s:maxLength=128
+	Key string `protobuf:"bytes,1,opt,name=key,proto3" json:"key,omitempty"`
+	// Attribute value corresponding to key.
+	//
+	// +k8s:required
+	// +k8s:maxLength=256
+	Value         string `protobuf:"bytes,2,opt,name=value,proto3" json:"value,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AttributeEntry) Reset() {
+	*x = AttributeEntry{}
+	mi := &file_atelet_atelet_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AttributeEntry) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AttributeEntry) ProtoMessage() {}
+
+func (x *AttributeEntry) ProtoReflect() protoreflect.Message {
+	mi := &file_atelet_atelet_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AttributeEntry.ProtoReflect.Descriptor instead.
+func (*AttributeEntry) Descriptor() ([]byte, []int) {
+	return file_atelet_atelet_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *AttributeEntry) GetKey() string {
+	if x != nil {
+		return x.Key
+	}
+	return ""
+}
+
+func (x *AttributeEntry) GetValue() string {
+	if x != nil {
+		return x.Value
+	}
+	return ""
+}
+
+// WorkerResources is what a worker can supply. It mirrors the control plane's
+// WorkerResources and is validated by the same rules.
 type WorkerResources struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Resources match the Actor's definition of resources.
-	// They are matched by name and used for placement.
+	// Resources are matched by name against actors' resources for placement.
+	//
+	// +k8s:optional
 	Resources *Resources `protobuf:"bytes,1,opt,name=resources,proto3" json:"resources,omitempty"`
-	// A count of Actors.  Workers can use this to limit the number of Actors
-	// that can be placed on them, constraining the costs of other things that
-	// are not captured in the resources above, but which still have costs -
-	// netns, mounts, file descriptors, etc.
+	// A count of Actors. Workers can use this to limit the number of Actors
+	// that can be placed on them, constraining costs not captured in the
+	// resources above.
+	//
+	// +k8s:optional
+	// +k8s:minimum=1
 	Actors        int32 `protobuf:"varint,2,opt,name=actors,proto3" json:"actors,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -134,7 +331,7 @@ type WorkerResources struct {
 
 func (x *WorkerResources) Reset() {
 	*x = WorkerResources{}
-	mi := &file_atelet_atelet_proto_msgTypes[2]
+	mi := &file_atelet_atelet_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -146,7 +343,7 @@ func (x *WorkerResources) String() string {
 func (*WorkerResources) ProtoMessage() {}
 
 func (x *WorkerResources) ProtoReflect() protoreflect.Message {
-	mi := &file_atelet_atelet_proto_msgTypes[2]
+	mi := &file_atelet_atelet_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -159,7 +356,7 @@ func (x *WorkerResources) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WorkerResources.ProtoReflect.Descriptor instead.
 func (*WorkerResources) Descriptor() ([]byte, []int) {
-	return file_atelet_atelet_proto_rawDescGZIP(), []int{2}
+	return file_atelet_atelet_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *WorkerResources) GetResources() *Resources {
@@ -176,12 +373,16 @@ func (x *WorkerResources) GetActors() int32 {
 	return 0
 }
 
-// ateapi.Resources.
 type Resources struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// limits is the maximum amount of compute resources allowed. Only "cpu"
 	// and "memory" are supported, each at most once, and each quantity must be
 	// greater than zero; the cpu limit must be less than 1000 cores.
+	//
+	// +k8s:optional
+	// +k8s:maxItems=2
+	// +k8s:listType=map
+	// +k8s:listMapKey=name
 	Limits        []*Limits `protobuf:"bytes,1,rep,name=limits,proto3" json:"limits,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -189,7 +390,7 @@ type Resources struct {
 
 func (x *Resources) Reset() {
 	*x = Resources{}
-	mi := &file_atelet_atelet_proto_msgTypes[3]
+	mi := &file_atelet_atelet_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -201,7 +402,7 @@ func (x *Resources) String() string {
 func (*Resources) ProtoMessage() {}
 
 func (x *Resources) ProtoReflect() protoreflect.Message {
-	mi := &file_atelet_atelet_proto_msgTypes[3]
+	mi := &file_atelet_atelet_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -214,7 +415,7 @@ func (x *Resources) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Resources.ProtoReflect.Descriptor instead.
 func (*Resources) Descriptor() ([]byte, []int) {
-	return file_atelet_atelet_proto_rawDescGZIP(), []int{3}
+	return file_atelet_atelet_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *Resources) GetLimits() []*Limits {
@@ -224,12 +425,17 @@ func (x *Resources) GetLimits() []*Limits {
 	return nil
 }
 
-// ateapi.Limits.
+// +k8s:customValidation # names, quantity parse/positivity, cpu bound
 type Limits struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	Name  string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	// +k8s:required
+	// +k8s:maxLength=16 # the Limits hook restricts values to cpu/memory
+	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
 	// quantity is in Kubernetes resource.Quantity string form (e.g. "500m",
 	// "2Gi").
+	//
+	// +k8s:required
+	// +k8s:maxLength=32 # the Limits hook requires a parseable quantity
 	Quantity      string `protobuf:"bytes,2,opt,name=quantity,proto3" json:"quantity,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -237,7 +443,7 @@ type Limits struct {
 
 func (x *Limits) Reset() {
 	*x = Limits{}
-	mi := &file_atelet_atelet_proto_msgTypes[4]
+	mi := &file_atelet_atelet_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -249,7 +455,7 @@ func (x *Limits) String() string {
 func (*Limits) ProtoMessage() {}
 
 func (x *Limits) ProtoReflect() protoreflect.Message {
-	mi := &file_atelet_atelet_proto_msgTypes[4]
+	mi := &file_atelet_atelet_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -262,7 +468,7 @@ func (x *Limits) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Limits.ProtoReflect.Descriptor instead.
 func (*Limits) Descriptor() ([]byte, []int) {
-	return file_atelet_atelet_proto_rawDescGZIP(), []int{4}
+	return file_atelet_atelet_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *Limits) GetName() string {
@@ -279,14 +485,62 @@ func (x *Limits) GetQuantity() string {
 	return ""
 }
 
+type RegisterWorkerResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RegisterWorkerResponse) Reset() {
+	*x = RegisterWorkerResponse{}
+	mi := &file_atelet_atelet_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RegisterWorkerResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RegisterWorkerResponse) ProtoMessage() {}
+
+func (x *RegisterWorkerResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_atelet_atelet_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RegisterWorkerResponse.ProtoReflect.Descriptor instead.
+func (*RegisterWorkerResponse) Descriptor() ([]byte, []int) {
+	return file_atelet_atelet_proto_rawDescGZIP(), []int{7}
+}
+
 var File_atelet_atelet_proto protoreflect.FileDescriptor
 
 const file_atelet_atelet_proto_rawDesc = "" +
 	"\n" +
-	"\x13atelet/atelet.proto\x12\x06atelet\"O\n" +
-	"\x18SetWorkerCapacityRequest\x123\n" +
-	"\bcapacity\x18\x01 \x01(\v2\x17.atelet.WorkerResourcesR\bcapacity\"\x1b\n" +
-	"\x19SetWorkerCapacityResponse\"Z\n" +
+	"\x13atelet/atelet.proto\x12\x06atelet\"\xd6\x01\n" +
+	"\x15RegisterWorkerRequest\x123\n" +
+	"\bcapacity\x18\x01 \x01(\v2\x17.atelet.WorkerResourcesR\bcapacity\x12?\n" +
+	"\x0fdefault_runtime\x18\x02 \x01(\v2\x16.atelet.SandboxRuntimeR\x0edefaultRuntime\x12G\n" +
+	"\x13restorable_runtimes\x18\x03 \x03(\v2\x16.atelet.SandboxRuntimeR\x12restorableRuntimes\"o\n" +
+	"\x0eSandboxRuntime\x12#\n" +
+	"\rsandbox_class\x18\x01 \x01(\tR\fsandboxClass\x128\n" +
+	"\aversion\x18\x02 \x01(\v2\x1e.atelet.VersionedSandboxCompatR\aversion\"w\n" +
+	"\x16VersionedSandboxCompat\x12%\n" +
+	"\x0eschema_version\x18\x01 \x01(\tR\rschemaVersion\x126\n" +
+	"\n" +
+	"attributes\x18\x02 \x03(\v2\x16.atelet.AttributeEntryR\n" +
+	"attributes\"8\n" +
+	"\x0eAttributeEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value\"Z\n" +
 	"\x0fWorkerResources\x12/\n" +
 	"\tresources\x18\x01 \x01(\v2\x11.atelet.ResourcesR\tresources\x12\x16\n" +
 	"\x06actors\x18\x02 \x01(\x05R\x06actors\"3\n" +
@@ -294,9 +548,10 @@ const file_atelet_atelet_proto_rawDesc = "" +
 	"\x06limits\x18\x01 \x03(\v2\x0e.atelet.LimitsR\x06limits\"8\n" +
 	"\x06Limits\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x1a\n" +
-	"\bquantity\x18\x02 \x01(\tR\bquantity2j\n" +
-	"\fAteomSupport\x12Z\n" +
-	"\x11SetWorkerCapacity\x12 .atelet.SetWorkerCapacityRequest\x1a!.atelet.SetWorkerCapacityResponse\"\x00BEZCgithub.com/helayoty/fiberd/examples/substrate/proto/atelet;ateletpbb\x06proto3"
+	"\bquantity\x18\x02 \x01(\tR\bquantity\"\x18\n" +
+	"\x16RegisterWorkerResponse2a\n" +
+	"\fAteomSupport\x12Q\n" +
+	"\x0eRegisterWorker\x12\x1d.atelet.RegisterWorkerRequest\x1a\x1e.atelet.RegisterWorkerResponse\"\x00BEZCgithub.com/helayoty/fiberd/examples/substrate/proto/atelet;ateletpbb\x06proto3"
 
 var (
 	file_atelet_atelet_proto_rawDescOnce sync.Once
@@ -310,25 +565,32 @@ func file_atelet_atelet_proto_rawDescGZIP() []byte {
 	return file_atelet_atelet_proto_rawDescData
 }
 
-var file_atelet_atelet_proto_msgTypes = make([]protoimpl.MessageInfo, 5)
+var file_atelet_atelet_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
 var file_atelet_atelet_proto_goTypes = []any{
-	(*SetWorkerCapacityRequest)(nil),  // 0: atelet.SetWorkerCapacityRequest
-	(*SetWorkerCapacityResponse)(nil), // 1: atelet.SetWorkerCapacityResponse
-	(*WorkerResources)(nil),           // 2: atelet.WorkerResources
-	(*Resources)(nil),                 // 3: atelet.Resources
-	(*Limits)(nil),                    // 4: atelet.Limits
+	(*RegisterWorkerRequest)(nil),  // 0: atelet.RegisterWorkerRequest
+	(*SandboxRuntime)(nil),         // 1: atelet.SandboxRuntime
+	(*VersionedSandboxCompat)(nil), // 2: atelet.VersionedSandboxCompat
+	(*AttributeEntry)(nil),         // 3: atelet.AttributeEntry
+	(*WorkerResources)(nil),        // 4: atelet.WorkerResources
+	(*Resources)(nil),              // 5: atelet.Resources
+	(*Limits)(nil),                 // 6: atelet.Limits
+	(*RegisterWorkerResponse)(nil), // 7: atelet.RegisterWorkerResponse
 }
 var file_atelet_atelet_proto_depIdxs = []int32{
-	2, // 0: atelet.SetWorkerCapacityRequest.capacity:type_name -> atelet.WorkerResources
-	3, // 1: atelet.WorkerResources.resources:type_name -> atelet.Resources
-	4, // 2: atelet.Resources.limits:type_name -> atelet.Limits
-	0, // 3: atelet.AteomSupport.SetWorkerCapacity:input_type -> atelet.SetWorkerCapacityRequest
-	1, // 4: atelet.AteomSupport.SetWorkerCapacity:output_type -> atelet.SetWorkerCapacityResponse
-	4, // [4:5] is the sub-list for method output_type
-	3, // [3:4] is the sub-list for method input_type
-	3, // [3:3] is the sub-list for extension type_name
-	3, // [3:3] is the sub-list for extension extendee
-	0, // [0:3] is the sub-list for field type_name
+	4, // 0: atelet.RegisterWorkerRequest.capacity:type_name -> atelet.WorkerResources
+	1, // 1: atelet.RegisterWorkerRequest.default_runtime:type_name -> atelet.SandboxRuntime
+	1, // 2: atelet.RegisterWorkerRequest.restorable_runtimes:type_name -> atelet.SandboxRuntime
+	2, // 3: atelet.SandboxRuntime.version:type_name -> atelet.VersionedSandboxCompat
+	3, // 4: atelet.VersionedSandboxCompat.attributes:type_name -> atelet.AttributeEntry
+	5, // 5: atelet.WorkerResources.resources:type_name -> atelet.Resources
+	6, // 6: atelet.Resources.limits:type_name -> atelet.Limits
+	0, // 7: atelet.AteomSupport.RegisterWorker:input_type -> atelet.RegisterWorkerRequest
+	7, // 8: atelet.AteomSupport.RegisterWorker:output_type -> atelet.RegisterWorkerResponse
+	8, // [8:9] is the sub-list for method output_type
+	7, // [7:8] is the sub-list for method input_type
+	7, // [7:7] is the sub-list for extension type_name
+	7, // [7:7] is the sub-list for extension extendee
+	0, // [0:7] is the sub-list for field type_name
 }
 
 func init() { file_atelet_atelet_proto_init() }
@@ -342,7 +604,7 @@ func file_atelet_atelet_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_atelet_atelet_proto_rawDesc), len(file_atelet_atelet_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   5,
+			NumMessages:   8,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

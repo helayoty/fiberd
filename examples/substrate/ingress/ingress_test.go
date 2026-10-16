@@ -1,6 +1,7 @@
 package ingress
 
 import (
+	"bufio"
 	"io"
 	"net"
 	"net/http"
@@ -180,6 +181,140 @@ func TestLeavingAFiberClosesItsIdleConnections(t *testing.T) {
 			case <-closed:
 			case <-time.After(10 * time.Second):
 				t.Fatal("the old fiber's idle connection stayed open")
+			}
+		})
+	}
+}
+
+// connect opens a CONNECT tunnel through srv over HTTP/1.1 as the router
+// does, sends one HTTP request for path through it, and returns the
+// CONNECT status and what came back through the tunnel.
+func connect(t *testing.T, addr, authority, actor, path string, during func()) (int, string) {
+	t.Helper()
+	c, err := net.DialTimeout("tcp", addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = c.Close() }()
+	_ = c.SetDeadline(time.Now().Add(10 * time.Second))
+	req := "CONNECT " + authority + " HTTP/1.1\r\nHost: " + authority + "\r\n"
+	if actor != "" {
+		req += TargetActorHeader + ": " + actor + "\r\n"
+	}
+	if _, err := io.WriteString(c, req+"\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	br := bufio.NewReader(c)
+	resp, err := http.ReadResponse(br, &http.Request{Method: http.MethodConnect})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, resp.Header.Get(StaleAssignmentHeader) + " " + strings.TrimSpace(string(b))
+	}
+	if during != nil {
+		during()
+	}
+	if _, err := io.WriteString(c, "GET "+path+" HTTP/1.1\r\nHost: actor\r\nConnection: close\r\n\r\n"); err != nil {
+		return resp.StatusCode, err.Error()
+	}
+	inner, err := http.ReadResponse(br, nil)
+	if err != nil {
+		return resp.StatusCode, "tunnel closed"
+	}
+	b, _ := io.ReadAll(inner.Body)
+	return resp.StatusCode, string(b)
+}
+
+// TestConnectTunnels checks the CONNECT path atenet-router takes by
+// default since Substrate v0.5.0. A tunnel for an activated actor reaches
+// its fiber, whatever port it names. Anything the router must re-resolve
+// is 421 with the stale header, and a deactivated actor's tunnel closes.
+func TestConnectTunnels(t *testing.T) {
+	cases := []struct {
+		name      string
+		authority string
+		actor     string
+		gone      bool // the actor is deactivated once the tunnel is open
+		code      int
+		body      string
+	}{
+		{name: "a tunnel reaches the actor's fiber", authority: "actor:80", actor: "team-a/a", code: http.StatusOK, body: "a GET /count host=actor"},
+		{name: "any port reaches the one endpoint", authority: "actor:9090", actor: "team-a/a", code: http.StatusOK, body: "a GET /count host=actor"},
+		{name: "an actor not here is misdirected", authority: "actor:80", actor: "team-a/other", code: http.StatusMisdirectedRequest, body: "true misdirected request"},
+		{name: "no actor is misdirected", authority: "actor:80", code: http.StatusMisdirectedRequest, body: "true misdirected request"},
+		{name: "an authority without a port is refused", authority: "actor", actor: "team-a/a", code: http.StatusBadRequest, body: " CONNECT authority must include a port"},
+		{name: "deactivating the actor closes its tunnel", authority: "actor:80", actor: "team-a/a", gone: true, code: http.StatusOK, body: "tunnel closed"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s, err := New(Config{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			srv := httptest.NewServer(s)
+			defer srv.Close()
+			s.Activate("team-a", "a", fakeFiber(t, "a"))
+			var during func()
+			if tc.gone {
+				during = func() {
+					s.Deactivate("team-a", "a")
+					time.Sleep(50 * time.Millisecond)
+				}
+			}
+			code, body := connect(t, srv.Listener.Addr().String(), tc.authority, tc.actor, "/count", during)
+			if code != tc.code || body != tc.body {
+				t.Fatalf("CONNECT = %d %q, want %d %q", code, body, tc.code, tc.body)
+			}
+		})
+	}
+}
+
+// TestConnectOverHTTP2 checks a tunnel the router opens as an HTTP/2
+// stream over TLS, its usual transport to a worker.
+func TestConnectOverHTTP2(t *testing.T) {
+	cases := []struct {
+		name string
+		path string
+		want string
+	}{
+		{name: "a request through an HTTP/2 tunnel", path: "/count", want: "a GET /count host=actor"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s, err := New(Config{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			s.Activate("team-a", "a", fakeFiber(t, "a"))
+			srv := httptest.NewUnstartedServer(s)
+			srv.EnableHTTP2 = true
+			srv.StartTLS()
+			defer srv.Close()
+			pr, pw := io.Pipe()
+			req, _ := http.NewRequest(http.MethodConnect, srv.URL, pr)
+			req.Host = "actor:80"
+			req.Header.Set(TargetActorHeader, "team-a/a")
+			resp, err := srv.Client().Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != http.StatusOK || resp.ProtoMajor != 2 {
+				t.Fatalf("CONNECT = %d over HTTP/%d", resp.StatusCode, resp.ProtoMajor)
+			}
+			go func() {
+				_, _ = io.WriteString(pw, "GET "+tc.path+" HTTP/1.1\r\nHost: actor\r\nConnection: close\r\n\r\n")
+			}()
+			inner, err := http.ReadResponse(bufio.NewReader(resp.Body), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			b, _ := io.ReadAll(inner.Body)
+			_ = pw.Close()
+			if string(b) != tc.want {
+				t.Fatalf("through the tunnel = %q, want %q", b, tc.want)
 			}
 		})
 	}

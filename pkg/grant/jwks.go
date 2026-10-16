@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -48,8 +49,13 @@ func (c *Cache) now() time.Time {
 	return time.Now()
 }
 
-// jwksClient fetches discovery documents and key sets.
-var jwksClient = &http.Client{Timeout: 5 * time.Second}
+// jwksClient fetches discovery documents and key sets. It follows no
+// redirect, so neither fetch can be sent on to another host than the one
+// the issuer URL or the jwks_uri names.
+var jwksClient = &http.Client{
+	Timeout:       5 * time.Second,
+	CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+}
 
 func (c *Cache) minRefresh() time.Duration {
 	if c.MinRefresh > 0 {
@@ -175,10 +181,10 @@ func (c *Cache) discover(ctx context.Context) (string, error) {
 	if c.IssuerURL == "" {
 		return "", errors.New("grant: cache has no issuer URL")
 	}
-	url := strings.TrimSuffix(c.IssuerURL, "/") + "/.well-known/openid-configuration"
+	wellKnown := strings.TrimSuffix(c.IssuerURL, "/") + "/.well-known/openid-configuration"
 	var d discovery
-	if err := c.getJSON(ctx, url, &d); err != nil {
-		return "", fmt.Errorf("grant: discovery %s: %w", url, err)
+	if err := c.getJSON(ctx, wellKnown, &d); err != nil {
+		return "", fmt.Errorf("grant: discovery %s: %w", wellKnown, err)
 	}
 	// OIDC discovery: the document's issuer must be the URL we asked.
 	if strings.TrimSuffix(d.Issuer, "/") != strings.TrimSuffix(c.IssuerURL, "/") {
@@ -187,7 +193,24 @@ func (c *Cache) discover(ctx context.Context) (string, error) {
 	if d.JWKSURI == "" {
 		return "", errors.New("grant: discovery document has no jwks_uri")
 	}
+	if err := checkJWKSURI(c.IssuerURL, d.JWKSURI); err != nil {
+		return "", err
+	}
 	return d.JWKSURI, nil
+}
+
+// checkJWKSURI accepts an absolute http or https jwks_uri. An https issuer
+// must name an https jwks_uri, so a discovery document cannot move the key
+// fetch to plaintext.
+func checkJWKSURI(issuer, jwksURI string) error {
+	u, err := url.Parse(jwksURI)
+	if err != nil || u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") {
+		return fmt.Errorf("grant: discovery jwks_uri %q is not an http(s) URL", jwksURI)
+	}
+	if strings.HasPrefix(strings.ToLower(issuer), "https://") && u.Scheme != "https" {
+		return fmt.Errorf("grant: discovery jwks_uri %q is not https, the issuer %q is", jwksURI, issuer)
+	}
+	return nil
 }
 
 func (c *Cache) getJSON(ctx context.Context, url string, dst any) error {
@@ -201,6 +224,9 @@ func (c *Cache) getJSON(ctx context.Context, url string, dst any) error {
 		return err
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		return fmt.Errorf("http %d: redirect to %q refused", resp.StatusCode, resp.Header.Get("Location"))
+	}
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("http %d", resp.StatusCode)
 	}

@@ -155,6 +155,32 @@ func TestSealDirErrors(t *testing.T) {
 
 func TestOpenDirErrors(t *testing.T) {
 	key := &artifact.SealKey{ID: "k", Key: make([]byte, 32)}
+	base := artifact.SealContext{Domain: "D", Session: "S", Fence: "f-1", Expires: time.Now().Add(time.Hour).Truncate(time.Second)}
+	// mixed returns a directory of two files for D/S, a.img sealed for
+	// base and b.img for base as change leaves it. Each opens on its own,
+	// since a file's subkey is bound to its name and not to its context.
+	mixed := func(change func(c *artifact.SealContext)) func(t *testing.T) string {
+		return func(t *testing.T) string {
+			t.Helper()
+			dir, other := t.TempDir(), t.TempDir()
+			src := t.TempDir()
+			writeFile(t, filepath.Join(src, "a.img"), "pages of one park")
+			if err := artifact.SealDir(src, dir, key, base); err != nil {
+				t.Fatal(err)
+			}
+			c := base
+			change(&c)
+			src = t.TempDir()
+			writeFile(t, filepath.Join(src, "b.img"), "pages of another")
+			if err := artifact.SealDir(src, other, key, c); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Rename(filepath.Join(other, "b.img"), filepath.Join(dir, "b.img")); err != nil {
+				t.Fatal(err)
+			}
+			return dir
+		}
+	}
 	cases := []struct {
 		name string
 		key  *artifact.SealKey
@@ -169,6 +195,12 @@ func TestOpenDirErrors(t *testing.T) {
 			writeFile(t, filepath.Join(dir, "dump.log"), "logs never travel")
 			return dir
 		}},
+		// One delta is sealed in one context. Files of two parks, each
+		// valid for D/S, do not open together.
+		{name: "files sealed for different fences", key: key, want: artifact.ErrSealed,
+			dir: mixed(func(c *artifact.SealContext) { c.Fence = "f-2" })},
+		{name: "files sealed with different expiries", key: key, want: artifact.ErrSealed,
+			dir: mixed(func(c *artifact.SealContext) { c.Expires = c.Expires.Add(time.Minute) })},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

@@ -73,7 +73,7 @@ The commit is the step where the ledger records the new fiber as running. It kee
 ## Security notes and known gaps
 
 - **Release is best effort.** Yield and the epoch bump log a failed runtime release and still drop the fiber from the ledger. The work can outlive its revocation while its slot looks free.
-- **Grant fields are not immutable per UID.** A redelivery by the home replaces the admitted fields in place, and the [warm](../glossary.md#warm) [template](../glossary.md#template) stays. A Clone whose token names another caller than the admitted grant is refused, but other fields are not compared. [Issuers](../glossary.md#issuer) should change only the lease for a UID and mint a new UID for anything else.
+- **Grant fields are not immutable per UID.** A redelivery by the home replaces the admitted fields in place, and the [warm](../glossary.md#warm) [template](../glossary.md#template) stays. A Clone whose token names another caller than the admitted grant is refused. Other fields are not compared, and the fiber runs under the admitted ones, so a lower W or device budget or a stricter durability delivered since the token was minted applies to it. [Issuers](../glossary.md#issuer) should change only the lease for a UID and mint a new UID for anything else.
 - **Revocation is per home.** Every home holding the grant must remove it.
 - **Watch has no tombstone.** A grant that leaves emits no record.
 - **Epoch loss.** A deleted epoch file looks like a first boot and restarts fences at 1, so the private state must live as long as the home's identity.

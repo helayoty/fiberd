@@ -17,6 +17,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -155,21 +156,21 @@ type atelet struct {
 	mu     sync.Mutex
 	refuse int
 	calls  int
-	got    *ateletpb.WorkerResources
+	got    *ateletpb.RegisterWorkerRequest
 }
 
-func (a *atelet) SetWorkerCapacity(_ context.Context, req *ateletpb.SetWorkerCapacityRequest) (*ateletpb.SetWorkerCapacityResponse, error) {
+func (a *atelet) RegisterWorker(_ context.Context, req *ateletpb.RegisterWorkerRequest) (*ateletpb.RegisterWorkerResponse, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.calls++
 	if a.calls <= a.refuse {
 		return nil, status.Error(codes.NotFound, "worker not found")
 	}
-	a.got = req.GetCapacity()
-	return &ateletpb.SetWorkerCapacityResponse{}, nil
+	a.got = req
+	return &ateletpb.RegisterWorkerResponse{}, nil
 }
 
-func (a *atelet) result() (int, *ateletpb.WorkerResources) {
+func (a *atelet) result() (int, *ateletpb.RegisterWorkerRequest) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.calls, a.got
@@ -201,18 +202,21 @@ func serve(t *testing.T, dir string, a *atelet, serverBundle, clientCA string) s
 	return sock
 }
 
-// TestReport checks that the report reaches atelet on this node and no
-// one else, and that it outlasts atelet's refusals.
+// TestReport checks that the registration reaches atelet on this node
+// and no one else, with the worker's capacity and runtime, and that it
+// outlasts atelet's refusals.
 func TestReport(t *testing.T) {
 	ca, other := newPKI(t), newPKI(t)
 	worker := ca.issue("spiffe://cluster.local/ns/team/sa/worker", "n1", x509.ExtKeyUsageClientAuth)
-	want := limits("cpu", "1000m", "memory", "1073741824")
+	want := &ateletpb.RegisterWorkerRequest{Capacity: limits("cpu", "1000m", "memory", "1073741824"), DefaultRuntime: capacity.Runtime("gvisor")}
+	moved := "spiffe://cluster.local/ns/substrate/sa/atelet"
 	cases := []struct {
-		name   string
-		plain  bool   // no TLS on either side
-		server string // atelet's bundle
-		refuse int
-		err    string // "" means accepted
+		name     string
+		plain    bool   // no TLS on either side
+		server   string // atelet's bundle
+		ateletID string // Config.AteletID
+		refuse   int
+		err      string // "" means accepted
 	}{
 		{name: "plaintext (tests)", plain: true},
 		{name: "atelet on this node", server: ca.issue(capacity.AteletID, "n1", x509.ExtKeyUsageServerAuth)},
@@ -221,6 +225,9 @@ func TestReport(t *testing.T) {
 			err: "atelet is on node n2"},
 		{name: "a peer that is not atelet", server: ca.issue("spiffe://cluster.local/ns/ate-system/sa/other", "n1", x509.ExtKeyUsageServerAuth),
 			err: "the peer is not " + capacity.AteletID},
+		{name: "atelet installed elsewhere, as the worker was told", server: ca.issue(moved, "n1", x509.ExtKeyUsageServerAuth), ateletID: moved},
+		{name: "the default atelet when the worker was told another", server: ca.issue(capacity.AteletID, "n1", x509.ExtKeyUsageServerAuth), ateletID: moved,
+			err: "the peer is not " + moved},
 		{name: "atelet with no node", server: ca.issue(capacity.AteletID, "", x509.ExtKeyUsageServerAuth),
 			err: "no PodIdentity with a node"},
 		{name: "a certificate from another CA", server: other.issue(capacity.AteletID, "n1", x509.ExtKeyUsageServerAuth),
@@ -234,7 +241,7 @@ func TestReport(t *testing.T) {
 			limitsDir := t.TempDir()
 			write(t, limitsDir, capacity.CPUFile, "1000")
 			write(t, limitsDir, capacity.MemoryFile, "1073741824")
-			cfg := capacity.Config{Dir: limitsDir, Backoff: time.Millisecond}
+			cfg := capacity.Config{Dir: limitsDir, Backoff: time.Millisecond, SandboxClass: "gvisor", AteletID: tc.ateletID}
 			a := &atelet{refuse: tc.refuse}
 			if tc.plain {
 				cfg.Socket = serve(t, dir, a, "", "")
@@ -276,8 +283,10 @@ func TestNew(t *testing.T) {
 	junk := write(t, dir, "junk.pem", "not pem")
 	cases := []struct {
 		name, cred, trust, err string
+		class                  string // "" is gvisor
 	}{
 		{name: "no TLS at all is plaintext", cred: "", trust: ""},
+		{name: "no sandbox class", class: "-", err: "a sandbox class is required"},
 		{name: "a bundle and a trust bundle", cred: good, trust: trust},
 		{name: "a bundle without a trust bundle", cred: good, err: "both the credential bundle and the trust bundle"},
 		{name: "a trust bundle without a bundle", trust: trust, err: "both the credential bundle and the trust bundle"},
@@ -289,7 +298,11 @@ func TestNew(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := capacity.New(capacity.Config{CredentialBundle: tc.cred, TrustBundle: tc.trust})
+			class := "gvisor"
+			if tc.class == "-" {
+				class = ""
+			}
+			_, err := capacity.New(capacity.Config{CredentialBundle: tc.cred, TrustBundle: tc.trust, SandboxClass: class})
 			if tc.err == "" {
 				if err != nil {
 					t.Fatalf("New = %v", err)
@@ -315,7 +328,7 @@ func TestRunEndsWithItsContext(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			r, err := capacity.New(capacity.Config{Socket: filepath.Join(shortDir(t), "none.sock"), Dir: t.TempDir(), Backoff: time.Millisecond})
+			r, err := capacity.New(capacity.Config{Socket: filepath.Join(shortDir(t), "none.sock"), Dir: t.TempDir(), Backoff: time.Millisecond, SandboxClass: "gvisor"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -327,6 +340,26 @@ func TestRunEndsWithItsContext(t *testing.T) {
 			}
 			if err := r.Run(ctx); !errors.Is(err, context.Canceled) {
 				t.Fatalf("Run = %v, want context.Canceled", err)
+			}
+		})
+	}
+}
+
+// TestRuntime checks the runtime a worker registers: its class, on this
+// host's architecture under Substrate's v1 compatibility schema.
+func TestRuntime(t *testing.T) {
+	cases := []struct {
+		name, class string
+	}{
+		{name: "gvisor", class: "gvisor"},
+		{name: "another class is passed through", class: "microvm"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			want := &ateletpb.SandboxRuntime{SandboxClass: tc.class, Version: &ateletpb.VersionedSandboxCompat{SchemaVersion: "v1",
+				Attributes: []*ateletpb.AttributeEntry{{Key: "architecture", Value: runtime.GOARCH}}}}
+			if got := capacity.Runtime(tc.class); !proto.Equal(got, want) {
+				t.Fatalf("Runtime = %v, want %v", got, want)
 			}
 		})
 	}

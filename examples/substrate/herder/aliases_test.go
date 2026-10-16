@@ -4,31 +4,23 @@ import ateompb "github.com/helayoty/fiberd/examples/substrate/proto/ateom"
 
 // Short names for the generated types, so the tests read as the protocol.
 type (
-	ateompbRun       = ateompb.RunWorkloadRequest
-	ateompbRestore   = ateompb.RestoreWorkloadRequest
-	ateompbCkpt      = ateompb.CheckpointWorkloadRequest
-	ateompbTerm      = ateompb.TerminateWorkloadRequest
-	ateompbStatsReq  = ateompb.GetWorkloadStatsRequest
-	ateompbActiveReq = ateompb.GetActiveWorkloadStatsRequest
-	ateompbSpec      = ateompb.WorkloadSpec
-	ateompbContainer = ateompb.Container
-	ateompbReadyz    = ateompb.Readyz
-	ateompbHTTPGet   = ateompb.HTTPGetAction
+	ateompbRun         = ateompb.RunWorkloadRequest
+	ateompbRestore     = ateompb.RestoreWorkloadRequest
+	ateompbCkpt        = ateompb.CheckpointWorkloadRequest
+	ateompbTerm        = ateompb.TerminateWorkloadRequest
+	ateompbStatsReq    = ateompb.GetWorkloadStatsRequest
+	ateompbActiveReq   = ateompb.GetActiveWorkloadStatsRequest
+	ateompbSpec        = ateompb.WorkloadSpec
+	ateompbContainer   = ateompb.Container
+	ateompbWakeup      = ateompb.WakeupProbe
+	ateompbHTTPGet     = ateompb.HttpGetAction
+	ateompbActorDirs   = ateompb.ActorDirs
+	ateompbStatsSample = ateompb.WorkloadStatsSample
 )
 
 const (
-	scopeFull         = ateompb.SnapshotScope_SNAPSHOT_SCOPE_FULL
-	scopeData         = ateompb.SnapshotScope_SNAPSHOT_SCOPE_DATA
-	scopeDataOnGolden = ateompb.SnapshotScope_SNAPSHOT_SCOPE_DATA_ON_GOLDEN
-	noWorkload        = ateompb.NoSampleReason_NO_SAMPLE_REASON_NO_WORKLOAD
-)
-
-type (
-	ateompbNoSampleReason = ateompb.NoSampleReason
-	ateompbStatsSample    = ateompb.WorkloadStatsSample
-)
-
-const (
-	notMeasurableYet = ateompb.NoSampleReason_NO_SAMPLE_REASON_NOT_MEASURABLE_YET
-	sourceCgroup     = ateompb.StatsSource_STATS_SOURCE_CGROUP
+	fidelityMemory  = ateompb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY
+	fidelityVolumes = ateompb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES
+	fidelityRootfs  = ateompb.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS
+	sourceCgroup    = ateompb.StatsSource_STATS_SOURCE_CGROUP
 )

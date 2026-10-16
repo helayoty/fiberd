@@ -53,7 +53,7 @@ func main() {
 		log.Fatal(err)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
-	err = run(ctx, o.podUID, o.listen, o.credBundle, o.trustBundle, o.clientID, o.readyAddr, o.paths)
+	err = run(ctx, o)
 	stop()
 	if err != nil {
 		log.Fatalf("ateom-fiberd: %v", err)
@@ -62,23 +62,25 @@ func main() {
 
 // options are the worker container's arguments that run uses.
 type options struct {
-	podUID, listen, credBundle, trustBundle, clientID, readyAddr string
-	paths                                                        herder.Paths
+	podUID, listen, connect, credBundle, trustBundle, clientID, ateletID, readyAddr string
+	paths                                                                           herder.Paths
 }
 
 // parseArgs reads Substrate's worker container arguments
-// (cmd/atecontroller) from args into fs. The egress and CONNECT listeners
-// are accepted but not served, because fibers use the Pod's network
-// directly and have one port.
+// (cmd/atecontroller) from args into fs. The egress listener and the DNS
+// egress policy are accepted but not served, because a fiber's sandbox
+// has no network.
 func parseArgs(fs *flag.FlagSet, args []string) (options, error) {
 	podUID := fs.String("pod-uid", env("POD_UID", ""), "the worker Pod's uid (Substrate keys the herder by it)")
 	listen := fs.String("atunnel-listen-address", ":443", "ingress: where atenet-router connects (mTLS)")
-	_ = fs.String("atunnel-connect-listen-address", ":8443", "accepted, not served (CONNECT tunnels)")
+	connect := fs.String("atunnel-connect-listen-address", ":8443", "ingress: where atenet-router opens CONNECT tunnels (mTLS)")
 	credBundle := fs.String("atunnel-credential-bundle", "", "PEM with this Pod's key and certificate (projected by Substrate)")
 	trustBundle := fs.String("atunnel-trust-bundle", "", "PEM with the CAs the router's certificate chains to")
 	_ = fs.String("atunnel-egress-listen-address", "", "accepted, not served (egress gateway)")
 	_ = fs.String("atunnel-egress-trust-bundle", "", "accepted, unused")
 	clientID := fs.String("atunnel-client-identity", ingress.DefaultAllowedClientID, "the SPIFFE id the router presents")
+	ateletID := fs.String("atunnel-broker-identity", capacity.AteletID, "the SPIFFE id the node's atelet presents")
+	_ = fs.String("dns-egress-policy", "", "accepted, not enforced (egress gateway)")
 	readyAddr := fs.String("readiness-listen-address", "0.0.0.0:8080", "the kubelet's /readyz")
 	basePath := fs.String("base-path", herder.DefaultBase, "the hostPath shared with atelet")
 	_ = fs.String("otlp-relay-socket", "", "accepted, unused")
@@ -90,13 +92,14 @@ func parseArgs(fs *flag.FlagSet, args []string) (options, error) {
 	if *podUID == "" {
 		return options{}, errors.New("ateom-fiberd: -pod-uid (or POD_UID) is required")
 	}
-	return options{podUID: *podUID, listen: *listen, credBundle: *credBundle, trustBundle: *trustBundle,
-		clientID: *clientID, readyAddr: *readyAddr, paths: herder.Paths{Base: *basePath}}, nil
+	return options{podUID: *podUID, listen: *listen, connect: *connect, credBundle: *credBundle, trustBundle: *trustBundle,
+		clientID: *clientID, ateletID: *ateletID, readyAddr: *readyAddr, paths: herder.Paths{Base: *basePath}}, nil
 }
 
 // run is the worker until ctx ends, which main ties to SIGTERM and
 // SIGINT, or until it fails. Everything it starts stops with ctx.
-func run(ctx context.Context, podUID, listen, credBundle, trustBundle, clientID, readyAddr string, paths herder.Paths) error {
+func run(ctx context.Context, o options) error {
+	podUID, credBundle, trustBundle, readyAddr, paths := o.podUID, o.credBundle, o.trustBundle, o.readyAddr, o.paths
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -183,33 +186,38 @@ func run(ctx context.Context, podUID, listen, credBundle, trustBundle, clientID,
 	}
 	defer func() { _ = fc.Close() }()
 
-	// The ingress atenet-router dials.
-	ing, err := ingress.New(ingress.Config{CredentialBundle: credBundle, TrustBundle: trustBundle, AllowedClientID: clientID})
+	// The ingress atenet-router dials, for requests and for CONNECT
+	// tunnels. The one server answers both.
+	ing, err := ingress.New(ingress.Config{CredentialBundle: credBundle, TrustBundle: trustBundle, AllowedClientID: o.clientID})
 	if err != nil {
 		return err
 	}
-	if il, err := net.Listen("tcp", listen); err == nil {
+	for _, addr := range []string{o.listen, o.connect} {
+		il, err := net.Listen("tcp", addr)
+		if err != nil {
+			log.Printf("ingress: not listening on %s: %v (actors are reachable only through the herder's tests)", addr, err)
+			continue
+		}
 		go func() {
 			if err := ing.Serve(ctx, il); err != nil {
 				log.Printf("ingress: %v", err)
 			}
 		}()
-	} else {
-		log.Printf("ingress: not listening on %s: %v (actors are reachable only through the herder's tests)", listen, err)
 	}
 
-	// The capacity report. Substrate places no actor on a worker until it
+	// The registration. Substrate places no actor on a worker until it
 	// says what it can host, so a bad bundle stops the worker here.
-	report, err := capacity.New(capacity.Config{Socket: paths.SupportSocket(), CredentialBundle: credBundle,
-		TrustBundle: trustBundle, Dir: env("ATEOM_FIBERD_CAPACITY_DIR", capacity.Dir)})
+	report, err := capacity.New(capacity.Config{Socket: paths.SupportSocket(), AteletID: o.ateletID, SandboxClass: herder.SandboxClass,
+		CredentialBundle: credBundle, TrustBundle: trustBundle, Dir: env("ATEOM_FIBERD_CAPACITY_DIR", capacity.Dir)})
 	if err != nil {
 		return err
 	}
 
-	// The herder atelet drives.
+	// The herder atelet drives. An import works in its own directory,
+	// because atelet may hand over a restore directory it keeps.
 	svc := herder.New(herder.Config{
 		Client: fc, Grants: h, Router: ing, Paths: paths,
-		Host: host.Config{DeltaRegistry: registry, DeltaKeys: deltaKeys, HomeID: podUID},
+		Host: host.Config{DeltaRegistry: registry, DeltaKeys: deltaKeys, HomeID: podUID, DeltaDir: filepath.Join(stateDir, "herder-imports")},
 	})
 	go svc.Run(ctx)
 	if err := os.MkdirAll(paths.AteomDir(podUID), 0o700); err != nil {
@@ -258,7 +266,7 @@ func run(ctx context.Context, podUID, listen, credBundle, trustBundle, clientID,
 		}
 	}()
 
-	log.Printf("ateom-fiberd: pod %s serving atelet at %s, ingress on %s, fiberd at %s, templates %v", podUID, sock, listen, fiberdAddr, templates)
+	log.Printf("ateom-fiberd: pod %s serving atelet at %s, ingress on %s, fiberd at %s, templates %v", podUID, sock, o.listen, fiberdAddr, templates)
 	err = serve(ctx, gs, ul, fail)
 	_ = os.Remove(sock)
 	return err

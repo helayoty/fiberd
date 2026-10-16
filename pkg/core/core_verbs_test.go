@@ -3,8 +3,10 @@ package core_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -100,18 +102,24 @@ func TestCloneDefaultDeadlines(t *testing.T) {
 }
 
 // prepRuntime is a fakeRuntime whose PrepareTemplate announces itself,
-// waits for the test, and then answers err.
+// waits for the test, and then answers the next error queued in errs, or
+// nil once the queue is empty.
 type prepRuntime struct {
 	fakeRuntime
 	started chan struct{}
 	proceed chan struct{}
-	err     error
+	errs    chan error
 }
 
 func (r prepRuntime) PrepareTemplate(context.Context, core.Grant) error {
 	r.started <- struct{}{}
 	<-r.proceed
-	return r.err
+	select {
+	case err := <-r.errs:
+		return err
+	default:
+		return nil
+	}
 }
 
 // waitCtx closes waiting the first time Done is asked for. Admit asks only
@@ -129,23 +137,33 @@ func (c *waitCtx) Done() <-chan struct{} {
 }
 
 // TestAdmitWaitsForInflight admits a grant twice at once. The second
-// waits for the first instead of warming the template again, and answers
-// what the first left behind. A second whose context ends stops waiting.
+// waits for the first instead of warming the template again, and shares
+// what the first admitted. It admits itself when the first failed, or
+// when it carries a longer lease than the first admitted, so neither a
+// retry nor a renewal is lost. A second whose context ends stops waiting.
 func TestAdmitWaitsForInflight(t *testing.T) {
+	lease := time.Now().Add(time.Hour)
 	cases := []struct {
 		name         string
-		firstErr     error // what the first admission's template warm answers
+		firstErr     error         // what the first admission's template warm answers
+		secondLease  time.Duration // the second grant's lease, relative to the first's; 0 is the same
 		cancelSecond bool
 		wantFirst    core.StatusCode
 		wantSecond   core.StatusCode
 		wantErr      error // the second's
 		wantAdmitted bool
+		wantWarms    int           // template warms in all
+		wantLease    time.Duration // the admitted lease, relative to the first's
 	}{
-		{name: "the second shares the first's success", wantFirst: core.OK, wantSecond: core.OK, wantAdmitted: true},
-		{name: "the second shares the first's failure", firstErr: errors.New("pull: manifest unknown"),
-			wantFirst: core.DeferredFallback, wantSecond: core.DeferredFallback, wantErr: core.ErrNotReady},
+		{name: "the second shares the first's success", wantFirst: core.OK, wantSecond: core.OK, wantAdmitted: true, wantWarms: 1},
+		{name: "the second retries after the first's failure", firstErr: errors.New("pull: manifest unknown"),
+			wantFirst: core.DeferredFallback, wantSecond: core.OK, wantAdmitted: true, wantWarms: 2},
 		{name: "a second whose context ends stops waiting", cancelSecond: true,
-			wantFirst: core.OK, wantSecond: core.DeferredFallback, wantErr: context.Canceled, wantAdmitted: true},
+			wantFirst: core.OK, wantSecond: core.DeferredFallback, wantErr: context.Canceled, wantAdmitted: true, wantWarms: 1},
+		{name: "a second with a longer lease admits its renewal after the first", secondLease: time.Hour,
+			wantFirst: core.OK, wantSecond: core.OK, wantAdmitted: true, wantWarms: 2, wantLease: time.Hour},
+		{name: "a second with a shorter lease shares the first's success", secondLease: -30 * time.Minute,
+			wantFirst: core.OK, wantSecond: core.OK, wantAdmitted: true, wantWarms: 1},
 	}
 	type result struct {
 		code core.StatusCode
@@ -153,9 +171,12 @@ func TestAdmitWaitsForInflight(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			g := core.Grant{UID: "g1", Tenant: "acme", Audience: "node-a"}
+			g := core.Grant{UID: "g1", Tenant: "acme", Audience: "node-a", LeaseExpiry: lease}
 			a := newCore(t, "up", core.TierCheckpoint)
-			rt := prepRuntime{fakeRuntime: fakeRuntime{tier: core.TierCheckpoint}, started: make(chan struct{}, 2), proceed: make(chan struct{}), err: tc.firstErr}
+			rt := prepRuntime{fakeRuntime: fakeRuntime{tier: core.TierCheckpoint}, started: make(chan struct{}, 2), proceed: make(chan struct{}), errs: make(chan error, 1)}
+			if tc.firstErr != nil {
+				rt.errs <- tc.firstErr
+			}
 			a.Runtime = rt
 			first := make(chan result, 1)
 			go func() {
@@ -173,9 +194,11 @@ func TestAdmitWaitsForInflight(t *testing.T) {
 				cancel()
 			}
 			ctx := &waitCtx{Context: base, waiting: make(chan struct{})}
+			g2 := g
+			g2.LeaseExpiry = lease.Add(tc.secondLease)
 			second := make(chan result, 1)
 			go func() {
-				code, err := a.Admit(ctx, g)
+				code, err := a.Admit(ctx, g2)
 				second <- result{code, err}
 			}()
 			select {
@@ -196,11 +219,177 @@ func TestAdmitWaitsForInflight(t *testing.T) {
 			if r2.code != tc.wantSecond || !errors.Is(r2.err, tc.wantErr) {
 				t.Fatalf("second admit = %d %v, want %d %v", r2.code, r2.err, tc.wantSecond, tc.wantErr)
 			}
-			if n := len(rt.started); n != 0 {
-				t.Fatalf("the template was warmed %d more times, want once in all", n)
+			// The first warm was taken above, so the rest are the retries.
+			if n := 1 + len(rt.started); n != tc.wantWarms {
+				t.Fatalf("the template was warmed %d times, want %d", n, tc.wantWarms)
 			}
-			if _, ok := a.Ledger.Grant("g1"); ok != tc.wantAdmitted {
+			held, ok := a.Ledger.Grant("g1")
+			if ok != tc.wantAdmitted {
 				t.Fatalf("admitted = %v, want %v", ok, tc.wantAdmitted)
+			}
+			if ok && !held.LeaseExpiry.Equal(lease.Add(tc.wantLease)) {
+				t.Fatalf("admitted lease = %s, want %s", held.LeaseExpiry.Sub(lease), tc.wantLease)
+			}
+		})
+	}
+}
+
+// TestAdmitRefreshKeepsDevices re-delivers an admitted grant that holds a
+// device channel. A refresh that fails gives back only the channel it
+// provisioned, hands the old one back to the runtime, and leaves it for
+// the revoke to release. A refresh that succeeds replaces the channel.
+func TestAdmitRefreshKeepsDevices(t *testing.T) {
+	gpu := core.DeviceBudget{Bytes: 1 << 30, Class: "gpu"}
+	cases := []struct {
+		name          string
+		plain         bool // the runtime takes no device channel
+		prepErr       error
+		devicesErr    error
+		device        core.DeviceBudget
+		offers        map[string]bool // the refresh's, the first delivery offers every class
+		want          core.StatusCode
+		wantErr       error
+		wantAttached  []string // the channels the runtime was handed, in order
+		wantReleased  []string // the channels given back by the refresh
+		wantAfterDrop []string // the channels given back once the grant is revoked
+	}{
+		{name: "a refresh that succeeds replaces the channel",
+			want: core.OK, wantAttached: []string{"c1", "c2"}, wantReleased: []string{"c1"}, wantAfterDrop: []string{"c1", "c2"}},
+		{name: "a refresh whose template fails to warm keeps the old channel", prepErr: errors.New("pull: manifest unknown"),
+			want: core.DeferredFallback, wantErr: core.ErrNotReady, wantAttached: []string{"c1", "c2", "c1"}, wantReleased: []string{"c2"}, wantAfterDrop: []string{"c2", "c1"}},
+		{name: "a refresh whose device class is no longer offered keeps the old channel", device: gpu, offers: map[string]bool{"sim": true},
+			want: core.NeedsTier, wantErr: core.ErrNeedsDevice, wantAttached: []string{"c1", "c2", "c1"}, wantReleased: []string{"c2"}, wantAfterDrop: []string{"c2", "c1"}},
+		{name: "a refresh whose channel cannot be provisioned keeps the old channel", devicesErr: errors.New("claim pending"),
+			want: core.DeferredFallback, wantErr: core.ErrNotReady, wantAttached: []string{"c1"}, wantAfterDrop: []string{"c1"}},
+		{name: "a failed refresh on a runtime that takes no channel keeps the old one", plain: true, prepErr: errors.New("pull: manifest unknown"),
+			want: core.DeferredFallback, wantErr: core.ErrNotReady, wantReleased: []string{"c2"}, wantAfterDrop: []string{"c2", "c1"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			g := core.Grant{UID: "g1", Tenant: "acme", Audience: "node-a", DeviceBudget: tc.device}
+			a := newCore(t, "up", core.TierCheckpoint)
+			rt := &admitRuntime{fakeRuntime: fakeRuntime{tier: core.TierCheckpoint}, offers: map[string]bool{"gpu": true, "sim": true}}
+			if tc.plain {
+				a.Runtime = plainPrepRuntime{fakeRuntime: fakeRuntime{tier: core.TierCheckpoint}, rt: rt}
+			} else {
+				a.Runtime = rt
+			}
+			var provisioned int
+			var released []string
+			var devicesErr error
+			a.Devices = func(context.Context, core.Grant) (core.DeviceChannel, func(), error) {
+				if devicesErr != nil {
+					return core.DeviceChannel{}, nil, devicesErr
+				}
+				provisioned++
+				name := fmt.Sprintf("c%d", provisioned)
+				return core.DeviceChannel{Kind: "static", Detail: name}, func() { released = append(released, name) }, nil
+			}
+			if code, err := a.Admit(context.Background(), g); err != nil || code != core.OK {
+				t.Fatalf("first admit = %d %v, want OK", code, err)
+			}
+			rt.prepErr, devicesErr = tc.prepErr, tc.devicesErr
+			if tc.offers != nil {
+				rt.offers = tc.offers
+			}
+			code, err := a.Admit(context.Background(), g)
+			if code != tc.want || !errors.Is(err, tc.wantErr) {
+				t.Fatalf("refresh = %d %v, want %d %v", code, err, tc.want, tc.wantErr)
+			}
+			var attached []string
+			for _, fc := range rt.attached {
+				attached = append(attached, fc.Detail)
+			}
+			if !slices.Equal(attached, tc.wantAttached) || !slices.Equal(released, tc.wantReleased) {
+				t.Fatalf("attached %v released %v, want %v %v", attached, released, tc.wantAttached, tc.wantReleased)
+			}
+			if _, ok := a.Ledger.Grant("g1"); !ok {
+				t.Fatal("the grant left the ledger")
+			}
+			a.Revoke("g1")
+			if !slices.Equal(released, tc.wantAfterDrop) {
+				t.Fatalf("released after revoke %v, want %v", released, tc.wantAfterDrop)
+			}
+		})
+	}
+}
+
+// plainPrepRuntime warms templates like rt but takes no device channel
+// and offers no device.
+type plainPrepRuntime struct {
+	fakeRuntime
+	rt *admitRuntime
+}
+
+func (r plainPrepRuntime) PrepareTemplate(ctx context.Context, g core.Grant) error {
+	return r.rt.PrepareTemplate(ctx, g)
+}
+
+// durableLog records each audit record with the durability it was asked
+// for.
+type durableLog struct {
+	mu   sync.Mutex
+	durs map[string]core.Durability // event -> durability of its last record
+}
+
+func (r *durableLog) Append(_ context.Context, d core.Durability, rec core.AuditRecord) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.durs == nil {
+		r.durs = map[string]core.Durability{}
+	}
+	r.durs[rec.Event] = d
+	return nil
+}
+
+// TestCloneUnderAdmittedGrant presents a token whose budgets differ from
+// the grant the home admitted under the same UID. The fiber runs under
+// the admitted W and device budgets and the admitted durability, so a
+// budget the home lowered since the token was minted is enforced. A grant
+// the home never delivered is admitted from the token and runs under it.
+func TestCloneUnderAdmittedGrant(t *testing.T) {
+	cases := []struct {
+		name       string
+		admitted   *core.Grant // nil means the home never delivered the grant
+		wantW      uint64
+		wantDevice uint64
+		wantDur    core.Durability
+	}{
+		{name: "the admitted W budget is enforced over the token's", admitted: &core.Grant{WBudgetBytes: 100},
+			wantW: 100, wantDur: core.BestEffort},
+		{name: "the admitted device budget is enforced over the token's", admitted: &core.Grant{DeviceBudget: core.DeviceBudget{Bytes: 1 << 20}},
+			wantDevice: 1 << 20, wantDur: core.BestEffort},
+		{name: "the admitted durability is enforced over the token's", admitted: &core.Grant{Policy: core.Policy{Durability: core.Sync}},
+			wantDur: core.Sync},
+		{name: "a grant the home never delivered runs under the token",
+			wantW: 1000, wantDur: core.BestEffort},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			token := core.Grant{UID: "g1", Tenant: "acme", Audience: "node-a", WBudgetBytes: 1000, Policy: core.Policy{Durability: core.BestEffort}}
+			if tc.admitted != nil {
+				// Only an admitted grant passes a device budget here, since
+				// the runtime offers no device for a self-admission.
+				token.DeviceBudget = core.DeviceBudget{Bytes: 1 << 30}
+			}
+			a := newCore(t, "up", core.TierCheckpoint, token)
+			var spec core.CloneSpec
+			a.Runtime = deadlineRuntime{fakeRuntime: fakeRuntime{tier: core.TierCheckpoint, exits: make(chan core.FiberExit, 8)}, spec: &spec}
+			rec := &durableLog{}
+			a.Audit = rec
+			if tc.admitted != nil {
+				g := *tc.admitted
+				g.UID, g.Tenant, g.Audience = token.UID, token.Tenant, token.Audience
+				a.Ledger.AdmitGrant(g)
+			}
+			if _, code, err := a.Clone(context.Background(), core.CloneRequest{GrantJWT: []byte("g1"), Deadline: time.Second}); err != nil || code != core.OK {
+				t.Fatalf("clone = %d %v, want OK", code, err)
+			}
+			if got := rec.durs["create"]; got != tc.wantDur {
+				t.Fatalf("create record durability = %d, want %d", got, tc.wantDur)
+			}
+			if spec.Grant.WBudgetBytes != tc.wantW || spec.Grant.DeviceBudget.Bytes != tc.wantDevice {
+				t.Fatalf("runtime got w_budget %d device_budget %d, want %d %d", spec.Grant.WBudgetBytes, spec.Grant.DeviceBudget.Bytes, tc.wantW, tc.wantDevice)
 			}
 		})
 	}

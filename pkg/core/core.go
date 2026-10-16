@@ -175,8 +175,8 @@ type Core struct {
 	// Clone that presents a valid token for it.
 	Revoked *Revoked
 
-	devicesMu      sync.Mutex
-	deviceReleases map[string]func() // grant uid -> release
+	devicesMu sync.Mutex
+	devices   map[string]heldDevices // grant uid -> the channel it holds
 
 	admitMu   sync.Mutex
 	admitting map[string]chan struct{}
@@ -249,17 +249,26 @@ func (a *Core) Clone(ctx context.Context, req CloneRequest) (CloneResponse, Stat
 	// on first sight. Its signature is the same proof a delivery carries,
 	// here inline. The template is warmed synchronously; homes pre-warm grants
 	// they are told about ahead of time so this is normally a no-op.
-	if held, known := a.Ledger.Grant(g.UID); !known {
+	if _, known := a.Ledger.Grant(g.UID); !known {
 		if code, err := a.Admit(ctx, g); err != nil {
 			return CloneResponse{}, code, err
 		}
-	} else if held.CallerThumbprint != g.CallerThumbprint {
-		// The token names another caller than the admitted grant, as when
-		// the issuer re-mints the UID with a new cnf. Park, Release and
-		// Watch authorize against the admitted grant, so a fiber from this
-		// token would answer to the wrong caller. Refuse until the grant is
-		// delivered again.
-		return CloneResponse{}, Unauthenticated, fmt.Errorf("%w: the token names another caller than the admitted grant", ErrCallerMismatch)
+	}
+	// The clone runs under the admitted grant, not the token's claims. The
+	// home may have delivered a lower W or device budget or a stricter
+	// durability since this token was minted, and an older token must not
+	// get around it. A grant revoked meanwhile is left to the ledger, which
+	// refuses the resolve.
+	if held, ok := a.Ledger.Grant(g.UID); ok {
+		if held.CallerThumbprint != g.CallerThumbprint {
+			// The token names another caller than the admitted grant, as
+			// when the issuer re-mints the UID with a new cnf. Park, Release
+			// and Watch authorize against the admitted grant, so a fiber
+			// from this token would answer to the wrong caller. Refuse until
+			// the grant is delivered again.
+			return CloneResponse{}, Unauthenticated, fmt.Errorf("%w: the token names another caller than the admitted grant", ErrCallerMismatch)
+		}
+		g = held
 	}
 
 	// 3. Backpressure before any work: the clone rate limit, then the pressure
@@ -524,8 +533,10 @@ type DeltaDiscarder interface {
 }
 
 // Admit records a verified grant and warms its template. Concurrent
-// admissions of the same UID wait for the first; a second delivery of an
-// already-admitted grant refreshes it in place.
+// admissions of the same UID wait for the first and share its result. One
+// that carries a longer lease, or finds the first failed, then admits
+// itself. A second delivery of an already-admitted grant refreshes it in
+// place.
 func (a *Core) Admit(ctx context.Context, g Grant) (StatusCode, error) {
 	if g.MinTier > a.Runtime.Tier() {
 		return NeedsTier, fmt.Errorf("%w: grant needs %s, runtime is %s", ErrNeedsTier, g.MinTier, a.Runtime.Tier())
@@ -549,17 +560,26 @@ func (a *Core) Admit(ctx context.Context, g Grant) (StatusCode, error) {
 	if a.admitting == nil {
 		a.admitting = make(map[string]chan struct{})
 	}
-	if wait, inflight := a.admitting[g.UID]; inflight {
+	for {
+		wait, inflight := a.admitting[g.UID]
+		if !inflight {
+			break
+		}
 		a.admitMu.Unlock()
 		select {
 		case <-wait:
 		case <-ctx.Done():
 			return DeferredFallback, ctx.Err()
 		}
-		if _, ok := a.Ledger.Grant(g.UID); ok {
+		// The first admission's result stands in for this one when it
+		// admitted a lease at least as long as this grant's. Otherwise it
+		// failed, or this grant renews the lease, and this admission runs
+		// itself. Another admission may have started meanwhile, so the
+		// slot is taken under the lock again.
+		if held, ok := a.Ledger.Grant(g.UID); ok && !renewsLease(held, g) {
 			return OK, nil
 		}
-		return a.missCode(ErrNotReady), ErrNotReady
+		a.admitMu.Lock()
 	}
 	done := make(chan struct{})
 	a.admitting[g.UID] = done
@@ -578,29 +598,34 @@ func (a *Core) Admit(ctx context.Context, g Grant) (StatusCode, error) {
 	}
 
 	// The device channel comes before the template: an engine needs its
-	// devices at warm-up. It is released with the grant.
-	var dc DeviceChannel
+	// devices at warm-up. It is released with the grant. On a refresh the
+	// channel the admitted grant already holds stays until this one is
+	// admitted. A refresh that fails hands the old channel back to the
+	// runtime, so the grant keeps running on what it had.
+	var fresh heldDevices
 	if a.Devices != nil {
 		fc, release, err := a.Devices(ctx, g)
 		if err != nil {
 			return a.missCode(ErrNotReady), fmt.Errorf("%w: devices: %w", ErrNotReady, err)
 		}
-		dc = fc
-		a.devicesMu.Lock()
-		if a.deviceReleases == nil {
-			a.deviceReleases = map[string]func(){}
-		}
-		if old := a.deviceReleases[g.UID]; old != nil {
-			old()
-		}
-		a.deviceReleases[g.UID] = release
-		a.devicesMu.Unlock()
+		fresh = heldDevices{channel: fc, release: release}
 		if fa, ok := a.Runtime.(DeviceAware); ok {
 			fa.AttachDevices(g.UID, fc)
 		}
 	}
+	refuse := func() {
+		if fresh.release != nil {
+			fresh.release()
+		}
+		a.devicesMu.Lock()
+		old, ok := a.devices[g.UID]
+		a.devicesMu.Unlock()
+		if fa, aware := a.Runtime.(DeviceAware); ok && aware {
+			fa.AttachDevices(g.UID, old.channel)
+		}
+	}
 	if err := a.Runtime.PrepareTemplate(ctx, g); err != nil {
-		a.releaseDevices(g.UID)
+		refuse()
 		return a.missCode(ErrNotReady), fmt.Errorf("%w: %w", ErrNotReady, err)
 	}
 	if g.DeviceBudget.Bytes > 0 {
@@ -608,11 +633,23 @@ func (a *Core) Admit(ctx context.Context, g Grant) (StatusCode, error) {
 		// engine holds a device of the class the grant budgets for.
 		dc, ok := a.Runtime.(DeviceCapable)
 		if !ok || !dc.OffersDevice(g.UID, g.DeviceBudget.Class) {
-			// The grant is refused, so nothing would release its channel.
-			a.releaseDevices(g.UID)
+			refuse()
 			return NeedsTier, fmt.Errorf("%w: class %q", ErrNeedsDevice, g.DeviceBudget.Class)
 		}
 	}
+	if a.Devices != nil {
+		a.devicesMu.Lock()
+		if a.devices == nil {
+			a.devices = map[string]heldDevices{}
+		}
+		old := a.devices[g.UID]
+		a.devices[g.UID] = fresh
+		a.devicesMu.Unlock()
+		if old.release != nil {
+			old.release()
+		}
+	}
+	dc := fresh.channel
 	a.Ledger.AdmitGrant(g)
 	a.restoreHeld(g.UID)
 	a.kickRefill()
@@ -626,14 +663,33 @@ func (a *Core) Admit(ctx context.Context, g Grant) (StatusCode, error) {
 	return OK, nil
 }
 
+// heldDevices is the device channel an admitted grant holds and how to
+// give it back.
+type heldDevices struct {
+	channel DeviceChannel
+	release func()
+}
+
+// renewsLease reports whether g carries a longer lease than the admitted
+// grant held. A lease that ends later renews it, and so does a grant with
+// no expiry replacing one that has one. The reaper yields the grant at
+// the admitted lease, so an admission that keeps the old one would end
+// the grant early.
+func renewsLease(held, g Grant) bool {
+	if held.LeaseExpiry.IsZero() {
+		return false
+	}
+	return g.LeaseExpiry.IsZero() || held.LeaseExpiry.Before(g.LeaseExpiry)
+}
+
 // releaseDevices gives a grant's device channel back, if it holds one.
 func (a *Core) releaseDevices(grantUID string) {
 	a.devicesMu.Lock()
-	release := a.deviceReleases[grantUID]
-	delete(a.deviceReleases, grantUID)
+	held := a.devices[grantUID]
+	delete(a.devices, grantUID)
 	a.devicesMu.Unlock()
-	if release != nil {
-		release()
+	if held.release != nil {
+		held.release()
 	}
 }
 

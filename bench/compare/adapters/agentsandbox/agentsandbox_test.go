@@ -233,6 +233,10 @@ func owned(kind, name string) map[string]any {
 func seedSandboxes(t *testing.T, srv *kubetest.Server) string {
 	t.Helper()
 	root := t.TempDir()
+	// The root is the node's kubepods slice, charged with every Pod.
+	if err := os.WriteFile(filepath.Join(root, "memory.current"), []byte("27000000000"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	for i, sb := range []struct{ name, ownerKind, owner string }{
 		{"counter-a", "SandboxWarmPool", "counter"}, {"counter-b", "SandboxWarmPool", "counter"},
 		{"counter-c", "SandboxClaim", "claim-x"}, {"other-a", "SandboxWarmPool", "other"},
@@ -258,11 +262,16 @@ func TestDensity(t *testing.T) {
 		// refilling: counter-b's Pod has no cgroup yet and the pool is
 		// not full until it has, as right after a density burst.
 		refilling bool
-		want      int64
+		// nouid: counter-c's Pod has no uid yet.
+		nouid   bool
+		want    int64
+		wantErr string
 	}{
 		{name: "standing is the pool's unclaimed sandboxes only", want: 1<<20 + 2<<20},
 		{name: "standing waits for a refilling pool to be full", refilling: true, want: 1<<20 + 2<<20},
 		{name: "handles are charged their own sandboxes", handles: []compare.Handle{{ID: "claim-x", Meta: map[string]string{"sandbox": "counter-c"}}}, want: 3 << 20},
+		{name: "a pod without a uid is an error, not the whole slice", nouid: true,
+			handles: []compare.Handle{{ID: "claim-x", Meta: map[string]string{"sandbox": "counter-c"}}}, wantErr: "pod counter-c has no uid"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -285,7 +294,18 @@ func TestDensity(t *testing.T) {
 				}()
 			}
 			srv.Put(poolPath, pool)
+			if tc.nouid {
+				srv.Update("/api/v1/namespaces/ns/pods/counter-c", func(obj map[string]any) {
+					delete(obj["metadata"].(map[string]any), "uid")
+				})
+			}
 			got, err := a.Density(context.Background(), tc.handles)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("density %d err %v, want an error with %q", got, err, tc.wantErr)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatal(err)
 			}

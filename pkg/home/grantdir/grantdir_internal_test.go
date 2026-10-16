@@ -1,6 +1,7 @@
 package grantdir
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -118,6 +119,46 @@ func TestScan(t *testing.T) {
 		if !ok {
 			return // later steps build on this one
 		}
+	}
+}
+
+// TestScanTokenSize checks the lane never reads a file over the token
+// size limit, the bound Verify applies. Such a file is not a grant. It
+// costs one stat a poll, and a grant file grown past the limit is a
+// removal.
+func TestScanTokenSize(t *testing.T) {
+	cases := []struct {
+		name string
+		seen map[string]fileState // what an earlier scan saw of a.jwt
+		size int
+		want []home.GrantEvent
+	}{
+		{name: "a file at the limit is delivered", seen: map[string]fileState{}, size: grant.MaxTokenBytes,
+			want: []home.GrantEvent{{Kind: home.GrantAdded, Token: bytes.Repeat([]byte("x"), grant.MaxTokenBytes)}}},
+		{name: "a file one byte over the limit is not a grant", seen: map[string]fileState{}, size: grant.MaxTokenBytes + 1},
+		{name: "a grant file grown past the limit is removed", size: grant.MaxTokenBytes + 1,
+			seen: map[string]fileState{"a.jwt": {uid: "uid-a"}},
+			want: []home.GrantEvent{{Kind: home.GrantRemoved, UID: "uid-a"}}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "a.jwt"), bytes.Repeat([]byte("x"), c.size), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			ch := make(chan home.GrantEvent, 16)
+			scan(context.Background(), dir, c.seen, ch)
+			close(ch)
+			var got []home.GrantEvent
+			for ev := range ch {
+				got = append(got, ev)
+			}
+			if !slices.EqualFunc(got, c.want, func(a, b home.GrantEvent) bool {
+				return a.Kind == b.Kind && a.UID == b.UID && bytes.Equal(a.Token, b.Token)
+			}) {
+				t.Fatalf("events %+v, want %+v", got, c.want)
+			}
+		})
 	}
 }
 

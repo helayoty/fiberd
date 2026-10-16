@@ -33,7 +33,7 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	AteomSupport_SetWorkerCapacity_FullMethodName = "/atelet.AteomSupport/SetWorkerCapacity"
+	AteomSupport_RegisterWorker_FullMethodName = "/atelet.AteomSupport/RegisterWorker"
 )
 
 // AteomSupportClient is the client API for AteomSupport service.
@@ -45,8 +45,8 @@ const (
 // Called by individual ateom pods over a local connection, authenticated with
 // ateom's k8s pod identity mTLS certificate.
 type AteomSupportClient interface {
-	// Report capacity and supply for this worker back to atelet.
-	SetWorkerCapacity(ctx context.Context, in *SetWorkerCapacityRequest, opts ...grpc.CallOption) (*SetWorkerCapacityResponse, error)
+	// Register capacity and supported sandbox runtimes for this worker with atelet.
+	RegisterWorker(ctx context.Context, in *RegisterWorkerRequest, opts ...grpc.CallOption) (*RegisterWorkerResponse, error)
 }
 
 type ateomSupportClient struct {
@@ -57,10 +57,10 @@ func NewAteomSupportClient(cc grpc.ClientConnInterface) AteomSupportClient {
 	return &ateomSupportClient{cc}
 }
 
-func (c *ateomSupportClient) SetWorkerCapacity(ctx context.Context, in *SetWorkerCapacityRequest, opts ...grpc.CallOption) (*SetWorkerCapacityResponse, error) {
+func (c *ateomSupportClient) RegisterWorker(ctx context.Context, in *RegisterWorkerRequest, opts ...grpc.CallOption) (*RegisterWorkerResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(SetWorkerCapacityResponse)
-	err := c.cc.Invoke(ctx, AteomSupport_SetWorkerCapacity_FullMethodName, in, out, cOpts...)
+	out := new(RegisterWorkerResponse)
+	err := c.cc.Invoke(ctx, AteomSupport_RegisterWorker_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -76,8 +76,8 @@ func (c *ateomSupportClient) SetWorkerCapacity(ctx context.Context, in *SetWorke
 // Called by individual ateom pods over a local connection, authenticated with
 // ateom's k8s pod identity mTLS certificate.
 type AteomSupportServer interface {
-	// Report capacity and supply for this worker back to atelet.
-	SetWorkerCapacity(context.Context, *SetWorkerCapacityRequest) (*SetWorkerCapacityResponse, error)
+	// Register capacity and supported sandbox runtimes for this worker with atelet.
+	RegisterWorker(context.Context, *RegisterWorkerRequest) (*RegisterWorkerResponse, error)
 	mustEmbedUnimplementedAteomSupportServer()
 }
 
@@ -88,8 +88,8 @@ type AteomSupportServer interface {
 // pointer dereference when methods are called.
 type UnimplementedAteomSupportServer struct{}
 
-func (UnimplementedAteomSupportServer) SetWorkerCapacity(context.Context, *SetWorkerCapacityRequest) (*SetWorkerCapacityResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method SetWorkerCapacity not implemented")
+func (UnimplementedAteomSupportServer) RegisterWorker(context.Context, *RegisterWorkerRequest) (*RegisterWorkerResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RegisterWorker not implemented")
 }
 func (UnimplementedAteomSupportServer) mustEmbedUnimplementedAteomSupportServer() {}
 func (UnimplementedAteomSupportServer) testEmbeddedByValue()                      {}
@@ -112,20 +112,20 @@ func RegisterAteomSupportServer(s grpc.ServiceRegistrar, srv AteomSupportServer)
 	s.RegisterService(&AteomSupport_ServiceDesc, srv)
 }
 
-func _AteomSupport_SetWorkerCapacity_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(SetWorkerCapacityRequest)
+func _AteomSupport_RegisterWorker_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RegisterWorkerRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(AteomSupportServer).SetWorkerCapacity(ctx, in)
+		return srv.(AteomSupportServer).RegisterWorker(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: AteomSupport_SetWorkerCapacity_FullMethodName,
+		FullMethod: AteomSupport_RegisterWorker_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(AteomSupportServer).SetWorkerCapacity(ctx, req.(*SetWorkerCapacityRequest))
+		return srv.(AteomSupportServer).RegisterWorker(ctx, req.(*RegisterWorkerRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -138,8 +138,8 @@ var AteomSupport_ServiceDesc = grpc.ServiceDesc{
 	HandlerType: (*AteomSupportServer)(nil),
 	Methods: []grpc.MethodDesc{
 		{
-			MethodName: "SetWorkerCapacity",
-			Handler:    _AteomSupport_SetWorkerCapacity_Handler,
+			MethodName: "RegisterWorker",
+			Handler:    _AteomSupport_RegisterWorker_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

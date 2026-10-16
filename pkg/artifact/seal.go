@@ -124,9 +124,11 @@ func SealDir(src, dst string, k *SealKey, c SealContext) error {
 }
 
 // OpenDir replaces every sealed file in dir by its plaintext. It refuses
-// any file not sealed with k for domain and session, or expired at now.
-// It returns the context the files were sealed with. On error, dir holds a
-// mix of sealed and plain files, and the caller must remove it.
+// any file not sealed with k for domain and session, or expired at now,
+// and a directory whose files were sealed for different contexts, so one
+// delta cannot be assembled from files of several parks. It returns the
+// one context the files were sealed with. On error, dir holds a mix of
+// sealed and plain files, and the caller must remove it.
 func OpenDir(dir string, k *SealKey, domain, session string, now time.Time) (SealContext, error) {
 	if k == nil {
 		return SealContext{}, errors.New("artifact: no seal key")
@@ -139,9 +141,12 @@ func OpenDir(dir string, k *SealKey, domain, session string, now time.Time) (Sea
 		return SealContext{}, fmt.Errorf("%w: nothing sealed in %s", ErrSealed, dir)
 	}
 	var got SealContext
-	for _, n := range names {
+	for i, n := range names {
 		path := filepath.Join(dir, n)
 		c, err := openFile(path, path+".open.tmp", k, domain, session, now)
+		if err == nil && i > 0 && !sameSealContext(got, c) {
+			err = fmt.Errorf("%w: sealed for another context than %s", ErrSealed, names[0])
+		}
 		if err != nil {
 			_ = os.Remove(path + ".open.tmp")
 			return SealContext{}, fmt.Errorf("artifact: open %s: %w", n, err)
@@ -152,6 +157,11 @@ func OpenDir(dir string, k *SealKey, domain, session string, now time.Time) (Sea
 		got = c
 	}
 	return got, nil
+}
+
+// sameSealContext reports whether two files were sealed for one context.
+func sameSealContext(a, b SealContext) bool {
+	return a.Domain == b.Domain && a.Session == b.Session && a.Fence == b.Fence && a.Expires.Equal(b.Expires)
 }
 
 func fileAEAD(k *SealKey, domain, name string, salt []byte) (cipher.AEAD, error) {
