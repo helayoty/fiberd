@@ -59,6 +59,10 @@ Give up a [grant](#grant) on one [home](#home). [fiberd](#fiberd) revokes it, [r
 ## Fence
 The identity of one run of a [fiber](#fiber), from the create or resume that starts it until it is parked or ends. It is made of the fiber's [grant](#grant), [fiberd](#fiberd)'s [epoch](#epoch) and a sequence number, and [Clone](#clone) returns it as the fiber ID, written `grant/epoch/seq`, such as `g1/1/2`.
 
+## Generation
+
+A [fiber](#fiber)'s place in its lineage, which [fiberd](#fiberd) counts and hands the template on every incarnation record. A fork of the warm [template](#template), a restore of its image or a pooled hand-out is 1. A resume is the [parked](#park) generation plus one, kept in the park's manifest, so a [session](#session) moved to another [home](#home) counts on. A template that counts its own incarnations can tell a missed one from the number.
+
 ## Epoch
 A counter [fiberd](#fiberd) keeps on disk and raises on every start, and whenever its [home](#home) loses its [scope](#scope). Raising it makes every [fence](#fence) minted before it invalid at once.
 

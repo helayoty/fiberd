@@ -365,7 +365,7 @@ class Fiber:
     def serve(self, handler: Callable[[socket.socket], None], *, listener: Optional[socket.socket] = None, poll: float = 0.5) -> None:
         """The accept loop. Listens, reports ready, hands each connection to handler and closes it after.
 
-        The fence file is checked before each connection, so a fiber resumed
+        The channel is polled before each connection, so a fiber resumed
         from a park is reseeded before it serves. A listener from listen()
         may be passed in when the fiber did work between binding and ready.
         Returns when the fiber is asked to stop (SIGTERM, or stopping set,
@@ -391,7 +391,7 @@ class Fiber:
                     conn, _ = srv.accept()
                 except (TimeoutError, InterruptedError):
                     continue
-                self.check_fence()
+                self.poll_incarnation()
                 try:
                     handler(conn)
                 finally:
@@ -416,7 +416,7 @@ class Fiber:
                     fd = self._next_handoff(poll)
                 except ConnectionResetError:
                     return
-                self.check_fence()
+                self.poll_incarnation()
                 conn = self._terminate(ctx, fd)
                 if conn is None:
                     continue
@@ -523,7 +523,7 @@ class Fiber:
             srv = listener if listener is not None else self.listen()
 
             async def checked(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-                self.check_fence()
+                self.poll_incarnation()
                 await one(reader, writer)
 
             if self.kind == "unix":
@@ -567,7 +567,7 @@ class Fiber:
                 fd = _ext().accept()
             except ConnectionResetError:
                 return
-            self.check_fence()
+            self.poll_incarnation()
             conn = await self._terminate_async(ctx, fd, handshake_timeout)
             if conn is not None:
                 yield conn
@@ -601,25 +601,26 @@ class Fiber:
             return None
         return reader, asyncio.StreamWriter(transport, protocol, reader, loop)
 
-    def check_fence(self) -> bool:
-        """Reads the fence file fiberd publishes beside the endpoint. A new fence is a resume, and reseeds.
+    def poll_incarnation(self) -> bool:
+        """Takes a resume's record off the channel, when one has arrived. True for a resume, which reseeds and runs the hooks.
 
         Called by serve() before each connection. An author running their
-        own loop over listen() calls it the same way. A gVisor fiber has
-        no fence file, since a resumed sandbox takes a whole identity.
+        own loop over listen() calls it the same way. It never blocks. The
+        record names the new fence, the session the resuming clone gave
+        and fiberd's generation, and brings a fresh seed. A gVisor fiber
+        has no channel to poll, since a resumed sandbox takes a whole
+        identity.
         """
         if self.backend == "gvisor":
             return False
-        now = _fence.live_fence(_fence.fence_file(self.endpoint, self.kind, self._birth), self.fence)
-        if now == self.fence:
+        rec = _ext().incarnation_poll()
+        if rec is None:
             return False
-        self.fence = now
-        self.fence_parts = _fence.parse_fence(now)
-        # A resume is the parked generation plus one, which is fiberd's
-        # count as long as this process saw every incarnation. A proc or
-        # runc resume brings no record of its own yet.
-        parked = self.incarnation.generation if self.incarnation is not None else 0
-        self._incarnate("resume", parked + 1, os.urandom(32))
+        kind, fence, _endpoint, _payload, seed, session, generation = rec
+        self.fence = fence
+        self.fence_parts = _fence.parse_fence(fence)
+        self.session = session
+        self._incarnate(kind, generation, seed)
         return True
 
     def _incarnate(self, kind: str, generation: int, seed: bytes | bytearray) -> None:

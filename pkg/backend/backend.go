@@ -123,10 +123,11 @@ type Fiber struct {
 	// Channel is the host's end of a handoff fiber's channel, on a
 	// Handoffer. The backend made the pair where the fiber's checkpoint
 	// can carry it, queued the incarnation record on it before the fiber
-	// was born (none at a resume) and handed the fiber the other end.
-	// The host owns this end from here, passes connections over it and
-	// closes it when the fiber ends. nil for every other fiber, whose
-	// channel both sides close once the record is read.
+	// was born or was restored, and handed the fiber the other end. The
+	// host owns this end from here, passes connections over it and
+	// closes it when the fiber ends. nil for every other fiber, which
+	// holds a pair of its own that the backend borrows an end of to
+	// send a resume's record.
 	Channel *os.File
 	// Footprint is what the fiber's leaf counted on the backend's W
 	// counter just before the fiber took its identity, for a backend
@@ -165,7 +166,9 @@ type ResumeSpec struct {
 	// the park's manifest (FiberSpec.Generation).
 	Generation int
 	// Handoff says the checkpoint's fiber serves handoff, so it holds a
-	// channel the restore replaces with a fresh one (Fiber.Channel).
+	// channel the restore replaces with a fresh one (Fiber.Channel). A
+	// backend sends every resumed fiber its record, kind "resume" with
+	// Fence, Generation and Session, on its channel before it serves.
 	Handoff bool
 }
 

@@ -4,6 +4,7 @@ package runctest
 
 import (
 	"context"
+	"strconv"
 	"testing"
 	"time"
 
@@ -13,12 +14,14 @@ import (
 // TestRandomPerIncarnation is the proc test of the same name across the
 // container boundary: forked siblings draw their own randomness, each
 // from the seed on its own incarnation record, and so do two fibers
-// resumed from one park. On runc the fence file the host
-// publishes at resume is read by the fiber as a mapped root inside the
-// container, which is the signal that makes the second part hold. The
-// getrandom rows ask the kernel directly, which a glibc of 2.41 or later
-// answers from a vDSO state page in user memory. The park drops that
-// page (pkg/sys/criu), or every resume would replay one keystream.
+// resumed from one park. On runc the restored tree lands in a fresh
+// network namespace, so the channel the resume's record arrives on is
+// the pair the fiber holds both ends of, dumped with it and remade
+// there, and the resume borrows its peer. A resume of a resumed park
+// shows the pair survives a second dump. The getrandom rows ask the
+// kernel directly, which a glibc of 2.41 or later answers from a vDSO
+// state page in user memory. The park drops that page (pkg/sys/criu),
+// or every resume would replay one keystream.
 func TestRandomPerIncarnation(t *testing.T) {
 	ctx := context.Background()
 	siblings := func(payload []byte) func(t *testing.T, rt core.Runtime, g core.Grant, cmd string) (string, string) {
@@ -35,31 +38,54 @@ func TestRandomPerIncarnation(t *testing.T) {
 			return out[0], out[1]
 		}
 	}
-	resumes := func(t *testing.T, rt core.Runtime, g core.Grant, cmd string) (string, string) {
-		h, err := rt.Clone(ctx, core.CloneSpec{Grant: g, Fence: core.Fence{GrantUID: g.UID, Epoch: 1, Seq: 1}, Deadline: 2 * time.Second})
-		if err != nil {
-			t.Fatalf("clone: %v", err)
-		}
-		talk(t, h.Endpoint, cmd)
-		ref, err := rt.Park(ctx, h.ID, true)
-		if err != nil {
-			t.Fatalf("park: %v", err)
-		}
-		var out []string
-		for seq := uint64(2); seq <= 3; seq++ {
-			h2, err := rt.Clone(ctx, core.CloneSpec{Grant: g, Source: core.SourceDelta, Ref: ref, Fence: core.Fence{GrantUID: g.UID, Epoch: 1, Seq: seq}, Deadline: 5 * time.Second})
+	// resumes parks one fiber born with payload and resumes it twice, or
+	// with chained parks the first resume and resumes that park for the
+	// second. Each resume names the fence, kind and generation its record
+	// brought, 2 for both resumes of one park and 3 for a resume of a
+	// resumed park.
+	resumes := func(payload []byte, chained bool) func(t *testing.T, rt core.Runtime, g core.Grant, cmd string) (string, string) {
+		return func(t *testing.T, rt core.Runtime, g core.Grant, cmd string) (string, string) {
+			h, err := rt.Clone(ctx, core.CloneSpec{Grant: g, Fence: core.Fence{GrantUID: g.UID, Epoch: 1, Seq: 1}, Deadline: 2 * time.Second, Payload: payload})
 			if err != nil {
-				t.Fatalf("resume %d: %v", seq, err)
+				t.Fatalf("clone: %v", err)
 			}
-			out = append(out, talk(t, h2.Endpoint, cmd))
-			if got := talk(t, h2.Endpoint, "fence"); got != h2.ID {
-				t.Fatalf("resume %d: fence = %q, want %q", seq, got, h2.ID)
+			born := talk(t, h.Endpoint, cmd)
+			ref, err := rt.Park(ctx, h.ID, true)
+			if err != nil {
+				t.Fatalf("park: %v", err)
 			}
-			if err := rt.Release(ctx, h2.ID, false); err != nil {
-				t.Fatalf("release %s: %v", h2.ID, err)
+			var out []string
+			for seq := uint64(2); seq <= 3; seq++ {
+				h2, err := rt.Clone(ctx, core.CloneSpec{Grant: g, Source: core.SourceDelta, Ref: ref, Fence: core.Fence{GrantUID: g.UID, Epoch: 1, Seq: seq}, Deadline: 5 * time.Second})
+				if err != nil {
+					t.Fatalf("resume %d: %v", seq, err)
+				}
+				out = append(out, talk(t, h2.Endpoint, cmd))
+				if got := talk(t, h2.Endpoint, "fence"); got != h2.ID {
+					t.Fatalf("resume %d: fence = %q, want %q", seq, got, h2.ID)
+				}
+				want := "2"
+				if chained {
+					want = strconv.FormatUint(seq, 10)
+				}
+				if kind, gen := talk(t, h2.Endpoint, "kind"), talk(t, h2.Endpoint, "generation"); kind != "resume" || gen != want {
+					t.Fatalf("resume %d reports kind %q generation %q, want resume %s from the record", seq, kind, gen, want)
+				}
+				if cmd == "seed" && out[len(out)-1] == born {
+					t.Fatalf("resume %d answers the birth seed %s, want the record's own", seq, born)
+				}
+				if chained && seq == 2 {
+					if ref, err = rt.Park(ctx, h2.ID, true); err != nil {
+						t.Fatalf("park %s: %v", h2.ID, err)
+					}
+					continue
+				}
+				if err := rt.Release(ctx, h2.ID, false); err != nil {
+					t.Fatalf("release %s: %v", h2.ID, err)
+				}
 			}
+			return out[0], out[1]
 		}
-		return out[0], out[1]
 	}
 	cases := []struct {
 		name string
@@ -77,8 +103,12 @@ func TestRandomPerIncarnation(t *testing.T) {
 		// network namespace carries. Before the record, no forked fiber
 		// had one.
 		{name: "forked siblings, the record's seed", cmd: "seed", draw: siblings([]byte(`{"keep_seed":1}`)), hex: 64},
-		{name: "two resumes of one park, libc random", cmd: "random", draw: resumes},
-		{name: "two resumes of one park, getrandom", cmd: "getrandom", draw: resumes},
+		{name: "two resumes of one park, libc random", cmd: "random", draw: resumes(nil, false)},
+		{name: "two resumes of one park, getrandom", cmd: "getrandom", draw: resumes(nil, false)},
+		{name: "two resumes of one park, the record's seed", cmd: "seed", draw: resumes([]byte(`{"keep_seed":1}`), false), hex: 64},
+		// Park, resume, park again, resume again: the pair is dumped twice.
+		{name: "a resume of a resumed park, libc random", cmd: "random", draw: resumes(nil, true)},
+		{name: "a resume of a resumed park, the record's seed", cmd: "seed", draw: resumes([]byte(`{"keep_seed":1}`), true), hex: 64},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

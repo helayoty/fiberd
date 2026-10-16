@@ -207,13 +207,17 @@ def test_server_context_trusts_the_caller_certificate_alone(world):
 
 
 class HandoffExt:
-    """The C binding of a handoff fiber: accept() hands out the server ends queued, then the channel's close."""
+    """The C binding of a handoff fiber: accept() hands out the server ends queued, then the channel's close. polls is what each incarnation_poll answers."""
 
-    ABI_VERSION = 6
+    ABI_VERSION = 8
 
-    def __init__(self):
+    def __init__(self, polls=()):
         self.calls = []
         self.queue = []
+        self.polls = list(polls)
+
+    def incarnation_poll(self):
+        return self.polls.pop(0) if self.polls else None
 
     def fiber_ready(self):
         self.calls.append(("ready",))
@@ -454,9 +458,10 @@ def test_accept_refusals(world, monkeypatch, name, f0, f1, f2):
 
 
 @linux_only
-def test_serve_handoff_reports_ready_checks_the_fence_and_ends_with_the_channel(world, tmp_path, monkeypatch):
+def test_serve_handoff_reports_ready_polls_the_channel_and_ends_with_the_channel(world, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    ext = HandoffExt()
+    # The resume's record, which the library read ahead of the first connection.
+    ext = HandoffExt(polls=[("resume", "g/1/2", "handoff", b"", bytearray(32), "", 2)])
     ch, host_end = socket.socketpair()
     f = handoff_fiber(world, ext, monkeypatch, ch)
     f._incarnate("fork", 1, os.urandom(32))
@@ -464,7 +469,6 @@ def test_serve_handoff_reports_ready_checks_the_fence_and_ends_with_the_channel(
     # fiberd's end: one message per connection, then the close at release.
     host_end.sendall(b"\0\0")
     host_end.close()
-    (tmp_path / "1-1.fence").write_text("g/1/2\n")
     served = []
 
     def handler(conn):
@@ -474,7 +478,7 @@ def test_serve_handoff_reports_ready_checks_the_fence_and_ends_with_the_channel(
     f.serve(handler, poll=0.05)
     join(threads)
     assert ext.calls == [("ready",)]
-    assert served == [(b"ping\n", "g/1/2", "resume")], "only the bound caller reached the handler, after the fence file was read"
+    assert served == [(b"ping\n", "g/1/2", "resume")], "only the bound caller reached the handler, after the record was polled"
     assert refused(results[0]) and results[1] == ("reply", b"pong\n")
 
 
@@ -506,14 +510,12 @@ def sock_dir():
         shutil.rmtree(d, ignore_errors=True)
 
 
-def test_serve_async_unix_reports_ready_checks_the_fence_and_unlinks(sock_dir, monkeypatch):
-    ext = HandoffExt()
+def test_serve_async_unix_reports_ready_polls_the_channel_and_unlinks(sock_dir, monkeypatch):
+    ext = HandoffExt(polls=[("resume", "g/1/2", "", b"", bytearray(32), "", 2)])
     monkeypatch.setattr(ft, "_ext", lambda: ext)
     ep = os.path.join(sock_dir, "ep.sock")
     f = ft.Fiber("g/1/1", ep, b"", "", {})
     f._incarnate("fork", 1, os.urandom(32))
-    with open(ep + ".fence", "w") as fh:
-        fh.write("g/1/2\n")
     served = []
 
     async def handler(reader, writer):

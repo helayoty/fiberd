@@ -18,9 +18,9 @@
  *   random          -> <n>       (libc random(), reseeded in every new
  *                                 incarnation: at the fork and after a
  *                                 restore from the record's seed mixed
- *                                 with the kernel's, and when the fence
- *                                 changes under a resumed fiber, so no
- *                                 two copies draw the same sequence)
+ *                                 with the kernel's, and from a resume's
+ *                                 record the same way, so no two copies
+ *                                 draw the same sequence)
  *   seed            -> <hex>     (the record's 32-byte seed, kept only
  *                                 when the payload set "keep_seed", for
  *                                 the runtime's own tests; "-" otherwise,
@@ -29,14 +29,18 @@
  *                                 shows whether the kernel's entropy is
  *                                 fresh in a copy, with no template
  *                                 state in between)
- *   fence           -> <fence>   (the current one: after a resume fiberd
- *                                 publishes the new fence beside a unix
- *                                 endpoint, and that file wins over the
- *                                 birth fence in memory)
+ *   fence           -> <fence>   (the current one: a resume's record
+ *                                 names the new fence, read off the
+ *                                 channel before each connection)
  *   getenv <NAME>   -> value or "-" (proves the scrub: only FIBERD_* exist)
  *   session         -> the session the caller named, or "-"
  *   generation      -> fiberd's count of this fiber's lineage (1 at
  *                      birth, the parked one plus one after a resume)
+ *   kind            -> the current record's kind, "fork" or "resume"
+ *   borrow <pid> <fd> -> "ok" when pidfd_open plus pidfd_getfd reach
+ *                      that descriptor of that pid from this fiber,
+ *                      else the errno's name (proves another grant's
+ *                      fiber cannot take this one's channel as fiberd does)
  *   payload         -> the birth payload in hex (up to 127 bytes), or "-"
  *   status <Key>    -> that field of /proc/self/status, or "-"
  *                      (CapEff and NoNewPrivs prove the privilege drop)
@@ -279,51 +283,20 @@ static void engine_start(size_t mb) {
 
 /* ---- the fiber's side of the device ----------------------------------- */
 
-static const char *cur_endpoint; /* this fiber's endpoint, for the fence file */
-static const char *cur_fence;
-static const fz_incarnation_t *cur_fiber; /* this fiber's record, for session and payload */
+static const fz_incarnation_t *cur_fiber; /* this fiber's birth record, for session and payload */
 /* The record's seed in hex, kept only under the "keep_seed" payload key
  * for the tests, since the library zeroes the record's copy at ready. */
 static char kept_seed[2 * 32 + 1];
-/* The generation this process serves as. It is the record's at birth
- * (fiberd's count), and a resume on proc or runc, which brings no record
- * yet, is the parked one's plus one. */
+/* The fence, kind and generation this process serves as, from the birth
+ * record and then from each resume's record (poll_incarnation). The
+ * fence is copied, since a polled record is valid only until the next
+ * poll. */
+static char cur_fence[128];
+static char cur_kind[16];
 static unsigned cur_generation;
 
-/* The fence this incarnation lives under: the one fiberd published
- * after a resume (the fence in memory is the birth fence, stale then),
- * else fallback, the fence in memory. The file sits beside the unix
- * endpoint; a fiber behind fiberd's tcp relay serves a unix socket
- * too and reads the file beside it. One that binds tcp itself, or takes
- * handed-off connections, has no socket, and finds the file in its
- * working directory (its grant's run directory) under the name of its
- * birth fence, <epoch>-<seq>.fence, the one fence it knows. A gVisor
- * incarnation has no fence file: its fence comes from the restore-time
- * spec and is current already. */
-static const char *live_fence(char *buf, size_t n, const char *fallback) {
-    const char *ep = cur_endpoint ? cur_endpoint : "";
-    if (strncmp(ep, "unix://", 7) == 0) ep += 7;
-    char path[300] = "";
-    if (ep[0] == '/') {
-        snprintf(path, sizeof path, "%s.fence", ep);
-    } else if (cur_fence) {
-        /* <grant>/<epoch>/<seq> -> <epoch>-<seq>.fence */
-        const char *e = strchr(cur_fence, '/');
-        const char *s = e ? strchr(e + 1, '/') : NULL;
-        if (e && s) snprintf(path, sizeof path, "%.*s-%s.fence", (int)(s - e - 1), e + 1, s + 1);
-    }
-    if (path[0]) {
-        FILE *f = fopen(path, "r");
-        if (f) {
-            if (fgets(buf, (int)n, f)) { buf[strcspn(buf, "\r\n")] = 0; fclose(f); if (buf[0]) return buf; }
-            fclose(f);
-        }
-    }
-    return fallback ? fallback : "?";
-}
-
 /* The fence the engine should file the slice under. */
-static const char *current_fence(char *buf, size_t n) { return live_fence(buf, n, cur_fence); }
+static const char *current_fence(void) { return cur_fence[0] ? cur_fence : "?"; }
 
 /* device_reserve asks the engine for a slice of bytes (0 releases it) and
  * returns the engine's reply line. */
@@ -336,7 +309,7 @@ static const char *device_reserve(unsigned long long bytes, char *reply, size_t 
     struct sockaddr_un a = { .sun_family = AF_UNIX };
     snprintf(a.sun_path, sizeof a.sun_path, "%s", eng);
     if (connect(s, (struct sockaddr *)&a, sizeof a) < 0) { close(s); return "err engine unreachable"; }
-    char fb[128]; const char *fence = current_fence(fb, sizeof fb);
+    const char *fence = current_fence();
     char req[256];
     int m = bytes ? snprintf(req, sizeof req, "reserve %s %llu\n", fence, bytes) : snprintf(req, sizeof req, "release %s\n", fence);
     (void)!write(s, req, (size_t)m);
@@ -373,6 +346,7 @@ static void errname(int e, char *out, size_t n) {
     case EHOSTUNREACH: snprintf(out, n, "EHOSTUNREACH\n"); break;
     case ETIMEDOUT: snprintf(out, n, "ETIMEDOUT\n"); break;
     case EINVAL: snprintf(out, n, "EINVAL\n"); break;
+    case ESRCH: snprintf(out, n, "ESRCH\n"); break;
     default: snprintf(out, n, "errno %d\n", e); break;
     }
 }
@@ -716,20 +690,48 @@ static void reseed_rngs_from(const unsigned char *host, size_t hn) {
 #endif
 }
 
-static void reseed_rngs(void) { reseed_rngs_from(NULL, 0); }
+/* set_incarnation records what this process serves as, from a record,
+ * and keeps the seed under "keep_seed" for the tests. */
+static void set_incarnation(const fz_incarnation_t *inc) {
+    snprintf(cur_fence, sizeof cur_fence, "%s", inc->fence);
+    snprintf(cur_kind, sizeof cur_kind, "%s", inc->kind);
+    cur_generation = inc->generation;
+    if (cur_fiber && payload_num(cur_fiber->payload, cur_fiber->payload_len, "\"keep_seed\"") && inc->seed_len == 32)
+        for (size_t i = 0; i < inc->seed_len; i++) snprintf(kept_seed + 2 * i, 3, "%02x", inc->seed[i]);
+}
 
-/* The fence this process last served under. A resumed fiber finds a new
- * one in the file beside its endpoint (live_fence) and reseeds before it
- * serves the connection it just accepted. */
-static char seen_fence[128];
+/* poll_incarnation asks the library for a resume's record. A resumed
+ * fiber lands mid-accept with the parked RNG state, and reseeds from
+ * the record before it serves the connection it just accepted, then
+ * lets the library zero the seed. */
+static void poll_incarnation(void) {
+    fz_incarnation_t inc;
+    if (fz_incarnation_poll(&inc) <= 0) return;
+    set_incarnation(&inc);
+    reseed_rngs_from(inc.seed, inc.seed_len);
+    fz_seed_forget();
+}
 
-static void reseed_if_new_fence(const char *fallback) {
-    char fb[128];
-    const char *now = live_fence(fb, sizeof fb, fallback);
-    if (strcmp(now, seen_fence) == 0) return;
-    snprintf(seen_fence, sizeof seen_fence, "%s", now);
-    cur_generation++;
-    reseed_rngs();
+/* borrow_errno is what pidfd_open plus pidfd_getfd of fd in pid answer
+ * from inside this fiber, "ok" or the errno's name. It shows whether a
+ * fiber can reach another's channel the way fiberd does. */
+#ifndef SYS_pidfd_open
+#define SYS_pidfd_open 434
+#endif
+#ifndef SYS_pidfd_getfd
+#define SYS_pidfd_getfd 438
+#endif
+static void borrow_errno(const char *arg, char *out, size_t n) {
+    int pid, fd;
+    if (sscanf(arg, "%d %d", &pid, &fd) != 2) { errname(EINVAL, out, n); return; }
+    int pidfd = (int)syscall(SYS_pidfd_open, pid, 0);
+    if (pidfd < 0) { errname(errno, out, n); return; }
+    int got = (int)syscall(SYS_pidfd_getfd, pidfd, fd, 0);
+    int e = errno;
+    close(pidfd);
+    if (got < 0) { errname(e, out, n); return; }
+    close(got);
+    snprintf(out, n, "ok\n");
 }
 
 static int serve_client(conn_t *c, const char *fence, unsigned long *counter) {
@@ -741,7 +743,7 @@ static int serve_client(conn_t *c, const char *fence, unsigned long *counter) {
         else if (strncmp(line, "dirty ", 6) == 0) { size_t n = dirty((size_t)strtoull(line + 6, NULL, 10)); snprintf(out, sizeof out, "ok %zu\n", n); }
         else if (strcmp(line, "incr") == 0) snprintf(out, sizeof out, "%lu\n", ++*counter);
         else if (strcmp(line, "get") == 0) snprintf(out, sizeof out, "%lu\n", *counter);
-        else if (strcmp(line, "fence") == 0) { char fb[128]; snprintf(out, sizeof out, "%s\n", live_fence(fb, sizeof fb, fence)); }
+        else if (strcmp(line, "fence") == 0) snprintf(out, sizeof out, "%s\n", cur_fence[0] ? cur_fence : fence);
         else if (strcmp(line, "pid") == 0) snprintf(out, sizeof out, "%d\n", (int)getpid());
         else if (strcmp(line, "random") == 0) snprintf(out, sizeof out, "%ld\n", random());
         else if (strcmp(line, "seed") == 0) snprintf(out, sizeof out, "%s\n", kept_seed[0] ? kept_seed : "-");
@@ -760,6 +762,8 @@ static int serve_client(conn_t *c, const char *fence, unsigned long *counter) {
         else if (strncmp(line, "getenv ", 7) == 0) { const char *v = getenv(line + 7); snprintf(out, sizeof out, "%s\n", v ? v : "-"); }
         else if (strcmp(line, "session") == 0) snprintf(out, sizeof out, "%s\n", cur_fiber && cur_fiber->session[0] ? cur_fiber->session : "-");
         else if (strcmp(line, "generation") == 0) snprintf(out, sizeof out, "%u\n", cur_generation);
+        else if (strcmp(line, "kind") == 0) snprintf(out, sizeof out, "%s\n", cur_kind[0] ? cur_kind : "-");
+        else if (strncmp(line, "borrow ", 7) == 0) borrow_errno(line + 7, out, sizeof out);
         else if (strcmp(line, "payload") == 0) {
             size_t n = cur_fiber ? cur_fiber->payload_len : 0;
             if (n == 0 || 2 * n + 2 > sizeof out) snprintf(out, sizeof out, "-\n");
@@ -811,7 +815,7 @@ static int serve_http(conn_t *c, const char *fence, unsigned long *counter) {
     char *q = strchr(target, '?');
     const char *query = "";
     if (q) { *q = 0; query = q + 1; }
-    char body[128];
+    char body[256];
     if (strcmp(target, "/readyz") == 0) { http_reply(c, 200, "OK", "ok\n"); return 0; }
     if (strcmp(method, "GET") == 0 && (strcmp(target, "/") == 0 || strcmp(target, "/count") == 0)) {
         snprintf(body, sizeof body, "%lu\n", *counter); http_reply(c, 200, "OK", body); return 0;
@@ -819,7 +823,7 @@ static int serve_http(conn_t *c, const char *fence, unsigned long *counter) {
     if (strcmp(method, "POST") == 0 && (strcmp(target, "/") == 0 || strcmp(target, "/incr") == 0)) {
         snprintf(body, sizeof body, "%lu\n", ++*counter); http_reply(c, 200, "OK", body); return 0;
     }
-    if (strcmp(target, "/fence") == 0) { char fb[128]; snprintf(body, sizeof body, "%s\n", live_fence(fb, sizeof fb, fence)); http_reply(c, 200, "OK", body); return 0; }
+    if (strcmp(target, "/fence") == 0) { snprintf(body, sizeof body, "%s\n", cur_fence[0] ? cur_fence : fence); http_reply(c, 200, "OK", body); return 0; }
     if (strcmp(method, "POST") == 0 && strcmp(target, "/dirty") == 0) {
         const char *b = strstr(query, "bytes=");
         size_t got = dirty(b ? (size_t)strtoull(b + 6, NULL, 10) : 0);
@@ -867,17 +871,12 @@ static int listen_endpoint(const char *ep) {
 }
 
 static int on_fiber(const fz_incarnation_t *f) {
-    cur_endpoint = f->endpoint;
-    cur_fence = f->fence;
     cur_fiber = f;
-    cur_generation = f->generation;
+    set_incarnation(f);
     /* This fiber's random() would otherwise replay the zygote's
      * sequence, the same in every sibling. The library leaves reseeding
      * to the template (see fz_on_fiber), and hands it the host's seed. */
-    snprintf(seen_fence, sizeof seen_fence, "%s", f->fence);
     reseed_rngs_from(f->seed, f->seed_len);
-    if (payload_num(f->payload, f->payload_len, "\"keep_seed\"") && f->seed_len == 32)
-        for (size_t i = 0; i < f->seed_len; i++) snprintf(kept_seed + 2 * i, 3, "%02x", f->seed[i]);
     int handoff = f->identity != NULL;
     if (handoff) {
 #ifdef FZ_TLS
@@ -923,12 +922,10 @@ static int on_fiber(const fz_incarnation_t *f) {
     for (;;) {
         int fd = handoff ? fz_accept() : accept4(s, NULL, NULL, SOCK_CLOEXEC);
         if (fd < 0) { if (errno == EINTR) continue; return 5; }
-        /* A resume lands here, mid-accept, with the parked RNG state. A
-         * fiber serving a unix socket sees the new fence beside it and
-         * reseeds before this first connection is served. A tcp or
-         * handoff fiber has no file to watch, so only its per-handshake
-         * TLS reseed covers it. */
-        reseed_if_new_fence(f->fence);
+        /* A resume lands here, mid-accept, with the parked RNG state
+         * and its record waiting on the channel. It reseeds before this
+         * first connection is served. */
+        poll_incarnation();
         conn_t c = { .fd = fd };
 #ifdef FZ_TLS
         if (handoff && tls_start(&c) < 0) { close(fd); continue; }
@@ -1036,7 +1033,7 @@ static int gvisor_main(void) {
         reseed_rngs_from(id.seed, id.seed_len);
         /* The record the fiber-side commands read, as on_fiber's is under a fork. */
         cur_fiber = &id;
-        cur_generation = id.generation;
+        set_incarnation(&id);
         fprintf(stderr, "refzygote: incarnation %s serving on %s\n", id.fence, id.endpoint);
         int rc = gvisor_serve_once(id.fence, id.endpoint, id.payload, id.payload_len, &counter);
         cur_fiber = NULL;

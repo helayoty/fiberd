@@ -13,8 +13,8 @@ import (
 // queued on the host's end as the fiber's incarnation record, a fresh
 // seed drawn here. make makes the pair where the fiber's checkpoint can
 // carry it, and nil is plain socketpair(2) in the host's namespace. An
-// inc with no fence queues nothing, which is a resume's channel. The
-// record and the seed are cleared once sent.
+// inc with no fence queues nothing. The record and the seed are cleared
+// once sent.
 func Channel(make func(typ int) ([2]int, error), inc Incarnation) (host, fiber *os.File, err error) {
 	if make == nil {
 		make = func(typ int) ([2]int, error) { return syscall.Socketpair(syscall.AF_UNIX, typ|syscall.SOCK_CLOEXEC, 0) }
@@ -27,7 +27,7 @@ func Channel(make func(typ int) ([2]int, error), inc Incarnation) (host, fiber *
 	if inc.Fence == "" {
 		return host, fiber, nil
 	}
-	if err := queue(fds[0], inc); err != nil {
+	if err := Queue(fds[0], inc); err != nil {
 		_ = host.Close()
 		_ = fiber.Close()
 		return nil, nil, err
@@ -35,9 +35,11 @@ func Channel(make func(typ int) ([2]int, error), inc Incarnation) (host, fiber *
 	return host, fiber, nil
 }
 
-// queue frames inc with a fresh seed and sends it on fd without
-// blocking, the one message a fiber reads before anything else.
-func queue(fd int, inc Incarnation) error {
+// Queue frames inc with a fresh seed drawn here and sends it on fd
+// without blocking: the first message a fiber reads at birth, and the
+// one a resumed fiber polls off its channel. The record and the seed
+// are cleared once sent.
+func Queue(fd int, inc Incarnation) error {
 	seed := make([]byte, SeedBytes)
 	if _, err := rand.Read(seed); err != nil {
 		return fmt.Errorf("backend: seed of %s: %w", inc.Fence, err)

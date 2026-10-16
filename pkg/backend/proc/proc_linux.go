@@ -58,6 +58,8 @@ import (
 	"syscall"
 	"time"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/helayoty/fiberd/pkg/backend"
 	"github.com/helayoty/fiberd/pkg/core"
 	"github.com/helayoty/fiberd/pkg/sys/criu"
@@ -89,6 +91,11 @@ type Options struct {
 	// Commander runs criu (criu.Options.Commander). Nil runs the binary
 	// CRIU names.
 	Commander criu.Commander
+	// Borrow takes a duplicate of descriptor fd of process pid, as
+	// pidfd_getfd(2) does, which a resume uses to reach the restored
+	// tree's channel. Nil is that system call, and a test sets one that
+	// hands out ends of pairs of its own.
+	Borrow func(pid, fd int) (*os.File, error)
 
 	// spawn starts the zygote's command. Nil is cmd.Start, and a test
 	// sets one that serves the control socket in this process.
@@ -538,9 +545,14 @@ type fiber struct {
 }
 
 // channelFD is where libfiberzygote keeps a fiber's channel
-// (FZ_CHANNEL_FD). Every fiber reads its record off it, and a handoff
-// fiber keeps it.
-const channelFD = 4
+// (FZ_CHANNEL_FD). Every fiber reads its records off it. A handoff
+// fiber's is fiberd's channel. Every other fiber's is a pair of its own,
+// whose peer it holds at channelPeerFD (FZ_CHANNEL_PEER_FD), the end
+// the backend borrows after a restore to send the resume's record.
+const (
+	channelFD     = 4
+	channelPeerFD = 5
+)
 
 // runDirFile, in a checkpoint of a fiber whose run directory was
 // narrowed, records the mount point of its grant's directory in the
@@ -593,6 +605,9 @@ func NewBackend(o Options) *Backend {
 	}
 	if o.procRoot == "" {
 		o.procRoot = "/proc"
+	}
+	if o.Borrow == nil {
+		o.Borrow = pidfdBorrow
 	}
 	b := &Backend{opt: o, criu: criu.Options{Bin: o.CRIU, Wrap: o.CRIUWrap, Commander: o.Commander}, tier: core.TierWarm, defaultRoot: defaultRoot,
 		zygotes: map[string]*zygote{}, fibers: map[string]*fiber{}, byPID: map[pidKey]*fiber{},
@@ -1285,8 +1300,8 @@ func (b *Backend) fiberEndpoint(z *zygote, endpoint string) string {
 // Clone makes the fiber's channel with its record queued, sends CLONE
 // with the leaf cgroup fd and the fiber's end of the channel, and waits
 // for CLONED. A handoff fiber's host end comes back in the Fiber. Any
-// other fiber reads its record and closes the channel, and so does the
-// backend here.
+// other fiber reads its record and replaces the channel with a pair of
+// its own (libfiberzygote), so the backend closes its end here.
 func (b *Backend) Clone(ctx context.Context, warmID string, spec backend.FiberSpec) (backend.Fiber, error) {
 	b.mu.Lock()
 	z, ok := b.zygotes[warmID]
@@ -1449,6 +1464,8 @@ func (b *Backend) Park(ctx context.Context, fiberID string, spec backend.ParkSpe
 			return err
 		}
 		extra = append(extra, "--external", "unix["+ino+"]")
+	} else if err := b.drainChannel(pid); err != nil {
+		return fmt.Errorf("proc: channel of %s: %w", fiberID, err)
 	}
 	err := b.criu.DumpWith(ctx, pid, spec.Dir, spec.Sync, extra)
 	// The fiber closes a host connection moments after its client does.
@@ -1482,6 +1499,67 @@ func handoffInherit(dir string, ch *os.File) ([]string, []*os.File, error) {
 		return nil, nil, fmt.Errorf("proc: %s in %s: malformed", handoffFile, dir)
 	}
 	return []string{"--inherit-fd", "fd[3]:socket:[" + rec.Inode + "]"}, []*os.File{ch}, nil
+}
+
+// sendResumed writes inc on the channel of the restored tree pid, by
+// borrowing the peer end the fiber holds. The record waits in the
+// fiber's queue for its next fz_incarnation_poll.
+func (b *Backend) sendResumed(pid int, inc backend.Incarnation) error {
+	peer, err := b.opt.Borrow(pid, channelPeerFD)
+	if err != nil {
+		return fmt.Errorf("borrow the channel's peer end: %w", err)
+	}
+	defer func() { _ = peer.Close() }()
+	return backend.Queue(int(peer.Fd()), inc)
+}
+
+// drainChannel takes every unread message off the channel of the fiber
+// pid before its dump, by borrowing the end it reads. A resume's record
+// the fiber has not polled yet would otherwise be dumped with it, seed
+// and all, and come back in every restore of the park.
+func (b *Backend) drainChannel(pid int) error {
+	ch, err := b.opt.Borrow(pid, channelFD)
+	if err != nil {
+		return fmt.Errorf("borrow the channel: %w", err)
+	}
+	defer func() { _ = ch.Close() }()
+	buf := make([]byte, backend.RecordMax)
+	defer clear(buf)
+	for {
+		n, _, _, _, err := syscall.Recvmsg(int(ch.Fd()), buf, nil, syscall.MSG_DONTWAIT)
+		switch {
+		case errors.Is(err, syscall.EAGAIN):
+			return nil
+		case err != nil:
+			return err
+		case n == 0:
+			return nil
+		}
+	}
+}
+
+// pidfdBorrow is pidfd_open(2) then pidfd_getfd(2): a duplicate of
+// descriptor fd of pid, which needs ptrace rights over it (CAP_SYS_PTRACE
+// in this process's user namespace, which fiberd keeps).
+func pidfdBorrow(pid, fd int) (*os.File, error) {
+	pidfd, err := unix.PidfdOpen(pid, 0)
+	if err != nil {
+		return nil, fmt.Errorf("pidfd_open %d: %w", pid, err)
+	}
+	defer func() { _ = unix.Close(pidfd) }()
+	got, err := unix.PidfdGetfd(pidfd, fd, 0)
+	if err != nil {
+		return nil, fmt.Errorf("pidfd_getfd %d of %d: %w", fd, pid, err)
+	}
+	return os.NewFile(uintptr(got), "borrowed"), nil
+}
+
+// restoreDone is a channel closed once the restored tree has ended, for
+// a resume that is given up after the restore.
+func restoreDone(res *criu.Restored) <-chan struct{} {
+	done := make(chan struct{})
+	go func() { _ = res.Wait(); close(done) }()
+	return done
 }
 
 // runDirInherit returns the criu arguments that bind the run directory
@@ -1550,9 +1628,8 @@ func (b *Backend) Resume(ctx context.Context, spec backend.ResumeSpec) (backend.
 				return backend.Fiber{}, err
 			}
 			// The fiber's run directory, if the checkpoint has one, is
-			// bound to the resuming grant's, where the host dials and
-			// writes the fence file. Its path inside the fiber stays the
-			// one it was born with.
+			// bound to the resuming grant's, where the host dials it. Its
+			// path inside the fiber stays the one it was born with.
 			var more []string
 			if more, runDir, err = runDirInherit(spec.Dir, spec.WorkDir); err != nil {
 				return backend.Fiber{}, err
@@ -1560,9 +1637,17 @@ func (b *Backend) Resume(ctx context.Context, spec backend.ResumeSpec) (backend.
 			extra = append(extra, more...)
 		}
 	}
+	// The resume's record: the new fence, the next generation, the
+	// endpoint as the fiber sees it and a fresh seed, which the fiber
+	// polls off its channel before it serves again.
+	endpoint := spec.Endpoint
+	if b.opt.Launcher != nil {
+		endpoint = b.opt.Launcher.Endpoint(wspec, spec.Endpoint)
+	}
+	inc := backend.Incarnation{Generation: spec.Generation, Kind: "resume", Fence: spec.Fence, Endpoint: endpoint, Session: spec.Session}
 	// A restored handoff fiber takes a fresh channel in place of its
 	// parked one, at the same descriptor, made where its next checkpoint
-	// can carry it. A resume brings no record on it yet.
+	// can carry it, with the record queued ahead of any connection.
 	var hostEnd, fiberEnd *os.File
 	if spec.Handoff {
 		var pair func(typ int) ([2]int, error)
@@ -1577,11 +1662,20 @@ func (b *Backend) Resume(ctx context.Context, spec backend.ResumeSpec) (backend.
 			pair = b.clonePair(z)
 		}
 		var err error
-		if hostEnd, fiberEnd, err = backend.Channel(pair, backend.Incarnation{}); err != nil {
+		if hostEnd, fiberEnd, err = backend.Channel(pair, inc); err != nil {
 			gone()
 			return backend.Fiber{}, fmt.Errorf("%s: %s: %w", b.Name(), spec.Fence, err)
 		}
 		defer func() { _ = fiberEnd.Close() }()
+	} else {
+		// Refused here, before any restore, as a birth's record is. The
+		// seed is drawn when the record is sent.
+		probe := inc
+		probe.Seed = make([]byte, backend.SeedBytes)
+		if _, err := probe.Record(); err != nil {
+			gone()
+			return backend.Fiber{}, fmt.Errorf("%s: %w", b.Name(), err)
+		}
 	}
 	closeHost := func() {
 		if hostEnd != nil {
@@ -1603,6 +1697,22 @@ func (b *Backend) Resume(ctx context.Context, spec backend.ResumeSpec) (backend.
 	if b.opt.Launcher != nil {
 		if err := b.opt.Launcher.Restored(wspec, res.PID); err != nil {
 			log.Printf("%s: restored %s: %v", b.Name(), spec.Fence, err)
+		}
+	}
+	if !spec.Handoff {
+		// The restored tree holds both ends of its own pair. Its peer
+		// end is borrowed for one write and let go, so the backend keeps
+		// no hold on the fiber's channel. A fiber that cannot be told it
+		// was resumed would serve with its parked random state, so the
+		// resume fails instead. criu, the tree's parent, is ended here,
+		// and the tree goes with its leaf, which the host kills on every
+		// failed resume. No pid is signalled, since nothing here can tell
+		// a restored root from a number another process has by now.
+		if err := b.sendResumed(res.PID, inc); err != nil {
+			_ = res.Process.Kill()
+			<-restoreDone(res)
+			gone()
+			return backend.Fiber{}, fmt.Errorf("%s: %s: %w", b.Name(), spec.Fence, err)
 		}
 	}
 	f := &fiber{id: spec.Fence, pid: res.PID, restored: res, warmID: spec.WarmID, handoff: spec.Handoff, runDir: runDir}

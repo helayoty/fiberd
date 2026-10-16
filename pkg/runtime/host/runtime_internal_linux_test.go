@@ -1026,10 +1026,8 @@ func TestFiberEnds(t *testing.T) {
 			}
 			cgSet(t, leaf, "cgroup.procs", "4242")
 			sock := r.unixPath(orphan)
-			for _, f := range []string{sock, sock + ".fence"} {
-				if err := os.WriteFile(f, nil, 0o600); err != nil {
-					t.Fatal(err)
-				}
+			if err := os.WriteFile(sock, nil, 0o600); err != nil {
+				t.Fatal(err)
 			}
 			// The fake fiber has no task in its leaf, but the orphan has one.
 			list, err := r.List(context.Background())
@@ -1040,8 +1038,8 @@ func TestFiberEnds(t *testing.T) {
 			if err := r.Release(context.Background(), orphan.String(), false); err != nil {
 				t.Fatal(err)
 			}
-			if leaf.Exists() || exists(sock) || exists(sock+".fence") {
-				t.Fatal("the orphan's leaf or files remain")
+			if leaf.Exists() || exists(sock) {
+				t.Fatal("the orphan's leaf or socket remain")
 			}
 		}},
 	}

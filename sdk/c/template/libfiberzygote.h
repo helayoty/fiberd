@@ -130,9 +130,17 @@
  * TLS identity, the channel stays open at FZ_CHANNEL_FD and every
  * message after it carries one connected socket in SCM_RIGHTS (see
  * fz_accept). Any other fiber's record has "-" in those four fields,
- * and the library closes the channel once the record is read, so the
- * fiber holds no socket to fiberd. A fiber restored from a checkpoint
- * keeps the record it was born with and is sent no new one. The identity is never a file.
+ * and the library then closes fiberd's end and makes the fiber a
+ * SOCK_SEQPACKET pair of its own, the end it reads at FZ_CHANNEL_FD
+ * and the peer at FZ_CHANNEL_PEER_FD. The fiber holds both, so a park
+ * dumps the pair whole and a restore remakes it inside the fiber's own
+ * namespaces. A fiber resumed from a park is sent a second record on
+ * that channel, kind "resume", with the new fence, the next generation
+ * and a fresh seed: fiberd borrows the peer end of the restored tree
+ * with pidfd_getfd(2), writes the record and closes its copy. A handoff
+ * fiber gets it on the fresh channel end the restore hands it, ahead
+ * of any connection. The template reads it with fz_incarnation_poll.
+ * The identity is never a file.
  * Every grant's fibers run as fiberd's user, so no file mode would keep
  * one grant's fibers out of another's key. The caller cert is the
  * certificate the clone arrived under, the one the thumbprint is of, so
@@ -157,8 +165,10 @@
  * fz_identity_t, which 5 made the caller's certificate (caller_pem). 6
  * added generation and kind. 7 made fz_incarnation_t the one record on
  * every backend, with the seed and the identity in it, and gave every
- * fiber a channel at FZ_CHANNEL_FD. */
-#define FZ_ABI_VERSION 7
+ * fiber a channel at FZ_CHANNEL_FD. 8 made that channel a pair the
+ * fiber keeps across parks, delivered a resume's record on it and added
+ * fz_incarnation_poll and fz_seed_forget. */
+#define FZ_ABI_VERSION 8
 
 #include <stddef.h>
 
@@ -185,8 +195,8 @@ typedef struct {
  * home resumes it. A template that counts its own incarnations can tell
  * a missed one from the number. The seed is 32 bytes of fresh entropy
  * from the host, to mix into every generator the template owns (see
- * fz_on_fiber). It is zeroed at fz_fiber_ready, and at fz_gvisor_ack,
- * so a checkpoint holds no seed. */
+ * fz_on_fiber). It is zeroed at fz_fiber_ready, at fz_gvisor_ack and at
+ * fz_seed_forget, so a checkpoint holds no seed. */
 typedef struct {
     const char *fence;            /* the fiber's identity, "grant/epoch/seq" */
     const char *endpoint;         /* unix socket path or tcp://host:port the fiber serves on,
@@ -195,7 +205,7 @@ typedef struct {
     size_t payload_len;
     const char *session;          /* the session the caller named, "" for an anonymous fiber */
     unsigned generation;          /* 1: a fork of the warm template starts a lineage */
-    const char *kind;             /* "fork" (proc, runc), "clone" (a gVisor restore of the image) or "resume" */
+    const char *kind;             /* "fork" (proc, runc), "clone" (a gVisor restore of the image) or "resume" (a park brought back) */
     const unsigned char *seed;    /* 32 bytes of fresh entropy from the host, zeroed once ready */
     size_t seed_len;
     const fz_identity_t *identity; /* a handoff fiber's TLS identity, NULL on every other fiber */
@@ -215,9 +225,10 @@ typedef struct {
  * only copy. A sandbox restored from a checkpoint and a fiber resumed
  * from a park (CRIU keeps the pid, so a pid check sees no copy) hold
  * that state too. Reseed again in every new incarnation, which is when
- * a restore returns and when the fence beside the endpoint changes, as
- * refzygote does. A generator that makes keys is best reseeded before
- * each use as well, as refzygote does before every TLS handshake.
+ * a restore returns and when fz_incarnation_poll hands over a resume's
+ * record, as refzygote does. A generator that makes keys is best
+ * reseeded before each use as well, as refzygote does before every TLS
+ * handshake.
  *
  * The child is a copy of the one thread that called fz_serve. A lock
  * another thread of the zygote (an engine) held at the clone stays held
@@ -263,11 +274,34 @@ int fz_serve(int ctl_fd, fz_on_fiber on_fiber);
  * killed and its CLONE answered with ERROR. */
 void fz_fiber_ready(void);
 
-/* Where a fiber's channel to fiberd lives while it has one. Every fiber
- * reads its record off it, and a handoff fiber keeps it, named by
- * FIBERD_CHANNEL_FD in its environment, for its connections through
- * fz_accept. It is not the fiber's to read or close. */
+/* Where a fiber's channel lives, named by FIBERD_CHANNEL_FD in its
+ * environment. Every fiber reads its birth record off it, a handoff
+ * fiber then takes its connections from it through fz_accept, and every
+ * fiber takes a resume's record from it through fz_incarnation_poll. A
+ * fiber that serves an endpoint of its own holds the channel's peer at
+ * FZ_CHANNEL_PEER_FD too, the end fiberd borrows after a restore.
+ * Neither is the fiber's to read, write or close. */
 #define FZ_CHANNEL_FD 4
+#define FZ_CHANNEL_PEER_FD 5
+
+/* A resume's record, when one has arrived on the channel since the last
+ * call: 1 with *inc filled, valid until the next call. 0 when none has.
+ * -1 with errno set: EBADF in a process with no channel (a gVisor
+ * sandbox), EPROTO for a message that is not a well-formed record, and
+ * ECONNRESET once fiberd has closed a handoff fiber's channel. It never
+ * blocks, so a template calls it before each connection it serves, as
+ * refzygote does, and reseeds from inc->seed when it answers 1. A
+ * record of a generation the fiber has already served is dropped. On a
+ * handoff fiber a connection that arrives meanwhile is kept for the
+ * next fz_accept. Each call zeroes the seed the previous one handed
+ * over, and fz_seed_forget zeroes it sooner. */
+int fz_incarnation_poll(fz_incarnation_t *inc);
+
+/* Zeroes every copy of a seed the library holds, the birth record's and
+ * the last polled record's. Call it once the generators are reseeded,
+ * so no seed is in memory when the fiber is parked. fz_fiber_ready and
+ * fz_gvisor_ack do it for the birth record. */
+void fz_seed_forget(void);
 
 /* Handoff fibers do not listen. fiberd accepts on their behalf and
  * passes each connected socket here. fz_accept blocks until the next one

@@ -23,10 +23,11 @@ import (
 // draws its own randomness. Two forked siblings differ at birth, which
 // on_fiber's reseed gives, and the seed each one reseeds from is the
 // host's, 32 bytes on its incarnation record and unlike its sibling's.
-// Two fibers resumed from one park must differ
-// too: CRIU restores the parked RNG state under the same pid, so the
-// fence the host publishes beside the endpoint at resume is the one
-// signal the template has to reseed before it serves. The getrandom
+// Two fibers resumed from one park must differ too: CRIU restores the
+// parked RNG state under the same pid, so the record fiberd writes on
+// the fiber's channel at resume, kind resume with a seed of its own
+// and the host's generation, is the one signal the template has to
+// reseed before it serves, and each resume gets its own. The getrandom
 // rows ask the kernel directly. A glibc of 2.41 or later answers
 // getrandom from a per-thread state page the vDSO keeps in user memory,
 // which a park dumps like any other page, so the park must drop it or
@@ -43,31 +44,41 @@ func TestRandomPerIncarnation(t *testing.T) {
 	// resume is released, not discarded, so the delta stays. Each
 	// incarnation answers cmd as its very first request, and names
 	// the fence it serves under.
-	resumeTwice := func(t *testing.T, rt core.Runtime, g core.Grant, cmd string) (string, string) {
-		h, err := rt.Clone(ctx, core.CloneSpec{Grant: g, Fence: core.Fence{GrantUID: g.UID, Epoch: 1, Seq: 1}, Deadline: 2 * time.Second})
-		if err != nil {
-			t.Fatalf("clone: %v", err)
-		}
-		talk(t, h.Endpoint, cmd) // the parked image holds a sequence in progress
-		ref, err := rt.Park(ctx, h.ID, true)
-		if err != nil {
-			t.Fatalf("park: %v", err)
-		}
-		var out []string
-		for seq := uint64(2); seq <= 3; seq++ {
-			h2, err := rt.Clone(ctx, core.CloneSpec{Grant: g, Source: core.SourceDelta, Ref: ref, Fence: core.Fence{GrantUID: g.UID, Epoch: 1, Seq: seq}, Deadline: 5 * time.Second})
+	resumeTwice := func(payload []byte) func(t *testing.T, rt core.Runtime, g core.Grant, cmd string) (string, string) {
+		return func(t *testing.T, rt core.Runtime, g core.Grant, cmd string) (string, string) {
+			h, err := rt.Clone(ctx, core.CloneSpec{Grant: g, Fence: core.Fence{GrantUID: g.UID, Epoch: 1, Seq: 1}, Deadline: 2 * time.Second, Payload: payload})
 			if err != nil {
-				t.Fatalf("resume %d: %v", seq, err)
+				t.Fatalf("clone: %v", err)
 			}
-			out = append(out, talk(t, h2.Endpoint, cmd))
-			if got := talk(t, h2.Endpoint, "fence"); got != h2.ID {
-				t.Fatalf("resume %d: fence = %q, want %q", seq, got, h2.ID)
+			born := talk(t, h.Endpoint, cmd) // the parked image holds a sequence in progress
+			ref, err := rt.Park(ctx, h.ID, true)
+			if err != nil {
+				t.Fatalf("park: %v", err)
 			}
-			if err := rt.Release(ctx, h2.ID, false); err != nil {
-				t.Fatalf("release %s: %v", h2.ID, err)
+			var out []string
+			for seq := uint64(2); seq <= 3; seq++ {
+				h2, err := rt.Clone(ctx, core.CloneSpec{Grant: g, Source: core.SourceDelta, Ref: ref, Fence: core.Fence{GrantUID: g.UID, Epoch: 1, Seq: seq}, Deadline: 5 * time.Second})
+				if err != nil {
+					t.Fatalf("resume %d: %v", seq, err)
+				}
+				out = append(out, talk(t, h2.Endpoint, cmd))
+				// The record the resume brought: the new fence, kind resume
+				// and the host's generation, the parked one plus one.
+				if got := talk(t, h2.Endpoint, "fence"); got != h2.ID {
+					t.Fatalf("resume %d: fence = %q, want %q", seq, got, h2.ID)
+				}
+				if kind, gen := talk(t, h2.Endpoint, "kind"), talk(t, h2.Endpoint, "generation"); kind != "resume" || gen != "2" {
+					t.Fatalf("resume %d reports kind %q generation %q, want resume 2 from the record", seq, kind, gen)
+				}
+				if cmd == "seed" && out[len(out)-1] == born {
+					t.Fatalf("resume %d answers the birth seed %s, want the record's own", seq, born)
+				}
+				if err := rt.Release(ctx, h2.ID, false); err != nil {
+					t.Fatalf("release %s: %v", h2.ID, err)
+				}
 			}
+			return out[0], out[1]
 		}
-		return out[0], out[1]
 	}
 	// resumedFork parks one fiber that has drawn and resumes it once. The
 	// copy answers cmd first, drawing, forking, and drawing once more in
@@ -127,16 +138,20 @@ func TestRandomPerIncarnation(t *testing.T) {
 		// The record's seed, kept by the template under the keep_seed
 		// payload key. Before the record, no forked fiber had one.
 		{name: "forked siblings, the record's seed", cmd: "seed", draw: siblings([]byte(`{"keep_seed":1}`)), hex: 64},
-		{name: "two resumes of one park, libc random", cmd: "random", draw: resumeTwice},
-		{name: "two resumes of one park, getrandom", cmd: "getrandom", draw: resumeTwice},
+		{name: "two resumes of one park, libc random", cmd: "random", draw: resumeTwice(nil)},
+		{name: "two resumes of one park, getrandom", cmd: "getrandom", draw: resumeTwice(nil)},
+		// Each resume's record carries a seed of its own, unlike the
+		// birth's and unlike the other resume's.
+		{name: "two resumes of one park, the record's seed", cmd: "seed", draw: resumeTwice([]byte(`{"keep_seed":1}`)), hex: 64},
 		{name: "a resumed fiber and the child it forks, getrandom", cmd: "getrandom fork", draw: resumedFork},
-		// A fiber that binds tcp itself has no socket to find its fence
-		// file beside. It reads the file named by its birth fence. The
+		// A fiber that binds tcp itself gets its record the same way. The
 		// ports sit below the kernel's ephemeral range (32768 and up), which
 		// any suite's listener or dial may be holding.
-		{name: "two resumes of one park on a tcp endpoint, libc random", cmd: "random", draw: resumeTwice,
+		{name: "two resumes of one park on a tcp endpoint, libc random", cmd: "random", draw: resumeTwice(nil),
 			runtime: func(t *testing.T) core.Runtime { return tcpRuntime(t, fiberendpoint.Inet4, "127.0.0.1", 21010, 21013) }},
-		{name: "two resumes of one park on a tcp endpoint, getrandom", cmd: "getrandom", draw: resumeTwice,
+		{name: "two resumes of one park on a tcp endpoint, getrandom", cmd: "getrandom", draw: resumeTwice(nil),
+			runtime: func(t *testing.T) core.Runtime { return tcpRuntime(t, fiberendpoint.Inet4, "127.0.0.1", 21010, 21013) }},
+		{name: "two resumes of one park on a tcp endpoint, the record's seed", cmd: "seed", draw: resumeTwice([]byte(`{"keep_seed":1}`)), hex: 64,
 			runtime: func(t *testing.T) core.Runtime { return tcpRuntime(t, fiberendpoint.Inet4, "127.0.0.1", 21010, 21013) }},
 	}
 	for _, tc := range cases {
@@ -173,19 +188,22 @@ func isHex(s string, n int) bool {
 	return err == nil
 }
 
-// TestSeedNeverLogged pins that the seed a fiber is born with reaches
-// the fiber alone. The template keeps it under the keep_seed payload key
-// and answers it, and that value is then looked for in the zygote's log
-// and in fiberd's, where neither the record nor the CLONE line may have
-// left it. The seed is 32 random bytes, so a 64-hex run equal to it is
-// the seed and nothing else.
+// TestSeedNeverLogged pins that the seed a fiber is born with, and the
+// one its resume brings, reach the fiber alone. The template keeps the
+// latest under the keep_seed payload key and answers it, and that value
+// is then looked for in the zygote's log, in fiberd's and in the park's
+// images, where neither the record nor the CLONE line nor the dump may
+// have left it. The seed is 32 random bytes, so a 64-hex run equal to it
+// is the seed and nothing else.
 func TestSeedNeverLogged(t *testing.T) {
 	cases := []struct {
 		name    string
 		payload []byte
+		resume  bool // park the fiber and resume it, and check the resume's seed
 	}{
 		{name: "a plain fiber", payload: []byte(`{"keep_seed":1}`)},
 		{name: "a fiber with a payload of its own", payload: []byte(`{"keep_seed":1,"dirty_bytes":4096}`)},
+		{name: "a resumed fiber", payload: []byte(`{"keep_seed":1}`), resume: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -206,8 +224,35 @@ func TestSeedNeverLogged(t *testing.T) {
 			if !isHex(seed, 64) {
 				t.Fatalf("seed = %q, want 64 hex characters", seed)
 			}
+			var images []string
+			if tc.resume {
+				if rt.Tier() < core.TierCheckpoint {
+					t.Skip("criu not usable here")
+				}
+				ref, err := rt.Park(ctx, h.ID, true)
+				if err != nil {
+					t.Fatalf("park: %v", err)
+				}
+				if h, err = rt.Clone(ctx, core.CloneSpec{Grant: g, Source: core.SourceDelta, Ref: ref, Fence: core.Fence{GrantUID: g.UID, Epoch: 1, Seq: 2}, Deadline: 5 * time.Second}); err != nil {
+					t.Fatalf("resume: %v", err)
+				}
+				born := seed
+				if seed = talk(t, h.Endpoint, "seed"); !isHex(seed, 64) || seed == born {
+					t.Fatalf("seed after the resume = %q, want 64 hex characters unlike the birth's %s", seed, born)
+				}
+				images, _ = filepath.Glob(filepath.Join(ref, "*.img"))
+			}
 			if err := rt.Release(ctx, h.ID, true); err != nil {
 				t.Fatal(err)
+			}
+			for _, img := range images {
+				b, err := os.ReadFile(img)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if strings.Contains(string(b), seed) {
+					t.Fatalf("%s holds the resume's seed %s", img, seed)
+				}
 			}
 			logs, _ := filepath.Glob(filepath.Join("/tmp", "fz-"+fmt.Sprint(os.Getpid()), "*", "zygote.log"))
 			if len(logs) == 0 {

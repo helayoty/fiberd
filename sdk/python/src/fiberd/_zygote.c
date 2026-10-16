@@ -27,8 +27,8 @@
 
 #include "libfiberzygote.h"
 
-#if FZ_ABI_VERSION != 7
-#error "fiberd._zygote binds FZ_ABI_VERSION 7; rebuild it against this header"
+#if FZ_ABI_VERSION != 8
+#error "fiberd._zygote binds FZ_ABI_VERSION 8; rebuild it against this header"
 #endif
 #ifdef Py_GIL_DISABLED
 #error "fiberd._zygote needs the GIL; the fork rules assume it and abi3 does not cover a free-threaded build"
@@ -195,6 +195,25 @@ static PyObject *py_gvisor_identity(PyObject *self, PyObject *unused) {
     return out;
 }
 
+/* py_incarnation_poll is fz_incarnation_poll: None when no resume
+ * record has arrived, else the record as gvisor_identity returns one,
+ * with the library's copy of the seed zeroed once the bytearray holds
+ * it. It never blocks, so the GIL is kept. */
+static PyObject *py_incarnation_poll(PyObject *self, PyObject *unused) {
+    (void)self; (void)unused;
+    fz_incarnation_t inc;
+    int rc = fz_incarnation_poll(&inc);
+    if (rc < 0) return PyErr_SetFromErrno(PyExc_OSError);
+    if (rc == 0) Py_RETURN_NONE;
+    PyObject *seed = seed_bytearray(&inc);
+    fz_seed_forget();
+    if (!seed) return NULL;
+    PyObject *out = Py_BuildValue("(sssy#OsI)", inc.kind, inc.fence, inc.endpoint,
+                                  (const char *)inc.payload, (Py_ssize_t)inc.payload_len, seed, inc.session, inc.generation);
+    Py_DECREF(seed);
+    return out;
+}
+
 static PyObject *py_gvisor_ack(PyObject *self, PyObject *unused) {
     (void)self; (void)unused;
     if (fz_gvisor_ack() < 0) return PyErr_SetFromErrno(PyExc_OSError);
@@ -208,6 +227,7 @@ static PyMethodDef methods[] = {
     {"accept", py_accept, METH_NOARGS, "fz_accept: the next handed-off connection's descriptor."},
     {"gvisor_identity", py_gvisor_identity, METH_NOARGS, "fz_gvisor_identity as (kind, fence, endpoint, payload, seed, session, generation)."},
     {"gvisor_ack", py_gvisor_ack, METH_NOARGS, "fz_gvisor_ack."},
+    {"incarnation_poll", py_incarnation_poll, METH_NOARGS, "fz_incarnation_poll: None, or a resume's record as gvisor_identity shapes one."},
     {NULL, NULL, 0, NULL}
 };
 

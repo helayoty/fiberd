@@ -122,9 +122,9 @@ func TestRelayedTCPOverProc(t *testing.T) {
 			if got := talk(t, h2.Endpoint, "get"); got != "2" {
 				t.Fatalf("counter after resume = %q, want 2", got)
 			}
-			// The resumed fiber reports its new fence either way: a relayed
-			// fiber reads the fence file beside its unix socket, one on a
-			// tcp listener of its own the file named by its birth fence.
+			// The resumed fiber reports its new fence either way, relayed or
+			// on a tcp listener of its own, from the resume's record it
+			// polled off its channel.
 			if got := talk(t, h2.Endpoint, "fence"); got != h2.ID {
 				t.Fatalf("fence after resume = %q, want %s", got, h2.ID)
 			}

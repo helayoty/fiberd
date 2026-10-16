@@ -1,4 +1,4 @@
-"""The fence, the endpoint and the fence file fiberd publishes beside it."""
+"""The fence and the endpoint, as fiberd spells them."""
 
 from __future__ import annotations
 
@@ -52,26 +52,3 @@ def tcp_bind(endpoint: str) -> tuple[bool, int]:
     if not sep or not port.isdigit():
         raise TemplateError(f"endpoint {endpoint!r} is not tcp://host:port")
     return host.startswith("["), int(port)
-
-
-def fence_file(endpoint: str, kind: str, birth: Fence) -> str:
-    """Where fiberd publishes a resumed fiber's fence, as refzygote looks for it.
-
-    Beside a unix endpoint, as <path>.fence. A fiber that binds tcp itself or
-    serves handed-off connections has no socket, and finds the file in its
-    working directory, its grant's run directory, under its birth fence's
-    name, <epoch>-<seq>.fence.
-    """
-    if kind == "unix":
-        return unix_path(endpoint) + ".fence"
-    return f"{birth.epoch}-{birth.seq}.fence"
-
-
-def live_fence(path: str, fallback: str) -> str:
-    """The fence in the file's first line, or fallback when there is none."""
-    try:
-        with open(path, encoding="utf-8", errors="replace") as f:
-            line = f.readline().strip()
-    except OSError:
-        return fallback
-    return line or fallback

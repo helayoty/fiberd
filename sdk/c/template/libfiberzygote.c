@@ -2,9 +2,9 @@
 #define _GNU_SOURCE
 #include "libfiberzygote.h"
 
-/* This file implements ABI version 7, so a header of another version refuses to build it. */
-#if FZ_ABI_VERSION != 7
-#error "libfiberzygote.c implements FZ_ABI_VERSION 7"
+/* This file implements ABI version 8, so a header of another version refuses to build it. */
+#if FZ_ABI_VERSION != 8
+#error "libfiberzygote.c implements FZ_ABI_VERSION 8"
 #endif
 
 #include <dirent.h>
@@ -651,14 +651,13 @@ static void fd_path(char *buf, int fd) {
 
 /* narrow_rundir leaves the zygote, and so every fiber, one directory of
  * fiberd's run directory, its own grant's. Every grant's directory
- * (endpoint sockets, fence files, the zygote's log) sits under one
+ * (endpoint sockets, the zygote's log) sits under one
  * parent, and a fiber is euid 0, so without this a fiber of one grant
  * could unlink or rebind another grant's sockets. The parent is covered
  * with an empty read-only tmpfs, in the zygote's own namespace alone,
  * and the grant's own directory is bound back at its place from a
  * descriptor opened before the cover. What a fiber creates there (its
- * endpoint) lands in fiberd's real directory and what fiberd
- * writes there (a fence file) is seen. The cwd is moved onto the bind,
+ * endpoint) lands in fiberd's real directory. The cwd is moved onto the bind,
  * and every fiber inherits it there, so a checkpoint names it through
  * the mount that will exist on restore. CRIU dumps the tmpfs with its
  * one empty directory and the bind as an external mount fiberd names
@@ -1057,32 +1056,45 @@ static int userns_filter(void) {
 #endif
 }
 
-/* FZ_CHANNEL_FD in a handoff fiber, -1 in any other fiber once its
- * record is read, in the zygote and in a gVisor sandbox. */
+/* FZ_CHANNEL_FD in a fiber, -1 in the zygote and in a gVisor sandbox. */
 static int channel_fd = -1;
 
 /* A session, an endpoint and a fence as the fiber's environment carries
  * them are at most ENV_VALUE_MAX - 1 characters. */
 #define ENV_VALUE_MAX 1024
 
-/* The incarnation record, as fiberd's first message on the channel
- * delivers it and as a gVisor sandbox reads it off the pool socket, 'i'
- * then eleven NUL-ended fields (see libfiberzygote.h). It lives in the
- * fiber's memory (the child's copy of these pages), never the zygote's.
- * The bound leaves room for a payload and a caller certificate of any
- * key size, and only the pages the record touches are ever copied. The
- * decoded payload, session and seed live beside it, and the seed is
- * zeroed once the fiber is ready. */
+/* An incarnation record, as fiberd's first message on the channel
+ * delivers it, as a gVisor sandbox reads it off the pool socket and as
+ * a resume sends it again, 'i' then eleven NUL-ended fields (see
+ * libfiberzygote.h). It lives in the fiber's memory (the child's copy
+ * of these pages), never the zygote's. The bound leaves room for a
+ * payload and a caller certificate of any key size, and only the pages
+ * a record touches are ever copied. The decoded payload, session and
+ * seed live beside it, and the seed is zeroed once used. The birth
+ * record stays in born for the fiber's life, since a handoff fiber's
+ * TLS library points into it. A record that arrives later, a resume's,
+ * lands in polled. */
 #define RECORD_MAX 65536
 #define RECORD_FIELDS 11
 #define SEED_LEN 32
-static char record_buf[RECORD_MAX];
-static unsigned char rec_payload[RECORD_MAX / 2];
-static char rec_session[ENV_VALUE_MAX];
-static unsigned char rec_seed[SEED_LEN];
-static char *rec_seed_hex; /* the seed's field in record_buf, zeroed with rec_seed */
-static fz_identity_t rec_identity;
-static fz_incarnation_t incarnation;
+struct record_store {
+    char buf[RECORD_MAX];
+    unsigned char payload[RECORD_MAX / 2];
+    char session[ENV_VALUE_MAX];
+    unsigned char seed[SEED_LEN];
+    char *seed_hex; /* the seed's field in buf, zeroed with seed */
+    fz_identity_t identity;
+    fz_incarnation_t inc;
+};
+static struct record_store born, polled;
+/* The generation this process serves, the birth record's and then each
+ * polled record's. A record at or below it is a replay and is dropped. */
+static unsigned served_generation;
+/* What fz_accept and fz_incarnation_poll read for each other on a
+ * handoff fiber's channel: a record that came ahead of a connection,
+ * and a connection that came while polling. */
+static int polled_pending;
+static int stashed_conn = -1;
 
 /* parse_generation reads a generation as the record carries it: decimal
  * digits only, 1 or more, within unsigned. 0 when it is not one. */
@@ -1098,13 +1110,14 @@ static unsigned parse_generation(const char *s) {
     return (unsigned)v;
 }
 
-/* parse_incarnation takes the record in rec, n bytes, apart into the
- * static storage above and fills incarnation from it. Returns 0, or -1
- * with a reason, and incarnation is then untouched. It allocates
- * nothing and takes no lock, since the fork path runs it before
- * on_fiber (see scrub_and_run). */
-static int parse_incarnation(char *rec, size_t n, const char **why) {
+/* parse_incarnation takes the record in st->buf, n bytes, apart into
+ * the store and fills st->inc from it. Returns 0, or -1 with a reason,
+ * and st->inc is then untouched. It allocates nothing and takes no
+ * lock, since the fork path runs it before on_fiber (see
+ * scrub_and_run). */
+static int parse_incarnation(struct record_store *st, size_t n, const char **why) {
     const char *fields[RECORD_FIELDS];
+    char *rec = st->buf;
     char *p = rec + 1, *end = rec + n;
     if (n < 2 || rec[0] != 'i' || end[-1] != 0) { *why = "not an incarnation record"; return -1; }
     for (int i = 0; i < RECORD_FIELDS; i++) {
@@ -1122,69 +1135,115 @@ static int parse_incarnation(char *rec, size_t n, const char **why) {
      * becomes an environment value. */
     size_t slen = 0;
     if (strcmp(fields[5], "-") != 0) {
-        if (strlen(fields[5]) / 2 >= sizeof rec_session) { *why = "record session too long"; return -1; }
-        slen = unhex(fields[5], (unsigned char *)rec_session, sizeof rec_session - 1);
-        if (memchr(rec_session, 0, slen)) { *why = "record session holds a NUL"; return -1; }
+        if (strlen(fields[5]) / 2 >= sizeof st->session) { *why = "record session too long"; return -1; }
+        slen = unhex(fields[5], (unsigned char *)st->session, sizeof st->session - 1);
+        if (memchr(st->session, 0, slen)) { *why = "record session holds a NUL"; return -1; }
     }
     /* A handoff identity is all four fields or none. */
     int set = 0;
     for (int i = 6; i < 10; i++) if (strcmp(fields[i], "-") != 0) set++;
     if (set != 0 && set != 4) { *why = "record identity is incomplete"; return -1; }
-    if (strlen(fields[10]) != 2 * SEED_LEN || unhex(fields[10], rec_seed, sizeof rec_seed) != SEED_LEN) {
-        memset(rec_seed, 0, sizeof rec_seed);
+    if (strlen(fields[10]) != 2 * SEED_LEN || unhex(fields[10], st->seed, sizeof st->seed) != SEED_LEN) {
+        memset(st->seed, 0, sizeof st->seed);
         *why = "record seed is not 32 bytes";
         return -1;
     }
     size_t plen = 0;
-    if (strcmp(fields[4], "-") != 0) plen = unhex(fields[4], rec_payload, sizeof rec_payload);
-    rec_session[slen] = 0;
-    rec_seed_hex = (char *)fields[10];
+    if (strcmp(fields[4], "-") != 0) plen = unhex(fields[4], st->payload, sizeof st->payload);
+    st->session[slen] = 0;
+    st->seed_hex = (char *)fields[10];
     if (set) {
-        rec_identity.key_pem = fields[6];
-        rec_identity.cert_pem = fields[7];
-        rec_identity.caller = fields[8];
-        rec_identity.caller_pem = fields[9];
+        st->identity.key_pem = fields[6];
+        st->identity.cert_pem = fields[7];
+        st->identity.caller = fields[8];
+        st->identity.caller_pem = fields[9];
     }
-    incarnation.fence = fields[2];
-    incarnation.endpoint = fields[3];
-    incarnation.payload = rec_payload;
-    incarnation.payload_len = plen;
-    incarnation.session = rec_session;
-    incarnation.generation = generation;
-    incarnation.kind = fields[1];
-    incarnation.seed = rec_seed;
-    incarnation.seed_len = SEED_LEN;
-    incarnation.identity = set ? &rec_identity : NULL;
+    st->inc.fence = fields[2];
+    st->inc.endpoint = fields[3];
+    st->inc.payload = st->payload;
+    st->inc.payload_len = plen;
+    st->inc.session = st->session;
+    st->inc.generation = generation;
+    st->inc.kind = fields[1];
+    st->inc.seed = st->seed;
+    st->inc.seed_len = SEED_LEN;
+    st->inc.identity = set ? &st->identity : NULL;
     return 0;
 }
 
-/* read_incarnation takes the record off the channel. fiberd queues it
- * before the CLONE, so it is there to read. Returns 0, or -1 with a
- * reason for the zygote's log. */
-static int read_incarnation(int fd, const char **why) {
+/* channel_recv takes one message off fd into buf, cap bytes, with
+ * flags added to recvmsg's. The first descriptor passed with it goes to
+ * *fd_out, -1 for none, and any other is closed. Returns the byte
+ * count, 0 at EOF, or -1 with errno, EPROTO for a message longer than
+ * a record. EINTR is retried, which cannot block a non-blocking read. */
+static ssize_t channel_recv(int fd, int flags, char *buf, size_t cap, int *fd_out) {
     char cbuf[CMSG_SPACE(4 * sizeof(int))];
-    struct iovec iov = { .iov_base = record_buf, .iov_len = sizeof record_buf };
+    struct iovec iov = { .iov_base = buf, .iov_len = cap };
     struct msghdr mh = { .msg_iov = &iov, .msg_iovlen = 1, .msg_control = cbuf, .msg_controllen = sizeof cbuf };
     ssize_t r;
-    do r = recvmsg(fd, &mh, MSG_CMSG_CLOEXEC); while (r < 0 && errno == EINTR);
-    /* Anything passed with it is not ours to keep. */
+    do r = recvmsg(fd, &mh, MSG_CMSG_CLOEXEC | flags); while (r < 0 && errno == EINTR);
+    *fd_out = -1;
+    if (r < 0) return -1;
     for (struct cmsghdr *c = CMSG_FIRSTHDR(&mh); c; c = CMSG_NXTHDR(&mh, c)) {
         if (c->cmsg_level != SOL_SOCKET || c->cmsg_type != SCM_RIGHTS) continue;
         size_t n = (c->cmsg_len - CMSG_LEN(0)) / sizeof(int);
-        for (size_t i = 0; i < n; i++) { int got; memcpy(&got, CMSG_DATA(c) + i * sizeof(int), sizeof(int)); close(got); }
+        for (size_t i = 0; i < n; i++) {
+            int got; memcpy(&got, CMSG_DATA(c) + i * sizeof(int), sizeof(int));
+            if (*fd_out < 0) *fd_out = got; else close(got);
+        }
     }
-    if (r < 0) { *why = "recvmsg on the channel failed"; return -1; }
-    if (r == 0) { *why = "channel closed before the record arrived"; return -1; }
-    if (mh.msg_flags & MSG_TRUNC) { *why = "record too long"; return -1; }
-    return parse_incarnation(record_buf, (size_t)r, why);
+    if (r > 0 && (mh.msg_flags & MSG_TRUNC)) {
+        if (*fd_out >= 0) { close(*fd_out); *fd_out = -1; }
+        errno = EPROTO;
+        return -1;
+    }
+    return r;
 }
 
-/* forget_seed zeroes the seed, in its decoded form and in the record,
- * once the fiber is ready and nothing should be reseeded from it again. */
-static void forget_seed(void) {
-    memset(rec_seed, 0, sizeof rec_seed);
-    if (rec_seed_hex) memset(rec_seed_hex, 0, strlen(rec_seed_hex));
-    incarnation.seed_len = 0;
+/* read_incarnation takes the birth record off the channel. fiberd
+ * queues it before the CLONE, so it is there to read. Returns 0, or -1
+ * with a reason for the zygote's log. Anything passed with it is not
+ * ours to keep. */
+static int read_incarnation(int fd, const char **why) {
+    int passed;
+    ssize_t r = channel_recv(fd, 0, born.buf, sizeof born.buf, &passed);
+    if (passed >= 0) close(passed);
+    if (r < 0 && errno == EPROTO) { *why = "record too long"; return -1; }
+    if (r < 0) { *why = "recvmsg on the channel failed"; return -1; }
+    if (r == 0) { *why = "channel closed before the record arrived"; return -1; }
+    return parse_incarnation(&born, (size_t)r, why);
+}
+
+/* forget_seed zeroes a store's seed, in its decoded form and in the
+ * record, once nothing should be reseeded from it again. */
+static void forget_seed(struct record_store *st) {
+    memset(st->seed, 0, sizeof st->seed);
+    if (st->seed_hex) memset(st->seed_hex, 0, strlen(st->seed_hex));
+    st->inc.seed_len = 0;
+}
+
+void fz_seed_forget(void) {
+    forget_seed(&born);
+    forget_seed(&polled);
+}
+
+/* own_pair replaces fiberd's channel end, which the fiber is done with,
+ * by a pair of the fiber's own at FZ_CHANNEL_FD and FZ_CHANNEL_PEER_FD.
+ * The fiber reads the first and never the second, which it holds so the
+ * pair is whole inside its tree: a park dumps both ends and a restore
+ * remakes them in the fiber's namespaces, and fiberd then borrows the
+ * peer to send the resume's record. System calls only, as the rule
+ * above scrub_and_run demands. Returns 0 or -1. */
+static int own_pair(void) {
+    int sv[2];
+    if (socketpair(AF_UNIX, SOCK_SEQPACKET, 0, sv) < 0) return -1;
+    /* Above both slots first, so neither dup2 lands on the other end. */
+    int a = fcntl(sv[0], F_DUPFD, FZ_CHANNEL_PEER_FD + 1);
+    int b = fcntl(sv[1], F_DUPFD, FZ_CHANNEL_PEER_FD + 1);
+    close(sv[0]); close(sv[1]);
+    if (a < 0 || b < 0 || dup2(a, FZ_CHANNEL_FD) < 0 || dup2(b, FZ_CHANNEL_PEER_FD) < 0) return -1;
+    close(a); close(b);
+    return 0;
 }
 
 /* The fiber's environment, built by the parent before the clone (see
@@ -1247,10 +1306,12 @@ static void scrub_and_run(int ready_w, int channel, const char *fence, struct co
      * holds leads outside its own tree, and a handoff fiber's channel is
      * the one socket CRIU is told is external. */
     if (sigchld_fd >= 0) { close(sigchld_fd); sigchld_fd = -1; }
-    if ((channel = fcntl(channel, F_DUPFD, FZ_CHANNEL_FD + 1)) < 0) _exit(EX_FDS);
+    if ((channel = fcntl(channel, F_DUPFD, FZ_CHANNEL_PEER_FD + 1)) < 0) _exit(EX_FDS);
     if (dup2(ready_w, 3) < 0) _exit(EX_FDS);
     if (dup2(channel, FZ_CHANNEL_FD) < 0) _exit(EX_FDS);
     channel_fd = FZ_CHANNEL_FD;
+    polled_pending = 0;
+    stashed_conn = -1;
     /* The raw syscall, since glibc has a wrapper only from 2.34 and musl has none. */
     if (syscall(SYS_close_range, FZ_CHANNEL_FD + 1, ~0U, 0) < 0) {
         for (int fd = FZ_CHANNEL_FD + 1; fd < 65536; fd++) close(fd);
@@ -1264,17 +1325,16 @@ static void scrub_and_run(int ready_w, int channel, const char *fence, struct co
         child_say(fence, "incarnation record", why);
         _exit(EX_IDENTITY);
     }
-    if (strcmp(incarnation.fence, fence) != 0) {
+    if (strcmp(born.inc.fence, fence) != 0) {
         child_say(fence, "incarnation record", "names another fence");
         _exit(EX_IDENTITY);
     }
+    served_generation = born.inc.generation;
     /* A handoff fiber keeps the channel for the connections fiberd
-     * passes it. Any other fiber is done with it, and holds no socket a
-     * park would have to carry. */
-    if (!incarnation.identity) {
-        close(channel_fd);
-        channel_fd = -1;
-    }
+     * passes it. Any other fiber is done with fiberd's end and takes a
+     * pair of its own in its place, which a park carries whole and a
+     * resume's record arrives on. */
+    if (!born.inc.identity && own_pair() < 0) _exit(EX_FDS);
     ready_fd = 3;
     /* stderr stays the zygote's log until fz_fiber_ready, so a fiber that
      * fails to start can say why. No fiber is checkpointed before then. */
@@ -1316,7 +1376,7 @@ static void scrub_and_run(int ready_w, int channel, const char *fence, struct co
     }
     if (cf.nocaps && drop_caps() < 0) _exit(EX_CAPS);
 
-    _exit(on_fiber(&incarnation) & 0xff);
+    _exit(on_fiber(&born.inc) & 0xff);
 }
 
 void fz_init(int argc, char **argv) {
@@ -1341,33 +1401,79 @@ void fz_init(int argc, char **argv) {
 void fz_fiber_ready(void) {
     if (ready_fd < 0) return;
     dup2(0, 2); /* /dev/null, so nothing leads outside the tree once checkpointable */
-    forget_seed();
+    forget_seed(&born);
     const char rec = READY_BYTE;
     (void)!write(ready_fd, &rec, 1);
     close(ready_fd);
     ready_fd = -1;
 }
 
+/* Messages after the birth record are read here first, so a connection
+ * that arrives behind a record never touches the record's store. */
+static char channel_msg[RECORD_MAX];
+
+/* take_record takes the n bytes in channel_msg as a resume's record,
+ * into polled. 1 when it is one the fiber has not served yet, 0 for a
+ * replay of a generation already served, -1 with EPROTO for anything
+ * else. */
+static int take_record(size_t n) {
+    const char *why;
+    if (channel_msg[0] != 'i') { errno = EPROTO; return -1; }
+    memcpy(polled.buf, channel_msg, n);
+    memset(channel_msg, 0, n); /* one copy of a seed, in polled, zeroed with it */
+    if (parse_incarnation(&polled, n, &why) < 0) { errno = EPROTO; return -1; }
+    return polled.inc.generation > served_generation;
+}
+
 int fz_accept(void) {
     if (channel_fd < 0) { errno = EBADF; return -1; }
+    if (stashed_conn >= 0) { int fd = stashed_conn; stashed_conn = -1; return fd; }
     for (;;) {
-        char b;
-        char cbuf[CMSG_SPACE(sizeof(int))];
-        struct iovec iov = { .iov_base = &b, .iov_len = 1 };
-        struct msghdr mh = { .msg_iov = &iov, .msg_iovlen = 1,
-                             .msg_control = cbuf, .msg_controllen = sizeof cbuf };
-        ssize_t r = recvmsg(channel_fd, &mh, MSG_CMSG_CLOEXEC);
-        if (r < 0) { if (errno == EINTR) continue; return -1; }
+        int fd;
+        ssize_t r = channel_recv(channel_fd, 0, channel_msg, sizeof channel_msg, &fd);
+        if (r < 0) return -1;
         if (r == 0) { errno = ECONNRESET; return -1; }
-        int fd = -1;
-        for (struct cmsghdr *c = CMSG_FIRSTHDR(&mh); c; c = CMSG_NXTHDR(&mh, c))
-            if (c->cmsg_level == SOL_SOCKET && c->cmsg_type == SCM_RIGHTS && fd < 0)
-                memcpy(&fd, CMSG_DATA(c), sizeof(int));
         if (fd >= 0) return fd;
-        /* A message without a descriptor (or one truncated away) carries
-         * nothing to serve, so wait for the next. The record never lands
-         * here, because scrub_and_run read it before on_fiber ran. */
+        /* A resume's record comes ahead of any connection, and waits
+         * here for fz_incarnation_poll. Any other message without a
+         * descriptor carries nothing to serve, so wait for the next. */
+        if (take_record((size_t)r) > 0) polled_pending = 1;
     }
+}
+
+/* poll_none is fz_incarnation_poll handing nothing over: whatever a
+ * dropped or refused record left in the store goes with it. */
+static int poll_none(int rc) {
+    int e = errno;
+    forget_seed(&polled);
+    errno = e;
+    return rc;
+}
+
+int fz_incarnation_poll(fz_incarnation_t *inc) {
+    if (channel_fd < 0) { errno = EBADF; return -1; }
+    /* The seed the last call handed over has served its purpose, unless
+     * fz_accept read a newer record into the store meanwhile. */
+    if (!polled_pending) forget_seed(&polled);
+    int got = polled_pending;
+    polled_pending = 0;
+    /* Every message queued so far, so the latest record wins. A
+     * connection stops the read, since nothing comes behind it in this
+     * incarnation. */
+    while (stashed_conn < 0) {
+        int fd;
+        ssize_t r = channel_recv(channel_fd, MSG_DONTWAIT, channel_msg, sizeof channel_msg, &fd);
+        if (r < 0 && errno == EAGAIN) break;
+        if (r < 0) return poll_none(-1);
+        if (r == 0) { errno = ECONNRESET; return poll_none(-1); }
+        if (fd >= 0) { stashed_conn = fd; break; }
+        got = take_record((size_t)r);
+        if (got < 0) return poll_none(-1);
+    }
+    if (!got) return poll_none(0);
+    served_generation = polled.inc.generation;
+    *inc = polled.inc;
+    return 1;
 }
 
 /* A pending child's pipe became readable or closed. Only the ready
@@ -1509,10 +1615,8 @@ static int handle_clone(int ctl_fd, char *line, const int passed[MAX_PASSED], fz
         snprintf(env_engine, sizeof env_engine, "FIBERD_ENGINE=%s", engine_endpoint);
         fiber_environ[ne++] = env_engine;
     }
-    if (strcmp(endpoint, "handoff") == 0) {
-        snprintf(env_channel, sizeof env_channel, "FIBERD_CHANNEL_FD=%d", FZ_CHANNEL_FD);
-        fiber_environ[ne++] = env_channel;
-    }
+    snprintf(env_channel, sizeof env_channel, "FIBERD_CHANNEL_FD=%d", FZ_CHANNEL_FD);
+    fiber_environ[ne++] = env_channel;
     if (slen) {
         snprintf(env_session, sizeof env_session, "FIBERD_SESSION=%s", session_buf);
         fiber_environ[ne++] = env_session;
@@ -1907,15 +2011,16 @@ int fz_gvisor_identity(fz_incarnation_t *id) {
     claim[0] = 't';
     memcpy(claim + 1, token, strlen(token) + 1);
     if (write(fd, claim, cn) != (ssize_t)cn) { int e = errno; close(fd); errno = e; return -1; }
-    struct iovec iov = { .iov_base = record_buf, .iov_len = sizeof record_buf };
+    struct iovec iov = { .iov_base = born.buf, .iov_len = sizeof born.buf };
     struct msghdr mh = { .msg_iov = &iov, .msg_iovlen = 1 };
     ssize_t r;
     do r = recvmsg(fd, &mh, 0); while (r < 0 && errno == EINTR);
     if (r < 0) { int e = errno; close(fd); errno = e; return -1; }
     if (r == 0 || (mh.msg_flags & MSG_TRUNC)) { close(fd); errno = r == 0 ? ECONNRESET : EMSGSIZE; return -1; }
     const char *why = NULL;
-    if (parse_incarnation(record_buf, (size_t)r, &why) < 0) { close(fd); errno = EPROTO; return -1; }
-    *id = incarnation;
+    if (parse_incarnation(&born, (size_t)r, &why) < 0) { close(fd); errno = EPROTO; return -1; }
+    served_generation = born.inc.generation;
+    *id = born.inc;
     gv_channel = fd;
     return 0;
 }
@@ -1923,14 +2028,14 @@ int fz_gvisor_identity(fz_incarnation_t *id) {
 int fz_gvisor_ack(void) {
     if (gv_channel < 0) { errno = EBADF; return -1; }
     char ack[FENCE_MAX + 2];
-    size_t n = strlen(incarnation.fence);
+    size_t n = strlen(born.inc.fence);
     ack[0] = 'a';
-    memcpy(ack + 1, incarnation.fence, n + 1);
+    memcpy(ack + 1, born.inc.fence, n + 1);
     ssize_t w = write(gv_channel, ack, n + 2);
     int e = errno;
     close(gv_channel);
     gv_channel = -1;
-    forget_seed();
+    forget_seed(&born);
     if (w != (ssize_t)(n + 2)) { errno = e; return -1; }
     return 0;
 }

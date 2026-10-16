@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import os
 import pathlib
 import random
@@ -17,12 +18,22 @@ from fiberd.template import _rules
 
 
 class FakeExt:
-    """The C binding as a recorder."""
+    """The C binding as a recorder. polls is what each incarnation_poll answers, None for an empty channel."""
 
-    ABI_VERSION = 7
+    ABI_VERSION = 8
 
-    def __init__(self):
+    def __init__(self, polls=()):
         self.calls = []
+        self.polls = list(polls)
+
+    def incarnation_poll(self):
+        self.calls.append(("poll",))
+        if not self.polls:
+            return None
+        rec = self.polls.pop(0)
+        if isinstance(rec, BaseException):
+            raise rec
+        return rec
 
     def init(self, argv):
         self.calls.append(("init", list(argv)))
@@ -202,26 +213,58 @@ def test_incarnation_reseeds_and_runs_hooks_in_order():
     assert (random.getrandbits(32), rng.getrandbits(32)) == before, "the generators were reseeded from the kernel, not left alone"
 
 
-FENCE_FILE = [
-    # the file's content, whether a resume is seen, the fence after
-    ("the birth fence", "g/1/1\n", False, "g/1/1"),
-    ("no file yet", None, False, "g/1/1"),
-    ("a new fence is a resume", "g/1/2\n", True, "g/1/2"),
+def resume_record(fence="g/1/2", generation=5, session="", kind="resume"):
+    """A resume's record as the binding hands it over: (kind, fence, endpoint, payload, seed, session, generation)."""
+    return (kind, fence, "/run/g/1-1.sock", b"", bytearray(SEED), session, generation)
+
+
+POLL = [
+    # what the channel holds, whether a resume is seen, the fence and the generation after
+    ("an empty channel", [None], False, "g/1/1", 4),
+    ("a resume's record", [resume_record()], True, "g/1/2", 5),
+    ("the latest record wins", [resume_record("g/1/2", 5), resume_record("g/1/3", 6)], True, "g/1/3", 6),
+    ("a record the library refused", [OSError(errno.EPROTO, "malformed record")], None, "g/1/1", 4),
 ]
 
 
-@table(FENCE_FILE)
-def test_check_fence(tmp_path, name, f0, f1, f2):
-    ep = str(tmp_path / "ep.sock")
-    if f0 is not None:
-        (tmp_path / "ep.sock.fence").write_text(f0)
-    f = ft.Fiber("g/1/1", ep, b"", "", {})
+@table(POLL)
+def test_poll_incarnation(monkeypatch, name, f0, f1, f2, f3):
+    ext = FakeExt(polls=f0)
+    monkeypatch.setattr(ft, "_ext", lambda: ext)
+    seen = []
+    monkeypatch.setattr(ft, "_hooks", [seen.append])
+    f = ft.Fiber("g/1/1", "/run/g/1-1.sock", b"", "", {"FIBERD_CHANNEL_FD": "4"})
     f._incarnate("fork", 4, os.urandom(32))
-    assert f.check_fence() == f1
+    if f1 is None:
+        with pytest.raises(OSError, match="malformed record"):
+            f.poll_incarnation()
+    else:
+        got = False
+        while ext.polls:
+            got = f.poll_incarnation() or got
+        assert got == f1
     assert f.fence == f2 and f.fence_parts == ft._fence.parse_fence(f2)
     assert f.incarnation.kind == ("resume" if f1 else "fork")
-    assert f.incarnation.generation == (5 if f1 else 4), "a resume is the parked generation plus one, not a count of this process"
-    assert f.check_fence() is False, "seen once"
+    assert f.incarnation.generation == f3, "the generation is the record's, fiberd's count, not a count of this process"
+    assert [(inc.kind, inc.fence) for inc in seen[1:]] == [("resume", r[1]) for r in f0 if isinstance(r, tuple)], "the hooks ran once per record"
+    assert all(bytes(inc.seed) == bytes(32) for inc in seen), "every seed is zeroed once the hooks ran"
+    assert f.poll_incarnation() is False, "an empty channel after"
+
+
+def test_poll_takes_the_session_off_the_record(monkeypatch):
+    ext = FakeExt(polls=[resume_record(session="conv 43")])
+    monkeypatch.setattr(ft, "_ext", lambda: ext)
+    f = ft.Fiber("g/1/1", "/run/g/1-1.sock", b"", "conv 42", {})
+    f._incarnate("fork", 1, os.urandom(32))
+    assert f.poll_incarnation() is True and f.session == "conv 43"
+
+
+def test_poll_is_nothing_on_gvisor(monkeypatch):
+    ext = FakeExt(polls=[resume_record()])
+    monkeypatch.setattr(ft, "_ext", lambda: ext)
+    f = ft.Fiber("g/1/1", "/host/1-1.sock", b"", "", {}, backend="gvisor")
+    f._incarnate("clone", 1, os.urandom(32))
+    assert f.poll_incarnation() is False and ext.calls == [], "a resumed sandbox takes a whole identity instead"
 
 
 @pytest.fixture
@@ -248,8 +291,8 @@ def test_listen_handoff_refused():
         f.listen()
 
 
-def test_serve_loop_reports_ready_checks_the_fence_and_hands_connections_over(sock_dir, monkeypatch):
-    ext = FakeExt()
+def test_serve_loop_reports_ready_polls_the_channel_and_hands_connections_over(sock_dir, monkeypatch):
+    ext = FakeExt(polls=[resume_record("g/1/2", 2)])
     monkeypatch.setattr(ft, "_ext", lambda: ext)
     ep = str(sock_dir / "ep.sock")
     f = ft.Fiber("g/1/1", ep, b"", "", {})
@@ -258,17 +301,16 @@ def test_serve_loop_reports_ready_checks_the_fence_and_hands_connections_over(so
     client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     client.connect(ep)
     client.sendall(b"hi\n")
-    (sock_dir / "ep.sock.fence").write_text("g/1/2\n")
     served = []
 
     def handler(conn):
-        served.append((conn.recv(16), f.fence, f.incarnation.kind))
+        served.append((conn.recv(16), f.fence, f.incarnation.kind, f.incarnation.generation))
         f.stopping.set()
 
     f.serve(handler, listener=srv, poll=0.05)
     client.close()
-    assert ext.calls == [("ready",)]
-    assert served == [(b"hi\n", "g/1/2", "resume")], "the fence file was read before the connection was served"
+    assert ext.calls == [("ready",), ("poll",)]
+    assert served == [(b"hi\n", "g/1/2", "resume", 2)], "the channel was polled before the connection was served"
     assert not os.path.exists(ep), "the endpoint is unlinked on the way out"
 
 
@@ -337,7 +379,7 @@ def test_serve_on_gvisor_runs_every_restore(tmp_path, monkeypatch):
     assert a.env["FIBERD_FENCE"] == "g/1/1" and a.env["FIBERD_SESSION"] == "conv 42"
     assert (b.backend, b.fence, b.session, b.incarnation.kind) == ("gvisor", "g/1/2", "", "resume")
     assert "FIBERD_SESSION" not in b.env
-    assert a.check_fence() is False and a.incarnation.generation == 1, "no fence file on gVisor"
+    assert a.poll_incarnation() is False and a.incarnation.generation == 1, "no channel to poll on gVisor"
 
 
 def test_serve_on_gvisor_ends_with_a_failed_incarnation(tmp_path, monkeypatch):

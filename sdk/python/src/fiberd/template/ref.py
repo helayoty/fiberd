@@ -16,6 +16,7 @@ the integration tests drive both the same way.
     getenv <NAME>   -> the value, or "-" (proves the scrub)
     session         -> the session the caller named, or "-"
     generation      -> fiberd's count of this fiber's lineage, 1 at birth and the parked one plus one after a resume
+    kind            -> the current record's kind, fork, resume or, on gVisor, restore
     payload         -> the birth payload in hex (up to 127 bytes), or "-"
     status <Key>    -> that field of /proc/self/status, or "-"
     read <path>     -> the file's first line, or "-"
@@ -123,6 +124,8 @@ def answer(st: State, line: str) -> str:
         return f.fence
     if cmd == "generation":
         return str(f.incarnation.generation) if f.incarnation is not None else "-"
+    if cmd == "kind":
+        return f.incarnation.kind if f.incarnation is not None else "-"
     if cmd == "pid":
         return str(os.getpid())
     if cmd == "random":

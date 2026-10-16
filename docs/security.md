@@ -68,7 +68,7 @@ An `UNTRUSTED` grant, the default, is admitted only on a backend that isolates t
 - Every proc and runc fiber is born in its own cgroup leaf and pid namespace. A proc fiber also gets a private mount namespace with fiberd's private paths covered, the run directory narrowed to its own grant's, and `/sys` and the host controls under `/proc` read-only. Confinement fails closed ([zygote.md](design/zygote.md)).
 - proc fibers run as uid 0 with every capability dropped under `no_new_privs`.
 - runc fibers are an unprivileged host uid in a per-grant user namespace, whose ids come from a pool far above ordinary users', with a loopback-only network namespace and nested user namespaces denied ([user-namespaces.md](design/user-namespaces.md)).
-- A template must reseed its random generators in every new run, at the fork, after a restore and when its fence changes ([zygote.md](design/zygote.md), [sdk/c/template/README.md](../sdk/c/template/README.md)). fiberd parks only with CRIU 4.2 or later, which leaves out the `getrandom` state a glibc of 2.41 or later keeps in user memory, so `getrandom` never replays a parked keystream ([backends.md](design/backends.md)).
+- A template must reseed its random generators in every new run, at the fork, after a restore and when a resume's record arrives on its channel ([zygote.md](design/zygote.md), [sdk/c/template/README.md](../sdk/c/template/README.md)). fiberd parks only with CRIU 4.2 or later, which leaves out the `getrandom` state a glibc of 2.41 or later keeps in user memory, so `getrandom` never replays a parked keystream ([backends.md](design/backends.md)).
 
 ## fiberd privileges
 
@@ -90,7 +90,7 @@ Every state transition appends a hash-chained record to fiberd's private spool, 
 - A runc fiber reads fiberd's network devices under its read-only `/sys` ([user-namespaces.md](design/user-namespaces.md)).
 - `SYS_ADMIN` is broad.
 - Unmeasured runtimes keep every capability.
-- Every copy of a template carries its random state, and only the template can reseed it. A forked fiber and a gVisor sandbox get fresh entropy on their incarnation record, in `on_fiber` and at the restore. A resumed proc or runc fiber learns it by watching its fence file, since CRIU keeps the pid. There is no uniform signal yet. A Hyperlight guest gets none, and a template that does not watch its fence file replays its parked sequence after a resume.
+- Every copy of a template carries its random state, and only the template can reseed it. Every proc, runc and gVisor incarnation gets fresh entropy on its incarnation record, in `on_fiber`, at a gVisor restore and, for a resumed proc or runc fiber, on the channel it polls before each connection, since CRIU keeps the pid. A Hyperlight guest gets none, and a template that does not poll its channel replays its parked sequence after a resume until it does.
 - Fibers have no general system-call filter. runc fibers cannot create user namespaces, but proc fibers can, though the read-only `/sys` and `/proc` locks still hold inside them ([zygote.md](design/zygote.md)).
 - Template images are signed but not sealed, so whatever a template holds in memory when it is checkpointed leaves the home in the clear. Keep secrets out of templates ([artifact.md](design/artifact.md)).
 - Address-space layout randomisation (ASLR) is off for every [zygote](glossary.md#zygote) and its fibers, so the fibers of a template share one fixed memory layout on every home. A memory-corruption exploit inside a fiber is easier, because an address learned in one fiber holds in all of them.

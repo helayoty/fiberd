@@ -402,12 +402,36 @@ func mountsCheckpoint(t *testing.T, runDir string) string {
 	return dir
 }
 
+// pairBorrow stands in for pidfd_getfd under a recorded restore, whose
+// "tree" is this process: it hands out ends of one pair of the test's
+// own, the read end for fd 4 and the peer for fd 5, as the restored
+// fiber would hold them.
+func pairBorrow(t *testing.T) func(pid, fd int) (*os.File, error) {
+	t.Helper()
+	sv, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_SEQPACKET|syscall.SOCK_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = syscall.Close(sv[0]); _ = syscall.Close(sv[1]) })
+	return func(_ int, fd int) (*os.File, error) {
+		end := sv[0]
+		if fd == 5 {
+			end = sv[1]
+		}
+		dup, err := syscall.Dup(end)
+		if err != nil {
+			return nil, err
+		}
+		return os.NewFile(uintptr(dup), "borrowed"), nil
+	}
+}
+
 // resumeOn restores the checkpoint in dir on be for grant g2.
 func resumeOn(t *testing.T, be *procbackend.Backend, dir, workDir string) error {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	f, err := be.Resume(ctx, backend.ResumeSpec{Dir: dir, Fence: "g/2-1", Endpoint: filepath.Join(workDir, "ep.sock"), CgroupFD: -1, WarmID: "g", WorkDir: workDir})
+	f, err := be.Resume(ctx, backend.ResumeSpec{Dir: dir, Fence: "g/2-1", Endpoint: filepath.Join(workDir, "ep.sock"), CgroupFD: -1, WarmID: "g", WorkDir: workDir, Generation: 2})
 	if err == nil {
 		t.Cleanup(func() { _ = f.Channel.Close() })
 	}
@@ -461,7 +485,7 @@ func TestResumeBindsRunDir(t *testing.T) {
 			if tc.prepare != nil {
 				tc.prepare(t, rootBind)
 			}
-			be := openProc(t, procbackend.Options{RootBind: rootBind, Commander: rc})
+			be := openProc(t, procbackend.Options{RootBind: rootBind, Commander: rc, Borrow: pairBorrow(t)})
 			dir := mountsCheckpoint(t, tc.record)
 			workDir := filepath.Join(t.TempDir(), "g2")
 			err := resumeOn(t, be, dir, workDir)
@@ -553,8 +577,8 @@ func TestRootBindShared(t *testing.T) {
 			rc := &recordingCriu{}
 			t.Cleanup(rc.release)
 			dir := filepath.Join(t.TempDir(), "root")
-			a := openProc(t, procbackend.Options{RootBind: dir, Commander: rc})
-			b := openProc(t, procbackend.Options{RootBind: dir, Commander: rc})
+			a := openProc(t, procbackend.Options{RootBind: dir, Commander: rc, Borrow: pairBorrow(t)})
+			b := openProc(t, procbackend.Options{RootBind: dir, Commander: rc, Borrow: pairBorrow(t)})
 			tc.run(t, dir, a, b, mountsCheckpoint(t, ""))
 			if _, mounted := mountAt(t, dir); mounted {
 				t.Fatalf("%s still mounted", dir)

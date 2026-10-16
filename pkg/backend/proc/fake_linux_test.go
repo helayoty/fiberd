@@ -430,6 +430,10 @@ type fakeCriu struct {
 	mu    sync.Mutex
 	calls [][]string
 	procs []*fakeProcess
+	// inherited is a duplicate of the last file a restore was handed to
+	// pass into the tree, the fiber's end of a handoff channel, so a test
+	// can read what the backend queued on it.
+	inherited *os.File
 }
 
 func (f *fakeCriu) Output(ctx context.Context, args []string) ([]byte, error) {
@@ -465,6 +469,14 @@ func (f *fakeCriu) Start(args []string, files []*os.File, cgroupFD int) (criu.Pr
 	defer f.mu.Unlock()
 	call := append(append([]string{}, args...), fmt.Sprintf("files=%d", len(files)), fmt.Sprintf("cgroup=%d", cgroupFD))
 	f.calls = append(f.calls, call)
+	if len(files) > 0 {
+		if fd, err := syscall.Dup(int(files[0].Fd())); err == nil {
+			if f.inherited != nil {
+				_ = f.inherited.Close()
+			}
+			f.inherited = os.NewFile(uintptr(fd), "inherited")
+		}
+	}
 	p := &fakeProcess{pid: f.restorePID, released: make(chan struct{})}
 	f.procs = append(f.procs, p)
 	switch f.restore {
@@ -550,16 +562,119 @@ func (p *fakeProcess) release(err error) {
 }
 
 // fakes are what a backend under test runs on: zygotes as goroutines,
-// criu as a recorder and /proc as a directory of the test's own.
+// criu as a recorder, /proc as a directory of the test's own and the
+// channel pairs of fibers as pairs the test made (borrow).
 type fakes struct {
 	spawn *fakeSpawner
 	criu  *fakeCriu
 	proc  string
+
+	mu    sync.Mutex
+	pairs map[int][2]int // by pid: the fiber's end at channelFD, its peer at channelPeerFD
+	// borrowed is every descriptor borrow handed the backend, so a test
+	// can check each was let go.
+	borrowed []int
 }
 
 func newFakes(t *testing.T) *fakes {
 	t.Helper()
-	return &fakes{spawn: &fakeSpawner{base: impossiblePID(t) + 100}, criu: &fakeCriu{restorePID: impossiblePID(t) + 50}, proc: t.TempDir()}
+	f := &fakes{spawn: &fakeSpawner{base: impossiblePID(t) + 100}, criu: &fakeCriu{restorePID: impossiblePID(t) + 50}, proc: t.TempDir(), pairs: map[int][2]int{}}
+	t.Cleanup(func() {
+		if f.criu.inherited != nil {
+			_ = f.criu.inherited.Close()
+		}
+		for _, p := range f.pairs {
+			_ = syscall.Close(p[0])
+			_ = syscall.Close(p[1])
+		}
+	})
+	return f
+}
+
+// pair gives the fiber pid a channel pair of its own, as libfiberzygote
+// makes one in the child, and returns the end the fiber reads.
+func (f *fakes) pair(t *testing.T, pid int) int {
+	t.Helper()
+	sv, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_SEQPACKET|syscall.SOCK_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.mu.Lock()
+	f.pairs[pid] = sv
+	f.mu.Unlock()
+	return sv[0]
+}
+
+// borrow is pidfd_getfd over the pairs: a duplicate of the end the pid
+// holds at fd, or ESRCH for a pid with no pair, as for one no process has.
+func (f *fakes) borrow(pid, fd int) (*os.File, error) {
+	f.mu.Lock()
+	sv, ok := f.pairs[pid]
+	f.mu.Unlock()
+	var end int
+	switch {
+	case !ok:
+		return nil, fmt.Errorf("pidfd_open %d: %w", pid, syscall.ESRCH)
+	case fd == channelFD:
+		end = sv[0]
+	case fd == channelPeerFD:
+		end = sv[1]
+	default:
+		return nil, fmt.Errorf("pidfd_getfd %d of %d: %w", fd, pid, syscall.EBADF)
+	}
+	dup, err := syscall.Dup(end)
+	if err != nil {
+		return nil, err
+	}
+	f.mu.Lock()
+	f.borrowed = append(f.borrowed, dup)
+	f.mu.Unlock()
+	return os.NewFile(uintptr(dup), "borrowed"), nil
+}
+
+// letGo reports whether every descriptor borrow handed out is closed, or
+// at least no longer one of the pairs' ends.
+func (f *fakes) letGo() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	ends := map[uint64]bool{}
+	for _, sv := range f.pairs {
+		for _, fd := range sv {
+			var st syscall.Stat_t
+			if syscall.Fstat(fd, &st) == nil {
+				ends[st.Ino] = true
+			}
+		}
+	}
+	for _, fd := range f.borrowed {
+		var st syscall.Stat_t
+		if syscall.Fstat(fd, &st) == nil && ends[st.Ino] {
+			return false
+		}
+	}
+	return true
+}
+
+// readRecord takes the one record queued on fd, the fiber's end of a
+// channel, as the library's poll does, or fails when none waits.
+func readRecord(t *testing.T, fd int) backend.Incarnation {
+	t.Helper()
+	buf := make([]byte, backend.RecordMax)
+	n, _, _, _, err := syscall.Recvmsg(fd, buf, nil, syscall.MSG_DONTWAIT)
+	if err != nil {
+		t.Fatalf("read the record off the channel: %v", err)
+	}
+	inc, err := backend.ParseIncarnation(buf[:n])
+	if err != nil {
+		t.Fatalf("record on the channel: %v", err)
+	}
+	return inc
+}
+
+// queued reports whether a message waits on fd.
+func queued(fd int) bool {
+	_, _, _, _, err := syscall.Recvmsg(fd, make([]byte, backend.RecordMax), nil, syscall.MSG_DONTWAIT|syscall.MSG_PEEK)
+	return err == nil
 }
 
 // open opens a backend over the fakes. The cleanup closes it, ends every
@@ -567,7 +682,7 @@ func newFakes(t *testing.T) *fakes {
 // goroutine left behind.
 func (f *fakes) open(t *testing.T, o Options) *Backend {
 	t.Helper()
-	o.spawn, o.procRoot, o.Commander = f.spawn.spawn, f.proc, f.criu
+	o.spawn, o.procRoot, o.Commander, o.Borrow = f.spawn.spawn, f.proc, f.criu, f.borrow
 	if o.RootBind == "" {
 		o.RootBind = filepath.Join(t.TempDir(), "root")
 	}

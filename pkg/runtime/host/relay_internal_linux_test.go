@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -272,18 +271,17 @@ func TestRelayedResume(t *testing.T) {
 				if h.ID != "g1/2/1" || h.Endpoint != "tcp://127.0.0.1:20000" {
 					t.Fatalf("resumed handle = %+v, want the parked port", h)
 				}
-				sb := f.be.(*sandboxBackend)
-				if ff := sb.fiber("g1/2/1"); ff.resume == nil || ff.resume.Endpoint != sock {
+				ff := f.be.(*sandboxBackend).fiber("g1/2/1")
+				if ff.resume == nil || ff.resume.Endpoint != sock {
 					t.Fatalf("the backend was told to resume on %+v, want the socket %s", ff.resume, sock)
 				}
 				if got := mustSay(t, h.Endpoint, "ping"); got != "g1/2/1:ping" {
 					t.Fatalf("ping after resume = %q", got)
 				}
-				// The new fence is published beside the socket, the one
-				// path the fiber knows, as for a unix endpoint.
-				fenceFn := sock + ".fence"
-				if b, err := os.ReadFile(fenceFn); err != nil || string(b) != "g1/2/1\n" {
-					t.Fatalf("fence file = %q %v", b, err)
+				// The new fence reaches the fiber on its channel, as for a
+				// unix endpoint, so the backend is told the generation.
+				if ff.resume.Generation != 2 {
+					t.Fatalf("the backend was told generation %d, want 2", ff.resume.Generation)
 				}
 				f.r.mu.Lock()
 				holder := f.r.ports[20000]
@@ -295,8 +293,8 @@ func TestRelayedResume(t *testing.T) {
 					t.Fatal(err)
 				}
 				refusesDial(t, h.Endpoint)
-				if exists(fenceFn) || heldPorts(f.r) != 0 {
-					t.Fatalf("fence file exists %v, %d ports held", exists(fenceFn), heldPorts(f.r))
+				if heldPorts(f.r) != 0 {
+					t.Fatalf("%d ports held after the release", heldPorts(f.r))
 				}
 			}},
 		{name: "a parked port another fiber holds: the resume takes a free one",

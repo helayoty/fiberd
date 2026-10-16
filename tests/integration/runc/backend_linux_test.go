@@ -356,7 +356,7 @@ func TestReleaseKeepsRestoredCopy(t *testing.T) {
 				_ = os.Remove(ep)
 				rl, rfd := leaf(t, gcg, "f-2-1")
 				delegate(t, be, "keep", rl)
-				restored, err = be.Resume(ctx, backend.ResumeSpec{Dir: images, Fence: "keep/2-1", Endpoint: ep, CgroupFD: rfd, Deadline: 10 * time.Second, WarmID: "keep", WorkDir: dir})
+				restored, err = be.Resume(ctx, backend.ResumeSpec{Dir: images, Fence: "keep/2-1", Endpoint: ep, CgroupFD: rfd, Deadline: 10 * time.Second, WarmID: "keep", WorkDir: dir, Generation: 2})
 				if err != nil {
 					t.Fatalf("resume: %v", err)
 				}

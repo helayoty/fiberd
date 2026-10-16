@@ -59,9 +59,10 @@ func TestReferenceTemplate(t *testing.T) {
 // draws its own randomness, on every backend. Two forked siblings differ,
 // which the fork incarnation's reseed gives, and so do two sandboxes
 // restored from one image, two pooled sandboxes handed out, and two
-// fibers resumed from one park. On proc the fence file beside the
-// endpoint is what a resumed fiber notices, and the on_incarnation hook
-// records the fork and then the resume under the new fence. The
+// fibers resumed from one park. On proc and runc the channel carries
+// the resume's record, which the SDK polls before each connection, and
+// the on_incarnation hook records the fork and then the resume under
+// the new fence. The
 // getrandom rows are os.urandom, which secrets and uuid4 read. A glibc
 // of 2.41 or later answers it from a vDSO state page in user memory,
 // which a CRIU park drops (pkg/sys/criu), or every resume would replay
@@ -69,8 +70,8 @@ func TestReferenceTemplate(t *testing.T) {
 // count of its lineage: a fork, a restore or a pooled hand-out is 1, a
 // resume is the parked generation plus one, and a resume of a resumed
 // park is 3. On gVisor the number is the identity record's, which the
-// old record carried as a constant. On proc and runc a resume brings
-// no record yet, and the SDK counts the parked generation plus one.
+// old record carried as a constant. On proc and runc it is the resume
+// record's, kind resume.
 func TestRandomPerIncarnation(t *testing.T) {
 	ctx := context.Background()
 	type draw func(t *testing.T, rt core.Runtime, g core.Grant, cmd string) (a, b string)
@@ -138,6 +139,9 @@ func TestRandomPerIncarnation(t *testing.T) {
 					want = int(seq)
 				}
 				generationIs(t, h2.Endpoint, want)
+				if got := talk(t, h2.Endpoint, "kind"); got != "resume" {
+					t.Fatalf("resume %d: kind = %q, want resume", seq, got)
+				}
 				if chained && seq == 2 {
 					if ref, err = rt.Park(ctx, h2.ID, true); err != nil {
 						t.Fatalf("park %s: %v", h2.ID, err)

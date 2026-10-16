@@ -17,22 +17,23 @@ import (
 	"github.com/helayoty/fiberd/pkg/tlsconf/tlsconftest"
 )
 
-// TestChannelClosedUnlessHandoff pins that a fiber holds its channel to
-// fiberd only while it serves handoff. Every fiber reads its record off
-// fd 4, and a fiber that serves an endpoint of its own then closes it
-// before on_fiber, so it holds no SOCK_SEQPACKET socket at all, a park
-// has no channel to carry and a runc resume lands in a fresh network
-// namespace as before. A handoff fiber keeps the channel, named in its
-// environment, and serves over it.
-func TestChannelClosedUnlessHandoff(t *testing.T) {
+// TestChannelDescriptors pins where a fiber's channel lives. Every fiber
+// reads its birth record off fd 4 and finds the number in its
+// environment. A fiber that serves an endpoint of its own then holds a
+// pair of its own there, both ends, fd 4 to read and fd 5 as the peer,
+// so a park carries the pair whole and a resume's record can be written
+// on the peer. A handoff fiber keeps fiberd's channel at fd 4 alone,
+// and serves over it.
+func TestChannelDescriptors(t *testing.T) {
 	ctx := context.Background()
 	cases := []struct {
-		name    string
-		handoff bool
-		wantEnv string // FIBERD_CHANNEL_FD as the fiber sees it
+		name      string
+		handoff   bool
+		wantEnv   string   // FIBERD_CHANNEL_FD as the fiber sees it
+		wantSocks []string // the SOCK_SEQPACKET descriptors the fiber holds
 	}{
-		{name: "a fiber serving its own endpoint holds no channel", wantEnv: "-"},
-		{name: "a handoff fiber keeps its channel at fd 4", handoff: true, wantEnv: "4"},
+		{name: "a fiber serving its own endpoint holds its own pair at fd 4 and 5", wantEnv: "4", wantSocks: []string{"4", "5"}},
+		{name: "a handoff fiber keeps fiberd's channel at fd 4", handoff: true, wantEnv: "4"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -62,8 +63,13 @@ func TestChannelClosedUnlessHandoff(t *testing.T) {
 			if got := talk(t, h.Endpoint, "getenv FIBERD_CHANNEL_FD"); got != tc.wantEnv {
 				t.Fatalf("FIBERD_CHANNEL_FD = %q, want %q", got, tc.wantEnv)
 			}
-			if socks := seqpacketSockets(t, peerPID(t, h.Endpoint)); len(socks) != 0 {
-				t.Fatalf("the fiber holds SOCK_SEQPACKET sockets %v, want none once its record is read", socks)
+			socks := seqpacketSockets(t, peerPID(t, h.Endpoint))
+			var fds []string
+			for _, s := range socks {
+				fds = append(fds, strings.Fields(s)[0])
+			}
+			if strings.Join(fds, ",") != strings.Join(tc.wantSocks, ",") {
+				t.Fatalf("the fiber holds SOCK_SEQPACKET sockets %v, want descriptors %v", socks, tc.wantSocks)
 			}
 		})
 	}
