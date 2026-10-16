@@ -1,0 +1,71 @@
+# An interleaved A/B of fiberd's own benchmarks (tests/bench) between two
+# refs, on demand only. Both refs run on ONE runner in ONE job, old and
+# new alternating, so the runner's noise lands on both sides. Both run the
+# head ref's harness. The median table goes to the job summary and the raw
+# logs to an artifact. Numbers compare only within one run.
+name: bench-ab
+
+on:
+  workflow_dispatch:
+    inputs:
+      base:
+        description: "Old side, a ref"
+        type: string
+        default: main
+      head:
+        description: "New side, a ref (empty for the ref this runs on)"
+        type: string
+        default: ""
+      runs:
+        description: "Timed runs per side, after a discarded warm-up"
+        type: string
+        default: "3"
+      harnesses:
+        description: "Space separated, from clone, storm and park"
+        type: string
+        default: "clone storm park"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bench-ab
+  cancel-in-progress: false
+
+jobs:
+  ab:
+    name: "A/B ${{ inputs.base }} against ${{ inputs.head || github.ref_name }}"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.head || github.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: runner facts (shared runners are noisy, so they go on the record)
+        run: |
+          { echo "### runner"; uname -srm; nproc; free -h | head -2; cat /proc/loadavg; git rev-parse HEAD; } | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: the old tree
+        env:
+          BASE: ${{ inputs.base }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/old"
+          git archive "$(git rev-parse --verify "origin/$BASE^{commit}" 2>/dev/null || git rev-parse --verify "$BASE^{commit}")" | tar -x -C "$RUNNER_TEMP/old"
+      - name: build the dev image
+        run: hack/dev/run.sh true
+      - name: run the A/B
+        env:
+          RUNS: ${{ inputs.runs }}
+          HARNESSES: ${{ inputs.harnesses }}
+        run: hack/bench/ab.sh "$RUNNER_TEMP/old" . "$RUNNER_TEMP/ab"
+      - name: median table
+        if: always()
+        run: python3 hack/bench/ab-table.py "$RUNNER_TEMP/ab" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: keep the raw logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: bench-ab-${{ github.run_id }}
+          path: ${{ runner.temp }}/ab
+          if-no-files-found: warn
