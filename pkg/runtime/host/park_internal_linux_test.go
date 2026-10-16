@@ -109,7 +109,7 @@ func TestPark(t *testing.T) {
 				if _, err := time.Parse(time.RFC3339Nano, m.ParkedAt); err != nil {
 					t.Fatalf("parked_at %q: %v", m.ParkedAt, err)
 				}
-				if parks := f.fake().parked(); len(parks) != 1 || parks[0] != (backend.ParkSpec{Dir: ref, Sync: false}) {
+				if parks := f.fake().parked(); len(parks) != 1 || parks[0] != (backend.ParkSpec{Dir: ref, Sync: false, Deadline: core.DefaultResumeDeadline}) {
 					t.Fatalf("backend parks = %+v", parks)
 				}
 				if !f.r.HasDelta(ref) || !exists(filepath.Join(ref, fakeDeltaFile)) {
@@ -198,6 +198,17 @@ func TestPark(t *testing.T) {
 				f.h.ID = "odd"
 			},
 			errText: "want grant/epoch/seq"},
+		// The park's wait on the fiber is bounded by the grant's resume
+		// deadline, which core sizes, and a plain fiber speaks on a pair
+		// the backend borrows, so no channel is handed over.
+		{name: "the backend is given the grant's resume deadline and no channel for a plain fiber", be: func() backend.Backend { return newCodecBackend(core.TierCheckpoint) }, grant: g,
+			check: func(t *testing.T, f *parkFixture, _ string) {
+				_, want := core.GrantDeadlines(f.r, "g1")
+				specs := f.fake().parked()
+				if len(specs) != 1 || specs[0].Deadline != want || specs[0].Channel != nil {
+					t.Fatalf("park specs = %+v, want one with deadline %s and no channel", specs, want)
+				}
+			}},
 		{name: "a dump the backend refuses leaves the fiber running and the log for diagnosis", be: func() backend.Backend {
 			cb := newCodecBackend(core.TierCheckpoint)
 			cb.parkErr = errors.New("fake: criu dump failed")

@@ -1440,10 +1440,12 @@ func (r *Runtime) Park(ctx context.Context, fiberID string, sync bool) (string, 
 	r.mu.Lock()
 	f, ok := r.fibers[fiberID]
 	var ep string
+	var channel *os.File
 	if ok {
 		f.released = true // the coming exit is ours, not a death
 		f.parked = true   // and its port stays with the delta
 		ep = f.endpoint
+		channel = f.channel
 	}
 	r.mu.Unlock()
 	if !ok {
@@ -1481,7 +1483,12 @@ func (r *Runtime) Park(ctx context.Context, fiberID string, sync bool) (string, 
 		_ = os.Rename(dir, dir+".failed")
 		return "", err
 	}
-	if err := r.be.Park(ctx, f.id, backend.ParkSpec{Dir: dir, Sync: sync}); err != nil {
+	// The fiber is asked to stop serving and dumped once it has. The
+	// wait is bounded by the grant's resume deadline, the one per-grant
+	// number for a wait on a fiber, and a handoff fiber answers on the
+	// channel the host holds.
+	_, deadline := core.GrantDeadlines(r, f.grantUID)
+	if err := r.be.Park(ctx, f.id, backend.ParkSpec{Dir: dir, Sync: sync, Deadline: deadline, Channel: channel}); err != nil {
 		return giveBack(err)
 	}
 	// A sync park's fiber runs until the delta is durable, so a failure

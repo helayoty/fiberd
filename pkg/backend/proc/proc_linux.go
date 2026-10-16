@@ -52,6 +52,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -92,10 +93,14 @@ type Options struct {
 	// CRIU names.
 	Commander criu.Commander
 	// Borrow takes a duplicate of descriptor fd of process pid, as
-	// pidfd_getfd(2) does, which a resume uses to reach the restored
-	// tree's channel. Nil is that system call, and a test sets one that
+	// pidfd_getfd(2) does, which a park and a resume use to reach the
+	// fiber's channel. Nil is that system call, and a test sets one that
 	// hands out ends of pairs of its own.
 	Borrow func(pid, fd int) (*os.File, error)
+	// Signal sends sig to process pid, which a park uses to ask the
+	// fiber to stop serving. Nil is kill(2), and a test sets one that
+	// records the signal.
+	Signal func(pid int, sig syscall.Signal) error
 
 	// spawn starts the zygote's command. Nil is cmd.Start, and a test
 	// sets one that serves the control socket in this process.
@@ -536,6 +541,7 @@ type fiber struct {
 	warmID   string
 	restored *criu.Restored
 	handoff  bool // serves handoff, so it holds its channel at channelFD
+	parks    int  // the park rounds asked of it so far, under b.mu
 	// runDir is where the fiber's mount namespace binds its grant's run
 	// directory (RUNDIR). The path is fixed at birth and survives every
 	// park and resume, while the host directory behind it is the resuming
@@ -608,6 +614,9 @@ func NewBackend(o Options) *Backend {
 	}
 	if o.Borrow == nil {
 		o.Borrow = pidfdBorrow
+	}
+	if o.Signal == nil {
+		o.Signal = syscall.Kill
 	}
 	b := &Backend{opt: o, criu: criu.Options{Bin: o.CRIU, Wrap: o.CRIUWrap, Commander: o.Commander}, tier: core.TierWarm, defaultRoot: defaultRoot,
 		zygotes: map[string]*zygote{}, fibers: map[string]*fiber{}, byPID: map[pidKey]*fiber{},
@@ -1409,8 +1418,9 @@ func (b *Backend) abandon(z *zygote, fence string, reply chan cloneResult) {
 	}
 }
 
-// Park dumps the fiber's tree with criu. With Sync the tree keeps running
-// (--leave-running); the host ends it once the images are durable.
+// Park asks the fiber to stop serving and dumps its tree with criu once
+// it has said so. With Sync the tree keeps running (--leave-running),
+// serving nothing, and the host ends it once the images are durable.
 func (b *Backend) Park(ctx context.Context, fiberID string, spec backend.ParkSpec) error {
 	if b.tier < core.TierCheckpoint {
 		return fmt.Errorf("proc: park needs %s (criu unavailable)", core.TierCheckpoint)
@@ -1418,10 +1428,12 @@ func (b *Backend) Park(ctx context.Context, fiberID string, spec backend.ParkSpe
 	b.mu.Lock()
 	f, ok := b.fibers[fiberID]
 	var z *zygote
-	var pid int
+	var pid, round int
 	if ok {
 		z = b.zygotes[f.warmID]
 		pid = f.pid
+		f.parks++
+		round = f.parks
 	}
 	b.mu.Unlock()
 	if !ok {
@@ -1464,19 +1476,132 @@ func (b *Backend) Park(ctx context.Context, fiberID string, spec backend.ParkSpe
 			return err
 		}
 		extra = append(extra, "--external", "unix["+ino+"]")
-	} else if err := b.drainChannel(pid); err != nil {
-		return fmt.Errorf("proc: channel of %s: %w", fiberID, err)
+	}
+	if err := b.quiesce(ctx, pid, round, spec); err != nil {
+		return fmt.Errorf("%s: park %s: %w", b.Name(), fiberID, err)
 	}
 	err := b.criu.DumpWith(ctx, pid, spec.Dir, spec.Sync, extra)
-	// The fiber closes a host connection moments after its client does.
+	// A host connection the fiber closed at the signal is gone from the
+	// kernel moments later.
 	for end := time.Now().Add(parkQuiesce); b.opt.Launcher != nil && hostSocket(err) && time.Now().Before(end); {
 		time.Sleep(20 * time.Millisecond)
 		err = b.criu.DumpWith(ctx, pid, spec.Dir, spec.Sync, extra)
+	}
+	if err != nil {
+		// The fiber waits for its resume's record. It is told the park
+		// failed instead, and serves on.
+		b.carryOn(pid, round, spec)
 	}
 	if b.opt.Launcher != nil && hostSocket(err) {
 		return fmt.Errorf("%s: park %s: a client from outside the container is still connected: %w", b.Name(), fiberID, err)
 	}
 	return err
+}
+
+// quiesce tells the fiber pid the park's round, signals it and waits,
+// within the spec's deadline, for its word that it serves nothing
+// (RecordQuiesce) for that round. A handoff fiber speaks on the host's
+// end of its channel (spec.Channel), any other on the peer end of its
+// own pair, borrowed for the exchange and let go before the dump. A
+// fiber that says nothing in time is not dumped, and is told so with
+// the round, so a late answer meets its own carry-on and the fiber
+// serves again rather than wait forever. Its stale answer, and a stale
+// carry-on of this round, name a round no later park honours. A fiber
+// that ends at the signal is found out at once.
+func (b *Backend) quiesce(ctx context.Context, pid, round int, spec backend.ParkSpec) error {
+	fd, done, err := b.channelEnd(pid, spec)
+	if err != nil {
+		return err
+	}
+	defer done()
+	if err := sendRound(fd, backend.RecordPark, round); err != nil {
+		return fmt.Errorf("name the park's round to the fiber: %w", err)
+	}
+	if err := b.opt.Signal(pid, syscall.SIGUSR1); err != nil {
+		return fmt.Errorf("signal the fiber: %w", err)
+	}
+	wctx := ctx
+	if spec.Deadline > 0 {
+		var cancel context.CancelFunc
+		wctx, cancel = context.WithTimeout(ctx, spec.Deadline)
+		defer cancel()
+	}
+	if err := awaitRecord(wctx, fd, backend.RecordQuiesce, strconv.Itoa(round)); err != nil {
+		_ = sendRound(fd, backend.RecordCarryOn, round)
+		return fmt.Errorf("the fiber did not stop serving for the park: %w", err)
+	}
+	return nil
+}
+
+// carryOn tells a fiber that said it stopped serving for round that
+// its park failed, so it serves on as it was. Best effort: a fiber
+// that cannot be told is one whose channel is gone with it.
+func (b *Backend) carryOn(pid, round int, spec backend.ParkSpec) {
+	fd, done, err := b.channelEnd(pid, spec)
+	if err != nil {
+		return
+	}
+	defer done()
+	_ = sendRound(fd, backend.RecordCarryOn, round)
+}
+
+// sendRound queues a record of kind with the park round as its one
+// field on fd, without blocking.
+func sendRound(fd int, kind byte, round int) error {
+	return syscall.Sendmsg(fd, backend.Record(kind, strconv.Itoa(round)), nil, nil, syscall.MSG_DONTWAIT|syscall.MSG_NOSIGNAL)
+}
+
+// channelEnd is the end of the fiber's channel the backend speaks on,
+// with what lets it go: the host's end of a handoff fiber's channel,
+// which stays the host's, or the peer end of any other fiber's own
+// pair, borrowed for the call.
+func (b *Backend) channelEnd(pid int, spec backend.ParkSpec) (int, func(), error) {
+	if spec.Channel != nil {
+		return int(spec.Channel.Fd()), func() {}, nil
+	}
+	peer, err := b.opt.Borrow(pid, channelPeerFD)
+	if err != nil {
+		return -1, nil, fmt.Errorf("borrow the channel's peer end: %w", err)
+	}
+	return int(peer.Fd()), func() { _ = peer.Close() }, nil
+}
+
+// awaitRecord waits for the fiber's next message on fd, the end of its
+// channel the backend holds, and wants it to be the record want with
+// these fields. A quiesce for another round is a late answer to an
+// earlier park and is dropped. The fiber writes nothing else there, so
+// any other message is a protocol error, and EOF means the fiber is
+// gone.
+func awaitRecord(ctx context.Context, fd int, want byte, fields ...string) error {
+	buf := make([]byte, backend.RecordMax)
+	for {
+		n, _, _, _, err := syscall.Recvmsg(fd, buf, nil, syscall.MSG_DONTWAIT)
+		switch {
+		case errors.Is(err, syscall.EAGAIN):
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			// A slice at a time, so the context is seen between them.
+			_, _ = unix.Poll([]unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}, 20)
+			continue
+		case err != nil:
+			return err
+		case n == 0:
+			return errors.New("the fiber ended")
+		}
+		// A record with no field is its kind byte alone.
+		kind, got, ok := buf[0], []string(nil), true
+		if n > 1 {
+			kind, got, ok = backend.ParseRecord(buf[:n])
+		}
+		if ok && kind == backend.RecordQuiesce && want == kind && !slices.Equal(got, fields) {
+			continue // a stale answer to an earlier round
+		}
+		if !ok || kind != want || !slices.Equal(got, fields) {
+			return fmt.Errorf("the fiber answered %q, want a %q record", buf[:n], want)
+		}
+		return nil
+	}
 }
 
 // handoffInherit returns the criu arguments and files that restore a
@@ -1502,40 +1627,28 @@ func handoffInherit(dir string, ch *os.File) ([]string, []*os.File, error) {
 }
 
 // sendResumed writes inc on the channel of the restored tree pid, by
-// borrowing the peer end the fiber holds. The record waits in the
-// fiber's queue for its next fz_incarnation_poll.
-func (b *Backend) sendResumed(pid int, inc backend.Incarnation) error {
+// borrowing the peer end the fiber holds, and waits on that end for the
+// fiber's ack, its word that it took the record and serves again under
+// the new fence, within ctx.
+func (b *Backend) sendResumed(ctx context.Context, pid int, inc backend.Incarnation) error {
 	peer, err := b.opt.Borrow(pid, channelPeerFD)
 	if err != nil {
 		return fmt.Errorf("borrow the channel's peer end: %w", err)
 	}
 	defer func() { _ = peer.Close() }()
-	return backend.Queue(int(peer.Fd()), inc)
+	if err := backend.Queue(int(peer.Fd()), inc); err != nil {
+		return err
+	}
+	return awaitAck(ctx, int(peer.Fd()), inc.Fence)
 }
 
-// drainChannel takes every unread message off the channel of the fiber
-// pid before its dump, by borrowing the end it reads. A resume's record
-// the fiber has not polled yet would otherwise be dumped with it, seed
-// and all, and come back in every restore of the park.
-func (b *Backend) drainChannel(pid int) error {
-	ch, err := b.opt.Borrow(pid, channelFD)
-	if err != nil {
-		return fmt.Errorf("borrow the channel: %w", err)
+// awaitAck waits on fd, an end of the fiber's channel, for the fiber's
+// ack of its resume under fence.
+func awaitAck(ctx context.Context, fd int, fence string) error {
+	if err := awaitRecord(ctx, fd, backend.RecordAck, fence); err != nil {
+		return fmt.Errorf("the fiber did not say it serves again: %w", err)
 	}
-	defer func() { _ = ch.Close() }()
-	buf := make([]byte, backend.RecordMax)
-	defer clear(buf)
-	for {
-		n, _, _, _, err := syscall.Recvmsg(int(ch.Fd()), buf, nil, syscall.MSG_DONTWAIT)
-		switch {
-		case errors.Is(err, syscall.EAGAIN):
-			return nil
-		case err != nil:
-			return err
-		case n == 0:
-			return nil
-		}
-	}
+	return nil
 }
 
 // pidfdBorrow is pidfd_open(2) then pidfd_getfd(2): a duplicate of
@@ -1699,21 +1812,28 @@ func (b *Backend) Resume(ctx context.Context, spec backend.ResumeSpec) (backend.
 			log.Printf("%s: restored %s: %v", b.Name(), spec.Fence, err)
 		}
 	}
-	if !spec.Handoff {
-		// The restored tree holds both ends of its own pair. Its peer
-		// end is borrowed for one write and let go, so the backend keeps
-		// no hold on the fiber's channel. A fiber that cannot be told it
-		// was resumed would serve with its parked random state, so the
-		// resume fails instead. criu, the tree's parent, is ended here,
-		// and the tree goes with its leaf, which the host kills on every
-		// failed resume. No pid is signalled, since nothing here can tell
-		// a restored root from a number another process has by now.
-		if err := b.sendResumed(res.PID, inc); err != nil {
-			_ = res.Process.Kill()
-			<-restoreDone(res)
-			gone()
-			return backend.Fiber{}, fmt.Errorf("%s: %s: %w", b.Name(), spec.Fence, err)
-		}
+	// The fiber takes the record and acks once it serves again. A plain
+	// fiber's record goes on the peer end of its own pair, borrowed for
+	// the exchange and let go, so the backend keeps no hold on the
+	// fiber's channel, and a handoff fiber's waits on its fresh channel,
+	// where the ack arrives on the host's end. A fiber that cannot be
+	// told it was resumed, or never says it serves, is not routed. criu,
+	// the tree's parent, is ended here, and the tree goes with its leaf,
+	// which the host kills on every failed resume. No pid is signalled,
+	// since nothing here can tell a restored root from a number another
+	// process has by now.
+	var ack error
+	if spec.Handoff {
+		ack = awaitAck(rctx, int(hostEnd.Fd()), spec.Fence)
+	} else {
+		ack = b.sendResumed(rctx, res.PID, inc)
+	}
+	if ack != nil {
+		_ = res.Process.Kill()
+		<-restoreDone(res)
+		closeHost()
+		gone()
+		return backend.Fiber{}, fmt.Errorf("%s: %s: %w", b.Name(), spec.Fence, ack)
 	}
 	f := &fiber{id: spec.Fence, pid: res.PID, restored: res, warmID: spec.WarmID, handoff: spec.Handoff, runDir: runDir}
 	b.mu.Lock()

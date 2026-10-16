@@ -3,8 +3,11 @@
 package pythontest
 
 import (
+	"bufio"
 	"context"
 	"encoding/hex"
+	"fmt"
+	"net"
 	"strconv"
 	"strings"
 	"testing"
@@ -236,6 +239,102 @@ func TestRandomPerIncarnation(t *testing.T) {
 // under the new fence with the session it was born with, and the park
 // and the resume are timed, which is the arm64 evidence docs/design/sdk.md
 // records.
+// TestParkRightAfterBirth parks a fiber the moment it is born, as
+// conformance C2 does, with the template held between its ready report
+// and its accept loop. The park's signal lands then, and the fiber must
+// answer it rather than end under the signal's default action.
+func TestParkRightAfterBirth(t *testing.T) {
+	ctx := context.Background()
+	cases := []struct {
+		name    string
+		payload []byte
+		sync    bool
+	}{
+		{name: "a sync park between ready and the accept loop, then a resume", payload: []byte(`{"serve_delay_ms":1500}`), sync: true},
+		{name: "an async park between ready and the accept loop, then a resume", payload: []byte(`{"serve_delay_ms":1500}`)},
+	}
+	for _, be := range backends {
+		for _, tc := range cases {
+			t.Run(be.name+"/"+tc.name, func(t *testing.T) {
+				rt := be.open(t, be.template)
+				if rt.Tier() < core.TierCheckpoint {
+					t.Skip("no park and resume here")
+				}
+				g := prepare(t, rt, "gbirth")
+				h, err := rt.Clone(ctx, core.CloneSpec{Grant: g, Fence: core.Fence{GrantUID: g.UID, Epoch: 1, Seq: 1}, Deadline: 20 * time.Second, Session: "S", Payload: tc.payload})
+				if err != nil {
+					t.Fatalf("clone: %v", err)
+				}
+				ref, err := rt.Park(ctx, h.ID, tc.sync)
+				if err != nil {
+					t.Fatalf("park right after birth: %v", err)
+				}
+				h2, err := rt.Clone(ctx, core.CloneSpec{Grant: g, Source: core.SourceDelta, Ref: ref, Fence: core.Fence{GrantUID: g.UID, Epoch: 1, Seq: 2}, Deadline: 30 * time.Second, Session: "S"})
+				if err != nil {
+					t.Fatalf("resume: %v", err)
+				}
+				t.Cleanup(func() { _ = rt.Release(ctx, h2.ID, true) })
+				for ask, want := range map[string]string{"incr": "1", "fence": h2.ID, "kind": "resume", "ping": "pong"} {
+					if got := talk(t, h2.Endpoint, ask); got != want {
+						t.Errorf("%s after resume = %q, want %q", ask, got, want)
+					}
+				}
+			})
+		}
+	}
+}
+
+// TestParkCutsTheConnection parks a Python fiber whose handler is
+// between a reply and its next read on a client that stays quiet. The
+// signal lands there, and the SDK must end that read, or the park waits
+// out its deadline.
+func TestParkCutsTheConnection(t *testing.T) {
+	ctx := context.Background()
+	for _, be := range backends {
+		if be.name == "gvisor" {
+			continue // a sandbox parks by closing its endpoint, with no connection cut
+		}
+		t.Run(be.name, func(t *testing.T) {
+			rt := be.open(t, be.template)
+			if rt.Tier() < core.TierCheckpoint {
+				t.Skip("no park and resume here")
+			}
+			g := prepare(t, rt, "gcut")
+			h, err := rt.Clone(ctx, core.CloneSpec{Grant: g, Fence: core.Fence{GrantUID: g.UID, Epoch: 1, Seq: 1}, Deadline: 20 * time.Second, Session: "S", Payload: []byte(`{"reply_delay_ms":500}`)})
+			if err != nil {
+				t.Fatalf("clone: %v", err)
+			}
+			c, err := net.DialTimeout("unix", strings.TrimPrefix(h.Endpoint, "unix://"), 2*time.Second)
+			if err != nil {
+				t.Fatalf("dial: %v", err)
+			}
+			defer func() { _ = c.Close() }()
+			_ = c.SetDeadline(time.Now().Add(10 * time.Second))
+			if _, err := fmt.Fprintln(c, "incr"); err != nil {
+				t.Fatal(err)
+			}
+			if reply, err := bufio.NewReader(c).ReadString('\n'); err != nil || strings.TrimSpace(reply) != "1" {
+				t.Fatalf("incr = %q (%v), want 1", reply, err)
+			}
+			ref, err := rt.Park(ctx, h.ID, false)
+			if err != nil {
+				t.Fatalf("park with the handler between a reply and its read: %v", err)
+			}
+			if _, err := c.Read(make([]byte, 1)); err == nil {
+				t.Fatal("the connection is still open after the park")
+			}
+			h2, err := rt.Clone(ctx, core.CloneSpec{Grant: g, Source: core.SourceDelta, Ref: ref, Fence: core.Fence{GrantUID: g.UID, Epoch: 1, Seq: 2}, Deadline: 30 * time.Second, Session: "S"})
+			if err != nil {
+				t.Fatalf("resume: %v", err)
+			}
+			t.Cleanup(func() { _ = rt.Release(ctx, h2.ID, true) })
+			if got := talk(t, h2.Endpoint, "get"); got != "1" {
+				t.Errorf("get after resume = %q, want 1", got)
+			}
+		})
+	}
+}
+
 func TestParkResumeKeepsState(t *testing.T) {
 	ctx := context.Background()
 	for _, be := range backends {

@@ -140,10 +140,20 @@ type Fiber struct {
 
 // ParkSpec asks for a checkpoint of a fiber into Dir. With Sync the
 // fiber keeps running after the checkpoint (the host ends it once the
-// images are durable); otherwise the checkpoint ends it.
+// images are durable); otherwise the checkpoint ends it. A park is
+// cooperative. The backend signals the fiber, which stops serving and
+// says so, and only then is it checkpointed. A fiber that never says
+// so is not parked, and the error names it.
 type ParkSpec struct {
 	Dir  string
 	Sync bool
+	// Deadline bounds the wait for the fiber to stop serving, the
+	// grant's resume deadline. Zero waits as long as the context allows.
+	Deadline time.Duration
+	// Channel is the host's end of a handoff fiber's channel, where
+	// that fiber says it has stopped. nil for every other fiber, which
+	// says so on a pair of its own that the backend borrows an end of.
+	Channel *os.File
 }
 
 // ResumeSpec brings a checkpoint back as a new fiber.
@@ -168,7 +178,8 @@ type ResumeSpec struct {
 	// Handoff says the checkpoint's fiber serves handoff, so it holds a
 	// channel the restore replaces with a fresh one (Fiber.Channel). A
 	// backend sends every resumed fiber its record, kind "resume" with
-	// Fence, Generation and Session, on its channel before it serves.
+	// Fence, Generation and Session, on its channel, and waits for the
+	// fiber's ack, which says it has taken the record and serves again.
 	Handoff bool
 }
 
@@ -241,6 +252,11 @@ type Backend interface {
 	// host's to kill through their cgroups.
 	Unwarm(id string)
 	Clone(ctx context.Context, warmID string, spec FiberSpec) (Fiber, error)
+	// Park asks the fiber to stop serving and checkpoints it once it
+	// has said so (ParkSpec). Resume brings a checkpoint back and
+	// returns once the fiber says it serves again, under the spec's
+	// deadline. A restored fiber that never says so is ended, and the
+	// host routes nothing to it.
 	Park(ctx context.Context, fiberID string, spec ParkSpec) error
 	Resume(ctx context.Context, spec ResumeSpec) (Fiber, error)
 	// Kill ends a fiber directly (the host also kills its cgroup).

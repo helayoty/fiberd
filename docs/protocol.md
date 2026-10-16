@@ -92,6 +92,8 @@ The diagram follows action selection and successful completion. [Outcomes](#outc
 
 `sync=true` makes the runtime fsync the delta and its manifest before the reply, and the fiber keeps running until that is done.
 
+The fiber is asked to stop serving before it is checkpointed ([zygote.md](design/zygote.md)). One that keeps serving past the grant's resume deadline is not parked. The call fails with `Internal` and the fiber runs on.
+
 Do not Park an anonymous fiber when retained checkpoint files or a reserved TCP port would be unacceptable. The public API has no session handle with which to resume or discard that anonymous parked state.
 
 ### Release

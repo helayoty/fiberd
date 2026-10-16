@@ -38,7 +38,7 @@ ft.serve(on_fiber)
 
 `fiberd-template pkg.module:on_fiber` runs a module the same way, with `init()` before the import.
 
-A `Fiber` carries `fence`, `fence_parts`, `endpoint`, `kind` (unix, tcp or handoff), `payload`, `session`, `env`, `incarnation` and `backend` (fork or gvisor). `listen()` returns a bound socket for an author who runs their own server, `ready()` reports to fiberd once listening, `poll_incarnation()` notices a resume, and `stopping` is set when the fiber is asked to stop. `@ft.on_incarnation` runs a function in every copy of the template, after `random` and OpenSSL are reseeded. The rules `serve()` enforces, and why, are in [docs/design/sdk.md](../../docs/design/sdk.md).
+A `Fiber` carries `fence`, `fence_parts`, `endpoint`, `kind` (unix, tcp or handoff), `payload`, `session`, `env`, `incarnation` and `backend` (fork or gvisor). `listen()` returns a bound socket for an author who runs their own server, `ready()` reports to fiberd once listening, in every incarnation, `parking` is set when fiberd asks for a park and `park()` answers it once nothing is served, and `stopping` is set when the fiber is asked to stop. `@ft.on_incarnation` runs a function in every copy of the template, after `random` and OpenSSL are reseeded. The rules `serve()` enforces, and why, are in [docs/design/sdk.md](../../docs/design/sdk.md).
 
 A [handoff](../../docs/glossary.md#handoff) fiber listens on nothing. `f.serve(handle)` works the same there. Each `conn` is an `ssl.SSLSocket`, with TLS terminated under the grant's identity and the bound caller's certificate the one the handshake admits, as `f.accept()` returns it.
 

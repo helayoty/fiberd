@@ -29,6 +29,8 @@ The probes that need fork or mount(2) (unshare, mount, remount, connect)
 and the device engine (reserve, devfree) stay with refzygote, which
 answers "err no engine" here. The payload is JSON. "dirty_bytes" is
 written right after ready, "ready_delay_ms" delays the ready report,
+"serve_delay_ms" holds the fiber between ready and its accept loop,
+"reply_delay_ms" pauses it between a reply and its next read,
 "ready_misuse" misuses the readiness pipe and "exit_after_ready" ends
 the fiber at once, for the runtime's own tests. --log reopens stdio on a
 file, as a launcher that runs the template as a container's init asks.
@@ -224,8 +226,8 @@ def _mkdir(path: str) -> str:
     return "ok"
 
 
-def handle(conn: socket.socket, st: State) -> None:
-    """Serves one connection, a line per request, until the peer closes."""
+def handle(conn: socket.socket, st: State, reply_delay: float = 0) -> None:
+    """Serves one connection, a line per request, until the peer closes. reply_delay is the test knob, a pause after each reply."""
     buf = b""
     while True:
         chunk = conn.recv(512)
@@ -236,6 +238,8 @@ def handle(conn: socket.socket, st: State) -> None:
             line, buf = buf.split(b"\n", 1)
             reply = answer(st, line.decode("utf-8", "replace").rstrip("\r"))
             conn.sendall(reply.encode("utf-8") + b"\n")
+            if reply_delay:
+                time.sleep(reply_delay)
 
 
 def payload_dict(payload: bytes) -> dict[str, Any]:
@@ -268,9 +272,14 @@ def on_fiber(warm: Warm, f: ft.Fiber) -> int:
     f.ready()
     if opts.get("exit_after_ready"):
         return 0
+    # A park can arrive from here on. The runtime's tests widen the gap
+    # before the accept loop to prove the fiber survives one.
+    if opts.get("serve_delay_ms"):
+        time.sleep(int(opts["serve_delay_ms"]) / 1000)
     if opts.get("dirty_bytes"):
         st.dirty(int(opts["dirty_bytes"]))
-    f.serve(lambda conn: handle(conn, st), listener=srv)
+    reply_delay = int(opts.get("reply_delay_ms", 0)) / 1000
+    f.serve(lambda conn: handle(conn, st, reply_delay), listener=srv)
     return 0
 
 

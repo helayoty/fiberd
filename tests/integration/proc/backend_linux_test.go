@@ -412,7 +412,28 @@ func pairBorrow(t *testing.T) func(pid, fd int) (*os.File, error) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = syscall.Close(sv[0]); _ = syscall.Close(sv[1]) })
+	// The restored fiber, played here: it takes the resume's record off
+	// its end and acks under the record's fence, which Resume waits for.
+	stop, done := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		buf := make([]byte, backend.RecordMax)
+		for {
+			select {
+			case <-stop:
+				return
+			case <-time.After(5 * time.Millisecond):
+			}
+			n, _, _, _, err := syscall.Recvmsg(sv[0], buf, nil, syscall.MSG_DONTWAIT)
+			if err != nil {
+				continue
+			}
+			if inc, err := backend.ParseIncarnation(buf[:n]); err == nil {
+				_ = syscall.Sendmsg(sv[0], backend.Record(backend.RecordAck, inc.Fence), nil, nil, syscall.MSG_DONTWAIT|syscall.MSG_NOSIGNAL)
+			}
+		}
+	}()
+	t.Cleanup(func() { close(stop); <-done; _ = syscall.Close(sv[0]); _ = syscall.Close(sv[1]) })
 	return func(_ int, fd int) (*os.File, error) {
 		end := sv[0]
 		if fd == 5 {

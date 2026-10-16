@@ -219,6 +219,7 @@ type box struct {
 	bundle   string
 	endpoint string
 	workDir  string
+	warmID   string // the warm instance it was restored under, for its grant's deadlines
 	// pooled marks a sandbox in b.pooled (id is its pooled id) rather
 	// than in b.boxes (id is its fence). probe marks the footprint probe,
 	// which is in neither and reports no exit. Both are read and written
@@ -1392,7 +1393,7 @@ func (b *Backend) start(ctx context.Context, w *warm, images string, argv []stri
 	if err != nil {
 		return backend.Fiber{}, err
 	}
-	x := &box{id: fence, cid: b.newCID("f", fence), endpoint: endpoint, workDir: w.workDir, done: make(chan struct{})}
+	x := &box{id: fence, cid: b.newCID("f", fence), endpoint: endpoint, workDir: w.workDir, warmID: w.id, done: make(chan struct{})}
 	x.bundle = b.bundleDir(x.cid)
 	_ = os.Remove(endpoint)
 	if w.noPool {
@@ -1498,7 +1499,7 @@ func (b *Backend) Pool(ctx context.Context, warmID string, sp backend.PoolSpec) 
 		ctx, cancel = context.WithTimeout(ctx, sp.Deadline)
 		defer cancel()
 	}
-	x := &box{cid: b.newCID("p", warmID), pooled: true, workDir: w.workDir, done: make(chan struct{})}
+	x := &box{cid: b.newCID("p", warmID), pooled: true, workDir: w.workDir, warmID: warmID, done: make(chan struct{})}
 	x.id = x.cid
 	x.bundle = b.bundleDir(x.cid)
 	if err := b.restore(ctx, w, x, w.images, w.argv, nil, sp.CgroupFD); err != nil {
@@ -1569,7 +1570,10 @@ func (b *Backend) Discard(pooledID string) {
 	}
 }
 
-// Park asks the workload to close its endpoint, then checkpoints.
+// Park asks the workload to close its endpoint, then checkpoints. The
+// wait for the endpoint to go is the spec's deadline, the grant's
+// resume deadline, or without one what this backend advises for the
+// grant's warm instance (DefaultDeadlines).
 func (b *Backend) Park(ctx context.Context, fiberID string, sp backend.ParkSpec) error {
 	b.mu.Lock()
 	x, ok := b.boxes[fiberID]
@@ -1580,7 +1584,11 @@ func (b *Backend) Park(ctx context.Context, fiberID string, sp backend.ParkSpec)
 	if _, err := b.runsc(ctx, -1, "kill", x.cid, "USR1"); err != nil {
 		return err
 	}
-	wctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	deadline := sp.Deadline
+	if deadline <= 0 {
+		_, deadline = b.DefaultDeadlines(x.warmID)
+	}
+	wctx, cancel := context.WithTimeout(ctx, deadline)
 	defer cancel()
 	if err := waitFile(wctx, x.endpoint, true); err != nil {
 		return fmt.Errorf("gvisor: %s did not close its endpoint for the checkpoint: %w", fiberID, err)

@@ -2,9 +2,9 @@
 #define _GNU_SOURCE
 #include "libfiberzygote.h"
 
-/* This file implements ABI version 8, so a header of another version refuses to build it. */
-#if FZ_ABI_VERSION != 8
-#error "libfiberzygote.c implements FZ_ABI_VERSION 8"
+/* This file implements ABI version 9, so a header of another version refuses to build it. */
+#if FZ_ABI_VERSION != 9
+#error "libfiberzygote.c implements FZ_ABI_VERSION 9"
 #endif
 
 #include <dirent.h>
@@ -1088,13 +1088,18 @@ struct record_store {
 };
 static struct record_store born, polled;
 /* The generation this process serves, the birth record's and then each
- * polled record's. A record at or below it is a replay and is dropped. */
+ * resume's. A record at or below it is a replay and is dropped. */
 static unsigned served_generation;
-/* What fz_accept and fz_incarnation_poll read for each other on a
- * handoff fiber's channel: a record that came ahead of a connection,
- * and a connection that came while polling. */
-static int polled_pending;
-static int stashed_conn = -1;
+/* Set once fz_incarnation_wait handed over a resume's record, until
+ * fz_fiber_ready acks it. */
+static int ack_pending;
+/* The park round the fiber answers, from the last 'p' fiberd queued
+ * before its signal, and whether that round's carry-on was already
+ * there when the fiber quiesced, so the wait answers 0 at once. A
+ * carry-on for any other round is stale and dropped, so one left by a
+ * park that gave up never undoes a later park's dump. */
+static unsigned park_round;
+static int park_over;
 
 /* parse_generation reads a generation as the record carries it: decimal
  * digits only, 1 or more, within unsigned. 0 when it is not one. */
@@ -1310,8 +1315,9 @@ static void scrub_and_run(int ready_w, int channel, const char *fence, struct co
     if (dup2(ready_w, 3) < 0) _exit(EX_FDS);
     if (dup2(channel, FZ_CHANNEL_FD) < 0) _exit(EX_FDS);
     channel_fd = FZ_CHANNEL_FD;
-    polled_pending = 0;
-    stashed_conn = -1;
+    ack_pending = 0;
+    park_round = 0;
+    park_over = 0;
     /* The raw syscall, since glibc has a wrapper only from 2.34 and musl has none. */
     if (syscall(SYS_close_range, FZ_CHANNEL_FD + 1, ~0U, 0) < 0) {
         for (int fd = FZ_CHANNEL_FD + 1; fd < 65536; fd++) close(fd);
@@ -1399,13 +1405,25 @@ void fz_init(int argc, char **argv) {
 }
 
 void fz_fiber_ready(void) {
-    if (ready_fd < 0) return;
-    dup2(0, 2); /* /dev/null, so nothing leads outside the tree once checkpointable */
-    forget_seed(&born);
-    const char rec = READY_BYTE;
-    (void)!write(ready_fd, &rec, 1);
-    close(ready_fd);
-    ready_fd = -1;
+    if (ready_fd >= 0) {
+        dup2(0, 2); /* /dev/null, so nothing leads outside the tree once checkpointable */
+        forget_seed(&born);
+        const char rec = READY_BYTE;
+        (void)!write(ready_fd, &rec, 1);
+        close(ready_fd);
+        ready_fd = -1;
+        return;
+    }
+    /* A resumed fiber listens again: the ack fiberd waits for before
+     * it routes anything here, under the new fence. */
+    if (!ack_pending || channel_fd < 0) return;
+    ack_pending = 0;
+    char ack[FENCE_MAX + 2];
+    size_t n = strlen(polled.inc.fence);
+    ack[0] = 'a';
+    memcpy(ack + 1, polled.inc.fence, n + 1);
+    (void)!send(channel_fd, ack, n + 2, MSG_NOSIGNAL);
+    forget_seed(&polled);
 }
 
 /* Messages after the birth record are read here first, so a connection
@@ -1425,55 +1443,116 @@ static int take_record(size_t n) {
     return polled.inc.generation > served_generation;
 }
 
-int fz_accept(void) {
-    if (channel_fd < 0) { errno = EBADF; return -1; }
-    if (stashed_conn >= 0) { int fd = stashed_conn; stashed_conn = -1; return fd; }
+/* channel_wait blocks until the channel has a message, then takes it
+ * without blocking. A signal ends the wait with EINTR, so a handler of
+ * the template's (a park's SIGUSR1) is seen by its loop. */
+static ssize_t channel_wait(char *buf, size_t cap, int *fd_out) {
     for (;;) {
-        int fd;
-        ssize_t r = channel_recv(channel_fd, 0, channel_msg, sizeof channel_msg, &fd);
-        if (r < 0) return -1;
-        if (r == 0) { errno = ECONNRESET; return -1; }
-        if (fd >= 0) return fd;
-        /* A resume's record comes ahead of any connection, and waits
-         * here for fz_incarnation_poll. Any other message without a
-         * descriptor carries nothing to serve, so wait for the next. */
-        if (take_record((size_t)r) > 0) polled_pending = 1;
+        struct pollfd p = { .fd = channel_fd, .events = POLLIN };
+        if (poll(&p, 1, -1) < 0) { *fd_out = -1; return -1; }
+        ssize_t r = channel_recv(channel_fd, MSG_DONTWAIT, buf, cap, fd_out);
+        if (r < 0 && errno == EAGAIN) continue;
+        return r;
     }
 }
 
-/* poll_none is fz_incarnation_poll handing nothing over: whatever a
+static int take_round(size_t n);
+
+int fz_accept(void) {
+    if (channel_fd < 0) { errno = EBADF; return -1; }
+    for (;;) {
+        int fd;
+        ssize_t r = channel_wait(channel_msg, sizeof channel_msg, &fd);
+        if (r < 0) return -1;
+        if (r == 0) { errno = ECONNRESET; return -1; }
+        if (fd >= 0) return fd;
+        /* A message without a descriptor carries nothing to serve. A
+         * park's round is noted for the quiesce to come, and ends this
+         * call as the park's signal would, since that signal may have
+         * landed already, before this wait began, and would then wake
+         * nothing. The template's loop looks at its park flag again. */
+        if (take_round((size_t)r) && channel_msg[0] == 'p') { errno = EINTR; return -1; }
+    }
+}
+
+/* record_round is the one decimal field of a 'p' or 'c' record in
+ * channel_msg, n bytes, or 0 for none. */
+static unsigned record_round(size_t n) {
+    if (n < 3 || channel_msg[n - 1] != 0) return 0;
+    return parse_generation(channel_msg + 1);
+}
+
+/* take_round notes a park message: 'p' names the round to answer, and
+ * 'c' ends the round it names. 1 when the message was one of those. */
+static int take_round(size_t n) {
+    switch (channel_msg[0]) {
+    case 'p': park_round = record_round(n); park_over = 0; return 1;
+    case 'c': if (record_round(n) == park_round) park_over = 1; return 1;
+    default: return 0;
+    }
+}
+
+/* send_quiesce says 'q' with the round the fiber answers. */
+static int send_quiesce(void) {
+    char q[16] = "q";
+    size_t n = 1 + fmt_uint(q + 1, park_round);
+    q[n++] = 0;
+    return send(channel_fd, q, n, MSG_NOSIGNAL) == (ssize_t)n ? 0 : -1;
+}
+
+int fz_quiesce(void) {
+    if (channel_fd < 0) { errno = EBADF; return -1; }
+    /* Whatever fiberd queued before its signal: the round, and the
+     * carry-on of a round that already gave up on this fiber. */
+    for (;;) {
+        int fd;
+        ssize_t r = channel_recv(channel_fd, MSG_DONTWAIT, channel_msg, sizeof channel_msg, &fd);
+        if (r < 0 && errno == EAGAIN) break;
+        if (r < 0) return -1;
+        if (r == 0) { errno = ECONNRESET; return -1; }
+        if (fd >= 0) { close(fd); continue; }
+        if (!take_round((size_t)r)) memset(channel_msg, 0, (size_t)r);
+    }
+    return send_quiesce();
+}
+
+/* wait_none is fz_incarnation_wait handing no record over: whatever a
  * dropped or refused record left in the store goes with it. */
-static int poll_none(int rc) {
+static int wait_none(int rc) {
     int e = errno;
     forget_seed(&polled);
     errno = e;
     return rc;
 }
 
-int fz_incarnation_poll(fz_incarnation_t *inc) {
+int fz_incarnation_wait(fz_incarnation_t *inc) {
     if (channel_fd < 0) { errno = EBADF; return -1; }
-    /* The seed the last call handed over has served its purpose, unless
-     * fz_accept read a newer record into the store meanwhile. */
-    if (!polled_pending) forget_seed(&polled);
-    int got = polled_pending;
-    polled_pending = 0;
-    /* Every message queued so far, so the latest record wins. A
-     * connection stops the read, since nothing comes behind it in this
-     * incarnation. */
-    while (stashed_conn < 0) {
+    /* The seed the last call handed over has served its purpose. */
+    forget_seed(&polled);
+    for (;;) {
+        /* The round already gave up on this fiber: serve on. */
+        if (park_over) { park_over = 0; return wait_none(0); }
         int fd;
-        ssize_t r = channel_recv(channel_fd, MSG_DONTWAIT, channel_msg, sizeof channel_msg, &fd);
-        if (r < 0 && errno == EAGAIN) break;
-        if (r < 0) return poll_none(-1);
-        if (r == 0) { errno = ECONNRESET; return poll_none(-1); }
-        if (fd >= 0) { stashed_conn = fd; break; }
-        got = take_record((size_t)r);
-        if (got < 0) return poll_none(-1);
+        ssize_t r = channel_wait(channel_msg, sizeof channel_msg, &fd);
+        if (r < 0) return wait_none(-1);
+        if (r == 0) { errno = ECONNRESET; return wait_none(-1); }
+        /* A connection handed over meanwhile is nobody's to serve. */
+        if (fd >= 0) { close(fd); continue; }
+        /* A new round while waiting (the fiber quiesced late, or on a
+         * signal of its own) is answered afresh. A carry-on ends the
+         * wait for the round it names, and a stale one is dropped. */
+        if (take_round((size_t)r)) {
+            if (channel_msg[0] == 'p' && send_quiesce() < 0) return wait_none(-1);
+            continue;
+        }
+        int got = take_record((size_t)r);
+        if (got < 0) return wait_none(-1);
+        if (!got) continue; /* a replay */
+        served_generation = polled.inc.generation;
+        ack_pending = 1;
+        *inc = polled.inc;
+        return 1;
     }
-    if (!got) return poll_none(0);
-    served_generation = polled.inc.generation;
-    *inc = polled.inc;
-    return 1;
 }
 
 /* A pending child's pipe became readable or closed. Only the ready

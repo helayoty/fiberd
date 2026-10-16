@@ -495,6 +495,17 @@ func (f *fakeCriu) Start(args []string, files []*os.File, cgroupFD int) (criu.Pr
 	return p, nil
 }
 
+// inheritedFD is the descriptor of the end the last restore was handed,
+// -1 before any.
+func (f *fakeCriu) inheritedFD() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.inherited == nil {
+		return -1
+	}
+	return int(f.inherited.Fd())
+}
+
 // recorded is every call so far, one line each.
 func (f *fakeCriu) recorded() []string {
 	f.mu.Lock()
@@ -574,6 +585,135 @@ type fakes struct {
 	// borrowed is every descriptor borrow handed the backend, so a test
 	// can check each was let go.
 	borrowed []int
+	// signals is every pid the backend signalled, and reply is what the
+	// fiber does at the signal, run in the backend's call.
+	signals   []int
+	reply     func(pid int)
+	signalErr error
+}
+
+// signal is Options.Signal: it records the park's signal and plays the
+// fiber's reply to it.
+func (f *fakes) signal(pid int, _ syscall.Signal) error {
+	f.mu.Lock()
+	f.signals = append(f.signals, pid)
+	reply, err := f.reply, f.signalErr
+	f.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	if reply != nil {
+		reply(pid)
+	}
+	return nil
+}
+
+// signalled is every pid the backend signalled so far.
+func (f *fakes) signalled() []int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]int(nil), f.signals...)
+}
+
+// say writes one message on fd, as the fiber writes its word on its
+// end of the channel.
+func say(t *testing.T, fd int, msg []byte) {
+	t.Helper()
+	if err := syscall.Sendmsg(fd, msg, nil, nil, syscall.MSG_DONTWAIT|syscall.MSG_NOSIGNAL); err != nil {
+		t.Errorf("say %q: %v", msg, err)
+	}
+}
+
+// parkRound takes the records queued on fd, the fiber's end, as the
+// library's quiesce does, and returns the round of the last 'p' among
+// them, 0 for none.
+func parkRound(t *testing.T, fd int) int {
+	t.Helper()
+	round := 0
+	buf := make([]byte, backend.RecordMax)
+	for {
+		n, _, _, _, err := syscall.Recvmsg(fd, buf, nil, syscall.MSG_DONTWAIT)
+		if errors.Is(err, syscall.EAGAIN) {
+			return round
+		}
+		if err != nil {
+			t.Fatalf("read the fiber's end: %v", err)
+		}
+		if kind, fields, ok := backend.ParseRecord(buf[:n]); ok && kind == backend.RecordPark && len(fields) == 1 {
+			round, _ = strconv.Atoi(fields[0])
+		}
+	}
+}
+
+// nextRecord is the next message queued on fd as its kind and fields
+// joined, "" for none.
+func nextRecord(t *testing.T, fd int) string {
+	t.Helper()
+	buf := make([]byte, backend.RecordMax)
+	n, _, _, _, err := syscall.Recvmsg(fd, buf, nil, syscall.MSG_DONTWAIT)
+	if errors.Is(err, syscall.EAGAIN) {
+		return ""
+	}
+	if err != nil {
+		t.Fatalf("read the fiber's end: %v", err)
+	}
+	kind, fields, ok := backend.ParseRecord(buf[:n])
+	if !ok {
+		return string(buf[:n])
+	}
+	return string(kind) + strings.Join(fields, " ")
+}
+
+// recvRecord takes the one record queued on fd without blocking, as
+// readRecord does, and reports instead of failing, for a goroutine.
+func recvRecord(fd int) (backend.Incarnation, error) {
+	buf := make([]byte, backend.RecordMax)
+	n, _, _, _, err := syscall.Recvmsg(fd, buf, nil, syscall.MSG_DONTWAIT)
+	if err != nil {
+		return backend.Incarnation{}, err
+	}
+	return backend.ParseIncarnation(buf[:n])
+}
+
+// acker plays a restored fiber on fd, the end it reads of its channel:
+// it takes the record the resume queues there and, unless told not to,
+// acks it under fence (ack ""), or under another fence. The record
+// goes out on the returned channel. fd is asked for until it is known,
+// since a handoff fiber's end exists only once the restore was handed
+// it. It gives up when stop is closed, so a resume that never queues
+// a record leaves no goroutine behind.
+func acker(fd func() int, fence, ack string, stop <-chan struct{}) <-chan backend.Incarnation {
+	out := make(chan backend.Incarnation, 1)
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			case <-time.After(5 * time.Millisecond):
+			}
+			rfd := fd()
+			if rfd < 0 {
+				continue
+			}
+			inc, err := recvRecord(rfd)
+			if errors.Is(err, syscall.EAGAIN) {
+				continue
+			}
+			if err != nil {
+				return
+			}
+			out <- inc
+			switch ack {
+			case "none":
+			case "":
+				_ = syscall.Sendmsg(rfd, append([]byte{backend.RecordAck}, append([]byte(fence), 0)...), nil, nil, syscall.MSG_DONTWAIT|syscall.MSG_NOSIGNAL)
+			default:
+				_ = syscall.Sendmsg(rfd, append([]byte{backend.RecordAck}, append([]byte(ack), 0)...), nil, nil, syscall.MSG_DONTWAIT|syscall.MSG_NOSIGNAL)
+			}
+			return
+		}
+	}()
+	return out
 }
 
 func newFakes(t *testing.T) *fakes {
@@ -655,22 +795,6 @@ func (f *fakes) letGo() bool {
 	return true
 }
 
-// readRecord takes the one record queued on fd, the fiber's end of a
-// channel, as the library's poll does, or fails when none waits.
-func readRecord(t *testing.T, fd int) backend.Incarnation {
-	t.Helper()
-	buf := make([]byte, backend.RecordMax)
-	n, _, _, _, err := syscall.Recvmsg(fd, buf, nil, syscall.MSG_DONTWAIT)
-	if err != nil {
-		t.Fatalf("read the record off the channel: %v", err)
-	}
-	inc, err := backend.ParseIncarnation(buf[:n])
-	if err != nil {
-		t.Fatalf("record on the channel: %v", err)
-	}
-	return inc
-}
-
 // queued reports whether a message waits on fd.
 func queued(fd int) bool {
 	_, _, _, _, err := syscall.Recvmsg(fd, make([]byte, backend.RecordMax), nil, syscall.MSG_DONTWAIT|syscall.MSG_PEEK)
@@ -682,7 +806,7 @@ func queued(fd int) bool {
 // goroutine left behind.
 func (f *fakes) open(t *testing.T, o Options) *Backend {
 	t.Helper()
-	o.spawn, o.procRoot, o.Commander, o.Borrow = f.spawn.spawn, f.proc, f.criu, f.borrow
+	o.spawn, o.procRoot, o.Commander, o.Borrow, o.Signal = f.spawn.spawn, f.proc, f.criu, f.borrow, f.signal
 	if o.RootBind == "" {
 		o.RootBind = filepath.Join(t.TempDir(), "root")
 	}

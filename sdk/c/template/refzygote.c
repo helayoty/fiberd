@@ -84,7 +84,23 @@
  * reports, and 3 calls fz_report, which must fail in a fiber. The zygote
  * must refuse such a fiber and go on serving. "exit_after_ready" has the
  * fiber end with exit 0 right after reporting ready, for the zygote's
- * CLONED then EXITED.
+ * CLONED then EXITED. "park_ignore" has the fiber serve on through a
+ * park's SIGUSR1, so fiberd must fail the park by name and leave it
+ * serving. "reply_delay_ms" has the fiber pause that long between a
+ * reply and its next read, where a park's signal may land and must
+ * still cut the connection. "park_delay_ms" has the fiber answer the signal that much
+ * later, as a long request would, so a fiber that answers after
+ * fiberd's deadline must meet the round's carry-on and serve again.
+ * "ack_skip" has a resumed fiber listen again and never ack its
+ * record, so fiberd must end it and route nothing to it.
+ *
+ * A park is cooperative (libfiberzygote.h). On SIGUSR1 the accept loop
+ * finishes the connection it is serving, closes it and the listener,
+ * says so with fz_quiesce and blocks in fz_incarnation_wait. It comes
+ * back with the resume's record, reseeds, listens again under the
+ * record's endpoint and acks with fz_fiber_ready, or with fiberd's word
+ * that the park failed, and then just listens again. A fiber whose
+ * wait fails ends with 122, the code for a lost record on every path.
  *
  * --http makes every fiber serve HTTP/1.1 on its endpoint instead of the
  * line protocol, for consumers that route web traffic to fibers (an
@@ -172,6 +188,46 @@ static int gvisor_mode;
  * the fiber's cgroup as W. In a restored sandbox there is no shared page
  * to break, the whole heap is already the fiber's own, so growing W means
  * allocating new memory; the kept allocations add up the same way. */
+/* The park's signal. SIGUSR1 stays blocked while a fiber runs and is
+ * let through only inside ppoll, in wait_readable, which every blocking
+ * wait goes through: the accept, the channel, each read on a
+ * connection. So the signal cannot land between a look at the flag and
+ * a wait that nothing else would end. No SA_RESTART, so the ppoll
+ * returns EINTR once the handler has run. A long request (dirty) looks
+ * at the pending signal as it goes. */
+static volatile sig_atomic_t park_requested;
+static sigset_t serve_mask; /* the fiber's mask with SIGUSR1 let through */
+static void on_usr1(int s) { (void)s; park_requested = 1; }
+
+/* park_arm installs the handler and blocks the signal, once per
+ * process, before anything that could be parked runs. */
+static void park_arm(void) {
+    struct sigaction sa = { .sa_handler = on_usr1 };
+    sigaction(SIGUSR1, &sa, NULL);
+    sigset_t blk;
+    sigemptyset(&blk);
+    sigaddset(&blk, SIGUSR1);
+    sigprocmask(SIG_BLOCK, &blk, &serve_mask);
+    sigdelset(&serve_mask, SIGUSR1);
+    park_requested = 0;
+}
+
+/* park_pending says whether a park is asked for: the flag, or the
+ * signal waiting behind the block. */
+static int park_pending(void) {
+    sigset_t s;
+    return park_requested || (sigpending(&s) == 0 && sigismember(&s, SIGUSR1));
+}
+
+/* wait_readable waits for fd with the park's signal let through. 0 when
+ * fd is readable, -1 with EINTR when the park was asked for (the flag
+ * is set), -1 with another errno on failure. */
+static int wait_readable(int fd) {
+    if (park_requested) { errno = EINTR; return -1; }
+    struct pollfd p = { .fd = fd, .events = POLLIN };
+    return ppoll(&p, 1, NULL, &serve_mask) < 0 ? -1 : 0;
+}
+
 static size_t dirty(size_t bytes) {
     if (gvisor_mode) {
         char *p = mmap(NULL, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -180,8 +236,12 @@ static size_t dirty(size_t bytes) {
         return bytes; /* kept on purpose */
     }
     if (bytes > heap_sz) bytes = heap_sz;
-    for (size_t i = 0; i < bytes; i += 4096) heap[i] ^= 1;
-    return bytes;
+    /* A long request looks at the park flag, as any should: under memory
+     * pressure each page costs a throttled fault, and the park's signal
+     * comes exactly then. What was done is answered. */
+    size_t i;
+    for (i = 0; i < bytes && !park_pending(); i += 4096) heap[i] ^= 1;
+    return i < bytes ? i : bytes;
 }
 
 /* Minimal extraction of "<key>": <n> from the JSON payload. */
@@ -287,11 +347,11 @@ static const fz_incarnation_t *cur_fiber; /* this fiber's birth record, for sess
 /* The record's seed in hex, kept only under the "keep_seed" payload key
  * for the tests, since the library zeroes the record's copy at ready. */
 static char kept_seed[2 * 32 + 1];
-/* The fence, kind and generation this process serves as, from the birth
- * record and then from each resume's record (poll_incarnation). The
- * fence is copied, since a polled record is valid only until the next
- * poll. */
+/* The fence, endpoint, kind and generation this process serves as, from
+ * the birth record and then from each resume's record (park). They are
+ * copied, since a resume's record is valid only until the next wait. */
 static char cur_fence[128];
+static char cur_endpoint[1024];
 static char cur_kind[16];
 static unsigned cur_generation;
 
@@ -503,10 +563,12 @@ typedef struct {
 static ssize_t conn_read(conn_t *c, void *p, size_t n) {
 #ifdef FZ_TLS
     if (c->ssl) {
+        if (SSL_pending(c->ssl) <= 0 && wait_readable(c->fd) < 0) return -1;
         int r = SSL_read(c->ssl, p, n > 65536 ? 65536 : (int)n);
         return r > 0 ? r : 0;
     }
 #endif
+    if (wait_readable(c->fd) < 0) return -1;
     return read(c->fd, p, n);
 }
 
@@ -694,22 +756,11 @@ static void reseed_rngs_from(const unsigned char *host, size_t hn) {
  * and keeps the seed under "keep_seed" for the tests. */
 static void set_incarnation(const fz_incarnation_t *inc) {
     snprintf(cur_fence, sizeof cur_fence, "%s", inc->fence);
+    snprintf(cur_endpoint, sizeof cur_endpoint, "%s", inc->endpoint);
     snprintf(cur_kind, sizeof cur_kind, "%s", inc->kind);
     cur_generation = inc->generation;
     if (cur_fiber && payload_num(cur_fiber->payload, cur_fiber->payload_len, "\"keep_seed\"") && inc->seed_len == 32)
         for (size_t i = 0; i < inc->seed_len; i++) snprintf(kept_seed + 2 * i, 3, "%02x", inc->seed[i]);
-}
-
-/* poll_incarnation asks the library for a resume's record. A resumed
- * fiber lands mid-accept with the parked RNG state, and reseeds from
- * the record before it serves the connection it just accepted, then
- * lets the library zero the seed. */
-static void poll_incarnation(void) {
-    fz_incarnation_t inc;
-    if (fz_incarnation_poll(&inc) <= 0) return;
-    set_incarnation(&inc);
-    reseed_rngs_from(inc.seed, inc.seed_len);
-    fz_seed_forget();
 }
 
 /* borrow_errno is what pidfd_open plus pidfd_getfd of fd in pid answer
@@ -733,6 +784,8 @@ static void borrow_errno(const char *arg, char *out, size_t n) {
     close(got);
     snprintf(out, n, "ok\n");
 }
+
+static unsigned long long reply_delay;
 
 static int serve_client(conn_t *c, const char *fence, unsigned long *counter) {
     char line[256];
@@ -783,6 +836,9 @@ static int serve_client(conn_t *c, const char *fence, unsigned long *counter) {
         else if (strcmp(line, "devfree") == 0) { char rp[128]; snprintf(out, sizeof out, "%s\n", device_reserve(0, rp, sizeof rp)); }
         else snprintf(out, sizeof out, "err unknown command\n");
         if (conn_write(c, out, strlen(out)) < 0) break;
+        /* "reply_delay_ms": a pause between the reply and the next read,
+         * where a park's signal may land, for the runtime's tests. */
+        if (reply_delay) usleep((useconds_t)(reply_delay * 1000));
     }
     return 0;
 }
@@ -870,9 +926,38 @@ static int listen_endpoint(const char *ep) {
     return s;
 }
 
+/* park answers a park's SIGUSR1 in a forked fiber. Nothing is being
+ * served (the caller closed its connection and listener). It tells
+ * fiberd, blocks until the tree is dumped and resumed or the park
+ * failed, reseeds from a resume's record and listens again, on the
+ * record's endpoint or the one it had. ack_skip is the test knob that
+ * never acks. Returns the new listener, or -1 when the fiber must end
+ * with 122, since it has no record to serve under. */
+static int park(int handoff, int ack_skip, int *listener) {
+    *listener = -1;
+    if (fz_quiesce() < 0) return -1;
+    fz_incarnation_t inc;
+    int rc;
+    while ((rc = fz_incarnation_wait(&inc)) < 0 && errno == EINTR) {}
+    if (rc < 0) return -1;
+    if (rc > 0) {
+        set_incarnation(&inc);
+        reseed_rngs_from(inc.seed, inc.seed_len);
+    }
+    if (!handoff && (*listener = listen_endpoint(cur_endpoint)) < 0) return -1;
+    if (ack_skip) fz_seed_forget();
+    else fz_fiber_ready();
+    return 0;
+}
+
 static int on_fiber(const fz_incarnation_t *f) {
     cur_fiber = f;
     set_incarnation(f);
+    park_arm();
+    int park_ignore = payload_num(f->payload, f->payload_len, "\"park_ignore\"") != 0;
+    unsigned long long park_delay = payload_num(f->payload, f->payload_len, "\"park_delay_ms\"");
+    reply_delay = payload_num(f->payload, f->payload_len, "\"reply_delay_ms\"");
+    int ack_skip = payload_num(f->payload, f->payload_len, "\"ack_skip\"") != 0;
     /* This fiber's random() would otherwise replay the zygote's
      * sequence, the same in every sibling. The library leaves reseeding
      * to the template (see fz_on_fiber), and hands it the host's seed. */
@@ -920,12 +1005,29 @@ static int on_fiber(const fz_incarnation_t *f) {
 
     unsigned long counter = 0;
     for (;;) {
+        if (park_requested && park_ignore) park_requested = 0; /* the test knob: serve on */
+        if (park_requested) {
+            /* Between connections, with the last one closed. The
+             * listener goes too, so a connection that arrives now is
+             * refused rather than left waiting in a queue the dump
+             * would find. The unix socket is unlinked, since the
+             * resume binds it afresh. */
+            park_requested = 0;
+            /* "park_delay_ms" is a request that takes this long to end,
+             * for a fiber that answers after fiberd's deadline. */
+            if (park_delay) usleep((useconds_t)(park_delay * 1000));
+            if (!handoff) {
+                close(s);
+                if (strncmp(cur_endpoint, "tcp://", 6) != 0) unlink(cur_endpoint);
+            }
+            if (park(handoff, ack_skip, &s) < 0) return 122;
+            continue;
+        }
+        /* The wait lets the signal through, so one that lands here is
+         * seen at the top of the loop and never behind a blocking accept. */
+        if (wait_readable(handoff ? FZ_CHANNEL_FD : s) < 0) { if (errno == EINTR) continue; return 5; }
         int fd = handoff ? fz_accept() : accept4(s, NULL, NULL, SOCK_CLOEXEC);
         if (fd < 0) { if (errno == EINTR) continue; return 5; }
-        /* A resume lands here, mid-accept, with the parked RNG state
-         * and its record waiting on the channel. It reseeds before this
-         * first connection is served. */
-        poll_incarnation();
         conn_t c = { .fd = fd };
 #ifdef FZ_TLS
         if (handoff && tls_start(&c) < 0) { close(fd); continue; }
@@ -937,9 +1039,6 @@ static int on_fiber(const fz_incarnation_t *f) {
 }
 
 /* ---- gVisor mode ------------------------------------------------------ */
-
-static volatile sig_atomic_t park_requested;
-static void on_usr1(int s) { (void)s; park_requested = 1; }
 
 /* Blocks until the next checkpoint of this sandbox completes. Returns 1
  * when this process is running in a sandbox restored from that image,
@@ -980,9 +1079,7 @@ static int gvisor_serve_once(const char *fence, const char *ep, const unsigned c
     size_t db = (size_t)payload_num(payload, plen, "\"dirty_bytes\"");
     if (db) dirty(db);
     while (!park_requested) {
-        struct pollfd p = { .fd = s, .events = POLLIN };
-        int r = poll(&p, 1, 100);
-        if (r <= 0) continue;
+        if (wait_readable(s) < 0) continue;
         int c = accept4(s, NULL, NULL, SOCK_CLOEXEC);
         if (c < 0) continue;
         conn_t cc = { .fd = c };
@@ -997,8 +1094,7 @@ static int gvisor_serve_once(const char *fence, const char *ep, const unsigned c
 }
 
 static int gvisor_main(void) {
-    struct sigaction sa = { .sa_handler = on_usr1 }; /* no SA_RESTART: blocking calls return EINTR */
-    sigaction(SIGUSR1, &sa, NULL);
+    park_arm();
     /* Init is done: tell the backend, which takes the template checkpoint
      * from outside (runsc checkpoint --leave-running) while this process
      * is blocked in wait_checkpoint(). That blocking read is gVisor's

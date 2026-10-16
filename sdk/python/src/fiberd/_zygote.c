@@ -14,7 +14,8 @@
  * after_in_child hook, and only then calls the Python callback with the
  * fiber's record (its seed as a bytearray the SDK zeroes after the
  * hooks, its identity as a tuple or None) and the C environ, which the
- * scrub has replaced.
+ * scrub has replaced. A park's wait (incarnation_wait) blocks in C
+ * without the GIL, so the SDK waits in slices of its own first.
  * Everything else, the rules, the incarnation hooks and the accept loop,
  * is fiberd.template. */
 #define PY_SSIZE_T_CLEAN
@@ -27,8 +28,8 @@
 
 #include "libfiberzygote.h"
 
-#if FZ_ABI_VERSION != 8
-#error "fiberd._zygote binds FZ_ABI_VERSION 8; rebuild it against this header"
+#if FZ_ABI_VERSION != 9
+#error "fiberd._zygote binds FZ_ABI_VERSION 9; rebuild it against this header"
 #endif
 #ifdef Py_GIL_DISABLED
 #error "fiberd._zygote needs the GIL; the fork rules assume it and abi3 does not cover a free-threaded build"
@@ -195,15 +196,32 @@ static PyObject *py_gvisor_identity(PyObject *self, PyObject *unused) {
     return out;
 }
 
-/* py_incarnation_poll is fz_incarnation_poll: None when no resume
- * record has arrived, else the record as gvisor_identity returns one,
- * with the library's copy of the seed zeroed once the bytearray holds
- * it. It never blocks, so the GIL is kept. */
-static PyObject *py_incarnation_poll(PyObject *self, PyObject *unused) {
+/* py_quiesce is fz_quiesce: the fiber's word that it serves nothing. */
+static PyObject *py_quiesce(PyObject *self, PyObject *unused) {
+    (void)self; (void)unused;
+    if (fz_quiesce() < 0) return PyErr_SetFromErrno(PyExc_OSError);
+    Py_RETURN_NONE;
+}
+
+/* py_incarnation_wait is fz_incarnation_wait: the resume's record as
+ * gvisor_identity returns one, with the library's copy of the seed
+ * zeroed once the bytearray holds it, or None when fiberd says the
+ * park failed and the fiber serves on. It blocks without the GIL, so
+ * the SDK calls it once the channel is readable, in slices it waits
+ * out in select with the stop flag checked. A signal's EINTR runs the
+ * Python handler and comes back as InterruptedError when it raised
+ * nothing. */
+static PyObject *py_incarnation_wait(PyObject *self, PyObject *unused) {
     (void)self; (void)unused;
     fz_incarnation_t inc;
-    int rc = fz_incarnation_poll(&inc);
-    if (rc < 0) return PyErr_SetFromErrno(PyExc_OSError);
+    int rc;
+    Py_BEGIN_ALLOW_THREADS
+    rc = fz_incarnation_wait(&inc);
+    Py_END_ALLOW_THREADS
+    if (rc < 0) {
+        if (errno == EINTR && PyErr_CheckSignals() < 0) return NULL;
+        return PyErr_SetFromErrno(PyExc_OSError);
+    }
     if (rc == 0) Py_RETURN_NONE;
     PyObject *seed = seed_bytearray(&inc);
     fz_seed_forget();
@@ -223,11 +241,12 @@ static PyObject *py_gvisor_ack(PyObject *self, PyObject *unused) {
 static PyMethodDef methods[] = {
     {"init", py_init, METH_O, "init(argv): fz_init, which re-execs argv once with address-space randomisation off."},
     {"serve", py_serve, METH_VARARGS, "serve(on_fiber, ctl_fd=3): fz_serve with the fork hooks; on_fiber(fence, endpoint, payload, session, env, generation, kind, seed, identity) runs in each child."},
-    {"fiber_ready", py_fiber_ready, METH_NOARGS, "fz_fiber_ready, which zeroes the library's copy of the seed."},
+    {"fiber_ready", py_fiber_ready, METH_NOARGS, "fz_fiber_ready, which zeroes the library's copy of the seed and acks a resume."},
     {"accept", py_accept, METH_NOARGS, "fz_accept: the next handed-off connection's descriptor."},
     {"gvisor_identity", py_gvisor_identity, METH_NOARGS, "fz_gvisor_identity as (kind, fence, endpoint, payload, seed, session, generation)."},
     {"gvisor_ack", py_gvisor_ack, METH_NOARGS, "fz_gvisor_ack."},
-    {"incarnation_poll", py_incarnation_poll, METH_NOARGS, "fz_incarnation_poll: None, or a resume's record as gvisor_identity shapes one."},
+    {"quiesce", py_quiesce, METH_NOARGS, "fz_quiesce: the fiber serves nothing and may be dumped."},
+    {"incarnation_wait", py_incarnation_wait, METH_NOARGS, "fz_incarnation_wait: a resume's record as gvisor_identity shapes one, or None when the park failed."},
     {NULL, NULL, 0, NULL}
 };
 

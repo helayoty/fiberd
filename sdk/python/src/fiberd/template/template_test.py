@@ -7,8 +7,11 @@ import os
 import pathlib
 import random
 import shutil
+import signal
 import socket
 import tempfile
+import threading
+import time
 
 import pytest
 
@@ -18,19 +21,20 @@ from fiberd.template import _rules
 
 
 class FakeExt:
-    """The C binding as a recorder. polls is what each incarnation_poll answers, None for an empty channel."""
+    """The C binding as a recorder. waits is what each incarnation_wait answers: a record, None for a park that failed, or an exception to raise."""
 
-    ABI_VERSION = 8
+    ABI_VERSION = 9
 
-    def __init__(self, polls=()):
+    def __init__(self, waits=()):
         self.calls = []
-        self.polls = list(polls)
+        self.waits = list(waits)
 
-    def incarnation_poll(self):
-        self.calls.append(("poll",))
-        if not self.polls:
-            return None
-        rec = self.polls.pop(0)
+    def quiesce(self):
+        self.calls.append(("quiesce",))
+
+    def incarnation_wait(self):
+        self.calls.append(("wait",))
+        rec = self.waits.pop(0)
         if isinstance(rec, BaseException):
             raise rec
         return rec
@@ -148,6 +152,29 @@ def test_born_hands_the_fiber_its_record(monkeypatch):
     assert not f.stopping.is_set() and f.identity is None
 
 
+def test_born_installs_the_park_handler_before_on_fiber(monkeypatch):
+    """A park's SIGUSR1 can land the moment the fiber reports ready, before serve(), and must set parking rather than end the fiber."""
+    ext = FakeExt()
+    monkeypatch.setattr(ft, "_ext", lambda: ext)
+    previous = signal.signal(signal.SIGUSR1, signal.SIG_DFL)
+    seen = []
+
+    def on_fiber(f):
+        handler = signal.getsignal(signal.SIGUSR1)
+        seen.append(handler)
+        if callable(handler):
+            handler(signal.SIGUSR1, None)
+        seen.append(f.parking.is_set())
+        return 0
+
+    try:
+        assert ft._born(on_fiber, "g/1/1", "/run/g/1-1.sock", b"", "", {}, 1, "fork", bytearray(32), None) == 0
+    finally:
+        signal.signal(signal.SIGUSR1, previous)
+    assert callable(seen[0]) and seen[0] is not signal.SIG_DFL, "the handler is in place before on_fiber runs"
+    assert seen[1] is True, "the handler sets parking"
+
+
 def test_born_reseeds_from_the_record_and_zeroes_the_seed(monkeypatch):
     """The fork incarnation's seed is the record's, the one the library handed over, not a draw of the SDK's own."""
     monkeypatch.setattr(ft, "_rebuild_environ", lambda env: None)
@@ -218,53 +245,111 @@ def resume_record(fence="g/1/2", generation=5, session="", kind="resume"):
     return (kind, fence, "/run/g/1-1.sock", b"", bytearray(SEED), session, generation)
 
 
-POLL = [
-    # what the channel holds, whether a resume is seen, the fence and the generation after
-    ("an empty channel", [None], False, "g/1/1", 4),
-    ("a resume's record", [resume_record()], True, "g/1/2", 5),
-    ("the latest record wins", [resume_record("g/1/2", 5), resume_record("g/1/3", 6)], True, "g/1/3", 6),
-    ("a record the library refused", [OSError(errno.EPROTO, "malformed record")], None, "g/1/1", 4),
+def channel(monkeypatch):
+    """A fiber's channel as a pair, fiberd's end returned beside the env that names the fiber's."""
+    fiber_end, host_end = socket.socketpair()
+    return host_end, {"FIBERD_CHANNEL_FD": str(fiber_end.fileno())}, fiber_end
+
+
+PARK = [
+    # what fiberd answers, whether park() reports a resume, the fence and the generation after, the hooks run
+    ("a resume's record", [resume_record()], True, "g/1/2", 5, [("resume", "g/1/2")]),
+    ("the park failed, the fiber serves on as it was", [None], False, "g/1/1", 4, []),
+    ("a signal's interruption, then the record", [InterruptedError(errno.EINTR, "interrupted"), resume_record()], True, "g/1/2", 5, [("resume", "g/1/2")]),
+    ("a record the library refused", [OSError(errno.EPROTO, "malformed record")], None, "g/1/1", 4, []),
 ]
 
 
-@table(POLL)
-def test_poll_incarnation(monkeypatch, name, f0, f1, f2, f3):
-    ext = FakeExt(polls=f0)
+@table(PARK)
+def test_park(monkeypatch, name, f0, f1, f2, f3, f4):
+    """park() tells fiberd the fiber serves nothing, waits for its answer, and reseeds under a resume's record."""
+    ext = FakeExt(waits=f0)
     monkeypatch.setattr(ft, "_ext", lambda: ext)
     seen = []
     monkeypatch.setattr(ft, "_hooks", [seen.append])
-    f = ft.Fiber("g/1/1", "/run/g/1-1.sock", b"", "", {"FIBERD_CHANNEL_FD": "4"})
+    host_end, env, fiber_end = channel(monkeypatch)
+    f = ft.Fiber("g/1/1", "/run/g/1-1.sock", b"", "", env)
     f._incarnate("fork", 4, os.urandom(32))
-    if f1 is None:
-        with pytest.raises(OSError, match="malformed record"):
-            f.poll_incarnation()
-    else:
-        got = False
-        while ext.polls:
-            got = f.poll_incarnation() or got
-        assert got == f1
+    f._ready = True
+    f.parking.set()
+    host_end.sendall(b"\0")  # the answer is there to read
+    try:
+        if f1 is None:
+            with pytest.raises(OSError, match="malformed record"):
+                f.park(poll=0.05)
+        else:
+            assert f.park(poll=0.05) is f1
+            assert f._ready is False, "ready() reports again, which after a resume acks"
+    finally:
+        host_end.close()
+        fiber_end.close()
+    assert not f.parking.is_set()
+    assert ext.calls == [("quiesce",)] + [("wait",)] * len(f0), "told fiberd first, then waited once per answer"
     assert f.fence == f2 and f.fence_parts == ft._fence.parse_fence(f2)
-    assert f.incarnation.kind == ("resume" if f1 else "fork")
     assert f.incarnation.generation == f3, "the generation is the record's, fiberd's count, not a count of this process"
-    assert [(inc.kind, inc.fence) for inc in seen[1:]] == [("resume", r[1]) for r in f0 if isinstance(r, tuple)], "the hooks ran once per record"
+    assert [(inc.kind, inc.fence) for inc in seen[1:]] == f4, "the hooks ran once per resume"
     assert all(bytes(inc.seed) == bytes(32) for inc in seen), "every seed is zeroed once the hooks ran"
-    assert f.poll_incarnation() is False, "an empty channel after"
 
 
-def test_poll_takes_the_session_off_the_record(monkeypatch):
-    ext = FakeExt(polls=[resume_record(session="conv 43")])
+# The time park() has to notice the stop, so code that notices nothing
+# fails the bound instead of hanging the suite.
+STOP_BOUND = 1.5
+
+STOPS = [
+    # how the fiber is asked to stop, 0.1s into the wait
+    ("stopping set", lambda f: f.stopping.set()),
+    ("SIGTERM under the handler serve() installs", lambda f: signal.pthread_kill(threading.main_thread().ident, signal.SIGTERM)),
+]
+
+
+@table(STOPS)
+def test_park_returns_when_the_fiber_is_asked_to_stop(monkeypatch, name, f0):
+    """The wait for fiberd's answer runs in slices with stopping checked, so a stop is seen with no answer in sight and the binding's wait is never entered."""
+    ext = FakeExt(waits=[resume_record()])
     monkeypatch.setattr(ft, "_ext", lambda: ext)
-    f = ft.Fiber("g/1/1", "/run/g/1-1.sock", b"", "conv 42", {})
+    host_end, env, fiber_end = channel(monkeypatch)
+    f = ft.Fiber("g/1/1", "/run/g/1-1.sock", b"", "", env)
     f._incarnate("fork", 1, os.urandom(32))
-    assert f.poll_incarnation() is True and f.session == "conv 43"
+    previous = signal.signal(signal.SIGTERM, lambda *_: f.stopping.set())
+    stop = threading.Timer(0.1, f0, [f])
+    try:
+        stop.start()
+        started = time.monotonic()
+        with pytest.raises(ConnectionResetError):
+            f.park(poll=0.05)
+        took = time.monotonic() - started
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+        stop.cancel()
+        stop.join()
+        host_end.close()
+        fiber_end.close()
+    assert took < STOP_BOUND, f"park() took {took:.2f}s to notice the stop"
+    assert ext.calls == [("quiesce",)], "incarnation_wait is called only once the channel is readable"
 
 
-def test_poll_is_nothing_on_gvisor(monkeypatch):
-    ext = FakeExt(polls=[resume_record()])
+def test_park_takes_the_session_off_the_record(monkeypatch):
+    ext = FakeExt(waits=[resume_record(session="conv 43")])
+    monkeypatch.setattr(ft, "_ext", lambda: ext)
+    host_end, env, fiber_end = channel(monkeypatch)
+    f = ft.Fiber("g/1/1", "/run/g/1-1.sock", b"", "conv 42", env)
+    f._incarnate("fork", 1, os.urandom(32))
+    host_end.sendall(b"\0")
+    try:
+        assert f.park(poll=0.05) is True and f.session == "conv 43"
+    finally:
+        host_end.close()
+        fiber_end.close()
+
+
+def test_park_is_refused_on_gvisor(monkeypatch):
+    ext = FakeExt(waits=[resume_record()])
     monkeypatch.setattr(ft, "_ext", lambda: ext)
     f = ft.Fiber("g/1/1", "/host/1-1.sock", b"", "", {}, backend="gvisor")
     f._incarnate("clone", 1, os.urandom(32))
-    assert f.poll_incarnation() is False and ext.calls == [], "a resumed sandbox takes a whole identity instead"
+    with pytest.raises(ft.TemplateError, match="returning from serve"):
+        f.park()
+    assert ext.calls == [], "a sandbox parks by closing its endpoint, and a resumed one takes a whole identity"
 
 
 @pytest.fixture
@@ -291,8 +376,8 @@ def test_listen_handoff_refused():
         f.listen()
 
 
-def test_serve_loop_reports_ready_polls_the_channel_and_hands_connections_over(sock_dir, monkeypatch):
-    ext = FakeExt(polls=[resume_record("g/1/2", 2)])
+def test_serve_loop_reports_ready_and_hands_connections_over(sock_dir, monkeypatch):
+    ext = FakeExt()
     monkeypatch.setattr(ft, "_ext", lambda: ext)
     ep = str(sock_dir / "ep.sock")
     f = ft.Fiber("g/1/1", ep, b"", "", {})
@@ -307,11 +392,75 @@ def test_serve_loop_reports_ready_polls_the_channel_and_hands_connections_over(s
         served.append((conn.recv(16), f.fence, f.incarnation.kind, f.incarnation.generation))
         f.stopping.set()
 
+    previous = (signal.getsignal(signal.SIGUSR1), signal.getsignal(signal.SIGTERM))
     f.serve(handler, listener=srv, poll=0.05)
     client.close()
-    assert ext.calls == [("ready",), ("poll",)]
-    assert served == [(b"hi\n", "g/1/2", "resume", 2)], "the channel was polled before the connection was served"
+    assert ext.calls == [("ready",)]
+    assert served == [(b"hi\n", "g/1/1", "fork", 1)]
     assert not os.path.exists(ep), "the endpoint is unlinked on the way out"
+    assert (signal.getsignal(signal.SIGUSR1), signal.getsignal(signal.SIGTERM)) == previous, "serve() restores the handlers it installed"
+
+
+def test_serve_loop_parks_on_usr1_and_serves_again(sock_dir, monkeypatch):
+    """The park's SIGUSR1, seen between connections: the listener goes, fiberd is told, and the resumed fiber listens and reports again."""
+    ext = FakeExt(waits=[resume_record("g/1/2", 2)])
+    monkeypatch.setattr(ft, "_ext", lambda: ext)
+    host_end, env, fiber_end = channel(monkeypatch)
+    host_end.sendall(b"\0")  # fiberd's answer, there once the fiber asks
+    ep = str(sock_dir / "ep.sock")
+    f = ft.Fiber("g/1/1", ep, b"", "", env)
+    f._incarnate("fork", 1, os.urandom(32))
+    served = []
+    gone_while_parked = []
+
+    cut = []
+
+    def talk(line):
+        c = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        c.connect(ep)
+        c.sendall(line)
+        c.recv(1)
+        if line == b"hi\n":
+            cut.append(c.recv(1))  # the fiber's end of it, cut at the signal
+        c.close()
+
+    def second_client():
+        # Once the fiber reports ready again, after its park.
+        deadline = time.monotonic() + 5
+        while ext.calls.count(("ready",)) < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        talk(b"again\n")
+
+    def handler(conn):
+        line = conn.recv(16)
+        served.append((line, f.fence, f.incarnation.kind, f.incarnation.generation))
+        conn.sendall(b"k")
+        if line == b"hi\n":
+            signal.raise_signal(signal.SIGUSR1)
+            gone_while_parked.append(ext.calls.count(("quiesce",)))
+            # The signal shut the connection in hand down, so a handler
+            # blocked here would have returned at once.
+            cut.append(conn.recv(1))
+        else:
+            f.stopping.set()
+
+    srv = f.listen()  # before the first client, which connects at once
+    first = threading.Thread(target=talk, args=(b"hi\n",))
+    second = threading.Thread(target=second_client)
+    first.start()
+    second.start()
+    try:
+        f.serve(handler, listener=srv, poll=0.05)
+    finally:
+        first.join()
+        second.join()
+        host_end.close()
+        fiber_end.close()
+    assert ext.calls == [("ready",), ("quiesce",), ("wait",), ("ready",)], "ready at birth, then the park's word, the wait and the ack"
+    assert served == [(b"hi\n", "g/1/1", "fork", 1), (b"again\n", "g/1/2", "resume", 2)], "the second connection reached the resumed incarnation"
+    assert gone_while_parked == [0], "the park waited for the connection being served to end"
+    assert cut == [b"", b""], "the signal cut the connection in hand, seen from both ends"
+    assert not os.path.exists(ep)
 
 
 # ---- gVisor --------------------------------------------------------------
@@ -379,7 +528,9 @@ def test_serve_on_gvisor_runs_every_restore(tmp_path, monkeypatch):
     assert a.env["FIBERD_FENCE"] == "g/1/1" and a.env["FIBERD_SESSION"] == "conv 42"
     assert (b.backend, b.fence, b.session, b.incarnation.kind) == ("gvisor", "g/1/2", "", "resume")
     assert "FIBERD_SESSION" not in b.env
-    assert a.poll_incarnation() is False and a.incarnation.generation == 1, "no channel to poll on gVisor"
+    with pytest.raises(ft.TemplateError):
+        a.park()
+    assert a.incarnation.generation == 1, "a sandbox has no channel to answer a park on"
 
 
 def test_serve_on_gvisor_ends_with_a_failed_incarnation(tmp_path, monkeypatch):

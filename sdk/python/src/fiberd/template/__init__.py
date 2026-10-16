@@ -206,6 +206,11 @@ def _born(on_fiber: Callable[[Fiber], int], fence: str, endpoint: str, payload: 
         f = Fiber(fence, endpoint, payload, session, env, identity=Identity(*identity) if identity is not None else None)
         if f.kind == "handoff" and f.identity is None:
             raise TemplateError("fiberd named a handoff fiber but its record holds no identity")
+        # A park's SIGUSR1 can arrive the moment the fiber reports ready,
+        # on any serve path, and the signal's default action would end
+        # the fiber. So the handler is in place before any application
+        # code, and before ready() can be called.
+        signal.signal(signal.SIGUSR1, lambda *_: f.parking.set())
         f._incarnate(kind, generation, seed)
     except BaseException:
         traceback.print_exc()
@@ -322,6 +327,10 @@ class Fiber:
         self.env = dict(env)
         self.incarnation: Optional[Incarnation] = None
         self.stopping = threading.Event()
+        # Set by the park's SIGUSR1, under the handler installed at birth
+        # on the fork path, before any application code. serve() answers
+        # it between connections, and an author's loop calls park().
+        self.parking = threading.Event()
         self.identity = identity
         self._birth = self.fence_parts
         self._ready = False
@@ -331,6 +340,9 @@ class Fiber:
         # The identity sealed in a memfd, held for the fiber's lifetime, and the context over it.
         self._identity_fd = -1
         self._tls: Optional[_handoff.ServerContext] = None
+        # The connection serve() is handing to the handler now, cut at
+        # the park's signal so a handler blocked in a read returns.
+        self._conn: Optional[socket.socket] = None
 
     def listen(self) -> socket.socket:
         """A bound, listening socket for a unix or tcp endpoint, as fiberd spelled it."""
@@ -365,12 +377,14 @@ class Fiber:
     def serve(self, handler: Callable[[socket.socket], None], *, listener: Optional[socket.socket] = None, poll: float = 0.5) -> None:
         """The accept loop. Listens, reports ready, hands each connection to handler and closes it after.
 
-        The channel is polled before each connection, so a fiber resumed
-        from a park is reseeded before it serves. A listener from listen()
-        may be passed in when the fiber did work between binding and ready.
-        Returns when the fiber is asked to stop (SIGTERM, or stopping set,
-        which on gVisor the park's SIGUSR1 does), with the endpoint closed
-        and unlinked.
+        A park's SIGUSR1 is answered between connections. The listener is
+        closed, fiberd is told the fiber serves nothing, and the loop
+        blocks in park() until the fiber is resumed, when it listens again
+        reseeded under the resume's record and reports ready, which acks.
+        A listener from listen() may be passed in when the fiber did work
+        between binding and ready. Returns when the fiber is asked to stop
+        (SIGTERM, or stopping set, which on gVisor the park's SIGUSR1
+        does), with the endpoint closed and unlinked.
 
         A handoff fiber listens on nothing. Each connection fiberd passes
         down the channel reaches handler as an ssl.SSLSocket, TLS already
@@ -381,34 +395,80 @@ class Fiber:
         if self.kind == "handoff":
             self._serve_handoff(handler, poll)
             return
-        srv = listener if listener is not None else self.listen()
+        srv: Optional[socket.socket] = listener if listener is not None else self.listen()
+        previous = self._handle_signals()
         try:
-            srv.settimeout(poll)
-            previous = signal.signal(signal.SIGTERM, lambda *_: self.stopping.set())
             self.ready()
             while not self.stopping.is_set():
+                assert srv is not None
+                if self.parking.is_set():
+                    self._close_listener(srv)
+                    srv = None
+                    try:
+                        self.park(poll=poll)
+                    except ConnectionResetError:
+                        return
+                    srv = self.listen()
+                    self.ready()
+                    continue
+                srv.settimeout(poll)
                 try:
                     conn, _ = srv.accept()
                 except (TimeoutError, InterruptedError):
                     continue
-                self.poll_incarnation()
+                self._conn = conn
                 try:
                     handler(conn)
                 finally:
+                    self._conn = None
                     conn.close()
-            signal.signal(signal.SIGTERM, previous)
         finally:
-            srv.close()
-            if self.kind == "unix":
-                try:
-                    os.unlink(_fence.unix_path(self.endpoint))
-                except OSError:
-                    pass
+            self._restore_signals(previous)
+            if srv is not None:
+                self._close_listener(srv)
+
+    def _handle_signals(self) -> list[tuple[int, Any]]:
+        """Installs serve()'s handlers: SIGTERM sets stopping, and on a forked fiber SIGUSR1 parks (_park_signal). Returns what to restore."""
+        previous = [(signal.SIGTERM, signal.signal(signal.SIGTERM, lambda *_: self.stopping.set()))]
+        if self.backend != "gvisor":
+            previous.append((signal.SIGUSR1, signal.signal(signal.SIGUSR1, lambda *_: self._park_signal())))
+        return previous
+
+    def _park_signal(self) -> None:
+        """The park's signal under serve(): parking is set, and the connection being served is shut down.
+
+        A handler blocked in a read on a client that stays quiet would
+        otherwise keep the fiber from answering, since the interpreter
+        retries a read the signal interrupted. The shutdown ends that
+        read with an empty result, which every handler treats as the
+        peer's close.
+        """
+        self.parking.set()
+        conn = self._conn
+        if conn is not None:
+            try:
+                conn.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+    @staticmethod
+    def _restore_signals(previous: list[tuple[int, Any]]) -> None:
+        for signum, handler in previous:
+            signal.signal(signum, handler)
+
+    def _close_listener(self, srv: socket.socket) -> None:
+        """Closes the listener and unlinks a unix endpoint, so nothing waits in its queue and a resume binds it afresh."""
+        srv.close()
+        if self.kind == "unix":
+            try:
+                os.unlink(_fence.unix_path(self.endpoint))
+            except OSError:
+                pass
 
     def _serve_handoff(self, handler: Callable[[socket.socket], None], poll: float) -> None:
-        """serve() for a handoff fiber. Waits on the channel, so stopping is noticed between connections as the other loop does."""
+        """serve() for a handoff fiber. Waits on the channel, so stopping and parking are noticed between connections as the other loop does."""
         ctx = self._tls_context()
-        previous = signal.signal(signal.SIGTERM, lambda *_: self.stopping.set())
+        previous = self._handle_signals()
         self.ready()
         try:
             while True:
@@ -416,31 +476,43 @@ class Fiber:
                     fd = self._next_handoff(poll)
                 except ConnectionResetError:
                     return
-                self.poll_incarnation()
                 conn = self._terminate(ctx, fd)
                 if conn is None:
                     continue
+                self._conn = conn
                 try:
                     handler(conn)
                 finally:
+                    self._conn = None
                     conn.close()
         finally:
-            signal.signal(signal.SIGTERM, previous)
+            self._restore_signals(previous)
 
     def _next_handoff(self, poll: float) -> int:
         """The next descriptor off the handoff channel.
 
-        The library's accept retries through signals, so a Python handler
-        that sets stopping would not be seen until a connection came. The
-        wait is done here instead, in poll slices with stopping checked
+        The library's accept blocks until a message, so a Python handler
+        that set stopping or parking would not be seen until one came. The
+        wait is done here instead, in poll slices with both checked
         between them, and the library is called once the channel is
-        readable. Raises ConnectionResetError when fiberd closed the
-        channel, and the same when the fiber is asked to stop.
+        readable. A park is answered here, with the connections of the
+        incarnation that ends already closed by the caller, and the next
+        descriptor is the resumed fiber's. Raises ConnectionResetError
+        when fiberd closed the channel, and the same when the fiber is
+        asked to stop.
         """
         while not self.stopping.is_set():
+            if self.parking.is_set():
+                self.park(poll=poll)
+                self.ready()
+                continue
             readable, _, _ = select.select([self._channel_fd], [], [], poll)
             if readable:
-                return _ext().accept()
+                try:
+                    return _ext().accept()
+                except InterruptedError:
+                    # A park's round arrived, or a signal. Look again.
+                    continue
         raise ConnectionResetError(errno.ECONNRESET, "the fiber was asked to stop")
 
     def accept(self, *, handshake_timeout: float = _handoff.HANDSHAKE_TIMEOUT, poll: float = 0.5) -> ssl.SSLSocket:
@@ -451,7 +523,10 @@ class Fiber:
         Blocks. Raises ConnectionResetError once fiberd closes the channel,
         which it does at release, and once the fiber is asked to stop
         (stopping set, which a SIGTERM handler such as serve()'s does),
-        noticed within poll seconds.
+        noticed within poll seconds. A park (parking set, by a SIGUSR1
+        handler such as serve()'s) is answered in the wait, so close the
+        connections in hand between calls, and the next one returned
+        comes to the resumed fiber.
         """
         ctx = self._tls_context()
         while True:
@@ -499,7 +574,9 @@ class Fiber:
 
         A unix or tcp endpoint is served by asyncio.start_unix_server or
         start_server over listen(). A handoff fiber is served from
-        connections(). The loop ends as serve()'s does.
+        connections(). A park closes the server and its connections, and
+        park() runs in a thread so the loop stays responsive to the stop.
+        The loop ends as serve()'s does.
         """
         loop = asyncio.get_running_loop()
 
@@ -510,6 +587,8 @@ class Fiber:
                 writer.close()
 
         loop.add_signal_handler(signal.SIGTERM, self.stopping.set)
+        if self.backend != "gvisor":
+            loop.add_signal_handler(signal.SIGUSR1, self.parking.set)
         try:
             if self.kind == "handoff":
                 self._tls_context()
@@ -521,40 +600,65 @@ class Fiber:
                     task.add_done_callback(tasks.discard)
                 return
             srv = listener if listener is not None else self.listen()
-
-            async def checked(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-                self.poll_incarnation()
-                await one(reader, writer)
-
-            if self.kind == "unix":
-                server = await asyncio.start_unix_server(checked, sock=srv)
-            else:
-                server = await asyncio.start_server(checked, sock=srv)
+            server = await self._start_server(srv, one)
             try:
                 self.ready()
                 while not self.stopping.is_set():
+                    if self.parking.is_set():
+                        await self._stop_server(server)
+                        server = None
+                        try:
+                            await loop.run_in_executor(None, functools.partial(self.park, poll=poll))
+                        except ConnectionResetError:
+                            return
+                        server = await self._start_server(self.listen(), one)
+                        self.ready()
+                        continue
                     await asyncio.sleep(poll)
             finally:
-                server.close()
-                if self.kind == "unix":
-                    try:
-                        os.unlink(_fence.unix_path(self.endpoint))
-                    except OSError:
-                        pass
+                if server is not None:
+                    await self._stop_server(server)
         finally:
             loop.remove_signal_handler(signal.SIGTERM)
+            if self.backend != "gvisor":
+                loop.remove_signal_handler(signal.SIGUSR1)
+
+    async def _start_server(self, srv: socket.socket, one: Callable[[asyncio.StreamReader, asyncio.StreamWriter], Awaitable[None]]) -> asyncio.Server:
+        if self.kind == "unix":
+            return await asyncio.start_unix_server(one, sock=srv)
+        return await asyncio.start_server(one, sock=srv)
+
+    async def _stop_server(self, server: asyncio.Server) -> None:
+        """Closes the server, its connections and the unix endpoint, so nothing of this incarnation is open when it is dumped."""
+        server.close()
+        server.close_clients()
+        await server.wait_closed()
+        if self.kind == "unix":
+            try:
+                os.unlink(_fence.unix_path(self.endpoint))
+            except OSError:
+                pass
 
     async def connections(self, *, poll: float = 0.5,
                           handshake_timeout: float = _handoff.HANDSHAKE_TIMEOUT) -> AsyncIterator[tuple[asyncio.StreamReader, asyncio.StreamWriter]]:
         """accept() for an async on_fiber. Yields (reader, writer) per handed-off connection, TLS terminated in the loop with the caller pinned.
 
         The loop waits on the handoff channel, so other tasks run between
-        connections. Call ready() first, as before accept(). Ends when
-        fiberd closes the channel or the fiber is asked to stop.
+        connections. Call ready() first, as before accept(). A park
+        (parking set) is answered here, with park() in a thread, once the
+        connections in hand are closed. Ends when fiberd closes the
+        channel or the fiber is asked to stop.
         """
         ctx = self._tls_context()
         loop = asyncio.get_running_loop()
         while not self.stopping.is_set():
+            if self.parking.is_set():
+                try:
+                    await loop.run_in_executor(None, functools.partial(self.park, poll=poll))
+                except ConnectionResetError:
+                    return
+                self.ready()
+                continue
             arrived = loop.create_future()
             loop.add_reader(self._channel_fd, lambda fut=arrived: fut.done() or fut.set_result(None))
             try:
@@ -567,7 +671,8 @@ class Fiber:
                 fd = _ext().accept()
             except ConnectionResetError:
                 return
-            self.poll_incarnation()
+            except InterruptedError:
+                continue  # a park's round arrived, or a signal: look again
             conn = await self._terminate_async(ctx, fd, handshake_timeout)
             if conn is not None:
                 yield conn
@@ -601,19 +706,28 @@ class Fiber:
             return None
         return reader, asyncio.StreamWriter(transport, protocol, reader, loop)
 
-    def poll_incarnation(self) -> bool:
-        """Takes a resume's record off the channel, when one has arrived. True for a resume, which reseeds and runs the hooks.
+    def park(self, *, poll: float = 0.5) -> bool:
+        """Answers a park, once parking is set and nothing is served: the listener and every connection closed.
 
-        Called by serve() before each connection. An author running their
-        own loop over listen() calls it the same way. It never blocks. The
-        record names the new fence, the session the resuming clone gave
-        and fiberd's generation, and brings a fresh seed. A gVisor fiber
-        has no channel to poll, since a resumed sandbox takes a whole
-        identity.
+        Tells fiberd the fiber serves nothing, which lets it be
+        checkpointed, and blocks until the fiber is resumed. Then it
+        reseeds and runs the hooks under the resume's record, which names
+        the new fence, the session the resuming clone gave and fiberd's
+        generation, and returns True. Or until fiberd says the park
+        failed, when it returns False and the fiber serves on as it was.
+        Either way the caller listens again and calls ready(), which after
+        a resume acks the record, and fiberd routes the fiber only then.
+        serve() does all of this. Raises ConnectionResetError when the
+        fiber is asked to stop meanwhile (stopping set), or when fiberd
+        closed a handoff fiber's channel. A gVisor fiber parks by
+        returning from serve(), so it never calls this.
         """
         if self.backend == "gvisor":
-            return False
-        rec = _ext().incarnation_poll()
+            raise TemplateError("a gVisor fiber parks by returning from serve() once stopping is set, not with park()")
+        self.parking.clear()
+        _ext().quiesce()
+        rec = self._wait_record(poll)
+        self._ready = False
         if rec is None:
             return False
         kind, fence, _endpoint, _payload, seed, session, generation = rec
@@ -622,6 +736,26 @@ class Fiber:
         self.session = session
         self._incarnate(kind, generation, seed)
         return True
+
+    def _wait_record(self, poll: float) -> Optional[tuple[Any, ...]]:
+        """fiberd's answer to the park: the resume's record, or None when the park failed.
+
+        The binding's wait blocks in C through anything a Python handler
+        does, so it is called only once the channel is readable, waited
+        for here in poll slices with stopping checked between them, as
+        _next_handoff waits. A signal that interrupts the C wait comes
+        back as InterruptedError, after its handler ran, and the wait
+        goes on.
+        """
+        while not self.stopping.is_set():
+            readable, _, _ = select.select([self._channel_fd], [], [], poll)
+            if not readable:
+                continue
+            try:
+                return _ext().incarnation_wait()
+            except InterruptedError:
+                continue
+        raise ConnectionResetError(errno.ECONNRESET, "the fiber was asked to stop")
 
     def _incarnate(self, kind: str, generation: int, seed: bytes | bytearray) -> None:
         """Reseeds every generator and runs the hooks, once per copy of the template. generation is fiberd's count.

@@ -64,4 +64,15 @@ set -e
 echo "--- ladder log:"
 grep -E 'pressure:|proc: parked|oom' "$STATE/fiberd.log" | head -30
 if ! kill -0 $FIBERD_PID 2>/dev/null; then echo "FAIL: fiberd died"; exit 1; fi
+# Every pressure park must go through. A park that failed had the fiber
+# released instead, which the storm's own verdict cannot see, so it is
+# counted here from fiberd's log and fails the run by itself.
+parked=$(grep -c 'pressure: parked ' "$STATE/fiberd.log" || true)
+failed=$(grep -c 'pressure: park .* failed' "$STATE/fiberd.log" || true)
+echo "pressure parks: parked=$parked failed=$failed"
+if [ "$failed" -gt 0 ]; then
+  echo "FAIL: $failed pressure park(s) failed and released the fiber instead:"
+  grep 'pressure: park .* failed' "$STATE/fiberd.log"
+  exit 1
+fi
 exit $rc

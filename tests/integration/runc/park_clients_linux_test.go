@@ -15,16 +15,17 @@ import (
 )
 
 // TestParkWaitsForClients parks a fiber while a host client is still
-// connected. A client that closes soon is waited for. One that stays is
-// named, and the fiber keeps serving.
+// connected. The fiber closes the connection at the park's signal, so
+// the client is cut off, criu meets no socket from the host's network
+// namespace, and the park goes through whether the client closes first
+// or stays.
 func TestParkWaitsForClients(t *testing.T) {
 	cases := []struct {
 		name       string
 		closeAfter time.Duration // 0 keeps the connection open through the park
-		wantErr    string
 	}{
 		{name: "a client that closes moments after the park was asked for", closeAfter: 150 * time.Millisecond},
-		{name: "a client that stays connected is named and the fiber keeps serving", wantErr: "from outside the container"},
+		{name: "a client that stays connected is cut off and the fiber is parked"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -56,26 +57,16 @@ func TestParkWaitsForClients(t *testing.T) {
 					_ = c.Close()
 				}()
 			}
-			t0 := time.Now()
 			ref, err := rt.Park(ctx, h.ID, false)
-			if tc.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-					t.Fatalf("park with a client connected = %v, want %q", err, tc.wantErr)
-				}
-				// The fiber serves one connection at a time, so ours goes
-				// before the next one is answered.
-				_ = c.Close()
-				if got := talk(t, h.Endpoint, "get"); got != "1" {
-					t.Fatalf("get after the refused park = %q, want 1 from the fiber still running", got)
-				}
-				_ = rt.Release(ctx, h.ID, false)
-				return
-			}
 			if err != nil {
-				t.Fatalf("park %s after the client closed: %v", time.Since(t0).Round(time.Millisecond), err)
+				t.Fatalf("park with a client connected: %v", err)
 			}
-			if since := time.Since(t0); since < tc.closeAfter {
-				t.Fatalf("park returned after %s, before the client closed at %s", since, tc.closeAfter)
+			if tc.closeAfter == 0 {
+				// The fiber closed the connection before it said it serves
+				// nothing, so the client sees the end of it.
+				if _, err := c.Read(make([]byte, 1)); err == nil {
+					t.Fatal("the client's connection is still open after the park")
+				}
 			}
 			h2, err := rt.Clone(ctx, core.CloneSpec{Grant: g, Source: core.SourceDelta, Ref: ref, Fence: core.Fence{GrantUID: "pc", Epoch: 1, Seq: 2}, Deadline: 10 * time.Second})
 			if err != nil {

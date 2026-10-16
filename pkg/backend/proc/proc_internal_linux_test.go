@@ -852,16 +852,31 @@ func TestCloneTranslatesTheHostPID(t *testing.T) {
 // container is retried. What cannot be dumped is refused before criu
 // runs. A fiber with a mount namespace of its own has its mounts named at
 // tests/integration/proc TestParkNamesOwnMounts.
+// TestPark checks that a park signals the fiber, dumps it only once it
+// has said it serves nothing, on the peer end of its own pair or on the
+// host's end of a handoff fiber's channel, and fails by name within the
+// deadline when it never says so, with nothing dumped. A dump that
+// fails after that tells the fiber to serve on.
 func TestPark(t *testing.T) {
 	cases := []struct {
-		name      string
-		criu      criuKnobs
-		launcher  bool
-		zygote    bool // the launcher's zygote is registered
-		handoff   bool // the fiber serves handoff
-		channel   bool // and holds its channel at fd 4
-		pair      bool // the fiber holds a pair of its own, as every other fiber does
-		unread    bool // with a resume's record it has not polled
+		name     string
+		criu     criuKnobs
+		launcher bool
+		zygote   bool // the launcher's zygote is registered
+		handoff  bool // the fiber serves handoff
+		channel  bool // and holds its channel at fd 4, with the host's end given to the park
+		pair     bool // the fiber holds a pair of its own, as every other fiber does
+		// answer is the fiber's word at the signal: "" for 'q' with the
+		// round as a cooperating fiber says, "none" for a fiber that
+		// serves on, "end" for one that dies, "stale" for a 'q' naming
+		// the round before, else the message it writes.
+		answer string
+		// late makes the row park twice: a first round the fiber never
+		// answers, then this round, which it answers. The stale carry-on
+		// of the first round must then name that round alone.
+		late      bool
+		signalErr error
+		deadline  time.Duration
 		sync      bool
 		fiber     bool   // register the fiber at all
 		dirIs     string // a directory already at this name in the image directory, or "file" for the image directory's parent
@@ -870,17 +885,27 @@ func TestPark(t *testing.T) {
 		wantFiles []string
 		noFiles   []string
 		wantDumps int
+		carryOn   bool // the fiber is told the park failed
 	}{
 		{name: "shares the host's mount namespace", fiber: true, pair: true, wantArgs: []string{"dump", "--ext-unix-sk"}, noFiles: []string{runDirFile, criu.MountsFile, handoffFile}, wantDumps: 1},
-		{name: "handoff channel is external", fiber: true, handoff: true, channel: true, wantArgs: []string{"--external unix[4711]"}, wantFiles: []string{handoffFile}, wantDumps: 1},
+		{name: "handoff channel is external and answers on the host's end", fiber: true, handoff: true, channel: true, wantArgs: []string{"--external unix[4711]"}, wantFiles: []string{handoffFile}, wantDumps: 1},
 		{name: "handoff fiber without a channel", fiber: true, handoff: true, wantErr: "handoff channel of f"},
-		// The pair is the fiber's own, so nothing is named external, and
-		// a record it never polled is taken off before the dump, so no
-		// seed lands in the images.
-		{name: "an unread record is drained before the dump", fiber: true, pair: true, unread: true, wantArgs: []string{"dump"}, noFiles: []string{handoffFile}, wantDumps: 1},
-		{name: "a channel that cannot be borrowed is not dumped", fiber: true, wantErr: "channel of f"},
+		{name: "a fiber whose peer end cannot be borrowed is not signalled", fiber: true, wantErr: "borrow the channel's peer end"},
+		{name: "a fiber that cannot be signalled is not dumped", fiber: true, pair: true, signalErr: errors.New("no such process"), wantErr: "signal the fiber: no such process"},
+		// The park's wait is the spec's deadline, never a number of its
+		// own, and a fiber that keeps serving is left serving.
+		{name: "a fiber that never answers is not dumped", fiber: true, pair: true, answer: "none", deadline: 100 * time.Millisecond, wantErr: "park f: the fiber did not stop serving for the park: context deadline exceeded"},
+		{name: "a fiber that ends at the signal", fiber: true, pair: true, answer: "end", deadline: 5 * time.Second, wantErr: "the fiber ended"},
+		{name: "a fiber that answers something else", fiber: true, pair: true, answer: "a", deadline: 5 * time.Second, wantErr: `the fiber answered "a", want a 'q' record`},
+		// The fiber is told each park's round, and answers with it. A
+		// late answer to a round that gave up is dropped, and the
+		// carry-on of that round names it, so a fiber that quiesces late
+		// meets its own carry-on and no later round's dump is undone by
+		// it.
+		{name: "an answer naming an earlier round is stale and not an answer", fiber: true, pair: true, answer: "stale", deadline: 100 * time.Millisecond, wantErr: "did not stop serving for the park: context deadline exceeded"},
+		{name: "a round that gave up leaves a carry-on for itself alone, and the next round parks", fiber: true, pair: true, late: true, wantArgs: []string{"dump"}, wantDumps: 1},
 		{name: "sync keeps it running", fiber: true, pair: true, sync: true, wantArgs: []string{"--leave-running"}, wantDumps: 1},
-		{name: "criu fails", fiber: true, pair: true, criu: criuKnobs{dumpErr: errors.New("exit status 1")}, wantErr: "criu dump"},
+		{name: "criu fails and the fiber is told to carry on", fiber: true, pair: true, criu: criuKnobs{dumpErr: errors.New("exit status 1")}, wantErr: "criu dump", wantDumps: 1, carryOn: true},
 		{name: "launcher names the container's mounts", fiber: true, pair: true, launcher: true, zygote: true, wantArgs: []string{"--dump-extra"}, wantDumps: 1},
 		{name: "a client from outside the container is retried", fiber: true, pair: true, launcher: true, zygote: true, wantDumps: 2,
 			criu: criuKnobs{dumpErr: errors.New("Error (criu/sk-unix.c:351): unix: Unix socket 60373 not found"), dumpErrOnce: true}},
@@ -893,22 +918,47 @@ func TestPark(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newFakes(t)
 			f.criu.criuKnobs = tc.criu
+			f.signalErr = tc.signalErr
 			var launcher Launcher
 			if tc.launcher {
 				launcher = &fakeLauncher{}
 			}
 			b := f.open(t, Options{Launcher: launcher})
 			pid := impossiblePID(t) + 30
+			// The end the fiber speaks on, and the end the park is handed
+			// for a handoff fiber.
+			speaks := -1
+			var hostEnd *os.File
 			if tc.channel {
 				f.socket(t, pid, channelFD, "4711")
+				sv, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_SEQPACKET|syscall.SOCK_CLOEXEC, 0)
+				if err != nil {
+					t.Fatal(err)
+				}
+				speaks = sv[1]
+				hostEnd = os.NewFile(uintptr(sv[0]), "host")
+				t.Cleanup(func() { _ = hostEnd.Close(); _ = syscall.Close(sv[1]) })
 			}
 			reads := -1
 			if tc.pair {
 				reads = f.pair(t, pid)
+				speaks = reads
 			}
-			if tc.unread {
-				if err := backend.Queue(f.pairs[pid][1], backend.Incarnation{Generation: 2, Kind: "resume", Fence: "g/2-1", Endpoint: "/ep"}); err != nil {
-					t.Fatal(err)
+			// The fiber reads the round fiberd queued before the signal,
+			// and answers for it.
+			silent := tc.answer == "none" || tc.late
+			f.reply = func(int) {
+				round := parkRound(t, speaks)
+				switch {
+				case silent:
+				case tc.answer == "end":
+					_ = syscall.Close(speaks)
+				case tc.answer == "":
+					say(t, speaks, backend.Record(backend.RecordQuiesce, strconv.Itoa(round)))
+				case tc.answer == "stale":
+					say(t, speaks, backend.Record(backend.RecordQuiesce, strconv.Itoa(round-1)))
+				default:
+					say(t, speaks, []byte(tc.answer))
 				}
 			}
 			if tc.fiber {
@@ -937,24 +987,74 @@ func TestPark(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			err := b.Park(context.Background(), "f", backend.ParkSpec{Dir: dir, Sync: tc.sync})
-			if tc.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-					t.Fatalf("Park = %v, want %q", err, tc.wantErr)
+			if tc.late {
+				// The first round, never answered: its carry-on waits on
+				// the fiber's end, naming round 1.
+				if err := b.Park(context.Background(), "f", backend.ParkSpec{Dir: dir, Deadline: 100 * time.Millisecond, Channel: hostEnd}); err == nil {
+					t.Fatal("the first round was answered by nobody, yet parked")
 				}
-				return
+				if got := nextRecord(t, speaks); got != "c1" {
+					t.Fatalf("after the round that gave up the fiber's end holds %q, want the carry-on c1", got)
+				}
+				silent = false
 			}
-			if err != nil {
-				t.Fatalf("Park: %v", err)
-			}
-			if tc.pair && (queued(reads) || !f.letGo()) {
-				t.Fatal("a record is still queued on the fiber's channel after the park, or its end is still held")
+			t0 := time.Now()
+			err := b.Park(context.Background(), "f", backend.ParkSpec{Dir: dir, Sync: tc.sync, Deadline: tc.deadline, Channel: hostEnd})
+			took := time.Since(t0)
+			if tc.late {
+				// The second round's own messages, and no carry-on for it.
+				if got := nextRecord(t, speaks); got != "" {
+					t.Fatalf("after the park the fiber's end holds %q, want nothing", got)
+				}
 			}
 			dumps := 0
 			for _, c := range f.criu.recorded() {
 				if strings.HasPrefix(c, "dump ") {
 					dumps++
 				}
+			}
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("Park = %v, want %q", err, tc.wantErr)
+				}
+				if dumps != tc.wantDumps {
+					t.Fatalf("%d dumps after the refusal, want %d", dumps, tc.wantDumps)
+				}
+				if tc.deadline > 0 && took > tc.deadline+time.Second {
+					t.Fatalf("the park took %s, want it bounded by the deadline %s", took, tc.deadline)
+				}
+				if tc.answer == "none" && len(f.signalled()) != 1 {
+					t.Fatalf("signalled %v, want the fiber once", f.signalled())
+				}
+				if tc.answer == "none" && !tc.carryOn {
+					// A round that gave up tells the fiber so, with its
+					// round, so a late answer meets it.
+					if got := nextRecord(t, speaks); got != "c1" {
+						t.Fatalf("after the round that gave up the fiber's end holds %q, want the carry-on c1", got)
+					}
+				}
+				if tc.carryOn {
+					if got := nextRecord(t, speaks); got != "c1" {
+						t.Fatalf("the fiber was told %q, want the carry-on c1", got)
+					}
+				}
+				if (tc.pair || tc.channel) && !f.letGo() {
+					t.Fatal("the backend still holds the end it borrowed")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Park: %v", err)
+			}
+			wantSignals := 1
+			if tc.late {
+				wantSignals = 2 // one per round
+			}
+			if got := f.signalled(); len(got) != wantSignals || got[0] != pid {
+				t.Fatalf("signalled %v, want the fiber %d %d time(s), before the dump", got, pid, wantSignals)
+			}
+			if tc.pair && (queued(reads) || !f.letGo()) {
+				t.Fatal("a record is still queued on the fiber's channel after the park, or its end is still held")
 			}
 			if dumps != tc.wantDumps {
 				t.Fatalf("%d dumps, want %d", dumps, tc.wantDumps)
@@ -1061,23 +1161,29 @@ func writeMounts(t *testing.T, dir string) {
 
 // TestResume checks that a checkpoint is restored under the resuming grant's
 // directory, that the restored fiber is sent its resume record, on the
-// peer end of its own pair borrowed for one write, or queued ahead of
-// everything on a handoff fiber's fresh channel, and that its end is
-// reported as the fiber's exit. A tree that cannot be sent the record
-// is ended, since it would serve with its parked random state. A
-// launcher is told of the tree it prepared for, and when it is gone. A
-// checkpoint with a mount namespace binds the restore root, which is
+// peer end of its own pair borrowed for the exchange, or queued ahead of
+// everything on a handoff fiber's fresh channel, that the resume returns
+// only once the fiber acked the record under its new fence, within the
+// deadline, and that its end is reported as the fiber's exit. A tree
+// that cannot be sent the record, or never acks it, is ended, since it
+// would serve with its parked random state or not at all. A launcher is
+// told of the tree it prepared for, and when it is gone. A checkpoint
+// with a mount namespace binds the restore root, which is
 // tests/integration/proc TestResumeBindsRunDir, and what refuses the
 // bind before any mount is refused here.
 func TestResume(t *testing.T) {
 	cases := []struct {
-		name      string
-		criu      criuKnobs
-		launcher  *fakeLauncher
-		setup     func(t *testing.T, dir, rootBind string)
-		spec      backend.ResumeSpec
-		record    bool // the checkpoint names a handoff channel
-		noPair    bool // the restored tree holds no pair to borrow
+		name     string
+		criu     criuKnobs
+		launcher *fakeLauncher
+		setup    func(t *testing.T, dir, rootBind string)
+		spec     backend.ResumeSpec
+		record   bool // the checkpoint names a handoff channel
+		noPair   bool // the restored tree holds no pair to borrow
+		// ack is the restored fiber's answer to its record: "" acks it
+		// under the new fence, "none" never acks, else acks under that.
+		ack       string
+		ended     bool // the restore ran and the tree it brought up is ended
 		kill      bool
 		wantErr   error
 		wantText  string
@@ -1090,7 +1196,14 @@ func TestResume(t *testing.T) {
 	}{
 		{name: "plain checkpoint", wantArgs: []string{"restore ", "--pidfile", "files=0 cgroup=-1"}, wantExit: "exit:0"},
 		{name: "the record names the next generation and the session", spec: backend.ResumeSpec{Generation: 7, Session: "conv 42"}, wantExit: "exit:0"},
-		{name: "a tree with no peer end to borrow is ended", noPair: true, wantText: "borrow the channel's peer end"},
+		{name: "a tree with no peer end to borrow is ended", noPair: true, ended: true, wantText: "borrow the channel's peer end"},
+		// The ack's wait is the spec's deadline. A tree that never acks
+		// is ended and no fiber is returned, so nothing routes to it.
+		{name: "a tree that never acks is ended under the deadline", ack: "none", ended: true, spec: backend.ResumeSpec{Deadline: 200 * time.Millisecond},
+			wantErr: context.DeadlineExceeded, wantText: "the fiber did not say it serves again"},
+		{name: "an ack under another fence ends the tree", ack: "g/9-9", ended: true, wantText: `the fiber answered "ag/9-9\x00", want a 'a' record`},
+		{name: "a handoff tree that never acks is ended", record: true, ack: "none", ended: true, spec: backend.ResumeSpec{Handoff: true, Deadline: 200 * time.Millisecond},
+			wantErr: context.DeadlineExceeded, wantText: "the fiber did not say it serves again"},
 		{name: "a generation the record cannot carry is refused before the restore", spec: backend.ResumeSpec{Generation: -1}, wantText: "not an incarnation"},
 		{name: "restore root is a symlink", setup: func(t *testing.T, dir, rootBind string) {
 			writeMounts(t, dir)
@@ -1124,7 +1237,7 @@ func TestResume(t *testing.T) {
 		{name: "criu unavailable", criu: criuKnobs{checkErr: errors.New("exit status 1")}, wantText: "resume needs FIBER_CHECKPOINT"},
 		{name: "launcher restores in its container", launcher: &fakeLauncher{endpointRoot: "/host"}, wantArgs: []string{"--restore-extra"}, wantExit: "exit:0",
 			wantCalls: "restoreExtra:DIR,restored:PID,restoredGone", wantEndpoint: "/host/ep.sock"},
-		{name: "launcher tree with no peer end to borrow is ended", launcher: &fakeLauncher{}, noPair: true, wantText: "borrow the channel's peer end",
+		{name: "launcher tree with no peer end to borrow is ended", launcher: &fakeLauncher{}, noPair: true, ended: true, wantText: "borrow the channel's peer end",
 			wantCalls: "restoreExtra:DIR,restored:PID,restoredGone"},
 		{name: "launcher restore without a run directory takes the endpoint's", launcher: &fakeLauncher{restoredErr: errors.New("mounts")}, spec: backend.ResumeSpec{WorkDir: "-"},
 			wantArgs: []string{"--restore-extra"}, wantExit: "exit:0", wantCalls: "restoreExtra:DIR,restored:PID,restoredGone", wantEndpoint: "ep.sock"},
@@ -1166,9 +1279,21 @@ func TestResume(t *testing.T) {
 			if spec.Generation == 0 {
 				spec.Generation = 2
 			}
+			// The restored fiber reads its record off the end it holds,
+			// its own pair's or the one the restore was handed, and acks.
 			reads := -1
 			if !tc.noPair && !spec.Handoff {
 				reads = f.pair(t, f.criu.restorePID)
+			}
+			fiberEnd := func() int { return reads }
+			if spec.Handoff {
+				fiberEnd = f.criu.inheritedFD
+			}
+			stop := make(chan struct{})
+			t.Cleanup(func() { close(stop) })
+			var records <-chan backend.Incarnation
+			if !tc.noPair {
+				records = acker(fiberEnd, "g/2-1", tc.ack, stop)
 			}
 			fb, err := b.Resume(context.Background(), spec)
 			if tc.wantErr != nil || tc.wantText != "" {
@@ -1178,7 +1303,7 @@ func TestResume(t *testing.T) {
 				if b.rootHeld {
 					t.Fatal("a refused resume holds the restore root")
 				}
-				if tc.noPair {
+				if tc.ended {
 					// The restore ran, and the tree it brought up is ended
 					// and forgotten.
 					if ps := f.criu.restored(); len(ps) != 1 || !ps[0].killed.Load() {
@@ -1190,6 +1315,9 @@ func TestResume(t *testing.T) {
 					if n != 0 {
 						t.Fatalf("%d fibers kept after the failed resume, want none", n)
 					}
+					if !f.letGo() {
+						t.Fatal("the backend still holds the end it borrowed")
+					}
 				}
 			} else if err != nil {
 				t.Fatalf("Resume: %v", err)
@@ -1198,12 +1326,12 @@ func TestResume(t *testing.T) {
 				if fb.ID != "g/2-1" || fb.PID != f.criu.restorePID || channelOf(t, fb) != spec.Handoff {
 					t.Fatalf("Resume = %+v, want g/2-1 with the restored pid %d and the host's end of a handoff channel", fb, f.criu.restorePID)
 				}
-				// The record waits on the fiber's end: the one it reads of
-				// its own pair, or the end the restore was handed.
-				if spec.Handoff {
-					reads = int(f.criu.inherited.Fd())
+				var inc backend.Incarnation
+				select {
+				case inc = <-records:
+				default:
+					t.Fatal("Resume returned before the fiber took its record and acked")
 				}
-				inc := readRecord(t, reads)
 				wantEndpoint := strings.ReplaceAll(tc.wantEndpoint, "WORK", workDir)
 				if wantEndpoint == "" {
 					wantEndpoint = spec.Endpoint
@@ -1212,7 +1340,7 @@ func TestResume(t *testing.T) {
 					inc.Session != spec.Session || inc.Identity != nil || len(inc.Seed) != backend.SeedBytes {
 					t.Fatalf("resume record = %+v, want kind resume, generation %d, fence g/2-1, endpoint %s, session %q, no identity", inc, spec.Generation, wantEndpoint, spec.Session)
 				}
-				if queued(reads) {
+				if reads >= 0 && queued(reads) {
 					t.Fatal("more than one record was queued")
 				}
 				if !f.letGo() {

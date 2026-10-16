@@ -12,11 +12,18 @@ import (
 // A channel record is one packet. Its kind byte comes first, then every
 // field ended by NUL. The one record every backend sends a fiber at
 // birth is the incarnation record, 'i'. A gVisor sandbox also claims
-// its restore with 't' and acks its endpoint with 'a'.
+// its restore with 't' and acks its endpoint with 'a'. A proc or runc
+// fiber is told the round of each park with 'p' before the signal,
+// says 'q' with that round when the signal has stopped it serving,
+// gets 'c' with the round when that park failed or gave up waiting,
+// and acks a resume's record with 'a' once it serves again.
 //
 //	i generation kind fence endpoint payload-hex|- session-hex|- key-PEM|- cert-PEM|- caller|- caller-PEM|- seed-hex
 //	t token
 //	a fence
+//	p round
+//	q round
+//	c round
 //
 // The payload and the session are hex so they may hold any byte, and
 // "-" when empty. The key, certificate, caller thumbprint and caller
@@ -26,6 +33,17 @@ const (
 	RecordIncarnation = 'i'
 	RecordClaim       = 't'
 	RecordAck         = 'a'
+	// RecordPark names a park's round, queued by fiberd before the
+	// park's signal. Every park of a fiber is a round of its own.
+	RecordPark = 'p'
+	// RecordQuiesce is the fiber's word that it serves nothing, its
+	// listener and every connection closed, so it may be dumped. It
+	// names the round it answers, and one for an earlier round is stale.
+	RecordQuiesce = 'q'
+	// RecordCarryOn is fiberd's word that the park of that round failed,
+	// or gave up waiting, so the fiber serves on as it was. The fiber
+	// honours it for the round it answered alone.
+	RecordCarryOn = 'c'
 	// IncarnationFields is how many fields an 'i' record carries.
 	IncarnationFields = 11
 	// SeedBytes is the size of the seed every incarnation record carries.

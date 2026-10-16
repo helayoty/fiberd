@@ -1381,7 +1381,9 @@ func TestParkAndResume(t *testing.T) {
 
 // TestParkRefusals covers a park of an unknown fiber, one whose workload cannot
 // be signalled, one that keeps its endpoint, and one whose checkpoint
-// fails.
+// fails. The wait for the endpoint is the spec's deadline, and without
+// one the resume deadline this backend advises for the grant's warm
+// instance, never a number of the park's own.
 func TestParkRefusals(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -1389,13 +1391,26 @@ func TestParkRefusals(t *testing.T) {
 		after    knobs // set once it is up
 		fiber    string
 		noBundle bool // the fiber's bundle is gone
-		wantErr  error
-		wantText string
+		deadline time.Duration
+		// tookMin and tookMax bound the wait, when the row is about it.
+		tookMin, tookMax time.Duration
+		wantErr          error
+		wantText         string
 	}{
 		{name: "unknown fiber", fiber: "nobody", wantText: `unknown fiber "nobody"`},
 		{name: "bundle gone", fiber: "g/1-1", noBundle: true, wantText: "config.json: no such file"},
 		{name: "workload cannot be signalled", fiber: "g/1-1", after: knobs{Fail: map[string]bool{"kill": true}}, wantText: "runsc kill"},
-		{name: "endpoint stays open", fiber: "g/1-1", before: knobs{IgnoreUSR1: true}, after: knobs{IgnoreUSR1: true}, wantErr: context.DeadlineExceeded, wantText: "did not close its endpoint for the checkpoint"},
+		{name: "endpoint stays open, waited for the spec's deadline", fiber: "g/1-1", before: knobs{IgnoreUSR1: true}, after: knobs{IgnoreUSR1: true},
+			deadline: 150 * time.Millisecond, tookMin: 150 * time.Millisecond, tookMax: time.Second,
+			wantErr: context.DeadlineExceeded, wantText: "did not close its endpoint for the checkpoint"},
+		{name: "endpoint stays open, waited for the floor without a deadline", fiber: "g/1-1", before: knobs{IgnoreUSR1: true}, after: knobs{IgnoreUSR1: true},
+			tookMin: resumeDeadline, tookMax: resumeDeadline + time.Second,
+			wantErr: context.DeadlineExceeded, wantText: "did not close its endpoint for the checkpoint"},
+		// A slow template raises the advised resume deadline to four
+		// times its restore, which is what the park then waits.
+		{name: "endpoint stays open, waited for the advised deadline without one", fiber: "g/1-1", before: knobs{IgnoreUSR1: true, SlowRestore: 600 * time.Millisecond}, after: knobs{IgnoreUSR1: true},
+			tookMin: deadlineFactor * 600 * time.Millisecond, tookMax: deadlineFactor*600*time.Millisecond + 2*time.Second,
+			wantErr: context.DeadlineExceeded, wantText: "did not close its endpoint for the checkpoint"},
 		{name: "checkpoint fails", fiber: "g/1-1", after: knobs{Fail: map[string]bool{"checkpoint": true}}, wantText: "runsc checkpoint"},
 	}
 	for _, tc := range cases {
@@ -1408,9 +1423,14 @@ func TestParkRefusals(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			err := b.Park(context.Background(), tc.fiber, backend.ParkSpec{Dir: filepath.Join(t.TempDir(), "park")})
+			t0 := time.Now()
+			err := b.Park(context.Background(), tc.fiber, backend.ParkSpec{Dir: filepath.Join(t.TempDir(), "park"), Deadline: tc.deadline})
+			took := time.Since(t0)
 			if err == nil || (tc.wantErr != nil && !errors.Is(err, tc.wantErr)) || !strings.Contains(err.Error(), tc.wantText) {
 				t.Fatalf("Park = %v, want %q (errors.Is %v)", err, tc.wantText, tc.wantErr)
+			}
+			if tc.tookMax > 0 && (took < tc.tookMin || took > tc.tookMax) {
+				t.Fatalf("the park waited %s, want between %s and %s", took, tc.tookMin, tc.tookMax)
 			}
 			if !f.alive(fc) {
 				t.Fatal("a refused park ended the fiber")
