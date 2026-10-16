@@ -46,11 +46,28 @@ endif
 .PHONY: all build test integration-tests vet lint proto proto-lint proto-check clean \
         bench zygote fuzz conform-stub conform-signed conform-logs conform-proc conform-proc-python conform-gvisor conform-gvisor-python conform-runc conform-runc-python conform-hyperlight-fake conform-hyperlight \
         python-build python-test python-dist python-proto python-proto-check \
+        typescript-build typescript-test typescript-proto typescript-proto-check \
         hyperlight-helper linux-hyperlight-check overcommit kind-up kind-down kind-image conform-kind slurm-up slurm-down conform-slurm example-knative example-knative-kvm example-kata example-substrate \
         registry-start mobility linux-shell linux-check linux-gvisor-check linux-test linux-lint bench-e2e \
         compare-phase0 compare-phase1 compare-phase2 compare-phase3 compare-phase4 compare-down
 
 all: build
+
+## TypeScript client (run npm ci --ignore-scripts --prefix sdk/typescript first)
+
+typescript-build: ## compile the Node.js client and its type declarations
+	npm --prefix sdk/typescript run build
+
+typescript-test: ## compile and test the Node.js client against in-process servers
+	npm --prefix sdk/typescript test
+
+typescript-proto: ## generate the TypeScript client's messages and gRPC stubs
+	$(TOOLS) buf generate --template sdk/typescript/buf.gen.yaml
+
+typescript-proto-check: ## compare the TypeScript bindings with a freshly generated scratch copy
+	@tmp=$$(mktemp -d) || exit 1; trap 'rm -rf "$$tmp"' EXIT; \
+	  $(TOOLS) buf generate --template sdk/typescript/buf.gen.yaml --output "$$tmp" && \
+	  diff -ru sdk/typescript/src/generated "$$tmp/sdk/typescript/src/generated"
 
 ## Go
 
@@ -174,7 +191,7 @@ test: ## unit tests (host OS, non-root; nothing under tests/ is compiled), fiber
 	$(GO) test -race -count=1 $(TESTFLAGS) $(PKGS)
 	@for m in $(EXAMPLES); do echo "--- $$m"; (cd $$m && $(GO) test -race -count=1 $(TESTFLAGS) ./...) || exit 1; done
 
-integration-tests: ## the integration suites (tests/integration and the examples' tests/) as root in the dev container, built with -tags integration
+integration-tests: typescript-build ## the integration suites (tests/integration and the examples' tests/) as root in the dev container, built with -tags integration
 	hack/dev/run.sh sh -ec 'go test -tags integration -count=1 $(INTEGRATION_PKGS); \
 	  for m in $(EXAMPLES); do [ -d $$m/tests ] || continue; echo "--- $$m"; (cd $$m && go test -tags integration -count=1 ./tests/...); done'
 
@@ -258,7 +275,7 @@ linux-check: ## probe the container for cgroup v2, PSI, criu, gcc
 linux-gvisor-check: ## probe runsc in the container: run, checkpoint/restore, host unix sockets, self-checkpoint
 	hack/dev/run.sh hack/dev/gvisor-check.sh
 
-linux-test: ## unit tests as uid 1001 (the GitHub runner's uid, not nobody, so a chown to 65534 cannot pass by luck), then the integration suites as root, inside the container
+linux-test: typescript-build ## unit tests as uid 1001 (the GitHub runner's uid, not nobody, so a chown to 65534 cannot pass by luck), then the integration suites as root, inside the container
 	hack/dev/run.sh sh -ec 'go mod download; for m in $(EXAMPLES); do (cd $$m && go mod download); done; \
 	  mkdir -p /tmp/nr && chmod 777 /tmp/nr; \
 	  env -u FIBERD_CGROUP_ROOT setpriv --reuid=1001 --regid=1001 --clear-groups --inh-caps=-all \

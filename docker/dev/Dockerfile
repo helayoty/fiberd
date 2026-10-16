@@ -30,10 +30,11 @@
 # from the base's snapshot of the archive or from the sid snapshot named
 # below, so a newer base digest or snapshot is the upgrade and `apt-get
 # upgrade` is not run.
+FROM node:24-bookworm-slim@sha256:a5f4366e834695d5f363b920c104953a535d3a9864d1bdf74566a0ebe01daee5 AS node
 FROM golang:1.26-bookworm@sha256:dc9ad6c05acc7a88e5b71bde60a5fe3bd4b9f0db209011711b464107438a8107
 
 LABEL org.opencontainers.image.source="https://github.com/helayoty/fiberd" \
-      org.opencontainers.image.description="fiberd Linux development workbench: Go, criu, runsc, Rust, cargo-hyperlight and CPython 3.14" \
+      org.opencontainers.image.description="fiberd Linux development workbench: Go, criu, runsc, Rust, cargo-hyperlight, CPython 3.14 and Node.js 24" \
       org.opencontainers.image.licenses="Apache-2.0"
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
@@ -211,6 +212,10 @@ RUN set -eu; \
       python3-grpcio python3-protobuf protobuf-compiler libprotobuf-dev python3-cryptography; \
     rm -rf /var/lib/apt/lists/*; \
     python3 -c 'import sys, grpc, google.protobuf, cryptography; print(sys.version)'
+
+COPY --from=node /usr/local/bin/node /usr/local/bin/node
+COPY --from=node /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
+RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm
 
 # GOTOOLCHAIN=auto lets the go.mod toolchain line fetch the exact version.
 ENV GOTOOLCHAIN=auto \

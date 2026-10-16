@@ -77,6 +77,8 @@ make conform-proc   # the same on real fibers, in the Linux dev container (hack/
 
 The [quickstart](docs/quickstart.md) walks through each call. To write your own template, read [sdk/c/template/README.md](sdk/c/template/README.md) for C or [sdk/python/README.md](sdk/python/README.md) for Python, and [the zygote design](docs/design/zygote.md).
 
+Callers can use the [Go client](sdk/go/client), [Python client](sdk/python/README.md#client), or [TypeScript client for Node.js](sdk/typescript/README.md).
+
 ## Examples
 
 - [Kubernetes](examples/kubernetes/README.md) is a controller that turns each `CapacityGrant` custom resource into a signed grant and one Pod running fiberd.
@@ -88,6 +90,8 @@ The [quickstart](docs/quickstart.md) walks through each call. To write your own 
 ## Contributing
 
 CI runs the unit tests (`make test`) on linux/amd64 and macOS as a non-root user. The integration suites under `tests/` and each example's `tests/` build only with `-tags integration` and run as root in the dev container (`make integration-tests`). Run `make test` and `make lint` before sending a change.
+
+`make integration-tests` and `make linux-test` rebuild the TypeScript client first. They need Node.js 22.12 or later on the host and dependencies installed with `npm ci --ignore-scripts --prefix sdk/typescript`.
 
 ## License
 

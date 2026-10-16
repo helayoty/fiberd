@@ -29,3 +29,11 @@ sdk/python/dist/
 sdk/python/wheelhouse/
 .pytest_cache/
 .ruff_cache/
+
+# The TypeScript client's dependencies, compiled output and package staging
+sdk/typescript/node_modules/
+sdk/typescript/dist/
+sdk/typescript/.test-build/
+sdk/typescript/*.tgz
+sdk/typescript/LICENSE
+sdk/typescript/NOTICE
