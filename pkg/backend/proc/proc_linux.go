@@ -1347,11 +1347,13 @@ func (b *Backend) Clone(ctx context.Context, warmID string, spec backend.FiberSp
 	// of the warm instance, with the endpoint as the fiber sees it, and
 	// a handoff fiber's TLS identity when it has one.
 	inc := backend.Incarnation{Generation: spec.Generation, Kind: "fork", Fence: spec.Fence, Endpoint: endpoint, Payload: spec.Payload, Session: spec.Session, Identity: spec.Identity}
-	hostEnd, fiberEnd, err := backend.Channel(b.clonePair(z), inc)
+	ends, err := backend.ChannelFDs(b.clonePair(z), inc)
 	if err != nil {
 		return backend.Fiber{}, fmt.Errorf("%s: %s: %w", b.Name(), spec.Fence, err)
 	}
-	defer func() { _ = fiberEnd.Close() }()
+	hostEnd, fiberEnd := ends[0], ends[1]
+	defer func() { _ = syscall.Close(fiberEnd) }()
+	closeHost := func() { _ = syscall.Close(hostEnd) }
 	msg := fmt.Sprintf("CLONE %s %s %d %s %s %s\n", spec.Fence, endpoint, deadline, payload, session, opt)
 	reply := make(chan cloneResult, 1)
 	z.pmu.Lock()
@@ -1364,16 +1366,16 @@ func (b *Backend) Clone(ctx context.Context, warmID string, spec backend.FiberSp
 	if spec.CgroupFD >= 0 {
 		fds = append(fds, spec.CgroupFD)
 	}
-	fds = append(fds, int(fiberEnd.Fd()))
+	fds = append(fds, fiberEnd)
 	if _, _, err := z.ctl.WriteMsgUnix([]byte(msg), syscall.UnixRights(fds...), nil); err != nil {
 		abandon()
-		_ = hostEnd.Close()
+		closeHost()
 		return backend.Fiber{}, fmt.Errorf("proc: send CLONE: %w", err)
 	}
 	select {
 	case res := <-reply:
 		if res.err != nil {
-			_ = hostEnd.Close()
+			closeHost()
 			return backend.Fiber{}, res.err
 		}
 		// The reader registered f under the zygote's pid. The host's pid
@@ -1388,18 +1390,18 @@ func (b *Backend) Clone(ctx context.Context, warmID string, spec backend.FiberSp
 		}
 		b.mu.Unlock()
 		if spec.Identity == nil {
-			_ = hostEnd.Close()
-			hostEnd = nil
+			closeHost()
+			return backend.Fiber{ID: f.id, PID: pid}, nil
 		}
-		return backend.Fiber{ID: f.id, PID: pid, Channel: hostEnd}, nil
+		return backend.Fiber{ID: f.id, PID: pid, Channel: os.NewFile(uintptr(hostEnd), "channel")}, nil
 	case <-ctx.Done():
 		// The zygote enforces the same deadline and kills the child.
 		abandon()
-		_ = hostEnd.Close()
+		closeHost()
 		return backend.Fiber{}, ctx.Err()
 	case <-z.gone:
 		abandon()
-		_ = hostEnd.Close()
+		closeHost()
 		return backend.Fiber{}, fmt.Errorf("%w: zygote exited", ErrZygote)
 	}
 }

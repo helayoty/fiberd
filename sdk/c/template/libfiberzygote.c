@@ -1078,13 +1078,15 @@ static int channel_fd = -1;
 #define RECORD_FIELDS 11
 #define SEED_LEN 32
 struct record_store {
-    char buf[RECORD_MAX];
-    unsigned char payload[RECORD_MAX / 2];
+    /* The small fields come first, so a short record and what is parsed
+     * out of it share one page of a fresh fiber's memory. */
     char session[ENV_VALUE_MAX];
     unsigned char seed[SEED_LEN];
     char *seed_hex; /* the seed's field in buf, zeroed with seed */
     fz_identity_t identity;
     fz_incarnation_t inc;
+    char buf[RECORD_MAX];
+    unsigned char payload[RECORD_MAX / 2];
 };
 static struct record_store born, polled;
 /* The generation this process serves, the birth record's and then each
@@ -1242,12 +1244,14 @@ void fz_seed_forget(void) {
 static int own_pair(void) {
     int sv[2];
     if (socketpair(AF_UNIX, SOCK_SEQPACKET, 0, sv) < 0) return -1;
-    /* Above both slots first, so neither dup2 lands on the other end. */
-    int a = fcntl(sv[0], F_DUPFD, FZ_CHANNEL_PEER_FD + 1);
-    int b = fcntl(sv[1], F_DUPFD, FZ_CHANNEL_PEER_FD + 1);
-    close(sv[0]); close(sv[1]);
-    if (a < 0 || b < 0 || dup2(a, FZ_CHANNEL_FD) < 0 || dup2(b, FZ_CHANNEL_PEER_FD) < 0) return -1;
-    close(a); close(b);
+    /* FZ_CHANNEL_FD holds fiberd's end, so neither new end is there. The
+     * peer's slot is the lowest free one, so an end may already sit in
+     * it. The read end moves first, and the peer then covers whatever
+     * is left at its slot, at most that read end's old number. */
+    if (dup2(sv[0], FZ_CHANNEL_FD) < 0) return -1;
+    if (sv[1] != FZ_CHANNEL_PEER_FD && dup2(sv[1], FZ_CHANNEL_PEER_FD) < 0) return -1;
+    if (sv[0] != FZ_CHANNEL_PEER_FD) close(sv[0]);
+    if (sv[1] != FZ_CHANNEL_PEER_FD) close(sv[1]);
     return 0;
 }
 
@@ -1311,7 +1315,10 @@ static void scrub_and_run(int ready_w, int channel, const char *fence, struct co
      * holds leads outside its own tree, and a handoff fiber's channel is
      * the one socket CRIU is told is external. */
     if (sigchld_fd >= 0) { close(sigchld_fd); sigchld_fd = -1; }
-    if ((channel = fcntl(channel, F_DUPFD, FZ_CHANNEL_PEER_FD + 1)) < 0) _exit(EX_FDS);
+    if (channel == 3 || channel == FZ_CHANNEL_FD) {
+        /* Sitting where one of the two dup2 below lands, so it moves above both first. */
+        if ((channel = fcntl(channel, F_DUPFD, FZ_CHANNEL_PEER_FD + 1)) < 0) _exit(EX_FDS);
+    }
     if (dup2(ready_w, 3) < 0) _exit(EX_FDS);
     if (dup2(channel, FZ_CHANNEL_FD) < 0) _exit(EX_FDS);
     channel_fd = FZ_CHANNEL_FD;
