@@ -93,10 +93,12 @@ func talk(t *testing.T, endpoint, line string) string {
 	if _, err := fmt.Fprintln(c, line); err != nil {
 		t.Fatalf("%s: %v", line, err)
 	}
-	reply, err := bufio.NewReader(c).ReadString('\n')
+	r := bufio.NewReader(c)
+	reply, err := r.ReadString('\n')
 	if err != nil {
 		t.Fatalf("%s: %v", line, err)
 	}
+	testenv.HangUp(c, r)
 	return strings.TrimSpace(reply)
 }
 

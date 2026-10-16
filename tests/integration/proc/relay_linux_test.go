@@ -3,6 +3,7 @@
 package proctest
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -245,4 +247,88 @@ func rounded(ds []time.Duration) []time.Duration {
 		out[i] = d.Round(time.Microsecond)
 	}
 	return out
+}
+
+// TestTalkHangsUpBeforeReturning checks the talk helper every proc test
+// parks after. When it returns, the fiber must hold no connection to
+// its port, since criu refuses to dump a connected TCP socket. A busy
+// runner can take a while to schedule the fiber that reads the caller's
+// hang-up, so the server here waits before it closes its end, and talk
+// must wait for that close.
+func TestTalkHangsUpBeforeReturning(t *testing.T) {
+	cases := []struct {
+		name  string
+		delay time.Duration // how long the server holds the connection after the caller's EOF
+	}{
+		{name: "the fiber closes at once"},
+		{name: "the fiber closes 200 ms after the caller hangs up", delay: 200 * time.Millisecond},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			l, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = l.Close() })
+			go func() {
+				for {
+					c, err := l.Accept()
+					if err != nil {
+						return
+					}
+					go func() {
+						r := bufio.NewReader(c)
+						for {
+							if _, err := r.ReadString('\n'); err != nil {
+								break
+							}
+							_, _ = fmt.Fprintln(c, "pong")
+						}
+						time.Sleep(tc.delay)
+						_ = c.Close()
+					}()
+				}
+			}()
+			_, port, err := net.SplitHostPort(l.Addr().String())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := talk(t, "tcp://"+l.Addr().String(), "ping"); got != "pong" {
+				t.Fatalf("ping = %q", got)
+			}
+			if held := heldConnections(t, port); held > 0 {
+				t.Fatalf("talk returned with the server still holding %d connection(s) on port %s", held, port)
+			}
+		})
+	}
+}
+
+// heldConnections counts the sockets bound to port, in this network
+// namespace, that a process still holds connected: ESTABLISHED or
+// CLOSE_WAIT. A listener and a socket only the kernel keeps (TIME_WAIT,
+// LAST_ACK) do not count.
+func heldConnections(t *testing.T, port string) int {
+	t.Helper()
+	p, err := strconv.Atoi(port)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := fmt.Sprintf(":%04X", p)
+	held := 0
+	for _, table := range []string{"/proc/net/tcp", "/proc/net/tcp6"} {
+		b, err := os.ReadFile(table)
+		if err != nil {
+			continue
+		}
+		for _, row := range strings.Split(string(b), "\n")[1:] {
+			f := strings.Fields(row)
+			if len(f) < 4 || !strings.HasSuffix(f[1], want) {
+				continue
+			}
+			if f[3] == "01" || f[3] == "08" {
+				held++
+			}
+		}
+	}
+	return held
 }

@@ -31,6 +31,7 @@ import (
 	"github.com/helayoty/fiberd/pkg/runtime/host"
 	"github.com/helayoty/fiberd/pkg/sys/caps"
 	"github.com/helayoty/fiberd/pkg/tlsconf"
+	"github.com/helayoty/fiberd/tests/internal/testenv"
 )
 
 // home is one runc runtime with the directories it was opened on.
@@ -223,10 +224,12 @@ func talkOver(t *testing.T, c net.Conn, line string) string {
 	if _, err := fmt.Fprintln(c, line); err != nil {
 		t.Fatal(err)
 	}
-	reply, err := bufio.NewReader(c).ReadString('\n')
+	r := bufio.NewReader(c)
+	reply, err := r.ReadString('\n')
 	if err != nil {
 		t.Fatalf("read reply to %q: %v", line, err)
 	}
+	testenv.HangUp(c, r)
 	return strings.TrimSpace(reply)
 }
 
