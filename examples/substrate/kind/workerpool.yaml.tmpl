@@ -3,8 +3,8 @@
 # the workers run it: every actor is a fiber in its own runsc sandbox,
 # restored from the template's sandbox image, with the worker's own runsc
 # and rootfs. The capabilities Substrate grants the class are the ones
-# this worker needs. ${SUBSTRATE_VERSION} is the node label the install
-# stamped.
+# this worker needs. With no configRef the pool follows the class's
+# default SandboxConfig.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -20,10 +20,9 @@ metadata:
 spec:
   replicas: 2
   workerImage: ${IMAGE}
-  sandboxClass: gvisor
+  sandboxClasses:
+  - name: gvisor
   template:
-    nodeSelector:
-      ate.dev/substrate-version: "${SUBSTRATE_VERSION}"
     resources:
       limits:
         cpu: "1"

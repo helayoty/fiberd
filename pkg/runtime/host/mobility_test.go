@@ -121,7 +121,7 @@ func TestExportImportDelta(t *testing.T) {
 			}
 		}},
 		{"import without a registry is refused", func(t *testing.T) {
-			if err := ImportDelta(ctx, Config{}, core.Grant{}, "S", t.TempDir()); err == nil {
+			if _, err := ImportDelta(ctx, Config{}, core.Grant{}, "S", t.TempDir()); err == nil {
 				t.Fatal("want an error without a registry")
 			}
 		}},
@@ -139,7 +139,7 @@ func TestExportImportDelta(t *testing.T) {
 					if _, err := ExportDelta(ctx, Config{DeltaRegistry: a.DeltaRegistry, DeltaKeys: tc.keys}, g, "S", t.TempDir()); err == nil {
 						t.Fatal("export: want an error")
 					}
-					if err := ImportDelta(ctx, Config{DeltaRegistry: b.DeltaRegistry, DeltaKeys: tc.keys}, g2, "S", t.TempDir()); err == nil {
+					if _, err := ImportDelta(ctx, Config{DeltaRegistry: b.DeltaRegistry, DeltaKeys: tc.keys}, g2, "S", t.TempDir()); err == nil {
 						t.Fatal("import: want an error")
 					}
 				})
@@ -265,7 +265,7 @@ func TestExportImportDelta(t *testing.T) {
 			}
 		}},
 		{"a home that does not trust the exporter refuses the import", func(t *testing.T) {
-			if err := ImportDelta(ctx, c, g2, "S2", out); !errors.Is(err, artifact.ErrUntrusted) {
+			if _, err := ImportDelta(ctx, c, g2, "S2", out); !errors.Is(err, artifact.ErrUntrusted) {
 				t.Fatalf("import = %v, want ErrUntrusted", err)
 			}
 		}},
@@ -279,7 +279,7 @@ func TestExportImportDelta(t *testing.T) {
 			if err := os.WriteFile(path, []byte(strings.Replace(string(orig), `"11"`, `"1"`, 1)), 0o644); err != nil {
 				t.Fatal(err)
 			}
-			if err := ImportDelta(ctx, b, g2, "S2", out); !errors.Is(err, artifact.ErrUntrusted) {
+			if _, err := ImportDelta(ctx, b, g2, "S2", out); !errors.Is(err, artifact.ErrUntrusted) {
 				t.Fatalf("import = %v, want ErrUntrusted", err)
 			}
 		}},
@@ -330,7 +330,7 @@ func TestExportImportDelta(t *testing.T) {
 						defer func() { _ = os.WriteFile(filepath.Join(out, f), orig, 0o644) }()
 					}
 					tc.tamper(t)
-					if err := ImportDelta(ctx, b, g2, "S2", out); !errors.Is(err, artifact.ErrUntrusted) {
+					if _, err := ImportDelta(ctx, b, g2, "S2", out); !errors.Is(err, artifact.ErrUntrusted) {
 						t.Fatalf("import = %v, want ErrUntrusted", err)
 					}
 					for _, tag := range []string{parentTag(parentSHA), sessionTag("S2")} {
@@ -342,14 +342,14 @@ func TestExportImportDelta(t *testing.T) {
 			}
 		}},
 		{"a home without the exporter's seal key cannot import", func(t *testing.T) {
-			if err := ImportDelta(ctx, d, g2, "S2", out); !errors.Is(err, artifact.ErrSealed) {
+			if _, err := ImportDelta(ctx, d, g2, "S2", out); !errors.Is(err, artifact.ErrSealed) {
 				t.Fatalf("import = %v, want ErrSealed", err)
 			}
 		}},
 		// The info file says which domain the session came from. A grant
 		// of another domain must not take it, whatever the file claims.
 		{"importing into a grant of another domain is refused", func(t *testing.T) {
-			if err := ImportDelta(ctx, b, g3, "S2", out); !errors.Is(err, artifact.ErrUntrusted) {
+			if _, err := ImportDelta(ctx, b, g3, "S2", out); !errors.Is(err, artifact.ErrUntrusted) {
 				t.Fatalf("import = %v, want ErrUntrusted", err)
 			}
 			repo3 := strings.TrimPrefix(domainRepoFor(b.DeltaRegistry, domainOf(t, g3)), artifact.FileScheme)
@@ -358,7 +358,7 @@ func TestExportImportDelta(t *testing.T) {
 			}
 		}},
 		{"import publishes the delta under the new name with this home's annotations", func(t *testing.T) {
-			if err := ImportDelta(ctx, b, g2, "S2", out); err != nil {
+			if _, err := ImportDelta(ctx, b, g2, "S2", out); err != nil {
 				t.Fatalf("import: %v", err)
 			}
 			var found bool
@@ -408,8 +408,24 @@ func TestExportImportDelta(t *testing.T) {
 		}},
 		// The same snapshot restored a second time, under a third name.
 		{"importing again reuses the parent already there", func(t *testing.T) {
-			if err := ImportDelta(ctx, b, g2, "S3", out); err != nil {
+			if _, err := ImportDelta(ctx, b, g2, "S3", out); err != nil {
 				t.Fatalf("second import: %v", err)
+			}
+		}},
+		// A caller withdraws an import whose clone failed by this tag and
+		// digest, so they must be what the registry holds for the session.
+		{"import returns the tag and digest it published", func(t *testing.T) {
+			im, err := ImportDelta(ctx, b, g2, "S5", out)
+			if err != nil {
+				t.Fatalf("import: %v", err)
+			}
+			want := repoB + ":" + sessionTag("S5")
+			got, found, err := artifact.Resolve(ctx, want)
+			if err != nil || !found {
+				t.Fatalf("imported session not found: %v", err)
+			}
+			if im.Ref != want || im.Digest != got.Digest {
+				t.Fatalf("ImportDelta = %+v, want ref %s and digest %s", im, want, got.Digest)
 			}
 		}},
 		// The import opens the delta in the clear while it reseals it, and
@@ -431,7 +447,7 @@ func TestExportImportDelta(t *testing.T) {
 				t.Run(tc.name, func(t *testing.T) {
 					cfg := b
 					cfg.DeltaDir = tc.deltaDir
-					err := ImportDelta(ctx, cfg, g2, "S4"+strconv.Itoa(i), out)
+					_, err := ImportDelta(ctx, cfg, g2, "S4"+strconv.Itoa(i), out)
 					if tc.workDir == "" {
 						if err == nil {
 							t.Fatal("imported with a working directory outside DeltaDir")
@@ -667,16 +683,19 @@ func TestExportImportRefusals(t *testing.T) {
 			return err
 		}, errText: "not a directory"},
 		{name: "import: the parent is looked up in a registry that cannot be reached", run: func(t *testing.T) error {
-			return ImportDelta(ctx, far, g, "S", exported)
+			_, err := ImportDelta(ctx, far, g, "S", exported)
+			return err
 		}, errText: "not a directory"},
 		{name: "import: the parent archive is missing", run: func(t *testing.T) error {
-			return ImportDelta(ctx, b, g, "S", copyExport(t, nil, ExportParentFile))
+			_, err := ImportDelta(ctx, b, g, "S", copyExport(t, nil, ExportParentFile))
+			return err
 		}, errText: "import parent"},
 		{name: "import: the parent's manifest is signed for another checkpoint", run: func(t *testing.T) error {
-			return ImportDelta(ctx, b, g, "S", copyExport(t, func(info *ExportInfo) { info.ParentAnnotations = otherLoc.Annotations }))
+			_, err := ImportDelta(ctx, b, g, "S", copyExport(t, func(info *ExportInfo) { info.ParentAnnotations = otherLoc.Annotations }))
+			return err
 		}, wantErr: artifact.ErrUntrusted, errText: "signed as checkpoint"},
 		{name: "import: the parent carries its own platform facts into the new registry", run: func(t *testing.T) error {
-			if err := ImportDelta(ctx, b, g, "S", exported); err != nil {
+			if _, err := ImportDelta(ctx, b, g, "S", exported); err != nil {
 				return err
 			}
 			ploc, found, err := artifact.Resolve(ctx, domainRepoFor(b.DeltaRegistry, domainOf(t, g))+":"+parentTag(parentSHA))
@@ -725,16 +744,18 @@ func TestExportImportRefusals(t *testing.T) {
 			_, err := ExportDelta(ctx, a, g, "MT", filepath.Join(unwritable, "out"))
 			return err
 		}, errText: "not a directory"},
-		{name: "import: no info file", run: func(t *testing.T) error { return ImportDelta(ctx, a, g, "S", t.TempDir()) }, wantErr: os.ErrNotExist},
+		{name: "import: no info file", run: func(t *testing.T) error { _, err := ImportDelta(ctx, a, g, "S", t.TempDir()); return err }, wantErr: os.ErrNotExist},
 		{name: "import: an info file that is not JSON", run: func(t *testing.T) error {
 			dir := t.TempDir()
 			write(t, dir, map[string]string{ExportInfoFile: "{"})
-			return ImportDelta(ctx, a, g, "S", dir)
+			_, err := ImportDelta(ctx, a, g, "S", dir)
+			return err
 		}, errText: ExportInfoFile},
 		{name: "import: no delta archive", run: func(t *testing.T) error {
 			dir := t.TempDir()
 			write(t, dir, map[string]string{ExportInfoFile: "{}"})
-			return ImportDelta(ctx, a, g, "S", dir)
+			_, err := ImportDelta(ctx, a, g, "S", dir)
+			return err
 		}, errText: "import delta"},
 		{name: "import: the info file names a parent the signed delta does not", run: func(t *testing.T) error {
 			dir := t.TempDir()
@@ -755,7 +776,8 @@ func TestExportImportRefusals(t *testing.T) {
 				}
 				write(t, dir, map[string]string{f: string(b)})
 			}
-			return ImportDelta(ctx, a, g, "S", dir)
+			_, err := ImportDelta(ctx, a, g, "S", dir)
+			return err
 		}, errText: "names parent"},
 	}
 	for _, tc := range cases {

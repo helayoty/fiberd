@@ -258,25 +258,33 @@ func ExportDelta(ctx context.Context, cfg Config, g core.Grant, session, dir str
 	return files, nil
 }
 
+// Imported is what ImportDelta published: the session's tag and the
+// digest it holds. A caller whose clone of the session fails can withdraw
+// the tag if it still holds that digest.
+type Imported struct {
+	Ref    string
+	Digest string
+}
+
 // ImportDelta publishes the files ExportDelta wrote in dir as session
 // under grant g, so that Clone(session) on this home finds, claims and
 // resumes it. The session name may differ from the exported one: a
 // template's golden state imported under many names is many sessions.
-func ImportDelta(ctx context.Context, cfg Config, g core.Grant, session, dir string) error {
+func ImportDelta(ctx context.Context, cfg Config, g core.Grant, session, dir string) (Imported, error) {
 	if err := cfg.checkDeltaRegistry(); err != nil {
-		return err
+		return Imported{}, err
 	}
 	var info ExportInfo
 	b, err := os.ReadFile(filepath.Join(dir, ExportInfoFile))
 	if err != nil {
-		return fmt.Errorf("host: import: %w", err)
+		return Imported{}, fmt.Errorf("host: import: %w", err)
 	}
 	if err := json.Unmarshal(b, &info); err != nil {
-		return fmt.Errorf("host: import %s: %w", ExportInfoFile, err)
+		return Imported{}, fmt.Errorf("host: import %s: %w", ExportInfoFile, err)
 	}
 	domain, err := g.SessionDomain()
 	if err != nil {
-		return fmt.Errorf("host: import %s/%s: %w", g.UID, session, err)
+		return Imported{}, fmt.Errorf("host: import %s/%s: %w", g.UID, session, err)
 	}
 	repo := domainRepoFor(cfg.DeltaRegistry, domain)
 	// The delta is opened in the clear below, so the working directory
@@ -289,11 +297,11 @@ func ImportDelta(ctx context.Context, cfg Config, g core.Grant, session, dir str
 		base = dir
 	}
 	if err := os.MkdirAll(base, 0o755); err != nil {
-		return fmt.Errorf("host: import: %w", err)
+		return Imported{}, fmt.Errorf("host: import: %w", err)
 	}
 	tmp, err := os.MkdirTemp(base, ".import-")
 	if err != nil {
-		return fmt.Errorf("host: import: %w", err)
+		return Imported{}, fmt.Errorf("host: import: %w", err)
 	}
 	defer func() { _ = os.RemoveAll(tmp) }()
 	// The delta must carry a trusted home's signature over these files and
@@ -308,36 +316,36 @@ func ImportDelta(ctx context.Context, cfg Config, g core.Grant, session, dir str
 	// grant. The session name is the export's, so a golden snapshot can
 	// be imported as many sessions.
 	if err := artifact.Untar(filepath.Join(dir, ExportDeltaFile), filepath.Join(tmp, "delta")); err != nil {
-		return fmt.Errorf("host: import delta: %w", err)
+		return Imported{}, fmt.Errorf("host: import delta: %w", err)
 	}
 	if err := cfg.DeltaKeys.VerifyDir(filepath.Join(tmp, "delta"), artifact.ArtifactTypeDelta, info.Annotations); err != nil {
-		return fmt.Errorf("host: import %s/%s: %w", g.UID, session, err)
+		return Imported{}, fmt.Errorf("host: import %s/%s: %w", g.UID, session, err)
 	}
 	now := time.Now()
 	if err := checkSigned(info.Annotations, domain, info.Session, now); err != nil {
-		return fmt.Errorf("host: import %s/%s: %w", g.UID, session, err)
+		return Imported{}, fmt.Errorf("host: import %s/%s: %w", g.UID, session, err)
 	}
 	sealed, err := artifact.OpenDir(filepath.Join(tmp, "delta"), cfg.DeltaKeys.Seal, domain, info.Session, now)
 	if err != nil {
-		return fmt.Errorf("host: import %s/%s: %w", g.UID, session, err)
+		return Imported{}, fmt.Errorf("host: import %s/%s: %w", g.UID, session, err)
 	}
 	if info.Parent != "" && info.Parent != info.Annotations[artifact.AnnotationParent] {
-		return fmt.Errorf("host: import %s/%s: %s names parent %s, the signed delta %s", g.UID, session, ExportInfoFile,
+		return Imported{}, fmt.Errorf("host: import %s/%s: %s names parent %s, the signed delta %s", g.UID, session, ExportInfoFile,
 			info.Parent, info.Annotations[artifact.AnnotationParent])
 	}
 	if info.Parent != "" {
 		pref := repo + ":" + parentTag(info.Parent)
 		if _, found, err := artifact.Resolve(ctx, pref); err != nil {
-			return err
+			return Imported{}, err
 		} else if !found {
 			if err := artifact.Untar(filepath.Join(dir, ExportParentFile), filepath.Join(tmp, "parent")); err != nil {
-				return fmt.Errorf("host: import parent: %w", err)
+				return Imported{}, fmt.Errorf("host: import parent: %w", err)
 			}
 			if err := cfg.DeltaKeys.VerifyDir(filepath.Join(tmp, "parent"), artifact.ArtifactTypeParent, info.ParentAnnotations); err != nil {
-				return fmt.Errorf("host: import %s/%s: parent %s: %w", g.UID, session, info.Parent[:12], err)
+				return Imported{}, fmt.Errorf("host: import %s/%s: parent %s: %w", g.UID, session, info.Parent[:12], err)
 			}
 			if err := checkParentSigned(info.ParentAnnotations, info.Parent); err != nil {
-				return fmt.Errorf("host: import %s/%s: %w", g.UID, session, err)
+				return Imported{}, fmt.Errorf("host: import %s/%s: %w", g.UID, session, err)
 			}
 			// The parent carries the platform facts it was made on, from its
 			// own signed manifest where it has them, else from the delta's.
@@ -350,7 +358,7 @@ func ImportDelta(ctx context.Context, cfg Config, g core.Grant, session, dir str
 				}
 			}
 			if _, err := artifact.PushDir(ctx, filepath.Join(tmp, "parent"), pref, artifact.ArtifactTypeParent, ann, cfg.DeltaKeys.Signer); err != nil {
-				return err
+				return Imported{}, err
 			}
 		}
 	}
@@ -366,8 +374,11 @@ func ImportDelta(ctx context.Context, cfg Config, g core.Grant, session, dir str
 	ref := repo + ":" + sessionTag(session)
 	sc, err := cfg.sealContext(g, session, sealed.Fence, now)
 	if err != nil {
-		return err
+		return Imported{}, err
 	}
-	_, err = pushDelta(ctx, cfg, filepath.Join(tmp, "delta"), ref, ann, sc)
-	return err
+	digest, err := pushDelta(ctx, cfg, filepath.Join(tmp, "delta"), ref, ann, sc)
+	if err != nil {
+		return Imported{}, err
+	}
+	return Imported{Ref: ref, Digest: digest}, nil
 }

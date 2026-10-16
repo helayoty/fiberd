@@ -1,15 +1,20 @@
-// Package capacity tells Substrate what a worker can host. The control
-// plane places an actor only on a worker that has reported its capacity,
-// so a worker that never reports sits idle forever and every resume fails
-// with "no free workers available". Substrate's own herders report once at
-// startup to the atelet on their node, and this package does the same for
+// Package capacity registers a worker with Substrate: what it can host
+// and the sandbox runtime its actors start under. The control plane
+// places an actor only on a worker that has registered, so a worker that
+// never registers sits idle forever and every resume fails with "no free
+// workers available". Substrate's own herders register once at startup
+// with the atelet on their node, and this package does the same for
 // ateom-fiberd:
 //
 //	downward API files ──Read──▶ one actor, cpu, memory
+//	this host ──────────Runtime──▶ gvisor, schema v1, architecture
 //	                                 │
-//	         SetWorkerCapacity over the node's AteomSupport socket (mTLS)
+//	          RegisterWorker over the node's AteomSupport socket (mTLS)
 //	                                 ▼
 //	              atelet ──▶ the control plane's Worker record
+//
+// A snapshot is stamped with the runtime of the worker that took it, and
+// restores only on a worker whose runtime matches it.
 //
 // The report retries until atelet accepts it, because the Worker record
 // may not exist yet when the worker first comes up. A peer whose
@@ -29,6 +34,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -50,10 +56,16 @@ const (
 	// MemoryFile holds the memory limit in bytes.
 	MemoryFile = "memory_bytes"
 	// Actors is how many actors a worker hosts at once. The herder holds
-	// one, as Substrate's Worker record assumes today.
+	// one.
 	Actors = 1
-	// AteletID is the SPIFFE id atelet's certificate must carry.
+	// AteletID is the SPIFFE id atelet's certificate must carry in the
+	// default install.
 	AteletID = "spiffe://cluster.local/ns/ate-system/sa/atelet"
+	// SchemaVersion and AttrArchitecture are Substrate's compatibility
+	// schema for a sandbox runtime (internal/hardware): v1 records the
+	// host's Go architecture.
+	SchemaVersion    = "v1"
+	AttrArchitecture = "architecture"
 )
 
 // oidPodIdentity names Substrate's PodIdentity certificate extension, a
@@ -79,6 +91,15 @@ func Read(dir string) *ateletpb.WorkerResources {
 	return wr
 }
 
+// Runtime is the sandbox runtime of class on this host, as Substrate's
+// own herders describe theirs.
+func Runtime(class string) *ateletpb.SandboxRuntime {
+	return &ateletpb.SandboxRuntime{SandboxClass: class, Version: &ateletpb.VersionedSandboxCompat{
+		SchemaVersion: SchemaVersion,
+		Attributes:    []*ateletpb.AttributeEntry{{Key: AttrArchitecture, Value: runtime.GOARCH}},
+	}}
+}
+
 func readLimit(path string) int64 {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -93,9 +114,15 @@ func readLimit(path string) int64 {
 	return v
 }
 
-// Config says where atelet is and how to reach it.
+// Config says where atelet is, how to reach it, and what this worker
+// runs.
 type Config struct {
 	Socket string // atelet's AteomSupport unix socket
+	// AteletID is the SPIFFE id atelet must present (default AteletID).
+	AteletID string
+	// SandboxClass is the class every actor here runs as ("gvisor").
+	// Required, since the control plane refuses a runtime without one.
+	SandboxClass string
 	// CredentialBundle is the PEM with this Pod's key and certificate, and
 	// TrustBundle the PEM with the CAs atelet's certificate chains to.
 	// Both empty means plaintext (tests).
@@ -104,7 +131,7 @@ type Config struct {
 	Backoff                       time.Duration // the first retry's wait (default 500ms)
 }
 
-// Reporter sends one capacity report.
+// Reporter sends one registration.
 type Reporter struct {
 	cfg   Config
 	creds credentials.TransportCredentials
@@ -115,6 +142,12 @@ type Reporter struct {
 // New checks the TLS material, so a worker with a broken bundle stops
 // before it serves.
 func New(cfg Config) (*Reporter, error) {
+	if cfg.SandboxClass == "" {
+		return nil, errors.New("capacity: a sandbox class is required")
+	}
+	if cfg.AteletID == "" {
+		cfg.AteletID = AteletID
+	}
 	if cfg.Dir == "" {
 		cfg.Dir = Dir
 	}
@@ -125,7 +158,7 @@ func New(cfg Config) (*Reporter, error) {
 	if cfg.CredentialBundle == "" && cfg.TrustBundle == "" {
 		return r, nil
 	}
-	tc, err := clientTLS(cfg.CredentialBundle, cfg.TrustBundle)
+	tc, err := clientTLS(cfg.CredentialBundle, cfg.TrustBundle, cfg.AteletID)
 	if err != nil {
 		return nil, err
 	}
@@ -145,15 +178,15 @@ func New(cfg Config) (*Reporter, error) {
 
 const maxBackoff = 30 * time.Second
 
-// Run reports the capacity, retrying with a doubling wait until atelet
+// Run registers the worker, retrying with a doubling wait until atelet
 // accepts it or ctx ends. It returns at once when this worker refuses the
 // peer's certificate (chain, SPIFFE id or node).
 func (r *Reporter) Run(ctx context.Context) error {
-	req := &ateletpb.SetWorkerCapacityRequest{Capacity: Read(r.cfg.Dir)}
+	req := &ateletpb.RegisterWorkerRequest{Capacity: Read(r.cfg.Dir), DefaultRuntime: Runtime(r.cfg.SandboxClass)}
 	for wait := r.cfg.Backoff; ; wait = min(2*wait, maxBackoff) {
 		err := r.once(ctx, req)
 		if err == nil {
-			log.Printf("capacity: reported %v to atelet", req.GetCapacity())
+			log.Printf("capacity: registered %v running %v with atelet", req.GetCapacity(), req.GetDefaultRuntime())
 			return nil
 		}
 		if ctx.Err() != nil {
@@ -171,7 +204,7 @@ func (r *Reporter) Run(ctx context.Context) error {
 	}
 }
 
-func (r *Reporter) once(ctx context.Context, req *ateletpb.SetWorkerCapacityRequest) error {
+func (r *Reporter) once(ctx context.Context, req *ateletpb.RegisterWorkerRequest) error {
 	sock := r.cfg.Socket
 	conn, err := grpc.NewClient("passthrough:///atelet",
 		grpc.WithTransportCredentials(r.creds),
@@ -184,7 +217,7 @@ func (r *Reporter) once(ctx context.Context, req *ateletpb.SetWorkerCapacityRequ
 	defer func() { _ = conn.Close() }()
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	_, err = ateletpb.NewAteomSupportClient(conn).SetWorkerCapacity(ctx, req)
+	_, err = ateletpb.NewAteomSupportClient(conn).RegisterWorker(ctx, req)
 	return err
 }
 
@@ -230,7 +263,7 @@ func loadBundle(path string) (*tls.Certificate, error) {
 // the same node incarnation. Atelet's certificate has no DNS name, so the
 // chain, the SPIFFE id and the node are checked by hand, as Substrate's
 // own herders do (internal/ateletdial).
-func clientTLS(credBundle, trustBundle string) (*tls.Config, error) {
+func clientTLS(credBundle, trustBundle, ateletID string) (*tls.Config, error) {
 	if credBundle == "" || trustBundle == "" {
 		return nil, errors.New("capacity: both the credential bundle and the trust bundle are required")
 	}
@@ -270,8 +303,8 @@ func clientTLS(credBundle, trustBundle string) (*tls.Config, error) {
 				KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}); err != nil {
 				return fmt.Errorf("capacity: atelet's certificate: %w", err)
 			}
-			if len(leaf.URIs) != 1 || leaf.URIs[0].String() != AteletID {
-				return fmt.Errorf("capacity: the peer is not %s", AteletID)
+			if len(leaf.URIs) != 1 || leaf.URIs[0].String() != ateletID {
+				return fmt.Errorf("capacity: the peer is not %s", ateletID)
 			}
 			peer, err := identityOf(leaf)
 			if err != nil {

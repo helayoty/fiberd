@@ -172,7 +172,7 @@ func TestSessionExportImport(t *testing.T) {
 	_, _ = a.Release(ctx, r3.FiberID, true)
 
 	// B imports it as S2 and resumes it there.
-	if err := host.ImportDelta(ctx, cfgB, gB, "S2", out); err != nil {
+	if _, err := host.ImportDelta(ctx, cfgB, gB, "S2", out); err != nil {
 		t.Fatalf("import: %v", err)
 	}
 	t0 := time.Now()
@@ -193,7 +193,7 @@ func TestSessionExportImport(t *testing.T) {
 	// serves on, the name the park minted, so it cannot come up beside
 	// S2 on this home and is refused rather than spliced onto S2's
 	// socket. Once S2 is parked, it resumes.
-	if err := host.ImportDelta(ctx, cfgB, gB, "S3", out); err != nil {
+	if _, err := host.ImportDelta(ctx, cfgB, gB, "S3", out); err != nil {
 		t.Fatalf("second import: %v", err)
 	}
 	if _, _, err := b.Clone(ctx, core.CloneRequest{GrantJWT: []byte("g"), Session: "S3", Deadline: 5 * time.Second}); err == nil || !strings.Contains(err.Error(), "is held by") {
