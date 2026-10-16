@@ -367,6 +367,24 @@ func fileSHA256(path string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
+// checkEntryName accepts the plain file names TarDir and PushDir write,
+// which untar and a pull then place under their destination. Anything
+// else is ErrEntryName: an empty name, "." or "..", a directory part, a
+// name that leaves the destination, one over 255 bytes, or one with a
+// character outside letters, digits, ".", "_" and "-".
+func checkEntryName(name string) error {
+	if name == "" || name == "." || name == ".." || len(name) > 255 || name != filepath.Base(name) || !filepath.IsLocal(name) {
+		return fmt.Errorf("%w: %q", ErrEntryName, name)
+	}
+	for _, r := range name {
+		plain := r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '.' || r == '_' || r == '-'
+		if !plain {
+			return fmt.Errorf("%w: %q", ErrEntryName, name)
+		}
+	}
+	return nil
+}
+
 func tarDir(src, dst string) error {
 	out, err := os.Create(dst)
 	if err != nil {
@@ -434,11 +452,10 @@ func untar(src, dst string) error {
 		}
 		// tarDir writes plain names, so a name with a directory part or
 		// one that leaves dst fails the unpack instead of being mapped.
-		name := hdr.Name
-		if name == "." || name != filepath.Base(name) || !filepath.IsLocal(name) {
-			return fmt.Errorf("%w: %q", ErrEntryName, hdr.Name)
+		if err := checkEntryName(hdr.Name); err != nil {
+			return err
 		}
-		out, err := os.OpenFile(filepath.Join(dst, name), os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+		out, err := os.OpenFile(filepath.Join(dst, hdr.Name), os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
 		if err != nil {
 			return err
 		}

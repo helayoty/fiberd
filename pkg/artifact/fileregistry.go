@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/go-jose/go-jose/v4"
 )
@@ -112,6 +114,11 @@ func filePushDir(dir, ref, artifactType string, annotations map[string]string, s
 	}
 	m := storedManifest{ArtifactType: artifactType, Annotations: annotations}
 	for _, f := range files {
+		// A name a pull would refuse fails the push, so nothing is
+		// published that cannot be claimed.
+		if err := checkEntryName(f.Name); err != nil {
+			return "", fmt.Errorf("artifact: push %s: %w", ref, err)
+		}
 		m.Files = append(m.Files, fileEntry{Name: f.Name, SHA256: strings.TrimPrefix(f.Digest, "sha256:"), Size: f.Size})
 	}
 	mb, err := json.Marshal(m)
@@ -188,7 +195,9 @@ func (m storedManifest) files() []File {
 }
 
 // readFileManifest reads the manifest stored under digest and checks it
-// hashes to it, as a registry's content addressing would.
+// hashes to it, as a registry's content addressing would. Every file it
+// names must be a plain name, because a pull joins the name under the
+// blob directory and the destination.
 func readFileManifest(repoDir, digest string) (storedManifest, error) {
 	var m storedManifest
 	b, err := os.ReadFile(filepath.Join(blobDir(repoDir, digest), "manifest.json"))
@@ -198,7 +207,42 @@ func readFileManifest(repoDir, digest string) (storedManifest, error) {
 	if sum := sha256.Sum256(b); "sha256:"+hex.EncodeToString(sum[:]) != digest {
 		return m, fmt.Errorf("artifact: manifest under %s does not hash to it", digest)
 	}
-	return m, json.Unmarshal(b, &m)
+	if err := json.Unmarshal(b, &m); err != nil {
+		return m, err
+	}
+	for _, f := range m.Files {
+		if err := checkEntryName(f.Name); err != nil {
+			return storedManifest{}, fmt.Errorf("artifact: manifest under %s: %w", digest, err)
+		}
+	}
+	return m, nil
+}
+
+// copyBlob copies a stored blob to dst. The blob must be a regular file
+// in place. A symlink planted in the store is refused, both by the Lstat
+// and by the open, so it never reads what it points at.
+func copyBlob(src, dst string, mode os.FileMode) error {
+	info, err := os.Lstat(src)
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("%s is not a regular file", src)
+	}
+	in, err := os.OpenFile(src, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = in.Close() }()
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, mode)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		return err
+	}
+	return out.Close()
 }
 
 func filePullDir(ref, dst string) (string, error) {
@@ -221,8 +265,8 @@ func filePullDir(ref, dst string) (string, error) {
 		return "", err
 	}
 	for _, f := range m.Files {
-		out := filepath.Join(dst, filepath.Base(f.Name))
-		if err := copyFile(filepath.Join(blobDir(repoDir, digest), "files", f.Name), out, 0o644); err != nil {
+		out := filepath.Join(dst, f.Name)
+		if err := copyBlob(filepath.Join(blobDir(repoDir, digest), "files", f.Name), out, 0o644); err != nil {
 			return "", fmt.Errorf("artifact: pull %s: %w", ref, err)
 		}
 		if sum, err := fileSHA256(out); err != nil || sum != f.SHA256 {

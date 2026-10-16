@@ -2,7 +2,10 @@ package artifact
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"maps"
 	"os"
@@ -432,6 +435,39 @@ func TestFileRegistryFaults(t *testing.T) {
 		}
 		writeFiles(t, filepath.Dir(path), map[string]string{filepath.Base(path): ""})
 	}
+	// repoint stores m as a new manifest over digest's files and points
+	// the tag t at it, as anyone who can write the registry could.
+	repoint := func(t *testing.T, repoDir, digest string, m storedManifest) {
+		t.Helper()
+		mb, err := json.Marshal(m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sum := sha256.Sum256(mb)
+		moved := "sha256:" + hex.EncodeToString(sum[:])
+		if err := os.Rename(blobDir(repoDir, digest), blobDir(repoDir, moved)); err != nil {
+			t.Fatal(err)
+		}
+		writeFiles(t, blobDir(repoDir, moved), map[string]string{"manifest.json": string(mb)})
+		writeFiles(t, filepath.Join(repoDir, "tags"), map[string]string{"t": moved + "\n"})
+	}
+	pagesSum := func(t *testing.T) string {
+		t.Helper()
+		sum := sha256.Sum256([]byte("pages"))
+		return hex.EncodeToString(sum[:])
+	}
+	// naming rewrites the manifest to list "pages" under name, with the
+	// bytes in place at path (relative to the blob directory), so the
+	// pull would succeed if it followed the name.
+	naming := func(name, path string) func(t *testing.T, repoDir, digest string) {
+		return func(t *testing.T, repoDir, digest string) {
+			t.Helper()
+			writeFiles(t, filepath.Dir(filepath.Join(blobDir(repoDir, digest), path)),
+				map[string]string{filepath.Base(path): "pages"})
+			repoint(t, repoDir, digest, storedManifest{ArtifactType: ArtifactTypeDelta,
+				Files: []fileEntry{{Name: name, SHA256: pagesSum(t), Size: 5}}})
+		}
+	}
 	cases := []struct {
 		name    string
 		corrupt func(t *testing.T, repoDir, digest string)
@@ -519,6 +555,32 @@ func TestFileRegistryFaults(t *testing.T) {
 				if err := os.Remove(filepath.Join(blobDir(repoDir, digest), "files", "pages-1.img")); err != nil {
 					t.Fatal(err)
 				}
+			}},
+		// A manifest is written by whoever can write the registry. Its
+		// names are joined under the blob directory and the destination,
+		// so only plain names are followed, on resolve as on pull.
+		{name: "pull refuses a manifest name that climbs out of the files", op: "pull",
+			corrupt: naming("../escape", "escape")},
+		{name: "resolve refuses a manifest name that climbs out of the files", op: "resolve",
+			corrupt: naming("../escape", "escape")},
+		{name: "pull refuses a manifest name with a directory part", op: "pull",
+			corrupt: naming("sub/pages-1.img", "files/sub/pages-1.img")},
+		{name: "pull refuses a manifest name outside the plain charset", op: "pull",
+			corrupt: naming("pages 1.img", "files/pages 1.img")},
+		{name: "pull refuses a blob that is a symlink", op: "pull",
+			corrupt: func(t *testing.T, repoDir, digest string) {
+				blob := filepath.Join(blobDir(repoDir, digest), "files", "pages-1.img")
+				if err := os.Remove(blob); err != nil {
+					t.Fatal(err)
+				}
+				writeFiles(t, filepath.Join(repoDir, "..", ".."), map[string]string{"outside": "pages"})
+				if err := os.Symlink(filepath.Join(repoDir, "..", "..", "outside"), blob); err != nil {
+					t.Fatal(err)
+				}
+			}},
+		{name: "push refuses a file name outside the plain charset", op: "push",
+			corrupt: func(t *testing.T, repoDir, _ string) {
+				writeFiles(t, filepath.Join(repoDir, "..", "..", "src"), map[string]string{"pages 1.img": "pages"})
 			}},
 		{name: "pull fails when the destination is under a file", op: "pull",
 			corrupt: func(t *testing.T, repoDir, _ string) { file(t, filepath.Join(repoDir, "..", "..", "dst")) }},

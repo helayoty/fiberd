@@ -13,6 +13,6 @@ var ErrSealed = errors.New("artifact: sealed content does not open")
 // ErrExpired means a sealed delta is past the expiry it was sealed with.
 var ErrExpired = errors.New("artifact: sealed content has expired")
 
-// ErrEntryName means an images archive names an entry that is not a
-// plain file name, as TarDir writes them.
+// ErrEntryName means an images archive or a file registry manifest names
+// a file that is not a plain file name, as TarDir and PushDir write them.
 var ErrEntryName = errors.New("artifact: archive entry is not a plain file name")
