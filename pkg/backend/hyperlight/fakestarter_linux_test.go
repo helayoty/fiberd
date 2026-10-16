@@ -86,7 +86,7 @@ func (s *fakeStarter) Start(args []string, workDir string, cgroupFD int, logf, c
 	s.mu.Unlock()
 	body := s.body
 	if body == nil {
-		body = func(r *fakeRun) { _ = fakehelper.Serve(r.ctl) }
+		body = func(r *fakeRun) { _ = fakehelper.Serve(r.ctl, r.log) }
 	}
 	go func() {
 		defer close(r.done)

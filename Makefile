@@ -55,7 +55,7 @@ endif
         bench zygote fuzz conform-stub conform-signed conform-logs conform-proc conform-proc-python conform-gvisor conform-gvisor-python conform-runc conform-runc-python conform-hyperlight-fake conform-hyperlight \
         python-build python-test python-dist python-proto python-proto-check \
         typescript-build typescript-skipped typescript-test typescript-proto typescript-proto-check \
-        hyperlight-helper linux-hyperlight-check overcommit kind-up kind-down kind-image conform-kind slurm-up slurm-down conform-slurm example-knative example-knative-kvm example-kata example-substrate \
+        hyperlight-helper linux-hyperlight-check linux-hyperlight-test overcommit kind-up kind-down kind-image conform-kind slurm-up slurm-down conform-slurm example-knative example-knative-kvm example-kata example-substrate \
         registry-start mobility linux-shell linux-check linux-gvisor-check linux-test linux-lint bench-e2e \
         compare-phase0 compare-phase1 compare-phase2 compare-phase3 compare-phase4 compare-down
 
@@ -126,6 +126,10 @@ hyperlight-helper: ## build the Hyperlight guest and helper (Rust) into bin/, in
 
 linux-hyperlight-check: ## probe /dev/kvm and run the helper's self-test (needs a hypervisor on the host)
 	FIBERD_DEV_DOCKER_ARGS="--device /dev/kvm" hack/dev/run.sh hack/hyperlight/check.sh
+
+linux-hyperlight-test: ## the hyperlight integration rows that need the real helper (needs /dev/kvm on the host; make hyperlight-helper first)
+	FIBERD_DEV_DOCKER_ARGS="--device /dev/kvm" hack/dev/run.sh env FIBERD_HL_HELPER=/src/bin/hyperlight-helper FIBERD_HL_GUEST=/src/bin/hyperlight-guest \
+	  go test -tags integration -count=1 -v -run 'TestRandomPerIncarnation|TestSeedNeverLogged' ./tests/integration/hyperlight/
 
 conform-hyperlight: ## C1-C10 against the hyperlight backend with the real helper (needs /dev/kvm on the host)
 	FIBERD_DEV_DOCKER_ARGS="--device /dev/kvm" hack/dev/run.sh env CONFORM_RUNTIME=hyperlight CONFORM_SIGNED=1 \

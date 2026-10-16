@@ -5,6 +5,7 @@ package hyperlight
 import (
 	"bufio"
 	"context"
+	"encoding/hex"
 	"errors"
 	"net"
 	"os"
@@ -63,7 +64,7 @@ func TestPlatform(t *testing.T) {
 	}{
 		{name: "a usable helper", starter: says(kvmIntel),
 			want: artifact.Platform{Kernel: "hyperlight-hyperlight_host/0.17.0", Libc: "fiberd-hyperlight-helper/0.1.0+kvm+GenuineIntel"}},
-		{name: "the fake helper", starter: says(fake), want: artifact.Platform{Kernel: "hyperlight-none", Libc: "fakehelper/1+none+none"}},
+		{name: "the fake helper", starter: says(fake), want: artifact.Platform{Kernel: "hyperlight-none", Libc: "fakehelper/2+none+none"}},
 		{name: "no usable helper", starter: &fakeStarter{versionErr: errors.New("exit status 1")}, want: artifact.Platform{Kernel: "hyperlight-unusable", Libc: "n/a"}},
 	}
 	for _, tc := range cases {
@@ -198,7 +199,7 @@ func TestFakeHelperProtocol(t *testing.T) {
 		}},
 		{name: "Clone: the fiber serves its endpoint under its fence", run: func(t *testing.T) {
 			f, err := be.Clone(ctx, "g1", backend.FiberSpec{Fence: "f1", Endpoint: ep("f1"), CgroupFD: -1, Deadline: time.Second,
-				Payload: []byte(`{"dirty_bytes": 1048576}`)})
+				Payload: []byte(`{"dirty_bytes": 1048576}`), Generation: 1})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -210,6 +211,9 @@ func TestFakeHelperProtocol(t *testing.T) {
 			}
 			if got := talk(t, ep("f1"), "fence"); got != "f1" {
 				t.Fatalf("fence = %q", got)
+			}
+			if got := talk(t, ep("f1"), "kind") + " " + talk(t, ep("f1"), "generation"); got != "clone 1" {
+				t.Fatalf("kind and generation = %q, want \"clone 1\"", got)
 			}
 		}},
 		{name: "W: what the payload dirtied, then what the guest dirties", run: func(t *testing.T) {
@@ -250,7 +254,7 @@ func TestFakeHelperProtocol(t *testing.T) {
 			}
 		}},
 		{name: "Resume: the parked state comes back under a new fence", run: func(t *testing.T) {
-			f, err := be.Resume(ctx, backend.ResumeSpec{Dir: park, Fence: "f2", Endpoint: ep("f2"), CgroupFD: -1, Deadline: 2 * time.Second, WarmID: "g1", WorkDir: work})
+			f, err := be.Resume(ctx, backend.ResumeSpec{Dir: park, Fence: "f2", Endpoint: ep("f2"), CgroupFD: -1, Deadline: 2 * time.Second, WarmID: "g1", WorkDir: work, Generation: 2})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -262,6 +266,9 @@ func TestFakeHelperProtocol(t *testing.T) {
 			}
 			if got := talk(t, ep("f2"), "fence"); got != "f2" {
 				t.Fatalf("fence after resume = %q", got)
+			}
+			if got := talk(t, ep("f2"), "kind") + " " + talk(t, ep("f2"), "generation"); got != "resume 2" {
+				t.Fatalf("kind and generation after resume = %q, want \"resume 2\"", got)
 			}
 			awaitW(t, be, "f2", 1<<20+4096)
 		}},
@@ -279,7 +286,7 @@ func TestFakeHelperProtocol(t *testing.T) {
 		}},
 		{name: "Clone past its deadline is a miss and the fiber is forgotten", run: func(t *testing.T) {
 			_, err := be.Clone(ctx, "g1", backend.FiberSpec{Fence: "f3", Endpoint: ep("f3"), CgroupFD: -1, Deadline: 100 * time.Millisecond,
-				Payload: []byte(`{"ready_delay_ms": 3000}`)})
+				Payload: []byte(`{"ready_delay_ms": 3000}`), Generation: 1})
 			if !errors.Is(err, context.DeadlineExceeded) {
 				t.Fatalf("Clone = %v, want the deadline exceeded", err)
 			}
@@ -288,7 +295,7 @@ func TestFakeHelperProtocol(t *testing.T) {
 			}
 		}},
 		{name: "Resume from an empty directory is the helper's error", run: func(t *testing.T) {
-			_, err := be.Resume(ctx, backend.ResumeSpec{Dir: filepath.Join(t.TempDir(), "nothing"), Fence: "f4", Endpoint: ep("f4"), CgroupFD: -1, WarmID: "g1"})
+			_, err := be.Resume(ctx, backend.ResumeSpec{Dir: filepath.Join(t.TempDir(), "nothing"), Fence: "f4", Endpoint: ep("f4"), CgroupFD: -1, WarmID: "g1", Generation: 2})
 			if !errors.Is(err, ErrHelper) || !strings.Contains(err.Error(), "state.json") {
 				t.Fatalf("Resume = %v, want ErrHelper about state.json", err)
 			}
@@ -313,7 +320,7 @@ func TestFakeHelperProtocol(t *testing.T) {
 			}
 		}},
 		{name: "Unwarm: the helper is ended and its exit reported, with its fibers as orphans", run: func(t *testing.T) {
-			f, err := be.Clone(ctx, "g1", backend.FiberSpec{Fence: "f6", Endpoint: ep("f6"), CgroupFD: -1, Deadline: time.Second})
+			f, err := be.Clone(ctx, "g1", backend.FiberSpec{Fence: "f6", Endpoint: ep("f6"), CgroupFD: -1, Deadline: time.Second, Generation: 1})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -348,6 +355,34 @@ type pipe struct {
 	h      *helper
 	theirs *net.UnixConn
 	rd     *bufio.Reader
+	last   string // the last command line heard by TestCommands
+}
+
+// sameLine is got against want, where want's SEED stands for any 32
+// hex bytes: a CLONE or RESUME carries a seed drawn per call.
+func sameLine(got, want string) bool {
+	g, w := strings.Fields(got), strings.Fields(want)
+	if len(g) != len(w) {
+		return false
+	}
+	for i := range w {
+		if w[i] == "SEED" {
+			if b, err := hex.DecodeString(g[i]); err != nil || len(b) != backend.SeedBytes {
+				return false
+			}
+			continue
+		}
+		if g[i] != w[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// seedOf is the last field of a CLONE or RESUME line.
+func seedOf(line string) string {
+	f := strings.Fields(line)
+	return f[len(f)-1]
 }
 
 // newPipe wires a helper over a socketpair and starts the read loop.
@@ -418,7 +453,7 @@ type asked struct {
 func (p *pipe) ask(ctx context.Context, fence, line string) <-chan asked {
 	ch := make(chan asked, 1)
 	go func() {
-		r, err := p.b.ask(ctx, p.h, fence, line)
+		r, err := p.b.ask(ctx, p.h, fence, []byte(line))
 		ch <- asked{r, err}
 	}()
 	return ch
@@ -556,7 +591,7 @@ func TestAsk(t *testing.T) {
 		{name: "a second command on a fence in flight is refused", run: func(t *testing.T, p *pipe) {
 			first := p.ask(context.Background(), "f", "PARK f /d 1")
 			p.hear(t)
-			_, err := p.b.ask(context.Background(), p.h, "f", "KILL f")
+			_, err := p.b.ask(context.Background(), p.h, "f", []byte("KILL f"))
 			if err == nil || !strings.Contains(err.Error(), "still in flight") {
 				t.Fatalf("second ask = %v", err)
 			}
@@ -582,7 +617,7 @@ func TestAsk(t *testing.T) {
 		}},
 		{name: "a socket the backend closed", run: func(t *testing.T, p *pipe) {
 			_ = p.h.ctl.Close()
-			_, err := p.b.ask(context.Background(), p.h, "f", "KILL f")
+			_, err := p.b.ask(context.Background(), p.h, "f", []byte("KILL f"))
 			if err == nil || !strings.Contains(err.Error(), "send:") {
 				t.Fatalf("ask = %v", err)
 			}
@@ -620,9 +655,9 @@ func TestCommands(t *testing.T) {
 		wantErr  string
 		check    func(t *testing.T, p *pipe)
 	}{
-		{name: "CLONE with the defaults", wantLine: "CLONE f /ep 500 -", reply: "CLONED f",
+		{name: "CLONE with the defaults", wantLine: "CLONE f /ep 500 - 1 SEED", reply: "CLONED f",
 			do: func(ctx context.Context, p *pipe, _ string) error {
-				_, err := p.b.Clone(ctx, "g1", backend.FiberSpec{Fence: "f", Endpoint: "/ep", CgroupFD: -1})
+				_, err := p.b.Clone(ctx, "g1", backend.FiberSpec{Fence: "f", Endpoint: "/ep", CgroupFD: -1, Generation: 1})
 				return err
 			},
 			check: func(t *testing.T, p *pipe) {
@@ -630,15 +665,46 @@ func TestCommands(t *testing.T) {
 					t.Fatal("the cloned fiber is not known")
 				}
 			}},
-		{name: "CLONE with a deadline and a payload", wantLine: "CLONE f /ep 1500 6869", reply: "CLONED f",
+		{name: "CLONE with a deadline, a payload and a later generation", wantLine: "CLONE f /ep 1500 6869 3 SEED", reply: "CLONED f",
 			do: func(ctx context.Context, p *pipe, _ string) error {
-				_, err := p.b.Clone(ctx, "g1", backend.FiberSpec{Fence: "f", Endpoint: "/ep", CgroupFD: -1, Deadline: 1500 * time.Millisecond, Payload: []byte("hi")})
+				_, err := p.b.Clone(ctx, "g1", backend.FiberSpec{Fence: "f", Endpoint: "/ep", CgroupFD: -1, Deadline: 1500 * time.Millisecond, Payload: []byte("hi"), Generation: 3})
 				return err
 			}},
-		{name: "CLONE refused by the helper: the fiber is forgotten and killed to be sure", wantLine: "CLONE f /ep 500 -", reply: "ERROR f no memory", after: "KILL f",
-			wantIs: ErrHelper, wantErr: "no memory",
+		{name: "CLONE without a generation is refused before anything is sent", wantErr: "generation 0 is not an incarnation",
 			do: func(ctx context.Context, p *pipe, _ string) error {
 				_, err := p.b.Clone(ctx, "g1", backend.FiberSpec{Fence: "f", Endpoint: "/ep", CgroupFD: -1})
+				return err
+			},
+			check: func(t *testing.T, p *pipe) {
+				if _, ok := p.b.FiberW("f"); ok {
+					t.Fatal("a fiber that was refused is known")
+				}
+			}},
+		{name: "two CLONEs carry two seeds", wantLine: "CLONE f /ep 500 - 1 SEED", reply: "CLONED f",
+			do: func(ctx context.Context, p *pipe, _ string) error {
+				_, err := p.b.Clone(ctx, "g1", backend.FiberSpec{Fence: "f", Endpoint: "/ep", CgroupFD: -1, Generation: 1})
+				return err
+			},
+			check: func(t *testing.T, p *pipe) {
+				first := p.last
+				done := make(chan error, 1)
+				go func() {
+					_, err := p.b.Clone(context.Background(), "g1", backend.FiberSpec{Fence: "f2", Endpoint: "/ep2", CgroupFD: -1, Generation: 1})
+					done <- err
+				}()
+				second := p.hear(t)
+				p.say(t, "CLONED f2")
+				if err := await(t, done); err != nil {
+					t.Fatal(err)
+				}
+				if seedOf(first) == seedOf(second) {
+					t.Fatalf("both CLONEs carry the seed %s", seedOf(first))
+				}
+			}},
+		{name: "CLONE refused by the helper: the fiber is forgotten and killed to be sure", wantLine: "CLONE f /ep 500 - 1 SEED", reply: "ERROR f no memory", after: "KILL f",
+			wantIs: ErrHelper, wantErr: "no memory",
+			do: func(ctx context.Context, p *pipe, _ string) error {
+				_, err := p.b.Clone(ctx, "g1", backend.FiberSpec{Fence: "f", Endpoint: "/ep", CgroupFD: -1, Generation: 1})
 				return err
 			},
 			check: func(t *testing.T, p *pipe) {
@@ -646,14 +712,19 @@ func TestCommands(t *testing.T) {
 					t.Fatal("the refused fiber is still known")
 				}
 			}},
-		{name: "CLONE past its deadline", wantLine: "CLONE f /ep 50 -", after: "KILL f", wantIs: context.DeadlineExceeded,
+		{name: "CLONE past its deadline", wantLine: "CLONE f /ep 50 - 1 SEED", after: "KILL f", wantIs: context.DeadlineExceeded,
 			do: func(ctx context.Context, p *pipe, _ string) error {
-				_, err := p.b.Clone(ctx, "g1", backend.FiberSpec{Fence: "f", Endpoint: "/ep", CgroupFD: -1, Deadline: 50 * time.Millisecond})
+				_, err := p.b.Clone(ctx, "g1", backend.FiberSpec{Fence: "f", Endpoint: "/ep", CgroupFD: -1, Deadline: 50 * time.Millisecond, Generation: 1})
 				return err
 			}},
-		{name: "RESUME", wantLine: "RESUME f DIR /ep 2000", reply: "CLONED f",
+		{name: "RESUME carries the parked generation plus one", wantLine: "RESUME f DIR /ep 2000 2 SEED", reply: "CLONED f",
 			do: func(ctx context.Context, p *pipe, dir string) error {
-				_, err := p.b.Resume(ctx, backend.ResumeSpec{Fence: "f", Dir: dir, Endpoint: "/ep", CgroupFD: -1, Deadline: 2 * time.Second, WarmID: "g1"})
+				_, err := p.b.Resume(ctx, backend.ResumeSpec{Fence: "f", Dir: dir, Endpoint: "/ep", CgroupFD: -1, Deadline: 2 * time.Second, WarmID: "g1", Generation: 2})
+				return err
+			}},
+		{name: "RESUME without a generation is refused before anything is sent", wantErr: "generation 0 is not an incarnation",
+			do: func(ctx context.Context, p *pipe, dir string) error {
+				_, err := p.b.Resume(ctx, backend.ResumeSpec{Fence: "f", Dir: dir, Endpoint: "/ep", CgroupFD: -1, WarmID: "g1"})
 				return err
 			}},
 		{name: "PARK with sync", wantLine: "PARK f DIR 1", reply: "PARKED f 10", wantDir: true,
@@ -748,9 +819,11 @@ func TestCommands(t *testing.T) {
 			done := make(chan error, 1)
 			go func() { done <- tc.do(context.Background(), p, dir) }()
 			if tc.wantLine != "" {
-				if got, want := p.hear(t), strings.ReplaceAll(tc.wantLine, "DIR", dir); got != want {
+				got, want := p.hear(t), strings.ReplaceAll(tc.wantLine, "DIR", dir)
+				if !sameLine(got, want) {
 					t.Fatalf("sent %q, want %q", got, want)
 				}
+				p.last = got
 				if tc.reply != "" {
 					p.say(t, tc.reply)
 				}

@@ -2,12 +2,14 @@
 //!
 //! One helper per warm template. Warm builds a sandbox from the guest
 //! binary, calls `Init`, and snapshots it; every fiber is a sandbox built
-//! from that snapshot, owned by a thread that serves the fiber's unix
-//! socket (the reference workload's line protocol) and takes commands
-//! from the control loop. Park is `Snapshot::save` into the directory
-//! fiberd gave (an OCI image layout); resume is `Snapshot::load` and a
-//! sandbox built from it. W is what the guest dirtied through `Dirty`,
-//! which the helper tracks and reports.
+//! from that snapshot, told its generation, fence and seed through
+//! `Incarnate` before its endpoint exists, and owned by a thread that
+//! serves the fiber's unix socket (the reference workload's line
+//! protocol) and takes commands from the control loop. Park is
+//! `Snapshot::save` into the directory fiberd gave (an OCI image layout);
+//! resume is `Snapshot::load`, a sandbox built from it and `Incarnate`
+//! again. W is what the guest dirtied through `Dirty`, which the helper
+//! tracks and reports. The command log never shows a seed or a payload.
 //!
 //!   hyperlight-helper --guest <path> [--heap-mb N]     (fd 3 = control)
 //!   hyperlight-helper --guest <path> --check           (self-test, no fd 3)
@@ -167,13 +169,79 @@ fn unhex(h: &str) -> Vec<u8> {
     (0..h.len() / 2).filter_map(|i| u8::from_str_radix(&h[2 * i..2 * i + 2], 16).ok()).collect()
 }
 
+/// What CLONE and RESUME carry for the guest: the host's generation and
+/// 32 seed bytes, fields 5 and 6 of either line. A line the guest would
+/// be wrong to take is refused here by name.
+fn parse_incarnation(f: &[&str]) -> Result<(u64, Vec<u8>)> {
+    if f.len() < 7 {
+        return Err(anyhow!("{} needs 6 fields, got {}", f[0], f.len() - 1));
+    }
+    let generation: u64 = f[5].parse().context("generation")?;
+    if generation < 1 {
+        return Err(anyhow!("generation {generation} is not an incarnation"));
+    }
+    let seed = unhex(f[6]);
+    if f[6].len() != 2 * SEED_BYTES || seed.len() != SEED_BYTES {
+        return Err(anyhow!("seed is not {SEED_BYTES} hex bytes"));
+    }
+    Ok((generation, seed))
+}
+
+const SEED_BYTES: usize = 32;
+
+/// The command line as the log shows it. A CLONE or RESUME carries the
+/// fiber's seed, which belongs to the fiber alone, and a CLONE its
+/// payload, which is the caller's; both are shown by size. Every other
+/// line is shown whole.
+fn log_line(f: &[&str]) -> String {
+    let (payload, seed) = match f[0] {
+        "CLONE" => (Some(4), Some(6)),
+        "RESUME" => (None, Some(6)),
+        _ => (None, None),
+    };
+    f.iter()
+        .enumerate()
+        .map(|(i, v)| match (Some(i) == payload, Some(i) == seed) {
+            (true, _) if *v != "-" => format!("payload:{}B", v.len() / 2),
+            (_, true) => format!("seed:{}B", v.len() / 2),
+            _ => v.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// What a fiber is born as: the kind of copy, the host's generation and
+/// the seed, which the guest takes through `Incarnate` and the helper
+/// then zeroes. The seed's hex is kept only under the payload's
+/// "keep_seed" key, for the tests that look for it in the logs.
+struct Birth {
+    kind: &'static str,
+    generation: u64,
+    seed: Vec<u8>,
+}
+
 /// One fiber: a sandbox, its endpoint and its command channel, on its
-/// own thread. `start` is the line answered once serving: CLONED, or an
-/// ERROR.
-fn fiber_thread(ctl: Ctl, fence: String, endpoint: PathBuf, mut sb: MultiUseSandbox, mut dirtied: u64, payload: Vec<u8>, cmds: Receiver<Cmd>) {
+/// own thread. The line answered once serving is CLONED, or an ERROR.
+fn fiber_thread(ctl: Ctl, fence: String, endpoint: PathBuf, mut sb: MultiUseSandbox, payload: Vec<u8>, mut birth: Birth, cmds: Receiver<Cmd>) {
+    let mut dirtied: u64 = 0;
     let delay = payload_num(&payload, "\"ready_delay_ms\"");
     if delay > 0 {
         thread::sleep(Duration::from_millis(delay));
+    }
+    // The guest learns who it is before anything can reach it.
+    let kept_seed = (payload_num(&payload, "\"keep_seed\"") > 0).then(|| birth.seed.iter().map(|b| format!("{b:02x}")).collect::<String>());
+    let took = sb.call::<i64>("Incarnate", (birth.generation as i64, fence.clone(), birth.seed.clone()));
+    birth.seed.fill(0);
+    match took {
+        Ok(g) if g == birth.generation as i64 => {}
+        Ok(g) => {
+            ctl.say(format!("ERROR {fence} incarnate: the guest took generation {g}, not {}", birth.generation));
+            return;
+        }
+        Err(e) => {
+            ctl.say(format!("ERROR {fence} incarnate: {e}"));
+            return;
+        }
     }
     let _ = std::fs::remove_file(&endpoint);
     let listener = match UnixListener::bind(&endpoint) {
@@ -186,10 +254,8 @@ fn fiber_thread(ctl: Ctl, fence: String, endpoint: PathBuf, mut sb: MultiUseSand
     let _ = listener.set_nonblocking(true);
     ctl.say(format!("CLONED {fence}"));
     let db = payload_num(&payload, "\"dirty_bytes\"");
-    if db > 0 {
-        if let Ok(n) = sb.call::<i64>("Dirty", db as i64) {
-            dirtied += n.max(0) as u64;
-        }
+    if db > 0 && let Ok(n) = sb.call::<i64>("Dirty", db as i64) {
+        dirtied += n.max(0) as u64;
     }
     ctl.say(format!("W {fence} {dirtied}"));
 
@@ -245,7 +311,11 @@ fn fiber_thread(ctl: Ctl, fence: String, endpoint: PathBuf, mut sb: MultiUseSand
                         "ping" => sb.call::<String>("Ping", ()).unwrap_or_else(|e| format!("err {e}")),
                         "incr" => sb.call::<i64>("Incr", ()).map(|n| n.to_string()).unwrap_or_else(|e| format!("err {e}")),
                         "get" => sb.call::<i64>("Get", ()).map(|n| n.to_string()).unwrap_or_else(|e| format!("err {e}")),
-                        "fence" => fence.clone(),
+                        "fence" => sb.call::<String>("Fence", ()).unwrap_or_else(|e| format!("err {e}")),
+                        "random" => sb.call::<u64>("Random", ()).map(|n| n.to_string()).unwrap_or_else(|e| format!("err {e}")),
+                        "generation" => sb.call::<i64>("Generation", ()).map(|n| n.to_string()).unwrap_or_else(|e| format!("err {e}")),
+                        "kind" => birth.kind.to_string(),
+                        "seed" => kept_seed.clone().unwrap_or_else(|| "-".to_string()),
                         "pid" => "0".to_string(),
                         "rss" => dirtied.to_string(),
                         "quit" => break,
@@ -315,6 +385,17 @@ fn check(args: &Args) -> Result<()> {
     let mut sb = from_snapshot(snap.clone())?;
     let pong: String = sb.call("Ping", ())?;
     eprintln!("sandbox from snapshot + Ping = {pong}: {:?}", t.elapsed());
+    let t = Instant::now();
+    let g: i64 = sb.call("Incarnate", (1i64, "check/1".to_string(), vec![1u8; SEED_BYTES]))?;
+    eprintln!("Incarnate(1, check/1, seed): {:?}, generation = {g}", t.elapsed());
+    let r1: u64 = sb.call("Random", ())?;
+    let mut other = from_snapshot(snap.clone())?;
+    let _: i64 = other.call("Incarnate", (1i64, "check/2".to_string(), vec![2u8; SEED_BYTES]))?;
+    let r2: u64 = other.call("Random", ())?;
+    if r1 == r2 {
+        return Err(anyhow!("two sandboxes with different seeds drew the same word {r1}"));
+    }
+    eprintln!("Random under two seeds: {r1} and {r2}");
     let n: i64 = sb.call("Incr", ())?;
     let d: i64 = sb.call("Dirty", 1i64 << 20)?;
     eprintln!("Incr = {n}, Dirty(1 MiB) = {d}");
@@ -366,28 +447,29 @@ fn main() -> Result<()> {
         // stderr is the helper's log (the backend points it at the
         // grant's zygote.log): one line per command, so a park that
         // never comes back can be told from one that never arrived.
-        eprintln!("helper: < {}", line.trim());
+        eprintln!("helper: < {}", log_line(&f));
         match f[0] {
-            "CLONE" if f.len() >= 5 => {
-                let (fence, endpoint, payload) = (f[1].to_string(), PathBuf::from(f[2]), if f[4] == "-" { Vec::new() } else { unhex(f[4]) });
-                match from_snapshot(snap.clone()) {
-                    Ok(sb) => {
-                        let (tx, rx) = channel();
-                        fibers.insert(fence.clone(), tx);
-                        let c = ctl.clone();
-                        thread::spawn(move || fiber_thread(c, fence, endpoint, sb, 0, payload, rx));
+            "CLONE" | "RESUME" if f.len() >= 2 => {
+                let fence = f[1].to_string();
+                let (generation, seed) = match parse_incarnation(&f) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        ctl.say(format!("ERROR {fence} {e:#}"));
+                        continue;
                     }
-                    Err(e) => ctl.say(format!("ERROR {fence} {e:#}")),
-                }
-            }
-            "RESUME" if f.len() >= 5 => {
-                let (fence, dir, endpoint) = (f[1].to_string(), PathBuf::from(f[2]), PathBuf::from(f[3]));
-                match resume_snapshot(&dir).and_then(from_snapshot) {
+                };
+                let (endpoint, payload, sb, kind) = if f[0] == "CLONE" {
+                    (PathBuf::from(f[2]), if f[4] == "-" { Vec::new() } else { unhex(f[4]) }, from_snapshot(snap.clone()), "clone")
+                } else {
+                    (PathBuf::from(f[3]), Vec::new(), resume_snapshot(Path::new(f[2])).and_then(from_snapshot), "resume")
+                };
+                match sb {
                     Ok(sb) => {
                         let (tx, rx) = channel();
                         fibers.insert(fence.clone(), tx);
                         let c = ctl.clone();
-                        thread::spawn(move || fiber_thread(c, fence, endpoint, sb, 0, Vec::new(), rx));
+                        let birth = Birth { kind, generation, seed };
+                        thread::spawn(move || fiber_thread(c, fence, endpoint, sb, payload, birth, rx));
                     }
                     Err(e) => ctl.say(format!("ERROR {fence} {e:#}")),
                 }
@@ -427,5 +509,50 @@ mod tests {
         assert!(f[0].starts_with("fiberd-hyperlight-helper/"), "{line:?}");
         assert_eq!(f[1], concat!("hyperlight_host/", env!("HYPERLIGHT_HOST_VERSION")));
         assert!(matches!(f[2], "kvm" | "mshv" | "none"), "{line:?}");
+    }
+
+    const SEED: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+
+    #[test]
+    fn the_log_shows_no_seed_and_no_payload() {
+        let cases: &[(&str, &str)] = &[
+            (&format!("CLONE f /ep 500 6869 1 {SEED}"), "CLONE f /ep 500 payload:2B 1 seed:32B"),
+            (&format!("CLONE f /ep 500 - 3 {SEED}"), "CLONE f /ep 500 - 3 seed:32B"),
+            (&format!("RESUME f /park /ep 2000 2 {SEED}"), "RESUME f /park /ep 2000 2 seed:32B"),
+            ("CLONE f /ep 500 -", "CLONE f /ep 500 -"),
+            ("PARK f /park 1", "PARK f /park 1"),
+            ("KILL f", "KILL f"),
+        ];
+        for (line, want) in cases {
+            let f: Vec<&str> = line.split_whitespace().collect();
+            let got = log_line(&f);
+            assert_eq!(&got, want, "{line}");
+            assert!(!got.contains(SEED), "{got}");
+        }
+    }
+
+    #[test]
+    fn an_incarnation_is_a_generation_and_32_seed_bytes() {
+        let cases: &[(&str, Option<u64>)] = &[
+            (&format!("CLONE f /ep 500 - 1 {SEED}"), Some(1)),
+            (&format!("RESUME f /park /ep 2000 7 {SEED}"), Some(7)),
+            ("CLONE f /ep 500 -", None),
+            (&format!("CLONE f /ep 500 - 0 {SEED}"), None),
+            (&format!("CLONE f /ep 500 - x {SEED}"), None),
+            ("CLONE f /ep 500 - 1 0011", None),
+            (&format!("CLONE f /ep 500 - 1 {SEED}zz"), None),
+        ];
+        for (line, want) in cases {
+            let f: Vec<&str> = line.split_whitespace().collect();
+            match (parse_incarnation(&f), want) {
+                (Ok((g, seed)), Some(w)) => {
+                    assert_eq!(g, *w, "{line}");
+                    assert_eq!(seed.len(), SEED_BYTES, "{line}");
+                    assert_eq!(seed[1], 1, "{line}");
+                }
+                (Err(_), None) => {}
+                (got, want) => panic!("{line}: {got:?}, want {want:?}"),
+            }
+        }
     }
 }

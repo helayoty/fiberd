@@ -19,6 +19,7 @@ package hyperlight
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -58,7 +59,7 @@ var ErrHelper = errors.New("hyperlight: helper error")
 // facts is what a helper's snapshots depend on. The helper reports it on
 // `--version` and on READY as one token each, in this order.
 //
-//	helper      the helper and its version ("fiberd-hyperlight-helper/0.1.0")
+//	helper      the helper and its version ("fiberd-hyperlight-helper/0.2.0")
 //	hyperlight  the hyperlight_host crate the helper was built with
 //	hypervisor  the one in use on this host (kvm, mshv)
 //	cpu         the CPU vendor string (GenuineIntel, AuthenticAMD)
@@ -447,11 +448,12 @@ func (b *Backend) helperGone(h *helper) {
 	b.exits <- backend.Exit{WarmID: h.id, Status: "helper exited"}
 }
 
-// ask sends one line and waits for the helper's reply on that fence.
-// Replies carry only the fence, so one command per fence may be in
-// flight: a second would take the first's place in pend and leave it
-// waiting for a reply that has already been delivered.
-func (b *Backend) ask(ctx context.Context, h *helper, fence, line string) (reply, error) {
+// ask sends one line, which it zeroes once written since a CLONE or a
+// RESUME carries the fiber's seed, and waits for the helper's reply on
+// that fence. Replies carry only the fence, so one command per fence
+// may be in flight: a second would take the first's place in pend and
+// leave it waiting for a reply that has already been delivered.
+func (b *Backend) ask(ctx context.Context, h *helper, fence string, line []byte) (reply, error) {
 	ch := make(chan reply, 1)
 	h.pmu.Lock()
 	if _, busy := h.pend[fence]; busy {
@@ -460,7 +462,9 @@ func (b *Backend) ask(ctx context.Context, h *helper, fence, line string) (reply
 	}
 	h.pend[fence] = ch
 	h.pmu.Unlock()
-	if _, err := h.ctl.Write([]byte(line + "\n")); err != nil {
+	_, err := h.ctl.Write(append(line, '\n'))
+	clear(line)
+	if err != nil {
 		h.reply(fence, reply{})
 		return reply{}, fmt.Errorf("hyperlight: send: %w", err)
 	}
@@ -502,7 +506,8 @@ func (b *Backend) Unwarm(id string) {
 	}
 }
 
-// Clone asks the helper for a fiber from the warm snapshot.
+// Clone asks the helper for a fiber from the warm snapshot, told its
+// generation and a fresh seed before it serves.
 func (b *Backend) Clone(ctx context.Context, warmID string, sp backend.FiberSpec) (backend.Fiber, error) {
 	b.mu.Lock()
 	h, ok := b.warms[warmID]
@@ -510,10 +515,38 @@ func (b *Backend) Clone(ctx context.Context, warmID string, sp backend.FiberSpec
 	if !ok {
 		return backend.Fiber{}, fmt.Errorf("hyperlight: no warm helper %q", warmID)
 	}
-	return b.start(ctx, h, sp.Fence, fmt.Sprintf("CLONE %s %s %d %s", sp.Fence, sp.Endpoint, deadlineMS(sp.Deadline), payloadHex(sp.Payload)), sp.Deadline)
+	line, err := incarnationLine(fmt.Sprintf("CLONE %s %s %d %s", sp.Fence, sp.Endpoint, deadlineMS(sp.Deadline), payloadHex(sp.Payload)), sp.Fence, sp.Generation)
+	if err != nil {
+		return backend.Fiber{}, err
+	}
+	return b.start(ctx, h, sp.Fence, line, sp.Deadline)
 }
 
-func (b *Backend) start(ctx context.Context, h *helper, fence, line string, deadline time.Duration) (backend.Fiber, error) {
+// incarnationLine ends a CLONE or RESUME with what the guest learns
+// through Incarnate: the host's generation and 32 bytes of fresh
+// entropy, hex. The seed is drawn here and lives in the line alone,
+// which ask zeroes once it is written. A generation the guest would be
+// wrong to take is refused here by name rather than shown as a helper
+// error.
+func incarnationLine(head, fence string, generation int) ([]byte, error) {
+	if generation < 1 {
+		return nil, fmt.Errorf("hyperlight: %s: generation %d is not an incarnation", fence, generation)
+	}
+	seed := make([]byte, backend.SeedBytes)
+	if _, err := rand.Read(seed); err != nil {
+		return nil, fmt.Errorf("hyperlight: seed of %s: %w", fence, err)
+	}
+	line := make([]byte, 0, len(head)+1+20+1+2*backend.SeedBytes)
+	line = append(line, head...)
+	line = append(line, ' ')
+	line = strconv.AppendInt(line, int64(generation), 10)
+	line = append(line, ' ')
+	line = hex.AppendEncode(line, seed)
+	clear(seed)
+	return line, nil
+}
+
+func (b *Backend) start(ctx context.Context, h *helper, fence string, line []byte, deadline time.Duration) (backend.Fiber, error) {
 	if deadline > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, deadline)
@@ -560,7 +593,7 @@ func (b *Backend) Park(ctx context.Context, fiberID string, sp backend.ParkSpec)
 		ctx, cancel = context.WithTimeout(ctx, parkTimeout)
 		defer cancel()
 	}
-	if _, err = b.ask(ctx, h, fiberID, fmt.Sprintf("PARK %s %s %s", fiberID, sp.Dir, sync)); err != nil {
+	if _, err = b.ask(ctx, h, fiberID, fmt.Appendf(nil, "PARK %s %s %s", fiberID, sp.Dir, sync)); err != nil {
 		// Name the deadline that fired, the caller's or this one.
 		if errors.Is(err, context.DeadlineExceeded) {
 			if callers {
@@ -577,7 +610,8 @@ func (b *Backend) Park(ctx context.Context, fiberID string, sp backend.ParkSpec)
 // a test can shorten it.
 var parkTimeout = 15 * time.Second
 
-// Resume asks the helper for a fiber from a park directory.
+// Resume asks the helper for a fiber from a park directory, told the
+// parked generation plus one and a fresh seed before it serves again.
 func (b *Backend) Resume(ctx context.Context, sp backend.ResumeSpec) (backend.Fiber, error) {
 	b.mu.Lock()
 	h, ok := b.warms[sp.WarmID]
@@ -585,7 +619,11 @@ func (b *Backend) Resume(ctx context.Context, sp backend.ResumeSpec) (backend.Fi
 	if !ok {
 		return backend.Fiber{}, fmt.Errorf("hyperlight: no warm helper %q to resume under", sp.WarmID)
 	}
-	return b.start(ctx, h, sp.Fence, fmt.Sprintf("RESUME %s %s %s %d", sp.Fence, sp.Dir, sp.Endpoint, deadlineMS(sp.Deadline)), sp.Deadline)
+	line, err := incarnationLine(fmt.Sprintf("RESUME %s %s %s %d", sp.Fence, sp.Dir, sp.Endpoint, deadlineMS(sp.Deadline)), sp.Fence, sp.Generation)
+	if err != nil {
+		return backend.Fiber{}, err
+	}
+	return b.start(ctx, h, sp.Fence, line, sp.Deadline)
 }
 
 func (b *Backend) Kill(fiberID string) error {

@@ -2,10 +2,11 @@
 //!
 //! The helper (hack/hyperlight/helper) calls `Init` once in the warm
 //! sandbox and snapshots it; every fiber is a sandbox restored from that
-//! snapshot, and the helper maps the fiber's line protocol (ping, incr,
-//! get, dirty) onto the guest functions below. State lives in guest
-//! memory, so it travels with a snapshot: that is what park and resume
-//! move.
+//! snapshot, told who it is with `Incarnate` before it serves, and the
+//! helper maps the fiber's line protocol (ping, incr, get, dirty, random,
+//! generation, fence) onto the guest functions below. State lives in
+//! guest memory, so it travels with a snapshot: that is what park and
+//! resume move, and why every incarnation is reseeded.
 //!
 //! Build: `cargo hyperlight build --release` (hack/hyperlight/build.sh).
 #![no_std]
@@ -22,12 +23,24 @@ use hyperlight_guest_bin::guest_function;
 
 static COUNTER: AtomicI64 = AtomicI64::new(0);
 
-/// Allocations kept on purpose: the working set the guest has dirtied.
-/// The guest is single-threaded, so an UnsafeCell is enough.
-struct Kept(UnsafeCell<Vec<Vec<u8>>>);
+/// Guest state the helper may read back. The guest is single-threaded,
+/// so an UnsafeCell is enough.
+struct Cell<T>(UnsafeCell<T>);
 // SAFETY: guest functions run one at a time on one vCPU.
-unsafe impl Sync for Kept {}
-static KEPT: Kept = Kept(UnsafeCell::new(Vec::new()));
+unsafe impl<T> Sync for Cell<T> {}
+
+/// Allocations kept on purpose: the working set the guest has dirtied.
+static KEPT: Cell<Vec<Vec<u8>>> = Cell(UnsafeCell::new(Vec::new()));
+
+/// What `Incarnate` told this sandbox: the host's count of its lineage,
+/// its fence, and the generator seeded from the host's 32 bytes.
+/// Everything here travels with a snapshot, so a resume replaces it.
+struct Incarnation {
+    generation: i64,
+    fence: String,
+    rng: [u64; 4],
+}
+static INC: Cell<Incarnation> = Cell(UnsafeCell::new(Incarnation { generation: 0, fence: String::new(), rng: [0; 4] }));
 
 fn touch(bytes: usize) -> usize {
     let mut v: Vec<u8> = Vec::with_capacity(bytes);
@@ -38,7 +51,7 @@ fn touch(bytes: usize) -> usize {
         v[i] = (i >> 12) as u8;
         i += 4096;
     }
-    // SAFETY: single-threaded guest, see Kept.
+    // SAFETY: single-threaded guest, see Cell.
     unsafe { (*KEPT.0.get()).push(v) };
     bytes
 }
@@ -55,6 +68,92 @@ fn init(mb: i64) -> Result<i64> {
     }
     core::hint::black_box(x);
     Ok(bytes as i64)
+}
+
+/// Incarnate is the first call into every fiber, before it serves: the
+/// host's generation, the fence it serves as, and 32 fresh bytes the
+/// generator is seeded from. The seed is the generator's whole state, so
+/// nothing of it is kept apart from the stream it drives, and a sandbox
+/// restored from a park keeps serving its old stream only until this
+/// call. Returns the generation it took.
+#[guest_function("Incarnate")]
+fn incarnate(generation: i64, fence: String, seed: Vec<u8>) -> Result<i64> {
+    let mut rng = [0u64; 4];
+    for (i, word) in rng.iter_mut().enumerate() {
+        let mut b = [0u8; 8];
+        if seed.len() >= 8 * (i + 1) {
+            b.copy_from_slice(&seed[8 * i..8 * i + 8]);
+        }
+        *word = u64::from_le_bytes(b) ^ hardware_random();
+    }
+    if rng == [0; 4] {
+        // xoshiro's one fixed point. A 32-byte host seed never lands here.
+        rng[0] = 1;
+    }
+    // SAFETY: single-threaded guest, see Cell.
+    unsafe { *INC.0.get() = Incarnation { generation, fence, rng } };
+    Ok(generation)
+}
+
+/// One word from the CPU's own generator where the guest has one, so the
+/// stream mixes what the host sent with what the host cannot know. On
+/// x86_64 that is rdrand, when CPUID says it exists. aarch64 has RNDR
+/// behind a feature register this guest does not probe, so the stream
+/// there is the host's seed alone.
+fn hardware_random() -> u64 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        // SAFETY: CPUID leaf 1 exists on every x86_64 CPU.
+        let has_rdrand = unsafe { core::arch::x86_64::__cpuid(1) }.ecx & (1 << 30) != 0;
+        if has_rdrand {
+            // SAFETY: the feature was checked just above.
+            return unsafe { rdrand() };
+        }
+    }
+    0
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "rdrnd")]
+unsafe fn rdrand() -> u64 {
+    let mut v = 0u64;
+    for _ in 0..10 {
+        // SAFETY: the caller checked CPUID for rdrand.
+        if unsafe { core::arch::x86_64::_rdrand64_step(&mut v) } == 1 {
+            return v;
+        }
+    }
+    0
+}
+
+/// Random is the next word of xoshiro256** over the incarnation's state.
+#[guest_function("Random")]
+fn random() -> Result<u64> {
+    // SAFETY: single-threaded guest, see Cell.
+    let s = unsafe { &mut (*INC.0.get()).rng };
+    let result = s[1].wrapping_mul(5).rotate_left(7).wrapping_mul(9);
+    let t = s[1] << 17;
+    s[2] ^= s[0];
+    s[3] ^= s[1];
+    s[1] ^= s[2];
+    s[0] ^= s[3];
+    s[2] ^= t;
+    s[3] = s[3].rotate_left(45);
+    Ok(result)
+}
+
+/// Generation is what Incarnate was given, 0 before the first call.
+#[guest_function("Generation")]
+fn generation() -> Result<i64> {
+    // SAFETY: single-threaded guest, see Cell.
+    Ok(unsafe { (*INC.0.get()).generation })
+}
+
+/// Fence is what Incarnate was given, empty before the first call.
+#[guest_function("Fence")]
+fn fence() -> Result<String> {
+    // SAFETY: single-threaded guest, see Cell.
+    Ok(unsafe { (*INC.0.get()).fence.clone() })
 }
 
 #[guest_function("Ping")]
