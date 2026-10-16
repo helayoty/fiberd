@@ -679,7 +679,8 @@ jobs:
             (umask 077 && printf '//registry.npmjs.org/:_authToken=%s\n' "$NPM_BOOTSTRAP_TOKEN" > "$npmrc")
             export NPM_CONFIG_USERCONFIG="$npmrc"
           fi
-          npm publish "npm/fiberd-client-$VERSION.tgz" --access public --provenance --tag "$DIST_TAG"
+          # The ./ keeps npm from reading npm/<file> as a GitHub owner/repo.
+          npm publish "./npm/fiberd-client-$VERSION.tgz" --access public --provenance --tag "$DIST_TAG"
 
   cleanup:
     name: clean up a failed or cancelled release
