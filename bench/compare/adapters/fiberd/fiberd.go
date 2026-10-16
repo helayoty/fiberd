@@ -266,8 +266,9 @@ func (a *Adapter) Resume(ctx context.Context, h compare.Handle) (compare.Handle,
 // f-<epoch>-<seq>, the template's is zygote, and pooled sandboxes are
 // pool/p-<n>, which a fiber handed one keeps. With no handles it is
 // what stands between activations, the zygote and a full pool. A
-// backend with no per-fiber leaf (Hyperlight's helper holds every
-// sandbox) is charged as the subtree beyond the zygote.
+// backend with no leaf at all (Hyperlight's helper holds every
+// sandbox) is charged as the subtree beyond the zygote. A leaf missing
+// or unreadable beside others is an error.
 func (a *Adapter) Density(ctx context.Context, hs []compare.Handle) (int64, error) {
 	if a.o.CgroupRoot == "" {
 		return 0, compare.ErrUnsupported
@@ -305,16 +306,19 @@ func (a *Adapter) Density(ctx context.Context, hs []compare.Handle) (int64, erro
 		}
 		dirs = append(dirs, d)
 	}
-	if handed <= len(pool) {
-		if sum, err := compare.SumCgroups(append(dirs, pool[:handed]...)); err == nil {
-			return sum, nil
+	if len(dirs) == 0 && len(pool) == 0 {
+		total, err := compare.CgroupMemory(grantDir)
+		if err != nil {
+			return 0, err
 		}
+		return total - zygote, nil
 	}
-	total, err := compare.CgroupMemory(grantDir)
-	if err != nil {
-		return 0, err
+	// Some fibers have leaves, so a missing one is lost, not a backend
+	// without leaves. The grant-wide bytes would hide that sample.
+	if handed > len(pool) {
+		return 0, fmt.Errorf("fiberd: %d of %d fibers have no cgroup leaf and the pool has %d", handed, len(hs), len(pool))
 	}
-	return total - zygote, nil
+	return compare.SumCgroups(append(dirs, pool[:handed]...))
 }
 
 // PoolLeaves lists the grant's pool leaves oldest first, none when it

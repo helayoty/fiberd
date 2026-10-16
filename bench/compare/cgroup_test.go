@@ -30,8 +30,19 @@ func TestCgroups(t *testing.T) {
 			needle: "1234-abcd", wantDir: "kubepods.slice/kubepods-pod1234_abcd.slice", wantSum: 4096},
 		{name: "cgroupfs driver keeps the dashes", dirs: map[string]string{"kubepods/burstable/pod1234-abcd": "8192\n"},
 			needle: "1234-abcd", wantDir: "kubepods/burstable/pod1234-abcd", wantSum: 8192},
+		{name: "kind's systemd slices under kubelet.slice", dirs: map[string]string{
+			"kubelet.slice/kubelet-kubepods.slice/kubelet-kubepods-besteffort.slice/kubelet-kubepods-besteffort-pod1234_abcd.slice": "16384\n"},
+			needle: "1234-abcd", wantDir: "kubelet.slice/kubelet-kubepods.slice/kubelet-kubepods-besteffort.slice/kubelet-kubepods-besteffort-pod1234_abcd.slice", wantSum: 16384},
+		{name: "a uid inside a longer one is not its pod", dirs: map[string]string{
+			"kubepods/besteffort/pod1234-abcd-ef": "1\n", "kubepods/burstable/pod1234-abcd": "8192\n"},
+			needle: "1234-abcd", wantDir: "kubepods/burstable/pod1234-abcd", wantSum: 8192},
+		{name: "a uid inside a longer slice is not its pod", dirs: map[string]string{
+			"kubepods.slice/kubepods-pod1234_abcd_ef.slice": "1\n"},
+			needle: "1234-abcd"},
+		{name: "an empty uid is refused, not the whole slice", dirs: map[string]string{
+			"": "27000000000\n", "kubepods/pod1234-abcd": "8192\n"}},
 		{name: "missing", dirs: map[string]string{"a": "1\n"}, needle: "zzz", wantErr: true},
-		{name: "unparsable memory.current", dirs: map[string]string{"pod1": "lots\n"}, needle: "pod1", wantDir: "pod1", wantErr: true},
+		{name: "unparsable memory.current", dirs: map[string]string{"kubepods/pod1": "lots\n"}, needle: "1", wantDir: "kubepods/pod1", wantErr: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

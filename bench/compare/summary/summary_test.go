@@ -110,6 +110,24 @@ func TestTable(t *testing.T) {
 				}
 			},
 		},
+		{
+			name: "a failed density run is a note beside the good runs' medians",
+			recs: []compare.Record{
+				{Kind: "density", System: "s", Class: "c", Run: 1, N: 4, Bytes: 4 << 20, Standing: 8 << 20},
+				{Kind: "density", System: "s", Class: "c", Run: 2, N: 4, Error: "fiberd: 1 of 4 fibers have no cgroup leaf and the pool has 0"},
+				act(1, 1, 1, ""),
+			},
+			wantRows: 1, wantP50: 1, wantP99: 1, wantSamp: 1, wantRuns: 1,
+			wantSide: func(t *testing.T, s Side) {
+				if s.DensityN != 4 || s.Marginal != 1<<20 || s.DensityErr == "" {
+					t.Errorf("density n=%d marginal=%d err %q, want 4, 1MiB and the error", s.DensityN, s.Marginal, s.DensityErr)
+				}
+				_, side := Cells(nil, []Side{s})
+				if note := side[1][len(side[1])-1]; !strings.Contains(note, "density: fiberd: 1 of 4 fibers") {
+					t.Errorf("note %q, want the density error", note)
+				}
+			},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -282,9 +282,11 @@ func TestDensity(t *testing.T) {
 		name     string
 		warm     int
 		cgroups  map[string]int64 // memory.current under the grant dir
+		bare     []string         // leaves without a memory.current
 		hs       []compare.Handle
 		standing int64
 		bytes    int64
+		wantErr  string
 	}{
 		{
 			name:     "no pool: the zygote stands, the fibers' leaves are charged",
@@ -307,6 +309,26 @@ func TestDensity(t *testing.T) {
 			hs:       []compare.Handle{handle("g/1/2")},
 			standing: 100, bytes: 900,
 		},
+		{
+			name:     "one fiber leaf missing beside another: an error, not the grant-wide bytes",
+			cgroups:  map[string]int64{"": 1000, "zygote": 100, "f-1-2": 10},
+			hs:       []compare.Handle{handle("g/1/2"), handle("g/1/3")},
+			standing: 100, wantErr: "1 of 2 fibers have no cgroup leaf",
+		},
+		{
+			name:     "more fibers without a leaf than the pool had: an error",
+			warm:     1,
+			cgroups:  map[string]int64{"": 1000, "zygote": 100, "pool": 200, "pool/p-1": 200},
+			hs:       []compare.Handle{handle("g/1/2"), handle("g/1/3")},
+			standing: 300, wantErr: "2 of 2 fibers have no cgroup leaf",
+		},
+		{
+			name:     "an unreadable fiber leaf: an error, not the grant-wide bytes",
+			cgroups:  map[string]int64{"": 1000, "zygote": 100},
+			bare:     []string{"f-1-2"},
+			hs:       []compare.Handle{handle("g/1/2")},
+			standing: 100, wantErr: "memory.current",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -327,18 +349,32 @@ func TestDensity(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+			for _, dir := range tc.bare {
+				if err := os.MkdirAll(filepath.Join(root, a.uid, dir), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			standing, err := a.Density(ctx, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
+			if standing != tc.standing {
+				t.Errorf("standing %d, want %d", standing, tc.standing)
+			}
 			bytes, err := a.Density(ctx, tc.hs)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("bytes %d err %v, want an error with %q", bytes, err, tc.wantErr)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatal(err)
 			}
-			if standing != tc.standing || bytes != tc.bytes {
-				t.Errorf("standing %d bytes %d, want %d and %d", standing, bytes, tc.standing, tc.bytes)
+			if bytes != tc.bytes {
+				t.Errorf("bytes %d, want %d", bytes, tc.bytes)
 			}
 		})
 	}
