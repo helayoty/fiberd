@@ -1,8 +1,10 @@
 # An interleaved A/B of fiberd's own benchmarks (tests/bench) between two
-# refs, on demand only. Both refs run on ONE runner in ONE job, old and
-# new alternating, so the runner's noise lands on both sides. Both run the
-# head ref's harness. The median table goes to the job summary and the raw
-# logs to an artifact. Numbers compare only within one run.
+# refs, on demand only. Run it by hand, or add the bench-ab label to a pull
+# request to compare its base with its head. Both refs run on ONE runner
+# in ONE job, old and new alternating, so the runner's noise lands on both
+# sides. Both run the head ref's harness. The median table goes to the job
+# summary and the raw logs to an artifact. Numbers compare only within one
+# run.
 name: bench-ab
 
 on:
@@ -24,6 +26,8 @@ on:
         description: "Space separated, from clone, storm and park"
         type: string
         default: "clone storm park"
+  pull_request:
+    types: [labeled]
 
 permissions:
   contents: read
@@ -34,13 +38,14 @@ concurrency:
 
 jobs:
   ab:
-    name: "A/B ${{ inputs.base }} against ${{ inputs.head || github.ref_name }}"
+    name: "A/B ${{ inputs.base || github.base_ref }} against ${{ inputs.head || github.head_ref || github.ref_name }}"
+    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'bench-ab'
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.head || github.ref }}
+          ref: ${{ inputs.head || github.event.pull_request.head.sha || github.ref }}
           fetch-depth: 0
           persist-credentials: false
       - name: runner facts (shared runners are noisy, so they go on the record)
@@ -48,7 +53,7 @@ jobs:
           { echo "### runner"; uname -srm; nproc; free -h | head -2; cat /proc/loadavg; git rev-parse HEAD; } | tee -a "$GITHUB_STEP_SUMMARY"
       - name: the old tree
         env:
-          BASE: ${{ inputs.base }}
+          BASE: ${{ inputs.base || github.event.pull_request.base.sha }}
         run: |
           mkdir -p "$RUNNER_TEMP/old"
           git archive "$(git rev-parse --verify "origin/$BASE^{commit}" 2>/dev/null || git rev-parse --verify "$BASE^{commit}")" | tar -x -C "$RUNNER_TEMP/old"
@@ -56,8 +61,8 @@ jobs:
         run: hack/dev/run.sh true
       - name: run the A/B
         env:
-          RUNS: ${{ inputs.runs }}
-          HARNESSES: ${{ inputs.harnesses }}
+          RUNS: ${{ inputs.runs || '3' }}
+          HARNESSES: ${{ inputs.harnesses || 'clone storm park' }}
         run: hack/bench/ab.sh "$RUNNER_TEMP/old" . "$RUNNER_TEMP/ab"
       - name: median table
         if: always()

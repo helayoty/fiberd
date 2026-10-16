@@ -103,8 +103,7 @@ fn incarnate(generation: i64, fence: String, seed: Vec<u8>) -> Result<i64> {
 fn hardware_random() -> u64 {
     #[cfg(target_arch = "x86_64")]
     {
-        // SAFETY: CPUID leaf 1 exists on every x86_64 CPU.
-        let has_rdrand = unsafe { core::arch::x86_64::__cpuid(1) }.ecx & (1 << 30) != 0;
+        let has_rdrand = core::arch::x86_64::__cpuid(1).ecx & (1 << 30) != 0;
         if has_rdrand {
             // SAFETY: the feature was checked just above.
             return unsafe { rdrand() };
@@ -113,13 +112,24 @@ fn hardware_random() -> u64 {
     0
 }
 
+/// Inline asm, because the hyperlight target refuses the rdrnd feature
+/// the intrinsic needs.
 #[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "rdrnd")]
 unsafe fn rdrand() -> u64 {
-    let mut v = 0u64;
     for _ in 0..10 {
-        // SAFETY: the caller checked CPUID for rdrand.
-        if unsafe { core::arch::x86_64::_rdrand64_step(&mut v) } == 1 {
+        let (v, ok): (u64, u8);
+        // SAFETY: the caller checked CPUID for rdrand, which writes only
+        // its register and the carry flag.
+        unsafe {
+            core::arch::asm!(
+                "rdrand {v}",
+                "setc {ok}",
+                v = out(reg) v,
+                ok = out(reg_byte) ok,
+                options(nomem, nostack),
+            );
+        }
+        if ok == 1 {
             return v;
         }
     }
