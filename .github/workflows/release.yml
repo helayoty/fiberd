@@ -213,9 +213,44 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  # The TypeScript client. The tarball npm publishes is the one the
+  # release assets carry.
+  npm-package:
+    name: build the TypeScript package
+    needs: [validate-tag, ci, integration, conformance, examples, fuzz]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+      - name: pack @fiberd/client
+        env:
+          VERSION: ${{ needs.validate-tag.outputs.version }}
+        shell: bash
+        working-directory: sdk/typescript
+        run: |
+          set -euo pipefail
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm version "$VERSION" --no-git-tag-version --allow-same-version
+          # npm shows the README, so its relative links point at the tag.
+          sed -i -E "s|\]\(([^)#:][^):]*)\)|](https://github.com/$GITHUB_REPOSITORY/blob/$TAG/sdk/typescript/\1)|g" README.md
+          mkdir -p "$RUNNER_TEMP/npm"
+          npm pack --pack-destination "$RUNNER_TEMP/npm"
+          ls "$RUNNER_TEMP/npm/fiberd-client-$VERSION.tgz"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: npm-package
+          path: ${{ runner.temp }}/npm/
+          if-no-files-found: error
+          retention-days: 7
+
   build-assets:
     name: build release archives
-    needs: [validate-tag, ci, integration, conformance, examples, fuzz, python-sdist, python-wheels]
+    needs: [validate-tag, ci, integration, conformance, examples, fuzz, python-sdist, python-wheels, npm-package]
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
@@ -230,8 +265,12 @@ jobs:
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
-      # The Python sdist and wheels join the archives under SHA256SUMS and
-      # the provenance attestation.
+      # The Python sdist and wheels and the npm tarball join the archives
+      # under SHA256SUMS and the provenance attestation.
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: npm-package
+          path: ${{ runner.temp }}/npm
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: python-*
@@ -322,8 +361,8 @@ jobs:
             pack "libfiberzygote_${VERSION}_linux_${arch}.tar.gz" "$lib"
           done
           rm -rf "$lib"
-          cp "$RUNNER_TEMP"/python/fiberd-*.tar.gz "$RUNNER_TEMP"/python/fiberd-*.whl "$dist/"
-          (cd "$dist" && sha256sum -- *.tar.gz *.whl *.spdx.json > SHA256SUMS)
+          cp "$RUNNER_TEMP"/python/fiberd-*.tar.gz "$RUNNER_TEMP"/python/fiberd-*.whl "$RUNNER_TEMP"/npm/fiberd-client-*.tgz "$dist/"
+          (cd "$dist" && sha256sum -- *.tar.gz *.whl *.tgz *.spdx.json > SHA256SUMS)
       - name: attest archive provenance
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
@@ -539,6 +578,10 @@ jobs:
 
           \`pip install 'fiberd[client]==${PYTHON_VERSION}'\`
 
+          ## TypeScript SDK
+
+          \`npm install @fiberd/client@${VERSION}\`
+
           ## Verify
 
           \`\`\`bash
@@ -589,9 +632,58 @@ jobs:
           packages-dir: dist/
           attestations: true
 
+  # npm also comes after the GitHub release, since a published version can
+  # never be reused. Re-running this job finishes a release whose publish
+  # failed. Trusted publishing, so no token is stored. The publisher on
+  # npm names this repository, release.yml and the npm environment, and
+  # npm attaches the provenance statement itself. A pre-release goes to
+  # the next dist-tag, so a plain install keeps the last final release.
+  publish-npm:
+    name: publish to npm
+    needs: [validate-tag, npm-package, publish-release]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment:
+      name: npm
+      url: https://www.npmjs.com/package/@fiberd/client/v/${{ needs.validate-tag.outputs.version }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: npm-package
+          path: npm
+      - name: publish @fiberd/client
+        env:
+          VERSION: ${{ needs.validate-tag.outputs.version }}
+          DIST_TAG: ${{ needs.validate-tag.outputs.prerelease == 'true' && 'next' || 'latest' }}
+          # Only for the first publish, before the package exists for a
+          # trusted publisher to attach to. Delete the secret afterwards.
+          NPM_BOOTSTRAP_TOKEN: ${{ secrets.NPM_BOOTSTRAP_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Trusted publishing needs npm 11.5.1 or later.
+          npm_version=$(npm --version)
+          if [[ "$(printf '%s\n' 11.5.1 "$npm_version" | sort -V | head -1)" != 11.5.1 ]]; then
+            echo "npm $npm_version cannot use trusted publishing, which needs 11.5.1 or later" >&2
+            exit 1
+          fi
+          if [[ -n "$NPM_BOOTSTRAP_TOKEN" ]]; then
+            echo "::warning::publishing with NPM_BOOTSTRAP_TOKEN. Set up the trusted publisher on npm, then delete the secret and revoke the token."
+            npmrc="$RUNNER_TEMP/npmrc"
+            (umask 077 && printf '//registry.npmjs.org/:_authToken=%s\n' "$NPM_BOOTSTRAP_TOKEN" > "$npmrc")
+            export NPM_CONFIG_USERCONFIG="$npmrc"
+          fi
+          npm publish "npm/fiberd-client-$VERSION.tgz" --access public --provenance --tag "$DIST_TAG"
+
   cleanup:
     name: clean up a failed or cancelled release
-    needs: [validate-tag, ci, integration, conformance, examples, fuzz, python-sdist, python-wheels, build-assets, build-image, release-draft, publish-image, publish-release, publish-pypi]
+    needs: [validate-tag, ci, integration, conformance, examples, fuzz, python-sdist, python-wheels, npm-package, build-assets, build-image, release-draft, publish-image, publish-release, publish-pypi, publish-npm]
     if: >-
       always() && needs.validate-tag.result == 'success' &&
       (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled'))
