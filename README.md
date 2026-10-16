@@ -91,7 +91,7 @@ Callers can use the [Go client](sdk/go/client), [Python client](sdk/python/READM
 
 CI runs the unit tests (`make test`) on linux/amd64 and macOS as a non-root user. The integration suites under `tests/` and each example's `tests/` build only with `-tags integration` and run as root in the dev container (`make integration-tests`). Run `make test` and `make lint` before sending a change.
 
-`make integration-tests` and `make linux-test` rebuild the TypeScript client first. They need Node.js 22.12 or later on the host and dependencies installed with `npm ci --ignore-scripts --prefix sdk/typescript`.
+`make integration-tests` and `make linux-test` rebuild the TypeScript client first when its dependencies are installed (`npm ci --ignore-scripts --prefix sdk/typescript`, Node.js 22.12 or later). Without them they leave out the TypeScript suite and say so.
 
 ## License
 

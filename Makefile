@@ -29,8 +29,16 @@ FUZZTIME ?= 120
 # Extra flags for the unit tests (CI passes -cover to print coverage).
 TESTFLAGS ?=
 # The integration suites. Every file under tests/ builds only with the
-# integration tag, so `make test` compiles none of them.
+# integration tag, so `make test` compiles none of them. The TypeScript
+# suite needs the client built from sdk/typescript/node_modules, which CI
+# installs. A checkout without them runs every other suite and says so.
+ifneq ($(wildcard sdk/typescript/node_modules),)
 INTEGRATION_PKGS := ./tests/integration/...
+TS_DIST := typescript-build
+else
+INTEGRATION_PKGS := $(shell GOOS=linux $(GO) list -tags integration ./tests/integration/... | grep -v /typescript)
+TS_DIST := typescript-skipped
+endif
 # Where the conformance targets that run in the dev container keep their
 # state and logs. On macOS it is the named volume fiberd-conform, mounted
 # at /conform by hack/dev/run.sh, because bin/ in the shared folder is slow
@@ -46,7 +54,7 @@ endif
 .PHONY: all build test integration-tests vet lint proto proto-lint proto-check clean \
         bench zygote fuzz conform-stub conform-signed conform-logs conform-proc conform-proc-python conform-gvisor conform-gvisor-python conform-runc conform-runc-python conform-hyperlight-fake conform-hyperlight \
         python-build python-test python-dist python-proto python-proto-check \
-        typescript-build typescript-test typescript-proto typescript-proto-check \
+        typescript-build typescript-skipped typescript-test typescript-proto typescript-proto-check \
         hyperlight-helper linux-hyperlight-check overcommit kind-up kind-down kind-image conform-kind slurm-up slurm-down conform-slurm example-knative example-knative-kvm example-kata example-substrate \
         registry-start mobility linux-shell linux-check linux-gvisor-check linux-test linux-lint bench-e2e \
         compare-phase0 compare-phase1 compare-phase2 compare-phase3 compare-phase4 compare-down
@@ -57,6 +65,9 @@ all: build
 
 typescript-build: ## compile the Node.js client and its type declarations
 	npm --prefix sdk/typescript run build
+
+typescript-skipped:
+	@echo "sdk/typescript/node_modules is missing, so tests/integration/typescript is left out. npm ci --ignore-scripts --prefix sdk/typescript includes it."
 
 typescript-test: ## compile and test the Node.js client against in-process servers
 	npm --prefix sdk/typescript test
@@ -191,7 +202,7 @@ test: ## unit tests (host OS, non-root; nothing under tests/ is compiled), fiber
 	$(GO) test -race -count=1 $(TESTFLAGS) $(PKGS)
 	@for m in $(EXAMPLES); do echo "--- $$m"; (cd $$m && $(GO) test -race -count=1 $(TESTFLAGS) ./...) || exit 1; done
 
-integration-tests: typescript-build ## the integration suites (tests/integration and the examples' tests/) as root in the dev container, built with -tags integration
+integration-tests: $(TS_DIST) ## the integration suites (tests/integration and the examples' tests/) as root in the dev container, built with -tags integration
 	hack/dev/run.sh sh -ec 'go test -tags integration -count=1 $(INTEGRATION_PKGS); \
 	  for m in $(EXAMPLES); do [ -d $$m/tests ] || continue; echo "--- $$m"; (cd $$m && go test -tags integration -count=1 ./tests/...); done'
 
@@ -275,7 +286,7 @@ linux-check: ## probe the container for cgroup v2, PSI, criu, gcc
 linux-gvisor-check: ## probe runsc in the container: run, checkpoint/restore, host unix sockets, self-checkpoint
 	hack/dev/run.sh hack/dev/gvisor-check.sh
 
-linux-test: typescript-build ## unit tests as uid 1001 (the GitHub runner's uid, not nobody, so a chown to 65534 cannot pass by luck), then the integration suites as root, inside the container
+linux-test: $(TS_DIST) ## unit tests as uid 1001 (the GitHub runner's uid, not nobody, so a chown to 65534 cannot pass by luck), then the integration suites as root, inside the container
 	hack/dev/run.sh sh -ec 'go mod download; for m in $(EXAMPLES); do (cd $$m && go mod download); done; \
 	  mkdir -p /tmp/nr && chmod 777 /tmp/nr; \
 	  env -u FIBERD_CGROUP_ROOT setpriv --reuid=1001 --regid=1001 --clear-groups --inh-caps=-all \
