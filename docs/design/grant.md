@@ -31,7 +31,7 @@ sequenceDiagram
 
 **Token checks.** Each of these must pass before the grant is trusted.
 
-- A token over 8 KiB is refused before parsing.
+- A token over 8 KiB is refused before parsing. The same bound holds for the unverified UID peek, and the grant directory never reads a larger file.
 - Only EdDSA and ES256 are accepted, before any key lookup, so `none` and symmetric algorithms never reach verification. The token has exactly one signature and a `kid`, and its algorithm must match the key's.
 - The registered claims (`iss`, `aud`, `jti`, `exp`) must agree with the grant claim inside the token.
 - The UID must be a DNS-1123 label, and the tenant, when set, one path segment ([grant fields](../protocol.md#grant-fields)).
@@ -40,7 +40,7 @@ sequenceDiagram
 
 The verifier does not enforce `exp`. Lease expiry is a capacity miss the [core](core.md) handles.
 
-**Keys.** Keys come only from OIDC discovery of the configured issuer, and the discovery document must name that same issuer. Keys are looked up by `kid` alone. An unknown `kid` triggers one refresh, at most once a minute. A key set older than `-jwks-max-stale` is refreshed once, and is refused if still stale. A stale key set, or one never loaded, makes the token unverifiable rather than bad, so the answer is [SHED](../glossary.md#clone-misses), not `Unauthenticated`. Each refresh is the standalone home's liveness signal ([home.md](home.md)).
+**Keys.** Keys come only from OIDC discovery of the configured issuer, and the discovery document must name that same issuer. Neither the discovery fetch nor the key fetch follows a redirect, and an https issuer must name an https `jwks_uri`. Keys are looked up by `kid` alone. An unknown `kid` triggers one refresh, at most once a minute. A key set older than `-jwks-max-stale` is refreshed once, and is refused if still stale. A stale key set, or one never loaded, makes the token unverifiable rather than bad, so the answer is [SHED](../glossary.md#clone-misses), not `Unauthenticated`. Each refresh is the standalone home's liveness signal ([home.md](home.md)).
 
 **Caller binding.** The `cnf` claim holds the `x5t#S256` thumbprint, the base64url SHA-256 of the caller's whole certificate. A bound grant presented over another certificate, or over plaintext, is refused. A home serving mutual TLS refuses unbound grants. When a token names another caller than the already admitted grant with that UID, it is refused until the home delivers the grant again.
 

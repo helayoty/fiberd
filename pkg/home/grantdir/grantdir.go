@@ -67,9 +67,12 @@ func scan(ctx context.Context, dir string, seen map[string]fileState, ch chan<- 
 	sort.Strings(names)
 	for _, name := range names {
 		path := filepath.Join(dir, name)
+		// Reading a FIFO or a device could block the poll, and a file
+		// over the token size limit is never a token, so neither is a
+		// grant. Neither is read.
 		info, err := os.Stat(path)
-		if err != nil || !info.Mode().IsRegular() {
-			continue // reading a FIFO or a device could block the poll
+		if err != nil || !info.Mode().IsRegular() || info.Size() > grant.MaxTokenBytes {
+			continue
 		}
 		present[name] = true
 		if st, ok := seen[name]; ok && st.mod.Equal(info.ModTime()) && st.size == info.Size() {

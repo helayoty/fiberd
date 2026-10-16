@@ -268,10 +268,10 @@ func TestCacheRefresh(t *testing.T) {
 	closed := httptest.NewServer(http.NotFoundHandler())
 	closed.Close()
 
-	// The handlers see the server URL through self, set once it exists.
 	type handlers struct {
-		disc func(w http.ResponseWriter, self string)
-		jwks func(w http.ResponseWriter)
+		disc  func(w http.ResponseWriter, self string)
+		jwks  func(w http.ResponseWriter)
+		moved func(w http.ResponseWriter, self string) // what /moved serves, for the redirect cases
 	}
 	discOK := func(w http.ResponseWriter, self string) {
 		_ = json.NewEncoder(w).Encode(map[string]string{"issuer": self + "/", "jwks_uri": self + "/jwks"})
@@ -279,7 +279,14 @@ func TestCacheRefresh(t *testing.T) {
 	jwksOf := func(keys ...jose.JSONWebKey) func(http.ResponseWriter) {
 		return func(w http.ResponseWriter) { _ = json.NewEncoder(w).Encode(jose.JSONWebKeySet{Keys: keys}) }
 	}
+	// redirect sends the client on to /moved, which serves the real thing.
+	redirect := func(w http.ResponseWriter, self string) {
+		w.Header().Set("Location", self+"/moved")
+		w.WriteHeader(http.StatusFound)
+	}
 
+	// The handlers see the server URL through self, set once it exists.
+	var self string
 	cases := []struct {
 		name       string
 		issuerURL  string // overrides the test server when set
@@ -308,6 +315,15 @@ func TestCacheRefresh(t *testing.T) {
 			h: handlers{disc: func(w http.ResponseWriter, self string) {
 				_ = json.NewEncoder(w).Encode(map[string]string{"issuer": self})
 			}}, wantErr: "no jwks_uri"},
+		// Neither fetch follows a redirect, even to the same host, so a
+		// discovery document or key set cannot be served from elsewhere.
+		{name: "a discovery document behind a redirect fails",
+			h:       handlers{disc: redirect, moved: discOK, jwks: jwksOf(good.Public())},
+			wantErr: "redirect"},
+		{name: "a key set behind a redirect fails",
+			h: handlers{disc: discOK, jwks: func(w http.ResponseWriter) { redirect(w, self) },
+				moved: func(w http.ResponseWriter, _ string) { jwksOf(good.Public())(w) }},
+			wantErr: "redirect"},
 		{name: "a key set answered with an error status fails",
 			h:       handlers{disc: discOK, jwks: func(w http.ResponseWriter) { http.Error(w, "boom", http.StatusInternalServerError) }},
 			wantErr: "http 500"},
@@ -322,13 +338,14 @@ func TestCacheRefresh(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			var self string
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch {
 				case r.URL.Path == "/.well-known/openid-configuration" && tc.h.disc != nil:
 					tc.h.disc(w, self)
 				case r.URL.Path == "/jwks" && tc.h.jwks != nil:
 					tc.h.jwks(w)
+				case r.URL.Path == "/moved" && tc.h.moved != nil:
+					tc.h.moved(w, self)
 				default:
 					http.NotFound(w, r)
 				}
