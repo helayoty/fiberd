@@ -2,7 +2,7 @@
 
 A [backend](../../docs/glossary.md#backend) whose mechanism is not reachable from Go plugs into fiberd through a **helper process**. Hyperlight has a Rust host API only, so it is one. fiberd starts one helper per [warm](../../docs/glossary.md#warm) [template](../../docs/glossary.md#template), inside the [grant](../../docs/glossary.md#grant)'s [cgroup](../../docs/glossary.md#cgroup), with a unix socketpair as the helper's fd 3, and speaks this line protocol on it. It is the [zygote](../../docs/glossary.md#zygote) protocol of `sdk/c/template/libfiberzygote.h` extended with [park](../../docs/glossary.md#park) and resume, with [fibers](../../docs/glossary.md#fiber) named by [fence](../../docs/glossary.md#fence) rather than pid, because the helper's fibers are sandboxes inside one process, not processes of their own, and with the [generation](../../docs/glossary.md#generation) and seed on the `CLONE` and `RESUME` lines rather than on a channel.
 
-![Runtime/helper sequence: PARKED acknowledges snapshot writing, the host fsyncs before KILL, and Park returns after manifest writing and exit cleanup. A later RESUME restores state under a new fence.](../../docs/images/hyperlight-helper-protocol.svg)
+![Runtime/helper sequence: PARKED acknowledges snapshot writing, the host fsyncs before KILL, and Park returns after manifest writing and exit cleanup. A later RESUME restores state under a new fence. CLONE and RESUME carry the generation and a fresh seed.](../../docs/images/hyperlight-helper-protocol.svg)
 
 A sync park fsyncs every file under the snapshot directory, nested ones and the manifest included, before KILL.
 
