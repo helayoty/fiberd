@@ -28,4 +28,7 @@ jobs:
           cache-dependency-path: sdk/typescript/package-lock.json
       - run: npm ci --ignore-scripts --prefix sdk/typescript
       - run: make linux-check
+      # The zygote library's Rust core, its undefined symbols against the
+      # allowlist and its PAC count, before every suite links it.
+      - run: hack/dev/run.sh make zygote-check
       - run: make linux-test
