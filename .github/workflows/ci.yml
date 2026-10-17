@@ -76,6 +76,11 @@ jobs:
       - run: make build
       # Coverage is printed per package for the log only. Nothing fails on it.
       - run: make test TESTFLAGS=-cover
+      # The zygote library's Rust core, its unit tests, clippy and rustfmt.
+      # Linux only, since the core calls glibc. rust-toolchain.toml in the
+      # crate installs its pinned toolchain on the first cargo call.
+      - if: runner.os == 'Linux'
+        run: make zygote-test
 
   typescript:
     name: "TypeScript client (${{ matrix.os }}, Node.js ${{ matrix.node }}): types, tests, tarball and proto drift"
