@@ -2,7 +2,7 @@
 
 This page is the canonical source for fiberd performance measurements. It separates benchmark results from conformance and acceptance tests, and it records enough context to explain what each number measures.
 
-The head-to-head comparison below is the latest run. The runs after it are historical results that were not rerun. Results from different runs should not be combined because the harness, concurrency, backend, and environment change the outcome.
+The head-to-head comparison below and the incarnation record A/B after it are the latest runs. The runs after them are historical results that were not rerun. Results from different runs should not be combined because the harness, concurrency, backend, and environment change the outcome.
 
 ![One uncached activation, with nested measurement spans: runtime call to ready sits inside the activator's Clone RPC, which sits inside the client's HTTP request and response. Verification and ledger work precede activation; audit and commit precede the Clone result; workload connection and execution follow.](./images/benchmark-methodology.svg)
 
@@ -95,6 +95,25 @@ Idle memory is what each instance adds, read from its cgroup after 30 seconds id
 - **Cold Pods at 50.** The kubelet pulls at most 5 images a second by default, so part of the cold Pod tail (p99 25 s) is pull throttling.
 - **One runner, one run.** This runner's EPYC 7763 is a generation older than the EPYC 9V74 of the previous run, and Pods were about a quarter slower on it at a burst of 10. Compare rows within this run only.
 - **agent-sandbox with a pool of 10** has no resume figure here. Only 2 of its 10 sandboxes were ready when the density step read it.
+
+## Cost of the incarnation record, CI A/B
+
+Every proc and runc fiber now gets its own channel and a record with a fresh seed, so the template can give each fiber its own random state. That costs about 70 to 100 µs per clone. The cost is accepted as the price of the per-fiber seed.
+
+- **Run.** [bench-ab 38983508961](https://github.com/helayoty/fiberd/actions/runs/38983508961), 2026-10-16. Old is main at c87de10, new is clone-signal at 60c4a26. GitHub ubuntu-24.04 runner, 4 vCPU, 15 GiB, kernel 6.17, amd64.
+- **Method.** `hack/bench/ab.sh` in one job, old and new alternating, one discarded warm-up each, then 3 timed runs per side. The table is the median of the per-run p50. Every run passed. The host load before each run is in the raw logs.
+
+| p50, ms | main | clone-signal | change |
+| --- | ---: | ---: | ---: |
+| proc single clone | 0.84 | 0.91 | +0.07 |
+| runc single clone | 0.70 | 0.80 | +0.10 |
+| client round trip, sequential | 1.23 | 1.27 | +0.04 |
+| client round trip, 50 at once | 16.1 | 16.7 | +0.6 |
+| runc resume | 51.4 | 52.6 | +1.2 |
+| proc park, proc resume | 51.4, 51.2 | 51.5, 51.5 | flat |
+| gVisor clone, resume | 136, 143 | 135, 128 | flat |
+
+A client's round trip grows by about 3%, because the clone is only part of it. The head-to-head above ran before this change. The gVisor rows vary by tens of ms between runs here, so they read as flat.
 
 ## gVisor warm pool, local A/B
 
