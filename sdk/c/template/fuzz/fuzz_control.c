@@ -15,13 +15,15 @@
  * zygote believe fz_init took it a mount namespace of its own, so
  * PREPARE mntns reaches the mount steps (and their shims) rather than
  * refusing at once. */
+/* The hooks this harness writes itself, for the Rust (common.h). The
+ * #defines below catch the same calls in the C. */
+#define FZ_SHIM_SYSCALL
+#define FZ_SHIM_MOUNT
+#define FZ_SHIM_UMOUNT2
+#define FZ_SHIM_MKDIR
 #include "common.h"
 #include <pthread.h>
 #include <sys/stat.h>
-long fz_fuzz_syscall(long nr, ...);
-int fz_fuzz_mount(const char *src, const char *target, const char *type, unsigned long flags, const void *opts);
-int fz_fuzz_umount2(const char *target, int flags);
-int fz_fuzz_mkdir(const char *path, mode_t mode);
 #define syscall fz_fuzz_syscall
 #define mount fz_fuzz_mount
 #define umount2 fz_fuzz_umount2
@@ -78,8 +80,7 @@ static void *drain(void *arg) {
 /* The zygote keeps what HIDE, DROP and RUNDIR said for the children it
  * will fork. Each input starts from a fresh zygote. */
 static void reset_zygote(void) {
-    for (int i = 0; i < nhide; i++) free(hide_paths[i]);
-    for (int i = 0; i < ndrop; i++) free(drop_paths[i]);
+    /* The path tables are fixed storage, so forgetting the count is all. */
     nhide = ndrop = 0;
     memset(hide_covered, 0, sizeof hide_covered);
     paths_refused = NULL;

@@ -1,12 +1,26 @@
 /* fuzz_identity delivers one message on a fiber's channel, as fiberd
- * queues the incarnation record before the CLONE, and lets
- * read_incarnation take it apart ('i' then eleven NUL-ended fields),
- * with descriptors it must not keep.
+ * queues the incarnation record before the CLONE, and lets the child's
+ * record read take it apart ('i' then eleven NUL-ended fields), with
+ * descriptors it must not keep.
  *
  * The input is [descriptor count][message bytes]. An empty message is a
  * closed channel instead. */
 #include "common.h"
 #include "../libfiberzygote.c"
+
+/* read_incarnation is the child's, in core/src/child.rs, and private
+ * there, since only scrub_and_run calls it. This is the same three
+ * steps over the two entries it is made of, channel_recv and
+ * parse_incarnation, both the core's through the shim. */
+static int read_incarnation(int fd, const char **why) {
+    int passed;
+    ssize_t r = channel_recv(fd, 0, born.buf, sizeof born.buf, &passed);
+    if (passed >= 0) close(passed);
+    if (r < 0 && errno == EPROTO) { *why = "record too long"; return -1; }
+    if (r < 0) { *why = "recvmsg on the channel failed"; return -1; }
+    if (r == 0) { *why = "channel closed before the record arrived"; return -1; }
+    return parse_incarnation(&born, (size_t)r, why);
+}
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     if (size < 1) return 0;

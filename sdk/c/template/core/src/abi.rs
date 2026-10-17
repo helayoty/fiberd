@@ -23,6 +23,68 @@ pub const SEED_LEN: usize = 32;
 pub const RUNDIR_MAX: usize = 4096;
 /// The lines HIDE and DROP may keep, each kind.
 pub const MAX_PATHS: usize = 16;
+/// A kept HIDE or DROP path's storage, the size of a control line
+/// (MAX_LINE in C). A line is at most MAX_LINE - 1 characters, so the
+/// path after its five-character prefix always fits whole, as strdup
+/// kept it. A smaller table would cut a long path, and stat would then
+/// answer for another name than the one fiberd sent. Untouched bss
+/// costs nothing and a checkpoint skips untouched pages.
+pub const KEEP_MAX: usize = 65536;
+/// The fiber's channel to fiberd, FZ_CHANNEL_FD in the header.
+pub const FZ_CHANNEL_FD: c_int = 4;
+/// The peer of the pair a non-handoff fiber makes, FZ_CHANNEL_PEER_FD.
+pub const FZ_CHANNEL_PEER_FD: c_int = 5;
+
+/// fz_on_fiber in the header: the template's entry, which returns the
+/// fiber's exit code.
+pub type OnFiber = Option<unsafe extern "C" fn(*const Incarnation) -> c_int>;
+
+/// struct fz_rs_child in libfiberzygote.c: what the child's path needs
+/// from the zygote, built by handle_clone before the clone. The statics
+/// the child resets stay C until stage 5, and the C resets them with
+/// plain stores before the one call into the core. The one it cannot,
+/// served_generation, is known only once the record is read, so the
+/// core writes it through the pointer here.
+#[repr(C)]
+pub struct Child {
+    /// The ready pipe's read end, the zygote's, closed first.
+    pub ready_r: c_int,
+    /// The ready pipe's write end, moved to fd 3.
+    pub ready_w: c_int,
+    /// fiberd's channel end as passed on the CLONE line.
+    pub channel: c_int,
+    /// The zygote's SIGCHLD descriptor, or -1.
+    pub sigchld_fd: c_int,
+    /// The pidns option.
+    pub pidns: c_int,
+    /// The mntns option.
+    pub mntns: c_int,
+    /// The nocaps option.
+    pub nocaps: c_int,
+    /// FIBERD_USERNS_NESTED=deny was given.
+    pub deny_nested_userns: c_int,
+    /// How many HIDE paths hide holds.
+    pub nhide: c_int,
+    /// How many DROP paths drop holds.
+    pub ndrop: c_int,
+    /// The fence the CLONE named, NUL-ended.
+    pub fence: *const c_char,
+    /// The store the birth record is read into, born in C.
+    pub born: *mut RecordStore,
+    /// The generation this process serves, set from the record.
+    pub served_generation: *mut c_uint,
+    /// The template's entry.
+    pub on_fiber: OnFiber,
+    /// The zygote's own executable as /proc/self/exe named it, NUL-ended,
+    /// empty when it could not be read.
+    pub self_exe: *const c_char,
+    /// The HIDE paths, nhide of them, each NUL-ended in KEEP_MAX bytes.
+    pub hide: *const [c_char; KEEP_MAX],
+    /// Which HIDE paths prepare_ns covered, one byte each.
+    pub hide_covered: *const u8,
+    /// The DROP paths, ndrop of them.
+    pub drop: *const [c_char; KEEP_MAX],
+}
 
 /// struct fz_rs_clone in libfiberzygote.c: what the Rust parser made of
 /// a CLONE line, for handle_clone to answer from. The pointers point
@@ -140,4 +202,27 @@ const _: () = {
     assert!(offset_of!(CloneOut, mntns) == 32);
     assert!(offset_of!(CloneOut, nocaps) == 36);
     assert!(offset_of!(CloneOut, session_len) == 40);
+    assert!(size_of::<Child>() == 104);
+    assert!(offset_of!(Child, ready_r) == 0);
+    assert!(offset_of!(Child, ready_w) == 4);
+    assert!(offset_of!(Child, channel) == 8);
+    assert!(offset_of!(Child, sigchld_fd) == 12);
+    assert!(offset_of!(Child, pidns) == 16);
+    assert!(offset_of!(Child, mntns) == 20);
+    assert!(offset_of!(Child, nocaps) == 24);
+    assert!(offset_of!(Child, deny_nested_userns) == 28);
+    assert!(offset_of!(Child, nhide) == 32);
+    assert!(offset_of!(Child, ndrop) == 36);
+    assert!(offset_of!(Child, fence) == 40);
+    assert!(offset_of!(Child, born) == 48);
+    assert!(offset_of!(Child, served_generation) == 56);
+    assert!(offset_of!(Child, on_fiber) == 64);
+    assert!(offset_of!(Child, self_exe) == 72);
+    assert!(offset_of!(Child, hide) == 80);
+    assert!(offset_of!(Child, hide_covered) == 88);
+    assert!(offset_of!(Child, drop) == 96);
+    assert!(
+        KEEP_MAX >= 4096,
+        "a realpath result (PATH_MAX) must fit a kept path"
+    );
 };

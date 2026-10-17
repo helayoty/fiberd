@@ -22,6 +22,16 @@ allow="$allow __addtf3 __multf3 __subtf3 __unordtf2 __udivti3"
 # memmove is copy_within, which moves mountinfo's partial line to the
 # front and an unescaped mount point down, as lock_sys did in C.
 allow="$allow memmove"
+# The child's path (child.rs, mounts.rs) and the sys seam make the system
+# calls the C made there: the raw syscall for clone3, clone, capset and
+# close_range, prctl for the filter and the capability drop, openat,
+# write, close and _exit in the legacy clone's child, mount, umount2,
+# mkdir and open behind the seam, stat and chdir for the mount steps,
+# dup2, fcntl, socketpair and recvmsg for the descriptors and the record,
+# setsid, signal, sigemptyset and sigprocmask for the session and the
+# mask, and strcmp for the fence check.
+allow="$allow syscall prctl openat close _exit mount umount2 mkdir open"
+allow="$allow stat chdir dup2 fcntl socketpair recvmsg setsid signal sigemptyset sigprocmask strcmp"
 deny_re='^(malloc|calloc|realloc|free|__rust_alloc.*)$'
 
 # The symbol tables of every member. readelf rather than nm, because GNU

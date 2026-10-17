@@ -2,8 +2,164 @@
 //! through libc, whose memchr and strlen are the SIMD loops the C file
 //! had. A Rust byte loop measured 8x slower on a 4 KB handoff record
 //! (bin/rust-core/DESIGN.md, section 5).
+//!
+//! The second half is the seam for the calls the C fuzz harnesses shim
+//! with a #define (fuzz/fuzz_control.c, fuzz/fuzz_procfiles.c). With the
+//! `fuzzshim` feature each one calls the `fz_fuzz_*` hook a harness
+//! defines, with the C signature the harness gives it, so no harness
+//! really clones or mounts. Without the feature each is the libc call.
+//! Every mount, umount2, mkdir, open and raw syscall of the core goes
+//! through here, so one feature flag covers them all.
 
-use core::ffi::c_char;
+use core::ffi::{c_char, c_int, c_long, c_ulong, c_void};
+
+/// The hooks the harnesses define, with exactly their C signatures.
+#[cfg(feature = "fuzzshim")]
+mod hook {
+    use core::ffi::{c_char, c_int, c_long, c_ulong, c_void};
+
+    unsafe extern "C" {
+        pub fn fz_fuzz_syscall(nr: c_long, ...) -> c_long;
+        pub fn fz_fuzz_mount(
+            src: *const c_char,
+            target: *const c_char,
+            fstype: *const c_char,
+            flags: c_ulong,
+            data: *const c_void,
+        ) -> c_int;
+        pub fn fz_fuzz_umount2(target: *const c_char, flags: c_int) -> c_int;
+        pub fn fz_fuzz_mkdir(path: *const c_char, mode: libc::mode_t) -> c_int;
+        pub fn fz_fuzz_open(path: *const c_char, flags: c_int, ...) -> c_int;
+    }
+}
+
+/// syscall(2) with up to five arguments, as the C file makes its raw
+/// calls (clone3, clone, capset, unshare, close_range). The wrapper sets
+/// errno and returns -1 as glibc's does. Missing arguments are zero,
+/// which the kernel ignores and the C passed for clone's tids and tls.
+///
+/// # Safety
+/// The arguments must be what system call nr takes, pointers live for
+/// the call, and the caller must know what the call does to the process
+/// (clone returns twice).
+pub unsafe fn syscall(nr: c_long, args: [c_long; 5]) -> c_long {
+    let [a, b, c, d, e] = args;
+    #[cfg(feature = "fuzzshim")]
+    // SAFETY: by the contract above, and the hook takes what syscall takes.
+    unsafe {
+        hook::fz_fuzz_syscall(nr, a, b, c, d, e)
+    }
+    #[cfg(not(feature = "fuzzshim"))]
+    // SAFETY: by the contract above.
+    unsafe {
+        libc::syscall(nr, a, b, c, d, e)
+    }
+}
+
+/// mount(2).
+///
+/// # Safety
+/// The strings are NUL-ended and live for the call, data is what the
+/// filesystem type takes or null.
+pub unsafe fn mount(
+    src: *const c_char,
+    target: *const c_char,
+    fstype: *const c_char,
+    flags: c_ulong,
+    data: *const c_void,
+) -> c_int {
+    #[cfg(feature = "fuzzshim")]
+    // SAFETY: by the contract above.
+    unsafe {
+        hook::fz_fuzz_mount(src, target, fstype, flags, data)
+    }
+    #[cfg(not(feature = "fuzzshim"))]
+    // SAFETY: by the contract above.
+    unsafe {
+        libc::mount(src, target, fstype, flags, data)
+    }
+}
+
+/// umount2(2).
+///
+/// # Safety
+/// target is NUL-ended and live for the call.
+pub unsafe fn umount2(target: *const c_char, flags: c_int) -> c_int {
+    #[cfg(feature = "fuzzshim")]
+    // SAFETY: by the contract above.
+    unsafe {
+        hook::fz_fuzz_umount2(target, flags)
+    }
+    #[cfg(not(feature = "fuzzshim"))]
+    // SAFETY: by the contract above.
+    unsafe {
+        libc::umount2(target, flags)
+    }
+}
+
+/// mkdir(2).
+///
+/// # Safety
+/// path is NUL-ended and live for the call.
+pub unsafe fn mkdir(path: *const c_char, mode: libc::mode_t) -> c_int {
+    #[cfg(feature = "fuzzshim")]
+    // SAFETY: by the contract above.
+    unsafe {
+        hook::fz_fuzz_mkdir(path, mode)
+    }
+    #[cfg(not(feature = "fuzzshim"))]
+    // SAFETY: by the contract above.
+    unsafe {
+        libc::mkdir(path, mode)
+    }
+}
+
+/// open(2) without a mode, for flags that create nothing.
+///
+/// # Safety
+/// path is NUL-ended and live for the call.
+pub unsafe fn open(path: *const c_char, flags: c_int) -> c_int {
+    #[cfg(feature = "fuzzshim")]
+    // SAFETY: by the contract above.
+    unsafe {
+        hook::fz_fuzz_open(path, flags)
+    }
+    #[cfg(not(feature = "fuzzshim"))]
+    // SAFETY: by the contract above.
+    unsafe {
+        libc::open(path, flags)
+    }
+}
+
+/// open(2) with a mode, for O_CREAT.
+///
+/// # Safety
+/// path is NUL-ended and live for the call.
+pub unsafe fn open_mode(path: *const c_char, flags: c_int, mode: libc::mode_t) -> c_int {
+    #[cfg(feature = "fuzzshim")]
+    // SAFETY: by the contract above, and a mode is what the hook's
+    // variadic tail takes.
+    unsafe {
+        hook::fz_fuzz_open(path, flags, mode as c_int)
+    }
+    #[cfg(not(feature = "fuzzshim"))]
+    // SAFETY: by the contract above.
+    unsafe {
+        libc::open(path, flags, mode as c_int)
+    }
+}
+
+/// The thread's errno.
+pub fn errno() -> c_int {
+    // SAFETY: errno is the thread's own.
+    unsafe { *libc::__errno_location() }
+}
+
+/// Sets the thread's errno, once, at the boundary.
+pub fn set_errno(e: c_int) {
+    // SAFETY: errno is the thread's own.
+    unsafe { *libc::__errno_location() = e }
+}
 
 /// The index of the first NUL in s, or s.len() when there is none.
 pub fn nul_at(s: &[u8]) -> usize {

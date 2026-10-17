@@ -21,6 +21,13 @@ doctest = false
 [dependencies]
 libc = { version = "0.2.191", default-features = false }
 
+[features]
+# fuzzshim routes mount, umount2, mkdir, open and every raw syscall
+# (clone3 among them) to extern "C" fz_fuzz_* hooks the C fuzz harnesses
+# define (fuzz/common.h), so a harness never really mounts or clones.
+# Only fuzz/run.sh turns it on.
+fuzzshim = []
+
 # cargo-fuzz builds the library with --cfg fuzzing (fuzz/), which leaves
 # the panic handler to the harness.
 [lints.rust]
