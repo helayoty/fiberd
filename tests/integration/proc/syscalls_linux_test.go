@@ -87,7 +87,7 @@ func fiberCalls(t *testing.T, path string) []string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	byPID := map[string][]string{}
 	var fiber string
 	sc := bufio.NewScanner(f)
