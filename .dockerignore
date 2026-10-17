@@ -15,6 +15,8 @@ fiberd
 examples/substrate/ateom-fiberd
 hack/hyperlight/guest/target
 hack/hyperlight/helper/target
+sdk/c/template/core/target
+sdk/c/template/core/fuzz/target
 **/*.test
 **/*.log
 

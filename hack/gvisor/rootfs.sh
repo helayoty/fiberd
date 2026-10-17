@@ -39,13 +39,18 @@ elif [ "$ARCH" = aarch64 ]; then
   exit 1
 fi
 if [ "$ARCH" = aarch64 ]; then FLAGS="$FLAGS -mbranch-protection=none"; fi
+# The library's Rust core, a static archive linked after the C. cargo
+# runs in the crate, so rustup takes the toolchain it pins. Rust emits no
+# PAC unless asked, and the check below covers its objects too.
+(cd sdk/c/template/core && cargo build --release --locked --quiet)
+CORE=sdk/c/template/core/target/release/libfiberzygote_core.a
 # With TLS, so handoff grants work on the runc backend. The static
 # OpenSSL's lookup warnings are about resolver calls the zygote never
 # makes. ZYGOTE_CFLAGS and ZYGOTE_LDFLAGS from the Makefile, with
 # -static-pie in place of -pie so the binary stays self-contained.
 # shellcheck disable=SC2086  # $FLAGS is a list
 gcc -static-pie -D_FORTIFY_SOURCE=3 -O2 -fstack-protector-strong -fstack-clash-protection -fPIE -Wformat=2 -Werror=format-security \
-  -Wl,-z,relro,-z,now -Wall -pthread $FLAGS -DFZ_TLS -o "$OUT/bin/refzygote" sdk/c/template/refzygote.c sdk/c/template/libfiberzygote.c -lssl -lcrypto -ldl 2>&1 | grep -v "requires at runtime the shared libraries\|^/usr/bin/ld: .*in function" >&2 || true
+  -Wl,-z,relro,-z,now -Wall -pthread $FLAGS -DFZ_TLS -o "$OUT/bin/refzygote" sdk/c/template/refzygote.c sdk/c/template/libfiberzygote.c "$CORE" -lssl -lcrypto -ldl 2>&1 | grep -v "requires at runtime the shared libraries\|^/usr/bin/ld: .*in function" >&2 || true
 [ -x "$OUT/bin/refzygote" ] || { echo "rootfs.sh: refzygote did not build" >&2; exit 1; }
 if [ "$ARCH" = aarch64 ]; then
   command -v objdump >/dev/null || { echo "rootfs.sh: objdump is needed to check $OUT/bin/refzygote for PAC" >&2; exit 1; }

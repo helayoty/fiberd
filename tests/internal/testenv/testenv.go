@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -110,13 +111,32 @@ func ZygoteBuildFlags(goarch string) []string {
 	return append(flags, "-pie", "-Wl,-z,relro,-z,now")
 }
 
+// CoreArchive builds the zygote library's Rust core
+// (sdk/c/template/core) once per test binary and returns the static
+// archive every C build of the library links after libfiberzygote.c.
+// cargo runs in the crate, so rustup takes the toolchain its
+// rust-toolchain.toml pins.
+var CoreArchive = sync.OnceValues(func() (string, error) {
+	dir := filepath.Join(RepoRoot(), "sdk", "c", "template", "core")
+	build := exec.Command("cargo", "build", "--release", "--locked")
+	build.Dir = dir
+	if out, err := build.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("build the zygote core: %w: %s", err, out)
+	}
+	return filepath.Join(dir, "target", "release", "libfiberzygote_core.a"), nil
+})
+
 // BuildZygote compiles the reference zygote with TLS for handoff grants
 // into dir and returns the binary's path.
 func BuildZygote(dir string) (string, error) {
+	core, err := CoreArchive()
+	if err != nil {
+		return "", err
+	}
 	bin := filepath.Join(dir, "refzygote")
 	zygote := filepath.Join(RepoRoot(), "sdk", "c", "template")
 	args := append(ZygoteBuildFlags(runtime.GOARCH), "-pthread", "-DFZ_TLS", "-o", bin,
-		filepath.Join(zygote, "refzygote.c"), filepath.Join(zygote, "libfiberzygote.c"), "-lssl", "-lcrypto")
+		filepath.Join(zygote, "refzygote.c"), filepath.Join(zygote, "libfiberzygote.c"), core, "-lssl", "-lcrypto")
 	build := exec.Command("gcc", args...)
 	build.Stderr = os.Stderr
 	if err := build.Run(); err != nil {

@@ -267,22 +267,15 @@ static ssize_t recv_line(int fd, char *buf, size_t cap, int fds_out[MAX_PASSED])
     return -1;
 }
 
-static int hexval(char c) {
-    if (c >= '0' && c <= '9') return c - '0';
-    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-    return -1;
-}
+/* The record parser lives in the Rust core (core/src/record.rs), behind
+ * these entries. unhex decodes hex pairs from s into out, cap bytes, until
+ * a bad digit, an odd tail or out is full, and returns the bytes written. */
+size_t fz_rs_unhex(const char *s, unsigned char *out, size_t cap);
+unsigned fz_rs_parse_generation(const char *s);
+struct record_store;
+int fz_rs_parse_incarnation(struct record_store *st, size_t n, const char **why);
 
-static size_t unhex(const char *s, unsigned char *out, size_t cap) {
-    size_t n = 0;
-    for (; s[0] && s[1] && n < cap; s += 2) {
-        int hi = hexval(s[0]), lo = hexval(s[1]);
-        if (hi < 0 || lo < 0) break;
-        out[n++] = (unsigned char)(hi << 4 | lo);
-    }
-    return n;
-}
+static size_t unhex(const char *s, unsigned char *out, size_t cap) { return fz_rs_unhex(s, out, cap); }
 
 /* ---- child bookkeeping ---- */
 
@@ -1089,6 +1082,32 @@ struct record_store {
     unsigned char payload[RECORD_MAX / 2];
 };
 static struct record_store born, polled;
+/* The Rust core mirrors these layouts (core/src/abi.rs) with the same
+ * numbers, so a field moved on either side fails to compile. */
+_Static_assert(sizeof(fz_identity_t) == 32, "fz_identity_t layout");
+_Static_assert(offsetof(fz_identity_t, key_pem) == 0, "fz_identity_t layout");
+_Static_assert(offsetof(fz_identity_t, cert_pem) == 8, "fz_identity_t layout");
+_Static_assert(offsetof(fz_identity_t, caller) == 16, "fz_identity_t layout");
+_Static_assert(offsetof(fz_identity_t, caller_pem) == 24, "fz_identity_t layout");
+_Static_assert(sizeof(fz_incarnation_t) == 80, "fz_incarnation_t layout");
+_Static_assert(offsetof(fz_incarnation_t, fence) == 0, "fz_incarnation_t layout");
+_Static_assert(offsetof(fz_incarnation_t, endpoint) == 8, "fz_incarnation_t layout");
+_Static_assert(offsetof(fz_incarnation_t, payload) == 16, "fz_incarnation_t layout");
+_Static_assert(offsetof(fz_incarnation_t, payload_len) == 24, "fz_incarnation_t layout");
+_Static_assert(offsetof(fz_incarnation_t, session) == 32, "fz_incarnation_t layout");
+_Static_assert(offsetof(fz_incarnation_t, generation) == 40, "fz_incarnation_t layout");
+_Static_assert(offsetof(fz_incarnation_t, kind) == 48, "fz_incarnation_t layout");
+_Static_assert(offsetof(fz_incarnation_t, seed) == 56, "fz_incarnation_t layout");
+_Static_assert(offsetof(fz_incarnation_t, seed_len) == 64, "fz_incarnation_t layout");
+_Static_assert(offsetof(fz_incarnation_t, identity) == 72, "fz_incarnation_t layout");
+_Static_assert(sizeof(struct record_store) == 99480, "record_store layout");
+_Static_assert(offsetof(struct record_store, session) == 0, "record_store layout");
+_Static_assert(offsetof(struct record_store, seed) == 1024, "record_store layout");
+_Static_assert(offsetof(struct record_store, seed_hex) == 1056, "record_store layout");
+_Static_assert(offsetof(struct record_store, identity) == 1064, "record_store layout");
+_Static_assert(offsetof(struct record_store, inc) == 1096, "record_store layout");
+_Static_assert(offsetof(struct record_store, buf) == 1176, "record_store layout");
+_Static_assert(offsetof(struct record_store, payload) == 66712, "record_store layout");
 /* The generation this process serves, the birth record's and then each
  * resume's. A record at or below it is a replay and is dropped. */
 static unsigned served_generation;
@@ -1105,77 +1124,15 @@ static int park_over;
 
 /* parse_generation reads a generation as the record carries it: decimal
  * digits only, 1 or more, within unsigned. 0 when it is not one. */
-static unsigned parse_generation(const char *s) {
-    if (!*s || *s == '0') return 0; /* no zero, no leading zero */
-    unsigned long v = 0;
-    for (; *s; s++) {
-        if (*s < '0' || *s > '9') return 0;
-        unsigned d = (unsigned)(*s - '0');
-        if (v > (UINT_MAX - d) / 10) return 0;
-        v = v * 10 + d;
-    }
-    return (unsigned)v;
-}
+static unsigned parse_generation(const char *s) { return fz_rs_parse_generation(s); }
 
 /* parse_incarnation takes the record in st->buf, n bytes, apart into
  * the store and fills st->inc from it. Returns 0, or -1 with a reason,
  * and st->inc is then untouched. It allocates nothing and takes no
  * lock, since the fork path runs it before on_fiber (see
- * scrub_and_run). */
+ * scrub_and_run). The body is core/src/record.rs. */
 static int parse_incarnation(struct record_store *st, size_t n, const char **why) {
-    const char *fields[RECORD_FIELDS];
-    char *rec = st->buf;
-    char *p = rec + 1, *end = rec + n;
-    if (n < 2 || rec[0] != 'i' || end[-1] != 0) { *why = "not an incarnation record"; return -1; }
-    for (int i = 0; i < RECORD_FIELDS; i++) {
-        if (p >= end) { *why = "record has too few fields"; return -1; }
-        if (!*p) { *why = "record has an empty field"; return -1; }
-        fields[i] = p;
-        p += strlen(p) + 1;
-    }
-    if (p != end) { *why = "record has too many fields"; return -1; }
-    unsigned generation = parse_generation(fields[0]);
-    if (!generation) { *why = "record names no generation"; return -1; }
-    if (strlen(fields[2]) >= FENCE_MAX) { *why = "record fence too long"; return -1; }
-    if (strlen(fields[3]) >= ENV_VALUE_MAX) { *why = "record endpoint too long"; return -1; }
-    /* The session is bounded and NUL-free as on the CLONE line, since it
-     * becomes an environment value. */
-    size_t slen = 0;
-    if (strcmp(fields[5], "-") != 0) {
-        if (strlen(fields[5]) / 2 >= sizeof st->session) { *why = "record session too long"; return -1; }
-        slen = unhex(fields[5], (unsigned char *)st->session, sizeof st->session - 1);
-        if (memchr(st->session, 0, slen)) { *why = "record session holds a NUL"; return -1; }
-    }
-    /* A handoff identity is all four fields or none. */
-    int set = 0;
-    for (int i = 6; i < 10; i++) if (strcmp(fields[i], "-") != 0) set++;
-    if (set != 0 && set != 4) { *why = "record identity is incomplete"; return -1; }
-    if (strlen(fields[10]) != 2 * SEED_LEN || unhex(fields[10], st->seed, sizeof st->seed) != SEED_LEN) {
-        memset(st->seed, 0, sizeof st->seed);
-        *why = "record seed is not 32 bytes";
-        return -1;
-    }
-    size_t plen = 0;
-    if (strcmp(fields[4], "-") != 0) plen = unhex(fields[4], st->payload, sizeof st->payload);
-    st->session[slen] = 0;
-    st->seed_hex = (char *)fields[10];
-    if (set) {
-        st->identity.key_pem = fields[6];
-        st->identity.cert_pem = fields[7];
-        st->identity.caller = fields[8];
-        st->identity.caller_pem = fields[9];
-    }
-    st->inc.fence = fields[2];
-    st->inc.endpoint = fields[3];
-    st->inc.payload = st->payload;
-    st->inc.payload_len = plen;
-    st->inc.session = st->session;
-    st->inc.generation = generation;
-    st->inc.kind = fields[1];
-    st->inc.seed = st->seed;
-    st->inc.seed_len = SEED_LEN;
-    st->inc.identity = set ? &st->identity : NULL;
-    return 0;
+    return fz_rs_parse_incarnation(st, n, why);
 }
 
 /* channel_recv takes one message off fd into buf, cap bytes, with

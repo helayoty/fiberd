@@ -20,19 +20,23 @@ CFLAGS="-g -O1 -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=all -fn
   -U_FORTIFY_SOURCE -Wall -Wextra -pthread"
 
 all=(fuzz_recv_line fuzz_identity fuzz_gvrecord fuzz_wait fuzz_procfiles fuzz_rundir fuzz_control fuzz_refzygote)
+# Every harness includes libfiberzygote.c, which calls the Rust core for
+# what has moved there (sdk/c/template/core), so each links its archive.
+CORE=sdk/c/template/core/target/release/libfiberzygote_core.a
 mode=run
 if [ "${1:-}" = build ]; then mode=build; shift; fi
 harnesses=("$@")
 [ ${#harnesses[@]} -gt 0 ] || harnesses=("${all[@]}")
 
 mkdir -p "$OUT/crashes"
+(cd sdk/c/template/core && cargo build --release --locked)
 for h in "${harnesses[@]}"; do
   extra=()
   # The reference workload includes only refzygote.c; the library is a
   # second translation unit beside it.
   [ "$h" = fuzz_refzygote ] && extra=(sdk/c/template/libfiberzygote.c)
   # shellcheck disable=SC2086  # $CFLAGS is a list
-  if ! $CLANG $CFLAGS -o "$OUT/$h" "sdk/c/template/fuzz/$h.c" "${extra[@]}"; then
+  if ! $CLANG $CFLAGS -o "$OUT/$h" "sdk/c/template/fuzz/$h.c" "${extra[@]}" "$CORE"; then
     echo "run.sh: $h did not build; is libFuzzer installed (libclang-rt-<N>-dev)?" >&2
     exit 1
   fi
