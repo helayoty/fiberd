@@ -29,7 +29,11 @@ fuzz_target!(|data: &[u8]| {
     let c_rc = unsafe { fz_c_parse_incarnation(&mut *c, n, &mut c_why) };
     let r_rc = unsafe { fz_rs_parse_incarnation(&mut *r, n, &mut r_why) };
     assert_eq!(c_rc, r_rc, "verdict");
-    assert_eq!(c_why.is_null(), r_why.is_null(), "a reason on one side only");
+    assert_eq!(
+        c_why.is_null(),
+        r_why.is_null(),
+        "a reason on one side only"
+    );
     if !c_why.is_null() {
         // SAFETY: both point at static strings.
         let (cw, rw) = unsafe { (cstr(c_why), cstr(r_why)) };

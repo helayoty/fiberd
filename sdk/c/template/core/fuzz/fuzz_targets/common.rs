@@ -49,7 +49,9 @@ pub fn rel<T>(p: *const T, st: &RecordStore) -> Option<usize> {
         return None;
     }
     let base = st as *const RecordStore as usize;
-    let off = (p as usize).checked_sub(base).expect("a pointer below the store");
+    let off = (p as usize)
+        .checked_sub(base)
+        .expect("a pointer below the store");
     assert!(off < size_of::<RecordStore>(), "a pointer past the store");
     Some(off)
 }

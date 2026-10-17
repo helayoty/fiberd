@@ -1,0 +1,25 @@
+ÿ183 117 0:64 / / rw,relatime - overlay overlay rw,lowerdir=/var/lib/desktop-containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/9768/fs:/var/lib/desktop-containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/9654/fs:/var/lib/desktop-containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/9653/fs:/var/lib/desktop-containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/9652/fs:/var/lib/desktop-containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/8790/fs:/var/lib/desktop-containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/8789/fs:/var/lib/desktop-containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/8788/fs:/var/lib/desktop-containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/8399/fs:/var/lib/desktop-containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/8398/fs:/var/lib/desktop-containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/8397/fs:/var/lib/desktop-containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/8396/fs:/var/lib/desktop-containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/8395/fs:/var/lib/desktop-containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/8394/fs:/var/lib/desktop-containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/8393/fs:/var/lib/desktop-containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/8392/fs:/var/lib/desktop-containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/8391/fs:/var/lib/desktop-containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/8390/fs:/var/lib/desktop-containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/1289/fs:/var/lib/desktop-containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/1288/fs:/var/lib/desktop-containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/1287/fs:/var/lib/desktop-containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/1286/fs:/var/lib/desktop-containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/1285/fs:/var/lib/desktop-containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/1284/fs:/var/lib/desktop-containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/1283/fs,upperdir=/var/lib/desktop-containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/9769/fs,workdir=/var/lib/desktop-containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/9769/work
+185 183 0:73 / /proc rw,nosuid,nodev,noexec,relatime - proc proc rw
+186 183 0:76 / /dev rw,nosuid - tmpfs tmpfs rw,size=65536k,mode=755
+187 186 0:79 / /dev/pts rw,nosuid,noexec,relatime - devpts devpts rw,gid=5,mode=620,ptmxmode=666
+188 183 0:90 / /sys rw,nosuid,nodev,noexec,relatime - sysfs sysfs rw
+189 188 0:39 / /sys/fs/cgroup rw,nosuid,nodev,noexec,relatime - cgroup2 cgroup rw
+190 186 0:71 / /dev/mqueue rw,nosuid,nodev,noexec,relatime - mqueue mqueue rw
+193 186 0:91 / /dev/shm rw,nosuid,nodev,noexec,relatime - tmpfs shm rw,size=65536k
+197 183 0:92 / /run rw,nosuid,nodev,noexec,relatime - tmpfs tmpfs rw,mode=755
+219 183 0:93 / /tmp rw,nosuid,nodev,relatime - tmpfs tmpfs rw
+220 183 254:1 /docker/volumes/fiberd-conform/_data /conform rw,relatime master:1 - ext4 /dev/vda1 rw,discard
+221 183 0:44 /dev-user/src/fiberd /src rw,nosuid,nodev,relatime - fakeowner /run/host_mark/Users rw,fakeowner
+222 183 254:1 /docker/containers/0000000000000000000000000000000000000000000000000000000000000000/resolv.conf /etc/resolv.conf rw,relatime - ext4 /dev/vda1 rw,discard
+223 183 254:1 /docker/containers/0000000000000000000000000000000000000000000000000000000000000000/hostname /etc/hostname rw,relatime - ext4 /dev/vda1 rw,discard
+224 183 254:1 /docker/containers/0000000000000000000000000000000000000000000000000000000000000000/hosts /etc/hosts rw,relatime - ext4 /dev/vda1 rw,discard
+225 183 254:1 /docker/volumes/fiberd-gomod/_data /go/pkg/mod rw,relatime master:1 - ext4 /dev/vda1 rw,discard
+226 183 254:1 /docker/volumes/fiberd-gocache/_data /root/.cache/go-build rw,relatime master:1 - ext4 /dev/vda1 rw,discard
+227 183 254:1 /docker/volumes/fiberd-cargo-registry/_data /usr/local/cargo/registry rw,relatime master:1 - ext4 /dev/vda1 rw,discard
+114 219 0:66 / /tmp/with\040space rw,relatime - tmpfs none rw
+300 188 0:6 / /sys/kernel/security rw,nosuid,nodev,noexec,relatime - securityfs securityfs rw
+301 188 0:32 / /sys/fs/bpf rw,nosuid,nodev,noexec,relatime - bpf bpf rw,mode=700
+302 188 0:12 / /sys/kernel/debug rw,nosuid,nodev,noexec,relatime - debugfs debugfs rw
+303 188 0:94 / /sys/fs/with\040space rw,relatime - tmpfs none rw
+304 183 0:95 / /system rw,relatime - tmpfs none rw
+305 183 0:96 / /sysfs rw,relatime - tmpfs none rw

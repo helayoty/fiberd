@@ -14,7 +14,8 @@ libfuzzer-sys = "0.4"
 fiberzygote-core = { path = ".." }
 libc = { version = "0.2.191", default-features = false }
 
-# record_diff links the C parser of main (csrc/record.c) as its oracle.
+# record_diff and line_diff link the C parsers of main (csrc/record.c,
+# csrc/line.c) as their oracles.
 [build-dependencies]
 cc = "1"
 
@@ -30,6 +31,23 @@ bench = false
 [[bin]]
 name = "record_diff"
 path = "fuzz_targets/record_diff.rs"
+test = false
+doc = false
+bench = false
+
+# The Rust line parsers alone, on the input format csrc/line.c defines,
+# checking what fuzz_rundir.c checks and what each answer promises.
+[[bin]]
+name = "line"
+path = "fuzz_targets/line.rs"
+test = false
+doc = false
+bench = false
+
+# The Rust line parsers against the C ones, on every input.
+[[bin]]
+name = "line_diff"
+path = "fuzz_targets/line_diff.rs"
 test = false
 doc = false
 bench = false

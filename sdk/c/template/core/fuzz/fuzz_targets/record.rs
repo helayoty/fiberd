@@ -64,7 +64,11 @@ fuzz_target!(|data: &[u8]| {
     assert!(hex >= buf && hex < buf + n, "seed_hex outside the record");
     let seed_hex = unsafe { cstr(st.seed_hex) };
     assert_eq!(seed_hex.len(), 2 * SEED_LEN);
-    assert_eq!(hex + seed_hex.len() + 1, buf + n, "the seed is the last field");
+    assert_eq!(
+        hex + seed_hex.len() + 1,
+        buf + n,
+        "the seed is the last field"
+    );
     if inc.identity.is_null() {
         return;
     }
@@ -78,5 +82,8 @@ fuzz_target!(|data: &[u8]| {
     assert_ne!(key, b"-");
     assert_eq!(id.cert_pem as usize, id.key_pem as usize + key.len() + 1);
     assert_eq!(id.caller as usize, id.cert_pem as usize + cert.len() + 1);
-    assert_eq!(id.caller_pem as usize, id.caller as usize + caller.len() + 1);
+    assert_eq!(
+        id.caller_pem as usize,
+        id.caller as usize + caller.len() + 1
+    );
 });
