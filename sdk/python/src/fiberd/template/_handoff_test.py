@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import errno
 import fcntl
 import os
 import signal
@@ -207,13 +208,21 @@ def test_server_context_trusts_the_caller_certificate_alone(world):
 
 
 class HandoffExt:
-    """The C binding of a handoff fiber: accept() hands out the server ends queued, then the channel's close."""
+    """The C binding of a handoff fiber: accept() hands out the server ends queued, then the channel's close. waits is what each incarnation_wait answers."""
 
-    ABI_VERSION = 5
+    ABI_VERSION = 9
 
-    def __init__(self):
+    def __init__(self, waits=()):
         self.calls = []
         self.queue = []
+        self.waits = list(waits)
+
+    def quiesce(self):
+        self.calls.append(("quiesce",))
+
+    def incarnation_wait(self):
+        self.calls.append(("wait",))
+        return self.waits.pop(0)
 
     def fiber_ready(self):
         self.calls.append(("ready",))
@@ -260,7 +269,7 @@ def client(pair, tmp_path, fd, line=b"ping\n", served=True):
 
 def handoff_fiber(world, ext, monkeypatch, channel, identity=None):
     monkeypatch.setattr(ft, "_ext", lambda: ext)
-    f = ft.Fiber("g/1/1", "handoff", b"", "", {"FIBERD_HANDOFF_FD": str(channel.fileno())}, identity=world.identity() if identity is None else identity)
+    f = ft.Fiber("g/1/1", "handoff", b"", "", {"FIBERD_CHANNEL_FD": str(channel.fileno())}, identity=world.identity() if identity is None else identity)
     assert f.kind == "handoff"
     return f
 
@@ -429,11 +438,11 @@ def test_tls_context_is_built_once_and_the_key_stays_in_a_memfd(world, monkeypat
 
 
 CONTEXT_FIBERS = [
-    # the fiber's environment, its identity, the refusal
-    ("a unix fiber has nothing to accept", {}, "ident", "only a handoff fiber"),
-    ("a handoff fiber without an identity", {"FIBERD_HANDOFF_FD": "4"}, None, "holds no identity"),
-    ("an identity without the caller's certificate", {"FIBERD_HANDOFF_FD": "4"}, "no caller cert", "no caller certificate"),
-    ("an identity with another caller's certificate", {"FIBERD_HANDOFF_FD": "4"}, "other caller", "not the caller the grant is bound to"),
+    # the fiber's endpoint, its identity, the refusal
+    ("a unix fiber has nothing to accept", "/tmp/ep.sock", "ident", "only a handoff fiber"),
+    ("a handoff fiber without an identity", "handoff", None, "holds no identity"),
+    ("an identity without the caller's certificate", "handoff", "no caller cert", "no caller certificate"),
+    ("an identity with another caller's certificate", "handoff", "other caller", "not the caller the grant is bound to"),
 ]
 
 
@@ -447,24 +456,23 @@ def test_accept_refusals(world, monkeypatch, name, f0, f1, f2):
         "other caller": world.identity(caller_pem=world.other.cert_pem),
     }
     identity = identities[f1]
-    f = ft.Fiber("g/1/1", "/tmp/ep.sock", b"", "", f0, identity=identity)
+    f = ft.Fiber("g/1/1", f0, b"", "", {"FIBERD_CHANNEL_FD": "4"}, identity=identity)
     with pytest.raises(ft.TemplateError, match=f2):
         f.accept()
     assert f._identity_fd == -1, "a refused identity is never sealed, so no memfd is left open"
 
 
 @linux_only
-def test_serve_handoff_reports_ready_checks_the_fence_and_ends_with_the_channel(world, tmp_path, monkeypatch):
+def test_serve_handoff_reports_ready_and_ends_with_the_channel(world, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     ext = HandoffExt()
     ch, host_end = socket.socketpair()
     f = handoff_fiber(world, ext, monkeypatch, ch)
-    f._incarnate("fork", os.urandom(32))
+    f._incarnate("fork", 1, os.urandom(32))
     threads, results = start_clients(world, tmp_path, ext, [world.other, world.caller], served=[False, True])
     # fiberd's end: one message per connection, then the close at release.
     host_end.sendall(b"\0\0")
     host_end.close()
-    (tmp_path / "1-1.fence").write_text("g/1/2\n")
     served = []
 
     def handler(conn):
@@ -474,8 +482,89 @@ def test_serve_handoff_reports_ready_checks_the_fence_and_ends_with_the_channel(
     f.serve(handler, poll=0.05)
     join(threads)
     assert ext.calls == [("ready",)]
-    assert served == [(b"ping\n", "g/1/2", "resume")], "only the bound caller reached the handler, after the fence file was read"
+    assert served == [(b"ping\n", "g/1/1", "fork")], "only the bound caller reached the handler"
     assert refused(results[0]) and results[1] == ("reply", b"pong\n")
+
+
+class RoundExt(HandoffExt):
+    """The binding when a park's round arrives ahead of its signal: the first accept ends with EINTR, as fz_accept does then."""
+
+    def __init__(self, waits=()):
+        super().__init__(waits)
+        self.rounds = 1
+
+    def accept(self):
+        if self.rounds:
+            self.rounds -= 1
+            self.calls.append(("round",))
+            raise InterruptedError(errno.EINTR, "a park's round")
+        return super().accept()
+
+
+@linux_only
+def test_serve_handoff_sees_a_park_round_ahead_of_its_signal(world, tmp_path, monkeypatch):
+    """An accept that ends with EINTR is not the end of the loop. It looks at parking again, finds the park, and answers it."""
+    monkeypatch.chdir(tmp_path)
+    ext = RoundExt(waits=[("resume", "g/1/2", "handoff", b"", bytearray(32), "", 2)])
+    ch, host_end = socket.socketpair()
+    f = handoff_fiber(world, ext, monkeypatch, ch)
+    f._incarnate("fork", 1, os.urandom(32))
+    threads, results = start_clients(world, tmp_path, ext, [world.caller])
+    # fiberd's end: the round, the resume's record after the park, the
+    # connection, then the close at release.
+    host_end.sendall(b"\0\0\0")
+    host_end.close()
+    served = []
+
+    def handler(conn):
+        served.append((conn.recv(64), f.fence, f.incarnation.kind))
+        conn.sendall(b"pong\n")
+
+    # The park flag is set as the handler would set it at the signal,
+    # once the round's EINTR has sent the loop back to look.
+    original = ext.accept
+
+    def accept_then_flag():
+        try:
+            return original()
+        except InterruptedError:
+            f.parking.set()
+            raise
+
+    ext.accept = accept_then_flag
+    f.serve(handler, poll=0.05)
+    join(threads)
+    assert ext.calls == [("ready",), ("round",), ("quiesce",), ("wait",), ("ready",)], "the round's EINTR, then the park answered, then the connection"
+    assert served == [(b"ping\n", "g/1/2", "resume")]
+    assert results == [("reply", b"pong\n")]
+
+
+@linux_only
+def test_serve_handoff_answers_a_park_between_connections(world, tmp_path, monkeypatch):
+    """A park on a handoff fiber: the connection in hand ends, fiberd is told, and the next connection comes to the resumed incarnation."""
+    monkeypatch.chdir(tmp_path)
+    ext = HandoffExt(waits=[("resume", "g/1/2", "handoff", b"", bytearray(32), "", 2)])
+    ch, host_end = socket.socketpair()
+    f = handoff_fiber(world, ext, monkeypatch, ch)
+    f._incarnate("fork", 1, os.urandom(32))
+    threads, results = start_clients(world, tmp_path, ext, [world.caller, world.caller])
+    # fiberd's end: the first connection, the resume's record after the
+    # park, the second connection, then the close at release.
+    host_end.sendall(b"\0\0\0")
+    host_end.close()
+    served = []
+
+    def handler(conn):
+        served.append((conn.recv(64), f.fence, f.incarnation.kind))
+        conn.sendall(b"pong\n")
+        if len(served) == 1:
+            f.parking.set()
+
+    f.serve(handler, poll=0.05)
+    join(threads)
+    assert ext.calls == [("ready",), ("quiesce",), ("wait",), ("ready",)], "the park was answered once the first connection was served, and the resume acked"
+    assert served == [(b"ping\n", "g/1/1", "fork"), (b"ping\n", "g/1/2", "resume")]
+    assert results == [("reply", b"pong\n")] * 2
 
 
 # ---- the async twins -----------------------------------------------------
@@ -506,14 +595,12 @@ def sock_dir():
         shutil.rmtree(d, ignore_errors=True)
 
 
-def test_serve_async_unix_reports_ready_checks_the_fence_and_unlinks(sock_dir, monkeypatch):
+def test_serve_async_unix_reports_ready_and_unlinks(sock_dir, monkeypatch):
     ext = HandoffExt()
     monkeypatch.setattr(ft, "_ext", lambda: ext)
     ep = os.path.join(sock_dir, "ep.sock")
     f = ft.Fiber("g/1/1", ep, b"", "", {})
-    f._incarnate("fork", os.urandom(32))
-    with open(ep + ".fence", "w") as fh:
-        fh.write("g/1/2\n")
+    f._incarnate("fork", 1, os.urandom(32))
     served = []
 
     async def handler(reader, writer):
@@ -538,7 +625,52 @@ def test_serve_async_unix_reports_ready_checks_the_fence_and_unlinks(sock_dir, m
 
     assert ft._run(on_fiber, f) == 0
     assert ext.calls == [("ready",)]
-    assert served == [(b"ping\n", "g/1/2", "resume")]
+    assert served == [(b"ping\n", "g/1/1", "fork")]
+    assert not os.path.exists(ep)
+
+
+def test_serve_async_unix_parks_on_usr1_and_serves_again(sock_dir, monkeypatch):
+    """The async loop's park: the server and its connections close, fiberd is told, and the resumed fiber listens and reports again."""
+    ext = HandoffExt(waits=[("resume", "g/1/2", "", b"", bytearray(32), "", 2)])
+    ch, host_end = socket.socketpair()
+    host_end.sendall(b"\0")  # fiberd's answer, there once the fiber asks
+    monkeypatch.setattr(ft, "_ext", lambda: ext)
+    ep = os.path.join(sock_dir, "ep.sock")
+    f = ft.Fiber("g/1/1", ep, b"", "", {"FIBERD_CHANNEL_FD": str(ch.fileno())})
+    f._incarnate("fork", 1, os.urandom(32))
+    served = []
+
+    async def handler(reader, writer):
+        served.append((await reader.readline(), f.fence, f.incarnation.kind))
+        writer.write(b"pong\n")
+        await writer.drain()
+
+    async def on_fiber(fiber):
+        async def talk():
+            reader, writer = await asyncio.open_unix_connection(ep)
+            writer.write(b"ping\n")
+            reply = await reader.readline()
+            writer.close()
+            return reply
+
+        serving = asyncio.ensure_future(fiber.serve_async(handler, poll=0.05))
+        await asyncio.sleep(0.05)
+        first = await talk()
+        signal.raise_signal(signal.SIGUSR1)
+        while ext.calls.count(("ready",)) < 2:
+            await asyncio.sleep(0.02)
+        second = await talk()
+        fiber.stopping.set()
+        await serving
+        return 0 if (first, second) == (b"pong\n", b"pong\n") else 5
+
+    try:
+        assert ft._run(on_fiber, f) == 0
+    finally:
+        host_end.close()
+        ch.close()
+    assert ext.calls == [("ready",), ("quiesce",), ("wait",), ("ready",)]
+    assert served == [(b"ping\n", "g/1/1", "fork"), (b"ping\n", "g/1/2", "resume")]
     assert not os.path.exists(ep)
 
 

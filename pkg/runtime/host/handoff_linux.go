@@ -3,12 +3,10 @@
 package host
 
 import (
-	"bytes"
 	"encoding/pem"
 	"errors"
 	"fmt"
 	"os"
-	"strings"
 	"syscall"
 
 	"github.com/helayoty/fiberd/pkg/backend"
@@ -19,12 +17,6 @@ import (
 // nothing, because connections come through fz_accept.
 const handoffEndpoint = "handoff"
 
-// identityTag opens the one message a fresh handoff fiber reads from its
-// channel before any connection, the grant's TLS identity. A connection
-// message is a zero byte with the socket in SCM_RIGHTS, so the two never
-// look alike.
-const identityTag = 'k'
-
 // handoffIdentity is the identity derived for a grant and the caller its
 // fibers accept. It is kept so HandoffRoute has the pin at hand and the
 // derivation runs once.
@@ -33,36 +25,23 @@ type handoffIdentity struct {
 	caller string
 }
 
+// channels reports whether the backend hands every fiber its
+// incarnation record on a channel at birth, which a handoff fiber keeps
+// for its connections (backend.Fiber.Channel).
+func (r *Runtime) channels() bool {
+	h, ok := r.be.(backend.Handoffer)
+	return ok && h.Handoff()
+}
+
 // canHandoff reports whether the backend can pass connections to fibers
 // and a router exists to take them from.
 func (r *Runtime) canHandoff() bool {
-	h, ok := r.be.(backend.Handoffer)
-	return ok && h.Handoff() && r.cfg.Handoff != nil
-}
-
-// handoffPair makes a handoff fiber's channel. The host keeps the first
-// end and the backend hands the second to the fiber. A backend whose fibers
-// live in a network namespace of their own makes the pair itself, where
-// the fiber's checkpoint can carry it.
-func (r *Runtime) handoffPair(grantUID string) (host, fiber *os.File, err error) {
-	if !r.canHandoff() {
-		return nil, nil, fmt.Errorf("%w: grant %s on backend %s", ErrNoHandoff, grantUID, r.be.Name())
-	}
-	var fds [2]int
-	if cm, ok := r.be.(backend.ChannelMaker); ok {
-		fds, err = cm.Socketpair(grantUID, syscall.SOCK_SEQPACKET)
-	} else {
-		fds, err = syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_SEQPACKET|syscall.SOCK_CLOEXEC, 0)
-	}
-	if err != nil {
-		return nil, nil, fmt.Errorf("host: handoff channel: %w", err)
-	}
-	return os.NewFile(uintptr(fds[0]), "handoff"), os.NewFile(uintptr(fds[1]), "handoff-fiber"), nil
+	return r.channels() && r.cfg.Handoff != nil
 }
 
 // prepareIdentity derives the grant's TLS identity (once) and records
 // the caller its fibers accept, so HandoffRoute can name the pin. It
-// writes nothing, because sendIdentity carries the identity to each fiber.
+// writes nothing, because identityFor puts the identity on each fiber's record.
 func (r *Runtime) prepareIdentity(grantUID, caller string) error {
 	r.mu.Lock()
 	had, ok := r.identities[grantUID]
@@ -95,68 +74,34 @@ func (r *Runtime) forgetIdentity(grantUID string) {
 	r.mu.Unlock()
 }
 
-// identityMessage frames an identity the way fz_handoff_identity parses
-// it. That is the tag, then the key PEM, the certificate PEM, the
-// caller thumbprint and the caller's certificate as PEM, each ended by
-// a NUL. callerCert is the DER the clone arrived under, which the
-// thumbprint is of. A fiber pins that one certificate in its handshake.
-func identityMessage(id handoff.Identity, caller string, callerCert []byte) ([]byte, error) {
-	if len(callerCert) == 0 {
-		return nil, errors.New("host: handoff identity has no caller certificate, which only a clone over mutual TLS carries")
-	}
-	callerPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: callerCert})
-	for _, f := range []struct{ name, v string }{{"key", string(id.KeyPEM)}, {"certificate", string(id.CertPEM)}, {"caller", caller}} {
-		if f.v == "" || strings.ContainsRune(f.v, 0) {
-			return nil, fmt.Errorf("host: handoff identity %s is empty or holds a NUL", f.name)
-		}
-	}
-	var b bytes.Buffer
-	b.WriteByte(identityTag)
-	for _, v := range [][]byte{id.KeyPEM, id.CertPEM, []byte(caller), callerPEM} {
-		b.Write(v)
-		b.WriteByte(0)
-	}
-	return b.Bytes(), nil
-}
-
-// sendIdentity queues a fresh handoff fiber's grant identity on the
-// host's end of its channel before the fiber is born, so it is the first
-// thing fz_accept reads, with callerCert as the one certificate the
-// fiber accepts. A resumed fiber holds it in memory and gets none. The
-// key is never a file, because fibers of every grant run as the fiberd's
-// user and no file mode would keep grants apart.
-func (r *Runtime) sendIdentity(ch *os.File, grantUID string, callerCert []byte) error {
+// identityFor is the grant's TLS identity for a handoff fiber's record,
+// the key PEM, the certificate PEM, the caller thumbprint and the
+// caller's certificate as PEM. callerCert is the DER the clone arrived
+// under, which the thumbprint is of. A fiber pins that one certificate
+// in its handshake. The identity is never a file, because fibers of
+// every grant run as fiberd's user and no file mode would keep grants
+// apart.
+func (r *Runtime) identityFor(grantUID string, callerCert []byte) (*backend.Identity, error) {
 	r.mu.Lock()
 	had, ok := r.identities[grantUID]
 	r.mu.Unlock()
 	if !ok {
-		return fmt.Errorf("host: no handoff identity prepared for grant %s", grantUID)
+		return nil, fmt.Errorf("host: no handoff identity prepared for grant %s", grantUID)
 	}
-	msg, err := identityMessage(had.id, had.caller, callerCert)
-	if err != nil {
-		return err
+	if len(callerCert) == 0 {
+		return nil, errors.New("host: handoff identity has no caller certificate, which only a clone over mutual TLS carries")
 	}
-	rc, err := ch.SyscallConn()
-	if err != nil {
-		return fmt.Errorf("host: handoff identity of %s: %w", grantUID, err)
+	if had.caller == "" {
+		return nil, errors.New("host: handoff identity names no caller")
 	}
-	var sendErr error
-	ctlErr := rc.Control(func(fd uintptr) {
-		sendErr = syscall.Sendmsg(int(fd), msg, nil, nil, syscall.MSG_DONTWAIT|syscall.MSG_NOSIGNAL)
-	})
-	if ctlErr != nil {
-		return fmt.Errorf("host: handoff identity of %s: %w", grantUID, ctlErr)
-	}
-	if sendErr != nil {
-		return fmt.Errorf("host: handoff identity of %s: %w", grantUID, sendErr)
-	}
-	return nil
+	return &backend.Identity{KeyPEM: string(had.id.KeyPEM), CertPEM: string(had.id.CertPEM), Caller: had.caller,
+		CallerPEM: string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: callerCert}))}, nil
 }
 
 // route gives a ready handoff fiber its routing key and returns the
 // endpoint its handle names, which is the router's address.
 func (r *Runtime) route(f *fiber) (string, error) {
-	if f.handoff == nil || r.cfg.Handoff == nil {
+	if !f.handoff || r.cfg.Handoff == nil {
 		return f.endpoint, nil
 	}
 	if _, err := r.cfg.Handoff.Add(f.id); err != nil {
@@ -166,7 +111,7 @@ func (r *Runtime) route(f *fiber) (string, error) {
 }
 
 func (r *Runtime) unroute(f *fiber) {
-	if f.handoff != nil && r.cfg.Handoff != nil {
+	if f.handoff && r.cfg.Handoff != nil {
 		r.cfg.Handoff.Remove(f.id)
 	}
 }
@@ -188,7 +133,7 @@ func (r *Runtime) HandoffRoute(fiberID string) (key, pin string, cert []byte, ok
 		id = r.identities[f.grantUID]
 	}
 	r.mu.Unlock()
-	if !known || f.handoff == nil {
+	if !known || !f.handoff {
 		return "", "", nil, false
 	}
 	key, ok = r.cfg.Handoff.Key(fiberID)
@@ -201,8 +146,8 @@ func (r *Runtime) HandoffRoute(fiberID string) (key, pin string, cert []byte, ok
 func (r *Runtime) Deliver(fiberID string, conn *os.File) error {
 	r.mu.Lock()
 	var ch *os.File
-	if f, ok := r.fibers[fiberID]; ok && f.ready {
-		ch = f.handoff
+	if f, ok := r.fibers[fiberID]; ok && f.ready && f.handoff {
+		ch = f.channel
 	}
 	r.mu.Unlock()
 	if ch == nil {

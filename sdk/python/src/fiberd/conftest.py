@@ -24,7 +24,7 @@ def _refuse(*_args, **_kwargs):
 class _NoExt:
     """The C binding's shape, every call refused."""
 
-    ABI_VERSION = 4
+    ABI_VERSION = 6
 
     def __getattr__(self, name):
         return _refuse
@@ -42,4 +42,3 @@ def _no_processes(monkeypatch):
     monkeypatch.setattr(ft, "_inited", False)
     monkeypatch.setattr(ft, "_hooks", [])
     monkeypatch.setattr(ft, "_randoms", [])
-    monkeypatch.setattr(ft, "_generation", 0)

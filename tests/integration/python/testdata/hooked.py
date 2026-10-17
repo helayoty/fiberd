@@ -1,10 +1,18 @@
-"""The reference workload plus an incarnation hook, whose record a fiber serves as "incarnations"."""
+"""The reference workload plus an incarnation hook, whose record a fiber serves as "incarnations" and whose seeds it serves as "seeds"."""
 import fiberd.template as ft
 from fiberd.template import ref
 
 ft.init()
 seen = []
-ft.on_incarnation(lambda inc: seen.append(f"{inc.kind}:{inc.generation}:{inc.fence}"))
+seeds = []
+
+
+@ft.on_incarnation
+def record(inc):
+    seen.append(f"{inc.kind}:{inc.generation}:{inc.fence}")
+    seeds.append(bytes(inc.seed).hex())
+
+
 warm = ref.Warm(1)
 
 
@@ -21,7 +29,12 @@ def on_fiber(f):
             while b"\n" in buf:
                 line, buf = buf.split(b"\n", 1)
                 line = line.decode()
-                reply = " ".join(seen) if line == "incarnations" else ref.answer(st, line)
+                if line == "incarnations":
+                    reply = " ".join(seen)
+                elif line == "seeds":
+                    reply = " ".join(seeds)
+                else:
+                    reply = ref.answer(st, line)
                 conn.sendall(reply.encode() + b"\n")
 
     f.serve(handle)

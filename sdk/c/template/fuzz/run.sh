@@ -19,7 +19,7 @@ FUZZTIME=${FUZZTIME:-120}
 CFLAGS="-g -O1 -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer \
   -U_FORTIFY_SOURCE -Wall -Wextra -pthread"
 
-all=(fuzz_recv_line fuzz_identity fuzz_gvrecord fuzz_procfiles fuzz_rundir fuzz_control fuzz_refzygote)
+all=(fuzz_recv_line fuzz_identity fuzz_gvrecord fuzz_wait fuzz_procfiles fuzz_rundir fuzz_control fuzz_refzygote)
 mode=run
 if [ "${1:-}" = build ]; then mode=build; shift; fi
 harnesses=("$@")
@@ -44,7 +44,7 @@ done
 max_len() {
   case $1 in
     fuzz_recv_line|fuzz_control) echo 70000 ;; # MAX_LINE is 65536
-    fuzz_identity) echo 70000 ;;               # IDENTITY_MAX is 65536
+    fuzz_identity|fuzz_wait) echo 70000 ;;     # RECORD_MAX is 65536
     fuzz_procfiles) echo 20000 ;;              # lock_sys buffers 8192
     *) echo 4096 ;;
   esac

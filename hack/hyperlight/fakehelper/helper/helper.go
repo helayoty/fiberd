@@ -2,6 +2,8 @@
 // hypervisor, each fiber a goroutine and each park a JSON file. The
 // fakehelper binary runs it as a process, and the backend's unit tests
 // run it as a goroutine, so everything it starts ends when Serve returns.
+// It logs every command as the Rust helper does, the seed and the
+// payload by size alone.
 package helper
 
 import (
@@ -9,6 +11,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
+	"math/rand/v2"
 	"net"
 	"os"
 	"path/filepath"
@@ -20,11 +24,15 @@ import (
 
 // Facts mirrors the Rust helper's snapshot facts (helper, hyperlight_host,
 // hypervisor, cpu). The fake has none of the last three.
-const Facts = "fakehelper/1 none none none"
+const Facts = "fakehelper/2 none none none"
+
+// SeedBytes is the seed every CLONE and RESUME carries, as hex.
+const SeedBytes = 32
 
 // Helper is one run of the protocol over a control connection.
 type Helper struct {
 	out chan string
+	log io.Writer
 
 	mu      sync.Mutex
 	boxes   map[string]*sandbox
@@ -45,17 +53,87 @@ type sandbox struct {
 	dirtied uint64
 	conns   map[net.Conn]struct{}
 	ended   bool // the sandbox was killed, so a late client is turned away
+
+	// What the sandbox was born as, in place of the guest's Incarnate:
+	// the kind of copy, the host's generation and a generator seeded
+	// from the host's bytes. The seed's hex is kept only under the
+	// payload's "keep_seed" key, for the tests that look for it in the
+	// logs.
+	kind       string
+	generation int
+	rng        *rand.ChaCha8
+	keptSeed   string
+}
+
+// birth is what CLONE and RESUME carry for the sandbox.
+type birth struct {
+	kind       string
+	generation int
+	seed       [SeedBytes]byte
+}
+
+// parseIncarnation reads the generation and the seed, fields 5 and 6 of
+// a CLONE or a RESUME, and refuses by name what a guest would be wrong
+// to take.
+func parseIncarnation(f []string) (birth, error) {
+	var b birth
+	if len(f) < 7 {
+		return b, fmt.Errorf("%s needs 6 fields, got %d", f[0], len(f)-1)
+	}
+	g, err := strconv.Atoi(f[5])
+	if err != nil || g < 1 || f[5][0] == '0' {
+		return b, fmt.Errorf("generation %q is not an incarnation", f[5])
+	}
+	seed, err := hex.DecodeString(f[6])
+	if err != nil || len(seed) != SeedBytes {
+		return b, fmt.Errorf("seed is not %d hex bytes", SeedBytes)
+	}
+	b.generation = g
+	copy(b.seed[:], seed)
+	clear(seed)
+	return b, nil
+}
+
+// redact is the command line as the log shows it. A CLONE or RESUME
+// carries the fiber's seed, and a CLONE its payload; both are shown by
+// size. Every other line is shown whole.
+func redact(f []string) string {
+	payload, seed := -1, -1
+	switch f[0] {
+	case "CLONE":
+		payload, seed = 4, 6
+	case "RESUME":
+		seed = 6
+	}
+	out := make([]string, len(f))
+	for i, v := range f {
+		switch {
+		case i == payload && v != "-":
+			out[i] = fmt.Sprintf("payload:%dB", len(v)/2)
+		case i == seed:
+			out[i] = fmt.Sprintf("seed:%dB", len(v)/2)
+		default:
+			out[i] = v
+		}
+	}
+	return strings.Join(out, " ")
 }
 
 type state struct {
 	Counter uint64 `json:"counter"`
 	Dirtied uint64 `json:"dirtied"`
+	// KeepSeed is the payload's "keep_seed" key, which a resumed sandbox
+	// honours as a resumed process honours its payload. The seed itself
+	// is never written.
+	KeepSeed bool `json:"keep_seed,omitempty"`
 }
 
 // Serve says READY on ctl and answers commands until ctl's read side
-// ends. Every sandbox, endpoint and goroutine is gone when it returns.
-func Serve(ctl net.Conn) error {
-	h := &Helper{out: make(chan string, 256), boxes: map[string]*sandbox{}, stop: make(chan struct{})}
+// ends, logging each one on log (the helper's stderr, which fiberd
+// points at the grant's zygote.log). Every sandbox, endpoint and
+// goroutine is gone when it returns.
+func Serve(ctl net.Conn, log io.Writer) error {
+	h := &Helper{out: make(chan string, 256), log: log, boxes: map[string]*sandbox{}, stop: make(chan struct{})}
 	wrote := make(chan struct{})
 	go func() {
 		defer close(wrote)
@@ -74,22 +152,29 @@ func Serve(ctl net.Conn) error {
 		if len(f) == 0 {
 			continue
 		}
+		_, _ = fmt.Fprintf(log, "helper: < %s\n", redact(f))
 		switch f[0] {
-		case "CLONE":
-			if len(f) < 5 {
+		case "CLONE", "RESUME":
+			if len(f) < 2 {
 				continue
 			}
-			h.spawn(func() { h.clone(f[1], f[2], f[4], nil) })
+			b, err := parseIncarnation(f)
+			if err != nil {
+				h.say("ERROR %s %v", f[1], err)
+				continue
+			}
+			if f[0] == "CLONE" {
+				b.kind = "clone"
+				h.spawn(func() { h.clone(f[1], f[2], f[4], nil, b) })
+			} else {
+				b.kind = "resume"
+				h.spawn(func() { h.resume(f[1], f[2], f[3], b) })
+			}
 		case "PARK":
 			if len(f) < 4 {
 				continue
 			}
 			h.spawn(func() { h.park(f[1], f[2], f[3] == "1") })
-		case "RESUME":
-			if len(f) < 5 {
-				continue
-			}
-			h.spawn(func() { h.resume(f[1], f[2], f[3]) })
 		case "KILL":
 			if len(f) >= 2 {
 				h.kill(f[1], "exit:137")
@@ -143,7 +228,7 @@ func payloadNum(p []byte, key string) uint64 {
 	return n
 }
 
-func (h *Helper) clone(fence, endpoint, payloadHex string, st *state) {
+func (h *Helper) clone(fence, endpoint, payloadHex string, st *state, born birth) {
 	var payload []byte
 	if payloadHex != "-" {
 		payload, _ = hex.DecodeString(payloadHex)
@@ -155,13 +240,21 @@ func (h *Helper) clone(fence, endpoint, payloadHex string, st *state) {
 			return
 		}
 	}
+	// The sandbox learns who it is before anything can reach it, and
+	// the helper's copy of the seed is gone once the generator has it.
+	b := &sandbox{h: h, fence: fence, endpoint: endpoint, conns: map[net.Conn]struct{}{},
+		kind: born.kind, generation: born.generation, rng: rand.NewChaCha8(born.seed)}
+	if payloadNum(payload, `"keep_seed"`) > 0 || (st != nil && st.KeepSeed) {
+		b.keptSeed = hex.EncodeToString(born.seed[:])
+	}
+	clear(born.seed[:])
 	_ = os.Remove(endpoint)
 	ln, err := net.Listen("unix", endpoint)
 	if err != nil {
 		h.say("ERROR %s bind: %v", fence, err)
 		return
 	}
-	b := &sandbox{h: h, fence: fence, endpoint: endpoint, ln: ln, conns: map[net.Conn]struct{}{}}
+	b.ln = ln
 	if st != nil {
 		b.counter, b.dirtied = st.Counter, st.Dirtied
 	}
@@ -247,6 +340,19 @@ func (b *sandbox) client(c net.Conn) {
 			reply = strconv.FormatUint(b.count(), 10)
 		case line == "fence":
 			reply = b.fence
+		case line == "random":
+			b.mu.Lock()
+			reply = strconv.FormatUint(b.rng.Uint64(), 10)
+			b.mu.Unlock()
+		case line == "generation":
+			reply = strconv.Itoa(b.generation)
+		case line == "kind":
+			reply = b.kind
+		case line == "seed":
+			reply = "-"
+			if b.keptSeed != "" {
+				reply = b.keptSeed
+			}
 		case line == "pid":
 			reply = "0"
 		case strings.HasPrefix(line, "getenv "):
@@ -311,7 +417,7 @@ func (h *Helper) park(fence, dir string, sync bool) {
 	// Stop serving before the state is written.
 	b.stopServing()
 	b.mu.Lock()
-	st := state{Counter: b.counter, Dirtied: b.dirtied}
+	st := state{Counter: b.counter, Dirtied: b.dirtied, KeepSeed: b.keptSeed != ""}
 	b.mu.Unlock()
 	data, _ := json.Marshal(st)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -334,7 +440,7 @@ func (h *Helper) park(fence, dir string, sync bool) {
 	}
 }
 
-func (h *Helper) resume(fence, dir, endpoint string) {
+func (h *Helper) resume(fence, dir, endpoint string, born birth) {
 	data, err := os.ReadFile(filepath.Join(dir, "state.json"))
 	if err != nil {
 		h.say("ERROR %s %v", fence, err)
@@ -345,5 +451,5 @@ func (h *Helper) resume(fence, dir, endpoint string) {
 		h.say("ERROR %s %v", fence, err)
 		return
 	}
-	h.clone(fence, endpoint, "-", &st)
+	h.clone(fence, endpoint, "-", &st, born)
 }

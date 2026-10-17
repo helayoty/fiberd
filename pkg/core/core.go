@@ -411,8 +411,17 @@ func (a *Core) Clone(ctx context.Context, req CloneRequest) (CloneResponse, Stat
 // deadlines are what a Clone of the grant without its own deadline gets,
 // and what a pool fill for it gets.
 func (a *Core) deadlines(grantUID string) (create, resume time.Duration) {
+	return GrantDeadlines(a.Runtime, grantUID)
+}
+
+// GrantDeadlines are the grant's create and resume deadlines: what the
+// runtime advises for it (DeadlineAdvisor), else the defaults. They
+// are the one source of a per-grant deadline, for a Clone without one
+// of its own, for a pool fill, and for the runtime's own waits on a
+// fiber, such as a park's wait for the fiber to stop serving.
+func GrantDeadlines(rt Runtime, grantUID string) (create, resume time.Duration) {
 	create, resume = DefaultCreateDeadline, DefaultResumeDeadline
-	if adv, ok := a.Runtime.(DeadlineAdvisor); ok {
+	if adv, ok := rt.(DeadlineAdvisor); ok {
 		if c, r := adv.DefaultDeadlines(grantUID); c > 0 && r > 0 {
 			create, resume = c, r
 		}

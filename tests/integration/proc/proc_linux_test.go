@@ -390,8 +390,6 @@ func TestParkResumeKeepsState(t *testing.T) {
 		say func(t *testing.T, rt core.Runtime, h core.FiberHandle, line string) string
 		// refused, when set, is a connection the fiber must turn away.
 		refused func(t *testing.T, rt core.Runtime, h core.FiberHandle)
-		// fenceFile is where the resumed fiber's new fence is published.
-		fenceFile func(h core.FiberHandle) string
 	}{
 		{
 			name: "direct",
@@ -399,12 +397,11 @@ func TestParkResumeKeepsState(t *testing.T) {
 			say: func(t *testing.T, _ core.Runtime, h core.FiberHandle, line string) string {
 				return talk(t, h.Endpoint, line)
 			},
-			fenceFile: func(h core.FiberHandle) string { return fiberendpoint.UnixPath(h.Endpoint) + ".fence" },
 		},
 		{
 			// The fiber never listens and terminates TLS itself. Its
 			// channel to the host is external to the checkpoint and
-			// replaced on resume.
+			// replaced on resume, with the resume's record first on it.
 			name:      "handoff",
 			mode:      core.EndpointHandoff,
 			callerX5t: callerX5t,
@@ -421,10 +418,6 @@ func TestParkResumeKeepsState(t *testing.T) {
 					}
 				}
 			},
-			// Under its birth fence's name, the one the fiber knows.
-			fenceFile: func(core.FiberHandle) string {
-				return filepath.Join("/tmp", "fz-"+fmt.Sprint(os.Getpid()), "g5", "1-1.fence")
-			},
 		},
 	}
 	for _, tc := range cases {
@@ -437,12 +430,12 @@ func TestParkResumeKeepsState(t *testing.T) {
 			if tc.refused != nil {
 				refused = func(h core.FiberHandle) { tc.refused(t, rt, h) }
 			}
-			parkResumeKeepsState(t, rt, tc.mode, tc.callerX5t, caller.Certificate[0], func(h core.FiberHandle, line string) string { return tc.say(t, rt, h, line) }, refused, tc.fenceFile)
+			parkResumeKeepsState(t, rt, tc.mode, tc.callerX5t, caller.Certificate[0], func(h core.FiberHandle, line string) string { return tc.say(t, rt, h, line) }, refused)
 		})
 	}
 }
 
-func parkResumeKeepsState(t *testing.T, rt core.Runtime, mode core.EndpointMode, callerX5t string, callerDER []byte, say func(core.FiberHandle, string) string, refused func(core.FiberHandle), fenceFile func(core.FiberHandle) string) {
+func parkResumeKeepsState(t *testing.T, rt core.Runtime, mode core.EndpointMode, callerX5t string, callerDER []byte, say func(core.FiberHandle, string) string, refused func(core.FiberHandle)) {
 	ctx := context.Background()
 	g := core.Grant{UID: "g5", TemplateDigest: "sha256:ref", WBudgetBytes: 64 << 20, CallerThumbprint: callerX5t, Policy: core.Policy{EndpointMode: mode}}
 	if err := rt.PrepareTemplate(ctx, g); err != nil {
@@ -482,7 +475,7 @@ func parkResumeKeepsState(t *testing.T, rt core.Runtime, mode core.EndpointMode,
 	}
 
 	// Resume under a new fence: the counter survived, the endpoint is the
-	// one the process bound, the new fence is published beside it.
+	// one the process bound, the new fence came on the fiber's channel.
 	f2 := core.Fence{GrantUID: "g5", Epoch: 1, Seq: 2}
 	t0 = time.Now()
 	h2, err := rt.Clone(ctx, core.CloneSpec{Grant: g, Source: core.SourceDelta, Ref: ref, Fence: f2, Deadline: 5 * time.Second})
@@ -499,9 +492,8 @@ func parkResumeKeepsState(t *testing.T, rt core.Runtime, mode core.EndpointMode,
 	if got := say(h2, "incr"); got != "3" {
 		t.Fatalf("incr after resume = %q", got)
 	}
-	pub, _ := os.ReadFile(fenceFile(h2))
-	if strings.TrimSpace(string(pub)) != "g5/1/2" {
-		t.Fatalf("published fence = %q", pub)
+	if fence, kind, gen := say(h2, "fence"), say(h2, "kind"), say(h2, "generation"); fence != "g5/1/2" || kind != "resume" || gen != "2" {
+		t.Fatalf("after the resume the fiber names %s %s %s, want g5/1/2 resume 2 from its record", fence, kind, gen)
 	}
 	if st, err := rt.Stats(ctx, h2.ID); err != nil || st.WUsedBytes == 0 {
 		t.Fatalf("stats after resume = %+v %v", st, err)
@@ -519,6 +511,9 @@ func parkResumeKeepsState(t *testing.T, rt core.Runtime, mode core.EndpointMode,
 	}
 	if got := say(h3, "get"); got != "3" {
 		t.Fatalf("counter after second resume = %q, want 3", got)
+	}
+	if fence, gen := say(h3, "fence"), say(h3, "generation"); fence != "g5/1/3" || gen != "3" {
+		t.Fatalf("after the second resume the fiber names %s generation %s, want g5/1/3 and 3", fence, gen)
 	}
 	if err := rt.Release(ctx, h3.ID, true); err != nil {
 		t.Fatal(err)

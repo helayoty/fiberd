@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -163,7 +164,7 @@ func cloned(t *testing.T, k knobs) (*Backend, *fakeRunsc, string, backend.Fiber)
 	b, f, w, workDir := warmed(t, k)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	fb, err := b.Clone(ctx, w.ID, backend.FiberSpec{Fence: "g/1-1", Endpoint: filepath.Join(workDir, "ep.sock"), CgroupFD: -1, Deadline: 2 * time.Second})
+	fb, err := b.Clone(ctx, w.ID, backend.FiberSpec{Fence: "g/1-1", Endpoint: filepath.Join(workDir, "ep.sock"), CgroupFD: -1, Deadline: 2 * time.Second, Generation: 1})
 	if err != nil {
 		t.Fatalf("Clone: %v", err)
 	}
@@ -1020,7 +1021,7 @@ func TestClone(t *testing.T) {
 			ep := filepath.Join(workDir, "ep.sock")
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			fb, err := b.Clone(ctx, w.ID, backend.FiberSpec{Fence: "g/1-1", Endpoint: ep, CgroupFD: -1, Deadline: 2 * time.Second, Payload: tc.payload, Session: tc.session})
+			fb, err := b.Clone(ctx, w.ID, backend.FiberSpec{Fence: "g/1-1", Endpoint: ep, CgroupFD: -1, Deadline: 2 * time.Second, Payload: tc.payload, Session: tc.session, Generation: 1})
 			if err != nil {
 				t.Fatalf("Clone: %v", err)
 			}
@@ -1053,7 +1054,7 @@ func TestClone(t *testing.T) {
 					t.Fatalf("a template that polls the spec was handed %v on the channel", records)
 				}
 			} else {
-				checkIdentity(t, cfgJSON, token, records, "clone", "g/1-1", "/host/ep.sock", tc.payload, tc.session)
+				checkIdentity(t, cfgJSON, token, records, 1, "clone", "g/1-1", "/host/ep.sock", tc.payload, tc.session)
 			}
 			tdir := filepath.Join(b.opt.StateDir, "templates", warmCID(t, b, "g"))
 			calls := f.calls()
@@ -1130,7 +1131,7 @@ func TestCloneRefusals(t *testing.T) {
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			_, err := b.Clone(ctx, warmID, backend.FiberSpec{Fence: "g/1-1", Endpoint: ep, CgroupFD: -1, Deadline: tc.deadline})
+			_, err := b.Clone(ctx, warmID, backend.FiberSpec{Fence: "g/1-1", Endpoint: ep, CgroupFD: -1, Deadline: tc.deadline, Generation: 1})
 			if err == nil || (tc.wantErr != nil && !errors.Is(err, tc.wantErr)) || !strings.Contains(err.Error(), tc.wantText) {
 				t.Fatalf("Clone = %v, want %q (errors.Is %v)", err, tc.wantText, tc.wantErr)
 			}
@@ -1208,7 +1209,7 @@ func TestRestoreBound(t *testing.T) {
 				wg.Add(1)
 				go func() {
 					defer wg.Done()
-					_, errs[i] = b.Clone(ctx, w.ID, backend.FiberSpec{Fence: fmt.Sprintf("g/1-%d", i), Endpoint: filepath.Join(workDir, fmt.Sprintf("ep%d.sock", i)), CgroupFD: -1, Deadline: deadline})
+					_, errs[i] = b.Clone(ctx, w.ID, backend.FiberSpec{Fence: fmt.Sprintf("g/1-%d", i), Endpoint: filepath.Join(workDir, fmt.Sprintf("ep%d.sock", i)), CgroupFD: -1, Deadline: deadline, Generation: 1})
 				}()
 				if i == 0 {
 					// The first clone holds a slot before any other asks.
@@ -1270,7 +1271,7 @@ func TestBundleOutsideRunDir(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			ep := filepath.Join(workDir, "ep.sock")
-			if _, err := b.Clone(ctx, w.ID, backend.FiberSpec{Fence: "g/1-1", Endpoint: ep, CgroupFD: -1, Deadline: 2 * time.Second}); err != nil {
+			if _, err := b.Clone(ctx, w.ID, backend.FiberSpec{Fence: "g/1-1", Endpoint: ep, CgroupFD: -1, Deadline: 2 * time.Second, Generation: 1}); err != nil {
 				t.Fatalf("Clone: %v", err)
 			}
 			fc := boxCID(t, b, "g/1-1")
@@ -1345,7 +1346,7 @@ func TestParkAndResume(t *testing.T) {
 			ep := filepath.Join(workDir, "ep2.sock")
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			fb, err := b.Resume(ctx, backend.ResumeSpec{Dir: dir, Fence: "g/2-1", Endpoint: ep, CgroupFD: -1, Deadline: 2 * time.Second, WarmID: "g", WorkDir: workDir, Session: "S"})
+			fb, err := b.Resume(ctx, backend.ResumeSpec{Dir: dir, Fence: "g/2-1", Endpoint: ep, CgroupFD: -1, Deadline: 2 * time.Second, WarmID: "g", WorkDir: workDir, Session: "S", Generation: 2})
 			if err != nil {
 				t.Fatalf("Resume: %v", err)
 			}
@@ -1366,7 +1367,7 @@ func TestParkAndResume(t *testing.T) {
 					t.Fatalf("resumed bundle = %s, channel records %v", cfgJSON, records)
 				}
 			} else {
-				checkIdentity(t, cfgJSON, token, records, "resume", "g/2-1", "/host/ep2.sock", nil, "S")
+				checkIdentity(t, cfgJSON, token, records, 2, "resume", "g/2-1", "/host/ep2.sock", nil, "S")
 			}
 			if err := b.Kill("g/2-1"); err != nil {
 				t.Fatalf("Kill: %v", err)
@@ -1380,7 +1381,9 @@ func TestParkAndResume(t *testing.T) {
 
 // TestParkRefusals covers a park of an unknown fiber, one whose workload cannot
 // be signalled, one that keeps its endpoint, and one whose checkpoint
-// fails.
+// fails. The wait for the endpoint is the spec's deadline, and without
+// one the resume deadline this backend advises for the grant's warm
+// instance, never a number of the park's own.
 func TestParkRefusals(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -1388,13 +1391,26 @@ func TestParkRefusals(t *testing.T) {
 		after    knobs // set once it is up
 		fiber    string
 		noBundle bool // the fiber's bundle is gone
-		wantErr  error
-		wantText string
+		deadline time.Duration
+		// tookMin and tookMax bound the wait, when the row is about it.
+		tookMin, tookMax time.Duration
+		wantErr          error
+		wantText         string
 	}{
 		{name: "unknown fiber", fiber: "nobody", wantText: `unknown fiber "nobody"`},
 		{name: "bundle gone", fiber: "g/1-1", noBundle: true, wantText: "config.json: no such file"},
 		{name: "workload cannot be signalled", fiber: "g/1-1", after: knobs{Fail: map[string]bool{"kill": true}}, wantText: "runsc kill"},
-		{name: "endpoint stays open", fiber: "g/1-1", before: knobs{IgnoreUSR1: true}, after: knobs{IgnoreUSR1: true}, wantErr: context.DeadlineExceeded, wantText: "did not close its endpoint for the checkpoint"},
+		{name: "endpoint stays open, waited for the spec's deadline", fiber: "g/1-1", before: knobs{IgnoreUSR1: true}, after: knobs{IgnoreUSR1: true},
+			deadline: 150 * time.Millisecond, tookMin: 150 * time.Millisecond, tookMax: time.Second,
+			wantErr: context.DeadlineExceeded, wantText: "did not close its endpoint for the checkpoint"},
+		{name: "endpoint stays open, waited for the floor without a deadline", fiber: "g/1-1", before: knobs{IgnoreUSR1: true}, after: knobs{IgnoreUSR1: true},
+			tookMin: resumeDeadline, tookMax: resumeDeadline + time.Second,
+			wantErr: context.DeadlineExceeded, wantText: "did not close its endpoint for the checkpoint"},
+		// A slow template raises the advised resume deadline to four
+		// times its restore, which is what the park then waits.
+		{name: "endpoint stays open, waited for the advised deadline without one", fiber: "g/1-1", before: knobs{IgnoreUSR1: true, SlowRestore: 600 * time.Millisecond}, after: knobs{IgnoreUSR1: true},
+			tookMin: deadlineFactor * 600 * time.Millisecond, tookMax: deadlineFactor*600*time.Millisecond + 2*time.Second,
+			wantErr: context.DeadlineExceeded, wantText: "did not close its endpoint for the checkpoint"},
 		{name: "checkpoint fails", fiber: "g/1-1", after: knobs{Fail: map[string]bool{"checkpoint": true}}, wantText: "runsc checkpoint"},
 	}
 	for _, tc := range cases {
@@ -1407,9 +1423,14 @@ func TestParkRefusals(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			err := b.Park(context.Background(), tc.fiber, backend.ParkSpec{Dir: filepath.Join(t.TempDir(), "park")})
+			t0 := time.Now()
+			err := b.Park(context.Background(), tc.fiber, backend.ParkSpec{Dir: filepath.Join(t.TempDir(), "park"), Deadline: tc.deadline})
+			took := time.Since(t0)
 			if err == nil || (tc.wantErr != nil && !errors.Is(err, tc.wantErr)) || !strings.Contains(err.Error(), tc.wantText) {
 				t.Fatalf("Park = %v, want %q (errors.Is %v)", err, tc.wantText, tc.wantErr)
+			}
+			if tc.tookMax > 0 && (took < tc.tookMin || took > tc.tookMax) {
+				t.Fatalf("the park waited %s, want between %s and %s", took, tc.tookMin, tc.tookMax)
 			}
 			if !f.alive(fc) {
 				t.Fatal("a refused park ended the fiber")
@@ -1440,7 +1461,7 @@ func TestResumeRefusals(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			_, err := b.Resume(context.Background(), backend.ResumeSpec{Dir: dir, Fence: "g/2-1", Endpoint: filepath.Join(t.TempDir(), "ep.sock"), CgroupFD: -1, WarmID: "g"})
+			_, err := b.Resume(context.Background(), backend.ResumeSpec{Dir: dir, Fence: "g/2-1", Endpoint: filepath.Join(t.TempDir(), "ep.sock"), CgroupFD: -1, WarmID: "g", Generation: 2})
 			if err == nil || !strings.Contains(err.Error(), tc.wantText) {
 				t.Fatalf("Resume = %v, want %q", err, tc.wantText)
 			}
@@ -1503,7 +1524,7 @@ func TestReapersFinishBeforeTeardown(t *testing.T) {
 		{name: "template and fiber", start: func(t *testing.T, b *Backend, workDir string) []string {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			if _, err := b.Clone(ctx, "g", backend.FiberSpec{Fence: "g/1-1", Endpoint: filepath.Join(workDir, "ep.sock"), CgroupFD: -1, Deadline: 2 * time.Second}); err != nil {
+			if _, err := b.Clone(ctx, "g", backend.FiberSpec{Fence: "g/1-1", Endpoint: filepath.Join(workDir, "ep.sock"), CgroupFD: -1, Deadline: 2 * time.Second, Generation: 1}); err != nil {
 				t.Fatalf("Clone: %v", err)
 			}
 			return []string{warmCID(t, b, "g"), boxCID(t, b, "g/1-1")}
@@ -1769,7 +1790,7 @@ func TestCIDReuse(t *testing.T) {
 			first: func(t *testing.T, b *Backend, workDir string) string {
 				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 				defer cancel()
-				if _, err := b.Clone(ctx, "g", backend.FiberSpec{Fence: "g/1-1", Endpoint: filepath.Join(workDir, "ep.sock"), CgroupFD: -1, Deadline: 2 * time.Second}); err != nil {
+				if _, err := b.Clone(ctx, "g", backend.FiberSpec{Fence: "g/1-1", Endpoint: filepath.Join(workDir, "ep.sock"), CgroupFD: -1, Deadline: 2 * time.Second, Generation: 1}); err != nil {
 					t.Fatalf("Clone: %v", err)
 				}
 				return boxCID(t, b, "g/1-1")
@@ -1781,7 +1802,7 @@ func TestCIDReuse(t *testing.T) {
 				<-gate.claimed
 				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 				defer cancel()
-				if _, err := b.Clone(ctx, "g", backend.FiberSpec{Fence: "g/1-1", Endpoint: filepath.Join(workDir, "ep.sock"), CgroupFD: -1, Deadline: 2 * time.Second}); err != nil {
+				if _, err := b.Clone(ctx, "g", backend.FiberSpec{Fence: "g/1-1", Endpoint: filepath.Join(workDir, "ep.sock"), CgroupFD: -1, Deadline: 2 * time.Second, Generation: 1}); err != nil {
 					t.Fatalf("second Clone: %v", err)
 				}
 				cid := boxCID(t, b, "g/1-1")
@@ -1839,9 +1860,10 @@ func isHex(s string, n int) bool {
 
 // checkIdentity checks a late-binding restore: its bundle carries the
 // token the sandbox claimed with and nothing of the fiber, and the one
-// identity record on the channel names the kind, fence, endpoint,
-// payload and session and carries a fresh seed of seedBytes.
-func checkIdentity(t *testing.T, cfgJSON []byte, token string, records [][]string, kind, fence, endpoint string, payload []byte, session string) {
+// incarnation record on the channel names the generation, kind, fence,
+// endpoint, payload and session, carries no identity (no sandbox serves
+// handoff) and a fresh seed of backend.SeedBytes.
+func checkIdentity(t *testing.T, cfgJSON []byte, token string, records [][]string, generation int, kind, fence, endpoint string, payload []byte, session string) {
 	t.Helper()
 	if !isHex(token, 2*tokenBytes) || !strings.Contains(string(cfgJSON), `"FIBERD_TOKEN=`+token+`"`) {
 		t.Fatalf("bundle token %q:\n%s", token, cfgJSON)
@@ -1851,8 +1873,8 @@ func checkIdentity(t *testing.T, cfgJSON []byte, token string, records [][]strin
 			t.Fatalf("bundle names %s, which belongs on the channel:\n%s", name, cfgJSON)
 		}
 	}
-	if len(records) != 1 || len(records[0]) != identityFields {
-		t.Fatalf("channel records = %v, want one identity of %d fields", records, identityFields)
+	if len(records) != 1 || len(records[0]) != backend.IncarnationFields {
+		t.Fatalf("channel records = %v, want one identity of %d fields", records, backend.IncarnationFields)
 	}
 	ph := "-"
 	if len(payload) > 0 {
@@ -1863,14 +1885,14 @@ func checkIdentity(t *testing.T, cfgJSON []byte, token string, records [][]strin
 		sh = hex.EncodeToString([]byte(session))
 	}
 	got := records[0]
-	want := []string{"", kind, fence, endpoint, ph, "-", "-", "-", sh, ""}
-	for i := 1; i < identityFields-1; i++ {
+	want := []string{strconv.Itoa(generation), kind, fence, endpoint, ph, sh, "-", "-", "-", "-", ""}
+	for i := 0; i < backend.IncarnationFields-1; i++ {
 		if got[i] != want[i] {
 			t.Fatalf("identity field %d = %q, want %q (record %v)", i, got[i], want[i], got)
 		}
 	}
-	if !isHex(got[identityFields-1], 2*seedBytes) {
-		t.Fatalf("identity seed = %q, want %d hex characters", got[identityFields-1], 2*seedBytes)
+	if !isHex(got[backend.IncarnationFields-1], 2*backend.SeedBytes) {
+		t.Fatalf("identity seed = %q, want %d hex characters", got[backend.IncarnationFields-1], 2*backend.SeedBytes)
 	}
 }
 
@@ -2004,7 +2026,7 @@ func TestPoolBind(t *testing.T) {
 				sock := poolSocketOf(t, b, "g")
 				var claim []byte
 				if tc.repeat {
-					claim = record(recClaim, token)
+					claim = backend.Record(backend.RecordClaim, token)
 				}
 				if !claimClosed(t, sock, claim, 2*claimWait) {
 					t.Fatal("the backend kept the connection")
@@ -2014,7 +2036,7 @@ func TestPoolBind(t *testing.T) {
 				}
 			}
 			ep := filepath.Join(workDir, "ep.sock")
-			fb, err := b.Bind(ctx, p.ID, backend.FiberSpec{Fence: "g/1-1", Endpoint: ep, CgroupFD: -1, Deadline: deadline, Payload: []byte{1, 2}, Session: "conv 42"})
+			fb, err := b.Bind(ctx, p.ID, backend.FiberSpec{Fence: "g/1-1", Endpoint: ep, CgroupFD: -1, Deadline: deadline, Payload: []byte{1, 2}, Session: "conv 42", Generation: 1})
 			if tc.wantBindErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantBindErr) {
 					t.Fatalf("Bind = %+v, %v, want %q", fb, err, tc.wantBindErr)
@@ -2046,7 +2068,7 @@ func TestPoolBind(t *testing.T) {
 				t.Fatal(err)
 			}
 			_, records = f.channelOf(p.ID)
-			checkIdentity(t, cfgJSON, token, records, "clone", "g/1-1", "/host/ep.sock", []byte{1, 2}, "conv 42")
+			checkIdentity(t, cfgJSON, token, records, 1, "clone", "g/1-1", "/host/ep.sock", []byte{1, 2}, "conv 42")
 			b.mu.Lock()
 			pooled, known := len(b.pooled), b.boxes["g/1-1"] != nil
 			b.mu.Unlock()
@@ -2078,7 +2100,7 @@ func TestPooledEnds(t *testing.T) {
 			if _, err := b.Pool(context.Background(), "nobody", backend.PoolSpec{CgroupFD: -1}); err == nil || !strings.Contains(err.Error(), `no warm template "nobody"`) {
 				t.Fatalf("Pool of an unknown template = %v", err)
 			}
-			if _, err := b.Bind(context.Background(), "nobody", backend.FiberSpec{Fence: "g/1-1", CgroupFD: -1}); err == nil || !strings.Contains(err.Error(), `no pooled sandbox "nobody"`) {
+			if _, err := b.Bind(context.Background(), "nobody", backend.FiberSpec{Fence: "g/1-1", CgroupFD: -1, Generation: 1}); err == nil || !strings.Contains(err.Error(), `no pooled sandbox "nobody"`) {
 				t.Fatalf("Bind of an unknown sandbox = %v", err)
 			}
 			b.Discard("nobody")
@@ -2111,7 +2133,7 @@ func TestPooledEnds(t *testing.T) {
 			if n != 0 {
 				t.Fatalf("%d sandboxes registered after the end", n)
 			}
-			if _, err := b.Bind(ctx, p.ID, backend.FiberSpec{Fence: "g/1-1", CgroupFD: -1}); err == nil {
+			if _, err := b.Bind(ctx, p.ID, backend.FiberSpec{Fence: "g/1-1", CgroupFD: -1, Generation: 1}); err == nil {
 				t.Fatal("Bind of an ended pooled sandbox succeeded")
 			}
 		})
@@ -2204,7 +2226,7 @@ func TestFillsYieldToClones(t *testing.T) {
 				// The clone's own restore takes slow, so queueing behind the
 				// fill's would take twice that.
 				t0 := time.Now()
-				_, err := b.Clone(ctx, w.ID, backend.FiberSpec{Fence: "g/1-1", Endpoint: filepath.Join(workDir, "ep.sock"), CgroupFD: -1, Deadline: 2 * time.Second})
+				_, err := b.Clone(ctx, w.ID, backend.FiberSpec{Fence: "g/1-1", Endpoint: filepath.Join(workDir, "ep.sock"), CgroupFD: -1, Deadline: 2 * time.Second, Generation: 1})
 				if err != nil {
 					t.Fatalf("Clone behind a fill = %v, want it served at once", err)
 				}
@@ -2227,7 +2249,7 @@ func TestFillsYieldToClones(t *testing.T) {
 				wg.Add(1)
 				go func() {
 					defer wg.Done()
-					_, cerr = b.Clone(ctx, w.ID, backend.FiberSpec{Fence: "g/1-1", Endpoint: filepath.Join(workDir, "ep.sock"), CgroupFD: -1, Deadline: 2 * time.Second})
+					_, cerr = b.Clone(ctx, w.ID, backend.FiberSpec{Fence: "g/1-1", Endpoint: filepath.Join(workDir, "ep.sock"), CgroupFD: -1, Deadline: 2 * time.Second, Generation: 1})
 				}()
 				waitFor(t, "the clone's restore to start", func() bool { return restoresStarted(f.calls()) >= 2 })
 				if _, err := b.Pool(ctx, w.ID, backend.PoolSpec{CgroupFD: -1, Deadline: 2 * time.Second}); err != nil {
@@ -2250,7 +2272,7 @@ func TestFillsYieldToClones(t *testing.T) {
 					wg.Add(1)
 					go func() {
 						defer wg.Done()
-						_, errs[i] = b.Clone(ctx, w.ID, backend.FiberSpec{Fence: fmt.Sprintf("g/1-%d", i), Endpoint: filepath.Join(workDir, fmt.Sprintf("ep%d.sock", i)), CgroupFD: -1, Deadline: 2 * time.Second})
+						_, errs[i] = b.Clone(ctx, w.ID, backend.FiberSpec{Fence: fmt.Sprintf("g/1-%d", i), Endpoint: filepath.Join(workDir, fmt.Sprintf("ep%d.sock", i)), CgroupFD: -1, Deadline: 2 * time.Second, Generation: 1})
 					}()
 					if i == 0 {
 						waitFor(t, "the first clone's restore to start", func() bool { return restoresStarted(f.calls()) >= 2 })
@@ -2382,7 +2404,7 @@ func TestFootprintBeforeHandOut(t *testing.T) {
 				if perr != nil {
 					t.Fatalf("Pool: %v", perr)
 				}
-				fb, err = b.Bind(ctx, p.ID, backend.FiberSpec{Fence: "g/1-1", Endpoint: filepath.Join(workDir, "ep.sock"), CgroupFD: fd, Deadline: 2 * time.Second})
+				fb, err = b.Bind(ctx, p.ID, backend.FiberSpec{Fence: "g/1-1", Endpoint: filepath.Join(workDir, "ep.sock"), CgroupFD: fd, Deadline: 2 * time.Second, Generation: 1})
 			case tc.resume:
 				b, _, workDir, _ := cloned(t, tc.knobs)
 				fc := boxCID(t, b, "g/1-1")
@@ -2395,16 +2417,77 @@ func TestFootprintBeforeHandOut(t *testing.T) {
 					return serr != nil
 				})
 				waitExit(t, b)
-				fb, err = b.Resume(ctx, backend.ResumeSpec{Dir: dir, Fence: "g/2-1", Endpoint: filepath.Join(workDir, "ep2.sock"), CgroupFD: fd, Deadline: 2 * time.Second, WarmID: "g", WorkDir: workDir})
+				fb, err = b.Resume(ctx, backend.ResumeSpec{Dir: dir, Fence: "g/2-1", Endpoint: filepath.Join(workDir, "ep2.sock"), CgroupFD: fd, Deadline: 2 * time.Second, WarmID: "g", WorkDir: workDir, Generation: 2})
 			default:
 				b, _, w, workDir := warmed(t, tc.knobs)
-				fb, err = b.Clone(ctx, w.ID, backend.FiberSpec{Fence: "g/1-1", Endpoint: filepath.Join(workDir, "ep.sock"), CgroupFD: fd, Deadline: 2 * time.Second})
+				fb, err = b.Clone(ctx, w.ID, backend.FiberSpec{Fence: "g/1-1", Endpoint: filepath.Join(workDir, "ep.sock"), CgroupFD: fd, Deadline: 2 * time.Second, Generation: 1})
 			}
 			if err != nil {
 				t.Fatalf("birth: %v", err)
 			}
 			if fb.Footprint != tc.want {
 				t.Fatalf("Footprint = %d, want %d", fb.Footprint, tc.want)
+			}
+		})
+	}
+}
+
+// TestHandOutGeneration checks that the identity record carries the
+// generation the host gave, whether the sandbox was restored for the
+// clone or handed out of the pool. The backend counts nothing itself.
+// The old backend wrote "2" for every clone and "0" for every resume,
+// which the rows above 1 catch. A generation below 1 is no incarnation,
+// and the template would exit on it, so it is refused by name instead.
+func TestHandOutGeneration(t *testing.T) {
+	cases := []struct {
+		name       string
+		pooled     bool // Pool then Bind, instead of Clone
+		generation int
+		wantErr    string
+	}{
+		{name: "a clone restored on demand is 1", generation: 1},
+		{name: "a pooled sandbox handed out is 1", pooled: true, generation: 1},
+		{name: "a clone the host counts as 7", generation: 7},
+		{name: "a pooled hand-out the host counts as 42", pooled: true, generation: 42},
+		{name: "a clone with no generation is refused", wantErr: "g/1-1: generation 0 is not an incarnation"},
+		{name: "a pooled hand-out with no generation is refused", pooled: true, wantErr: "g/1-1: generation 0 is not an incarnation"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b, f, w, workDir := warmed(t, knobs{})
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			spec := backend.FiberSpec{Fence: "g/1-1", Endpoint: filepath.Join(workDir, "ep.sock"), CgroupFD: -1, Deadline: 2 * time.Second, Generation: tc.generation}
+			var cid string
+			var err error
+			if tc.pooled {
+				p, perr := b.Pool(ctx, w.ID, backend.PoolSpec{CgroupFD: -1, Deadline: 2 * time.Second})
+				if perr != nil {
+					t.Fatalf("Pool: %v", perr)
+				}
+				_, err = b.Bind(ctx, p.ID, spec)
+				cid = p.ID
+			} else {
+				_, err = b.Clone(ctx, w.ID, spec)
+				if err == nil {
+					cid = boxCID(t, b, "g/1-1")
+				}
+			}
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("err = %v, want %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("hand-out: %v", err)
+			}
+			_, records := f.channelOf(cid)
+			if len(records) != 1 || len(records[0]) != backend.IncarnationFields {
+				t.Fatalf("channel records = %v, want one identity", records)
+			}
+			if got := records[0][0]; got != strconv.Itoa(tc.generation) {
+				t.Fatalf("identity generation = %q, want %d", got, tc.generation)
 			}
 		})
 	}

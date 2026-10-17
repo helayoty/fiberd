@@ -62,7 +62,7 @@ def wait_checkpoint(path: str = CHECKPOINT) -> str:
 
 
 def incarnation_kind(kind: str) -> str:
-    """The incarnation kind for what the identity record says: a clone of the image is a restore."""
+    """The incarnation kind for what the incarnation record says: a clone of the image is a restore."""
     return "resume" if kind == "resume" else "restore"
 
 

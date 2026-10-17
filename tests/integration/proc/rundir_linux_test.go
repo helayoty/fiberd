@@ -15,7 +15,7 @@ import (
 )
 
 // TestFiberSeesOnlyItsRunDir pins that a proc fiber, which is euid 0,
-// cannot see another grant's endpoint sockets or fence files. Its mount
+// cannot see another grant's endpoint sockets. Its mount
 // namespace covers fiberd's run directory with an empty read-only tmpfs
 // and binds back only its own grant's directory. A park and resume keep
 // the view, because CRIU restores the cover and binds the resuming grant's
@@ -47,12 +47,6 @@ func TestFiberSeesOnlyItsRunDir(t *testing.T) {
 			if err != nil {
 				t.Fatalf("clone B: %v", err)
 			}
-			// A fence file of B's, as the host writes one beside a
-			// resumed fiber's endpoint.
-			bFence := fiberendpoint.UnixPath(hb.Endpoint) + ".fence"
-			if err := os.WriteFile(bFence, []byte("grb/1/1\n"), 0o644); err != nil {
-				t.Fatal(err)
-			}
 			// probe runs the read-only stat probe in the fiber at ep
 			// against every path and compares with what it should see.
 			probe := func(when, ep string, want map[string]string) {
@@ -69,7 +63,6 @@ func TestFiberSeesOnlyItsRunDir(t *testing.T) {
 				fiberendpoint.UnixPath(ha.Endpoint):        "sock",
 				filepath.Join(runDir, "grb"):               "ENOENT",
 				fiberendpoint.UnixPath(hb.Endpoint):        "ENOENT",
-				bFence:                                     "ENOENT",
 				filepath.Join(runDir, "grb", "zygote.log"): "ENOENT",
 			}
 			probe("born A", ha.Endpoint, fromA)
@@ -102,14 +95,12 @@ func TestFiberSeesOnlyItsRunDir(t *testing.T) {
 			}
 			fromA[fiberendpoint.UnixPath(ha2.Endpoint)] = "sock"
 			probe("resumed A", ha2.Endpoint, fromA)
-			// The fence file the host wrote for the new incarnation is
-			// in A's directory, which the fiber sees through its bind.
-			if got := talk(t, ha2.Endpoint, "read "+fiberendpoint.UnixPath(ha2.Endpoint)+".fence"); got != "gra/1/2" {
-				t.Fatalf("resumed A reads its fence file as %q, want gra/1/2", got)
+			// The new fence came on A's channel, not through any file.
+			if got := talk(t, ha2.Endpoint, "fence"); got != "gra/1/2" {
+				t.Fatalf("resumed A names its fence %q, want gra/1/2", got)
 			}
 			probe("B after A resumed", hb.Endpoint, map[string]string{
-				fiberendpoint.UnixPath(ha2.Endpoint):            "ENOENT",
-				fiberendpoint.UnixPath(ha2.Endpoint) + ".fence": "ENOENT",
+				fiberendpoint.UnixPath(ha2.Endpoint): "ENOENT",
 			})
 			for _, h := range []core.FiberHandle{ha2, hb} {
 				if err := rt.Release(ctx, h.ID, true); err != nil {

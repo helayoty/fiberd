@@ -96,7 +96,7 @@ func TestRegistryMobility(t *testing.T) {
 	parentSHA := shaOf(parentPages)
 	repo := domainRepoFor(a.cfg.DeltaRegistry, domainOf(t, g))
 	deltaA := filepath.Join(a.cfg.DeltaDir, "g1", "1-1")
-	m := manifest{Fence: "g1/1/1", GrantUID: "g1", Endpoint: "unix:///run/g1/1-1.sock", Template: g.TemplateDigest, Backend: "fake",
+	m := manifest{Fence: "g1/1/1", GrantUID: "g1", Endpoint: "unix:///run/g1/1-1.sock", Template: g.TemplateDigest, Backend: "fake", Generation: 3,
 		WBytes: 7, Delta: true, Parent: parentSHA, ParkedAt: time.Now().UTC().Format(time.RFC3339Nano)}
 	var remote string
 	var found core.RemoteDelta
@@ -151,7 +151,7 @@ func TestRegistryMobility(t *testing.T) {
 			want := map[string]string{artifact.AnnotationWBytes: "7", artifact.AnnotationParent: parentSHA, artifact.AnnotationHome: "home-a",
 				artifact.AnnotationFence: "g1/1/1", artifact.AnnotationGrant: "g1", artifact.AnnotationArch: "arm64", artifact.AnnotationKernel: "6.10.0",
 				artifact.AnnotationLibc: "glibc 2.40", artifact.AnnotationBackend: "fake", artifact.AnnotationDomain: domainOf(t, g),
-				artifact.AnnotationSession: "S", artifact.AnnotationSealKey: "seal"}
+				artifact.AnnotationSession: "S", artifact.AnnotationSealKey: "seal", artifact.AnnotationGeneration: "3"}
 			for k, v := range want {
 				if loc.Annotations[k] != v {
 					t.Fatalf("annotation %s = %q, want %q (all: %v)", k, loc.Annotations[k], v, loc.Annotations)

@@ -173,10 +173,8 @@ func TestOrphanKilledInLeaf(t *testing.T) {
 			pid := startInLeaf(t, leaf, tc.command)
 			// The orphan served beside the live fiber, in the grant's run directory.
 			sock := filepath.Join(filepath.Dir(endpoint.UnixPath(h.Endpoint)), "5-5.sock")
-			for _, f := range []string{sock, sock + ".fence"} {
-				if err := os.WriteFile(f, nil, 0o600); err != nil {
-					t.Fatal(err)
-				}
+			if err := os.WriteFile(sock, nil, 0o600); err != nil {
+				t.Fatal(err)
 			}
 			ctx := context.Background()
 			list, err := r.List(ctx)
@@ -186,8 +184,8 @@ func TestOrphanKilledInLeaf(t *testing.T) {
 			if err := r.Release(ctx, orphan.String(), false); err != nil {
 				t.Fatal(err)
 			}
-			if leaf.Exists() || exists(sock) || exists(sock+".fence") {
-				t.Fatal("the orphan's leaf or files remain")
+			if leaf.Exists() || exists(sock) {
+				t.Fatal("the orphan's leaf or socket remain")
 			}
 			// The task is dead, reaped or not, so it only answers as a zombie.
 			if st, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat"); err == nil && !strings.Contains(string(st), ") Z ") {

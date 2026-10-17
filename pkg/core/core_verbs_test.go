@@ -43,6 +43,38 @@ func (r advisedRuntime) DefaultDeadlines(uid string) (time.Duration, time.Durati
 	return r.create, r.resume
 }
 
+// TestGrantDeadlines checks the one source of a grant's deadlines: the
+// runtime's advice for that grant when it advises both, else the
+// defaults. A runtime that advises nothing, or for another grant, or
+// only one of the two, leaves the defaults.
+func TestGrantDeadlines(t *testing.T) {
+	cases := []struct {
+		name           string
+		advise         string // the grant the runtime advises for, "" for a runtime that advises nothing
+		create, resume time.Duration
+		grant          string
+		wantC, wantR   time.Duration
+	}{
+		{name: "a runtime that advises nothing", grant: "g1", wantC: core.DefaultCreateDeadline, wantR: core.DefaultResumeDeadline},
+		{name: "advice for the grant", advise: "g1", create: 5 * time.Second, resume: 9 * time.Second, grant: "g1", wantC: 5 * time.Second, wantR: 9 * time.Second},
+		{name: "advice for another grant", advise: "g2", create: 5 * time.Second, resume: 9 * time.Second, grant: "g1", wantC: core.DefaultCreateDeadline, wantR: core.DefaultResumeDeadline},
+		{name: "advice with a zero resume is ignored", advise: "g1", create: 5 * time.Second, grant: "g1", wantC: core.DefaultCreateDeadline, wantR: core.DefaultResumeDeadline},
+		{name: "advice with a zero create is ignored", advise: "g1", resume: 9 * time.Second, grant: "g1", wantC: core.DefaultCreateDeadline, wantR: core.DefaultResumeDeadline},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var rt core.Runtime = deadlineRuntime{}
+			if tc.advise != "" {
+				rt = advisedRuntime{grant: tc.advise, create: tc.create, resume: tc.resume}
+			}
+			c, r := core.GrantDeadlines(rt, tc.grant)
+			if c != tc.wantC || r != tc.wantR {
+				t.Fatalf("GrantDeadlines = %s/%s, want %s/%s", c, r, tc.wantC, tc.wantR)
+			}
+		})
+	}
+}
+
 // TestCloneDefaultDeadlines checks the deadline the runtime is given. The
 // caller's own deadline is always honoured. Without one, a create gets the
 // create default and a resume the resume default, from the runtime when

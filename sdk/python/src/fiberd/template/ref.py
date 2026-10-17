@@ -15,6 +15,8 @@ the integration tests drive both the same way.
     rss             -> resident bytes
     getenv <NAME>   -> the value, or "-" (proves the scrub)
     session         -> the session the caller named, or "-"
+    generation      -> fiberd's count of this fiber's lineage, 1 at birth and the parked one plus one after a resume
+    kind            -> the current record's kind, fork, resume or, on gVisor, restore
     payload         -> the birth payload in hex (up to 127 bytes), or "-"
     status <Key>    -> that field of /proc/self/status, or "-"
     read <path>     -> the file's first line, or "-"
@@ -27,6 +29,8 @@ The probes that need fork or mount(2) (unshare, mount, remount, connect)
 and the device engine (reserve, devfree) stay with refzygote, which
 answers "err no engine" here. The payload is JSON. "dirty_bytes" is
 written right after ready, "ready_delay_ms" delays the ready report,
+"serve_delay_ms" holds the fiber between ready and its accept loop,
+"reply_delay_ms" pauses it between a reply and its next read,
 "ready_misuse" misuses the readiness pipe and "exit_after_ready" ends
 the fiber at once, for the runtime's own tests. --log reopens stdio on a
 file, as a launcher that runs the template as a container's init asks.
@@ -120,6 +124,10 @@ def answer(st: State, line: str) -> str:
         return str(st.warm.counter)
     if cmd == "fence":
         return f.fence
+    if cmd == "generation":
+        return str(f.incarnation.generation) if f.incarnation is not None else "-"
+    if cmd == "kind":
+        return f.incarnation.kind if f.incarnation is not None else "-"
     if cmd == "pid":
         return str(os.getpid())
     if cmd == "random":
@@ -218,8 +226,8 @@ def _mkdir(path: str) -> str:
     return "ok"
 
 
-def handle(conn: socket.socket, st: State) -> None:
-    """Serves one connection, a line per request, until the peer closes."""
+def handle(conn: socket.socket, st: State, reply_delay: float = 0) -> None:
+    """Serves one connection, a line per request, until the peer closes. reply_delay is the test knob, a pause after each reply."""
     buf = b""
     while True:
         chunk = conn.recv(512)
@@ -230,6 +238,8 @@ def handle(conn: socket.socket, st: State) -> None:
             line, buf = buf.split(b"\n", 1)
             reply = answer(st, line.decode("utf-8", "replace").rstrip("\r"))
             conn.sendall(reply.encode("utf-8") + b"\n")
+            if reply_delay:
+                time.sleep(reply_delay)
 
 
 def payload_dict(payload: bytes) -> dict[str, Any]:
@@ -262,9 +272,14 @@ def on_fiber(warm: Warm, f: ft.Fiber) -> int:
     f.ready()
     if opts.get("exit_after_ready"):
         return 0
+    # A park can arrive from here on. The runtime's tests widen the gap
+    # before the accept loop to prove the fiber survives one.
+    if opts.get("serve_delay_ms"):
+        time.sleep(int(opts["serve_delay_ms"]) / 1000)
     if opts.get("dirty_bytes"):
         st.dirty(int(opts["dirty_bytes"]))
-    f.serve(lambda conn: handle(conn, st), listener=srv)
+    reply_delay = int(opts.get("reply_delay_ms", 0)) / 1000
+    f.serve(lambda conn: handle(conn, st, reply_delay), listener=srv)
     return 0
 
 

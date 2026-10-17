@@ -77,6 +77,19 @@ func rawZygoteWith(t *testing.T, dir string, wrap []string, setup string) (*net.
 	return uc, rd
 }
 
+// send writes one line to a raw zygote. A CLONE line takes the channel
+// fiberd would attach, with the record queued on it.
+func send(t *testing.T, uc *net.UnixConn, line string) {
+	t.Helper()
+	if strings.HasPrefix(line, "CLONE ") {
+		sendClone(t, uc, line)
+		return
+	}
+	if _, err := uc.Write([]byte(line + "\n")); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // readLine returns the zygote's next line, or "" when none comes within
 // two seconds.
 func readLine(t *testing.T, uc *net.UnixConn, rd *bufio.Reader) string {
@@ -180,9 +193,7 @@ func TestControlProtocolLines(t *testing.T) {
 			if strings.Contains(line, "%s") {
 				line = fmt.Sprintf(line, dir)
 			}
-			if _, err := uc.Write([]byte(line + "\n")); err != nil {
-				t.Fatal(err)
-			}
+			send(t, uc, line)
 			got := readLine(t, uc, rd)
 			if !strings.HasPrefix(got, tc.want) {
 				t.Fatalf("reply %.200q, want it to start with %.200q", got, tc.want)
@@ -255,9 +266,7 @@ func TestSetupPhase(t *testing.T) {
 				if strings.Contains(line, "%s") {
 					line = fmt.Sprintf(line, dir)
 				}
-				if _, err := uc.Write([]byte(line + "\n")); err != nil {
-					t.Fatal(err)
-				}
+				send(t, uc, line)
 				got := readLine(t, uc, rd)
 				if tc.gone {
 					if got != "" {

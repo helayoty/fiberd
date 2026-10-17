@@ -47,14 +47,19 @@ func cloneDirect(t *testing.T, be *procbackend.Backend, w backend.Warm, dir, fen
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	return be.Clone(ctx, w.ID, backend.FiberSpec{
-		Fence:    fence,
-		Endpoint: filepath.Join(dir, strings.ReplaceAll(fence, "/", "-")+".sock"),
-		CgroupFD: -1,
-		Deadline: 2 * time.Second,
-		OwnPIDNS: true,
-		Payload:  []byte(payload),
+	fb, err := be.Clone(ctx, w.ID, backend.FiberSpec{
+		Generation: 1,
+		Fence:      fence,
+		Endpoint:   filepath.Join(dir, strings.ReplaceAll(fence, "/", "-")+".sock"),
+		CgroupFD:   -1,
+		Deadline:   2 * time.Second,
+		OwnPIDNS:   true,
+		Payload:    []byte(payload),
 	})
+	if err == nil {
+		t.Cleanup(func() { _ = fb.Channel.Close() })
+	}
+	return fb, err
 }
 
 // TestHideFailureRefusesClone pins that a fiber runs only when every HIDE

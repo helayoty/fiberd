@@ -50,9 +50,11 @@ func TestExitWakesZygote(t *testing.T) {
 					t.Fatalf("clone %d: %v", i, err)
 				}
 				if i == 1 {
-					// The zygote's block and its descriptor are its own.
-					if got := talk(t, h.Endpoint, "status SigBlk"); got != "0000000000000000" {
-						t.Fatalf("fiber SigBlk = %q, want none blocked", got)
+					// The zygote's block and its descriptor are its own. The
+					// fiber's mask holds SIGUSR1 alone, refzygote's own block
+					// for the park's signal, let through only in its waits.
+					if got := talk(t, h.Endpoint, "status SigBlk"); got != "0000000000000200" {
+						t.Fatalf("fiber SigBlk = %q, want SIGUSR1 alone, never the zygote's SIGCHLD", got)
 					}
 					if fd := signalfdOf(t, peerPID(t, h.Endpoint)); fd != "" {
 						t.Fatalf("fiber holds the zygote's signalfd at fd %s", fd)

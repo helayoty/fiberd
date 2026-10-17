@@ -109,7 +109,7 @@ func TestPark(t *testing.T) {
 				if _, err := time.Parse(time.RFC3339Nano, m.ParkedAt); err != nil {
 					t.Fatalf("parked_at %q: %v", m.ParkedAt, err)
 				}
-				if parks := f.fake().parked(); len(parks) != 1 || parks[0] != (backend.ParkSpec{Dir: ref, Sync: false}) {
+				if parks := f.fake().parked(); len(parks) != 1 || parks[0] != (backend.ParkSpec{Dir: ref, Sync: false, Deadline: core.DefaultResumeDeadline}) {
 					t.Fatalf("backend parks = %+v", parks)
 				}
 				if !f.r.HasDelta(ref) || !exists(filepath.Join(ref, fakeDeltaFile)) {
@@ -198,6 +198,17 @@ func TestPark(t *testing.T) {
 				f.h.ID = "odd"
 			},
 			errText: "want grant/epoch/seq"},
+		// The park's wait on the fiber is bounded by the grant's resume
+		// deadline, which core sizes, and a plain fiber speaks on a pair
+		// the backend borrows, so no channel is handed over.
+		{name: "the backend is given the grant's resume deadline and no channel for a plain fiber", be: func() backend.Backend { return newCodecBackend(core.TierCheckpoint) }, grant: g,
+			check: func(t *testing.T, f *parkFixture, _ string) {
+				_, want := core.GrantDeadlines(f.r, "g1")
+				specs := f.fake().parked()
+				if len(specs) != 1 || specs[0].Deadline != want || specs[0].Channel != nil {
+					t.Fatalf("park specs = %+v, want one with deadline %s and no channel", specs, want)
+				}
+			}},
 		{name: "a dump the backend refuses leaves the fiber running and the log for diagnosis", be: func() backend.Backend {
 			cb := newCodecBackend(core.TierCheckpoint)
 			cb.parkErr = errors.New("fake: criu dump failed")
@@ -383,13 +394,13 @@ func TestResume(t *testing.T) {
 				if h.ID != "g1/2/1" || h.Endpoint != "unix://"+sock {
 					t.Fatalf("handle = %+v", h)
 				}
-				if b, err := os.ReadFile(sock + ".fence"); err != nil || string(b) != "g1/2/1\n" {
-					t.Fatalf("fence file = %q %v", b, err)
-				}
+				// The backend is told what the resumed fiber's record
+				// says: the new fence and the next generation.
 				cb := f.be.(*codecBackend)
 				ff := cb.fiber("g1/2/1")
 				if ff == nil || ff.resume == nil || ff.resume.Dir != ref || ff.resume.Endpoint != sock || ff.resume.WarmID != "g1" ||
-					ff.resume.WorkDir != filepath.Join(f.r.cfg.RunDir, "g1") || ff.resume.CgroupFD < 0 || ff.resume.Handoff != nil {
+					ff.resume.WorkDir != filepath.Join(f.r.cfg.RunDir, "g1") || ff.resume.CgroupFD < 0 || ff.resume.Handoff ||
+					ff.resume.Fence != "g1/2/1" || ff.resume.Generation != 2 {
 					t.Fatalf("resume spec = %+v", ff)
 				}
 				parent := shaOf("zygote pages of g1")
@@ -400,12 +411,11 @@ func TestResume(t *testing.T) {
 				if !leaf.Exists() || cgUint(t, leaf, "memory.max") != 64*mib {
 					t.Fatal("the resumed fiber has no leaf of its own")
 				}
-				// Its end removes the fence file with the rest.
 				if err := f.r.Release(context.Background(), h.ID, false); err != nil {
 					t.Fatal(err)
 				}
-				if exists(sock+".fence") || leaf.Exists() {
-					t.Fatal("the fence file or the leaf remain")
+				if leaf.Exists() {
+					t.Fatal("the leaf remains")
 				}
 			}},
 		{name: "below the checkpoint tier", be: func() backend.Backend { return newFakeBackend(core.TierWarm) }, grant: g,
@@ -464,6 +474,12 @@ func TestResume(t *testing.T) {
 				if f.r.root.Child("g1").Child("f-2-1").Exists() || len(f.r.fibers) != 0 {
 					t.Fatal("the leaf or the record was left behind")
 				}
+				if exists(filepath.Join(f.r.cfg.RunDir, "g1", "1-1.sock")) {
+					t.Fatal("the failed resume left the socket name behind")
+				}
+				if ents, _ := os.ReadDir(f.r.cfg.RunDir); len(ents) != 1 {
+					t.Fatalf("the run directory holds %d entries, want the grant's alone", len(ents))
+				}
 			}},
 		{name: "a tcp delta keeps its port across park and resume", be: func() backend.Backend { return newSandboxBackend(core.TierSnapshot) }, grant: g,
 			mod: func(c *Config) { c.Endpoints = tcpPolicy }, ref: parkFirst,
@@ -477,13 +493,8 @@ func TestResume(t *testing.T) {
 				if holder != "g1/2/1" {
 					t.Fatalf("port 20000 held by %q, want the new fence", holder)
 				}
-				// Published under the birth fence's name, the one the fiber knows.
-				fenceFn := filepath.Join(f.r.cfg.RunDir, "g1", "1-1.fence")
-				if b, err := os.ReadFile(fenceFn); err != nil || string(b) != "g1/2/1\n" {
-					t.Fatalf("fence file = %q %v", b, err)
-				}
-				if ff := f.be.(*sandboxBackend).fiber("g1/2/1"); ff.resume.Endpoint != "tcp://127.0.0.1:20000" {
-					t.Fatalf("the backend was told to serve on %s", ff.resume.Endpoint)
+				if ff := f.be.(*sandboxBackend).fiber("g1/2/1"); ff.resume.Endpoint != "tcp://127.0.0.1:20000" || ff.resume.Generation != 2 {
+					t.Fatalf("the backend was told to serve on %s as generation %d", ff.resume.Endpoint, ff.resume.Generation)
 				}
 				// Another delta parked on the same port, while the resumed
 				// fiber holds it, cannot come back here.
@@ -507,7 +518,7 @@ func TestResume(t *testing.T) {
 					t.Fatal("parking a released fiber must fail")
 				}
 			}},
-		{name: "a handoff delta gets a fresh channel and no identity message", be: func() backend.Backend { return newSandboxBackend(core.TierSnapshot) }, grant: handoffG,
+		{name: "a handoff delta gets a fresh channel and no record", be: func() backend.Backend { return newSandboxBackend(core.TierSnapshot) }, grant: handoffG,
 			mod: func(c *Config) { c.Handoff, c.HandoffKey = handoffRouter(), handoffKey }, ref: parkFirst,
 			check: func(t *testing.T, f *parkFixture, ref string, h core.FiberHandle) {
 				if m := readManifest(t, ref); !m.Handoff {
@@ -515,8 +526,14 @@ func TestResume(t *testing.T) {
 				}
 				sb := f.be.(*sandboxBackend)
 				ff := sb.fiber("g1/2/1")
-				if ff.resume.Endpoint != handoffEndpoint || ff.resume.Handoff == nil || ff.handoff < 0 || ff.identity != nil {
+				if ff.resume.Endpoint != handoffEndpoint || !ff.resume.Handoff || ff.handoff < 0 || ff.identity != nil {
 					t.Fatalf("resume = %+v, identity %q", ff.resume, ff.identity)
+				}
+				f.r.mu.Lock()
+				ch := f.r.fibers["g1/2/1"].channel
+				f.r.mu.Unlock()
+				if ch == nil {
+					t.Fatal("the host holds no end of the resumed fiber's channel")
 				}
 				if h.Endpoint != "tcp://10.0.0.1:443" {
 					t.Fatalf("handle endpoint = %s", h.Endpoint)
@@ -532,7 +549,7 @@ func TestResume(t *testing.T) {
 			ref: func(t *testing.T, f *parkFixture) string {
 				return manifestOnly(t, f, manifest{Fence: "g1/1/1", Backend: "fake", Handoff: true}, nil)
 			},
-			errText: "handoff",
+			errText: "hand connections",
 			check: func(t *testing.T, f *parkFixture, _ string, _ core.FiberHandle) {
 				if f.r.root.Child("g1").Child("f-2-1").Exists() {
 					t.Fatal("the leaf was left behind")
@@ -580,13 +597,19 @@ func TestResume(t *testing.T) {
 				if f.r.root.Child("g1").Child("f-2-1").Exists() || len(f.r.fibers) != 0 {
 					t.Fatal("the leaf or the record was left behind")
 				}
+				if exists(filepath.Join(f.r.cfg.RunDir, "g1", "1-1.sock")) {
+					t.Fatal("the failed resume left the socket name behind")
+				}
+				if ents, _ := os.ReadDir(f.r.cfg.RunDir); len(ents) != 1 {
+					t.Fatalf("the run directory holds %d entries, want the grant's alone", len(ents))
+				}
 			}},
 		{name: "a handoff delta whose channel the backend cannot make", be: func() backend.Backend {
 			sb := newSandboxBackend(core.TierSnapshot)
 			return sb
 		}, grant: g, mod: func(c *Config) { c.Handoff, c.HandoffKey = handoffRouter(), handoffKey },
 			ref: func(t *testing.T, f *parkFixture) string {
-				f.be.(*sandboxBackend).err = errors.New("fake: netns gone")
+				f.be.(*sandboxBackend).channelErr = errors.New("fake: netns gone")
 				return manifestOnly(t, f, manifest{Fence: "g1/1/1", Backend: "fake", Handoff: true}, nil)
 			},
 			errText: "netns gone",
@@ -662,10 +685,12 @@ func TestReleaseDiscard(t *testing.T) {
 }
 
 // TestReleaseOrphan restarts fiberd under a live fiber and releases it
-// as an orphan. Its leaf goes, and so do the files it served on. A resumed
-// fiber keeps the socket name of its park, which only the fence file beside
-// it ties to the current fence. Other fibers' files stay. The kill of a
-// task still in the leaf is tests/integration/host TestOrphanKilledInLeaf.
+// as an orphan. Its leaf goes, and so does the socket its fence names.
+// A resumed fiber serves the socket name of its park, which nothing on
+// disk ties to its fence since the fence rides its channel, so that
+// name stays until the next fiber binds it. Other fibers' files stay.
+// The kill of a task still in the leaf is tests/integration/host
+// TestOrphanKilledInLeaf.
 func TestReleaseOrphan(t *testing.T) {
 	g := core.Grant{UID: "g1", TemplateDigest: "sha256:tmpl", WBudgetBytes: 64 * mib}
 	next := core.Fence{GrantUID: "g1", Epoch: 2, Seq: 1}
@@ -688,42 +713,36 @@ func TestReleaseOrphan(t *testing.T) {
 		// fiber readies the orphan and returns its fence.
 		fiber func(t *testing.T, f *parkFixture) core.Fence
 		gone  []string // under the grant's run directory
+		stays []string // the orphan's, under the grant's run directory, but not tied to its fence
 	}{
 		{name: "a cloned fiber: its socket by its fence", be: func() backend.Backend {
 			b := newFakeBackend(core.TierWarm)
 			b.endpointFile = true
 			return b
 		}, fiber: func(_ *testing.T, f *parkFixture) core.Fence { return f.fence }, gone: []string{"1-1.sock"}},
-		{name: "a resumed fiber: the socket it kept from its park and the fence file beside it", be: func() backend.Backend {
+		{name: "a resumed fiber: the socket name of its park stays", be: func() backend.Backend {
 			b := newCodecBackend(core.TierCheckpoint)
 			b.serve = true
 			return b
-		}, fiber: resumed, gone: []string{"1-1.sock", "1-1.sock.fence"}},
-		{name: "a fiber resumed on tcp: its fence file by its birth fence", be: func() backend.Backend { return newSandboxBackend(core.TierSnapshot) },
-			mod: func(c *Config) { c.Endpoints = tcpPolicy }, fiber: resumed, gone: []string{"1-1.fence"}},
-		{name: "a fiber resumed behind a relay: the socket it kept and the fence file beside it", be: func() backend.Backend { return relayBackend(core.TierSnapshot) },
-			mod: func(c *Config) { c.Endpoints = tcpPolicy }, fiber: resumed, gone: []string{"1-1.sock", "1-1.sock.fence"}},
+		}, fiber: resumed, stays: []string{"1-1.sock"}},
+		{name: "a fiber resumed on tcp: nothing on disk", be: func() backend.Backend { return newSandboxBackend(core.TierSnapshot) },
+			mod: func(c *Config) { c.Endpoints = tcpPolicy }, fiber: resumed},
+		{name: "a fiber resumed behind a relay: the socket name of its park stays", be: func() backend.Backend { return relayBackend(core.TierSnapshot) },
+			mod: func(c *Config) { c.Endpoints = tcpPolicy }, fiber: resumed, stays: []string{"1-1.sock"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newParkFixture(t, tc.be(), g, tc.mod)
 			orphan := tc.fiber(t, f)
 			run := filepath.Join(f.r.cfg.RunDir, "g1")
-			for _, n := range tc.gone {
+			for _, n := range append(append([]string{}, tc.gone...), tc.stays...) {
 				if !exists(filepath.Join(run, n)) {
 					t.Fatalf("%s is not there to begin with", n)
 				}
 			}
-			// Another fiber's socket and fence file, and a fence file that
-			// is a link to one naming the orphan, are not the orphan's.
-			write(t, run, map[string]string{"9-9.sock": "", "9-9.sock.fence": "g1/9/9\n"})
-			named := filepath.Join(t.TempDir(), "named")
-			write(t, filepath.Dir(named), map[string]string{"named": orphan.String() + "\n"})
-			if err := os.Symlink(named, filepath.Join(run, "8-8.sock.fence")); err != nil {
-				t.Fatal(err)
-			}
-			write(t, run, map[string]string{"8-8.sock": ""})
-			kept := []string{"9-9.sock", "9-9.sock.fence", "8-8.sock", "8-8.sock.fence"}
+			// Another fiber's socket is not the orphan's.
+			write(t, run, map[string]string{"9-9.sock": ""})
+			kept := append([]string{"9-9.sock"}, tc.stays...)
 
 			// A restarted fiberd over the same directories knows nothing of
 			// the fiber, whose leaf still holds a task.
@@ -755,118 +774,6 @@ func TestReleaseOrphan(t *testing.T) {
 			for _, n := range kept {
 				if !exists(filepath.Join(run, n)) {
 					t.Errorf("%s, not the orphan's, was removed", n)
-				}
-			}
-		})
-	}
-}
-
-// TestResumeFenceFile checks where a resumed fiber's new fence is
-// published and how. A fiber that serves a unix socket, behind a relay
-// or not, finds it beside that socket, the one path it knows. One that
-// binds tcp itself finds it under the run directory by its birth fence,
-// the one fence it holds in memory.
-// The grant's fibers write that directory too, so fiberd, which runs
-// as root, never writes through a name there. A link a fiber planted is
-// replaced, not followed, and a directory denies the fiber its file and
-// nothing else. A restore that fails leaves no fence file behind.
-func TestResumeFenceFile(t *testing.T) {
-	g := core.Grant{UID: "g1", TemplateDigest: "sha256:tmpl", FiberMax: 4, WBudgetBytes: 64 * mib}
-	next := core.Fence{GrantUID: "g1", Epoch: 2, Seq: 1}
-	unixServing := func() backend.Backend {
-		b := newCodecBackend(core.TierCheckpoint)
-		b.serve = true
-		return b
-	}
-	symlink := func(t *testing.T, fenceFn, victim string) {
-		t.Helper()
-		if err := os.Symlink(victim, fenceFn); err != nil {
-			t.Fatal(err)
-		}
-	}
-	cases := []struct {
-		name string
-		be   func() backend.Backend
-		mod  func(*Config)
-		// file is the fence file's name under the grant's run directory.
-		file string
-		// plant puts something at that name before the resume.
-		plant     func(t *testing.T, fenceFn, victim string)
-		resumeErr error
-		// wantFile is whether a regular file naming the new fence is
-		// there after the resume.
-		wantFile bool
-	}{
-		{name: "unix: beside the socket", be: unixServing, file: "1-1.sock.fence", wantFile: true},
-		{name: "relayed tcp: beside the socket the relay dials", be: func() backend.Backend { return relayBackend(core.TierSnapshot) },
-			mod: func(c *Config) { c.Endpoints = tcpPolicy }, file: "1-1.sock.fence", wantFile: true},
-		{name: "tcp bound by the backend: by the birth fence", be: func() backend.Backend { return newSandboxBackend(core.TierSnapshot) },
-			mod: func(c *Config) { c.Endpoints = tcpPolicy }, file: "1-1.fence", wantFile: true},
-		{name: "unix: a planted link is replaced, not followed", be: unixServing, file: "1-1.sock.fence", plant: symlink, wantFile: true},
-		{name: "relayed tcp: a planted link is replaced, not followed", be: func() backend.Backend { return relayBackend(core.TierSnapshot) },
-			mod: func(c *Config) { c.Endpoints = tcpPolicy }, file: "1-1.sock.fence", plant: symlink, wantFile: true},
-		{name: "tcp bound by the backend: a planted link is replaced, not followed", be: func() backend.Backend { return newSandboxBackend(core.TierSnapshot) },
-			mod: func(c *Config) { c.Endpoints = tcpPolicy }, file: "1-1.fence", plant: symlink, wantFile: true},
-		{name: "a planted directory denies the file and nothing else", be: unixServing, file: "1-1.sock.fence",
-			plant: func(t *testing.T, fenceFn, _ string) {
-				t.Helper()
-				if err := os.Mkdir(fenceFn, 0o755); err != nil {
-					t.Fatal(err)
-				}
-			}},
-		{name: "a failed restore leaves no fence file", be: unixServing, file: "1-1.sock.fence", resumeErr: errors.New("fake: criu restore failed")},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			f := newParkFixture(t, tc.be(), g, tc.mod)
-			f.fake().resumeErr = tc.resumeErr
-			ref, err := f.r.Park(context.Background(), f.h.ID, false)
-			if err != nil {
-				t.Fatalf("Park: %v", err)
-			}
-			fenceFn := filepath.Join(f.r.cfg.RunDir, "g1", tc.file)
-			victim := filepath.Join(t.TempDir(), "victim")
-			write(t, filepath.Dir(victim), map[string]string{"victim": "untouched\n"})
-			if tc.plant != nil {
-				tc.plant(t, fenceFn, victim)
-			}
-			h, err := f.r.Clone(context.Background(), core.CloneSpec{Grant: g, Source: core.SourceDelta, Ref: ref, Fence: next, Deadline: time.Second})
-			if (err != nil) != (tc.resumeErr != nil) {
-				t.Fatalf("resume = %+v, %v, want error %v", h, err, tc.resumeErr)
-			}
-			if b, _ := os.ReadFile(victim); string(b) != "untouched\n" {
-				t.Fatalf("fiberd wrote through the planted link: victim reads %q", b)
-			}
-			st, lerr := os.Lstat(fenceFn)
-			switch {
-			case tc.wantFile:
-				if lerr != nil || !st.Mode().IsRegular() {
-					t.Fatalf("fence file %s: %v %v, want a regular file", tc.file, st, lerr)
-				}
-				if b, err := os.ReadFile(fenceFn); err != nil || string(b) != next.String()+"\n" {
-					t.Fatalf("fence file = %q %v, want the new fence", b, err)
-				}
-			case tc.resumeErr != nil:
-				if lerr == nil {
-					t.Fatalf("the failed resume left %s behind", tc.file)
-				}
-				if exists(filepath.Join(f.r.cfg.RunDir, "g1", "1-1.sock")) {
-					t.Fatal("the failed resume left the socket name behind")
-				}
-			default:
-				if lerr != nil || !st.IsDir() {
-					t.Fatalf("the planted directory %s was replaced: %v %v", tc.file, st, lerr)
-				}
-			}
-			if ents, _ := os.ReadDir(f.r.cfg.RunDir); len(ents) != 1 {
-				t.Fatalf("the run directory holds %d entries, want the grant's alone (no temp file left)", len(ents))
-			}
-			if err == nil {
-				if err := f.r.Release(context.Background(), h.ID, true); err != nil {
-					t.Fatal(err)
-				}
-				if exists(fenceFn) && tc.wantFile {
-					t.Fatalf("%s remains after the release", tc.file)
 				}
 			}
 		})
@@ -925,7 +832,6 @@ func TestResumeRefusesHeldSocket(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newParkFixture(t, tc.be(), g, tc.mod) // g1/1/1 serves 1-1.sock
 			ctx := context.Background()
-			run := filepath.Join(f.r.cfg.RunDir, "g1")
 			if !tc.reverse {
 				ref := foreign(t, f, "g1/1/1", "1-1.sock", tc.relayed)
 				h, err := f.r.Clone(ctx, core.CloneSpec{Grant: g, Source: core.SourceDelta, Ref: ref, Fence: core.Fence{GrantUID: "g1", Epoch: 2, Seq: 1}})
@@ -935,8 +841,8 @@ func TestResumeRefusesHeldSocket(t *testing.T) {
 				if got := mustSay(t, f.h.Endpoint, "ping"); got != "g1/1/1:ping" {
 					t.Fatalf("the holder answered %q after the refused resume", got)
 				}
-				if f.r.root.Child("g1").Child("f-2-1").Exists() || exists(filepath.Join(run, "1-1.sock.fence")) || heldPorts(f.r) != boolInt(tc.relayed) {
-					t.Fatalf("the refused resume left its leaf, a fence file, or a port (%d held)", heldPorts(f.r))
+				if f.r.root.Child("g1").Child("f-2-1").Exists() || heldPorts(f.r) != boolInt(tc.relayed) {
+					t.Fatalf("the refused resume left its leaf or a port (%d held)", heldPorts(f.r))
 				}
 				return
 			}
@@ -1289,6 +1195,97 @@ func TestResumeW(t *testing.T) {
 			st, err := f.r.Stats(ctx, h.ID)
 			if err != nil || (st.WUsedBytes > 0) != tc.positive {
 				t.Fatalf("Stats = %+v %v, want W above zero %v", st, err, tc.positive)
+			}
+		})
+	}
+}
+
+// TestGeneration checks the host's count of a lineage. A clone is
+// generation 1. A park writes the fiber's generation into its manifest,
+// and a resume of that park is the parked generation plus one, which
+// the backend is told. Two resumes of one park are the same generation,
+// and a resume of a resumed park counts on. On the old host no count
+// existed: the backend was told nothing and the manifest held nothing,
+// so a template saw a constant.
+func TestGeneration(t *testing.T) {
+	g := core.Grant{UID: "g1", TemplateDigest: "sha256:tmpl", FiberMax: 2, WBudgetBytes: 64 * mib}
+	cases := []struct {
+		name string
+		// steps after the clone. "park" parks the latest fiber, "resume"
+		// resumes the latest park, "again" releases the latest fiber and
+		// resumes the first park once more.
+		steps []string
+		// want is the generation of every fiber in the order they were
+		// born, as the backend was told it. wantParked is what each park's
+		// manifest records, in park order.
+		want       []int
+		wantParked []int
+	}{
+		{name: "a clone starts its lineage at 1", want: []int{1}},
+		{name: "a resume is the parked generation plus one", steps: []string{"park", "resume"}, want: []int{1, 2}, wantParked: []int{1}},
+		{name: "a resume of a resumed park counts on", steps: []string{"park", "resume", "park", "resume"}, want: []int{1, 2, 3}, wantParked: []int{1, 2}},
+		{name: "a second resume of one park is the same generation", steps: []string{"park", "resume", "again"}, want: []int{1, 2, 2}, wantParked: []int{1}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			f := newParkFixture(t, newCodecBackend(core.TierCheckpoint), g, nil)
+			cb := f.be.(*codecBackend)
+			fibers := []string{f.h.ID}
+			var refs []string
+			resume := func(ref string) {
+				fence := core.Fence{GrantUID: "g1", Epoch: 1, Seq: uint64(len(fibers) + 1)}
+				h, err := f.r.Clone(ctx, core.CloneSpec{Grant: g, Source: core.SourceDelta, Ref: ref, Fence: fence, Deadline: time.Second, CallerCert: callerDER})
+				if err != nil {
+					t.Fatalf("resume %s from %s: %v", fence, ref, err)
+				}
+				fibers = append(fibers, h.ID)
+			}
+			for _, step := range tc.steps {
+				switch step {
+				case "park":
+					ref, err := f.r.Park(ctx, fibers[len(fibers)-1], false)
+					if err != nil {
+						t.Fatalf("park %s: %v", fibers[len(fibers)-1], err)
+					}
+					refs = append(refs, ref)
+				case "resume":
+					resume(refs[len(refs)-1])
+				case "again":
+					if err := f.r.Release(ctx, fibers[len(fibers)-1], false); err != nil {
+						t.Fatalf("release: %v", err)
+					}
+					resume(refs[0])
+				}
+			}
+			var got []int
+			for i, id := range fibers {
+				ff := cb.fiber(id)
+				if ff == nil {
+					t.Fatalf("the backend has no record of %s", id)
+				}
+				switch {
+				case i == 0:
+					got = append(got, ff.spec.Generation)
+				case ff.resume == nil:
+					t.Fatalf("%s was not resumed", id)
+				default:
+					got = append(got, ff.resume.Generation)
+				}
+			}
+			if fmt.Sprint(got) != fmt.Sprint(tc.want) {
+				t.Fatalf("the backend was told generations %v, want %v", got, tc.want)
+			}
+			var parked []int
+			for _, ref := range refs {
+				var m manifest
+				if err := readJSON(filepath.Join(ref, "manifest.json"), &m); err != nil {
+					t.Fatal(err)
+				}
+				parked = append(parked, m.Generation)
+			}
+			if fmt.Sprint(parked) != fmt.Sprint(tc.wantParked) {
+				t.Fatalf("the manifests record generations %v, want %v", parked, tc.wantParked)
 			}
 		})
 	}

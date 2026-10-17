@@ -116,6 +116,7 @@ jobs:
           ls -l /dev/kvm
       - run: make hyperlight-helper
       - run: make linux-hyperlight-check
+      - run: make linux-hyperlight-test
       - run: make conform-hyperlight
       - name: make the state readable for the upload (written as root inside the container)
         if: always()

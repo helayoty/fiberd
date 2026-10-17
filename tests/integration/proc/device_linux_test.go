@@ -186,7 +186,7 @@ func TestParkEvictsAndResumeRenegotiates(t *testing.T) {
 		t.Fatalf("counter after resume = %q", got)
 	}
 	// Renegotiate: the slice is filed under the new fence, which the fiber
-	// read from the fence file beside its endpoint.
+	// took from the resume's record on its channel.
 	if got := talk(t, h2.Endpoint, "reserve 1048576"); got != "ok" {
 		t.Fatalf("reserve after resume = %q", got)
 	}

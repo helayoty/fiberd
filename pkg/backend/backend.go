@@ -99,21 +99,36 @@ type FiberSpec struct {
 	// Session is the name the caller gave the Clone, "" for an anonymous
 	// fiber. The fiber learns it at birth.
 	Session string
+	// Generation is the fiber's place in its lineage, which the host
+	// counts. A fiber born from the warm instance, forked or restored
+	// from its image, is 1. A fiber resumed from a park is the parked
+	// one's plus one (ResumeSpec). A backend that tells its fibers who
+	// they are hands the number over with the identity.
+	Generation int
 	// OwnPIDNS asks for the fiber to be the init of its own pid namespace
 	// so its checkpoint restores anywhere. Backends that always isolate
 	// ignore it.
 	OwnPIDNS bool
-	// Handoff, when set, is the fiber's end of a SOCK_SEQPACKET pair the
-	// host passes connections over. The fiber serves those instead of
-	// Endpoint. Only a Handoffer is given one. The backend does not keep
-	// it, and the caller closes it after Clone.
-	Handoff *os.File
+	// Identity is a handoff fiber's TLS identity, which rides on its
+	// incarnation record, and the fiber then serves the connections the
+	// host passes over its channel instead of Endpoint. nil for every
+	// other fiber. Only a Handoffer is given one.
+	Identity *Identity
 }
 
 // Fiber is a running fiber.
 type Fiber struct {
 	ID  string
 	PID int // root process; 0 when the backend has no process per fiber
+	// Channel is the host's end of a handoff fiber's channel, on a
+	// Handoffer. The backend made the pair where the fiber's checkpoint
+	// can carry it, queued the incarnation record on it before the fiber
+	// was born or was restored, and handed the fiber the other end. The
+	// host owns this end from here, passes connections over it and
+	// closes it when the fiber ends. nil for every other fiber, which
+	// holds a pair of its own that the backend borrows an end of to
+	// send a resume's record.
+	Channel *os.File
 	// Footprint is what the fiber's leaf counted on the backend's W
 	// counter just before the fiber took its identity, for a backend
 	// whose fibers carry a fixed footprint. The host subtracts it from
@@ -125,10 +140,20 @@ type Fiber struct {
 
 // ParkSpec asks for a checkpoint of a fiber into Dir. With Sync the
 // fiber keeps running after the checkpoint (the host ends it once the
-// images are durable); otherwise the checkpoint ends it.
+// images are durable); otherwise the checkpoint ends it. A park is
+// cooperative. The backend signals the fiber, which stops serving and
+// says so, and only then is it checkpointed. A fiber that never says
+// so is not parked, and the error names it.
 type ParkSpec struct {
 	Dir  string
 	Sync bool
+	// Deadline bounds the wait for the fiber to stop serving, the
+	// grant's resume deadline. Zero waits as long as the context allows.
+	Deadline time.Duration
+	// Channel is the host's end of a handoff fiber's channel, where
+	// that fiber says it has stopped. nil for every other fiber, which
+	// says so on a pair of its own that the backend borrows an end of.
+	Channel *os.File
 }
 
 // ResumeSpec brings a checkpoint back as a new fiber.
@@ -147,9 +172,15 @@ type ResumeSpec struct {
 	// fiber, "" when anonymous. A backend whose resumed fiber takes a
 	// fresh identity hands it over again.
 	Session string
-	// Handoff replaces the handoff channel of a checkpoint taken from a
-	// handoff fiber (FiberSpec.Handoff). It is nil for any other checkpoint.
-	Handoff *os.File
+	// Generation is the parked fiber's generation plus one, read from
+	// the park's manifest (FiberSpec.Generation).
+	Generation int
+	// Handoff says the checkpoint's fiber serves handoff, so it holds a
+	// channel the restore replaces with a fresh one (Fiber.Channel). A
+	// backend sends every resumed fiber its record, kind "resume" with
+	// Fence, Generation and Session, on its channel, and waits for the
+	// fiber's ack, which says it has taken the record and serves again.
+	Handoff bool
 }
 
 // EndpointSchemer is implemented by backends that can serve fibers on
@@ -161,9 +192,11 @@ type EndpointSchemer interface {
 	EndpointSchemes() []string
 }
 
-// Handoffer is implemented by backends whose fibers can serve
-// connections the host passes them (FiberSpec.Handoff), across park and
-// resume. The host refuses a handoff grant on any other backend.
+// Handoffer is implemented by backends whose fibers read their
+// incarnation record off a channel at birth, and whose handoff fibers
+// (FiberSpec.Identity) keep that channel (Fiber.Channel) across park and
+// resume for the connections the host passes them. The host refuses a
+// handoff grant on any other backend.
 type Handoffer interface {
 	Handoff() bool
 }
@@ -219,6 +252,11 @@ type Backend interface {
 	// host's to kill through their cgroups.
 	Unwarm(id string)
 	Clone(ctx context.Context, warmID string, spec FiberSpec) (Fiber, error)
+	// Park asks the fiber to stop serving and checkpoints it once it
+	// has said so (ParkSpec). Resume brings a checkpoint back and
+	// returns once the fiber says it serves again, under the spec's
+	// deadline. A restored fiber that never says so is ended, and the
+	// host routes nothing to it.
 	Park(ctx context.Context, fiberID string, spec ParkSpec) error
 	Resume(ctx context.Context, spec ResumeSpec) (Fiber, error)
 	// Kill ends a fiber directly (the host also kills its cgroup).
@@ -238,19 +276,6 @@ type Backend interface {
 // grants. A backend that does not implement it does not isolate.
 type Isolator interface {
 	IsolatesTenants() bool
-}
-
-// ChannelMaker is implemented by backends whose fibers live in a network
-// namespace of their own. criu finds only the sockets of the namespaces
-// it dumps, so a pair the host made in its own namespace cannot be
-// checkpointed with the fiber. The host asks such a backend for every
-// pair it shares with a fiber. Other backends share the host's namespace,
-// and plain socketpair(2) does.
-type ChannelMaker interface {
-	// Socketpair makes a close-on-exec AF_UNIX pair of the given type
-	// (SOCK_SEQPACKET for a handoff channel) for a fiber of the warm
-	// instance.
-	Socketpair(warmID string, typ int) ([2]int, error)
 }
 
 // IDMapper is implemented by backends whose warm instance and fibers run

@@ -22,10 +22,8 @@ fn hyperlight_host_version(lock: &str) -> Option<String> {
             in_pkg = false;
         } else if line == "name = \"hyperlight-host\"" {
             in_pkg = true;
-        } else if in_pkg {
-            if let Some(v) = line.strip_prefix("version = ") {
-                return Some(v.trim_matches('"').to_string());
-            }
+        } else if in_pkg && let Some(v) = line.strip_prefix("version = ") {
+            return Some(v.trim_matches('"').to_string());
         }
     }
     None

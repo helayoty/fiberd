@@ -164,7 +164,7 @@ func TestStageTemplate(t *testing.T) {
 			if src := templateMountOf(t, filepath.Join(tdir, "bundle")); src != staged {
 				t.Fatalf("template bundle binds %q, want %q", src, staged)
 			}
-			fb, err := b.Clone(ctx, w.ID, backend.FiberSpec{Fence: "g/1-1", Endpoint: filepath.Join(workDir, "ep.sock"), CgroupFD: -1, Deadline: 2 * time.Second})
+			fb, err := b.Clone(ctx, w.ID, backend.FiberSpec{Fence: "g/1-1", Endpoint: filepath.Join(workDir, "ep.sock"), CgroupFD: -1, Deadline: 2 * time.Second, Generation: 1})
 			if err != nil {
 				t.Fatalf("Clone: %v", err)
 			}
@@ -222,7 +222,7 @@ func TestResumeTemplateMount(t *testing.T) {
 			}
 			a, _ := newFake(t, knobs{})
 			wa, workA := warmOn(a, tc.parkRegistry)
-			if _, err := a.Clone(ctx, wa.ID, backend.FiberSpec{Fence: "g/1-1", Endpoint: filepath.Join(workA, "ep.sock"), CgroupFD: -1, Deadline: 2 * time.Second}); err != nil {
+			if _, err := a.Clone(ctx, wa.ID, backend.FiberSpec{Fence: "g/1-1", Endpoint: filepath.Join(workA, "ep.sock"), CgroupFD: -1, Deadline: 2 * time.Second, Generation: 1}); err != nil {
 				t.Fatalf("Clone: %v", err)
 			}
 			park := filepath.Join(t.TempDir(), "park")
@@ -247,7 +247,7 @@ func TestResumeTemplateMount(t *testing.T) {
 				h.mu.Unlock()
 			}
 			ep := filepath.Join(workH, "ep2.sock")
-			f, err := h.Resume(ctx, backend.ResumeSpec{Dir: park, Fence: "g/2-1", Endpoint: ep, CgroupFD: -1, Deadline: 2 * time.Second, WarmID: "g", WorkDir: workH})
+			f, err := h.Resume(ctx, backend.ResumeSpec{Dir: park, Fence: "g/2-1", Endpoint: ep, CgroupFD: -1, Deadline: 2 * time.Second, WarmID: "g", WorkDir: workH, Generation: 2})
 			if tc.wantText != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantText) {
 					t.Fatalf("Resume = %v, want %q", err, tc.wantText)

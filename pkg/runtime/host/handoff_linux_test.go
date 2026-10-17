@@ -14,68 +14,54 @@ import (
 
 	"github.com/helayoty/fiberd/pkg/backend"
 	"github.com/helayoty/fiberd/pkg/core"
-	"github.com/helayoty/fiberd/pkg/handoff"
 )
 
 // callerDER stands in for the DER certificate a clone arrives under in
 // the tests of this package, whose fake backends never open TLS.
 var callerDER = []byte("caller der")
 
-// callerPEM is callerDER as the identity message carries it.
+// callerPEM is callerDER as the record carries it.
 var callerPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: callerDER})
 
-// TestIdentityMessage checks that the one message a fresh handoff fiber reads
-// before any connection is the tag, then the key, the certificate, the
-// caller's thumbprint and the caller's certificate as PEM, each ended by
-// a NUL, as libfiberzygote parses it. A clone without the caller's
-// certificate, as one without mutual TLS, has no message. A field that
-// is empty or holds a NUL cannot be framed.
-func TestIdentityMessage(t *testing.T) {
-	id := handoff.Identity{KeyPEM: []byte("-----BEGIN PRIVATE KEY-----\nk\n-----END PRIVATE KEY-----\n"), CertPEM: []byte("-----BEGIN CERTIFICATE-----\nc\n-----END CERTIFICATE-----\n")}
+// TestIdentityFor checks that a handoff fiber's record takes the grant's
+// key, certificate and caller, and the caller's certificate as PEM, as
+// libfiberzygote parses it. A clone without the caller's certificate, as
+// one without mutual TLS, gets no identity, and neither does a grant
+// whose identity was never prepared or names no caller.
+func TestIdentityFor(t *testing.T) {
 	cases := []struct {
 		name       string
-		id         handoff.Identity
+		prepared   bool
 		caller     string
 		callerCert []byte
-		// fields, when set, are what the message must carry in order.
-		// Otherwise framing must fail.
-		fields [][]byte
+		wantErr    string
 	}{
-		{name: "key, certificate, caller, caller certificate", id: id, caller: "x5t", callerCert: callerDER, fields: [][]byte{id.KeyPEM, id.CertPEM, []byte("x5t"), callerPEM}},
-		{name: "no caller certificate", id: id, caller: "x5t"},
-		{name: "no caller", id: id, callerCert: callerDER},
-		{name: "no key", id: handoff.Identity{CertPEM: id.CertPEM}, caller: "x5t", callerCert: callerDER},
-		{name: "no certificate", id: handoff.Identity{KeyPEM: id.KeyPEM}, caller: "x5t", callerCert: callerDER},
-		{name: "NUL in a field", id: id, caller: "x\x00t", callerCert: callerDER},
+		{name: "key, certificate, caller, caller certificate", prepared: true, caller: "x5t", callerCert: callerDER},
+		{name: "no caller certificate", prepared: true, caller: "x5t", wantErr: "no caller certificate"},
+		{name: "no caller", prepared: true, callerCert: callerDER, wantErr: "names no caller"},
+		{name: "no identity prepared", caller: "x5t", callerCert: callerDER, wantErr: "no handoff identity prepared"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			msg, err := identityMessage(tc.id, tc.caller, tc.callerCert)
-			if tc.fields == nil {
-				if err == nil {
-					t.Fatalf("framed %q, want an error", msg)
+			r := &Runtime{cfg: Config{HandoffKey: handoffKey}}
+			if tc.prepared {
+				if err := r.prepareIdentity("g1", tc.caller); err != nil {
+					t.Fatal(err)
+				}
+			}
+			id, err := r.identityFor("g1", tc.callerCert)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("identityFor = %+v, %v, want an error mentioning %q", id, err, tc.wantErr)
 				}
 				return
 			}
 			if err != nil {
 				t.Fatal(err)
 			}
-			if msg[0] != identityTag || msg[len(msg)-1] != 0 {
-				t.Fatalf("message %q: want tag %q first and a NUL last", msg, identityTag)
-			}
-			got := bytes.Split(msg[1:len(msg)-1], []byte{0})
-			if len(got) != len(tc.fields) {
-				t.Fatalf("%d fields %q, want %d", len(got), got, len(tc.fields))
-			}
-			for i := range got {
-				if !bytes.Equal(got[i], tc.fields[i]) {
-					t.Fatalf("field %d = %q, want %q", i, got[i], tc.fields[i])
-				}
-			}
-			// A connection message is a zero byte, and the two must never
-			// be confused.
-			if msg[0] == 0 {
-				t.Fatal("identity message starts like a connection message")
+			had := r.identities["g1"].id
+			if id.KeyPEM != string(had.KeyPEM) || id.CertPEM != string(had.CertPEM) || id.Caller != "x5t" || id.CallerPEM != string(callerPEM) {
+				t.Fatalf("identity = %+v, want the grant's and the caller's certificate", id)
 			}
 		})
 	}
@@ -126,22 +112,24 @@ func TestIdentityLifecycle(t *testing.T) {
 	}
 }
 
-// TestCanHandoff checks that a home hands connections to fibers only when its
-// backend can take them and a router gives them out.
+// TestCanHandoff checks that a home gives its fibers a channel when its
+// backend takes one, and hands connections to them only when a router
+// gives them out as well.
 func TestCanHandoff(t *testing.T) {
 	cases := []struct {
-		name   string
-		be     backend.Backend
-		router bool
-		want   bool
+		name     string
+		be       backend.Backend
+		router   bool
+		channels bool
+		want     bool
 	}{
-		{name: "a backend without handoff", be: newFakeBackend(core.TierWarm), router: true},
+		{name: "a backend without channels", be: newFakeBackend(core.TierWarm), router: true},
 		{name: "a backend that says no", be: &struct {
 			*fakeBackend
 			handoffMixin
 		}{newFakeBackend(core.TierWarm), handoffMixin{false}}, router: true},
-		{name: "a handoff backend without a router", be: newSandboxBackend(core.TierSnapshot)},
-		{name: "a handoff backend with a router", be: newSandboxBackend(core.TierSnapshot), router: true, want: true},
+		{name: "a channel backend without a router", be: newSandboxBackend(core.TierSnapshot), channels: true},
+		{name: "a channel backend with a router", be: newSandboxBackend(core.TierSnapshot), router: true, channels: true, want: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -152,11 +140,11 @@ func TestCanHandoff(t *testing.T) {
 			if got := r.canHandoff(); got != tc.want || r.HandsOff() != tc.want {
 				t.Fatalf("canHandoff = %v, HandsOff = %v, want %v", got, r.HandsOff(), tc.want)
 			}
+			if r.channels() != tc.channels {
+				t.Fatalf("channels = %v, want %v", r.channels(), tc.channels)
+			}
 			if tc.want {
 				return
-			}
-			if _, _, err := r.handoffPair("g1"); !errors.Is(err, ErrNoHandoff) {
-				t.Fatalf("handoffPair = %v, want ErrNoHandoff", err)
 			}
 			if _, _, _, ok := r.HandoffRoute("g1/1/1"); ok {
 				t.Fatal("a home without handoff routes a fiber")
@@ -191,75 +179,6 @@ func recvHandoff(t *testing.T, fd int) ([]byte, []int) {
 	return buf[:n], fds
 }
 
-// TestSendIdentity checks that the identity is one message queued on the
-// host's end of a fresh channel, and nothing is sent when there is none to
-// send or nowhere to send it.
-func TestSendIdentity(t *testing.T) {
-	cases := []struct {
-		name string
-		// prepare sets the runtime up. closeHost and closePeer close a
-		// channel end before the send.
-		caller               string
-		noCert               bool
-		prepared             bool
-		closeHost, closePeer bool
-		wantErr              string
-	}{
-		{name: "queued for the fiber", caller: "x5t", prepared: true},
-		{name: "no identity prepared", wantErr: "no handoff identity prepared"},
-		{name: "an identity without a caller cannot be framed", prepared: true, wantErr: "caller is empty"},
-		{name: "a clone without the caller's certificate has nothing to pin", caller: "x5t", noCert: true, prepared: true, wantErr: "no caller certificate"},
-		{name: "a host end already closed", caller: "x5t", prepared: true, closeHost: true, wantErr: "use of closed file"},
-		{name: "a fiber end already gone", caller: "x5t", prepared: true, closePeer: true, wantErr: "broken pipe"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			r := &Runtime{cfg: Config{HandoffKey: handoffKey}}
-			if tc.prepared {
-				if err := r.prepareIdentity("g1", tc.caller); err != nil {
-					t.Fatal(err)
-				}
-			}
-			fds, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_SEQPACKET|syscall.SOCK_CLOEXEC, 0)
-			if err != nil {
-				t.Fatal(err)
-			}
-			host := os.NewFile(uintptr(fds[0]), "host")
-			defer func() { _ = host.Close() }()
-			if tc.closeHost {
-				_ = host.Close()
-			}
-			if tc.closePeer {
-				_ = syscall.Close(fds[1])
-			} else {
-				defer func() { _ = syscall.Close(fds[1]) }()
-			}
-			cert := callerDER
-			if tc.noCert {
-				cert = nil
-			}
-			err = r.sendIdentity(host, "g1", cert)
-			if tc.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-					t.Fatalf("sendIdentity = %v, want an error mentioning %q", err, tc.wantErr)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatal(err)
-			}
-			msg, passed := recvHandoff(t, fds[1])
-			want, _ := identityMessage(r.identities["g1"].id, "x5t", callerDER)
-			if !bytes.Equal(msg, want) || len(passed) != 0 {
-				t.Fatalf("the fiber read %q with %d fds, want the identity message alone", msg, len(passed))
-			}
-			if !bytes.HasSuffix(msg, append(callerPEM, 0)) {
-				t.Fatalf("the message %q does not end with the caller's certificate", msg)
-			}
-		})
-	}
-}
-
 // TestDeliver checks that a connection reaches a ready handoff fiber as one
 // zero byte with the socket attached, and every other fiber or state is
 // refused without blocking.
@@ -289,7 +208,7 @@ func TestDeliver(t *testing.T) {
 		}, wantErr: ErrNotHandoff},
 		{name: "a fiber whose host end is closed", target: func(_ *testing.T, r *Runtime, _ *sandboxBackend, h, _ string) string {
 			r.mu.Lock()
-			_ = r.fibers[h].handoff.Close()
+			_ = r.fibers[h].channel.Close()
 			r.mu.Unlock()
 			return h
 		}, wantErr: ErrNotHandoff},
@@ -340,7 +259,7 @@ func TestDeliver(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			// The identity went first, then the connection.
+			// The record went first, then the connection.
 			ff := be.fiber(h.ID)
 			msg, fds := recvHandoff(t, ff.handoff)
 			if !bytes.Equal(msg, []byte{0}) || len(fds) != 1 {

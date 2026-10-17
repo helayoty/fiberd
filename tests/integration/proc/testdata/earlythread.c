@@ -23,7 +23,7 @@ static void *sleeper(void *arg) {
     return NULL;
 }
 
-static int on_fiber(const fz_fiber_t *f) {
+static int on_fiber(const fz_incarnation_t *f) {
     (void)f;
     fz_fiber_ready();
     for (;;) pause();

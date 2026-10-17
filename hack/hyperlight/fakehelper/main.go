@@ -36,7 +36,7 @@ func main() {
 		os.Exit(2)
 	}
 	time.Sleep(time.Duration(*initMS) * time.Millisecond)
-	if err := helper.Serve(ctl); err != nil {
+	if err := helper.Serve(ctl, os.Stderr); err != nil {
 		fmt.Fprintf(os.Stderr, "fakehelper: %v\n", err)
 	}
 }

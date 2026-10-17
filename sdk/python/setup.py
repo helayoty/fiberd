@@ -94,6 +94,9 @@ if sys.platform == "linux":
         # Relative and inside the package, since setuptools refuses absolute
         # sources in a wheel. _libfiberzygote.c includes the library source.
         sources=["src/fiberd/_zygote.c", "src/fiberd/_libfiberzygote.c"],
+        # The library is included, not listed, so it is named here, or an
+        # in-place build keeps an extension older than the library.
+        depends=[os.path.join(C_DIR, name) for name in C_FILES],
         include_dirs=[C_DIR],
         define_macros=[("Py_LIMITED_API", "0x030E0000")],
         py_limited_api=True,

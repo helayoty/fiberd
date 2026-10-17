@@ -22,8 +22,9 @@
  *     zygote takes for itself in fz_init and fills before READY, so a
  *     fiber's namespace is a copy and its birth pays only for what is
  *     its own.
- *   - Identity (the fence) is handed to the child after the fork and is
- *     never baked into the template.
+ *   - Identity (the fence, the seed, a handoff fiber's key) is handed to
+ *     the child after the fork, on its channel, and is never baked into
+ *     the template.
  *   - Readiness is reported when the application says so, under the
  *     deadline fiberd set. A late child is killed, not delivered.
  *   - Clones are forked back to back. The loop polls every pending
@@ -90,19 +91,20 @@
  *                     "-" for an anonymous fiber, and at most 1023 bytes
  *                     decoded with no NUL in them. The fiber also finds
  *                     it as FIBERD_SESSION in its environment, unset
- *                     when anonymous. The fiber's cgroup
- *                     directory fd rides along in SCM_RIGHTS on the same
- *                     message. opts is a comma list. "pidns" makes the child the init of its
- *                     own pid namespace. "mntns" gives it a private mount
- *                     namespace. "nocaps" drops every capability under
- *                     no_new_privs. "handoff" means the last descriptor on
- *                     the message is the fiber's end of a SOCK_SEQPACKET
- *                     pair fiberd passes connections over, kept at
- *                     FZ_HANDOFF_FD (see fz_accept). A child that cannot
+ *                     when anonymous. The fiber's cgroup directory fd,
+ *                     when fiberd has one, and then the fiber's channel
+ *                     ride along in SCM_RIGHTS on the same message. The
+ *                     channel is the last descriptor, the fiber's end of
+ *                     a SOCK_SEQPACKET pair, kept at FZ_CHANNEL_FD. opts
+ *                     is a comma list. "pidns" makes the child the init
+ *                     of its own pid namespace. "mntns" gives it a
+ *                     private mount namespace. "nocaps" drops every
+ *                     capability under no_new_privs. A child that cannot
  *                     get what it was asked for ends before it runs, and
  *                     the CLONE is answered with an ERROR. So is a mntns
  *                     CLONE after a refused HIDE, DROP, RUNDIR or
- *                     PREPARE, or after PREPARE none.
+ *                     PREPARE, or after PREPARE none, or a CLONE without
+ *                     a channel.
  *   zygote -> fiberd  CLONED <fence> <pid>
  *   zygote -> fiberd  ERROR <fence> <reason>
  *                     For a child that ended before ready, the reason is
@@ -110,24 +112,60 @@
  *                     the code stands for when the library assigned it.
  *                     110-115 and 117 are the confinement steps (116 is
  *                     retired, since the zygote narrows the run directory
- *                     at PREPARE), 120 the descriptors, 121 the handoff
- *                     identity and 125 the cgroup leaf on the legacy clone.
+ *                     at PREPARE), 120 the descriptors, 121 the
+ *                     incarnation record and 125 the cgroup leaf on the
+ *                     legacy clone.
  *   zygote -> fiberd  EXITED <pid> exit:<code>|signal:<num>
  *
- * On a fresh handoff fiber's channel the first message, queued by the
- * fiberd before the CLONE, is the grant's TLS identity.
+ * On every fiber's channel the first message, queued by fiberd before
+ * the CLONE, is the fiber's incarnation record, the same record a
+ * gVisor sandbox reads (fz_gvisor_identity below).
  *
- *   fiberd -> fiber   'k' <key PEM> NUL <cert PEM> NUL <caller> NUL <caller cert PEM> NUL
+ *   fiberd -> fiber   'i' <generation> NUL <kind> NUL <fence> NUL <endpoint> NUL <payload-hex|-> NUL
+ *                     <session-hex|-> NUL <key PEM|-> NUL <cert PEM|-> NUL <caller|-> NUL <caller cert PEM|-> NUL <seed-hex> NUL
  *
- * The library reads it in the child before the application runs (see
- * fz_handoff_identity). Every message after it carries one connected
- * socket in SCM_RIGHTS (see fz_accept). A fiber restored from a
- * checkpoint keeps the identity it was born with and is sent no new one.
- * The identity is never a file. Every grant's fibers run as fiberd's
- * user, so no file mode would keep one grant's fibers out of another's
- * key. The caller cert is the certificate the clone arrived under, the
- * one the thumbprint is of, so a TLS library can trust that certificate
- * alone and refuse every other during the handshake.
+ * The library reads it in the child before the application runs, into
+ * the child's memory and never the zygote's, and hands it to on_fiber as
+ * fz_incarnation_t. On a handoff fiber the record carries the grant's
+ * TLS identity, the channel stays open at FZ_CHANNEL_FD and every
+ * message after it carries one connected socket in SCM_RIGHTS (see
+ * fz_accept). Any other fiber's record has "-" in those four fields,
+ * and the library then closes fiberd's end and makes the fiber a
+ * SOCK_SEQPACKET pair of its own, the end it reads at FZ_CHANNEL_FD
+ * and the peer at FZ_CHANNEL_PEER_FD. The fiber holds both, so a park
+ * dumps the pair whole and a restore remakes it inside the fiber's own
+ * namespaces. fiberd speaks on the other end: it borrows the peer of
+ * a plain fiber with pidfd_getfd(2) for each exchange, and holds the
+ * host's end of a handoff fiber's channel.
+ *
+ * A park is cooperative. fiberd queues the park's round on the channel
+ * and sends the fiber SIGUSR1. The template stops serving, closes its
+ * listener and every connection it accepted, and calls fz_quiesce,
+ * which answers with that round, then fz_incarnation_wait. Only then is
+ * the fiber dumped. A fiber that never says so in time is not parked,
+ * fiberd fails the park by name and tells the fiber so for that round,
+ * so a late answer meets its own carry-on and the fiber serves again.
+ * Every park is a round of its own, and the fiber honours a carry-on
+ * for the round it answered alone, so one left by a park that gave up
+ * never undoes a later park's dump. A resume restores the tree, with
+ * the fiber still in fz_incarnation_wait, and sends it a second record
+ * on the channel, kind "resume", with the new fence, the next
+ * generation and a fresh seed. The template reseeds, listens again and
+ * calls fz_fiber_ready, which acks. fiberd routes the fiber only after
+ * the ack, and ends a restored tree that never acks.
+ *
+ *   fiberd -> fiber   'p' <round> NUL     a park, before the signal
+ *   fiber  -> fiberd  'q' <round> NUL     the fiber serves nothing, dump it
+ *   fiberd -> fiber   'i' ... (kind "resume"), after the restore
+ *   fiberd -> fiber   'c' <round> NUL     that park failed, serve on as you were
+ *   fiber  -> fiberd  'a' <fence> NUL     listening again under the new fence
+ *
+ * The identity is never a file.
+ * Every grant's fibers run as fiberd's user, so no file mode would keep
+ * one grant's fibers out of another's key. The caller cert is the
+ * certificate the clone arrived under, the one the thumbprint is of, so
+ * a TLS library can trust that certificate alone and refuse every other
+ * during the handshake.
  *
  * An engine zygote, one that owns device state its fibers use over IPC,
  * adds these lines, unsolicited, from any thread.
@@ -143,12 +181,43 @@
 #define FIBERZYGOTE_H
 
 /* The ABI this header describes, which every binding checks at build time.
- * 3 added session to fz_gvisor_identity_t. 4 added a fourth field to
- * fz_identity_t, which 5 made the caller's certificate (caller_pem). */
-#define FZ_ABI_VERSION 5
+ * 3 added session to the gVisor identity. 4 added a fourth field to
+ * fz_identity_t, which 5 made the caller's certificate (caller_pem). 6
+ * added generation and kind. 7 made fz_incarnation_t the one record on
+ * every backend, with the seed and the identity in it, and gave every
+ * fiber a channel at FZ_CHANNEL_FD. 8 made that channel a pair the
+ * fiber keeps across parks and delivered a resume's record on it. 9
+ * made the park cooperative: fz_quiesce and fz_incarnation_wait
+ * replaced the poll, and fz_fiber_ready acks a resume. */
+#define FZ_ABI_VERSION 9
 
 #include <stddef.h>
 
+/* A handoff fiber terminates TLS itself with the grant's identity, which
+ * rides on its incarnation record and the library holds in the fiber's
+ * memory, never the zygote's, so no key ends up in a template
+ * checkpoint. key_pem and cert_pem are the grant's PKCS #8 private key
+ * and self-signed certificate. caller is the thumbprint (x5t#S256,
+ * base64url) of the one client certificate the fiber may accept, and
+ * caller_pem is that certificate, for a TLS library that trusts one
+ * certificate as its anchor and so refuses every other in the
+ * handshake. */
+typedef struct {
+    const char *key_pem;
+    const char *cert_pem;
+    const char *caller;
+    const char *caller_pem;
+} fz_identity_t;
+
+/* What a fiber learns at birth, from the incarnation record on its
+ * channel. The generation is fiberd's count of the lineage. A fiber born
+ * from the warm template, forked or restored from its image, is 1. A
+ * fiber resumed from a park is the parked one's plus one, on whichever
+ * home resumes it. A template that counts its own incarnations can tell
+ * a missed one from the number. The seed is 32 bytes of fresh entropy
+ * from the host, to mix into every generator the template owns (see
+ * fz_on_fiber). It is zeroed at fz_fiber_ready, at fz_gvisor_ack and at
+ * fz_seed_forget, so a checkpoint holds no seed. */
 typedef struct {
     const char *fence;            /* the fiber's identity, "grant/epoch/seq" */
     const char *endpoint;         /* unix socket path or tcp://host:port the fiber serves on,
@@ -156,7 +225,12 @@ typedef struct {
     const unsigned char *payload; /* opaque data delivered at birth */
     size_t payload_len;
     const char *session;          /* the session the caller named, "" for an anonymous fiber */
-} fz_fiber_t;
+    unsigned generation;          /* 1: a fork of the warm template starts a lineage */
+    const char *kind;             /* "fork" (proc, runc), "clone" (a gVisor restore of the image) or "resume" (a park brought back) */
+    const unsigned char *seed;    /* 32 bytes of fresh entropy from the host, zeroed once ready */
+    size_t seed_len;
+    const fz_identity_t *identity; /* a handoff fiber's TLS identity, NULL on every other fiber */
+} fz_incarnation_t;
 
 /* Runs in the CHILD after the scrub. Serve on f->endpoint, call
  * fz_fiber_ready() once listening, then do the fiber's work. The return
@@ -167,20 +241,22 @@ typedef struct {
  * (libc's random(), a TLS library's DRBG, a language runtime's hash
  * seed, a UUID generator). The library reseeds none of them, because it
  * takes no lock between the clone and this call, and srandom takes one.
- * Reseed each of them here from getrandom(2), before it is used. A fork
- * is not the only copy. A sandbox restored from a checkpoint and a fiber
- * resumed from a park (CRIU keeps the pid, so a pid check sees no copy)
- * hold that state too. Reseed again in every new incarnation, which is
- * when a restore returns and when the fence beside the endpoint changes,
- * as refzygote does. A generator that makes keys is best reseeded before
- * each use as well, as refzygote does before every TLS handshake.
+ * Reseed each of them here from f->seed mixed with getrandom(2), before
+ * it is used, as refzygote's reseed_rngs_from does. A fork is not the
+ * only copy. A sandbox restored from a checkpoint and a fiber resumed
+ * from a park (CRIU keeps the pid, so a pid check sees no copy) hold
+ * that state too. Reseed again in every new incarnation, which is when
+ * a restore returns and when fz_incarnation_wait hands over a resume's
+ * record, as refzygote does. A generator that makes keys is best
+ * reseeded before each use as well, as refzygote does before every TLS
+ * handshake.
  *
  * The child is a copy of the one thread that called fz_serve. A lock
  * another thread of the zygote (an engine) held at the clone stays held
  * in the copy, malloc's and a stream's included, since the raw clone
  * runs no atfork handlers. A template with threads of its own keeps
  * their allocation and stdio rare, or stops them around clones. */
-typedef int (*fz_on_fiber)(const fz_fiber_t *f);
+typedef int (*fz_on_fiber)(const fz_incarnation_t *f);
 
 /* Runs in the ZYGOTE for every control line that is not CLONE, HIDE,
  * DROP or RUNDIR. That is EVICT <fence>, and whatever a runtime and its
@@ -210,79 +286,97 @@ void fz_init(int argc, char **argv);
  * was skipped. */
 int fz_serve(int ctl_fd, fz_on_fiber on_fiber);
 
-/* Called by on_fiber in the child once its endpoint accepts connections.
+/* Called by on_fiber in the child once its endpoint accepts connections,
+ * in every incarnation. At birth it reports on the readiness pipe.
  * Until then fiberd has not acknowledged the clone, and the child's
  * stderr is the zygote's log, for saying why it could not start. After
- * it, stderr is /dev/null. The readiness pipe is fd 3 and is not the
- * fiber's to use. A fiber that writes anything else on it, or closes it
- * without calling this, is killed and its CLONE answered with ERROR. */
+ * it, stderr is /dev/null, and the record's seed is zeroed. The
+ * readiness pipe is fd 3 and is not the fiber's to use. A fiber that
+ * writes anything else on it, or closes it without calling this, is
+ * killed and its CLONE answered with ERROR. After fz_incarnation_wait
+ * handed over a resume's record it acks that record on the channel
+ * instead, once the template listens again, and zeroes its seed.
+ * fiberd routes a resumed fiber only after the ack. */
 void fz_fiber_ready(void);
 
-/* Where a handoff fiber's channel to fiberd lives. FIBERD_HANDOFF_FD
- * names it in the fiber's environment and is unset for other fibers. */
-#define FZ_HANDOFF_FD 4
+/* Where a fiber's channel lives, named by FIBERD_CHANNEL_FD in its
+ * environment. Every fiber reads its birth record off it, a handoff
+ * fiber then takes its connections from it through fz_accept, and every
+ * fiber answers a park and takes a resume's record on it through
+ * fz_quiesce and fz_incarnation_wait. A fiber that serves an endpoint
+ * of its own holds the channel's peer at FZ_CHANNEL_PEER_FD too, the
+ * end fiberd borrows for each exchange. Neither is the fiber's to
+ * read, write or close. */
+#define FZ_CHANNEL_FD 4
+#define FZ_CHANNEL_PEER_FD 5
 
-/* A handoff fiber terminates TLS itself with the grant's identity, which
- * fiberd sends down the channel at birth and the library holds in the
- * fiber's memory, never the zygote's, so no key ends up in a template
- * checkpoint. key_pem and cert_pem are the grant's PKCS #8 private key
- * and self-signed certificate. caller is the thumbprint (x5t#S256,
- * base64url) of the one client certificate the fiber may accept, and
- * caller_pem is that certificate, for a TLS library that trusts one
- * certificate as its anchor and so refuses every other in the
- * handshake. */
-typedef struct {
-    const char *key_pem;
-    const char *cert_pem;
-    const char *caller;
-    const char *caller_pem;
-} fz_identity_t;
+/* Answers a park's SIGUSR1: tells fiberd the fiber serves nothing, for
+ * the round fiberd queued before the signal. Call it with the listener
+ * and every accepted connection closed, and nothing in flight, since
+ * the dump that follows keeps what it finds. Returns 0, or -1 with
+ * errno set, EBADF in a process with no channel (a gVisor sandbox).
+ * Then call fz_incarnation_wait. */
+int fz_quiesce(void);
 
-/* The identity of the fiber calling, valid for its lifetime. A restored
- * fiber keeps the one it was born with. NULL when the fiber is not a
- * handoff fiber. Load it into the TLS library in on_fiber, before
- * fz_fiber_ready. */
-const fz_identity_t *fz_handoff_identity(void);
+/* Blocks for fiberd's answer to fz_quiesce. 1 with *inc filled, valid
+ * until the next call: the tree was dumped and restored, and this is
+ * the resume's record, with the new fence, the next generation and a
+ * fresh seed. The template reseeds from inc->seed, listens again on
+ * inc->endpoint and calls fz_fiber_ready, which acks. 0: the park
+ * failed, or gave up waiting for the fiber, and the fiber serves on as
+ * it was, listening again on its endpoint. -1 with errno set: EINTR when a signal interrupted the
+ * wait, which a handler of the template's has run for (call again to
+ * keep waiting), EBADF with no channel, EPROTO for a message that is
+ * not a record, and ECONNRESET once fiberd has closed a handoff fiber's
+ * channel. A record of a generation the fiber has already served is
+ * dropped and the wait goes on. A connection handed to a handoff fiber
+ * meanwhile is closed, since nothing serves it in the incarnation that
+ * ended. Each call zeroes the seed the previous one handed over, and
+ * fz_seed_forget zeroes it sooner. */
+int fz_incarnation_wait(fz_incarnation_t *inc);
+
+/* Zeroes every copy of a seed the library holds, the birth record's and
+ * the last resume's. Call it once the generators are reseeded, so no
+ * seed is in memory when the fiber is parked. fz_fiber_ready and
+ * fz_gvisor_ack do it as well. */
+void fz_seed_forget(void);
 
 /* Handoff fibers do not listen. fiberd accepts on their behalf and
  * passes each connected socket here. fz_accept blocks until the next one
  * and returns it with close-on-exec set, or -1 with errno set. EBADF
  * means the fiber is not a handoff fiber. ECONNRESET means fiberd has
- * closed the channel and the fiber is being released. */
+ * closed the channel and the fiber is being released. EINTR means a
+ * signal interrupted the wait and its handler has run, or a park's
+ * round arrived on the channel ahead of its signal. Either way the
+ * template's loop looks at its park flag again before it calls back,
+ * which is how a park reaches a handoff fiber. */
 int fz_accept(void);
 
 /* gVisor templates. Nothing forks on gVisor. Every fiber is a sandbox
  * restored from the template's checkpoint. After its checkpoint read
  * answers "restore", the template calls fz_gvisor_identity, which hands
  * the spec's one-shot FIBERD_TOKEN to fiberd at
- * /fiberd/channel/pool.sock and blocks for the identity. It then reseeds,
- * binds the endpoint and calls fz_gvisor_ack, which zeroes the seed.
+ * /fiberd/channel/pool.sock and blocks for the incarnation record, the
+ * 'i' record above. It then reseeds, binds the endpoint and calls
+ * fz_gvisor_ack, which zeroes the seed.
  *
  *   sandbox -> fiberd  't' <token> NUL
- *   fiberd  -> sandbox 'i' <generation> NUL <kind> NUL <fence> NUL <endpoint> NUL <payload-hex|-> NUL
- *                      <key PEM|-> NUL <cert PEM|-> NUL <caller|-> NUL <session-hex|-> NUL <seed-hex> NUL
+ *   fiberd  -> sandbox 'i' ... (the record above, kind "clone" or "resume", no identity)
  *   sandbox -> fiberd  'a' <fence> NUL
  *
  * The session is hex so a name may hold any character, "-" for an
  * anonymous fiber, and at most 1023 bytes decoded with no NUL in them,
- * as on the CLONE line.
+ * as on the CLONE line. The generation is decimal, 1 or more, as
+ * fz_incarnation_t describes it.
  */
-typedef struct {
-    const char *kind;             /* "clone" (from the template image) or "resume" (from a park) */
-    const char *fence;
-    const char *endpoint;         /* the unix socket path to serve, under /host */
-    const unsigned char *payload; /* opaque data delivered at birth */
-    size_t payload_len;
-    const unsigned char *seed;    /* 32 bytes of fresh entropy from the host */
-    size_t seed_len;
-    const char *session;          /* the session the caller named, "" for an anonymous fiber */
-} fz_gvisor_identity_t;
 
-/* Blocks for this sandbox's identity, valid until the next call.
- * -1 with errno set on failure, and the template then exits with 122. */
-int fz_gvisor_identity(fz_gvisor_identity_t *id);
+/* Blocks for this sandbox's record, valid until the next call. The
+ * endpoint is the unix socket path to serve, under /host. -1 with
+ * errno set on failure, and the template then exits with 122. */
+int fz_gvisor_identity(fz_incarnation_t *id);
 
-/* Tells fiberd the endpoint is bound, and closes the channel. */
+/* Tells fiberd the endpoint is bound, closes the channel and zeroes the
+ * seed. */
 int fz_gvisor_ack(void);
 
 /* Engine support. fz_set_engine names the engine's IPC endpoint, which

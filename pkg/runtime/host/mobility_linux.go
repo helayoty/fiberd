@@ -76,11 +76,12 @@ func (r *Runtime) PublishDelta(ctx context.Context, deltaRef string, g core.Gran
 	}
 	ref := repo + ":" + sessionTag(session)
 	ann := map[string]string{
-		artifact.AnnotationWBytes: strconv.FormatUint(m.WBytes, 10),
-		artifact.AnnotationParent: m.Parent,
-		artifact.AnnotationHome:   r.cfg.HomeID,
-		artifact.AnnotationFence:  m.Fence,
-		artifact.AnnotationGrant:  grantUID,
+		artifact.AnnotationWBytes:     strconv.FormatUint(m.WBytes, 10),
+		artifact.AnnotationParent:     m.Parent,
+		artifact.AnnotationHome:       r.cfg.HomeID,
+		artifact.AnnotationFence:      m.Fence,
+		artifact.AnnotationGrant:      grantUID,
+		artifact.AnnotationGeneration: strconv.Itoa(m.Generation),
 	}
 	r.host.Annotate(ann) // what a claiming home must be able to restore
 	if _, local := r.cfg.Command(m.Template); local {

@@ -338,10 +338,11 @@ func TestReleaseKeepsRestoredCopy(t *testing.T) {
 			if tc.restored {
 				fl, ffd := leaf(t, gcg, "f-1-1")
 				delegate(t, be, "keep", fl)
-				f, err := be.Clone(ctx, w.ID, backend.FiberSpec{Fence: "keep/1-1", Endpoint: ep, CgroupFD: ffd, Deadline: 2 * time.Second, OwnPIDNS: true})
+				f, err := be.Clone(ctx, w.ID, backend.FiberSpec{Generation: 1, Fence: "keep/1-1", Endpoint: ep, CgroupFD: ffd, Deadline: 2 * time.Second, OwnPIDNS: true})
 				if err != nil {
 					t.Fatalf("clone: %v", err)
 				}
+				defer func() { _ = f.Channel.Close() }()
 				talk(t, ep, "incr")
 				images := filepath.Join(t.TempDir(), "images")
 				if err := be.Park(ctx, f.ID, backend.ParkSpec{Dir: images}); err != nil {
@@ -355,10 +356,11 @@ func TestReleaseKeepsRestoredCopy(t *testing.T) {
 				_ = os.Remove(ep)
 				rl, rfd := leaf(t, gcg, "f-2-1")
 				delegate(t, be, "keep", rl)
-				restored, err = be.Resume(ctx, backend.ResumeSpec{Dir: images, Fence: "keep/2-1", Endpoint: ep, CgroupFD: rfd, Deadline: 10 * time.Second, WarmID: "keep", WorkDir: dir})
+				restored, err = be.Resume(ctx, backend.ResumeSpec{Dir: images, Fence: "keep/2-1", Endpoint: ep, CgroupFD: rfd, Deadline: 10 * time.Second, WarmID: "keep", WorkDir: dir, Generation: 2})
 				if err != nil {
 					t.Fatalf("resume: %v", err)
 				}
+				defer func() { _ = restored.Channel.Close() }()
 				if got := talk(t, ep, "get"); got != "1" {
 					t.Fatalf("counter after resume = %q, want 1", got)
 				}

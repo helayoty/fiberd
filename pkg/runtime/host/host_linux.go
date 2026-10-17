@@ -7,13 +7,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/helayoty/fiberd/pkg/artifact"
@@ -145,20 +143,27 @@ type fiber struct {
 	port     int    // tcp endpoints: the port held while running or parked
 	sock     string // the unix socket path the backend serves under the run directory, "" for none
 	birth    string // the fence the fiber was born under, which it holds in memory across resumes
-	fenceFn  string // where a resumed fiber's new fence is published, "" for a fresh one
-	budget   uint64 // w_budget_bytes; 0 = unlimited
-	devMax   uint64 // device_budget bytes; 0 = none
-	quota    uint64 // the grant's parked-delta bytes on this home (0 = none)
-	base     uint64 // the leaf's own count before the hand-out, subtracted from W (0 = the template's probe)
-	overWhy  string // why the host killed it, for the exit's detail
-	released bool   // Release or Park in progress: do not report the exit
-	parked   bool   // the end in progress is a park: the port stays with the delta
-	overW    bool   // killed by the host for exceeding its W budget
-	ready    bool   // the backend has answered: before that, W is a restore in flight, not the fiber's
-	pooled   bool   // handed out of the pool, in the leaf it was restored in
-	// handoff is the host's end of a handoff fiber's channel. It is nil
-	// for a fiber reached directly.
-	handoff *os.File
+	// generation counts the fiber's lineage: 1 when born from the warm
+	// instance, the parked generation plus one when resumed. A park
+	// writes it into the manifest, so the count survives a move.
+	generation int
+	budget     uint64 // w_budget_bytes; 0 = unlimited
+	devMax     uint64 // device_budget bytes; 0 = none
+	quota      uint64 // the grant's parked-delta bytes on this home (0 = none)
+	base       uint64 // the leaf's own count before the hand-out, subtracted from W (0 = the template's probe)
+	overWhy    string // why the host killed it, for the exit's detail
+	released   bool   // Release or Park in progress: do not report the exit
+	parked     bool   // the end in progress is a park: the port stays with the delta
+	overW      bool   // killed by the host for exceeding its W budget
+	ready      bool   // the backend has answered: before that, W is a restore in flight, not the fiber's
+	pooled     bool   // handed out of the pool, in the leaf it was restored in
+	// channel is the host's end of a handoff fiber's channel, which the
+	// backend made and carried its incarnation record at birth, and the
+	// host passes connections over. It is nil for every other fiber.
+	// handoff says the fiber serves those connections rather than an
+	// endpoint.
+	channel *os.File
+	handoff bool
 	// relay is the tcp listener in front of a fiber that serves a unix
 	// socket on a tcp home. It is nil for every other fiber.
 	relay *relay
@@ -1073,9 +1078,9 @@ func (r *Runtime) finish(f *fiber, reason, detail string) {
 		_ = os.Remove(p)
 	}
 	r.freeSocket(f.sock, f.id)
-	if f.handoff != nil {
-		r.unroute(f)
-		_ = f.handoff.Close()
+	r.unroute(f)
+	if f.channel != nil {
+		_ = f.channel.Close()
 	}
 	// The leaf may still be tearing down, so retry briefly.
 	_ = removeSoon(f.cg)
@@ -1087,9 +1092,6 @@ func (r *Runtime) finish(f *fiber, reason, detail string) {
 	if !parked {
 		r.freePort(f.port, f.id)
 	}
-	if f.fenceFn != "" {
-		_ = os.Remove(f.fenceFn)
-	}
 	close(f.done)
 	if !released {
 		r.exits <- core.FiberExit{FiberID: f.id, Reason: reason, Detail: detail}
@@ -1099,46 +1101,6 @@ func (r *Runtime) finish(f *fiber, reason, detail string) {
 // unixPath is where a unix endpoint for the fence lives.
 func (r *Runtime) unixPath(fence core.Fence) string {
 	return filepath.Join(r.cfg.RunDir, fence.GrantUID, fmt.Sprintf("%d-%d.sock", fence.Epoch, fence.Seq))
-}
-
-// fenceFile is where the current fence of a resumed fiber is published
-// for applications that need it, since the fence in the fiber's memory
-// is stale after a resume. A fiber that serves a unix socket, relayed
-// or not, finds it beside that socket (sock), the one path it knows.
-// One that binds tcp itself, or takes handed-off connections, finds it
-// in the grant's run directory, its working directory, under the name
-// of its birth fence, the one fence it holds in memory however many
-// times it was resumed.
-func (r *Runtime) fenceFile(sock string, birth core.Fence) string {
-	if sock != "" {
-		return sock + ".fence"
-	}
-	return filepath.Join(r.cfg.RunDir, birth.GrantUID, fmt.Sprintf("%d-%d.fence", birth.Epoch, birth.Seq))
-}
-
-// publishFence writes fence to path, a name under a grant's run
-// directory. The grant's fibers write that directory too, and fiberd
-// runs as root, so it never opens by that name. The file is made under
-// the run directory itself, which no fiber sees, and renamed into
-// place. A rename replaces a link a fiber planted without following it
-// and fails on a directory, so the most a fiber can do is deny itself
-// the file.
-func (r *Runtime) publishFence(path string, fence core.Fence) error {
-	tmp, err := os.CreateTemp(r.cfg.RunDir, ".fence-")
-	if err != nil {
-		return err
-	}
-	_, werr := tmp.WriteString(fence.String() + "\n")
-	merr := tmp.Chmod(0o644) // fibers read it, and runc's run as a mapped root
-	if err := errors.Join(werr, merr, tmp.Close()); err != nil {
-		_ = os.Remove(tmp.Name())
-		return err
-	}
-	if err := os.Rename(tmp.Name(), path); err != nil {
-		_ = os.Remove(tmp.Name())
-		return err
-	}
-	return nil
 }
 
 // mintEndpoint chooses a fiber's endpoint under the runtime's policy:
@@ -1332,17 +1294,15 @@ func (r *Runtime) start(ctx context.Context, z *warm, spec core.CloneSpec, p *po
 		return core.FiberHandle{}, err
 	}
 	url, bind, port := "", handoffEndpoint, 0
-	var hostEnd, fiberEnd *os.File
-	if spec.Grant.Policy.EndpointMode == core.EndpointHandoff {
-		hostEnd, fiberEnd, err = r.handoffPair(spec.Grant.UID)
-		if err == nil {
-			defer func() { _ = fiberEnd.Close() }()
-			// The grant's TLS identity waits in the channel for the
-			// fiber to be born, with the caller it serves. It is never
-			// a file.
-			if err = r.sendIdentity(hostEnd, spec.Grant.UID, spec.CallerCert); err != nil {
-				_ = hostEnd.Close()
-			}
+	handoff := spec.Grant.Policy.EndpointMode == core.EndpointHandoff
+	var identity *backend.Identity
+	if handoff {
+		// The record the backend queues for the fiber carries the
+		// grant's TLS identity, with the caller it serves.
+		if !r.canHandoff() {
+			err = fmt.Errorf("%w: grant %s on backend %s", ErrNoHandoff, spec.Grant.UID, r.be.Name())
+		} else {
+			identity, err = r.identityFor(spec.Grant.UID, spec.CallerCert)
 		}
 	} else {
 		url, bind, port, err = r.mintEndpoint(spec.Fence)
@@ -1356,9 +1316,6 @@ func (r *Runtime) start(ctx context.Context, z *warm, spec core.CloneSpec, p *po
 		sock = bind // a unix socket, served directly or behind the relay
 		if err := r.claimSocket(sock, spec.Fence.String()); err != nil {
 			r.freePort(port, spec.Fence.String())
-			if hostEnd != nil {
-				_ = hostEnd.Close()
-			}
 			giveUp()
 			return core.FiberHandle{}, err
 		}
@@ -1372,9 +1329,11 @@ func (r *Runtime) start(ctx context.Context, z *warm, spec core.CloneSpec, p *po
 			return core.FiberHandle{}, err
 		}
 	}
+	// A fiber born from the warm instance, forked or restored from its
+	// image, starts its lineage at generation 1.
 	f := &fiber{id: spec.Fence.String(), grantUID: spec.Grant.UID, cg: leaf, endpoint: url, port: port, sock: sock, birth: spec.Fence.String(),
-		budget: spec.Grant.WBudgetBytes, devMax: spec.Grant.DeviceBudget.Bytes,
-		quota: deltaQuota(spec.Grant), handoff: hostEnd, relay: rl, done: make(chan struct{}), pooled: p != nil}
+		generation: 1, budget: spec.Grant.WBudgetBytes, devMax: spec.Grant.DeviceBudget.Bytes,
+		quota: deltaQuota(spec.Grant), handoff: handoff, relay: rl, done: make(chan struct{}), pooled: p != nil}
 	// Registered before the backend answers so an exit that races the
 	// reply is not lost.
 	r.mu.Lock()
@@ -1382,7 +1341,7 @@ func (r *Runtime) start(ctx context.Context, z *warm, spec core.CloneSpec, p *po
 	r.mu.Unlock()
 	fspec := backend.FiberSpec{
 		Fence: f.id, Endpoint: bind, CgroupFD: int(lfd.Fd()), Deadline: spec.Deadline,
-		Payload: spec.Payload, Session: spec.Session, OwnPIDNS: true, Handoff: fiberEnd,
+		Payload: spec.Payload, Session: spec.Session, Generation: f.generation, OwnPIDNS: true, Identity: identity,
 	}
 	var fb backend.Fiber
 	if p != nil {
@@ -1405,9 +1364,6 @@ func (r *Runtime) start(ctx context.Context, z *warm, spec core.CloneSpec, p *po
 		}
 		r.freeSocket(sock, f.id)
 		r.freePort(port, f.id)
-		if hostEnd != nil {
-			_ = hostEnd.Close()
-		}
 		if p != nil || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 			// The backend kills a sandbox it could not bind or start in
 			// time, reporting a pooled one's end under its pooled id, and
@@ -1419,6 +1375,11 @@ func (r *Runtime) start(ctx context.Context, z *warm, spec core.CloneSpec, p *po
 		}
 		return core.FiberHandle{}, err
 	}
+	// The host's end of the fiber's channel is the host's from here, and
+	// finish closes it with the fiber.
+	r.mu.Lock()
+	f.channel = fb.Channel
+	r.mu.Unlock()
 	ep, err := r.route(f)
 	if err != nil {
 		_ = r.Release(ctx, f.id, false)
@@ -1437,8 +1398,8 @@ func (r *Runtime) start(ctx context.Context, z *warm, spec core.CloneSpec, p *po
 type manifest struct {
 	Fence    string `json:"fence"`
 	GrantUID string `json:"grant_uid"`
-	// Birth is the fence the fiber was born under and still holds in
-	// memory, which names its fence file when it serves no unix socket.
+	// Birth is the fence the fiber was born under, which names the
+	// socket it serves however often it is resumed.
 	Birth    string `json:"birth_fence,omitempty"`
 	Endpoint string `json:"endpoint"`
 	// Handoff marks a fiber that served handed-off connections, not Endpoint.
@@ -1449,6 +1410,9 @@ type manifest struct {
 	Relay    string `json:"relay_socket,omitempty"`
 	Template string `json:"template_digest"`
 	Backend  string `json:"backend"`
+	// Generation is the parked fiber's place in its lineage. A resume of
+	// this park is the next one, on this home or another.
+	Generation int `json:"generation"`
 	// WBytes is what the park costs to move: the delta's bytes when the
 	// checkpoint is a delta, else the full image bytes.
 	WBytes uint64 `json:"w_bytes"`
@@ -1476,10 +1440,12 @@ func (r *Runtime) Park(ctx context.Context, fiberID string, sync bool) (string, 
 	r.mu.Lock()
 	f, ok := r.fibers[fiberID]
 	var ep string
+	var channel *os.File
 	if ok {
 		f.released = true // the coming exit is ours, not a death
 		f.parked = true   // and its port stays with the delta
 		ep = f.endpoint
+		channel = f.channel
 	}
 	r.mu.Unlock()
 	if !ok {
@@ -1517,15 +1483,20 @@ func (r *Runtime) Park(ctx context.Context, fiberID string, sync bool) (string, 
 		_ = os.Rename(dir, dir+".failed")
 		return "", err
 	}
-	if err := r.be.Park(ctx, f.id, backend.ParkSpec{Dir: dir, Sync: sync}); err != nil {
+	// The fiber is asked to stop serving and dumped once it has. The
+	// wait is bounded by the grant's resume deadline, the one per-grant
+	// number for a wait on a fiber, and a handoff fiber answers on the
+	// channel the host holds.
+	_, deadline := core.GrantDeadlines(r, f.grantUID)
+	if err := r.be.Park(ctx, f.id, backend.ParkSpec{Dir: dir, Sync: sync, Deadline: deadline, Channel: channel}); err != nil {
 		return giveBack(err)
 	}
 	// A sync park's fiber runs until the delta is durable, so a failure
 	// gives it back. An async park's fiber is gone, so the ref goes back
 	// with any error, and the ledger parks the session rather than count a
 	// dead fiber.
-	m := manifest{Fence: f.id, GrantUID: f.grantUID, Birth: f.birth, Endpoint: ep, Handoff: f.handoff != nil, Backend: r.be.Name(),
-		WUsed: w, ParkedAt: time.Now().UTC().Format(time.RFC3339Nano)}
+	m := manifest{Fence: f.id, GrantUID: f.grantUID, Birth: f.birth, Endpoint: ep, Handoff: f.handoff, Backend: r.be.Name(),
+		Generation: f.generation, WUsed: w, ParkedAt: time.Now().UTC().Format(time.RFC3339Nano)}
 	if f.relay != nil {
 		m.Relay = f.relay.sock
 	}
@@ -1644,25 +1615,24 @@ func (r *Runtime) resume(ctx context.Context, spec core.CloneSpec) (core.FiberHa
 	defer func() { _ = lfd.Close() }()
 	workDir := filepath.Join(r.cfg.RunDir, spec.Grant.UID)
 	_ = os.MkdirAll(workDir, 0o755)
-	// A handoff fiber gets a new channel in place of its parked one. Any
-	// other restored listener serves on its parked endpoint. That is a unix
+	// Every fiber of a channel backend gets a new channel in place of its
+	// parked one (below). A handoff fiber serves on it. Any other
+	// restored listener serves on its parked endpoint. That is a unix
 	// socket that binds its path again, or the tcp port, which must still
 	// be this fiber's (or free) on this home.
 	var parked endpoint.Endpoint
-	var hostEnd, fiberEnd *os.File
 	if m.Handoff {
 		// The restored fiber holds its identity in memory. The pin is
 		// recorded here for HandoffRoute, and the new channel carries
 		// only connections.
+		if !r.canHandoff() {
+			_ = rmdir(leaf)
+			return core.FiberHandle{}, fmt.Errorf("%w: grant %s on backend %s", ErrNoHandoff, spec.Grant.UID, r.be.Name())
+		}
 		if err := r.prepareIdentity(spec.Grant.UID, spec.Grant.CallerThumbprint); err != nil {
 			_ = rmdir(leaf)
 			return core.FiberHandle{}, err
 		}
-		if hostEnd, fiberEnd, err = r.handoffPair(spec.Grant.UID); err != nil {
-			_ = rmdir(leaf)
-			return core.FiberHandle{}, err
-		}
-		defer func() { _ = fiberEnd.Close() }()
 	} else {
 		if parked, err = endpoint.Parse(m.Endpoint); err != nil {
 			_ = rmdir(leaf)
@@ -1724,9 +1694,8 @@ func (r *Runtime) resume(ctx context.Context, spec core.CloneSpec) (core.FiberHa
 			bind = filepath.Join(workDir, filepath.Base(m.Relay))
 		}
 	}
-	// The fiber resumes with its old fence in memory; the new one is
-	// published for applications that need it, beside the socket it
-	// serves when it serves one, else under its birth fence's name.
+	// The fiber resumes with its birth fence in memory and learns the
+	// new one from the record the backend sends it on its channel.
 	birth, err := core.ParseFence(m.Birth)
 	if err != nil {
 		birth, err = core.ParseFence(m.Fence) // parked once, never resumed: born under the parked fence
@@ -1749,10 +1718,6 @@ func (r *Runtime) resume(ctx context.Context, spec core.CloneSpec) (core.FiberHa
 		}
 		_ = os.Remove(sock)
 	}
-	fenceFn := r.fenceFile(sock, birth)
-	if err := r.publishFence(fenceFn, spec.Fence); err != nil {
-		log.Printf("host: fence file %s for %s not written: %v", fenceFn, spec.Fence, err)
-	}
 
 	served := m.Endpoint
 	var rl *relay
@@ -1764,20 +1729,23 @@ func (r *Runtime) resume(ctx context.Context, spec core.CloneSpec) (core.FiberHa
 		if rl, err = r.openRelay(port, bind); err != nil {
 			r.freeSocket(sock, spec.Fence.String())
 			r.freePort(port, spec.Fence.String())
-			_ = os.Remove(fenceFn)
 			_ = rmdir(leaf)
 			return core.FiberHandle{}, err
 		}
 	}
-	f := &fiber{id: spec.Fence.String(), grantUID: spec.Grant.UID, cg: leaf, port: port, sock: sock, birth: birth.String(), fenceFn: fenceFn,
-		endpoint: served, budget: spec.Grant.WBudgetBytes, devMax: spec.Grant.DeviceBudget.Bytes,
-		quota: deltaQuota(spec.Grant), handoff: hostEnd, relay: rl, done: make(chan struct{})}
+	// The resumed fiber is the next generation of the parked one's
+	// lineage, whichever home parked it. The backend tells it so on its
+	// channel, and a handoff fiber gets a fresh channel from the backend
+	// in place of its parked one, with that record first on it.
+	f := &fiber{id: spec.Fence.String(), grantUID: spec.Grant.UID, cg: leaf, port: port, sock: sock, birth: birth.String(),
+		generation: m.Generation + 1, endpoint: served, budget: spec.Grant.WBudgetBytes, devMax: spec.Grant.DeviceBudget.Bytes,
+		quota: deltaQuota(spec.Grant), handoff: m.Handoff, relay: rl, done: make(chan struct{})}
 	r.mu.Lock()
 	r.fibers[f.id] = f
 	r.mu.Unlock()
 	refused := r.pidsHits(gcg)
 	fb, err := r.be.Resume(ctx, backend.ResumeSpec{Dir: dir, Fence: f.id, Endpoint: bind, CgroupFD: int(lfd.Fd()), Deadline: spec.Deadline,
-		WarmID: spec.Grant.UID, WorkDir: workDir, Session: spec.Session, Handoff: fiberEnd})
+		WarmID: spec.Grant.UID, WorkDir: workDir, Session: spec.Session, Generation: f.generation, Handoff: m.Handoff})
 	if err != nil {
 		err = r.pidsPressure(gcg, refused, spec.Grant.UID, err)
 		r.mu.Lock()
@@ -1790,19 +1758,17 @@ func (r *Runtime) resume(ctx context.Context, spec core.CloneSpec) (core.FiberHa
 		}
 		r.freeSocket(sock, f.id)
 		r.freePort(port, f.id)
-		if hostEnd != nil {
-			_ = hostEnd.Close()
-		}
 		_ = leaf.Kill()
 		_ = rmdir(leaf)
-		// Nothing serves on the socket a failed restore may have bound,
-		// and no fiber is left to read the fence file.
+		// Nothing serves on the socket a failed restore may have bound.
 		if sock != "" {
 			_ = os.Remove(sock)
 		}
-		_ = os.Remove(fenceFn)
 		return core.FiberHandle{}, err
 	}
+	r.mu.Lock()
+	f.channel = fb.Channel
+	r.mu.Unlock()
 	ep, err := r.route(f)
 	if err != nil {
 		_ = r.Release(ctx, f.id, false)
@@ -1893,49 +1859,11 @@ func (r *Runtime) killOrphan(ctx context.Context, fence core.Fence) error {
 		case <-time.After(10 * time.Millisecond):
 		}
 	}
+	// A resumed orphan served the socket it was parked under, named by
+	// another fence, which nothing here records. That name is unlinked
+	// before the next fiber binds it.
 	_ = os.Remove(r.unixPath(fence))
-	_ = os.Remove(r.unixPath(fence) + ".fence")
-	// A resumed fiber's fence file names its current fence, under the
-	// name of the socket it serves (parked under, relayed or not) or of
-	// its birth fence. The file goes, and the socket beside it.
-	for _, fn := range r.fenceFiles(fence) {
-		_ = os.Remove(fn)
-		if sock, ok := strings.CutSuffix(fn, ".fence"); ok && strings.HasSuffix(sock, ".sock") {
-			_ = os.Remove(sock)
-		}
-	}
 	return rmdir(leaf)
-}
-
-// fenceFiles finds the fence files in the grant's run directory that
-// name fence, which a resumed fiber of that fence reads. The grant's
-// directory is the fiber's to write, so only a regular file is read,
-// never through a link.
-func (r *Runtime) fenceFiles(fence core.Fence) []string {
-	dir := filepath.Join(r.cfg.RunDir, fence.GrantUID)
-	ents, err := os.ReadDir(dir)
-	if err != nil {
-		return nil
-	}
-	want := fence.String()
-	var out []string
-	for _, e := range ents {
-		name := e.Name()
-		if !e.Type().IsRegular() || !strings.HasSuffix(name, ".fence") {
-			continue
-		}
-		f, err := os.OpenFile(filepath.Join(dir, name), os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
-		if err != nil {
-			continue
-		}
-		buf := make([]byte, 256)
-		n, _ := io.ReadFull(f, buf)
-		_ = f.Close()
-		if strings.TrimSpace(string(buf[:n])) == want {
-			out = append(out, filepath.Join(dir, name))
-		}
-	}
-	return out
 }
 
 // PruneGrants removes leftover cgroups of grants not in keep: the warm

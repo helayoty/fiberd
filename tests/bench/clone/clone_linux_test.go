@@ -125,6 +125,10 @@ func TestE2ECloneNumbers(t *testing.T) {
 					for _, id := range fibers {
 						_ = h.client.Release(ctx, id, false)
 					}
+					// Let fiberd's clone rate limit refill the round's
+					// tokens, so the next round measures clones, not
+					// backpressure. The pause is outside every timer.
+					time.Sleep(time.Duration(tc.clones) * time.Second / core.DefaultBaseRate)
 				}
 			}
 			breakdown(t, rtt, h.clock.take())
