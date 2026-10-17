@@ -507,7 +507,8 @@ const _: () = {
 /// flags added to recvmsg's. The first descriptor passed with it goes to
 /// *fd_out, -1 for none, and any other is closed. Returns the byte
 /// count, 0 at EOF, or -1 with errno, EPROTO for a message longer than
-/// a record. EINTR is retried, which cannot block a non-blocking read.
+/// a record. A zero-length message reads as EOF, and its descriptors
+/// are closed. EINTR is retried, which cannot block a non-blocking read.
 ///
 /// # Safety
 /// buf has cap writable bytes and fd_out is writable.
@@ -569,6 +570,14 @@ pub unsafe fn channel_recv(
             }
             c = libc::CMSG_NXTHDR(&raw const mh, c);
         }
+    }
+    // A zero-length message is EOF to every caller, and on a seqpacket
+    // channel one may still carry descriptors. They are closed here, or
+    // they would leak behind the EOF.
+    if r == 0 && *fd_out >= 0 {
+        // SAFETY: fd_out is a descriptor the message just passed.
+        unsafe { libc::close(*fd_out) };
+        *fd_out = -1;
     }
     if r > 0 && mh.msg_flags & libc::MSG_TRUNC != 0 {
         if *fd_out >= 0 {
@@ -1330,6 +1339,60 @@ mod tests {
                 [libc::EINVAL, libc::EPERM].contains(&e),
                 "{name}: errno {e}"
             );
+        }
+    }
+
+    #[test]
+    fn a_zero_length_message_leaks_no_descriptor() {
+        // A zero-length seqpacket message reads as EOF, and the C kept
+        // the descriptors it carried open behind it. Each is a pipe's
+        // write end here, so the read end sees EOF only once every copy
+        // of it is closed.
+        let cases: &[(&str, usize)] = &[("one descriptor", 1), ("two descriptors", 2)];
+        for (name, n) in cases {
+            let [ours, theirs] = pair();
+            let mut reads = Vec::new();
+            let mut writes = Vec::new();
+            for _ in 0..*n {
+                let mut p = [-1; 2];
+                // SAFETY: p is live for the call.
+                let rc = unsafe { libc::pipe2(p.as_mut_ptr(), libc::O_NONBLOCK | libc::O_CLOEXEC) };
+                assert_eq!(rc, 0, "{name}: pipe2");
+                reads.push(p[0]);
+                writes.push(p[1]);
+            }
+            send_fds(theirs, b"", &writes);
+            for fd in writes {
+                // SAFETY: the test's own copy, the message holds another.
+                unsafe { libc::close(fd) };
+            }
+            let mut buf = [0u8; 16];
+            let mut got_fd = -2;
+            // SAFETY: buf has 16 bytes.
+            let r = unsafe {
+                fz_rs_channel_recv(
+                    ours,
+                    libc::MSG_DONTWAIT,
+                    buf.as_mut_ptr().cast(),
+                    buf.len(),
+                    &mut got_fd,
+                )
+            };
+            assert_eq!(r, 0, "{name}: EOF");
+            assert_eq!(got_fd, -1, "{name}: nothing handed over");
+            for fd in reads {
+                let mut b = [0u8; 1];
+                // SAFETY: b is live for the call.
+                let got = unsafe { libc::read(fd, b.as_mut_ptr().cast(), 1) };
+                assert_eq!(got, 0, "{name}: a passed write end is still open");
+                // SAFETY: the test's own.
+                unsafe { libc::close(fd) };
+            }
+            // SAFETY: the pair is the test's own.
+            unsafe {
+                libc::close(ours);
+                libc::close(theirs);
+            }
         }
     }
 }

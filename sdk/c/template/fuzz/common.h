@@ -92,14 +92,16 @@ struct fz_rs_fiber_state {
     bool ack_pending;
     bool park_over;
     char gv_last_token[65];
+    char ack_fence[128];
 };
-_Static_assert(sizeof(struct fz_rs_fiber_state) == 88, "State in core/src/fiber.rs");
+_Static_assert(sizeof(struct fz_rs_fiber_state) == 216, "State in core/src/fiber.rs");
 _Static_assert(offsetof(struct fz_rs_fiber_state, served_generation) == 8, "State in core/src/fiber.rs");
 _Static_assert(offsetof(struct fz_rs_fiber_state, park_round) == 12, "State in core/src/fiber.rs");
 _Static_assert(offsetof(struct fz_rs_fiber_state, gv_channel) == 16, "State in core/src/fiber.rs");
 _Static_assert(offsetof(struct fz_rs_fiber_state, ack_pending) == 20, "State in core/src/fiber.rs");
 _Static_assert(offsetof(struct fz_rs_fiber_state, park_over) == 21, "State in core/src/fiber.rs");
 _Static_assert(offsetof(struct fz_rs_fiber_state, gv_last_token) == 22, "State in core/src/fiber.rs");
+_Static_assert(offsetof(struct fz_rs_fiber_state, ack_fence) == 87, "State in core/src/fiber.rs");
 struct record_store;
 struct fz_rs_fiber_state *fz_rs_fuzz_state(void);
 struct record_store *fz_rs_fuzz_born(void);

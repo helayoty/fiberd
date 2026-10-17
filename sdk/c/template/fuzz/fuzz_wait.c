@@ -64,6 +64,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
             ssize_t n = recv(s[1], ack, sizeof ack, MSG_DONTWAIT);
             if (n != (ssize_t)(strlen(inc.fence) + 2) || ack[0] != 'a' || strcmp(ack + 1, inc.fence) != 0) abort();
             if (F->ack_pending || polled->inc.seed_len != 0) abort();
+            for (size_t i = 0; i < sizeof F->ack_fence; i++) if (F->ack_fence[i]) abort(); /* wiped once acked */
         } else if (rc < 0) {
             if (errno != EPROTO && errno != ECONNRESET) abort();
         } else if (rc != 0) {

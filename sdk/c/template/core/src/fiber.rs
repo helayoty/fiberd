@@ -4,9 +4,11 @@
 //! fz_gvisor_identity and fz_gvisor_ack, each with the signature
 //! libfiberzygote.h gives it.
 //!
-//! They run in a fiber, after scrub_and_run, on the fiber's one thread
-//! or the template's, never two at once, which is the header's rule. A
-//! park's SIGUSR1 may interrupt them. The library installs no handler,
+//! They run in a fiber, after scrub_and_run. libfiberzygote.h (at
+//! FZ_CHANNEL_FD) says these calls share the library's state, so they
+//! must never overlap: one at a time, never from a signal handler, and
+//! any thread may make the next once the last has returned. A park's
+//! SIGUSR1 may interrupt them. The library installs no handler,
 //! so a poll the signal ends returns EINTR, and the entry hands it to
 //! the template's loop as the C did. Every entry sets errno once, at the
 //! boundary, to what the header promises (EBADF, EPROTO, ECONNRESET,
@@ -60,12 +62,17 @@ const TOKEN_TRIES: u32 = 3000;
 const CONNECT_TRIES: u32 = 2000;
 const TRY_EVERY_US: libc::useconds_t = 1000;
 
-/// A static the C ABI's rule guards: the fiber-side API runs on one
-/// thread at a time, and the child's path runs before any of it.
+/// A static the header's rule guards. libfiberzygote.h (at FZ_CHANNEL_FD)
+/// says the fiber-side calls must never overlap: one at a time, never
+/// from a signal handler, and any thread may make the next once the
+/// last has returned. The child's path runs before any of them, as the
+/// process's one thread.
 pub struct Global<T>(UnsafeCell<T>);
 
-// SAFETY: every access is from the one thread the header allows at a
-// time (see the module comment), so no two threads share the value.
+// SAFETY: by the header's rule above, no two calls overlap, so no two
+// threads touch the value at once. A call on another thread comes once
+// the last has returned, which the template orders as the header asks,
+// so each access happens after the last.
 unsafe impl<T> Sync for Global<T> {}
 
 impl<T> Global<T> {
@@ -110,10 +117,15 @@ pub struct State {
     /// after a restore returns, and a restored copy keeps this memory,
     /// so a token already used is waited out.
     pub gv_last_token: [u8; GVISOR_TOKEN_MAX + 1],
+    /// The fence of the resume's record fz_incarnation_wait handed
+    /// over, NUL-ended, which fz_fiber_ready acks. A copy, so a later
+    /// wait that writes over polled (a refused record, a replay) cannot
+    /// change what the ack names. Wiped once acked.
+    pub ack_fence: [u8; FENCE_MAX],
 }
 
 const _: () = {
-    assert!(size_of::<State>() == 88);
+    assert!(size_of::<State>() == 216);
     assert!(offset_of!(State, channel_fd) == 0);
     assert!(offset_of!(State, ready_fd) == 4);
     assert!(offset_of!(State, served_generation) == 8);
@@ -122,6 +134,7 @@ const _: () = {
     assert!(offset_of!(State, ack_pending) == 20);
     assert!(offset_of!(State, park_over) == 21);
     assert!(offset_of!(State, gv_last_token) == 22);
+    assert!(offset_of!(State, ack_fence) == 87);
 };
 
 impl State {
@@ -136,6 +149,7 @@ impl State {
             ack_pending: false,
             park_over: false,
             gv_last_token: [0; GVISOR_TOKEN_MAX + 1],
+            ack_fence: [0; FENCE_MAX],
         }
     }
 }
@@ -178,8 +192,9 @@ pub struct Fiber<'a> {
 /// The Fiber of the statics.
 ///
 /// # Safety
-/// The caller is an entry on the one thread the header allows, and
-/// holds no other reference into the statics while this one lives.
+/// The caller is an entry, which by the header's rule overlaps no other
+/// (see Global), and holds no other reference into the statics while
+/// this one lives.
 unsafe fn global<'a>() -> Fiber<'a> {
     // SAFETY: by the contract above, each static is referenced once.
     unsafe {
@@ -254,7 +269,8 @@ pub fn forget_seed(st: &mut RecordStore) {
 /// The fence a store's record names, from its NUL-ended field in buf,
 /// at most FENCE_MAX bytes. The parser keeps it shorter. A store whose
 /// buf was overwritten after its parse (a refused record) is cut there,
-/// where the C read on and overflowed its ack buffer.
+/// where the C read on and overflowed its ack buffer. A resume's ack
+/// does not read it at all, but the snapshot in State.
 fn fence_of(st: &RecordStore) -> &[u8] {
     let off = (st.inc.fence as usize).wrapping_sub(st.buf.as_ptr() as usize);
     let Some(rest) = st.buf.get(off..) else {
@@ -345,20 +361,28 @@ impl Fiber<'_> {
     /// polled. Ok(true) when it is one the fiber has not served yet,
     /// Ok(false) for a replay of a generation already served, EPROTO for
     /// anything else. The message's copy is wiped once copied, so the
-    /// one copy of a seed is in polled, zeroed with it.
+    /// one copy of a seed is in polled, zeroed with it. A refused
+    /// message is wiped whole wherever it lies, and so is a replay's
+    /// seed, since the next record may be shorter and leave it behind.
     pub fn take_record(&mut self, n: usize) -> Result<bool, Errno> {
+        let n = n.min(RECORD_MAX);
         if self.msg.first() != Some(&b'i') {
+            wipe(self.msg.get_mut(..n).unwrap_or(&mut []));
             return Err(Errno(libc::EPROTO));
         }
-        let n = n.min(RECORD_MAX);
         if let (Some(dst), Some(src)) = (self.polled.buf.get_mut(..n), self.msg.get(..n)) {
             dst.copy_from_slice(src);
         }
         wipe(self.msg.get_mut(..n).unwrap_or(&mut []));
         if parse_store(self.polled, n).is_err() {
+            wipe(self.polled.buf.get_mut(..n).unwrap_or(&mut []));
             return Err(Errno(libc::EPROTO));
         }
-        Ok(self.polled.inc.generation > self.st.served_generation)
+        let fresh = self.polled.inc.generation > self.st.served_generation;
+        if !fresh {
+            forget_seed(self.polled);
+        }
+        Ok(fresh)
     }
 
     /// channel_wait blocks until the channel has a message, then takes
@@ -415,8 +439,9 @@ impl Fiber<'_> {
             return;
         }
         self.st.ack_pending = false;
-        let (ack, n) = ack_message(fence_of(self.polled));
+        let (ack, n) = ack_message(c_str(&self.st.ack_fence));
         send_all(self.st.channel_fd, ack.get(..n).unwrap_or(&[]));
+        wipe(&mut self.st.ack_fence);
         forget_seed(self.polled);
     }
 
@@ -424,7 +449,9 @@ impl Fiber<'_> {
     /// a descriptor carries nothing to serve. A park's round is noted
     /// for the quiesce to come, and ends this call as the park's signal
     /// would, with EINTR, since that signal may have landed already,
-    /// before this wait began, and would then wake nothing.
+    /// before this wait began, and would then wake nothing. Every
+    /// message is wiped whole once read, since one may be a record with
+    /// a seed.
     pub fn accept(&mut self) -> Result<c_int, Errno> {
         if self.st.channel_fd < 0 {
             return Err(Errno(libc::EBADF));
@@ -434,10 +461,12 @@ impl Fiber<'_> {
             if n == 0 {
                 return Err(Errno(libc::ECONNRESET));
             }
+            let park = fd < 0 && self.take_round(n) && self.is_park();
+            wipe(self.msg.get_mut(..n).unwrap_or(&mut []));
             if fd >= 0 {
                 return Ok(fd);
             }
-            if self.take_round(n) && self.is_park() {
+            if park {
                 return Err(Errno(libc::EINTR));
             }
         }
@@ -497,6 +526,7 @@ impl Fiber<'_> {
             // A connection handed over meanwhile is nobody's to serve.
             if fd >= 0 {
                 close(fd);
+                wipe(self.msg.get_mut(..n).unwrap_or(&mut []));
                 continue;
             }
             // A new round while waiting (the fiber quiesced late, or on
@@ -514,6 +544,8 @@ impl Fiber<'_> {
             }
             self.st.served_generation = self.polled.inc.generation;
             self.st.ack_pending = true;
+            self.st.ack_fence = [0; FENCE_MAX];
+            sys::append(&mut self.st.ack_fence, 0, fence_of(self.polled));
             return Ok(Some(self.polled.inc));
         }
     }
@@ -587,7 +619,16 @@ impl Fiber<'_> {
             close(fd);
             return Err(e);
         }
-        let (claim, cn) = claim_message(&token);
+        self.take_identity(fd, &token)
+    }
+
+    /// The claim and the record of fz_gvisor_identity, on fd, a
+    /// connected pool socket it owns: says 't' with token, reads the
+    /// record into born and keeps fd for the ack. On any failure fd is
+    /// closed, and a record read and then refused (too long, or not
+    /// parsing) is wiped from born's buffer, since it may hold a seed.
+    pub fn take_identity(&mut self, fd: c_int, token: &[u8]) -> Result<Incarnation, Errno> {
+        let (claim, cn) = claim_message(token);
         let claim = claim.get(..cn).unwrap_or(&[]);
         // SAFETY: write reads claim.len() bytes of claim, which is live.
         let w = unsafe { libc::write(fd, claim.as_ptr().cast(), claim.len()) };
@@ -619,6 +660,12 @@ impl Fiber<'_> {
         };
         if n == 0 || mh.msg_flags & libc::MSG_TRUNC != 0 {
             close(fd);
+            wipe(
+                self.born
+                    .buf
+                    .get_mut(..n.min(RECORD_MAX))
+                    .unwrap_or(&mut []),
+            );
             return Err(Errno(if n == 0 {
                 libc::ECONNRESET
             } else {
@@ -627,6 +674,7 @@ impl Fiber<'_> {
         }
         if parse_store(self.born, n).is_err() {
             close(fd);
+            wipe(self.born.buf.get_mut(..n).unwrap_or(&mut []));
             return Err(Errno(libc::EPROTO));
         }
         self.st.served_generation = self.born.inc.generation;
@@ -697,21 +745,21 @@ fn at_boundary(r: Result<c_int, Errno>) -> c_int {
 /// fz_fiber_ready in libfiberzygote.h.
 #[unsafe(no_mangle)]
 pub extern "C" fn fz_fiber_ready() {
-    // SAFETY: an entry, on the thread the header allows.
+    // SAFETY: an entry, which overlaps no other (see Global).
     unsafe { global() }.ready();
 }
 
 /// fz_accept in libfiberzygote.h: the descriptor, or -1 with errno.
 #[unsafe(no_mangle)]
 pub extern "C" fn fz_accept() -> c_int {
-    // SAFETY: an entry, on the thread the header allows.
+    // SAFETY: an entry, which overlaps no other (see Global).
     at_boundary(unsafe { global() }.accept())
 }
 
 /// fz_quiesce in libfiberzygote.h: 0, or -1 with errno.
 #[unsafe(no_mangle)]
 pub extern "C" fn fz_quiesce() -> c_int {
-    // SAFETY: an entry, on the thread the header allows.
+    // SAFETY: an entry, which overlaps no other (see Global).
     at_boundary(unsafe { global() }.quiesce().map(|()| 0))
 }
 
@@ -723,7 +771,7 @@ pub extern "C" fn fz_quiesce() -> c_int {
 /// which is then not written.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fz_incarnation_wait(inc: *mut Incarnation) -> c_int {
-    // SAFETY: an entry, on the thread the header allows.
+    // SAFETY: an entry, which overlaps no other (see Global).
     let got = unsafe { global() }.wait();
     at_boundary(got.map(|got| match got {
         Some(rec) => {
@@ -740,7 +788,7 @@ pub unsafe extern "C" fn fz_incarnation_wait(inc: *mut Incarnation) -> c_int {
 /// fz_seed_forget in libfiberzygote.h.
 #[unsafe(no_mangle)]
 pub extern "C" fn fz_seed_forget() {
-    // SAFETY: an entry, on the thread the header allows.
+    // SAFETY: an entry, which overlaps no other (see Global).
     unsafe { global() }.seed_forget();
 }
 
@@ -751,7 +799,7 @@ pub extern "C" fn fz_seed_forget() {
 /// id is writable, or null, which is then not written.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fz_gvisor_identity(id: *mut Incarnation) -> c_int {
-    // SAFETY: an entry, on the thread the header allows, and the spec
+    // SAFETY: an entry, which overlaps no other (see Global), and the spec
     // buffer is referenced here alone.
     let got = unsafe { global().gvisor_identity(&mut *SPEC_ENV.get()) };
     at_boundary(got.map(|rec| {
@@ -766,7 +814,7 @@ pub unsafe extern "C" fn fz_gvisor_identity(id: *mut Incarnation) -> c_int {
 /// fz_gvisor_ack in libfiberzygote.h: 0, or -1 with errno.
 #[unsafe(no_mangle)]
 pub extern "C" fn fz_gvisor_ack() -> c_int {
-    // SAFETY: an entry, on the thread the header allows.
+    // SAFETY: an entry, which overlaps no other (see Global).
     at_boundary(unsafe { global() }.gvisor_ack().map(|()| 0))
 }
 
@@ -824,6 +872,16 @@ mod tests {
 
     /// record with the endpoint and the payload's hex field given.
     fn record_with(g: &str, fence: &str, endpoint: &str, payload: &str) -> Vec<u8> {
+        record_seeded(g, fence, endpoint, payload, SEED_HEX)
+    }
+
+    /// A seed of its own, so a test can tell one record's seed from
+    /// another's.
+    const OTHER_SEED_HEX: &[u8] =
+        b"f0f1f2f3f4f5f6f7f8f9fafbfcfdfeffe0e1e2e3e4e5e6e7e8e9eaebecedeeef";
+
+    /// record_with with the seed's hex field given.
+    fn record_seeded(g: &str, fence: &str, endpoint: &str, payload: &str, seed: &[u8]) -> Vec<u8> {
         let mut r = vec![b'i'];
         let fields: [&[u8]; 11] = [
             g.as_bytes(),
@@ -836,7 +894,7 @@ mod tests {
             b"-",
             b"-",
             b"-",
-            SEED_HEX,
+            seed,
         ];
         for f in fields {
             r.extend_from_slice(f);
@@ -1132,22 +1190,32 @@ mod tests {
             rig.msg[..tc.msg.len()].copy_from_slice(&tc.msg);
             let got = rig.fiber().take_record(tc.msg.len());
             assert_eq!(got, tc.want, "{}", tc.name);
-            if tc.msg[0] == b'i' {
-                // The message's copy is gone, the store's is the one.
-                assert!(
-                    rig.msg[..tc.msg.len()].iter().all(|&b| b == 0),
-                    "{}: wiped",
-                    tc.name
-                );
+            // The message's copy is gone whatever it was.
+            assert!(
+                rig.msg[..tc.msg.len()].iter().all(|&b| b == 0),
+                "{}: wiped",
+                tc.name
+            );
+            if got == Ok(true) {
+                // The store's copy is the one, seed and all.
                 assert_eq!(
                     &rig.polled.buf[..tc.msg.len()],
                     &tc.msg[..],
                     "{}: copied",
                     tc.name
                 );
-            }
-            if got.is_ok() {
                 assert_eq!(rig.polled.inc.seed_len, 32, "{}", tc.name);
+            } else {
+                // A replay's seed and a refused record go at once.
+                assert!(
+                    !rig.polled
+                        .buf
+                        .windows(SEED_HEX.len())
+                        .any(|w| w == SEED_HEX),
+                    "{}: no seed in polled.buf",
+                    tc.name
+                );
+                assert!(rig.polled.seed.iter().all(|&b| b == 0), "{}: seed", tc.name);
             }
             assert_eq!(
                 rig.st.served_generation, tc.served,
@@ -1545,21 +1613,15 @@ mod tests {
             want_sent: Vec<Vec<u8>>,
             want_payload: &'static [u8],
         }
-        let cut_fence = {
-            let mut a = vec![b'a'];
-            a.extend_from_slice(&[b'A'; FENCE_MAX]);
-            a.push(0);
-            a
-        };
         let cases = [
             Case {
                 // The seed's field sits 600 bytes past the fence, so the
-                // refusal's wipe of it leaves more than FENCE_MAX bytes
-                // with no NUL where the fence was.
-                name: "the ack after a refusal is cut at FENCE_MAX",
+                // C's wipe of it left more than FENCE_MAX bytes with no
+                // NUL where the fence was, and its ack overflowed.
+                name: "the ack after a refusal names the record handed over",
                 first: record_with("2", "g/1/2", &"e".repeat(600), "-"),
                 ready: true,
-                want_sent: vec![cut_fence],
+                want_sent: vec![msg(b'a', "g/1/2")],
                 want_payload: &[],
             },
             Case {
@@ -1596,9 +1658,8 @@ mod tests {
             let sent = rig.answers();
             assert_eq!(sent, tc.want_sent, "{}: sent", tc.name);
             for ack in &sent {
-                assert_eq!(
-                    ack.len(),
-                    FENCE_MAX + 2,
+                assert!(
+                    ack.len() <= FENCE_MAX + 2,
                     "{}: the ack fits its buffer",
                     tc.name
                 );
@@ -1624,6 +1685,206 @@ mod tests {
                 "{}: hex",
                 tc.name
             );
+        }
+    }
+
+    #[test]
+    fn the_ack_names_the_record_handed_over() {
+        // fz_incarnation_wait hands over g/3/3, then the template waits
+        // again before fz_fiber_ready. The C acked whatever bytes then
+        // lay at the old fence's offset in polled.buf, so a refused
+        // record of the same shape made it ack "ag/X/X".
+        struct Case {
+            name: &'static str,
+            then: Vec<Q>,
+            want_wait: Result<Option<c_uint>, Errno>,
+            want_sent: Vec<Vec<u8>>,
+        }
+        let cases = [
+            Case {
+                name: "a refused record at the same offsets",
+                then: vec![Q::M(record("0", "g/X/X"))],
+                want_wait: Err(Errno(libc::EPROTO)),
+                want_sent: vec![msg(b'a', "g/3/3")],
+            },
+            Case {
+                name: "a replay at the same offsets",
+                then: vec![Q::M(record("2", "g/Y/Y")), Q::Eof],
+                want_wait: Err(Errno(libc::ECONNRESET)),
+                want_sent: vec![msg(b'a', "g/3/3")],
+            },
+            Case {
+                name: "a park that gave up still owes the resume its ack",
+                then: vec![Q::M(msg(b'p', "9")), Q::M(msg(b'c', "9"))],
+                want_wait: Ok(None),
+                want_sent: vec![msg(b'q', "9"), msg(b'a', "g/3/3")],
+            },
+            Case {
+                name: "a second resume is the one acked",
+                then: vec![Q::M(record("4", "g/3/4"))],
+                want_wait: Ok(Some(4)),
+                want_sent: vec![msg(b'a', "g/3/4")],
+            },
+        ];
+        for tc in cases {
+            let mut rig = Rig::new();
+            rig.queue(&[Q::M(record("3", "g/3/3"))]);
+            assert!(
+                matches!(rig.fiber().wait(), Ok(Some(_))),
+                "{}: the resume",
+                tc.name
+            );
+            rig.queue(&tc.then);
+            let got = rig.fiber().wait();
+            assert_eq!(
+                got.map(|r| r.map(|inc| inc.generation)),
+                tc.want_wait,
+                "{}: wait",
+                tc.name
+            );
+            rig.fiber().ready();
+            assert_eq!(rig.answers(), tc.want_sent, "{}: sent", tc.name);
+            assert!(!rig.st.ack_pending, "{}: acked once", tc.name);
+            assert!(
+                rig.st.ack_fence.iter().all(|&b| b == 0),
+                "{}: snapshot wiped",
+                tc.name
+            );
+        }
+    }
+
+    #[test]
+    fn no_seed_stays_in_a_message_buffer() {
+        // Each case leaves a record's seed where the C left it: a record
+        // that reached fz_accept stayed in channel_msg, a refused one in
+        // polled.buf, a replay's past the end of the shorter record that
+        // followed it, and one riding with a descriptor in channel_msg.
+        struct Case {
+            name: &'static str,
+            accept: bool,
+            served: c_uint,
+            queue: Vec<Q>,
+            want: Result<Option<c_uint>, Errno>, // Ok(None) for accept's descriptor
+            gone: &'static [u8],
+        }
+        let long = "e".repeat(300);
+        let cases = [
+            Case {
+                name: "a record that reaches accept",
+                accept: true,
+                served: 1,
+                queue: vec![Q::M(record("2", "g/1/2")), Q::Fd(msg(b'x', ""))],
+                want: Ok(None),
+                gone: SEED_HEX,
+            },
+            Case {
+                name: "a record refused in wait",
+                accept: false,
+                served: 1,
+                queue: vec![Q::M(record("0", "g/1/0"))],
+                want: Err(Errno(libc::EPROTO)),
+                gone: SEED_HEX,
+            },
+            Case {
+                name: "a replay before a shorter fresh record",
+                accept: false,
+                served: 5,
+                queue: vec![
+                    Q::M(record_seeded("3", "g/1/3", &long, "-", OTHER_SEED_HEX)),
+                    Q::M(record("6", "g/1/6")),
+                ],
+                want: Ok(Some(6)),
+                gone: OTHER_SEED_HEX,
+            },
+            Case {
+                name: "a record riding with a descriptor in wait",
+                accept: false,
+                served: 5,
+                queue: vec![
+                    Q::Fd(record_seeded("7", "g/1/7", &long, "-", OTHER_SEED_HEX)),
+                    Q::M(record("6", "g/1/6")),
+                ],
+                want: Ok(Some(6)),
+                gone: OTHER_SEED_HEX,
+            },
+        ];
+        for tc in cases {
+            let mut rig = Rig::new();
+            rig.st.served_generation = tc.served;
+            close_all(rig.queue(&tc.queue));
+            let got = if tc.accept {
+                rig.fiber().accept().map(|fd| {
+                    close_all(vec![fd]);
+                    None
+                })
+            } else {
+                rig.fiber().wait().map(|r| r.map(|inc| inc.generation))
+            };
+            assert_eq!(got, tc.want, "{}", tc.name);
+            for (place, buf) in [
+                ("channel_msg", &rig.msg[..]),
+                ("polled.buf", &rig.polled.buf[..]),
+            ] {
+                assert!(
+                    !buf.windows(tc.gone.len()).any(|w| w == tc.gone),
+                    "{}: a seed stays in {place}",
+                    tc.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_refused_identity_leaves_no_seed() {
+        // fz_gvisor_identity reads the pool's record into born.buf. The C
+        // left one it refused there, seed and all.
+        struct Case {
+            name: &'static str,
+            send: Vec<u8>,
+            want: Result<c_uint, Errno>,
+        }
+        let mut long = record("1", "g/5/1");
+        long.resize(RECORD_MAX + 100, b'x');
+        let cases = [
+            Case {
+                name: "a record that does not parse",
+                send: record("0", "g/5/0"),
+                want: Err(Errno(libc::EPROTO)),
+            },
+            Case {
+                name: "a record longer than the store",
+                send: long,
+                want: Err(Errno(libc::EMSGSIZE)),
+            },
+            Case {
+                name: "a record taken",
+                send: record("1", "g/5/1"),
+                want: Ok(1),
+            },
+        ];
+        for tc in cases {
+            let mut rig = Rig::new();
+            close_all(rig.queue(&[Q::M(tc.send.clone())]));
+            // A copy of the fiber's end stands in for the pool socket,
+            // which take_identity owns and closes on a refusal.
+            // SAFETY: an integer argument alone.
+            let pool = unsafe { libc::dup(rig.st.channel_fd) };
+            let got = rig.fiber().take_identity(pool, b"tok\0");
+            assert_eq!(got.map(|inc| inc.generation), tc.want, "{}", tc.name);
+            assert_eq!(
+                rig.answers(),
+                vec![msg(b't', "tok")],
+                "{}: the claim",
+                tc.name
+            );
+            let kept = rig.born.buf.windows(SEED_HEX.len()).any(|w| w == SEED_HEX);
+            assert_eq!(kept, tc.want.is_ok(), "{}: the seed in born.buf", tc.name);
+            if tc.want.is_ok() {
+                assert_eq!(rig.st.gv_channel, pool, "{}: kept for the ack", tc.name);
+                close_all(vec![pool]);
+            } else {
+                assert_eq!(rig.st.gv_channel, -1, "{}", tc.name);
+            }
         }
     }
 }
