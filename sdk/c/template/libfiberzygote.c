@@ -23,7 +23,6 @@
 #include <sys/signalfd.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
-#include <sys/un.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -37,26 +36,6 @@
 #include <limits.h>
 #include <stddef.h>
 
-/* clone3 as the kernel headers of 5.3 and later spell it, for a build
- * against older ones (manylinux_2_28 ships 4.18's). The number is the
- * same on every architecture, and struct clone_args is the 5.7 layout,
- * which the kernel takes by its size. A kernel without clone3 still
- * answers ENOSYS and gets the fallback to clone (see do_clone). */
-#ifndef __NR_clone3
-#define __NR_clone3 435
-#endif
-#ifndef SYS_clone3
-#define SYS_clone3 __NR_clone3
-#endif
-#ifndef CLONE_ARGS_SIZE_VER0
-struct clone_args {
-    __aligned_u64 flags, pidfd, child_tid, parent_tid, exit_signal, stack, stack_size, tls, set_tid, set_tid_size, cgroup;
-};
-#endif
-#ifndef CLONE_INTO_CGROUP
-#define CLONE_INTO_CGROUP 0x200000000ULL
-#endif
-
 #define MAX_LINE 65536
 #define MAX_KIDS 4096
 #define MAX_PENDING 1024
@@ -67,8 +46,9 @@ struct clone_args {
  * fence fiberd sent. A longer one is refused, never cut. */
 #define FENCE_MAX 128
 
-/* The ready record is the one byte 'r'. The zygote takes anything else
- * on the pipe as a fiber that misused it. */
+/* The ready record is the one byte 'r', which fz_fiber_ready writes
+ * (READY_BYTE in core/src/fiber.rs). The zygote takes anything else on
+ * the pipe as a fiber that misused it. */
 #define READY_BYTE 'r'
 
 /* A control line is at most SEND_MAX - 1 characters. The longest is the
@@ -78,8 +58,6 @@ struct clone_args {
 #define SEND_MAX (RUNDIR_MAX + 512)
 
 extern char **environ;
-
-static int ready_fd = -1;
 
 /* SIGCHLD, blocked since fz_init, read here in the poll set. A child's
  * exit wakes the loop, so its EXITED line goes out at once and not at
@@ -105,7 +83,8 @@ static const char *paths_refused;
  * FIBERD_OWN_MNTNS is set, before any thread exists, and fz_serve fills
  * it at PREPARE mntns (prepare_ns), before READY. A mntns fiber's
  * namespace is then a copy with the grant-wide work already done, and
- * its birth adds only what is its own (see mount_ns). A fiberd whose
+ * its birth adds only what is its own (mount_ns in core/src/mounts.rs).
+ * A fiberd whose
  * fibers get no mount namespace (runc, an artifact build) leaves the
  * variable unset, and the zygote stays in the namespace it was started
  * in, as before. */
@@ -116,13 +95,24 @@ static int ns_prepared;     /* prepare_ns went through, so mntns fibers may be b
 /* What a mntns fiber must not see (HIDE, covered) or keep (DROP,
  * unmounted), as fiberd sent them. hide_covered says which HIDE paths
  * prepare_ns found and covered. One missing then is looked for again at
- * each birth (see mount_ns), so a directory fiberd makes after READY
- * is hidden as it was before the zygote had a namespace of its own. */
-static char *hide_paths[MAX_PATHS];
+ * each birth (see mount_ns in core/src/mounts.rs), so a directory
+ * fiberd makes after READY is hidden as it was before the zygote had a
+ * namespace of its own.
+ *
+ * Each path is kept whole in fixed storage the size of a line, since a
+ * line is at most MAX_LINE - 1 characters and the path is the line less
+ * its prefix. A smaller table would cut a long path, and stat would then
+ * answer for another name than the one fiberd sent. The pages never
+ * written cost nothing, in memory or in a checkpoint. The size is
+ * KEEP_MAX in core/src/abi.rs too. */
+#define KEEP_MAX MAX_LINE
+static char hide_paths[MAX_PATHS][KEEP_MAX];
 static int nhide;
 static unsigned char hide_covered[MAX_PATHS];
-static char *drop_paths[MAX_PATHS];
+static char drop_paths[MAX_PATHS][KEEP_MAX];
 static int ndrop;
+_Static_assert(KEEP_MAX == 65536, "KEEP_MAX is 65536 in core/src/abi.rs");
+_Static_assert(PATH_MAX <= KEEP_MAX, "a realpath result fits a kept path");
 
 /* fiberd's run directory and this grant's directory in it (RUNDIR),
  * in static storage the child reads without allocating. Empty until the
@@ -267,22 +257,106 @@ static ssize_t recv_line(int fd, char *buf, size_t cap, int fds_out[MAX_PASSED])
     return -1;
 }
 
-static int hexval(char c) {
-    if (c >= '0' && c <= '9') return c - '0';
-    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-    return -1;
-}
+/* The record parser lives in the Rust core (core/src/record.rs). Every
+ * caller is in the core now (the child's path and the fiber-side API).
+ * The entry is declared here for the fuzz harnesses, which include this
+ * file and parse with it. */
+struct record_store;
+int fz_rs_parse_incarnation(struct record_store *st, size_t n, const char **why);
 
-static size_t unhex(const char *s, unsigned char *out, size_t cap) {
-    size_t n = 0;
-    for (; s[0] && s[1] && n < cap; s += 2) {
-        int hi = hexval(s[0]), lo = hexval(s[1]);
-        if (hi < 0 || lo < 0) break;
-        out[n++] = (unsigned char)(hi << 4 | lo);
-    }
-    return n;
-}
+/* The line parsers live in the Rust core too (core/src/line.rs and
+ * core/src/procfiles.rs), behind these entries. Each takes a line or a
+ * file's bytes apart as the C did, cutting a line up in place as
+ * strtok_r did, so the fields stay C strings here. The replies, the
+ * mounts and every error line are chosen here from what they return. */
+
+/* What fz_rs_parse_clone made of a CLONE line (core/src/abi.rs). */
+struct fz_rs_clone {
+    const char *fence;    /* NUL-ended in the line, or NULL when it has none */
+    const char *endpoint; /* NUL-ended in the line, or NULL when it has none */
+    size_t endpoint_len;
+    int deadline_ms;      /* with the default of 50, once the fence fits */
+    int pidns, mntns, nocaps;
+    size_t session_len;   /* decoded into the session buffer, NUL-ended */
+};
+_Static_assert(sizeof(struct fz_rs_clone) == 48, "fz_rs_clone layout");
+_Static_assert(offsetof(struct fz_rs_clone, fence) == 0, "fz_rs_clone layout");
+_Static_assert(offsetof(struct fz_rs_clone, endpoint) == 8, "fz_rs_clone layout");
+_Static_assert(offsetof(struct fz_rs_clone, endpoint_len) == 16, "fz_rs_clone layout");
+_Static_assert(offsetof(struct fz_rs_clone, deadline_ms) == 24, "fz_rs_clone layout");
+_Static_assert(offsetof(struct fz_rs_clone, pidns) == 28, "fz_rs_clone layout");
+_Static_assert(offsetof(struct fz_rs_clone, mntns) == 32, "fz_rs_clone layout");
+_Static_assert(offsetof(struct fz_rs_clone, nocaps) == 36, "fz_rs_clone layout");
+_Static_assert(offsetof(struct fz_rs_clone, session_len) == 40, "fz_rs_clone layout");
+/* Why fz_rs_parse_clone refused the line, or 0 when the checks on the
+ * zygote's own state are next (CloneRefusal in core/src/line.rs). */
+enum { FZ_RS_CLONE_OK = 0, FZ_RS_CLONE_MALFORMED = 1, FZ_RS_CLONE_FENCE_LONG = 2, FZ_RS_CLONE_SESSION_LONG = 3, FZ_RS_CLONE_SESSION_NUL = 4 };
+int fz_rs_parse_clone(char *line, char *session, size_t cap, struct fz_rs_clone *out);
+/* The Rust writes RUNDIR_MAX bytes at most into each path (RUNDIR_MAX in
+ * core/src/abi.rs), so the two buffers must be that size. */
+_Static_assert(sizeof rundir_parent == 4096 && sizeof rundir_own == 4096, "rundir buffers match RUNDIR_MAX in core/src/abi.rs");
+int fz_rs_set_rundir(char *line, char *parent, char *own, const char **why);
+/* What read_setup does with a line (Setup in core/src/line.rs). */
+enum { FZ_RS_SETUP_HIDE = 0, FZ_RS_SETUP_DROP = 1, FZ_RS_SETUP_RUNDIR = 2, FZ_RS_SETUP_PREPARE_MNTNS = 3, FZ_RS_SETUP_PREPARE_NONE = 4, FZ_RS_SETUP_OTHER = 5 };
+int fz_rs_setup_kind(const char *line);
+int fz_rs_is_rebind(const char *line);
+char *fz_rs_mountinfo_sys_mount(char *buf, size_t have, size_t *start, int *skipping);
+size_t fz_rs_mountinfo_carry(char *buf, size_t cap, size_t have, size_t start, int *skipping);
+int fz_rs_in_child_userns(const char *uid_map);
+
+/* The child's path lives in the Rust core (core/src/child.rs and
+ * core/src/mounts.rs): the clone3 birth with its legacy fallback,
+ * scrub_and_run from the clone to on_fiber, the mount steps, the seccomp
+ * filter against nested user namespaces and the capability drop. No
+ * system call of the child's is made here any more. The zygote-side
+ * callers that stay (lock_sys, prepare_ns) reach the shared steps
+ * through these entries. fz_rs_channel_recv is declared for the fuzz
+ * harnesses, since its callers are all in the core now. */
+pid_t fz_rs_birth(int cgroup_fd, unsigned long long want);
+int fz_rs_ro_remount(const char *path);
+int fz_rs_cover_empty(const char *path);
+int fz_rs_narrow_rundir(const char *parent, const char *own);
+int fz_rs_cover_hide(const char *path, const char *self_exe);
+int fz_rs_drop_paths_now(const char (*paths)[KEEP_MAX], int n);
+ssize_t fz_rs_channel_recv(int fd, int flags, char *buf, size_t cap, int *fd_out);
+
+/* What the child's path needs from the zygote (Child in core/src/abi.rs),
+ * built by handle_clone before the clone. The zygote's statics the child
+ * resets stay here until stage 5, and scrub_and_run resets them with
+ * plain stores before the one call into the core. The fiber's state (the
+ * channel, the park round, the readiness pipe, the served generation and
+ * the record stores) is the core's (core/src/fiber.rs), which resets it
+ * and reads the birth record into it itself. */
+struct fz_rs_child {
+    int ready_r, ready_w, channel, sigchld_fd;
+    int pidns, mntns, nocaps, deny_nested_userns;
+    int nhide, ndrop;
+    const char *fence;
+    fz_on_fiber on_fiber;
+    const char *self_exe;
+    const char (*hide)[KEEP_MAX];
+    const unsigned char *hide_covered;
+    const char (*drop)[KEEP_MAX];
+};
+_Static_assert(sizeof(struct fz_rs_child) == 88, "fz_rs_child layout");
+_Static_assert(offsetof(struct fz_rs_child, ready_r) == 0, "fz_rs_child layout");
+_Static_assert(offsetof(struct fz_rs_child, ready_w) == 4, "fz_rs_child layout");
+_Static_assert(offsetof(struct fz_rs_child, channel) == 8, "fz_rs_child layout");
+_Static_assert(offsetof(struct fz_rs_child, sigchld_fd) == 12, "fz_rs_child layout");
+_Static_assert(offsetof(struct fz_rs_child, pidns) == 16, "fz_rs_child layout");
+_Static_assert(offsetof(struct fz_rs_child, mntns) == 20, "fz_rs_child layout");
+_Static_assert(offsetof(struct fz_rs_child, nocaps) == 24, "fz_rs_child layout");
+_Static_assert(offsetof(struct fz_rs_child, deny_nested_userns) == 28, "fz_rs_child layout");
+_Static_assert(offsetof(struct fz_rs_child, nhide) == 32, "fz_rs_child layout");
+_Static_assert(offsetof(struct fz_rs_child, ndrop) == 36, "fz_rs_child layout");
+_Static_assert(offsetof(struct fz_rs_child, fence) == 40, "fz_rs_child layout");
+_Static_assert(offsetof(struct fz_rs_child, on_fiber) == 48, "fz_rs_child layout");
+_Static_assert(offsetof(struct fz_rs_child, self_exe) == 56, "fz_rs_child layout");
+_Static_assert(offsetof(struct fz_rs_child, hide) == 64, "fz_rs_child layout");
+_Static_assert(offsetof(struct fz_rs_child, hide_covered) == 72, "fz_rs_child layout");
+_Static_assert(offsetof(struct fz_rs_child, drop) == 80, "fz_rs_child layout");
+_Static_assert(FZ_CHANNEL_FD == 4 && FZ_CHANNEL_PEER_FD == 5, "the channel descriptors are 4 and 5 in core/src/abi.rs");
+_Noreturn void fz_rs_scrub_and_run(const struct fz_rs_child *c);
 
 /* ---- child bookkeeping ---- */
 
@@ -318,6 +392,11 @@ enum {
     EX_MNT_PRIVATE = 110, EX_MNT_PROC, EX_MNT_DROP, EX_MNT_HIDE, EX_CAPS, EX_MNT_RO, EX_USERNS = 117,
     EX_FDS = 120, EX_IDENTITY = 121, EX_CGROUP = 125
 };
+/* The child ends with these codes from the Rust core (core/src/child.rs),
+ * which pins the same numbers. exit_why below reads them for fiberd. */
+_Static_assert(EX_MNT_PRIVATE == 110 && EX_MNT_PROC == 111 && EX_MNT_DROP == 112 && EX_MNT_HIDE == 113 &&
+               EX_CAPS == 114 && EX_MNT_RO == 115 && EX_USERNS == 117 && EX_FDS == 120 && EX_IDENTITY == 121 &&
+               EX_CGROUP == 125, "the exit codes match core/src/child.rs");
 
 /* exit_why says what a code above stands for, or NULL for any other
  * code (the template's own). */
@@ -418,103 +497,47 @@ static void reap(int ctl_fd) {
 
 /* ---- birth ---- */
 
-/* birth forks the fiber straight into its leaf cgroup. With pidns the
- * child is the init of its own pid namespace, so a checkpoint of it
- * restores anywhere without colliding with a live pid. With mntns it
- * gets a mount namespace of its own. Both need CAP_SYS_ADMIN, and a
- * namespace the kernel refuses fails the birth. No fiber runs without
- * one it was asked to have.
- *
- * A kernel without clone3, or without CLONE_INTO_CGROUP (before 5.7),
- * gets the legacy clone with the same namespace flags. The child then
- * moves itself into its leaf before it touches memory, so the window is
- * its first instructions only. A child that cannot reach its leaf ends
- * there with EX_CGROUP, because it must not run charged to the zygote's
- * cgroup. Any other refusal of clone3 (EPERM for a namespace, EBADF for
- * a descriptor that is no cgroup) is the answer, with no second try.
- * Both calls are the raw syscall, so the child runs on a copy of this
- * stack with no atfork handlers, under the rule above scrub_and_run. */
+/* birth forks the fiber straight into its leaf cgroup, with the
+ * namespaces in want, or takes the legacy clone where clone3 is missing
+ * and has the child join its leaf itself. Returns the pid, 0 in the
+ * child, or -1 with errno. The body is core/src/child.rs, under the
+ * rule above scrub_and_run. */
 static pid_t birth(int cgroup_fd, unsigned long long want) {
-    struct clone_args args;
-    memset(&args, 0, sizeof args);
-    args.exit_signal = SIGCHLD;
-    args.flags = want;
-    if (cgroup_fd >= 0) {
-        args.flags |= CLONE_INTO_CGROUP;
-        args.cgroup = (unsigned long long)cgroup_fd;
-    }
-    long pid = syscall(SYS_clone3, &args, sizeof args);
-    if (pid >= 0) return (pid_t)pid;
-    if (errno != ENOSYS && errno != EINVAL && errno != E2BIG) return -1;
-    /* Flags, then a zero stack (the child's is this one, copied) and
-     * zero tids and tls. x86_64 takes (ptid, ctid, tls) and arm64
-     * (ptid, tls, ctid). All three are zero, so the order is moot. */
-    pid = syscall(SYS_clone, (unsigned long)(want | SIGCHLD), 0UL, 0UL, 0UL, 0UL);
-    if (pid == 0 && cgroup_fd >= 0) {
-        int procs = openat(cgroup_fd, "cgroup.procs", O_WRONLY | O_CLOEXEC);
-        if (procs < 0) _exit(EX_CGROUP);
-        /* "0" is the writer itself, whatever its pid namespace. The
-         * kernel takes the byte whole or not at all. */
-        if (write(procs, "0", 1) != 1) _exit(EX_CGROUP);
-        close(procs);
-    }
-    return (pid_t)pid;
+    return fz_rs_birth(cgroup_fd, want);
 }
 
-/* ro_remount makes the mount at path read-only in this namespace alone.
- * MS_REMOUNT|MS_BIND changes the per-mount flags, not the superblock, so
- * fiberd and the host keep writing through their own mounts of the
- * same filesystem. The flags are set outright, so nosuid, nodev and
- * noexec are restated. Any mount point will do, with no bind first. */
+/* ro_remount makes the mount at path read-only in this namespace alone,
+ * for lock_sys. The body is core/src/mounts.rs. */
 static int ro_remount(const char *path) {
-    return mount(NULL, path, NULL, MS_BIND | MS_REMOUNT | MS_RDONLY | MS_NOSUID | MS_NODEV | MS_NOEXEC, NULL);
+    return fz_rs_ro_remount(path);
 }
 
-/* unescape_mount undoes mountinfo's octal escapes (\040 for a space) in
- * place. */
-static void unescape_mount(char *s) {
-    char *w = s;
-    for (; *s; s++, w++) {
-        if (s[0] == '\\' && s[1] >= '0' && s[1] <= '7' && s[2] >= '0' && s[2] <= '7' && s[3] >= '0' && s[3] <= '7') {
-            *w = (char)((s[1] - '0') * 64 + (s[2] - '0') * 8 + (s[3] - '0'));
-            s += 3;
-        } else {
-            *w = *s;
-        }
-    }
-    *w = 0;
-}
+/* unescape_mount, which undid mountinfo's octal escapes (\040 for a
+ * space) in place, is in the Rust core now (procfiles::unescape_mount),
+ * called from the line loop lock_sys drives below. */
 
-/* lock_procsys and lock_sys take away the fiber's write access to the
- * kernel's knobs. The fiber is euid 0 in the initial user namespace with
- * every capability dropped, and sysctl and kernfs (cgroup, sysfs) check
- * the owner write bit for euid 0 and ask for no capability. Without
- * this, /proc/sys/kernel/core_pattern and modprobe are host root, and
+/* lock_sys takes away the fiber's write access to the kernel's knobs
+ * under /sys. The fiber is euid 0 in the initial user namespace with
+ * every capability dropped, and kernfs (cgroup, sysfs) checks the owner
+ * write bit for euid 0 and asks for no capability. Without this
  * /sys/fs/cgroup lifts the fiber's own and other grants' limits. A
  * read-only mount stands in the way, since the check happens in the
- * fiber's mount namespace.
+ * fiber's mount namespace. (The same for /proc/sys and the rest of the
+ * fiber's fresh /proc is per fiber, lock_procsys and lock_proc in
+ * core/src/mounts.rs.)
  *
- *   - /proc/sys is a directory of the proc mount, not a mount of its
- *     own, so it is bound onto itself to have a mount to make read-only.
- *     A first MS_BIND ignores MS_RDONLY and only the remount applies it.
- *     This is per fiber (lock_procsys), after its fresh /proc, because a
- *     pidns fiber's /proc is a mount of its own that covers whatever the
- *     zygote bound on its /proc/sys. The zygote's bind would sit under
- *     the fresh /proc, out of the fiber's sight, and leave its own
- *     /proc/sys writable.
- *   - All of /sys, every mount under it included, is made read-only in
- *     place. sysfs has knobs of its own writable by euid 0 (/sys/kernel,
- *     /sys/module/<m>/parameters), and the cgroup mount is under it.
- *     Changing the flags of the existing mounts, rather than stacking a
- *     bind on each, keeps the tree CRIU dumps the same shape, and CRIU
- *     restores the flags with the mounts, so a resumed fiber is as
- *     closed as a born one. Reading under /sys still works. Where /sys
- *     has no mounts there is nothing to do. This is done once, in the
- *     zygote's own namespace (lock_sys, from prepare_ns), and every
- *     fiber's copy carries the flags. A mount the host adds under /sys
- *     after that never reaches the zygote's namespace, which is private,
- *     so no fiber sees it at all. /sys/firmware is covered with an empty
- *     tmpfs besides.
+ * All of /sys, every mount under it included, is made read-only in
+ * place. sysfs has knobs of its own writable by euid 0 (/sys/kernel,
+ * /sys/module/<m>/parameters), and the cgroup mount is under it.
+ * Changing the flags of the existing mounts, rather than stacking a
+ * bind on each, keeps the tree CRIU dumps the same shape, and CRIU
+ * restores the flags with the mounts, so a resumed fiber is as closed
+ * as a born one. Reading under /sys still works. Where /sys has no
+ * mounts there is nothing to do. This is done once, in the zygote's own
+ * namespace (from prepare_ns), and every fiber's copy carries the
+ * flags. A mount the host adds under /sys after that never reaches the
+ * zygote's namespace, which is private, so no fiber sees it at all.
+ * /sys/firmware is covered with an empty tmpfs besides.
  *
  * lock_sys reads mountinfo with raw syscalls into a stack buffer and
  * splits it by hand, allocating nothing. The rule above scrub_and_run
@@ -524,60 +547,14 @@ static void unescape_mount(char *s) {
  * several, and no mount under /sys has a name that long.
  *
  * Every mount is tried whatever happened to the ones before it, so one
- * refusal leaves as little writable as possible. Both return 0, or -1
- * when any step failed. */
-static int lock_procsys(void) {
-    if (mount("/proc/sys", "/proc/sys", NULL, MS_BIND, NULL) < 0 || ro_remount("/proc/sys") < 0) return -1;
-    return 0;
-}
-
-/* lock_proc takes away the rest of what a fiber could write or see
- * under its fresh /proc, the paths runc and Docker list for a container.
- * /proc/sysrq-trigger is root-owned 0200 and its write asks for no
- * capability, so without this a euid-0 fiber with every capability
- * dropped reboots, crashes or powers off the node wherever kernel.sysrq
- * allows it, which is the default on the major distributions. The same
- * owner-bit rule writes the smp_affinity files under /proc/irq and
- * what is under /proc/bus and /proc/fs (nfsd). Each is bound onto
- * itself and made read-only, as /proc/sys is. /proc/scsi (its scsi
- * file takes devices
- * off the host) and /proc/acpi (wakeup rewires the host's wakeup
- * devices) are covered with an empty read-only tmpfs, which CRIU dumps
- * and restores as it does a HIDE cover. A path this kernel does not have
- * is skipped, as runc skips it. One that exists and cannot be locked
- * fails the birth, since a fiber must not run with it writable.
- *
- * runc's masked files are not covered. /proc/kcore and /proc/kmsg ask
- * for a capability the fiber lacks (CAP_SYS_RAWIO, CAP_SYSLOG). The rest
- * (/proc/keys, /proc/timer_list, /proc/sched_debug) are read-only to
- * begin with, and a mask would be a bind of another file, which CRIU
- * restores as the host's own path (pkg/sys/criu/mounts.go names a file
- * mount by its path), so a resumed fiber would see them again. The one
- * writable among them, /proc/latency_stats, is made read-only instead.
- * Allocation-free, for mount_ns. */
-static const char *const proc_ro[] = { "/proc/sysrq-trigger", "/proc/bus", "/proc/fs", "/proc/irq", "/proc/latency_stats" };
-static const char *const proc_masked[] = { "/proc/scsi", "/proc/acpi" };
+ * refusal leaves as little writable as possible. Returns 0, or -1 when
+ * any step failed. */
 
 /* cover_empty mounts an empty read-only tmpfs over the directory at
  * path. Returns 0, -1 with errno, or 0 having done nothing when there is
- * no such path. */
+ * no such path. The body is core/src/mounts.rs. */
 static int cover_empty(const char *path) {
-    struct stat st;
-    if (stat(path, &st) < 0) return errno == ENOENT ? 0 : -1;
-    if (!S_ISDIR(st.st_mode)) { errno = ENOTDIR; return -1; }
-    return mount("tmpfs", path, "tmpfs", MS_RDONLY | MS_NOSUID | MS_NODEV | MS_NOEXEC, "size=4k,mode=0555");
-}
-
-static int lock_proc(void) {
-    int rc = 0;
-    struct stat st;
-    for (size_t i = 0; i < sizeof proc_ro / sizeof proc_ro[0]; i++) {
-        if (stat(proc_ro[i], &st) < 0) { if (errno != ENOENT) rc = -1; continue; }
-        if (mount(proc_ro[i], proc_ro[i], NULL, MS_BIND, NULL) < 0 || ro_remount(proc_ro[i]) < 0) rc = -1;
-    }
-    for (size_t i = 0; i < sizeof proc_masked / sizeof proc_masked[0]; i++)
-        if (cover_empty(proc_masked[i]) < 0) rc = -1;
-    return rc;
+    return fz_rs_cover_empty(path);
 }
 
 static int lock_sys(void) {
@@ -592,33 +569,14 @@ static int lock_sys(void) {
         if (n < 0) { if (errno == EINTR) continue; rc = -1; break; }
         if (n == 0) break; /* EOF. mountinfo ends every line with '\n' */
         have += (size_t)n;
+        /* The Rust core walks the complete lines, hands over each mount
+         * point under /sys (the fifth field, unescaped in place) and then
+         * carries the partial line to the front, or drops a full buffer
+         * with no newline and skips to the end of that line. */
         size_t start = 0;
-        char *nl;
-        while ((nl = memchr(buf + start, '\n', have - start)) != NULL) {
-            *nl = 0;
-            if (skipping) {
-                skipping = 0;
-            } else {
-                /* 36 35 98:0 /mnt1 /mnt2 rw,noatime master:1 - ext3 /dev/root rw
-                 * (0)(1)(2)  (3)   (4) is the mount point */
-                char *save = NULL, *mp = NULL;
-                int i = 0;
-                for (char *tok = strtok_r(buf + start, " ", &save); tok; tok = strtok_r(NULL, " ", &save))
-                    if (i++ == 4) { mp = tok; break; }
-                if (mp) {
-                    unescape_mount(mp);
-                    if ((strcmp(mp, "/sys") == 0 || strncmp(mp, "/sys/", 5) == 0) && ro_remount(mp) < 0) rc = -1;
-                }
-            }
-            start = (size_t)(nl - buf) + 1;
-        }
-        if (start == 0 && have == sizeof buf) {
-            skipping = 1; /* no newline in a full buffer, so drop it and finish the line next read */
-            have = 0;
-        } else {
-            memmove(buf, buf + start, have - start);
-            have -= start;
-        }
+        for (const char *mp; (mp = fz_rs_mountinfo_sys_mount(buf, have, &start, &skipping)) != NULL;)
+            if (ro_remount(mp) < 0) rc = -1;
+        have = fz_rs_mountinfo_carry(buf, sizeof buf, have, start, &skipping);
     }
     int e = errno;
     close(fd);
@@ -630,59 +588,12 @@ static int lock_sys(void) {
     return rc;
 }
 
-/* fmt_uint writes v in decimal to buf (at least 11 bytes) and returns
- * the length. By hand, because the child uses no stdio (see the rule at
- * scrub_and_run). */
-static size_t fmt_uint(char *buf, unsigned v) {
-    char d[16];
-    size_t n = sizeof d;
-    do { d[--n] = (char)('0' + v % 10); v /= 10; } while (v);
-    memcpy(buf, d + n, sizeof d - n);
-    return sizeof d - n;
-}
-
-/* fd_path writes "/proc/self/fd/<fd>" to buf (at least 32 bytes). */
-static void fd_path(char *buf, int fd) {
-    static const char pfx[] = "/proc/self/fd/";
-    memcpy(buf, pfx, sizeof pfx - 1);
-    size_t n = fmt_uint(buf + sizeof pfx - 1, (unsigned)fd);
-    buf[sizeof pfx - 1 + n] = 0;
-}
-
 /* narrow_rundir leaves the zygote, and so every fiber, one directory of
- * fiberd's run directory, its own grant's. Every grant's directory
- * (endpoint sockets, the zygote's log) sits under one
- * parent, and a fiber is euid 0, so without this a fiber of one grant
- * could unlink or rebind another grant's sockets. The parent is covered
- * with an empty read-only tmpfs, in the zygote's own namespace alone,
- * and the grant's own directory is bound back at its place from a
- * descriptor opened before the cover. What a fiber creates there (its
- * endpoint) lands in fiberd's real directory. The cwd is moved onto the bind,
- * and every fiber inherits it there, so a checkpoint names it through
- * the mount that will exist on restore. CRIU dumps the tmpfs with its
- * one empty directory and the bind as an external mount fiberd names
- * on restore, so a resumed fiber is bound to the resuming grant's
- * directory. Runs once, from prepare_ns. Returns 0, or -1, and every
- * mntns CLONE is then refused. */
+ * fiberd's run directory, its own grant's (RUNDIR). Runs once, from
+ * prepare_ns. Returns 0, or -1, and every mntns CLONE is then refused.
+ * The body is core/src/mounts.rs. */
 static int narrow_rundir(void) {
-    int fd = open(rundir_own, O_PATH | O_DIRECTORY | O_CLOEXEC);
-    if (fd < 0) return -1;
-    if (mount("tmpfs", rundir_parent, "tmpfs", MS_NOSUID | MS_NODEV | MS_NOEXEC, "size=64k,mode=0755") < 0) {
-        int e = errno;
-        close(fd);
-        errno = e;
-        return -1;
-    }
-    char src[32];
-    fd_path(src, fd);
-    int rc = 0;
-    if (mkdir(rundir_own, 0755) < 0 ||
-        mount(src, rundir_own, NULL, MS_BIND, NULL) < 0 ||
-        mount(NULL, rundir_parent, NULL, MS_REMOUNT | MS_RDONLY | MS_NOSUID | MS_NODEV | MS_NOEXEC, "size=64k") < 0 ||
-        chdir(rundir_own) < 0)
-        rc = -1;
-    close(fd);
-    return rc;
+    return fz_rs_narrow_rundir(rundir_parent, rundir_own);
 }
 
 /* The steps of prepare_ns and mount_ns that can fail, for their results,
@@ -696,132 +607,20 @@ enum { F_PRIVATE = 1, F_PROC = 2, F_RO = 4, F_DROP = 8, F_HIDE = 16, F_RUNDIR = 
  * template cache and hides the cache. */
 static char self_exe[RUNDIR_MAX];
 
-/* under reports whether path lies inside dir (not dir itself). */
-static int under(const char *path, const char *dir) {
-    size_t n = strlen(dir);
-    return n > 0 && strncmp(path, dir, n) == 0 && path[n] == '/';
-}
-
-/* bind_exe_back makes the zygote's executable visible again at its own
- * path inside the tmpfs just mounted over dir, and nothing else of dir.
- * The directories between are made in the tmpfs, an empty file stands
- * as the mount point, and the executable is bound onto it read-only,
- * with no setuid and no device nodes honoured, from src, a descriptor
- * of it opened by path before the cover. The descriptor matters:
- * /proc/self/exe still names the mount of the namespace the zygote was
- * started in, and a bind from another namespace's mount is EINVAL.
- * Fibers are forked from the zygote and map the same file, and CRIU
- * names a mapped file by its path, which must resolve in the fiber's
- * namespace to the file it maps, so a fiber whose executable sat under
- * a plain cover could not be parked. The bind is a mount fiberd
- * names on restore, like the run directory's.
- *
- * The directories are made 0755, like the run directory's cover
- * (narrow_rundir), never 0555. The zygote runs with fiberd's narrow
- * capability set, which has no CAP_DAC_OVERRIDE, so uid 0 cannot
- * create anything in a directory without its owner's write bit. What
- * seals the cover is the read-only remount cover_hide ends with, which
- * no fiber can undo. Allocation-free, for mount_ns. Returns 0 or -1. */
-static int bind_exe_back(const char *dir, int src) {
-    char path[RUNDIR_MAX];
-    size_t n = strlen(self_exe);
-    if (n >= sizeof path) return -1;
-    memcpy(path, self_exe, n + 1);
-    for (char *p = path + strlen(dir) + 1; (p = strchr(p, '/')) != NULL; p++) {
-        *p = 0;
-        if (mkdir(path, 0755) < 0 && errno != EEXIST) return -1;
-        *p = '/';
-    }
-    int fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0555);
-    if (fd < 0) return -1;
-    close(fd);
-    char from[32];
-    fd_path(from, src);
-    if (mount(from, path, NULL, MS_BIND, NULL) < 0 ||
-        mount(NULL, path, NULL, MS_REMOUNT | MS_BIND | MS_RDONLY | MS_NOSUID | MS_NODEV, NULL) < 0)
-        return -1;
-    return 0;
-}
-
-/* cover_hide covers HIDE path i with an empty read-only tmpfs. Returns 1
- * when it did, 0 when the path does not exist (nothing to hide yet) and
- * -1 when it exists and could not be covered, with errno set. A path
- * that is not a directory fails, because a file cannot be covered
- * without CRIU binding the original back on restore. A path that holds
- * the zygote's own executable gets the executable bound back inside the
- * cover (bind_exe_back) before the cover is made read-only. That cover
- * is mounted 0755, so the zygote can build in it without
- * CAP_DAC_OVERRIDE (see bind_exe_back), and sealed by the remount.
- * Allocation-free, for mount_ns. */
+/* cover_hide covers HIDE path i with an empty read-only tmpfs, with the
+ * zygote's executable bound back inside when the path holds it. Returns
+ * 1 when it did, 0 when the path does not exist (nothing to hide yet)
+ * and -1 when it exists and could not be covered, with errno set. The
+ * body is core/src/mounts.rs, where mount_ns calls it per fiber. */
 static int cover_hide(int i) {
-    struct stat st;
-    if (stat(hide_paths[i], &st) < 0) return errno == ENOENT ? 0 : -1;
-    if (!S_ISDIR(st.st_mode)) {
-        errno = ENOTDIR;
-        return -1;
-    }
-    if (!under(self_exe, hide_paths[i]))
-        return mount("tmpfs", hide_paths[i], "tmpfs", MS_RDONLY | MS_NOSUID | MS_NODEV | MS_NOEXEC, "size=4k,mode=0555") < 0 ? -1 : 1;
-    int src = open(self_exe, O_PATH | O_CLOEXEC);
-    if (src < 0) return -1;
-    int rc = 1;
-    if (mount("tmpfs", hide_paths[i], "tmpfs", MS_NOSUID | MS_NODEV | MS_NOEXEC, "size=64k,mode=0755") < 0 ||
-        bind_exe_back(hide_paths[i], src) < 0 ||
-        mount(NULL, hide_paths[i], NULL, MS_REMOUNT | MS_RDONLY | MS_NOSUID | MS_NODEV | MS_NOEXEC, "size=64k") < 0)
-        rc = -1;
-    int e = errno;
-    close(src);
-    errno = e;
-    return rc;
+    return fz_rs_cover_hide(hide_paths[i], self_exe);
 }
 
 /* drop_paths_now unmounts every DROP path from the calling namespace.
- * Returns 0, or -1 when one that is mounted would not go. A path that is
- * no mount point, or does not exist, has nothing to drop. */
+ * Returns 0, or -1 when one that is mounted would not go. The body is
+ * core/src/mounts.rs, where mount_ns calls it per fiber. */
 static int drop_paths_now(void) {
-    int rc = 0;
-    for (int i = 0; i < ndrop; i++)
-        if (umount2(drop_paths[i], MNT_DETACH) < 0 && errno != EINVAL && errno != ENOENT) rc = -1;
-    return rc;
-}
-
-/* mount_ns finishes the child's mount namespace, a copy of the zygote's
- * prepared one (prepare_ns). What is grant-wide is already there, /sys
- * read-only, the run directory narrowed and the HIDE directories
- * covered, so what remains is the fiber's own. Its /proc shows only its
- * pid namespace, /proc/sys and the other host controls on that fresh
- * /proc are read-only or covered (lock_proc), the DROP paths are gone,
- * and a HIDE directory that did not exist at PREPARE is covered now if
- * it has appeared. Returns the F_ bits of the steps that
- * failed, 0 when all went through, and the child ends on any of them.
- *
- * The copy is already private, since every mount in the zygote's
- * namespace is, and MS_REC|MS_PRIVATE on / restates it. When even that
- * is refused nothing is mounted or unmounted at all, since a change to a
- * shared mount would propagate back into the zygote's namespace. DROP
- * is repeated here, after the zygote dropped the same paths at PREPARE,
- * for a mount at that path the zygote's namespace holds all the same
- * (a restore root bound before the warm, dropped at PREPARE, cannot
- * reappear, but the step is one system call and fails closed). */
-static int mount_ns(int own_pidns) {
-    int failed = 0;
-    if (mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL) < 0) return F_PRIVATE;
-    if (own_pidns && mount("proc", "/proc", "proc", MS_NOSUID | MS_NODEV | MS_NOEXEC, NULL) < 0) failed |= F_PROC;
-    if (lock_procsys() < 0 || lock_proc() < 0) failed |= F_RO;
-    if (drop_paths_now() < 0) failed |= F_DROP;
-    for (int i = 0; i < nhide; i++)
-        if (!hide_covered[i] && cover_hide(i) < 0) failed |= F_HIDE;
-    return failed;
-}
-
-/* mount_exit is the child's exit code for the first of mount_ns's failed
- * steps, in the order mount_ns takes them. */
-static int mount_exit(int failed) {
-    if (failed & F_PRIVATE) return EX_MNT_PRIVATE;
-    if (failed & F_PROC) return EX_MNT_PROC;
-    if (failed & F_RO) return EX_MNT_RO;
-    if (failed & F_DROP) return EX_MNT_DROP;
-    return EX_MNT_HIDE;
+    return fz_rs_drop_paths_now(drop_paths, ndrop);
 }
 
 /* prepare_why is the reason the zygote refuses to serve after the first
@@ -875,13 +674,14 @@ static int prepare_ns(void) {
     if (rundir_parent[0] && narrow_rundir() < 0) failed |= F_RUNDIR;
     /* fiberd names a HIDE path as it was configured and the kernel
      * names the executable resolved (/proc/self/exe). With a symlink in
-     * the path, under() would miss, the cover would land on the real
+     * the path, under (core/src/mounts.rs) would miss, the cover would land on the real
      * directory with the executable not bound back, and no park of the
-     * grant could name it. Each path is resolved here, where allocating
-     * is fine. One that does not exist yet keeps its name. */
+     * grant could name it. Each path is resolved here, into a buffer of
+     * the PATH_MAX bytes realpath promises, and kept in its slot. One
+     * that does not exist yet keeps its name. */
     for (int i = 0; i < nhide; i++) {
-        char *real = realpath(hide_paths[i], NULL);
-        if (real) { free(hide_paths[i]); hide_paths[i] = real; }
+        char real[PATH_MAX];
+        if (realpath(hide_paths[i], real)) memcpy(hide_paths[i], real, strlen(real) + 1);
     }
     for (int i = 0; i < nhide; i++) {
         int c = cover_hide(i);
@@ -955,131 +755,33 @@ static void own_mountns(void) {
     have_own_ns = 1;
 }
 
-/* drop_caps leaves the child with no capability it can use or regain.
- * no_new_privs means exec never raises permitted above the empty set,
- * the ambient set is cleared, the effective, permitted and inheritable
- * sets are emptied, and so is the bounding set where the caller holds
- * CAP_SETPCAP. A container's default set often lacks it, and
- * no_new_privs already covers what the bounding set would. Returns 0,
- * or -1 if no_new_privs or the empty sets were refused. */
-static int drop_caps(void) {
-    int rc = 0;
-    if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) < 0) rc = -1;
-    for (int c = 0; prctl(PR_CAPBSET_READ, c, 0, 0, 0) >= 0; c++)
-        (void)prctl(PR_CAPBSET_DROP, c, 0, 0, 0);
-#ifdef PR_CAP_AMBIENT
-    if (prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_CLEAR_ALL, 0, 0, 0) < 0 && errno != EINVAL) rc = -1;
-#endif
-    struct __user_cap_header_struct h = { .version = _LINUX_CAPABILITY_VERSION_3, .pid = 0 };
-    struct __user_cap_data_struct d[_LINUX_CAPABILITY_U32S_3];
-    memset(d, 0, sizeof d);
-    if (syscall(SYS_capset, &h, d) < 0) rc = -1;
-    return rc;
-}
-
+/* The nocaps option. The child drops every capability it can use or
+ * regain (drop_caps in core/src/child.rs). */
 struct confine {
     int pidns, mntns, nocaps;
 };
 
 /* Set when fiberd asked for nested user namespaces to be denied
  * (FIBERD_USERNS_NESTED=deny). The zygote's own namespace has its limit
- * set to 0 (cap_nested_userns), and every fiber gets the filter below as
- * well, because a checkpoint restores a fiber into a new user namespace
- * with the default limit, and criu carries seccomp filters across. */
+ * set to 0 (cap_nested_userns), and every fiber gets a seccomp filter as
+ * well (userns_filter in core/src/child.rs), because a checkpoint
+ * restores a fiber into a new user namespace with the default limit,
+ * and criu carries seccomp filters across. */
 static int deny_nested_userns;
-
-#if defined(__x86_64__)
-#define FZ_AUDIT_ARCH AUDIT_ARCH_X86_64
-#elif defined(__aarch64__)
-#define FZ_AUDIT_ARCH AUDIT_ARCH_AARCH64
-#endif
-#if __BYTE_ORDER == __LITTLE_ENDIAN
-#define FZ_ARG_LO(i) (offsetof(struct seccomp_data, args) + 8 * (i))
-#else
-#define FZ_ARG_LO(i) (offsetof(struct seccomp_data, args) + 8 * (i) + 4)
-#endif
-/* On x86_64 a number with this bit set selects the x32 table under the
- * same AUDIT_ARCH_X86_64, where unshare and friends have other numbers
- * than the ones matched below. The kernel calls it __X32_SYSCALL_BIT. */
-#define FZ_X32_SYSCALL_BIT 0x40000000
-
-/* userns_filter refuses the system calls that make or join a user
- * namespace. unshare and clone with CLONE_NEWUSER, and setns onto a user
- * namespace (or onto whatever the descriptor is), get EPERM. clone3 gets
- * ENOSYS, as a kernel without it would answer, because its flags sit in
- * a struct seccomp cannot read, and libc then falls back to clone. On
- * x86_64 an x32 number kills the process, as libseccomp and Docker do,
- * so the matches cannot be sidestepped through the other table.
- * Everything else passes. Installing needs CAP_SYS_ADMIN in the caller's
- * user namespace or no_new_privs. Allocation-free, for scrub_and_run. */
-static int userns_filter(void) {
-#ifndef FZ_AUDIT_ARCH
-    errno = ENOSYS;
-    return -1;
-#else
-    static struct sock_filter f[] = {
-        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, arch)),
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, FZ_AUDIT_ARCH, 1, 0),
-        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS),
-        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
-#if defined(__x86_64__)
-        /* nr >= X32_SYSCALL_BIT is an x32 call, not one of ours */
-        BPF_JUMP(BPF_JMP | BPF_JGE | BPF_K, FZ_X32_SYSCALL_BIT, 0, 1),
-        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS),
-#endif
-        /* unshare(flags) */
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_unshare, 0, 4),
-        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, FZ_ARG_LO(0)),
-        BPF_JUMP(BPF_JMP | BPF_JSET | BPF_K, CLONE_NEWUSER, 0, 1),
-        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
-        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
-        /* clone(flags, ...) */
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_clone, 0, 4),
-        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, FZ_ARG_LO(0)),
-        BPF_JUMP(BPF_JMP | BPF_JSET | BPF_K, CLONE_NEWUSER, 0, 1),
-        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
-        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
-        /* clone3(struct clone_args *) */
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_clone3, 0, 1),
-        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | ENOSYS),
-        /* setns(fd, nstype) */
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_setns, 0, 5),
-        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, FZ_ARG_LO(1)),
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 0, 2, 0),
-        BPF_JUMP(BPF_JMP | BPF_JSET | BPF_K, CLONE_NEWUSER, 1, 0),
-        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
-        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
-        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
-    };
-    struct sock_fprog prog = { .len = sizeof f / sizeof f[0], .filter = f };
-    return prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog, 0, 0);
-#endif
-}
-
-/* FZ_CHANNEL_FD in a fiber, -1 in the zygote and in a gVisor sandbox. */
-static int channel_fd = -1;
 
 /* A session, an endpoint and a fence as the fiber's environment carries
  * them are at most ENV_VALUE_MAX - 1 characters. */
 #define ENV_VALUE_MAX 1024
 
-/* An incarnation record, as fiberd's first message on the channel
- * delivers it, as a gVisor sandbox reads it off the pool socket and as
- * a resume sends it again, 'i' then eleven NUL-ended fields (see
- * libfiberzygote.h). It lives in the fiber's memory (the child's copy
- * of these pages), never the zygote's. The bound leaves room for a
- * payload and a caller certificate of any key size, and only the pages
- * a record touches are ever copied. The decoded payload, session and
- * seed live beside it, and the seed is zeroed once used. The birth
- * record stays in born for the fiber's life, since a handoff fiber's
- * TLS library points into it. A record that arrives later, a resume's,
- * lands in polled. */
+/* An incarnation record and what is parsed out of it, 'i' then eleven
+ * NUL-ended fields (see libfiberzygote.h). The fiber's two stores, the
+ * birth record's and a resume's, are the Rust core's (core/src/fiber.rs),
+ * in its bss as they were here. The layout stays here, pinned to the
+ * core's (core/src/abi.rs) with the same numbers, for the fuzz harnesses
+ * that include this file and look into the stores. */
 #define RECORD_MAX 65536
-#define RECORD_FIELDS 11
 #define SEED_LEN 32
 struct record_store {
-    /* The small fields come first, so a short record and what is parsed
-     * out of it share one page of a fresh fiber's memory. */
     char session[ENV_VALUE_MAX];
     unsigned char seed[SEED_LEN];
     char *seed_hex; /* the seed's field in buf, zeroed with seed */
@@ -1088,172 +790,32 @@ struct record_store {
     char buf[RECORD_MAX];
     unsigned char payload[RECORD_MAX / 2];
 };
-static struct record_store born, polled;
-/* The generation this process serves, the birth record's and then each
- * resume's. A record at or below it is a replay and is dropped. */
-static unsigned served_generation;
-/* Set once fz_incarnation_wait handed over a resume's record, until
- * fz_fiber_ready acks it. */
-static int ack_pending;
-/* The park round the fiber answers, from the last 'p' fiberd queued
- * before its signal, and whether that round's carry-on was already
- * there when the fiber quiesced, so the wait answers 0 at once. A
- * carry-on for any other round is stale and dropped, so one left by a
- * park that gave up never undoes a later park's dump. */
-static unsigned park_round;
-static int park_over;
-
-/* parse_generation reads a generation as the record carries it: decimal
- * digits only, 1 or more, within unsigned. 0 when it is not one. */
-static unsigned parse_generation(const char *s) {
-    if (!*s || *s == '0') return 0; /* no zero, no leading zero */
-    unsigned long v = 0;
-    for (; *s; s++) {
-        if (*s < '0' || *s > '9') return 0;
-        unsigned d = (unsigned)(*s - '0');
-        if (v > (UINT_MAX - d) / 10) return 0;
-        v = v * 10 + d;
-    }
-    return (unsigned)v;
-}
-
-/* parse_incarnation takes the record in st->buf, n bytes, apart into
- * the store and fills st->inc from it. Returns 0, or -1 with a reason,
- * and st->inc is then untouched. It allocates nothing and takes no
- * lock, since the fork path runs it before on_fiber (see
- * scrub_and_run). */
-static int parse_incarnation(struct record_store *st, size_t n, const char **why) {
-    const char *fields[RECORD_FIELDS];
-    char *rec = st->buf;
-    char *p = rec + 1, *end = rec + n;
-    if (n < 2 || rec[0] != 'i' || end[-1] != 0) { *why = "not an incarnation record"; return -1; }
-    for (int i = 0; i < RECORD_FIELDS; i++) {
-        if (p >= end) { *why = "record has too few fields"; return -1; }
-        if (!*p) { *why = "record has an empty field"; return -1; }
-        fields[i] = p;
-        p += strlen(p) + 1;
-    }
-    if (p != end) { *why = "record has too many fields"; return -1; }
-    unsigned generation = parse_generation(fields[0]);
-    if (!generation) { *why = "record names no generation"; return -1; }
-    if (strlen(fields[2]) >= FENCE_MAX) { *why = "record fence too long"; return -1; }
-    if (strlen(fields[3]) >= ENV_VALUE_MAX) { *why = "record endpoint too long"; return -1; }
-    /* The session is bounded and NUL-free as on the CLONE line, since it
-     * becomes an environment value. */
-    size_t slen = 0;
-    if (strcmp(fields[5], "-") != 0) {
-        if (strlen(fields[5]) / 2 >= sizeof st->session) { *why = "record session too long"; return -1; }
-        slen = unhex(fields[5], (unsigned char *)st->session, sizeof st->session - 1);
-        if (memchr(st->session, 0, slen)) { *why = "record session holds a NUL"; return -1; }
-    }
-    /* A handoff identity is all four fields or none. */
-    int set = 0;
-    for (int i = 6; i < 10; i++) if (strcmp(fields[i], "-") != 0) set++;
-    if (set != 0 && set != 4) { *why = "record identity is incomplete"; return -1; }
-    if (strlen(fields[10]) != 2 * SEED_LEN || unhex(fields[10], st->seed, sizeof st->seed) != SEED_LEN) {
-        memset(st->seed, 0, sizeof st->seed);
-        *why = "record seed is not 32 bytes";
-        return -1;
-    }
-    size_t plen = 0;
-    if (strcmp(fields[4], "-") != 0) plen = unhex(fields[4], st->payload, sizeof st->payload);
-    st->session[slen] = 0;
-    st->seed_hex = (char *)fields[10];
-    if (set) {
-        st->identity.key_pem = fields[6];
-        st->identity.cert_pem = fields[7];
-        st->identity.caller = fields[8];
-        st->identity.caller_pem = fields[9];
-    }
-    st->inc.fence = fields[2];
-    st->inc.endpoint = fields[3];
-    st->inc.payload = st->payload;
-    st->inc.payload_len = plen;
-    st->inc.session = st->session;
-    st->inc.generation = generation;
-    st->inc.kind = fields[1];
-    st->inc.seed = st->seed;
-    st->inc.seed_len = SEED_LEN;
-    st->inc.identity = set ? &st->identity : NULL;
-    return 0;
-}
-
-/* channel_recv takes one message off fd into buf, cap bytes, with
- * flags added to recvmsg's. The first descriptor passed with it goes to
- * *fd_out, -1 for none, and any other is closed. Returns the byte
- * count, 0 at EOF, or -1 with errno, EPROTO for a message longer than
- * a record. EINTR is retried, which cannot block a non-blocking read. */
-static ssize_t channel_recv(int fd, int flags, char *buf, size_t cap, int *fd_out) {
-    char cbuf[CMSG_SPACE(4 * sizeof(int))];
-    struct iovec iov = { .iov_base = buf, .iov_len = cap };
-    struct msghdr mh = { .msg_iov = &iov, .msg_iovlen = 1, .msg_control = cbuf, .msg_controllen = sizeof cbuf };
-    ssize_t r;
-    do r = recvmsg(fd, &mh, MSG_CMSG_CLOEXEC | flags); while (r < 0 && errno == EINTR);
-    *fd_out = -1;
-    if (r < 0) return -1;
-    for (struct cmsghdr *c = CMSG_FIRSTHDR(&mh); c; c = CMSG_NXTHDR(&mh, c)) {
-        if (c->cmsg_level != SOL_SOCKET || c->cmsg_type != SCM_RIGHTS) continue;
-        size_t n = (c->cmsg_len - CMSG_LEN(0)) / sizeof(int);
-        for (size_t i = 0; i < n; i++) {
-            int got; memcpy(&got, CMSG_DATA(c) + i * sizeof(int), sizeof(int));
-            if (*fd_out < 0) *fd_out = got; else close(got);
-        }
-    }
-    if (r > 0 && (mh.msg_flags & MSG_TRUNC)) {
-        if (*fd_out >= 0) { close(*fd_out); *fd_out = -1; }
-        errno = EPROTO;
-        return -1;
-    }
-    return r;
-}
-
-/* read_incarnation takes the birth record off the channel. fiberd
- * queues it before the CLONE, so it is there to read. Returns 0, or -1
- * with a reason for the zygote's log. Anything passed with it is not
- * ours to keep. */
-static int read_incarnation(int fd, const char **why) {
-    int passed;
-    ssize_t r = channel_recv(fd, 0, born.buf, sizeof born.buf, &passed);
-    if (passed >= 0) close(passed);
-    if (r < 0 && errno == EPROTO) { *why = "record too long"; return -1; }
-    if (r < 0) { *why = "recvmsg on the channel failed"; return -1; }
-    if (r == 0) { *why = "channel closed before the record arrived"; return -1; }
-    return parse_incarnation(&born, (size_t)r, why);
-}
-
-/* forget_seed zeroes a store's seed, in its decoded form and in the
- * record, once nothing should be reseeded from it again. */
-static void forget_seed(struct record_store *st) {
-    memset(st->seed, 0, sizeof st->seed);
-    if (st->seed_hex) memset(st->seed_hex, 0, strlen(st->seed_hex));
-    st->inc.seed_len = 0;
-}
-
-void fz_seed_forget(void) {
-    forget_seed(&born);
-    forget_seed(&polled);
-}
-
-/* own_pair replaces fiberd's channel end, which the fiber is done with,
- * by a pair of the fiber's own at FZ_CHANNEL_FD and FZ_CHANNEL_PEER_FD.
- * The fiber reads the first and never the second, which it holds so the
- * pair is whole inside its tree: a park dumps both ends and a restore
- * remakes them in the fiber's namespaces, and fiberd then borrows the
- * peer to send the resume's record. System calls only, as the rule
- * above scrub_and_run demands. Returns 0 or -1. */
-static int own_pair(void) {
-    int sv[2];
-    if (socketpair(AF_UNIX, SOCK_SEQPACKET, 0, sv) < 0) return -1;
-    /* FZ_CHANNEL_FD holds fiberd's end, so neither new end is there. The
-     * peer's slot is the lowest free one, so an end may already sit in
-     * it. The read end moves first, and the peer then covers whatever
-     * is left at its slot, at most that read end's old number. */
-    if (dup2(sv[0], FZ_CHANNEL_FD) < 0) return -1;
-    if (sv[1] != FZ_CHANNEL_PEER_FD && dup2(sv[1], FZ_CHANNEL_PEER_FD) < 0) return -1;
-    if (sv[0] != FZ_CHANNEL_PEER_FD) close(sv[0]);
-    if (sv[1] != FZ_CHANNEL_PEER_FD) close(sv[1]);
-    return 0;
-}
+/* The Rust core mirrors these layouts (core/src/abi.rs) with the same
+ * numbers, so a field moved on either side fails to compile. */
+_Static_assert(sizeof(fz_identity_t) == 32, "fz_identity_t layout");
+_Static_assert(offsetof(fz_identity_t, key_pem) == 0, "fz_identity_t layout");
+_Static_assert(offsetof(fz_identity_t, cert_pem) == 8, "fz_identity_t layout");
+_Static_assert(offsetof(fz_identity_t, caller) == 16, "fz_identity_t layout");
+_Static_assert(offsetof(fz_identity_t, caller_pem) == 24, "fz_identity_t layout");
+_Static_assert(sizeof(fz_incarnation_t) == 80, "fz_incarnation_t layout");
+_Static_assert(offsetof(fz_incarnation_t, fence) == 0, "fz_incarnation_t layout");
+_Static_assert(offsetof(fz_incarnation_t, endpoint) == 8, "fz_incarnation_t layout");
+_Static_assert(offsetof(fz_incarnation_t, payload) == 16, "fz_incarnation_t layout");
+_Static_assert(offsetof(fz_incarnation_t, payload_len) == 24, "fz_incarnation_t layout");
+_Static_assert(offsetof(fz_incarnation_t, session) == 32, "fz_incarnation_t layout");
+_Static_assert(offsetof(fz_incarnation_t, generation) == 40, "fz_incarnation_t layout");
+_Static_assert(offsetof(fz_incarnation_t, kind) == 48, "fz_incarnation_t layout");
+_Static_assert(offsetof(fz_incarnation_t, seed) == 56, "fz_incarnation_t layout");
+_Static_assert(offsetof(fz_incarnation_t, seed_len) == 64, "fz_incarnation_t layout");
+_Static_assert(offsetof(fz_incarnation_t, identity) == 72, "fz_incarnation_t layout");
+_Static_assert(sizeof(struct record_store) == 99480, "record_store layout");
+_Static_assert(offsetof(struct record_store, session) == 0, "record_store layout");
+_Static_assert(offsetof(struct record_store, seed) == 1024, "record_store layout");
+_Static_assert(offsetof(struct record_store, seed_hex) == 1056, "record_store layout");
+_Static_assert(offsetof(struct record_store, identity) == 1064, "record_store layout");
+_Static_assert(offsetof(struct record_store, inc) == 1096, "record_store layout");
+_Static_assert(offsetof(struct record_store, buf) == 1176, "record_store layout");
+_Static_assert(offsetof(struct record_store, payload) == 66712, "record_store layout");
 
 /* The fiber's environment, built by the parent before the clone (see
  * handle_clone) and assigned whole in the child. */
@@ -1265,23 +827,6 @@ static char env_session[sizeof "FIBERD_SESSION=" + ENV_VALUE_MAX];
 static char *fiber_environ[6];
 /* The session named on the CLONE line, decoded, for the fiber's record. */
 static char session_buf[ENV_VALUE_MAX];
-
-/* child_say writes a startup failure to stderr, still the zygote's log
- * here, with write(2) alone (see the rule above scrub_and_run). */
-static void child_say(const char *fence, const char *what, const char *why) {
-    const char *parts[] = { "libfiberzygote ", fence, ": ", what, ": ", why, "\n" };
-    for (size_t i = 0; i < sizeof parts / sizeof parts[0]; i++)
-        (void)!write(2, parts[i], strlen(parts[i]));
-}
-
-/* child_say_errno is child_say with an errno value as the reason, as a
- * number. strerror translates through the locale under a lock the child
- * must not take. */
-static void child_say_errno(const char *fence, const char *what, int e) {
-    char why[sizeof "errno " + 11] = "errno ";
-    why[sizeof "errno " - 1 + fmt_uint(why + sizeof "errno " - 1, (unsigned)e)] = 0;
-    child_say(fence, what, why);
-}
 
 /* scrub_and_run is the child between the clone and the application.
  *
@@ -1296,100 +841,32 @@ static void child_say_errno(const char *fence, const char *what, int e) {
  * Only system calls and pure string functions are used. Everything the
  * fiber needs built (its environment, its record) is built by the
  * parent before the clone or read into static storage with raw
- * syscalls, and errors are written with write(2) (child_say). */
-static void scrub_and_run(int ready_w, int channel, const char *fence, struct confine cf, fz_on_fiber on_fiber) {
+ * syscalls, and errors are written with write(2).
+ *
+ * The path itself is core/src/child.rs, under the same rule. What is
+ * left here is plain stores to this file's statics, which stay here
+ * until stage 5, and the one call. Nothing reads these statics before
+ * on_fiber, so their order against the child's system calls does not
+ * matter, and no system call is made here. */
+static void scrub_and_run(const struct fz_rs_child *c) {
     /* The control channel is the zygote's, not this child's. fz_report
      * from a fiber must fail, not write into whatever lands at fd 3 (the
-     * readiness pipe, below). The mutex copied from the zygote may be
-     * held by a thread that does not exist here, so it starts over. */
+     * readiness pipe). The mutex copied from the zygote may be held by a
+     * thread that does not exist here, so it starts over. */
     g_ctl_fd = -1;
     control_handler = NULL;
     static const pthread_mutex_t fresh = PTHREAD_MUTEX_INITIALIZER;
     memcpy(&g_ctl_mu, &fresh, sizeof g_ctl_mu);
-
-    /* Descriptors. The zygote's SIGCHLD descriptor goes first, wherever
-     * it sits. The readiness pipe is parked at fd 3 (over the inherited
-     * control descriptor), the fiber's channel to fiberd at
-     * FZ_CHANNEL_FD, everything above is closed, and the standard three
-     * point at /dev/null (stderr once ready). Nothing else a ready fiber
-     * holds leads outside its own tree, and a handoff fiber's channel is
-     * the one socket CRIU is told is external. */
-    if (sigchld_fd >= 0) { close(sigchld_fd); sigchld_fd = -1; }
-    if (channel == 3 || channel == FZ_CHANNEL_FD) {
-        /* Sitting where one of the two dup2 below lands, so it moves above both first. */
-        if ((channel = fcntl(channel, F_DUPFD, FZ_CHANNEL_PEER_FD + 1)) < 0) _exit(EX_FDS);
-    }
-    if (dup2(ready_w, 3) < 0) _exit(EX_FDS);
-    if (dup2(channel, FZ_CHANNEL_FD) < 0) _exit(EX_FDS);
-    channel_fd = FZ_CHANNEL_FD;
-    ack_pending = 0;
-    park_round = 0;
-    park_over = 0;
-    /* The raw syscall, since glibc has a wrapper only from 2.34 and musl has none. */
-    if (syscall(SYS_close_range, FZ_CHANNEL_FD + 1, ~0U, 0) < 0) {
-        for (int fd = FZ_CHANNEL_FD + 1; fd < 65536; fd++) close(fd);
-    }
-    /* The fiber's record is the channel's first message, read here into
-     * this child's memory so no application code runs without it and no
-     * checkpoint is taken before it is consumed. It names the fence the
-     * CLONE did, or the child is not the fiber fiberd asked for. */
-    const char *why = NULL;
-    if (read_incarnation(channel_fd, &why) < 0) {
-        child_say(fence, "incarnation record", why);
-        _exit(EX_IDENTITY);
-    }
-    if (strcmp(born.inc.fence, fence) != 0) {
-        child_say(fence, "incarnation record", "names another fence");
-        _exit(EX_IDENTITY);
-    }
-    served_generation = born.inc.generation;
-    /* A handoff fiber keeps the channel for the connections fiberd
-     * passes it. Any other fiber is done with fiberd's end and takes a
-     * pair of its own in its place, which a park carries whole and a
-     * resume's record arrives on. */
-    if (!born.inc.identity && own_pair() < 0) _exit(EX_FDS);
-    ready_fd = 3;
-    /* stderr stays the zygote's log until fz_fiber_ready, so a fiber that
-     * fails to start can say why. No fiber is checkpointed before then. */
-    int null = open("/dev/null", O_RDWR | O_CLOEXEC);
-    if (null >= 0) {
-        dup2(null, 0); dup2(null, 1);
-        if (null > 3) close(null);
-    }
-
+    /* The core closes the zygote's SIGCHLD descriptor (c->sigchld_fd),
+     * parks the readiness pipe at fd 3 and the channel at FZ_CHANNEL_FD,
+     * and resets the fiber's state (core/src/fiber.rs) to name them. */
+    sigchld_fd = -1;
     /* Environment. Nothing is inherited but the identity assigned now.
      * The parent built fiber_environ for this clone. The grant's TLS
      * identity is in memory (the record), not in any file it could
      * name. */
     environ = fiber_environ;
-
-    /* Session and signals. The mask is emptied, so SIGCHLD, blocked in
-     * the zygote for its descriptor, reaches the fiber as usual. No
-     * PR_SET_PDEATHSIG, because a resumed fiber has a different parent,
-     * and the runtime kills leaves through the cgroup when the zygote or
-     * fiberd goes away. No reseeding of anything, because srandom
-     * takes libc's lock on the random state, which falls under the rule
-     * above, so the template reseeds in on_fiber (see fz_on_fiber). */
-    setsid();
-    signal(SIGCHLD, SIG_DFL);
-    sigset_t none; sigemptyset(&none); sigprocmask(SIG_SETMASK, &none, NULL);
-
-    /* Mounts first, since they need the capabilities dropped right
-     * after. A fiber that cannot be confined as fiberd asked does not
-     * run. The child ends, its exit code naming the step that failed. */
-    if (cf.mntns) {
-        int failed = mount_ns(cf.pidns);
-        if (failed) _exit(mount_exit(failed));
-    }
-    /* Before the capabilities go, since installing may need
-     * CAP_SYS_ADMIN. */
-    if (deny_nested_userns && userns_filter() < 0) {
-        child_say_errno(fence, "deny nested user namespaces", errno);
-        _exit(EX_USERNS);
-    }
-    if (cf.nocaps && drop_caps() < 0) _exit(EX_CAPS);
-
-    _exit(on_fiber(&born.inc) & 0xff);
+    fz_rs_scrub_and_run(c);
 }
 
 void fz_init(int argc, char **argv) {
@@ -1411,156 +888,11 @@ void fz_init(int argc, char **argv) {
     own_mountns();
 }
 
-void fz_fiber_ready(void) {
-    if (ready_fd >= 0) {
-        dup2(0, 2); /* /dev/null, so nothing leads outside the tree once checkpointable */
-        forget_seed(&born);
-        const char rec = READY_BYTE;
-        (void)!write(ready_fd, &rec, 1);
-        close(ready_fd);
-        ready_fd = -1;
-        return;
-    }
-    /* A resumed fiber listens again: the ack fiberd waits for before
-     * it routes anything here, under the new fence. */
-    if (!ack_pending || channel_fd < 0) return;
-    ack_pending = 0;
-    char ack[FENCE_MAX + 2];
-    size_t n = strlen(polled.inc.fence);
-    ack[0] = 'a';
-    memcpy(ack + 1, polled.inc.fence, n + 1);
-    (void)!send(channel_fd, ack, n + 2, MSG_NOSIGNAL);
-    forget_seed(&polled);
-}
-
-/* Messages after the birth record are read here first, so a connection
- * that arrives behind a record never touches the record's store. */
-static char channel_msg[RECORD_MAX];
-
-/* take_record takes the n bytes in channel_msg as a resume's record,
- * into polled. 1 when it is one the fiber has not served yet, 0 for a
- * replay of a generation already served, -1 with EPROTO for anything
- * else. */
-static int take_record(size_t n) {
-    const char *why;
-    if (channel_msg[0] != 'i') { errno = EPROTO; return -1; }
-    memcpy(polled.buf, channel_msg, n);
-    memset(channel_msg, 0, n); /* one copy of a seed, in polled, zeroed with it */
-    if (parse_incarnation(&polled, n, &why) < 0) { errno = EPROTO; return -1; }
-    return polled.inc.generation > served_generation;
-}
-
-/* channel_wait blocks until the channel has a message, then takes it
- * without blocking. A signal ends the wait with EINTR, so a handler of
- * the template's (a park's SIGUSR1) is seen by its loop. */
-static ssize_t channel_wait(char *buf, size_t cap, int *fd_out) {
-    for (;;) {
-        struct pollfd p = { .fd = channel_fd, .events = POLLIN };
-        if (poll(&p, 1, -1) < 0) { *fd_out = -1; return -1; }
-        ssize_t r = channel_recv(channel_fd, MSG_DONTWAIT, buf, cap, fd_out);
-        if (r < 0 && errno == EAGAIN) continue;
-        return r;
-    }
-}
-
-static int take_round(size_t n);
-
-int fz_accept(void) {
-    if (channel_fd < 0) { errno = EBADF; return -1; }
-    for (;;) {
-        int fd;
-        ssize_t r = channel_wait(channel_msg, sizeof channel_msg, &fd);
-        if (r < 0) return -1;
-        if (r == 0) { errno = ECONNRESET; return -1; }
-        if (fd >= 0) return fd;
-        /* A message without a descriptor carries nothing to serve. A
-         * park's round is noted for the quiesce to come, and ends this
-         * call as the park's signal would, since that signal may have
-         * landed already, before this wait began, and would then wake
-         * nothing. The template's loop looks at its park flag again. */
-        if (take_round((size_t)r) && channel_msg[0] == 'p') { errno = EINTR; return -1; }
-    }
-}
-
-/* record_round is the one decimal field of a 'p' or 'c' record in
- * channel_msg, n bytes, or 0 for none. */
-static unsigned record_round(size_t n) {
-    if (n < 3 || channel_msg[n - 1] != 0) return 0;
-    return parse_generation(channel_msg + 1);
-}
-
-/* take_round notes a park message: 'p' names the round to answer, and
- * 'c' ends the round it names. 1 when the message was one of those. */
-static int take_round(size_t n) {
-    switch (channel_msg[0]) {
-    case 'p': park_round = record_round(n); park_over = 0; return 1;
-    case 'c': if (record_round(n) == park_round) park_over = 1; return 1;
-    default: return 0;
-    }
-}
-
-/* send_quiesce says 'q' with the round the fiber answers. */
-static int send_quiesce(void) {
-    char q[16] = "q";
-    size_t n = 1 + fmt_uint(q + 1, park_round);
-    q[n++] = 0;
-    return send(channel_fd, q, n, MSG_NOSIGNAL) == (ssize_t)n ? 0 : -1;
-}
-
-int fz_quiesce(void) {
-    if (channel_fd < 0) { errno = EBADF; return -1; }
-    /* Whatever fiberd queued before its signal: the round, and the
-     * carry-on of a round that already gave up on this fiber. */
-    for (;;) {
-        int fd;
-        ssize_t r = channel_recv(channel_fd, MSG_DONTWAIT, channel_msg, sizeof channel_msg, &fd);
-        if (r < 0 && errno == EAGAIN) break;
-        if (r < 0) return -1;
-        if (r == 0) { errno = ECONNRESET; return -1; }
-        if (fd >= 0) { close(fd); continue; }
-        if (!take_round((size_t)r)) memset(channel_msg, 0, (size_t)r);
-    }
-    return send_quiesce();
-}
-
-/* wait_none is fz_incarnation_wait handing no record over: whatever a
- * dropped or refused record left in the store goes with it. */
-static int wait_none(int rc) {
-    int e = errno;
-    forget_seed(&polled);
-    errno = e;
-    return rc;
-}
-
-int fz_incarnation_wait(fz_incarnation_t *inc) {
-    if (channel_fd < 0) { errno = EBADF; return -1; }
-    /* The seed the last call handed over has served its purpose. */
-    forget_seed(&polled);
-    for (;;) {
-        /* The round already gave up on this fiber: serve on. */
-        if (park_over) { park_over = 0; return wait_none(0); }
-        int fd;
-        ssize_t r = channel_wait(channel_msg, sizeof channel_msg, &fd);
-        if (r < 0) return wait_none(-1);
-        if (r == 0) { errno = ECONNRESET; return wait_none(-1); }
-        /* A connection handed over meanwhile is nobody's to serve. */
-        if (fd >= 0) { close(fd); continue; }
-        /* A new round while waiting (the fiber quiesced late, or on a
-         * signal of its own) is answered afresh. A carry-on ends the
-         * wait for the round it names, and a stale one is dropped. */
-        if (take_round((size_t)r)) {
-            if (channel_msg[0] == 'p' && send_quiesce() < 0) return wait_none(-1);
-            continue;
-        }
-        int got = take_record((size_t)r);
-        if (got < 0) return wait_none(-1);
-        if (!got) continue; /* a replay */
-        served_generation = polled.inc.generation;
-        ack_pending = 1;
-        *inc = polled.inc;
-        return 1;
-    }
-}
+/* The fiber-side API (fz_fiber_ready, fz_accept, fz_quiesce,
+ * fz_incarnation_wait, fz_seed_forget) and the gVisor side
+ * (fz_gvisor_identity, fz_gvisor_ack) are the Rust core's
+ * (core/src/fiber.rs), exported from there with the header's
+ * signatures, with the state only they and the child's path touch. */
 
 /* A pending child's pipe became readable or closed. Only the ready
  * record (see fz_fiber_ready) makes a fiber. On EOF or anything else
@@ -1615,29 +947,22 @@ static void expire_pending(int ctl_fd) {
 }
 
 static int handle_clone(int ctl_fd, char *line, const int passed[MAX_PASSED], fz_on_fiber on_fiber) {
-    /* CLONE <fence> <endpoint> <deadline_ms> <hexpayload|-> <hexsession|-> [opt,opt...] */
-    char *save = NULL;
-    strtok_r(line, " ", &save);
-    const char *fence = strtok_r(NULL, " ", &save);
-    const char *endpoint = strtok_r(NULL, " ", &save);
-    const char *dl = strtok_r(NULL, " ", &save);
-    const char *hex = strtok_r(NULL, " ", &save);
-    const char *shex = strtok_r(NULL, " ", &save);
-    char *opts = strtok_r(NULL, " ", &save);
-    struct confine cf = {0};
-    char *osave = NULL;
-    for (char *o = opts ? strtok_r(opts, ",", &osave) : NULL; o; o = strtok_r(NULL, ",", &osave)) {
-        if (strcmp(o, "pidns") == 0) cf.pidns = 1;
-        else if (strcmp(o, "mntns") == 0) cf.mntns = 1;
-        else if (strcmp(o, "nocaps") == 0) cf.nocaps = 1;
-    }
+    /* CLONE <fence> <endpoint> <deadline_ms> <hexpayload|-> <hexsession|-> [opt,opt...]
+     * The Rust core takes the line apart (line::parse_clone), cutting it
+     * up in place, and decodes the session into session_buf. Each ERROR
+     * is sent from here, at the place its check always had among the
+     * checks on the zygote's own state. */
+    struct fz_rs_clone cl;
+    int refused = fz_rs_parse_clone(line, session_buf, sizeof session_buf, &cl);
+    const char *fence = cl.fence, *endpoint = cl.endpoint;
+    struct confine cf = { .pidns = cl.pidns, .mntns = cl.mntns, .nocaps = cl.nocaps };
     /* Until the fence is known to fit, it goes on the line cut to what
      * the records hold, so the line is sent rather than dropped. */
-    if (!fence || !endpoint || !dl || !hex || !shex) {
+    if (refused == FZ_RS_CLONE_MALFORMED) {
         sendf(ctl_fd, "ERROR %.*s malformed CLONE", FENCE_MAX - 1, fence ? fence : "?");
         return 0;
     }
-    if (strlen(fence) >= FENCE_MAX) {
+    if (refused == FZ_RS_CLONE_FENCE_LONG) {
         sendf(ctl_fd, "ERROR %.*s fence too long (at most %d characters)", FENCE_MAX - 1, fence, FENCE_MAX - 1);
         return 0;
     }
@@ -1657,25 +982,20 @@ static int handle_clone(int ctl_fd, char *line, const int passed[MAX_PASSED], fz
         sendf(ctl_fd, "ERROR %s CLONE without a channel", fence);
         return 0;
     }
-    int deadline_ms = atoi(dl);
-    if (deadline_ms <= 0) deadline_ms = 50;
+    int deadline_ms = cl.deadline_ms;
     /* The payload reaches the fiber on its record. The line's copy is
      * not decoded here. The session is a C string for the fiber's
      * environment, so a NUL inside it, or more than fits, is refused
      * rather than cut. */
-    size_t slen = 0;
-    if (strcmp(shex, "-") != 0) {
-        if (strlen(shex) / 2 >= sizeof session_buf) {
-            sendf(ctl_fd, "ERROR %s session too long (at most %d bytes)", fence, ENV_VALUE_MAX - 1);
-            return 0;
-        }
-        slen = unhex(shex, (unsigned char *)session_buf, sizeof session_buf - 1);
-        if (memchr(session_buf, 0, slen)) {
-            sendf(ctl_fd, "ERROR %s session holds a NUL byte", fence);
-            return 0;
-        }
+    if (refused == FZ_RS_CLONE_SESSION_LONG) {
+        sendf(ctl_fd, "ERROR %s session too long (at most %d bytes)", fence, ENV_VALUE_MAX - 1);
+        return 0;
     }
-    session_buf[slen] = 0;
+    if (refused == FZ_RS_CLONE_SESSION_NUL) {
+        sendf(ctl_fd, "ERROR %s session holds a NUL byte", fence);
+        return 0;
+    }
+    size_t slen = cl.session_len;
 
     if (npending >= MAX_PENDING) {
         sendf(ctl_fd, "ERROR %s too many clones in flight", fence);
@@ -1689,7 +1009,7 @@ static int handle_clone(int ctl_fd, char *line, const int passed[MAX_PASSED], fz
     /* At most ENV_VALUE_MAX - 1 characters, as the fence is at most
      * FENCE_MAX - 1 (see libfiberzygote.h). Checked on the length itself,
      * since env_endpoint has room for the name as well. */
-    if (strlen(endpoint) >= ENV_VALUE_MAX) {
+    if (cl.endpoint_len >= ENV_VALUE_MAX) {
         sendf(ctl_fd, "ERROR %s endpoint too long (at most %d characters)", fence, ENV_VALUE_MAX - 1);
         return 0;
     }
@@ -1711,6 +1031,15 @@ static int handle_clone(int ctl_fd, char *line, const int passed[MAX_PASSED], fz
     int rp[2];
     if (pipe2(rp, O_CLOEXEC) < 0) { sendf(ctl_fd, "ERROR %s pipe: %s", fence, strerror(errno)); return 0; }
 
+    /* What the child's path needs, built before the clone so the child
+     * does nothing but its plain stores and the one call. */
+    struct fz_rs_child child = {
+        .ready_r = rp[0], .ready_w = rp[1], .channel = channel, .sigchld_fd = sigchld_fd,
+        .pidns = cf.pidns, .mntns = cf.mntns, .nocaps = cf.nocaps, .deny_nested_userns = deny_nested_userns,
+        .nhide = nhide, .ndrop = ndrop,
+        .fence = fence, .on_fiber = on_fiber,
+        .self_exe = self_exe, .hide = hide_paths, .hide_covered = hide_covered, .drop = drop_paths,
+    };
     unsigned long long want = (cf.pidns ? CLONE_NEWPID : 0) | (cf.mntns ? CLONE_NEWNS : 0);
     pid_t pid = birth(cgroup_fd, want);
     if (pid < 0) {
@@ -1719,8 +1048,7 @@ static int handle_clone(int ctl_fd, char *line, const int passed[MAX_PASSED], fz
         return 0;
     }
     if (pid == 0) {
-        close(rp[0]);
-        scrub_and_run(rp[1], channel, fence, cf, on_fiber);
+        scrub_and_run(&child);
         _exit(127); /* not reached */
     }
     close(rp[1]);
@@ -1746,25 +1074,9 @@ static int handle_clone(int ctl_fd, char *line, const int passed[MAX_PASSED], fz
  * made again inside the tmpfs that covers parent. A parent of "/" would
  * cover the root. Returns 0, or -1 with a reason. Runs in the zygote's
  * loop, where allocation would be fine, but the paths go to static
- * storage so the child reads them without any. */
-static int set_rundir(char *line, const char **why) {
-    char *save = NULL;
-    strtok_r(line, " ", &save);
-    const char *parent = strtok_r(NULL, " ", &save);
-    const char *own = strtok_r(NULL, " ", &save);
-    if (!parent || !own || strtok_r(NULL, " ", &save)) { *why = "want RUNDIR <parent> <own>"; return -1; }
-    size_t pl = strlen(parent), ol = strlen(own);
-    if (pl >= RUNDIR_MAX || ol >= RUNDIR_MAX) { *why = "path too long"; return -1; }
-    if (parent[0] != '/' || own[0] != '/') { *why = "want absolute paths"; return -1; }
-    if (pl == 1) { *why = "parent must not be /"; return -1; }
-    if (parent[pl - 1] == '/' || own[ol - 1] == '/' || strstr(parent, "//") || strstr(own, "//")) { *why = "want clean paths"; return -1; }
-    if (ol <= pl + 1 || strncmp(own, parent, pl) != 0 || own[pl] != '/') { *why = "own must be under parent"; return -1; }
-    const char *name = own + pl + 1;
-    if (strchr(name, '/') || strcmp(name, ".") == 0 || strcmp(name, "..") == 0) { *why = "own must be a direct child of parent"; return -1; }
-    memcpy(rundir_parent, parent, pl + 1);
-    memcpy(rundir_own, own, ol + 1);
-    return 0;
-}
+ * storage so the child reads them without any. The parsing is in the
+ * Rust core (line::parse_rundir). */
+static int set_rundir(char *line, const char **why) { return fz_rs_set_rundir(line, rundir_parent, rundir_own, why); }
 
 /* in_child_userns reports whether this process runs in a user namespace
  * other than the initial one, read from its uid_map. The initial
@@ -1777,9 +1089,7 @@ static int in_child_userns(void) {
     close(fd);
     if (n <= 0) return 0;
     buf[n] = 0;
-    unsigned long inside, outside, count;
-    if (sscanf(buf, "%lu %lu %lu", &inside, &outside, &count) != 3) return 0;
-    return !(inside == 0 && outside == 0 && count == 4294967295UL);
+    return fz_rs_in_child_userns(buf);
 }
 
 static int write_str(const char *path, const char *val) {
@@ -1866,7 +1176,7 @@ static int rebind_ctl(int ctl_fd) {
     static char line[64];
     int passed[MAX_PASSED];
     ssize_t n = recv_line(ctl_fd, line, sizeof line, passed);
-    if (n <= 0 || strcmp(line, "REBIND") != 0 || passed[0] < 0) {
+    if (n <= 0 || !fz_rs_is_rebind(line) || passed[0] < 0) {
         for (int i = 0; i < MAX_PASSED; i++) if (passed[i] >= 0) close(passed[i]);
         fprintf(stderr, "libfiberzygote: expected REBIND with a socket, got %s\n", n > 0 ? line : "end of stream");
         errno = EPROTO;
@@ -1881,11 +1191,13 @@ static int rebind_ctl(int ctl_fd) {
  * mount_ns, or refuses it when the zygote holds no more. */
 static void keep_path(const char *line) {
     int hide = line[0] == 'H';
-    char **paths = hide ? hide_paths : drop_paths;
+    char (*paths)[KEEP_MAX] = hide ? hide_paths : drop_paths;
     int *count = hide ? &nhide : &ndrop;
-    char *p = *count < MAX_PATHS ? strdup(line + 5) : NULL;
-    if (p) {
-        paths[(*count)++] = p;
+    if (*count < MAX_PATHS) {
+        /* The line is at most MAX_LINE - 1 characters (recv_line), so
+         * the path after its prefix always fits its KEEP_MAX slot. */
+        const char *p = line + 5;
+        memcpy(paths[(*count)++], p, strlen(p) + 1);
         return;
     }
     paths_refused = hide ? "HIDE: too many paths" : "DROP: too many paths";
@@ -1912,20 +1224,25 @@ static int read_setup(int ctl_fd) {
             if (passed[i] >= 0) close(passed[i]);
         if (n < 0) return -1;
         if (n == 0) return 0;
-        if (strncmp(line, "HIDE /", 6) == 0 || strncmp(line, "DROP /", 6) == 0) {
+        switch (fz_rs_setup_kind(line)) {
+        case FZ_RS_SETUP_HIDE:
+        case FZ_RS_SETUP_DROP:
             keep_path(line);
-        } else if (strncmp(line, "RUNDIR ", 7) == 0) {
+            break;
+        case FZ_RS_SETUP_RUNDIR: {
             const char *why = NULL;
             if (set_rundir(line, &why) < 0) {
                 paths_refused = "RUNDIR refused";
                 fprintf(stderr, "libfiberzygote: RUNDIR refused: %s\n", why);
             }
-        } else if (strcmp(line, "PREPARE mntns") == 0) {
+            break;
+        }
+        case FZ_RS_SETUP_PREPARE_MNTNS:
             if (prepare_ns() < 0) fprintf(stderr, "libfiberzygote: PREPARE refused: %s\n", paths_refused);
             return 1;
-        } else if (strcmp(line, "PREPARE none") == 0) {
+        case FZ_RS_SETUP_PREPARE_NONE:
             return 1;
-        } else {
+        default:
             fprintf(stderr, "libfiberzygote: expected HIDE, DROP, RUNDIR or PREPARE before READY, got %.60s\n", line);
             errno = EPROTO;
             return -1;
@@ -2035,93 +1352,4 @@ int fz_serve(int ctl_fd, fz_on_fiber on_fiber) {
         for (int i = 0; i < MAX_PASSED; i++)
             if (passed[i] >= 0) close(passed[i]);
     }
-}
-
-/* ---- gVisor ------------------------------------------------------------ */
-
-#define GVISOR_SPEC_ENV "/proc/gvisor/spec_environ"
-#define GVISOR_POOL_SOCKET "/fiberd/channel/pool.sock"
-#define GVISOR_TOKEN_MAX 64
-
-/* The token this process last claimed with. The spec environment can
- * still show the previous restore's for a moment after a restore
- * returns, and a restored copy keeps this memory, so a token already
- * used is waited out. */
-static char gv_last_token[GVISOR_TOKEN_MAX + 1];
-static int gv_channel = -1;
-
-/* spec_token copies FIBERD_TOKEN out of the spec environment, KEY=VALUE
- * entries separated by NUL or newline. 0 when it is not there. */
-static int spec_token(char *out, size_t n) {
-    static char buf[65536];
-    int fd = open(GVISOR_SPEC_ENV, O_RDONLY | O_CLOEXEC);
-    if (fd < 0) return 0;
-    ssize_t got = 0, r;
-    while ((r = read(fd, buf + got, sizeof buf - 1 - got)) > 0) got += r;
-    close(fd);
-    if (got <= 0) return 0;
-    buf[got] = 0;
-    for (ssize_t i = 0; i < got; i++) if (buf[i] == '\n') buf[i] = 0;
-    for (char *p = buf; p < buf + got; p += strlen(p) + 1) {
-        if (strncmp(p, "FIBERD_TOKEN=", 13) != 0) continue;
-        size_t len = strlen(p + 13);
-        if (len == 0 || len >= n) return 0;
-        memcpy(out, p + 13, len + 1);
-        return 1;
-    }
-    return 0;
-}
-
-int fz_gvisor_identity(fz_incarnation_t *id) {
-    if (gv_channel >= 0) { close(gv_channel); gv_channel = -1; }
-    char token[GVISOR_TOKEN_MAX + 1];
-    int fresh = 0;
-    for (int i = 0; i < 3000 && !fresh; i++) {
-        fresh = spec_token(token, sizeof token) && strcmp(token, gv_last_token) != 0;
-        if (!fresh) usleep(1000);
-    }
-    if (!fresh) { errno = ENOENT; return -1; }
-    memcpy(gv_last_token, token, sizeof token);
-    int fd = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
-    if (fd < 0) return -1;
-    struct sockaddr_un a = { .sun_family = AF_UNIX, .sun_path = GVISOR_POOL_SOCKET };
-    int rc = -1;
-    for (int i = 0; i < 2000 && rc < 0; i++) {
-        rc = connect(fd, (struct sockaddr *)&a, sizeof a);
-        if (rc < 0 && errno != ECONNREFUSED && errno != ENOENT) break;
-        if (rc < 0) usleep(1000);
-    }
-    if (rc < 0) { int e = errno; close(fd); errno = e; return -1; }
-    char claim[GVISOR_TOKEN_MAX + 2];
-    size_t cn = 1 + strlen(token) + 1;
-    claim[0] = 't';
-    memcpy(claim + 1, token, strlen(token) + 1);
-    if (write(fd, claim, cn) != (ssize_t)cn) { int e = errno; close(fd); errno = e; return -1; }
-    struct iovec iov = { .iov_base = born.buf, .iov_len = sizeof born.buf };
-    struct msghdr mh = { .msg_iov = &iov, .msg_iovlen = 1 };
-    ssize_t r;
-    do r = recvmsg(fd, &mh, 0); while (r < 0 && errno == EINTR);
-    if (r < 0) { int e = errno; close(fd); errno = e; return -1; }
-    if (r == 0 || (mh.msg_flags & MSG_TRUNC)) { close(fd); errno = r == 0 ? ECONNRESET : EMSGSIZE; return -1; }
-    const char *why = NULL;
-    if (parse_incarnation(&born, (size_t)r, &why) < 0) { close(fd); errno = EPROTO; return -1; }
-    served_generation = born.inc.generation;
-    *id = born.inc;
-    gv_channel = fd;
-    return 0;
-}
-
-int fz_gvisor_ack(void) {
-    if (gv_channel < 0) { errno = EBADF; return -1; }
-    char ack[FENCE_MAX + 2];
-    size_t n = strlen(born.inc.fence);
-    ack[0] = 'a';
-    memcpy(ack + 1, born.inc.fence, n + 1);
-    ssize_t w = write(gv_channel, ack, n + 2);
-    int e = errno;
-    close(gv_channel);
-    gv_channel = -1;
-    forget_seed(&born);
-    if (w != (ssize_t)(n + 2)) { errno = e; return -1; }
-    return 0;
 }

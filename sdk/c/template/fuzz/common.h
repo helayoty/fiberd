@@ -1,11 +1,14 @@
 /* Shared helpers for the libFuzzer harnesses in this directory. Each
- * harness includes the zygote source it tests, so it reaches the static
- * parsers directly, and hands them the fuzz input through the kind of
+ * harness includes the zygote source it tests, so it reaches the C's
+ * static functions directly and the Rust core's entries through the
+ * declarations there. It hands them the fuzz input through the kind of
  * descriptor they read from, a memfd for a file or a socket for a peer. */
 #ifndef FZ_FUZZ_COMMON_H
 #define FZ_FUZZ_COMMON_H
 #define _GNU_SOURCE
 #include <errno.h>
+#include <stdbool.h>
+#include <stddef.h>
 #include <fcntl.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -14,6 +17,95 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include <stdarg.h>
+#include <sys/mount.h>
+#include <sys/stat.h>
+
+/* The system call hooks. run.sh links the core archive built with its
+ * fuzzshim feature, whose sys layer calls these five instead of libc, so
+ * a harness can shim what the Rust does as it shims the C with #define.
+ * That archive needs all five. A harness that shims one defines
+ * FZ_SHIM_<NAME> before it includes this file and writes its own. Every
+ * other hook gets the pass-through below, which calls the real function. */
+long fz_fuzz_syscall(long nr, ...);
+int fz_fuzz_mount(const char *src, const char *target, const char *type, unsigned long flags, const void *opts);
+int fz_fuzz_umount2(const char *target, int flags);
+int fz_fuzz_mkdir(const char *path, mode_t mode);
+int fz_fuzz_open(const char *path, int flags, ...);
+
+#ifndef FZ_SHIM_SYSCALL
+/* Only the core calls the hook here (the C reaches syscall itself), and
+ * its sys::syscall always passes five arguments, zero past what the call
+ * takes. So the pass-through forwards five. */
+long fz_fuzz_syscall(long nr, ...) {
+    long a[5];
+    va_list ap;
+    va_start(ap, nr);
+    for (int i = 0; i < 5; i++) a[i] = va_arg(ap, long);
+    va_end(ap);
+    return syscall(nr, a[0], a[1], a[2], a[3], a[4]);
+}
+#endif
+
+#ifndef FZ_SHIM_MOUNT
+int fz_fuzz_mount(const char *src, const char *target, const char *type, unsigned long flags, const void *opts) {
+    return mount(src, target, type, flags, opts);
+}
+#endif
+
+#ifndef FZ_SHIM_UMOUNT2
+int fz_fuzz_umount2(const char *target, int flags) {
+    return umount2(target, flags);
+}
+#endif
+
+#ifndef FZ_SHIM_MKDIR
+int fz_fuzz_mkdir(const char *path, mode_t mode) {
+    return mkdir(path, mode);
+}
+#endif
+
+#ifndef FZ_SHIM_OPEN
+/* open reads a mode only when the flags ask to create a file. */
+int fz_fuzz_open(const char *path, int flags, ...) {
+    mode_t mode = 0;
+    if ((flags & O_CREAT) || (flags & O_TMPFILE) == O_TMPFILE) {
+        va_list ap;
+        va_start(ap, flags);
+        mode = (mode_t)va_arg(ap, unsigned int);
+        va_end(ap);
+    }
+    return open(path, flags, mode);
+}
+#endif
+
+/* The fiber's state and record stores, which the Rust core owns
+ * (core/src/fiber.rs) and its fuzzshim archive hands out, so a harness
+ * sets them up and checks them as it did the C file's statics. struct
+ * fz_rs_fiber_state is State there, pinned with the same numbers. */
+struct fz_rs_fiber_state {
+    int channel_fd;
+    int ready_fd;
+    unsigned served_generation;
+    unsigned park_round;
+    int gv_channel;
+    bool ack_pending;
+    bool park_over;
+    char gv_last_token[65];
+    char ack_fence[128];
+};
+_Static_assert(sizeof(struct fz_rs_fiber_state) == 216, "State in core/src/fiber.rs");
+_Static_assert(offsetof(struct fz_rs_fiber_state, served_generation) == 8, "State in core/src/fiber.rs");
+_Static_assert(offsetof(struct fz_rs_fiber_state, park_round) == 12, "State in core/src/fiber.rs");
+_Static_assert(offsetof(struct fz_rs_fiber_state, gv_channel) == 16, "State in core/src/fiber.rs");
+_Static_assert(offsetof(struct fz_rs_fiber_state, ack_pending) == 20, "State in core/src/fiber.rs");
+_Static_assert(offsetof(struct fz_rs_fiber_state, park_over) == 21, "State in core/src/fiber.rs");
+_Static_assert(offsetof(struct fz_rs_fiber_state, gv_last_token) == 22, "State in core/src/fiber.rs");
+_Static_assert(offsetof(struct fz_rs_fiber_state, ack_fence) == 87, "State in core/src/fiber.rs");
+struct record_store;
+struct fz_rs_fiber_state *fz_rs_fuzz_state(void);
+struct record_store *fz_rs_fuzz_born(void);
+struct record_store *fz_rs_fuzz_polled(void);
 
 /* memfd_of returns a memfd holding data, positioned at its start. The
  * harness cannot run without one, so a refusal aborts. */

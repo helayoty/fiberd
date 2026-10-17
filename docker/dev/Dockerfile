@@ -217,6 +217,20 @@ COPY --from=node /usr/local/bin/node /usr/local/bin/node
 COPY --from=node /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
 RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm
 
+# Rust for the zygote library's core (sdk/c/template/core): the exact
+# stable its rust-toolchain.toml pins, with clippy and rustfmt, and both
+# Linux targets so `cargo check --target` covers the other arch here. The
+# fuzz targets under core/fuzz need a nightly for the sanitizers and
+# cargo-fuzz, so the one their rust-toolchain.toml pins is installed too,
+# for `make fuzz` only. The product build stays on stable.
+ARG CARGO_FUZZ_VERSION=0.13.2
+RUN set -eu; \
+    rustup toolchain install 1.99.0 --profile minimal -c clippy -c rustfmt; \
+    rustup target add --toolchain 1.99.0 x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; \
+    rustup toolchain install nightly-2026-10-08 --profile minimal; \
+    cargo +1.99.0 install --locked cargo-fuzz --version "${CARGO_FUZZ_VERSION}"; \
+    rm -rf /usr/local/cargo/registry/cache /usr/local/cargo/git
+
 # GOTOOLCHAIN=auto lets the go.mod toolchain line fetch the exact version.
 ENV GOTOOLCHAIN=auto \
     GOFLAGS=-buildvcs=false \

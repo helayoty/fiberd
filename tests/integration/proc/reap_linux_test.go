@@ -22,8 +22,13 @@ import (
 func TestWaitBoundedNeverBlocks(t *testing.T) {
 	bin := filepath.Join(filepath.Dir(zygoteBin), "waitbounded")
 	// The probe includes the library source, so it is built with the
-	// Makefile's ZYGOTE_CFLAGS and ZYGOTE_LDFLAGS, as the zygote is.
-	build := exec.Command("gcc", append(testenv.ZygoteBuildFlags(runtime.GOARCH), "-pthread", "-o", bin, "testdata/waitbounded.c")...)
+	// Makefile's ZYGOTE_CFLAGS and ZYGOTE_LDFLAGS, and links the core
+	// archive, as the zygote is.
+	core, err := testenv.CoreArchive()
+	if err != nil {
+		t.Fatal(err)
+	}
+	build := exec.Command("gcc", append(testenv.ZygoteBuildFlags(runtime.GOARCH), "-pthread", "-o", bin, "testdata/waitbounded.c", core)...)
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build waitbounded: %v: %s", err, out)
 	}

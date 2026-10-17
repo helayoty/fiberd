@@ -1,0 +1,45 @@
+[package]
+name = "fiberzygote-core"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.99"
+license = "Apache-2.0"
+description = "The core of libfiberzygote, behind its unchanged C ABI"
+publish = false
+
+[lib]
+name = "fiberzygote_core"
+# The staticlib is what every template links. The rlib is for the fuzz
+# targets under fuzz/.
+crate-type = ["staticlib", "rlib"]
+# No doctests: cargo would build the staticlib with unwinding for them,
+# which a no_std final artifact cannot do. The unit tests are the lib test.
+doctest = false
+
+# libc only, for the system calls the C file makes. No alloc crate and no
+# global allocator, so nothing in the library can allocate.
+[dependencies]
+libc = { version = "0.2.191", default-features = false }
+
+[features]
+# fuzzshim routes mount, umount2, mkdir, open and every raw syscall
+# (clone3 among them) to extern "C" fz_fuzz_* hooks the C fuzz harnesses
+# define (fuzz/common.h), so a harness never really mounts or clones.
+# Only fuzz/run.sh turns it on.
+fuzzshim = []
+
+# cargo-fuzz builds the library with --cfg fuzzing (fuzz/), which leaves
+# the panic handler to the harness.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }
+
+[profile.release]
+opt-level = 2
+panic = "abort"
+codegen-units = 1
+debug = false
+# A wrapped sum is a bug here as much as in debug.
+overflow-checks = true
+
+[profile.dev]
+panic = "abort"

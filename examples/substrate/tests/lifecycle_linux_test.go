@@ -105,13 +105,21 @@ var procZygote = sync.OnceValues(func() (string, error) {
 	if err := os.MkdirAll(work, 0o755); err != nil {
 		return "", err
 	}
+	// The library's Rust core first, run in the crate so rustup takes the
+	// toolchain it pins, then linked after libfiberzygote.c.
+	core := exec.Command("cargo", "build", "--release", "--locked")
+	core.Dir = "../../../sdk/c/template/core"
+	if out, err := core.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("cargo: %w: %s", err, out)
+	}
 	args := []string{"-O2", "-pthread"}
 	// As in the Makefile's ZYGOTE_CFLAGS, arm64 builds take no pointer
 	// authentication, since a restored process keeps stale PAC keys.
 	if runtime.GOARCH == "arm64" {
 		args = append(args, "-mbranch-protection=none")
 	}
-	build := exec.Command("gcc", append(args, "-o", bin, "../../../sdk/c/template/refzygote.c", "../../../sdk/c/template/libfiberzygote.c")...)
+	build := exec.Command("gcc", append(args, "-o", bin, "../../../sdk/c/template/refzygote.c", "../../../sdk/c/template/libfiberzygote.c",
+		"../../../sdk/c/template/core/target/release/libfiberzygote_core.a")...)
 	build.Stderr = os.Stderr
 	if err := build.Run(); err != nil {
 		return "", fmt.Errorf("gcc: %w", err)

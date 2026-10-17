@@ -1,0 +1,59 @@
+[package]
+name = "fiberzygote-core-fuzz"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "cargo-fuzz targets for the core of libfiberzygote"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+fiberzygote-core = { path = ".." }
+libc = { version = "0.2.191", default-features = false }
+
+# record_diff and line_diff link the C parsers of main (csrc/record.c,
+# csrc/line.c) as their oracles.
+[build-dependencies]
+cc = "1"
+
+# The Rust parser alone, checking what fuzz_identity.c checks.
+[[bin]]
+name = "record"
+path = "fuzz_targets/record.rs"
+test = false
+doc = false
+bench = false
+
+# The Rust parser against the C one, on every input.
+[[bin]]
+name = "record_diff"
+path = "fuzz_targets/record_diff.rs"
+test = false
+doc = false
+bench = false
+
+# The Rust line parsers alone, on the input format csrc/line.c defines,
+# checking what fuzz_rundir.c checks and what each answer promises.
+[[bin]]
+name = "line"
+path = "fuzz_targets/line.rs"
+test = false
+doc = false
+bench = false
+
+# The Rust line parsers against the C ones, on every input.
+[[bin]]
+name = "line_diff"
+path = "fuzz_targets/line_diff.rs"
+test = false
+doc = false
+bench = false
+
+[profile.release]
+debug = 1
+
+# Its own root, so the core's manifest stays a plain package.
+[workspace]

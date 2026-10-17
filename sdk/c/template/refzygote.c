@@ -119,7 +119,8 @@
  * resumed fiber renegotiates by reserving again. A real CUDA engine is a
  * drop-in that speaks the same lines.
  *
- * Build: gcc -O2 -pthread -o refzygote refzygote.c libfiberzygote.c
+ * Build: (cd core && cargo build --release --locked)
+ *        gcc -O2 -pthread -o refzygote refzygote.c libfiberzygote.c core/target/release/libfiberzygote_core.a
  *        (add -DFZ_TLS ... -lssl -lcrypto to serve handoff grants)
  * Run:   fiberd starts it; by hand: refzygote --heap-mb 64 3<>/dev/null
  *

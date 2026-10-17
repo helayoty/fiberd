@@ -1,11 +1,12 @@
 # libfiberzygote
 
-The C library a [template](../../../docs/glossary.md#template) links to become a fiberd [zygote](../../../docs/glossary.md#zygote). fiberd starts the template, which warms up once and then forks a [fiber](../../../docs/glossary.md#fiber) for every [Clone](../../../docs/glossary.md#clone). `libfiberzygote.h` is the API, `refzygote.c` is the reference template the tests and images use, and `fuzz/` holds the libFuzzer harnesses.
+The C library a [template](../../../docs/glossary.md#template) links to become a fiberd [zygote](../../../docs/glossary.md#zygote). fiberd starts the template, which warms up once and then forks a [fiber](../../../docs/glossary.md#fiber) for every [Clone](../../../docs/glossary.md#clone). `libfiberzygote.h` is the API, `refzygote.c` is the reference template the tests and images use, `core/` is the library's Rust core, and `fuzz/` and `core/fuzz/` hold the libFuzzer harnesses.
 
-Build a template from source.
+Build a template from source. The core needs cargo, which takes the toolchain `core/rust-toolchain.toml` pins.
 
 ```bash
-cc -O2 -pthread -o mytemplate main.c libfiberzygote.c
+(cd core && cargo build --release --locked)
+cc -O2 -pthread -o mytemplate main.c libfiberzygote.c core/target/release/libfiberzygote_core.a
 ```
 
 Or link the prebuilt static library from a release.

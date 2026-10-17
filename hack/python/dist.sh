@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Build the sdist, then a wheel from that sdist, and test the installed
-# wheel, as the release does with cibuildwheel. Offline, inside the dev
-# container. Nothing is written into the tree, since it builds from a copy.
+# wheel, as the release does with cibuildwheel. The sdist vendors the Rust
+# core's libc, from cargo's registry or crates.io. Everything after it is
+# offline, inside the dev container. Nothing is written into the tree,
+# since it builds from a copy.
 # The wheel is linux_<arch> here. auditwheel makes it manylinux in CI.
 #
 #   hack/python/dist.sh [outdir]      default /tmp/fiberd-python-dist
@@ -11,11 +13,12 @@ out=${1:-/tmp/fiberd-python-dist}
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 rm -rf "$out"
-mkdir -p "$out" "$work/repo/sdk/c/template" "$work/sdist"
+mkdir -p "$out" "$work/repo/sdk/c/template/core" "$work/sdist"
 
 # What setup.py reads, laid out as in the tree.
 cp LICENSE NOTICE "$work/repo/"
 cp sdk/c/template/libfiberzygote.c sdk/c/template/libfiberzygote.h "$work/repo/sdk/c/template/"
+(cd sdk/c/template/core && cp -R Cargo.toml Cargo.lock rust-toolchain.toml build.rs src "$work/repo/sdk/c/template/core/")
 tar -C sdk -cf - --exclude=build --exclude='*.so' --exclude=__pycache__ --exclude='*.egg-info' python |
   tar -C "$work/repo/sdk" -xf -
 (cd "$work/repo/sdk/python" && python3 setup.py -q sdist -d "$out" >/dev/null)
@@ -36,7 +39,9 @@ if [ -d "$sysroot/usr/include" ]; then
 fi
 python3 -m venv --system-site-packages "$work/venv"
 export PATH="$work/venv/bin:$PATH"
-pip wheel -q --no-index --no-build-isolation --no-deps -w "$out" "$sdist"
+# The sdist must carry the crate and libc. An empty CARGO_HOME hides the
+# registry, so the wheel builds from what the sdist holds or not at all.
+CARGO_HOME="$work/cargo" CARGO_NET_OFFLINE=true pip wheel -q --no-index --no-build-isolation --no-deps -w "$out" "$sdist"
 wheel=$(echo "$out"/fiberd-*.whl)
 case "$wheel" in
   *-cp314-abi3-linux_*.whl) ;;

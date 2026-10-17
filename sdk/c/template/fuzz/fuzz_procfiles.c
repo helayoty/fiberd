@@ -5,9 +5,11 @@
  * told, so nothing is mounted.
  *
  * The input is [mode and mount verdict][file bytes]. */
+/* The hooks this harness writes itself, for the Rust (common.h). The
+ * #defines below catch the same calls in the C. */
+#define FZ_SHIM_OPEN
+#define FZ_SHIM_MOUNT
 #include "common.h"
-int fz_fuzz_open(const char *path, int flags, ...);
-int fz_fuzz_mount(const char *src, const char *target, const char *type, unsigned long flags, const void *opts);
 #define open fz_fuzz_open
 #define mount fz_fuzz_mount
 #include "../libfiberzygote.c"
