@@ -306,7 +306,13 @@ void fz_fiber_ready(void);
  * fz_quiesce and fz_incarnation_wait. A fiber that serves an endpoint
  * of its own holds the channel's peer at FZ_CHANNEL_PEER_FD too, the
  * end fiberd borrows for each exchange. Neither is the fiber's to
- * read, write or close. */
+ * read, write or close.
+ *
+ * The fiber-side calls (fz_fiber_ready, fz_accept, fz_quiesce,
+ * fz_incarnation_wait, fz_seed_forget, fz_gvisor_identity and
+ * fz_gvisor_ack) share the library's state, so they must never
+ * overlap. Make one at a time, never from a signal handler. Any thread
+ * may make the next once the last has returned. */
 #define FZ_CHANNEL_FD 4
 #define FZ_CHANNEL_PEER_FD 5
 
