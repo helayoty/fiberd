@@ -3,7 +3,7 @@
 //! with _Static_assert in the C file, so a field moved on one side fails
 //! to compile on the other.
 
-use core::ffi::{c_char, c_uint};
+use core::ffi::{c_char, c_int, c_uint};
 use core::mem::{offset_of, size_of};
 
 /// A fence is at most FENCE_MAX - 1 characters.
@@ -18,6 +18,34 @@ pub const RECORD_MAX: usize = 65536;
 pub const RECORD_FIELDS: usize = 11;
 /// The seed's length in bytes, 32 bytes of fresh entropy from the host.
 pub const SEED_LEN: usize = 32;
+/// A RUNDIR path is at most RUNDIR_MAX - 1 characters, the size of the
+/// static storage the child reads it from.
+pub const RUNDIR_MAX: usize = 4096;
+/// The lines HIDE and DROP may keep, each kind.
+pub const MAX_PATHS: usize = 16;
+
+/// struct fz_rs_clone in libfiberzygote.c: what the Rust parser made of
+/// a CLONE line, for handle_clone to answer from. The pointers point
+/// into the line, which the parser cut up in place as strtok_r did.
+#[repr(C)]
+pub struct CloneOut {
+    /// The fence, NUL-ended, or null when the line has none.
+    pub fence: *const c_char,
+    /// The endpoint, NUL-ended, or null when the line has none.
+    pub endpoint: *const c_char,
+    /// The endpoint's length, for the check against ENV_VALUE_MAX.
+    pub endpoint_len: usize,
+    /// The deadline in ms, with the default of 50, once the fence fits.
+    pub deadline_ms: c_int,
+    /// The pidns option.
+    pub pidns: c_int,
+    /// The mntns option.
+    pub mntns: c_int,
+    /// The nocaps option.
+    pub nocaps: c_int,
+    /// The decoded session's length in the session buffer.
+    pub session_len: usize,
+}
 
 /// fz_identity_t.
 #[repr(C)]
@@ -103,4 +131,13 @@ const _: () = {
     assert!(offset_of!(RecordStore, inc) == 1096);
     assert!(offset_of!(RecordStore, buf) == 1176);
     assert!(offset_of!(RecordStore, payload) == 66712);
+    assert!(size_of::<CloneOut>() == 48);
+    assert!(offset_of!(CloneOut, fence) == 0);
+    assert!(offset_of!(CloneOut, endpoint) == 8);
+    assert!(offset_of!(CloneOut, endpoint_len) == 16);
+    assert!(offset_of!(CloneOut, deadline_ms) == 24);
+    assert!(offset_of!(CloneOut, pidns) == 28);
+    assert!(offset_of!(CloneOut, mntns) == 32);
+    assert!(offset_of!(CloneOut, nocaps) == 36);
+    assert!(offset_of!(CloneOut, session_len) == 40);
 };

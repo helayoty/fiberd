@@ -268,14 +268,52 @@ static ssize_t recv_line(int fd, char *buf, size_t cap, int fds_out[MAX_PASSED])
 }
 
 /* The record parser lives in the Rust core (core/src/record.rs), behind
- * these entries. unhex decodes hex pairs from s into out, cap bytes, until
- * a bad digit, an odd tail or out is full, and returns the bytes written. */
-size_t fz_rs_unhex(const char *s, unsigned char *out, size_t cap);
-unsigned fz_rs_parse_generation(const char *s);
+ * this entry. Its unhex and parse_generation are called from the core's
+ * line parsers now, so nothing here names them. */
 struct record_store;
 int fz_rs_parse_incarnation(struct record_store *st, size_t n, const char **why);
 
-static size_t unhex(const char *s, unsigned char *out, size_t cap) { return fz_rs_unhex(s, out, cap); }
+/* The line parsers live in the Rust core too (core/src/line.rs and
+ * core/src/procfiles.rs), behind these entries. Each takes a line or a
+ * file's bytes apart as the C did, cutting a line up in place as
+ * strtok_r did, so the fields stay C strings here. The replies, the
+ * mounts and every error line are chosen here from what they return. */
+
+/* What fz_rs_parse_clone made of a CLONE line (core/src/abi.rs). */
+struct fz_rs_clone {
+    const char *fence;    /* NUL-ended in the line, or NULL when it has none */
+    const char *endpoint; /* NUL-ended in the line, or NULL when it has none */
+    size_t endpoint_len;
+    int deadline_ms;      /* with the default of 50, once the fence fits */
+    int pidns, mntns, nocaps;
+    size_t session_len;   /* decoded into the session buffer, NUL-ended */
+};
+_Static_assert(sizeof(struct fz_rs_clone) == 48, "fz_rs_clone layout");
+_Static_assert(offsetof(struct fz_rs_clone, fence) == 0, "fz_rs_clone layout");
+_Static_assert(offsetof(struct fz_rs_clone, endpoint) == 8, "fz_rs_clone layout");
+_Static_assert(offsetof(struct fz_rs_clone, endpoint_len) == 16, "fz_rs_clone layout");
+_Static_assert(offsetof(struct fz_rs_clone, deadline_ms) == 24, "fz_rs_clone layout");
+_Static_assert(offsetof(struct fz_rs_clone, pidns) == 28, "fz_rs_clone layout");
+_Static_assert(offsetof(struct fz_rs_clone, mntns) == 32, "fz_rs_clone layout");
+_Static_assert(offsetof(struct fz_rs_clone, nocaps) == 36, "fz_rs_clone layout");
+_Static_assert(offsetof(struct fz_rs_clone, session_len) == 40, "fz_rs_clone layout");
+/* Why fz_rs_parse_clone refused the line, or 0 when the checks on the
+ * zygote's own state are next (CloneRefusal in core/src/line.rs). */
+enum { FZ_RS_CLONE_OK = 0, FZ_RS_CLONE_MALFORMED = 1, FZ_RS_CLONE_FENCE_LONG = 2, FZ_RS_CLONE_SESSION_LONG = 3, FZ_RS_CLONE_SESSION_NUL = 4 };
+int fz_rs_parse_clone(char *line, char *session, size_t cap, struct fz_rs_clone *out);
+/* The Rust writes RUNDIR_MAX bytes at most into each path (RUNDIR_MAX in
+ * core/src/abi.rs), so the two buffers must be that size. */
+_Static_assert(sizeof rundir_parent == 4096 && sizeof rundir_own == 4096, "rundir buffers match RUNDIR_MAX in core/src/abi.rs");
+int fz_rs_set_rundir(char *line, char *parent, char *own, const char **why);
+/* What read_setup does with a line (Setup in core/src/line.rs). */
+enum { FZ_RS_SETUP_HIDE = 0, FZ_RS_SETUP_DROP = 1, FZ_RS_SETUP_RUNDIR = 2, FZ_RS_SETUP_PREPARE_MNTNS = 3, FZ_RS_SETUP_PREPARE_NONE = 4, FZ_RS_SETUP_OTHER = 5 };
+int fz_rs_setup_kind(const char *line);
+int fz_rs_is_rebind(const char *line);
+int fz_rs_take_round(const char *msg, size_t n, unsigned *round, int *over);
+char *fz_rs_mountinfo_sys_mount(char *buf, size_t have, size_t *start, int *skipping);
+size_t fz_rs_mountinfo_carry(char *buf, size_t cap, size_t have, size_t start, int *skipping);
+int fz_rs_in_child_userns(const char *uid_map);
+int fz_rs_spec_token(char *env, size_t got, char *out, size_t n);
 
 /* ---- child bookkeeping ---- */
 
@@ -463,20 +501,9 @@ static int ro_remount(const char *path) {
     return mount(NULL, path, NULL, MS_BIND | MS_REMOUNT | MS_RDONLY | MS_NOSUID | MS_NODEV | MS_NOEXEC, NULL);
 }
 
-/* unescape_mount undoes mountinfo's octal escapes (\040 for a space) in
- * place. */
-static void unescape_mount(char *s) {
-    char *w = s;
-    for (; *s; s++, w++) {
-        if (s[0] == '\\' && s[1] >= '0' && s[1] <= '7' && s[2] >= '0' && s[2] <= '7' && s[3] >= '0' && s[3] <= '7') {
-            *w = (char)((s[1] - '0') * 64 + (s[2] - '0') * 8 + (s[3] - '0'));
-            s += 3;
-        } else {
-            *w = *s;
-        }
-    }
-    *w = 0;
-}
+/* unescape_mount, which undid mountinfo's octal escapes (\040 for a
+ * space) in place, is in the Rust core now (procfiles::unescape_mount),
+ * called from the line loop lock_sys drives below. */
 
 /* lock_procsys and lock_sys take away the fiber's write access to the
  * kernel's knobs. The fiber is euid 0 in the initial user namespace with
@@ -585,33 +612,14 @@ static int lock_sys(void) {
         if (n < 0) { if (errno == EINTR) continue; rc = -1; break; }
         if (n == 0) break; /* EOF. mountinfo ends every line with '\n' */
         have += (size_t)n;
+        /* The Rust core walks the complete lines, hands over each mount
+         * point under /sys (the fifth field, unescaped in place) and then
+         * carries the partial line to the front, or drops a full buffer
+         * with no newline and skips to the end of that line. */
         size_t start = 0;
-        char *nl;
-        while ((nl = memchr(buf + start, '\n', have - start)) != NULL) {
-            *nl = 0;
-            if (skipping) {
-                skipping = 0;
-            } else {
-                /* 36 35 98:0 /mnt1 /mnt2 rw,noatime master:1 - ext3 /dev/root rw
-                 * (0)(1)(2)  (3)   (4) is the mount point */
-                char *save = NULL, *mp = NULL;
-                int i = 0;
-                for (char *tok = strtok_r(buf + start, " ", &save); tok; tok = strtok_r(NULL, " ", &save))
-                    if (i++ == 4) { mp = tok; break; }
-                if (mp) {
-                    unescape_mount(mp);
-                    if ((strcmp(mp, "/sys") == 0 || strncmp(mp, "/sys/", 5) == 0) && ro_remount(mp) < 0) rc = -1;
-                }
-            }
-            start = (size_t)(nl - buf) + 1;
-        }
-        if (start == 0 && have == sizeof buf) {
-            skipping = 1; /* no newline in a full buffer, so drop it and finish the line next read */
-            have = 0;
-        } else {
-            memmove(buf, buf + start, have - start);
-            have -= start;
-        }
+        for (const char *mp; (mp = fz_rs_mountinfo_sys_mount(buf, have, &start, &skipping)) != NULL;)
+            if (ro_remount(mp) < 0) rc = -1;
+        have = fz_rs_mountinfo_carry(buf, sizeof buf, have, start, &skipping);
     }
     int e = errno;
     close(fd);
@@ -1122,10 +1130,6 @@ static int ack_pending;
 static unsigned park_round;
 static int park_over;
 
-/* parse_generation reads a generation as the record carries it: decimal
- * digits only, 1 or more, within unsigned. 0 when it is not one. */
-static unsigned parse_generation(const char *s) { return fz_rs_parse_generation(s); }
-
 /* parse_incarnation takes the record in st->buf, n bytes, apart into
  * the store and fills st->inc from it. Returns 0, or -1 with a reason,
  * and st->inc is then untouched. It allocates nothing and takes no
@@ -1439,22 +1443,11 @@ int fz_accept(void) {
     }
 }
 
-/* record_round is the one decimal field of a 'p' or 'c' record in
- * channel_msg, n bytes, or 0 for none. */
-static unsigned record_round(size_t n) {
-    if (n < 3 || channel_msg[n - 1] != 0) return 0;
-    return parse_generation(channel_msg + 1);
-}
-
 /* take_round notes a park message: 'p' names the round to answer, and
- * 'c' ends the round it names. 1 when the message was one of those. */
-static int take_round(size_t n) {
-    switch (channel_msg[0]) {
-    case 'p': park_round = record_round(n); park_over = 0; return 1;
-    case 'c': if (record_round(n) == park_round) park_over = 1; return 1;
-    default: return 0;
-    }
-}
+ * 'c' ends the round it names. 1 when the message was one of those. The
+ * round's one decimal field is read in the Rust core (line::take_round,
+ * record_round), which keeps park_round and park_over here. */
+static int take_round(size_t n) { return fz_rs_take_round(channel_msg, n, &park_round, &park_over); }
 
 /* send_quiesce says 'q' with the round the fiber answers. */
 static int send_quiesce(void) {
@@ -1572,29 +1565,22 @@ static void expire_pending(int ctl_fd) {
 }
 
 static int handle_clone(int ctl_fd, char *line, const int passed[MAX_PASSED], fz_on_fiber on_fiber) {
-    /* CLONE <fence> <endpoint> <deadline_ms> <hexpayload|-> <hexsession|-> [opt,opt...] */
-    char *save = NULL;
-    strtok_r(line, " ", &save);
-    const char *fence = strtok_r(NULL, " ", &save);
-    const char *endpoint = strtok_r(NULL, " ", &save);
-    const char *dl = strtok_r(NULL, " ", &save);
-    const char *hex = strtok_r(NULL, " ", &save);
-    const char *shex = strtok_r(NULL, " ", &save);
-    char *opts = strtok_r(NULL, " ", &save);
-    struct confine cf = {0};
-    char *osave = NULL;
-    for (char *o = opts ? strtok_r(opts, ",", &osave) : NULL; o; o = strtok_r(NULL, ",", &osave)) {
-        if (strcmp(o, "pidns") == 0) cf.pidns = 1;
-        else if (strcmp(o, "mntns") == 0) cf.mntns = 1;
-        else if (strcmp(o, "nocaps") == 0) cf.nocaps = 1;
-    }
+    /* CLONE <fence> <endpoint> <deadline_ms> <hexpayload|-> <hexsession|-> [opt,opt...]
+     * The Rust core takes the line apart (line::parse_clone), cutting it
+     * up in place, and decodes the session into session_buf. Each ERROR
+     * is sent from here, at the place its check always had among the
+     * checks on the zygote's own state. */
+    struct fz_rs_clone cl;
+    int refused = fz_rs_parse_clone(line, session_buf, sizeof session_buf, &cl);
+    const char *fence = cl.fence, *endpoint = cl.endpoint;
+    struct confine cf = { .pidns = cl.pidns, .mntns = cl.mntns, .nocaps = cl.nocaps };
     /* Until the fence is known to fit, it goes on the line cut to what
      * the records hold, so the line is sent rather than dropped. */
-    if (!fence || !endpoint || !dl || !hex || !shex) {
+    if (refused == FZ_RS_CLONE_MALFORMED) {
         sendf(ctl_fd, "ERROR %.*s malformed CLONE", FENCE_MAX - 1, fence ? fence : "?");
         return 0;
     }
-    if (strlen(fence) >= FENCE_MAX) {
+    if (refused == FZ_RS_CLONE_FENCE_LONG) {
         sendf(ctl_fd, "ERROR %.*s fence too long (at most %d characters)", FENCE_MAX - 1, fence, FENCE_MAX - 1);
         return 0;
     }
@@ -1614,25 +1600,20 @@ static int handle_clone(int ctl_fd, char *line, const int passed[MAX_PASSED], fz
         sendf(ctl_fd, "ERROR %s CLONE without a channel", fence);
         return 0;
     }
-    int deadline_ms = atoi(dl);
-    if (deadline_ms <= 0) deadline_ms = 50;
+    int deadline_ms = cl.deadline_ms;
     /* The payload reaches the fiber on its record. The line's copy is
      * not decoded here. The session is a C string for the fiber's
      * environment, so a NUL inside it, or more than fits, is refused
      * rather than cut. */
-    size_t slen = 0;
-    if (strcmp(shex, "-") != 0) {
-        if (strlen(shex) / 2 >= sizeof session_buf) {
-            sendf(ctl_fd, "ERROR %s session too long (at most %d bytes)", fence, ENV_VALUE_MAX - 1);
-            return 0;
-        }
-        slen = unhex(shex, (unsigned char *)session_buf, sizeof session_buf - 1);
-        if (memchr(session_buf, 0, slen)) {
-            sendf(ctl_fd, "ERROR %s session holds a NUL byte", fence);
-            return 0;
-        }
+    if (refused == FZ_RS_CLONE_SESSION_LONG) {
+        sendf(ctl_fd, "ERROR %s session too long (at most %d bytes)", fence, ENV_VALUE_MAX - 1);
+        return 0;
     }
-    session_buf[slen] = 0;
+    if (refused == FZ_RS_CLONE_SESSION_NUL) {
+        sendf(ctl_fd, "ERROR %s session holds a NUL byte", fence);
+        return 0;
+    }
+    size_t slen = cl.session_len;
 
     if (npending >= MAX_PENDING) {
         sendf(ctl_fd, "ERROR %s too many clones in flight", fence);
@@ -1646,7 +1627,7 @@ static int handle_clone(int ctl_fd, char *line, const int passed[MAX_PASSED], fz
     /* At most ENV_VALUE_MAX - 1 characters, as the fence is at most
      * FENCE_MAX - 1 (see libfiberzygote.h). Checked on the length itself,
      * since env_endpoint has room for the name as well. */
-    if (strlen(endpoint) >= ENV_VALUE_MAX) {
+    if (cl.endpoint_len >= ENV_VALUE_MAX) {
         sendf(ctl_fd, "ERROR %s endpoint too long (at most %d characters)", fence, ENV_VALUE_MAX - 1);
         return 0;
     }
@@ -1703,25 +1684,9 @@ static int handle_clone(int ctl_fd, char *line, const int passed[MAX_PASSED], fz
  * made again inside the tmpfs that covers parent. A parent of "/" would
  * cover the root. Returns 0, or -1 with a reason. Runs in the zygote's
  * loop, where allocation would be fine, but the paths go to static
- * storage so the child reads them without any. */
-static int set_rundir(char *line, const char **why) {
-    char *save = NULL;
-    strtok_r(line, " ", &save);
-    const char *parent = strtok_r(NULL, " ", &save);
-    const char *own = strtok_r(NULL, " ", &save);
-    if (!parent || !own || strtok_r(NULL, " ", &save)) { *why = "want RUNDIR <parent> <own>"; return -1; }
-    size_t pl = strlen(parent), ol = strlen(own);
-    if (pl >= RUNDIR_MAX || ol >= RUNDIR_MAX) { *why = "path too long"; return -1; }
-    if (parent[0] != '/' || own[0] != '/') { *why = "want absolute paths"; return -1; }
-    if (pl == 1) { *why = "parent must not be /"; return -1; }
-    if (parent[pl - 1] == '/' || own[ol - 1] == '/' || strstr(parent, "//") || strstr(own, "//")) { *why = "want clean paths"; return -1; }
-    if (ol <= pl + 1 || strncmp(own, parent, pl) != 0 || own[pl] != '/') { *why = "own must be under parent"; return -1; }
-    const char *name = own + pl + 1;
-    if (strchr(name, '/') || strcmp(name, ".") == 0 || strcmp(name, "..") == 0) { *why = "own must be a direct child of parent"; return -1; }
-    memcpy(rundir_parent, parent, pl + 1);
-    memcpy(rundir_own, own, ol + 1);
-    return 0;
-}
+ * storage so the child reads them without any. The parsing is in the
+ * Rust core (line::parse_rundir). */
+static int set_rundir(char *line, const char **why) { return fz_rs_set_rundir(line, rundir_parent, rundir_own, why); }
 
 /* in_child_userns reports whether this process runs in a user namespace
  * other than the initial one, read from its uid_map. The initial
@@ -1734,9 +1699,7 @@ static int in_child_userns(void) {
     close(fd);
     if (n <= 0) return 0;
     buf[n] = 0;
-    unsigned long inside, outside, count;
-    if (sscanf(buf, "%lu %lu %lu", &inside, &outside, &count) != 3) return 0;
-    return !(inside == 0 && outside == 0 && count == 4294967295UL);
+    return fz_rs_in_child_userns(buf);
 }
 
 static int write_str(const char *path, const char *val) {
@@ -1823,7 +1786,7 @@ static int rebind_ctl(int ctl_fd) {
     static char line[64];
     int passed[MAX_PASSED];
     ssize_t n = recv_line(ctl_fd, line, sizeof line, passed);
-    if (n <= 0 || strcmp(line, "REBIND") != 0 || passed[0] < 0) {
+    if (n <= 0 || !fz_rs_is_rebind(line) || passed[0] < 0) {
         for (int i = 0; i < MAX_PASSED; i++) if (passed[i] >= 0) close(passed[i]);
         fprintf(stderr, "libfiberzygote: expected REBIND with a socket, got %s\n", n > 0 ? line : "end of stream");
         errno = EPROTO;
@@ -1869,20 +1832,25 @@ static int read_setup(int ctl_fd) {
             if (passed[i] >= 0) close(passed[i]);
         if (n < 0) return -1;
         if (n == 0) return 0;
-        if (strncmp(line, "HIDE /", 6) == 0 || strncmp(line, "DROP /", 6) == 0) {
+        switch (fz_rs_setup_kind(line)) {
+        case FZ_RS_SETUP_HIDE:
+        case FZ_RS_SETUP_DROP:
             keep_path(line);
-        } else if (strncmp(line, "RUNDIR ", 7) == 0) {
+            break;
+        case FZ_RS_SETUP_RUNDIR: {
             const char *why = NULL;
             if (set_rundir(line, &why) < 0) {
                 paths_refused = "RUNDIR refused";
                 fprintf(stderr, "libfiberzygote: RUNDIR refused: %s\n", why);
             }
-        } else if (strcmp(line, "PREPARE mntns") == 0) {
+            break;
+        }
+        case FZ_RS_SETUP_PREPARE_MNTNS:
             if (prepare_ns() < 0) fprintf(stderr, "libfiberzygote: PREPARE refused: %s\n", paths_refused);
             return 1;
-        } else if (strcmp(line, "PREPARE none") == 0) {
+        case FZ_RS_SETUP_PREPARE_NONE:
             return 1;
-        } else {
+        default:
             fprintf(stderr, "libfiberzygote: expected HIDE, DROP, RUNDIR or PREPARE before READY, got %.60s\n", line);
             errno = EPROTO;
             return -1;
@@ -2008,7 +1976,8 @@ static char gv_last_token[GVISOR_TOKEN_MAX + 1];
 static int gv_channel = -1;
 
 /* spec_token copies FIBERD_TOKEN out of the spec environment, KEY=VALUE
- * entries separated by NUL or newline. 0 when it is not there. */
+ * entries separated by NUL or newline. 0 when it is not there. The read
+ * is here, the search in the Rust core (procfiles::spec_token). */
 static int spec_token(char *out, size_t n) {
     static char buf[65536];
     int fd = open(GVISOR_SPEC_ENV, O_RDONLY | O_CLOEXEC);
@@ -2017,16 +1986,7 @@ static int spec_token(char *out, size_t n) {
     while ((r = read(fd, buf + got, sizeof buf - 1 - got)) > 0) got += r;
     close(fd);
     if (got <= 0) return 0;
-    buf[got] = 0;
-    for (ssize_t i = 0; i < got; i++) if (buf[i] == '\n') buf[i] = 0;
-    for (char *p = buf; p < buf + got; p += strlen(p) + 1) {
-        if (strncmp(p, "FIBERD_TOKEN=", 13) != 0) continue;
-        size_t len = strlen(p + 13);
-        if (len == 0 || len >= n) return 0;
-        memcpy(out, p + 13, len + 1);
-        return 1;
-    }
-    return 0;
+    return fz_rs_spec_token(buf, (size_t)got, out, n);
 }
 
 int fz_gvisor_identity(fz_incarnation_t *id) {

@@ -19,6 +19,9 @@ done
 # finding, and an allocator is one by name even if it were on this list.
 allow="abort getauxval memchr memcpy memset memcmp bcmp strlen write __errno_location"
 allow="$allow __addtf3 __multf3 __subtf3 __unordtf2 __udivti3"
+# memmove is copy_within, which moves mountinfo's partial line to the
+# front and an unescaped mount point down, as lock_sys did in C.
+allow="$allow memmove"
 deny_re='^(malloc|calloc|realloc|free|__rust_alloc.*)$'
 
 # The symbol tables of every member. readelf rather than nm, because GNU

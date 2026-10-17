@@ -19,6 +19,20 @@ pub fn nul_at(s: &[u8]) -> usize {
     }
 }
 
+/// The index of the first c in s, or s.len() when there is none.
+pub fn byte_at(s: &[u8], c: u8) -> usize {
+    if s.is_empty() {
+        return 0;
+    }
+    // SAFETY: memchr reads at most s.len() bytes of s, which is live.
+    let p = unsafe { libc::memchr(s.as_ptr().cast(), i32::from(c), s.len()) };
+    if p.is_null() {
+        s.len()
+    } else {
+        (p as usize).wrapping_sub(s.as_ptr() as usize)
+    }
+}
+
 /// The bytes of a C string, the NUL not included.
 ///
 /// # Safety
@@ -27,6 +41,16 @@ pub unsafe fn c_bytes<'a>(s: *const c_char) -> &'a [u8] {
     // SAFETY: strlen reads s up to its NUL, and the slice covers the same
     // bytes, which the caller keeps live.
     unsafe { core::slice::from_raw_parts(s.cast(), libc::strlen(s)) }
+}
+
+/// The bytes of a C string the caller may cut up, the NUL not included.
+///
+/// # Safety
+/// s is a NUL-ended string nothing else touches for 'a.
+pub unsafe fn c_bytes_mut<'a>(s: *mut c_char) -> &'a mut [u8] {
+    // SAFETY: strlen reads s up to its NUL, and the slice covers the same
+    // bytes, which the caller keeps live and ours.
+    unsafe { core::slice::from_raw_parts_mut(s.cast(), libc::strlen(s)) }
 }
 
 /// Copies src into buf at off, as far as it fits, and returns the new
@@ -98,6 +122,20 @@ mod tests {
         ];
         for (name, input, want) in cases {
             assert_eq!(nul_at(input), *want, "{name}");
+        }
+    }
+
+    #[test]
+    fn byte_at_finds_the_first_match() {
+        let cases: &[(&str, &[u8], u8, usize)] = &[
+            ("empty", b"", b' ', 0),
+            ("none", b"abc", b' ', 3),
+            ("first", b" abc", b' ', 0),
+            ("the first of two", b"a b c", b' ', 1),
+            ("a NUL is a byte like any other", b"ab\0c", 0, 2),
+        ];
+        for (name, input, c, want) in cases {
+            assert_eq!(byte_at(input, *c), *want, "{name}");
         }
     }
 

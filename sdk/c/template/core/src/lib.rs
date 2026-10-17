@@ -1,7 +1,8 @@
 //! The core of libfiberzygote, the zygote side of fiberd's process
 //! runtime, behind the C ABI of libfiberzygote.h. The C file calls the
 //! `fz_rs_*` entries for what has moved here, one concern per stage
-//! (bin/rust-core/DESIGN.md). The record parser is the first.
+//! (bin/rust-core/DESIGN.md). The record parser came first, then the
+//! line parsers (line, procfiles).
 //!
 //! No standard library, no allocator and no lock. A fiber runs this code
 //! right after its clone, where C's rule is the same. The unit tests and
@@ -11,6 +12,8 @@
 #![deny(unsafe_op_in_unsafe_fn, missing_docs)]
 
 pub mod abi;
+pub mod line;
+pub mod procfiles;
 pub mod record;
 pub mod sys;
 
