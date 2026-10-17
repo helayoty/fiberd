@@ -149,6 +149,18 @@ pub unsafe fn open_mode(path: *const c_char, flags: c_int, mode: libc::mode_t) -
     }
 }
 
+/// An errno value carried inside the crate, set on the thread once, at
+/// the C boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Errno(pub c_int);
+
+impl Errno {
+    /// What the call that just failed left in errno.
+    pub fn last() -> Errno {
+        Errno(errno())
+    }
+}
+
 /// The thread's errno.
 pub fn errno() -> c_int {
     // SAFETY: errno is the thread's own.

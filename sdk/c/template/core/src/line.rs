@@ -490,7 +490,9 @@ pub unsafe extern "C" fn fz_rs_is_rebind(line: *const c_char) -> c_int {
 }
 
 /// take_round in C, on the n bytes of msg and the fiber's park_round
-/// and park_over. Returns 1 for a 'p' or 'c' message, else 0.
+/// and park_over. Returns 1 for a 'p' or 'c' message, else 0. Only the
+/// tests and the line_diff fuzz target call it, since fiber.rs calls
+/// take_round directly.
 ///
 /// # Safety
 /// msg holds n live bytes, n at least 1, and round and over are

@@ -23,7 +23,6 @@
 #include <sys/signalfd.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
-#include <sys/un.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -47,8 +46,9 @@
  * fence fiberd sent. A longer one is refused, never cut. */
 #define FENCE_MAX 128
 
-/* The ready record is the one byte 'r'. The zygote takes anything else
- * on the pipe as a fiber that misused it. */
+/* The ready record is the one byte 'r', which fz_fiber_ready writes
+ * (READY_BYTE in core/src/fiber.rs). The zygote takes anything else on
+ * the pipe as a fiber that misused it. */
 #define READY_BYTE 'r'
 
 /* A control line is at most SEND_MAX - 1 characters. The longest is the
@@ -58,8 +58,6 @@
 #define SEND_MAX (RUNDIR_MAX + 512)
 
 extern char **environ;
-
-static int ready_fd = -1;
 
 /* SIGCHLD, blocked since fz_init, read here in the poll set. A child's
  * exit wakes the loop, so its EXITED line goes out at once and not at
@@ -259,9 +257,10 @@ static ssize_t recv_line(int fd, char *buf, size_t cap, int fds_out[MAX_PASSED])
     return -1;
 }
 
-/* The record parser lives in the Rust core (core/src/record.rs), behind
- * this entry. Its unhex and parse_generation are called from the core's
- * line parsers now, so nothing here names them. */
+/* The record parser lives in the Rust core (core/src/record.rs). Every
+ * caller is in the core now (the child's path and the fiber-side API).
+ * The entry is declared here for the fuzz harnesses, which include this
+ * file and parse with it. */
 struct record_store;
 int fz_rs_parse_incarnation(struct record_store *st, size_t n, const char **why);
 
@@ -301,19 +300,18 @@ int fz_rs_set_rundir(char *line, char *parent, char *own, const char **why);
 enum { FZ_RS_SETUP_HIDE = 0, FZ_RS_SETUP_DROP = 1, FZ_RS_SETUP_RUNDIR = 2, FZ_RS_SETUP_PREPARE_MNTNS = 3, FZ_RS_SETUP_PREPARE_NONE = 4, FZ_RS_SETUP_OTHER = 5 };
 int fz_rs_setup_kind(const char *line);
 int fz_rs_is_rebind(const char *line);
-int fz_rs_take_round(const char *msg, size_t n, unsigned *round, int *over);
 char *fz_rs_mountinfo_sys_mount(char *buf, size_t have, size_t *start, int *skipping);
 size_t fz_rs_mountinfo_carry(char *buf, size_t cap, size_t have, size_t start, int *skipping);
 int fz_rs_in_child_userns(const char *uid_map);
-int fz_rs_spec_token(char *env, size_t got, char *out, size_t n);
 
 /* The child's path lives in the Rust core (core/src/child.rs and
  * core/src/mounts.rs): the clone3 birth with its legacy fallback,
  * scrub_and_run from the clone to on_fiber, the mount steps, the seccomp
  * filter against nested user namespaces and the capability drop. No
  * system call of the child's is made here any more. The zygote-side
- * callers that stay (lock_sys, prepare_ns, the fiber-side API) reach the
- * shared steps through these entries. */
+ * callers that stay (lock_sys, prepare_ns) reach the shared steps
+ * through these entries. fz_rs_channel_recv is declared for the fuzz
+ * harnesses, since its callers are all in the core now. */
 pid_t fz_rs_birth(int cgroup_fd, unsigned long long want);
 int fz_rs_ro_remount(const char *path);
 int fz_rs_cover_empty(const char *path);
@@ -321,28 +319,26 @@ int fz_rs_narrow_rundir(const char *parent, const char *own);
 int fz_rs_cover_hide(const char *path, const char *self_exe);
 int fz_rs_drop_paths_now(const char (*paths)[KEEP_MAX], int n);
 ssize_t fz_rs_channel_recv(int fd, int flags, char *buf, size_t cap, int *fd_out);
-size_t fz_rs_fmt_uint(char *buf, unsigned v);
 
 /* What the child's path needs from the zygote (Child in core/src/abi.rs),
- * built by handle_clone before the clone. The statics the child resets
- * stay here until stage 5. scrub_and_run resets them with plain stores
- * before the one call into the core, and the one it cannot, the served
- * generation, is known only once the record is read, so the core writes
- * it through the pointer here. */
+ * built by handle_clone before the clone. The zygote's statics the child
+ * resets stay here until stage 5, and scrub_and_run resets them with
+ * plain stores before the one call into the core. The fiber's state (the
+ * channel, the park round, the readiness pipe, the served generation and
+ * the record stores) is the core's (core/src/fiber.rs), which resets it
+ * and reads the birth record into it itself. */
 struct fz_rs_child {
     int ready_r, ready_w, channel, sigchld_fd;
     int pidns, mntns, nocaps, deny_nested_userns;
     int nhide, ndrop;
     const char *fence;
-    struct record_store *born;
-    unsigned *served_generation;
     fz_on_fiber on_fiber;
     const char *self_exe;
     const char (*hide)[KEEP_MAX];
     const unsigned char *hide_covered;
     const char (*drop)[KEEP_MAX];
 };
-_Static_assert(sizeof(struct fz_rs_child) == 104, "fz_rs_child layout");
+_Static_assert(sizeof(struct fz_rs_child) == 88, "fz_rs_child layout");
 _Static_assert(offsetof(struct fz_rs_child, ready_r) == 0, "fz_rs_child layout");
 _Static_assert(offsetof(struct fz_rs_child, ready_w) == 4, "fz_rs_child layout");
 _Static_assert(offsetof(struct fz_rs_child, channel) == 8, "fz_rs_child layout");
@@ -354,13 +350,11 @@ _Static_assert(offsetof(struct fz_rs_child, deny_nested_userns) == 28, "fz_rs_ch
 _Static_assert(offsetof(struct fz_rs_child, nhide) == 32, "fz_rs_child layout");
 _Static_assert(offsetof(struct fz_rs_child, ndrop) == 36, "fz_rs_child layout");
 _Static_assert(offsetof(struct fz_rs_child, fence) == 40, "fz_rs_child layout");
-_Static_assert(offsetof(struct fz_rs_child, born) == 48, "fz_rs_child layout");
-_Static_assert(offsetof(struct fz_rs_child, served_generation) == 56, "fz_rs_child layout");
-_Static_assert(offsetof(struct fz_rs_child, on_fiber) == 64, "fz_rs_child layout");
-_Static_assert(offsetof(struct fz_rs_child, self_exe) == 72, "fz_rs_child layout");
-_Static_assert(offsetof(struct fz_rs_child, hide) == 80, "fz_rs_child layout");
-_Static_assert(offsetof(struct fz_rs_child, hide_covered) == 88, "fz_rs_child layout");
-_Static_assert(offsetof(struct fz_rs_child, drop) == 96, "fz_rs_child layout");
+_Static_assert(offsetof(struct fz_rs_child, on_fiber) == 48, "fz_rs_child layout");
+_Static_assert(offsetof(struct fz_rs_child, self_exe) == 56, "fz_rs_child layout");
+_Static_assert(offsetof(struct fz_rs_child, hide) == 64, "fz_rs_child layout");
+_Static_assert(offsetof(struct fz_rs_child, hide_covered) == 72, "fz_rs_child layout");
+_Static_assert(offsetof(struct fz_rs_child, drop) == 80, "fz_rs_child layout");
 _Static_assert(FZ_CHANNEL_FD == 4 && FZ_CHANNEL_PEER_FD == 5, "the channel descriptors are 4 and 5 in core/src/abi.rs");
 _Noreturn void fz_rs_scrub_and_run(const struct fz_rs_child *c);
 
@@ -594,13 +588,6 @@ static int lock_sys(void) {
     return rc;
 }
 
-/* fmt_uint writes v in decimal to buf (at least 11 bytes) and returns
- * the length. By hand, because a fiber uses no stdio (see the rule at
- * scrub_and_run). The body is core/src/mounts.rs, for send_quiesce. */
-static size_t fmt_uint(char *buf, unsigned v) {
-    return fz_rs_fmt_uint(buf, v);
-}
-
 /* narrow_rundir leaves the zygote, and so every fiber, one directory of
  * fiberd's run directory, its own grant's (RUNDIR). Runs once, from
  * prepare_ns. Returns 0, or -1, and every mntns CLONE is then refused.
@@ -782,30 +769,19 @@ struct confine {
  * and criu carries seccomp filters across. */
 static int deny_nested_userns;
 
-/* FZ_CHANNEL_FD in a fiber, -1 in the zygote and in a gVisor sandbox. */
-static int channel_fd = -1;
-
 /* A session, an endpoint and a fence as the fiber's environment carries
  * them are at most ENV_VALUE_MAX - 1 characters. */
 #define ENV_VALUE_MAX 1024
 
-/* An incarnation record, as fiberd's first message on the channel
- * delivers it, as a gVisor sandbox reads it off the pool socket and as
- * a resume sends it again, 'i' then eleven NUL-ended fields (see
- * libfiberzygote.h). It lives in the fiber's memory (the child's copy
- * of these pages), never the zygote's. The bound leaves room for a
- * payload and a caller certificate of any key size, and only the pages
- * a record touches are ever copied. The decoded payload, session and
- * seed live beside it, and the seed is zeroed once used. The birth
- * record stays in born for the fiber's life, since a handoff fiber's
- * TLS library points into it. A record that arrives later, a resume's,
- * lands in polled. */
+/* An incarnation record and what is parsed out of it, 'i' then eleven
+ * NUL-ended fields (see libfiberzygote.h). The fiber's two stores, the
+ * birth record's and a resume's, are the Rust core's (core/src/fiber.rs),
+ * in its bss as they were here. The layout stays here, pinned to the
+ * core's (core/src/abi.rs) with the same numbers, for the fuzz harnesses
+ * that include this file and look into the stores. */
 #define RECORD_MAX 65536
-#define RECORD_FIELDS 11
 #define SEED_LEN 32
 struct record_store {
-    /* The small fields come first, so a short record and what is parsed
-     * out of it share one page of a fresh fiber's memory. */
     char session[ENV_VALUE_MAX];
     unsigned char seed[SEED_LEN];
     char *seed_hex; /* the seed's field in buf, zeroed with seed */
@@ -814,7 +790,6 @@ struct record_store {
     char buf[RECORD_MAX];
     unsigned char payload[RECORD_MAX / 2];
 };
-static struct record_store born, polled;
 /* The Rust core mirrors these layouts (core/src/abi.rs) with the same
  * numbers, so a field moved on either side fails to compile. */
 _Static_assert(sizeof(fz_identity_t) == 32, "fz_identity_t layout");
@@ -841,51 +816,6 @@ _Static_assert(offsetof(struct record_store, identity) == 1064, "record_store la
 _Static_assert(offsetof(struct record_store, inc) == 1096, "record_store layout");
 _Static_assert(offsetof(struct record_store, buf) == 1176, "record_store layout");
 _Static_assert(offsetof(struct record_store, payload) == 66712, "record_store layout");
-/* The generation this process serves, the birth record's and then each
- * resume's. A record at or below it is a replay and is dropped. */
-static unsigned served_generation;
-/* Set once fz_incarnation_wait handed over a resume's record, until
- * fz_fiber_ready acks it. */
-static int ack_pending;
-/* The park round the fiber answers, from the last 'p' fiberd queued
- * before its signal, and whether that round's carry-on was already
- * there when the fiber quiesced, so the wait answers 0 at once. A
- * carry-on for any other round is stale and dropped, so one left by a
- * park that gave up never undoes a later park's dump. */
-static unsigned park_round;
-static int park_over;
-
-/* parse_incarnation takes the record in st->buf, n bytes, apart into
- * the store and fills st->inc from it. Returns 0, or -1 with a reason,
- * and st->inc is then untouched. It allocates nothing and takes no
- * lock, since the fork path runs it before on_fiber (see
- * scrub_and_run). The body is core/src/record.rs. */
-static int parse_incarnation(struct record_store *st, size_t n, const char **why) {
-    return fz_rs_parse_incarnation(st, n, why);
-}
-
-/* channel_recv takes one message off fd into buf, cap bytes, with
- * flags added to recvmsg's. The first descriptor passed with it goes to
- * *fd_out, -1 for none, and any other is closed. Returns the byte
- * count, 0 at EOF, or -1 with errno, EPROTO for a message longer than
- * a record. The body is core/src/child.rs, which reads the birth record
- * with it too. */
-static ssize_t channel_recv(int fd, int flags, char *buf, size_t cap, int *fd_out) {
-    return fz_rs_channel_recv(fd, flags, buf, cap, fd_out);
-}
-
-/* forget_seed zeroes a store's seed, in its decoded form and in the
- * record, once nothing should be reseeded from it again. */
-static void forget_seed(struct record_store *st) {
-    memset(st->seed, 0, sizeof st->seed);
-    if (st->seed_hex) memset(st->seed_hex, 0, strlen(st->seed_hex));
-    st->inc.seed_len = 0;
-}
-
-void fz_seed_forget(void) {
-    forget_seed(&born);
-    forget_seed(&polled);
-}
 
 /* The fiber's environment, built by the parent before the clone (see
  * handle_clone) and assigned whole in the child. */
@@ -927,15 +857,10 @@ static void scrub_and_run(const struct fz_rs_child *c) {
     control_handler = NULL;
     static const pthread_mutex_t fresh = PTHREAD_MUTEX_INITIALIZER;
     memcpy(&g_ctl_mu, &fresh, sizeof g_ctl_mu);
-    /* The core closes the zygote's SIGCHLD descriptor (c->sigchld_fd)
-     * and parks the readiness pipe at fd 3 and the channel at
-     * FZ_CHANNEL_FD, which these name from here on. */
+    /* The core closes the zygote's SIGCHLD descriptor (c->sigchld_fd),
+     * parks the readiness pipe at fd 3 and the channel at FZ_CHANNEL_FD,
+     * and resets the fiber's state (core/src/fiber.rs) to name them. */
     sigchld_fd = -1;
-    channel_fd = FZ_CHANNEL_FD;
-    ack_pending = 0;
-    park_round = 0;
-    park_over = 0;
-    ready_fd = 3;
     /* Environment. Nothing is inherited but the identity assigned now.
      * The parent built fiber_environ for this clone. The grant's TLS
      * identity is in memory (the record), not in any file it could
@@ -963,145 +888,11 @@ void fz_init(int argc, char **argv) {
     own_mountns();
 }
 
-void fz_fiber_ready(void) {
-    if (ready_fd >= 0) {
-        dup2(0, 2); /* /dev/null, so nothing leads outside the tree once checkpointable */
-        forget_seed(&born);
-        const char rec = READY_BYTE;
-        (void)!write(ready_fd, &rec, 1);
-        close(ready_fd);
-        ready_fd = -1;
-        return;
-    }
-    /* A resumed fiber listens again: the ack fiberd waits for before
-     * it routes anything here, under the new fence. */
-    if (!ack_pending || channel_fd < 0) return;
-    ack_pending = 0;
-    char ack[FENCE_MAX + 2];
-    size_t n = strlen(polled.inc.fence);
-    ack[0] = 'a';
-    memcpy(ack + 1, polled.inc.fence, n + 1);
-    (void)!send(channel_fd, ack, n + 2, MSG_NOSIGNAL);
-    forget_seed(&polled);
-}
-
-/* Messages after the birth record are read here first, so a connection
- * that arrives behind a record never touches the record's store. */
-static char channel_msg[RECORD_MAX];
-
-/* take_record takes the n bytes in channel_msg as a resume's record,
- * into polled. 1 when it is one the fiber has not served yet, 0 for a
- * replay of a generation already served, -1 with EPROTO for anything
- * else. */
-static int take_record(size_t n) {
-    const char *why;
-    if (channel_msg[0] != 'i') { errno = EPROTO; return -1; }
-    memcpy(polled.buf, channel_msg, n);
-    memset(channel_msg, 0, n); /* one copy of a seed, in polled, zeroed with it */
-    if (parse_incarnation(&polled, n, &why) < 0) { errno = EPROTO; return -1; }
-    return polled.inc.generation > served_generation;
-}
-
-/* channel_wait blocks until the channel has a message, then takes it
- * without blocking. A signal ends the wait with EINTR, so a handler of
- * the template's (a park's SIGUSR1) is seen by its loop. */
-static ssize_t channel_wait(char *buf, size_t cap, int *fd_out) {
-    for (;;) {
-        struct pollfd p = { .fd = channel_fd, .events = POLLIN };
-        if (poll(&p, 1, -1) < 0) { *fd_out = -1; return -1; }
-        ssize_t r = channel_recv(channel_fd, MSG_DONTWAIT, buf, cap, fd_out);
-        if (r < 0 && errno == EAGAIN) continue;
-        return r;
-    }
-}
-
-static int take_round(size_t n);
-
-int fz_accept(void) {
-    if (channel_fd < 0) { errno = EBADF; return -1; }
-    for (;;) {
-        int fd;
-        ssize_t r = channel_wait(channel_msg, sizeof channel_msg, &fd);
-        if (r < 0) return -1;
-        if (r == 0) { errno = ECONNRESET; return -1; }
-        if (fd >= 0) return fd;
-        /* A message without a descriptor carries nothing to serve. A
-         * park's round is noted for the quiesce to come, and ends this
-         * call as the park's signal would, since that signal may have
-         * landed already, before this wait began, and would then wake
-         * nothing. The template's loop looks at its park flag again. */
-        if (take_round((size_t)r) && channel_msg[0] == 'p') { errno = EINTR; return -1; }
-    }
-}
-
-/* take_round notes a park message: 'p' names the round to answer, and
- * 'c' ends the round it names. 1 when the message was one of those. The
- * round's one decimal field is read in the Rust core (line::take_round,
- * record_round), which keeps park_round and park_over here. */
-static int take_round(size_t n) { return fz_rs_take_round(channel_msg, n, &park_round, &park_over); }
-
-/* send_quiesce says 'q' with the round the fiber answers. */
-static int send_quiesce(void) {
-    char q[16] = "q";
-    size_t n = 1 + fmt_uint(q + 1, park_round);
-    q[n++] = 0;
-    return send(channel_fd, q, n, MSG_NOSIGNAL) == (ssize_t)n ? 0 : -1;
-}
-
-int fz_quiesce(void) {
-    if (channel_fd < 0) { errno = EBADF; return -1; }
-    /* Whatever fiberd queued before its signal: the round, and the
-     * carry-on of a round that already gave up on this fiber. */
-    for (;;) {
-        int fd;
-        ssize_t r = channel_recv(channel_fd, MSG_DONTWAIT, channel_msg, sizeof channel_msg, &fd);
-        if (r < 0 && errno == EAGAIN) break;
-        if (r < 0) return -1;
-        if (r == 0) { errno = ECONNRESET; return -1; }
-        if (fd >= 0) { close(fd); continue; }
-        if (!take_round((size_t)r)) memset(channel_msg, 0, (size_t)r);
-    }
-    return send_quiesce();
-}
-
-/* wait_none is fz_incarnation_wait handing no record over: whatever a
- * dropped or refused record left in the store goes with it. */
-static int wait_none(int rc) {
-    int e = errno;
-    forget_seed(&polled);
-    errno = e;
-    return rc;
-}
-
-int fz_incarnation_wait(fz_incarnation_t *inc) {
-    if (channel_fd < 0) { errno = EBADF; return -1; }
-    /* The seed the last call handed over has served its purpose. */
-    forget_seed(&polled);
-    for (;;) {
-        /* The round already gave up on this fiber: serve on. */
-        if (park_over) { park_over = 0; return wait_none(0); }
-        int fd;
-        ssize_t r = channel_wait(channel_msg, sizeof channel_msg, &fd);
-        if (r < 0) return wait_none(-1);
-        if (r == 0) { errno = ECONNRESET; return wait_none(-1); }
-        /* A connection handed over meanwhile is nobody's to serve. */
-        if (fd >= 0) { close(fd); continue; }
-        /* A new round while waiting (the fiber quiesced late, or on a
-         * signal of its own) is answered afresh. A carry-on ends the
-         * wait for the round it names, and a stale one is dropped. */
-        if (take_round((size_t)r)) {
-            if (channel_msg[0] == 'p' && send_quiesce() < 0) return wait_none(-1);
-            continue;
-        }
-        int got = take_record((size_t)r);
-        if (got < 0) return wait_none(-1);
-        if (!got) continue; /* a replay */
-        served_generation = polled.inc.generation;
-        ack_pending = 1;
-        *inc = polled.inc;
-        return 1;
-    }
-}
+/* The fiber-side API (fz_fiber_ready, fz_accept, fz_quiesce,
+ * fz_incarnation_wait, fz_seed_forget) and the gVisor side
+ * (fz_gvisor_identity, fz_gvisor_ack) are the Rust core's
+ * (core/src/fiber.rs), exported from there with the header's
+ * signatures, with the state only they and the child's path touch. */
 
 /* A pending child's pipe became readable or closed. Only the ready
  * record (see fz_fiber_ready) makes a fiber. On EOF or anything else
@@ -1246,7 +1037,7 @@ static int handle_clone(int ctl_fd, char *line, const int passed[MAX_PASSED], fz
         .ready_r = rp[0], .ready_w = rp[1], .channel = channel, .sigchld_fd = sigchld_fd,
         .pidns = cf.pidns, .mntns = cf.mntns, .nocaps = cf.nocaps, .deny_nested_userns = deny_nested_userns,
         .nhide = nhide, .ndrop = ndrop,
-        .fence = fence, .born = &born, .served_generation = &served_generation, .on_fiber = on_fiber,
+        .fence = fence, .on_fiber = on_fiber,
         .self_exe = self_exe, .hide = hide_paths, .hide_covered = hide_covered, .drop = drop_paths,
     };
     unsigned long long want = (cf.pidns ? CLONE_NEWPID : 0) | (cf.mntns ? CLONE_NEWNS : 0);
@@ -1561,85 +1352,4 @@ int fz_serve(int ctl_fd, fz_on_fiber on_fiber) {
         for (int i = 0; i < MAX_PASSED; i++)
             if (passed[i] >= 0) close(passed[i]);
     }
-}
-
-/* ---- gVisor ------------------------------------------------------------ */
-
-#define GVISOR_SPEC_ENV "/proc/gvisor/spec_environ"
-#define GVISOR_POOL_SOCKET "/fiberd/channel/pool.sock"
-#define GVISOR_TOKEN_MAX 64
-
-/* The token this process last claimed with. The spec environment can
- * still show the previous restore's for a moment after a restore
- * returns, and a restored copy keeps this memory, so a token already
- * used is waited out. */
-static char gv_last_token[GVISOR_TOKEN_MAX + 1];
-static int gv_channel = -1;
-
-/* spec_token copies FIBERD_TOKEN out of the spec environment, KEY=VALUE
- * entries separated by NUL or newline. 0 when it is not there. The read
- * is here, the search in the Rust core (procfiles::spec_token). */
-static int spec_token(char *out, size_t n) {
-    static char buf[65536];
-    int fd = open(GVISOR_SPEC_ENV, O_RDONLY | O_CLOEXEC);
-    if (fd < 0) return 0;
-    ssize_t got = 0, r;
-    while ((r = read(fd, buf + got, sizeof buf - 1 - got)) > 0) got += r;
-    close(fd);
-    if (got <= 0) return 0;
-    return fz_rs_spec_token(buf, (size_t)got, out, n);
-}
-
-int fz_gvisor_identity(fz_incarnation_t *id) {
-    if (gv_channel >= 0) { close(gv_channel); gv_channel = -1; }
-    char token[GVISOR_TOKEN_MAX + 1];
-    int fresh = 0;
-    for (int i = 0; i < 3000 && !fresh; i++) {
-        fresh = spec_token(token, sizeof token) && strcmp(token, gv_last_token) != 0;
-        if (!fresh) usleep(1000);
-    }
-    if (!fresh) { errno = ENOENT; return -1; }
-    memcpy(gv_last_token, token, sizeof token);
-    int fd = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
-    if (fd < 0) return -1;
-    struct sockaddr_un a = { .sun_family = AF_UNIX, .sun_path = GVISOR_POOL_SOCKET };
-    int rc = -1;
-    for (int i = 0; i < 2000 && rc < 0; i++) {
-        rc = connect(fd, (struct sockaddr *)&a, sizeof a);
-        if (rc < 0 && errno != ECONNREFUSED && errno != ENOENT) break;
-        if (rc < 0) usleep(1000);
-    }
-    if (rc < 0) { int e = errno; close(fd); errno = e; return -1; }
-    char claim[GVISOR_TOKEN_MAX + 2];
-    size_t cn = 1 + strlen(token) + 1;
-    claim[0] = 't';
-    memcpy(claim + 1, token, strlen(token) + 1);
-    if (write(fd, claim, cn) != (ssize_t)cn) { int e = errno; close(fd); errno = e; return -1; }
-    struct iovec iov = { .iov_base = born.buf, .iov_len = sizeof born.buf };
-    struct msghdr mh = { .msg_iov = &iov, .msg_iovlen = 1 };
-    ssize_t r;
-    do r = recvmsg(fd, &mh, 0); while (r < 0 && errno == EINTR);
-    if (r < 0) { int e = errno; close(fd); errno = e; return -1; }
-    if (r == 0 || (mh.msg_flags & MSG_TRUNC)) { close(fd); errno = r == 0 ? ECONNRESET : EMSGSIZE; return -1; }
-    const char *why = NULL;
-    if (parse_incarnation(&born, (size_t)r, &why) < 0) { close(fd); errno = EPROTO; return -1; }
-    served_generation = born.inc.generation;
-    *id = born.inc;
-    gv_channel = fd;
-    return 0;
-}
-
-int fz_gvisor_ack(void) {
-    if (gv_channel < 0) { errno = EBADF; return -1; }
-    char ack[FENCE_MAX + 2];
-    size_t n = strlen(born.inc.fence);
-    ack[0] = 'a';
-    memcpy(ack + 1, born.inc.fence, n + 1);
-    ssize_t w = write(gv_channel, ack, n + 2);
-    int e = errno;
-    close(gv_channel);
-    gv_channel = -1;
-    forget_seed(&born);
-    if (w != (ssize_t)(n + 2)) { errno = e; return -1; }
-    return 0;
 }

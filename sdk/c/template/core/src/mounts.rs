@@ -639,20 +639,6 @@ pub unsafe fn kept<'a>(p: *const [c_char; KEEP_MAX], n: c_int) -> &'a [[c_char; 
     unsafe { core::slice::from_raw_parts(p, n) }
 }
 
-/// fmt_uint, for send_quiesce in the C shim: v in decimal into buf (at
-/// least 11 bytes), and its length. No NUL is written.
-///
-/// # Safety
-/// buf has room for 10 digits.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn fz_rs_fmt_uint(buf: *mut c_char, v: u32) -> usize {
-    let mut digits = [0u8; 10];
-    let n = sys::append_decimal(&mut digits, 0, v);
-    // SAFETY: buf has room by the contract above, digits has n bytes.
-    unsafe { ptr::copy_nonoverlapping(digits.as_ptr(), buf.cast(), n) };
-    n
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(
@@ -813,22 +799,6 @@ mod tests {
             let got = unsafe { narrow_rundir(parent.as_ptr(), own.as_ptr()) };
             assert_eq!(got, -1, "{name}");
             assert_eq!(sys::errno(), *want_errno, "{name}: errno");
-        }
-    }
-
-    #[test]
-    fn fmt_uint_writes_decimal_without_a_nul() {
-        let cases: &[(&str, u32, &str)] = &[
-            ("zero", 0, "0"),
-            ("one digit", 9, "9"),
-            ("ten digits", u32::MAX, "4294967295"),
-        ];
-        for (name, v, want) in cases {
-            let mut buf = [b'x'; 16];
-            // SAFETY: buf has room for 10 digits.
-            let n = unsafe { fz_rs_fmt_uint(buf.as_mut_ptr().cast(), *v) };
-            assert_eq!(&buf[..n], want.as_bytes(), "{name}");
-            assert_eq!(buf[n], b'x', "{name}: nothing past the digits");
         }
     }
 }

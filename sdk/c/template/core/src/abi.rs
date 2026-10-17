@@ -40,11 +40,12 @@ pub const FZ_CHANNEL_PEER_FD: c_int = 5;
 pub type OnFiber = Option<unsafe extern "C" fn(*const Incarnation) -> c_int>;
 
 /// struct fz_rs_child in libfiberzygote.c: what the child's path needs
-/// from the zygote, built by handle_clone before the clone. The statics
-/// the child resets stay C until stage 5, and the C resets them with
-/// plain stores before the one call into the core. The one it cannot,
-/// served_generation, is known only once the record is read, so the
-/// core writes it through the pointer here.
+/// from the zygote, built by handle_clone before the clone. The zygote's
+/// statics the child resets stay C until stage 5, and the C resets them
+/// with plain stores before the one call into the core. The fiber's
+/// state, the birth record's store among it, is the core's own
+/// (fiber.rs), so the core resets it and reads the record into it with
+/// no pointer from C.
 #[repr(C)]
 pub struct Child {
     /// The ready pipe's read end, the zygote's, closed first.
@@ -69,10 +70,6 @@ pub struct Child {
     pub ndrop: c_int,
     /// The fence the CLONE named, NUL-ended.
     pub fence: *const c_char,
-    /// The store the birth record is read into, born in C.
-    pub born: *mut RecordStore,
-    /// The generation this process serves, set from the record.
-    pub served_generation: *mut c_uint,
     /// The template's entry.
     pub on_fiber: OnFiber,
     /// The zygote's own executable as /proc/self/exe named it, NUL-ended,
@@ -111,6 +108,7 @@ pub struct CloneOut {
 
 /// fz_identity_t.
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct Identity {
     /// The grant's PKCS #8 private key.
     pub key_pem: *const c_char,
@@ -124,6 +122,7 @@ pub struct Identity {
 
 /// fz_incarnation_t.
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct Incarnation {
     /// The fiber's identity, "grant/epoch/seq".
     pub fence: *const c_char,
@@ -202,7 +201,7 @@ const _: () = {
     assert!(offset_of!(CloneOut, mntns) == 32);
     assert!(offset_of!(CloneOut, nocaps) == 36);
     assert!(offset_of!(CloneOut, session_len) == 40);
-    assert!(size_of::<Child>() == 104);
+    assert!(size_of::<Child>() == 88);
     assert!(offset_of!(Child, ready_r) == 0);
     assert!(offset_of!(Child, ready_w) == 4);
     assert!(offset_of!(Child, channel) == 8);
@@ -214,13 +213,11 @@ const _: () = {
     assert!(offset_of!(Child, nhide) == 32);
     assert!(offset_of!(Child, ndrop) == 36);
     assert!(offset_of!(Child, fence) == 40);
-    assert!(offset_of!(Child, born) == 48);
-    assert!(offset_of!(Child, served_generation) == 56);
-    assert!(offset_of!(Child, on_fiber) == 64);
-    assert!(offset_of!(Child, self_exe) == 72);
-    assert!(offset_of!(Child, hide) == 80);
-    assert!(offset_of!(Child, hide_covered) == 88);
-    assert!(offset_of!(Child, drop) == 96);
+    assert!(offset_of!(Child, on_fiber) == 48);
+    assert!(offset_of!(Child, self_exe) == 56);
+    assert!(offset_of!(Child, hide) == 64);
+    assert!(offset_of!(Child, hide_covered) == 72);
+    assert!(offset_of!(Child, drop) == 80);
     assert!(
         KEEP_MAX >= 4096,
         "a realpath result (PATH_MAX) must fit a kept path"

@@ -1,7 +1,9 @@
-/* fuzz_gvrecord feeds parse_incarnation one record, held in a buffer of
+/* fuzz_gvrecord feeds the record parser one record, held in a buffer of
  * exactly its size so a read past the end crashes. That is the parser a
  * gVisor sandbox runs on what the pool socket hands it, and the one a
- * forked fiber runs on its channel's first message. */
+ * forked fiber runs on its channel's first message. Every caller of it
+ * is in the Rust core, so this drives its entry, fz_rs_parse_incarnation
+ * (core/src/record.rs), the one they share. */
 #include "common.h"
 #include "../libfiberzygote.c"
 
@@ -16,7 +18,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     memcpy(rec, data, size);
     memcpy(st->buf, data, size);
     const char *why = NULL;
-    int rc = parse_incarnation(st, size, &why);
+    int rc = fz_rs_parse_incarnation(st, size, &why);
     const fz_incarnation_t incarnation = st->inc;
     /* Offsets into st->buf, as offsets into the exact-size copy. */
 #define IN_REC(ptr) ((ptr) >= st->buf && (ptr) < st->buf + size)

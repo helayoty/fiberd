@@ -214,6 +214,24 @@ pub unsafe extern "C" fn fz_rs_parse_incarnation(
     let Some(st) = (unsafe { st.as_mut() }) else {
         return -1;
     };
+    match parse_store(st, n) {
+        Ok(()) => 0,
+        Err(reason) => {
+            if !why.is_null() {
+                // SAFETY: why is writable by the contract above.
+                unsafe { *why = reason.as_ptr() };
+            }
+            -1
+        }
+    }
+}
+
+/// parse_incarnation on a store the caller holds: the record in
+/// st.buf, n bytes, taken apart into the store, with st.inc filled from
+/// it. Err carries the reason, and st.inc is then untouched. The
+/// fiber-side API (fiber.rs) parses a resume's record and a gVisor
+/// sandbox's with it.
+pub fn parse_store(st: &mut RecordStore, n: usize) -> Result<(), &'static CStr> {
     let n = n.min(RECORD_MAX);
     let parsed = {
         let RecordStore {
@@ -225,19 +243,12 @@ pub unsafe extern "C" fn fz_rs_parse_incarnation(
         } = st;
         parse(buf.get(..n).unwrap_or(&[]), session, seed, payload)
     };
-    let parsed = match parsed {
-        Ok(p) => p,
-        Err(reason) => {
-            if !why.is_null() {
-                // SAFETY: why is writable by the contract above.
-                unsafe { *why = reason.as_ptr() };
-            }
-            return -1;
-        }
-    };
-    // Every field lies within buf[..n], which parse checked.
+    let parsed = parsed?;
+    // Every field lies within buf[..n], which parse checked. The seed's
+    // field is written through later (fiber::forget_seed), so its
+    // pointer is taken from the buffer as mutable.
+    st.seed_hex = st.buf.as_mut_ptr().wrapping_add(parsed.offset(10)).cast();
     let at = |i: usize| -> *const c_char { st.buf.as_ptr().wrapping_add(parsed.offset(i)).cast() };
-    st.seed_hex = at(10).cast_mut();
     if parsed.identity {
         st.identity = Identity {
             key_pem: at(6),
@@ -262,7 +273,7 @@ pub unsafe extern "C" fn fz_rs_parse_incarnation(
             ptr::null()
         },
     };
-    0
+    Ok(())
 }
 
 /// parse_generation in C, on a NUL-ended string.

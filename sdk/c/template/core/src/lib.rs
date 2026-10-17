@@ -4,7 +4,8 @@
 //! (bin/rust-core/DESIGN.md). The record parser came first, then the
 //! line parsers (line, procfiles), then the child's path (child, with
 //! its mount steps in mounts), whose system calls go through the sys
-//! seam.
+//! seam, then the fiber-side API (fiber), whose fz_* entries are
+//! exported from here directly.
 //!
 //! No standard library, no allocator and no lock. A fiber runs this code
 //! right after its clone, where C's rule is the same. The unit tests and
@@ -15,6 +16,7 @@
 
 pub mod abi;
 pub mod child;
+pub mod fiber;
 pub mod line;
 pub mod mounts;
 pub mod procfiles;

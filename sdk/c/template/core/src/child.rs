@@ -3,7 +3,8 @@
 //! mount steps in mounts.rs, userns_filter against nested user
 //! namespaces and drop_caps for its capabilities. The C shim builds a
 //! Child (abi.rs) before the clone, resets its own statics with plain
-//! stores in the child and makes one call here.
+//! stores in the child and makes one call here. The fiber's state is
+//! the core's (fiber.rs), reset here and holding the birth record.
 //!
 //! THE RULE FOR THIS PATH. Nothing here may allocate, free, use stdio
 //! or take a lock before on_fiber runs, on either birth path. The clone
@@ -32,6 +33,7 @@ use core::mem::{offset_of, size_of};
 use core::ptr;
 
 use crate::abi::{Child, FZ_CHANNEL_FD, FZ_CHANNEL_PEER_FD, RECORD_MAX, RecordStore};
+use crate::fiber;
 use crate::mounts::{self, Tables};
 use crate::sys;
 
@@ -704,10 +706,11 @@ unsafe fn child_say_errno(fence: *const c_char, what: &CStr, e: c_int) {
 /// scrub_and_run is the child between the clone and the application,
 /// under the rule at the top of this module. The C shim has already
 /// reset its own statics with plain stores (the control descriptor and
-/// handler, the report mutex, the channel and park state, ready_fd and
-/// environ), none of which anything reads before on_fiber. What is
-/// known only once the record is read, served_generation, is written
-/// through c.
+/// handler, the report mutex, the SIGCHLD descriptor and environ). The
+/// fiber's state is reset here first, with plain stores too (the
+/// channel and park state and ready_fd, fiber::reset_for_child). None
+/// of it is read before on_fiber. What is known only once the record is
+/// read, the served generation, is noted then.
 ///
 /// Descriptors first. The ready pipe's read end is the zygote's. The
 /// zygote's SIGCHLD descriptor goes, wherever it sits. The readiness
@@ -747,6 +750,10 @@ unsafe fn child_say_errno(fence: *const c_char, what: &CStr, e: c_int) {
 /// The caller is the child of birth, c is a live Child whose pointers
 /// are what abi.rs says, and the whole process is this path's.
 pub unsafe fn scrub_and_run(c: &Child) -> ! {
+    // SAFETY: the child is the process's one thread, by the contract
+    // above.
+    unsafe { fiber::reset_for_child() };
+    let born_store = fiber::born();
     // SAFETY: integer arguments alone, descriptors the zygote held.
     unsafe {
         libc::close(c.ready_r);
@@ -798,17 +805,17 @@ pub unsafe fn scrub_and_run(c: &Child) -> ! {
         }
     }
     let mut why: *const c_char = ptr::null();
-    // SAFETY: c.born is the live store, by the contract above.
-    if unsafe { read_incarnation(FZ_CHANNEL_FD, c.born, &mut why) } < 0 {
+    // SAFETY: the birth record's store is live and this path's alone.
+    if unsafe { read_incarnation(FZ_CHANNEL_FD, born_store, &mut why) } < 0 {
         // SAFETY: fence by the contract above, why was set with the -1.
         unsafe {
             child_say(c.fence, c"incarnation record", why);
             libc::_exit(EX_IDENTITY)
         }
     }
-    // SAFETY: c.born is live and parsed, so inc.fence is a NUL-ended
+    // SAFETY: the store is live and parsed, so inc.fence is a NUL-ended
     // field in its buf, and c.fence is NUL-ended.
-    let born = unsafe { &*c.born };
+    let born = unsafe { &*born_store };
     // SAFETY: both NUL-ended, as above.
     if unsafe { libc::strcmp(born.inc.fence, c.fence) } != 0 {
         // SAFETY: fence by the contract above, the reason is static.
@@ -821,10 +828,8 @@ pub unsafe fn scrub_and_run(c: &Child) -> ! {
             libc::_exit(EX_IDENTITY)
         }
     }
-    if !c.served_generation.is_null() {
-        // SAFETY: a live static of the C's, by the contract above.
-        unsafe { *c.served_generation = born.inc.generation };
-    }
+    // SAFETY: the process's one thread, by the contract above.
+    unsafe { fiber::set_served_generation(born.inc.generation) };
     if born.inc.identity.is_null() && own_pair() < 0 {
         // SAFETY: _exit ends the child and never returns.
         unsafe { libc::_exit(EX_FDS) }
@@ -877,9 +882,14 @@ pub unsafe fn scrub_and_run(c: &Child) -> ! {
         // SAFETY: _exit ends the child and never returns.
         unsafe { libc::_exit(EX_CAPS) }
     }
+    // The record's address is taken from the store, not from the shared
+    // reference above, since on_fiber may call fz_fiber_ready, which
+    // writes the store (the seed).
+    // SAFETY: the store is live, and only its address is taken.
+    let inc = unsafe { &raw const (*born_store).inc };
     let rc = match c.on_fiber {
         // SAFETY: the template's entry, with the record it was promised.
-        Some(on_fiber) => unsafe { on_fiber(&raw const born.inc) },
+        Some(on_fiber) => unsafe { on_fiber(inc) },
         // No template passes a null entry, and the C would have crashed
         // on the call. abort takes nothing and never returns.
         None => unsafe { libc::abort() },
@@ -916,7 +926,7 @@ pub unsafe extern "C" fn fz_rs_scrub_and_run(c: *const Child) -> ! {
     }
 }
 
-/// channel_recv, for the C shim and the fiber-side API still there.
+/// channel_recv, for the C fuzz harnesses (fuzz/fuzz_identity.c).
 ///
 /// # Safety
 /// As channel_recv, and fd_out is writable.

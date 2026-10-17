@@ -1,5 +1,5 @@
 //! Shared by the line targets: the input format csrc/line.c's header
-//! defines, and the Rust side of each parser driven as libfiberzygote.c
+//! defines, and the Rust side of each parser driven as the library
 //! drives it, through the fz_rs_* entries.
 #![allow(dead_code)]
 
@@ -238,9 +238,9 @@ pub fn rs_uid_map(file: &[u8]) -> c_int {
     unsafe { fz_rs_in_child_userns(buf.as_ptr().cast()) }
 }
 
-/// spec_token as libfiberzygote.c drives it: reads of at most 65535
-/// bytes into a static buffer, which keeps what an earlier read left
-/// past them, into out.
+/// spec_token as fz_gvisor_identity drives it (fiber.rs), reading at
+/// most 65535 bytes into a static buffer, which keeps what an earlier
+/// read left past them, into out.
 pub fn rs_spec_token(file: &[u8], out: &mut [u8]) -> c_int {
     let mut buf = vec![0x5au8; 65536];
     let got = file.len().min(buf.len() - 1);

@@ -1,11 +1,14 @@
 /* Shared helpers for the libFuzzer harnesses in this directory. Each
- * harness includes the zygote source it tests, so it reaches the static
- * parsers directly, and hands them the fuzz input through the kind of
+ * harness includes the zygote source it tests, so it reaches the C's
+ * static functions directly and the Rust core's entries through the
+ * declarations there. It hands them the fuzz input through the kind of
  * descriptor they read from, a memfd for a file or a socket for a peer. */
 #ifndef FZ_FUZZ_COMMON_H
 #define FZ_FUZZ_COMMON_H
 #define _GNU_SOURCE
 #include <errno.h>
+#include <stdbool.h>
+#include <stddef.h>
 #include <fcntl.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -75,6 +78,32 @@ int fz_fuzz_open(const char *path, int flags, ...) {
     return open(path, flags, mode);
 }
 #endif
+
+/* The fiber's state and record stores, which the Rust core owns
+ * (core/src/fiber.rs) and its fuzzshim archive hands out, so a harness
+ * sets them up and checks them as it did the C file's statics. struct
+ * fz_rs_fiber_state is State there, pinned with the same numbers. */
+struct fz_rs_fiber_state {
+    int channel_fd;
+    int ready_fd;
+    unsigned served_generation;
+    unsigned park_round;
+    int gv_channel;
+    bool ack_pending;
+    bool park_over;
+    char gv_last_token[65];
+};
+_Static_assert(sizeof(struct fz_rs_fiber_state) == 88, "State in core/src/fiber.rs");
+_Static_assert(offsetof(struct fz_rs_fiber_state, served_generation) == 8, "State in core/src/fiber.rs");
+_Static_assert(offsetof(struct fz_rs_fiber_state, park_round) == 12, "State in core/src/fiber.rs");
+_Static_assert(offsetof(struct fz_rs_fiber_state, gv_channel) == 16, "State in core/src/fiber.rs");
+_Static_assert(offsetof(struct fz_rs_fiber_state, ack_pending) == 20, "State in core/src/fiber.rs");
+_Static_assert(offsetof(struct fz_rs_fiber_state, park_over) == 21, "State in core/src/fiber.rs");
+_Static_assert(offsetof(struct fz_rs_fiber_state, gv_last_token) == 22, "State in core/src/fiber.rs");
+struct record_store;
+struct fz_rs_fiber_state *fz_rs_fuzz_state(void);
+struct record_store *fz_rs_fuzz_born(void);
+struct record_store *fz_rs_fuzz_polled(void);
 
 /* memfd_of returns a memfd holding data, positioned at its start. The
  * harness cannot run without one, so a refusal aborts. */

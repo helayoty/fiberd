@@ -322,7 +322,9 @@ pub unsafe extern "C" fn fz_rs_in_child_userns(s: *const c_char) -> c_int {
 
 /// spec_token in C: finds FIBERD_TOKEN in the got bytes of env, which it
 /// cuts up in place, and copies it NUL-ended into out, n bytes. Returns
-/// 1, or 0 when it is not there, is empty or does not fit.
+/// 1, or 0 when it is not there, is empty or does not fit. Only the
+/// tests and the line fuzz targets call it, since fiber.rs calls
+/// spec_token directly.
 ///
 /// # Safety
 /// env holds got live bytes nothing else touches, and out has room for

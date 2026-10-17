@@ -32,6 +32,10 @@ allow="$allow memmove"
 # mask, and strcmp for the fence check.
 allow="$allow syscall prctl openat close _exit mount umount2 mkdir open"
 allow="$allow stat chdir dup2 fcntl socketpair recvmsg setsid signal sigemptyset sigprocmask strcmp"
+# The fiber-side API and the gVisor side (fiber.rs) make the calls the C
+# made there: poll and send on the channel, socket, connect and usleep
+# for the pool socket, and read for the spec environment.
+allow="$allow poll send socket connect usleep read"
 deny_re='^(malloc|calloc|realloc|free|__rust_alloc.*)$'
 
 # The symbol tables of every member. readelf rather than nm, because GNU

@@ -26,7 +26,7 @@ pub const REASONS: &[&str] = &[
 pub fn store_with(data: &[u8]) -> (Box<RecordStore>, usize) {
     let n = data.len().min(RECORD_MAX);
     // SAFETY: every field of a record_store is plain data, so all-zero
-    // is a valid value, as the C file's bss stores start out.
+    // is a valid value, as the core's bss stores start out (fiber.rs).
     let mut st = unsafe { Box::<RecordStore>::new_zeroed().assume_init() };
     st.buf[..n].copy_from_slice(&data[..n]);
     (st, n)
