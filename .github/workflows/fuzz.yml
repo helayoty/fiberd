@@ -14,9 +14,9 @@ permissions:
 
 jobs:
   fuzz:
-    name: fuzz the zygote's parsers (libFuzzer) and the handoff SNI parser (go test -fuzz)
+    name: fuzz the zygote's parsers (libFuzzer, C harnesses and the core's cargo-fuzz targets) and the handoff SNI parser (go test -fuzz)
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -24,8 +24,18 @@ jobs:
           go-version-file: go.mod
       - name: install clang with libFuzzer
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends clang libclang-rt-dev
-      # 60 seconds per harness. A crash fails the job and leaves its input
-      # under bin/fuzz/crashes/ (the Go fuzzer writes to testdata/fuzz/).
+      # The core's cargo-fuzz targets need a nightly for the sanitizers, in
+      # this job only. rustup installs the one the fuzz crate's
+      # rust-toolchain.toml pins on the first cargo call there.
+      - name: install the fuzz crate's nightly and cargo-fuzz
+        env:
+          CARGO_FUZZ_VERSION: 0.13.2
+        run: |
+          (cd sdk/c/template/core/fuzz && cargo --version)
+          cargo install --locked cargo-fuzz --version "$CARGO_FUZZ_VERSION"
+      # 60 seconds per cargo-fuzz target (ten) and for the C harness and the
+      # Go fuzzer. A crash fails the job and leaves its input under
+      # bin/fuzz/crashes/ (the Go fuzzer writes to testdata/fuzz/).
       - run: make fuzz FUZZTIME=60
       - name: keep the crashing inputs
         if: failure()

@@ -1,12 +1,12 @@
-/* Shared helpers for the libFuzzer harnesses in this directory. Each
- * harness includes the zygote source it tests, so it reaches the static
- * parsers directly, and hands them the fuzz input through the kind of
- * descriptor they read from, a memfd for a file or a socket for a peer. */
+/* Helpers for the libFuzzer harness in this directory, fuzz_refzygote.
+ * It hands the reference workload's parsers the fuzz input through the
+ * kind of descriptor they read from, a memfd for a stream of lines or a
+ * socket for a peer. */
 #ifndef FZ_FUZZ_COMMON_H
 #define FZ_FUZZ_COMMON_H
 #define _GNU_SOURCE
 #include <errno.h>
-#include <fcntl.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -56,15 +56,6 @@ static inline void send_fds(int sock, const uint8_t *data, size_t n, const int *
     ssize_t r;
     do r = sendmsg(sock, &mh, MSG_NOSIGNAL); while (r < 0 && errno == EINTR);
     if (r != (ssize_t)n) abort();
-}
-
-/* send_scratch_fds is send_fds with nfds throwaway memfds attached, which
- * it closes once they are in flight. */
-static inline void send_scratch_fds(int sock, const uint8_t *data, size_t n, size_t nfds) {
-    int fds[8];
-    for (size_t i = 0; i < nfds; i++) fds[i] = memfd_of(NULL, 0);
-    send_fds(sock, data, n, fds, nfds);
-    for (size_t i = 0; i < nfds; i++) close(fds[i]);
 }
 
 #endif

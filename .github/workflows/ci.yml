@@ -76,6 +76,11 @@ jobs:
       - run: make build
       # Coverage is printed per package for the log only. Nothing fails on it.
       - run: make test TESTFLAGS=-cover
+      # The zygote library's Rust crate, its unit tests, clippy and rustfmt.
+      # Linux only, since the library calls glibc. rust-toolchain.toml in the
+      # crate installs its pinned toolchain on the first cargo call.
+      - if: runner.os == 'Linux'
+        run: make zygote-test
 
   typescript:
     name: "TypeScript client (${{ matrix.os }}, Node.js ${{ matrix.node }}): types, tests, tarball and proto drift"
@@ -122,7 +127,9 @@ jobs:
       - run: python -m pip install ruff pytest cryptography
       - run: ruff check sdk/python
       # On Linux this compiles fiberd._zygote against sdk/c/template with the
-      # hardening flags. Off Linux the package has no extension. The client
+      # hardening flags, and cargo builds the library's Rust crate on the
+      # stable its rust-toolchain.toml pins. Off Linux the package has no
+      # extension. The client
       # extra brings grpcio and protobuf, so fiberd.client is tested too.
       - run: python -m pip install -e "sdk/python[client]"
       - run: python -m pytest -q sdk/python
@@ -165,3 +172,6 @@ jobs:
       # CRIU restores trap on a signed return address on a FEAT_FPAC CPU.
       - if: runner.arch == 'ARM64'
         run: hack/python/pac.sh wheelhouse/*.whl
+      # The wheel links the zygote library's archive. Its undefined
+      # symbols against the allowlist, and its PAC count on arm64.
+      - run: make zygote-check

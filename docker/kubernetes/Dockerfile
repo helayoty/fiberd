@@ -51,14 +51,37 @@ RUN set -eu; if ! command -v runsc >/dev/null 2>&1; then \
       echo "$sum  /usr/local/bin/runsc" | sha512sum -c - >/dev/null; \
       chmod 0755 /usr/local/bin/runsc; \
     fi; runsc --version
+# Rust for the zygote library (sdk/c/template/core), with the pins
+# of docker/dev/Dockerfile. rustup-init is a pinned release checked
+# against its published sha256, and rustup checks the toolchain against
+# the signed channel manifest. The toolchain is the one the crate's
+# rust-toolchain.toml pins. The dev image already has it.
+ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo PATH=/usr/local/cargo/bin:$PATH
+ARG RUSTUP_VERSION=1.29.1
+ARG RUSTUP_SHA256_X86_64=dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb71
+ARG RUSTUP_SHA256_AARCH64=15f6e4ce9f583b929c996c91562bad6d4454f3281de858b02cdfdef615fac433
+ARG RUST_TOOLCHAIN=1.99.0
+RUN set -eu; if ! command -v cargo >/dev/null 2>&1; then \
+      arch=$(uname -m); \
+      case "$arch" in \
+        x86_64)  sum=$RUSTUP_SHA256_X86_64 ;; \
+        aarch64) sum=$RUSTUP_SHA256_AARCH64 ;; \
+        *) echo "no pinned rustup-init for $arch" >&2; exit 1 ;; \
+      esac; \
+      curl -fsSL "https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/${arch}-unknown-linux-gnu/rustup-init" -o /tmp/rustup-init; \
+      echo "$sum  /tmp/rustup-init" | sha256sum -c - >/dev/null; \
+      chmod 0755 /tmp/rustup-init; \
+      /tmp/rustup-init -y --no-modify-path --profile minimal --default-toolchain "${RUST_TOOLCHAIN}" -c clippy -c rustfmt; \
+      rm -f /tmp/rustup-init; \
+    fi; cargo --version
 WORKDIR /src
 COPY . .
 # Go binaries are static and reproducible. The reference zygote is built
 # with TLS (-DFZ_TLS) because handoff fibers must serve the TLS identity
-# they receive, with ZYGOTE_CFLAGS and ZYGOTE_LDFLAGS from the Makefile. On
-# aarch64 it is built without PAC branch protection, because a process
-# restored from a checkpoint keeps stale PAC keys (see
-# docker/dev/Dockerfile).
+# they receive, with ZYGOTE_CFLAGS and ZYGOTE_LDFLAGS from the Makefile,
+# and links the zygote library's archive. On aarch64 it is built without PAC
+# branch protection, because a process restored from a checkpoint keeps
+# stale PAC keys (see docker/dev/Dockerfile).
 # fiberd is built with the fiberd_testhooks tag, since kind conformance
 # drives the test-only admin controls (-admin-unsafe). The release image
 # (docker/fiberd) is built without it.
@@ -72,6 +95,7 @@ ENV CGO_ENABLED=0 GOFLAGS=-trimpath
 RUN set -eu; mkdir -p /out; \
     ldflags="-s -w -buildid="; \
     go build -ldflags "$ldflags" -o /out/ ./hack/storm ./hack/fibctl ./hack/sessioncheck; \
+    (cd sdk/c/template/core && cargo build --release --locked); \
     hack/gvisor/rootfs.sh /out/rootfs >/dev/null; \
     go test -c -tags integration -ldflags "$ldflags" -o /out/grant-conform ./tests/e2e/conform; \
     (cd examples/kubernetes && go build -tags fiberd_testhooks -ldflags "$ldflags" -o /out/ ./cmd/...); \
@@ -80,7 +104,7 @@ RUN set -eu; mkdir -p /out; \
     [ ! -d "$sysroot/usr/include" ] || sr="--sysroot=$sysroot -B$sysroot/usr/lib/$(gcc -print-multiarch)"; \
     gcc $sr -D_FORTIFY_SOURCE=3 -O2 -fstack-protector-strong -fstack-clash-protection -fPIE -Wformat=2 -Werror=format-security \
       -pie -Wl,-z,relro,-z,now -Wall -Wextra -pthread $flags -DFZ_TLS -o /out/refzygote \
-      sdk/c/template/refzygote.c sdk/c/template/libfiberzygote.c -lssl -lcrypto; \
+      sdk/c/template/refzygote.c sdk/c/template/core/target/release/libfiberzygote_core.a -lssl -lcrypto; \
     need=$(objdump -T /out/refzygote | grep -o "GLIBC_2\.[0-9]*" | sort -t. -k2 -n | tail -1); \
     [ "${need#GLIBC_2.}" -le 36 ] || { echo "refzygote needs $need, newer than the bookworm runtime" >&2; exit 1; }
 

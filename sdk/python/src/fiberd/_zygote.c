@@ -1,7 +1,8 @@
 /* _zygote is the CPython binding of libfiberzygote (sdk/c/template), the one part
  * of fiberd.template that must be C. It is built against the limited API
- * so one wheel serves every CPython from 3.14, and compiled together with
- * libfiberzygote.c under the Makefile's ZYGOTE_CFLAGS (see setup.py).
+ * so one wheel serves every CPython from 3.14, compiled under the
+ * Makefile's ZYGOTE_CFLAGS, and linked with the library's archive (see
+ * setup.py).
  *
  * What it does that Python cannot. The library forks a fiber with a raw
  * clone3 and runs no atfork handler, so the child starts as a byte copy
@@ -28,8 +29,8 @@
 
 #include "libfiberzygote.h"
 
-#if FZ_ABI_VERSION != 9
-#error "fiberd._zygote binds FZ_ABI_VERSION 9; rebuild it against this header"
+#if FZ_ABI_VERSION != 10
+#error "fiberd._zygote binds FZ_ABI_VERSION 10; rebuild it against this header"
 #endif
 #ifdef Py_GIL_DISABLED
 #error "fiberd._zygote needs the GIL; the fork rules assume it and abi3 does not cover a free-threaded build"

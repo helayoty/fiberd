@@ -1,0 +1,4 @@
+?22 28 0:21 / /sys rw,nosuid,nodev,noexec,relatime shared:7 - sysfs sysfs rw
+23 22 0:22 / /sys/fs/cgroup rw,nosuid,nodev,noexec,relatime shared:8 - cgroup2 cgroup2 rw
+24 1 0:23 / /proc rw,nosuid,nodev,noexec,relatime shared:9 - proc proc rw
+25 1 8:1 / /mnt/with\040space rw,relatime - ext4 /dev/sda1 rw

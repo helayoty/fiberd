@@ -13,6 +13,13 @@
 # Rust build output of the Hyperlight guest and helper
 hack/hyperlight/*/target/
 
+# Rust build output of the zygote library's core and its fuzz crate, and
+# what cargo-fuzz leaves beside the seeds
+sdk/c/template/core/target/
+sdk/c/template/core/fuzz/target/
+sdk/c/template/core/fuzz/artifacts/
+sdk/c/template/core/fuzz/coverage/
+
 # Binaries built at the repository root. Anchored, so cmd/fiberd and
 # docker/fiberd are never ignored.
 /fiberd

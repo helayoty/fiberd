@@ -1,9 +1,12 @@
-"""The one extension, fiberd._zygote, over sdk/c/template/libfiberzygote.c.
+"""The one extension, fiberd._zygote, over the zygote library (sdk/c/template).
 
 The extension is built against the limited API (abi3, CPython 3.14 and
-later) and compiled with the Makefile's ZYGOTE_CFLAGS, with -fPIC in place
-of -fPIE since it is a shared object. Off Linux there is no extension, and
-fiberd.template says so when it is used. The unit tests beside the sources
+later) and its C glue is compiled with the Makefile's ZYGOTE_CFLAGS, with
+-fPIC in place of -fPIE since it is a shared object. It links the
+library's archive, which cargo builds first from the Rust crate in
+sdk/c/template/core, so a build needs cargo.
+Off Linux there is no extension, and fiberd.template says so when it is
+used. The unit tests beside the sources
 and their conftest are left out of the wheel. The sdist keeps them, for the
 wheel test (wheel-test.sh).
 
@@ -15,25 +18,42 @@ which PyPI refuses.
 
 from __future__ import annotations
 
+import glob
 import os
 import platform
 import shutil
+import subprocess
 import sys
 
 from setuptools import Extension, setup
+from setuptools.command.build_ext import build_ext as _build_ext
 from setuptools.command.build_py import build_py as _build_py
 from setuptools.command.sdist import sdist as _sdist
 
 HERE = os.path.abspath(os.path.dirname(__file__))
 REPO = os.path.normpath(os.path.join(HERE, "..", ".."))
 
-# The C library is sdk/c/template in the tree. An sdist holds nothing outside
-# this directory, so it carries a copy in libfiberzygote/.
+# The library is sdk/c/template in the tree, its header and its crate. An
+# sdist holds nothing outside this directory, so it carries a copy in
+# libfiberzygote/.
 C_SDIST = "libfiberzygote"
 C_DIR = os.path.join(HERE, C_SDIST)
 if not os.path.isdir(C_DIR):
     C_DIR = os.path.join(REPO, "sdk", "c", "template")
-C_FILES = ("libfiberzygote.c", "libfiberzygote.h")
+HEADERS = ("libfiberzygote.h",)
+# The library is the crate in core/ beside the header. An sdist carries the
+# crate with libc vendored into core/vendor and a core/.cargo/config.toml
+# that points cargo there, so a build from it needs no network. cargo runs
+# in the crate, so rustup takes the toolchain its rust-toolchain.toml pins
+# and cargo finds that config.
+CORE_DIR = os.path.join(C_DIR, "core")
+CORE_FILES = ("Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "build.rs", "src")
+CORE_CONFIG = """[source.crates-io]
+replace-with = "vendored-sources"
+
+[source.vendored-sources]
+directory = "vendor"
+"""
 
 # Mirrors ZYGOTE_CFLAGS and ZYGOTE_LDFLAGS in the Makefile. The -U comes
 # first because the interpreter's own flags may define _FORTIFY_SOURCE.
@@ -44,6 +64,10 @@ CFLAGS = [
 if platform.machine() in ("aarch64", "arm64"):
     CFLAGS.append("-mbranch-protection=none")
 LDFLAGS = ["-Wl,-z,relro,-z,now"]
+
+
+def cargo(cwd: str, *args: str) -> None:
+    subprocess.run(["cargo", *args], cwd=cwd, check=True)
 
 
 def is_test_module(name: str) -> bool:
@@ -72,14 +96,41 @@ class build_py(_build_py):
         return [m for m in super().find_package_modules(package, package_dir) if not is_test_module(m[1])]
 
 
+class build_ext(_build_ext):
+    """Builds the library's crate into the build directory and links its archive."""
+
+    def build_extension(self, ext):
+        target = os.path.abspath(os.path.join(self.build_temp, "core"))
+        quiet = () if self.verbose else ("--quiet",)
+        # In the tree libc comes from cargo's registry, fetched here once.
+        if not os.path.isdir(os.path.join(CORE_DIR, "vendor")):
+            cargo(CORE_DIR, "fetch", "--locked", *quiet)
+        cargo(CORE_DIR, "build", "--release", "--locked", "--offline", "--target-dir", target, *quiet)
+        ext.extra_objects = [os.path.join(target, "release", "libfiberzygote_core.a")]
+        super().build_extension(ext)
+
+
 class sdist(_sdist):
-    """Adds the C library, LICENSE and NOTICE, which live outside this directory."""
+    """Adds the header and the library's crate with libc vendored, LICENSE
+    and NOTICE, which live outside this directory."""
 
     def make_release_tree(self, base_dir, files):
         super().make_release_tree(base_dir, files)
         self.mkpath(os.path.join(base_dir, C_SDIST))
-        for name in C_FILES:
+        for name in HEADERS:
             shutil.copyfile(os.path.join(C_DIR, name), os.path.join(base_dir, C_SDIST, name))
+        core = os.path.join(base_dir, C_SDIST, "core")
+        self.mkpath(core)
+        for name in CORE_FILES:
+            src = os.path.join(CORE_DIR, name)
+            if os.path.isdir(src):
+                shutil.copytree(src, os.path.join(core, name))
+            else:
+                shutil.copyfile(src, os.path.join(core, name))
+        cargo(core, "vendor", "--locked", "--quiet", "vendor")
+        self.mkpath(os.path.join(core, ".cargo"))
+        with open(os.path.join(core, ".cargo", "config.toml"), "w", encoding="utf-8") as fp:
+            fp.write(CORE_CONFIG)
         for name in ("LICENSE", "NOTICE"):
             src = os.path.join(HERE, name)
             if not os.path.exists(src):
@@ -92,11 +143,14 @@ if sys.platform == "linux":
     ext_modules.append(Extension(
         "fiberd._zygote",
         # Relative and inside the package, since setuptools refuses absolute
-        # sources in a wheel. _libfiberzygote.c includes the library source.
-        sources=["src/fiberd/_zygote.c", "src/fiberd/_libfiberzygote.c"],
-        # The library is included, not listed, so it is named here, or an
-        # in-place build keeps an extension older than the library.
-        depends=[os.path.join(C_DIR, name) for name in C_FILES],
+        # sources in a wheel.
+        sources=["src/fiberd/_zygote.c"],
+        # The header is included and the library's archive is linked, so
+        # both are named here, or an in-place build keeps an extension older
+        # than the library.
+        depends=[os.path.join(C_DIR, name) for name in HEADERS]
+        + [os.path.join(CORE_DIR, name) for name in ("Cargo.toml", "Cargo.lock", "build.rs")]
+        + sorted(glob.glob(os.path.join(CORE_DIR, "src", "**", "*.rs"), recursive=True)),
         include_dirs=[C_DIR],
         define_macros=[("Py_LIMITED_API", "0x030E0000")],
         py_limited_api=True,
@@ -105,4 +159,4 @@ if sys.platform == "linux":
     ))
 
 os.chdir(HERE)
-setup(version=version(), ext_modules=ext_modules, cmdclass={"build_py": build_py, "sdist": sdist})
+setup(version=version(), ext_modules=ext_modules, cmdclass={"build_ext": build_ext, "build_py": build_py, "sdist": sdist})

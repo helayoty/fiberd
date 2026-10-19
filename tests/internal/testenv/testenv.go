@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -110,13 +111,50 @@ func ZygoteBuildFlags(goarch string) []string {
 	return append(flags, "-pie", "-Wl,-z,relro,-z,now")
 }
 
+// CoreArchive builds the zygote library (sdk/c/template/core) once per
+// test binary and returns the static archive every C build of a
+// template links. cargo runs in the crate, so rustup takes the
+// toolchain its rust-toolchain.toml pins.
+var CoreArchive = sync.OnceValues(func() (string, error) {
+	return buildCore("release", "")
+})
+
+// TesthooksArchive builds the zygote library with its testhooks feature,
+// which exports what the fixtures under tests/integration/proc/testdata
+// reach and the product archive does not carry (fz_rs_wait_bounded). It
+// has a target directory of its own, so the product archive stays as
+// CoreArchive built it.
+var TesthooksArchive = sync.OnceValues(func() (string, error) {
+	return buildCore(filepath.Join("testhooks", "release"), "testhooks")
+})
+
+// buildCore runs cargo in the crate with the features named, into
+// target/<sub>, and returns the archive's path there.
+func buildCore(sub, features string) (string, error) {
+	dir := filepath.Join(RepoRoot(), "sdk", "c", "template", "core")
+	args := []string{"build", "--release", "--locked"}
+	if features != "" {
+		args = append(args, "--features", features, "--target-dir", filepath.Join("target", features))
+	}
+	build := exec.Command("cargo", args...)
+	build.Dir = dir
+	if out, err := build.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("build the zygote library: %w: %s", err, out)
+	}
+	return filepath.Join(dir, "target", sub, "libfiberzygote_core.a"), nil
+}
+
 // BuildZygote compiles the reference zygote with TLS for handoff grants
 // into dir and returns the binary's path.
 func BuildZygote(dir string) (string, error) {
+	core, err := CoreArchive()
+	if err != nil {
+		return "", err
+	}
 	bin := filepath.Join(dir, "refzygote")
 	zygote := filepath.Join(RepoRoot(), "sdk", "c", "template")
 	args := append(ZygoteBuildFlags(runtime.GOARCH), "-pthread", "-DFZ_TLS", "-o", bin,
-		filepath.Join(zygote, "refzygote.c"), filepath.Join(zygote, "libfiberzygote.c"), "-lssl", "-lcrypto")
+		filepath.Join(zygote, "refzygote.c"), core, "-lssl", "-lcrypto")
 	build := exec.Command("gcc", args...)
 	build.Stderr = os.Stderr
 	if err := build.Run(); err != nil {

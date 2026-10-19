@@ -224,7 +224,14 @@ func TestWBytesOfLiveTask(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			r, h := prepared(t, tc.be(), core.Grant{UID: "g1", TemplateDigest: "sha256:tmpl"}, nil)
-			startSleeper(t, leafOf(r, "g1", "f-1-1"))
+			leaf := leafOf(r, "g1", "f-1-1")
+			startSleeper(t, leaf)
+			// The sleeper joins the leaf after Start returns, so wait for its
+			// pages there, or every case reads 0.
+			waitFor(t, "the sleeper's pages in the leaf", func() bool {
+				n, err := leaf.MemoryCurrent()
+				return err == nil && n > 0
+			})
 			st, err := r.Stats(context.Background(), h.ID)
 			if err != nil || (st.WUsedBytes > 0) != tc.positive {
 				t.Fatalf("Stats = %+v %v, want W above zero %v", st, err, tc.positive)

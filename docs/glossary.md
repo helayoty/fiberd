@@ -21,7 +21,7 @@ The one process on a [home](#home). It verifies [grants](#grant), keeps the reco
 The program a [grant](#grant) runs, named by the content digest of its image or artifact. It starts once and does its slow setup once, and every [fiber](#fiber) is then forked or restored from it.
 
 ## Zygote
-A [template](#template) linked with fiberd's small C library, libfiberzygote, so [fiberd](#fiberd) can ask it to fork a new [fiber](#fiber). The proc and runc [backends](#backend) use one, and the fork is cheap because the child shares the zygote's memory until it writes to it.
+A [template](#template) linked with fiberd's small library, libfiberzygote, so [fiberd](#fiberd) can ask it to fork a new [fiber](#fiber). The proc and runc [backends](#backend) use one, and the fork is cheap because the child shares the zygote's memory until it writes to it.
 
 ## Warm
 A [template](#template) that has started and finished its setup, and waits to make [fibers](#fiber). [fiberd](#fiberd) keeps one warm instance per [grant](#grant), so a new fiber skips the slow start.

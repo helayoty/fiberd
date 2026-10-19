@@ -30,29 +30,46 @@ RUN if ! command -v criu >/dev/null 2>&1; then \
       && CRIU_VERSION="${CRIU_VERSION}" sh /tmp/fiberd-criu/install-criu.sh; \
     fi \
     && rm -rf /tmp/fiberd-criu
+# Rust for the zygote library (sdk/c/template/core), with the pins
+# of docker/dev/Dockerfile. rustup-init is a pinned release checked
+# against its published sha256, and rustup checks the toolchain against
+# the signed channel manifest. The toolchain is the one the crate's
+# rust-toolchain.toml pins. The dev image already has it.
+ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo PATH=/usr/local/cargo/bin:$PATH
+ARG RUSTUP_VERSION=1.29.1
+ARG RUSTUP_SHA256_X86_64=dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb71
+ARG RUSTUP_SHA256_AARCH64=15f6e4ce9f583b929c996c91562bad6d4454f3281de858b02cdfdef615fac433
+ARG RUST_TOOLCHAIN=1.99.0
+RUN set -eu; if ! command -v cargo >/dev/null 2>&1; then \
+      arch=$(uname -m); \
+      case "$arch" in \
+        x86_64)  sum=$RUSTUP_SHA256_X86_64 ;; \
+        aarch64) sum=$RUSTUP_SHA256_AARCH64 ;; \
+        *) echo "no pinned rustup-init for $arch" >&2; exit 1 ;; \
+      esac; \
+      curl -fsSL "https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/${arch}-unknown-linux-gnu/rustup-init" -o /tmp/rustup-init; \
+      echo "$sum  /tmp/rustup-init" | sha256sum -c - >/dev/null; \
+      chmod 0755 /tmp/rustup-init; \
+      /tmp/rustup-init -y --no-modify-path --profile minimal --default-toolchain "${RUST_TOOLCHAIN}" -c clippy -c rustfmt; \
+      rm -f /tmp/rustup-init; \
+    fi; cargo --version
 WORKDIR /src
 COPY . .
-# fiberd is static and reproducible. The zygote library takes ZYGOTE_CFLAGS
-# from the Makefile with -fPIC in place of -fPIE, since the archive links
-# into PIE templates and shared objects alike, and no link flags, since an
-# archive is not linked. On aarch64 it is built without PAC branch
-# protection, because a process restored from a checkpoint keeps stale PAC
-# keys (see docker/dev/Dockerfile).
-# With the dev image the C is compiled against its Debian 12 sysroot,
-# since the dev image's live glibc is newer than this runtime base.
+# fiberd is static and reproducible. The zygote library is cargo's
+# archive of its Rust crate, with no C in it. Rust emits no pointer
+# authentication unless asked, which a process restored from a checkpoint
+# cannot use (see docker/dev/Dockerfile), and its objects are PIC, so the
+# archive links into PIE templates and shared objects alike. The source
+# paths are remapped.
 ENV CGO_ENABLED=0 GOFLAGS=-trimpath
 ARG VERSION=""
 RUN set -eu; mkdir -p /out/bin /out/lib /out/doc; \
     go build -ldflags "-s -w -buildid= -X main.version=${VERSION}" -o /out/bin/fiberd ./cmd/fiberd; \
     hack/release/third-party-notices.sh ./cmd/fiberd > /out/doc/THIRD_PARTY_NOTICES; \
     cp LICENSE NOTICE /out/doc/; \
-    flags=""; if [ "$(uname -m)" = aarch64 ]; then flags="-mbranch-protection=none"; fi; \
-    sysroot=/usr/local/sysroot-nopac; sr=""; \
-    [ ! -d "$sysroot/usr/include" ] || sr="--sysroot=$sysroot -B$sysroot/usr/lib/$(gcc -print-multiarch)"; \
-    gcc $sr -D_FORTIFY_SOURCE=3 -O2 -fstack-protector-strong -fstack-clash-protection -fPIC -Wformat=2 -Werror=format-security \
-      -Wall -Wextra -pthread $flags -ffile-prefix-map="$PWD"=. \
-      -c sdk/c/template/libfiberzygote.c -o /tmp/libfiberzygote.o; \
-    ar rcsD /out/lib/libfiberzygote.a /tmp/libfiberzygote.o
+    (cd sdk/c/template/core && RUSTFLAGS="--remap-path-prefix=/src=. --remap-path-prefix=$CARGO_HOME=/cargo" \
+      cargo build --release --locked --target-dir /tmp/core); \
+    cp /tmp/core/release/libfiberzygote_core.a /out/lib/libfiberzygote.a
 
 FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587
 # Labels for local builds. The release workflow adds the rest.

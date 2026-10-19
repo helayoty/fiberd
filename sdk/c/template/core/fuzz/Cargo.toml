@@ -1,0 +1,109 @@
+[package]
+name = "fiberzygote-core-fuzz"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "cargo-fuzz targets for the core of libfiberzygote"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+# fuzzshim sends the core's mounts and raw syscalls to the fz_fuzz_*
+# hooks (fuzz_targets/hooks.rs) and hands out the fiber's state.
+fiberzygote-core = { path = "..", features = ["fuzzshim"] }
+libc = { version = "0.2.191", default-features = false }
+
+# record_diff and line_diff link the C reference in csrc/ as their
+# oracle.
+[build-dependencies]
+cc = "1"
+
+# The record parser alone, against what each answer promises.
+[[bin]]
+name = "record"
+path = "fuzz_targets/record.rs"
+test = false
+doc = false
+bench = false
+
+# The record parser against the C reference in csrc/.
+[[bin]]
+name = "record_diff"
+path = "fuzz_targets/record_diff.rs"
+test = false
+doc = false
+bench = false
+
+# The line parsers alone, on the input format csrc/line.c defines,
+# against what each answer promises.
+[[bin]]
+name = "line"
+path = "fuzz_targets/line.rs"
+test = false
+doc = false
+bench = false
+
+# The line parsers against the C reference in csrc/.
+[[bin]]
+name = "line_diff"
+path = "fuzz_targets/line_diff.rs"
+test = false
+doc = false
+bench = false
+
+# recv_line over a stream cut into chunks, descriptors riding along.
+[[bin]]
+name = "recv_line"
+path = "fuzz_targets/recv_line.rs"
+test = false
+doc = false
+bench = false
+
+# lock_sys and in_child_userns over a file under /proc.
+[[bin]]
+name = "procfiles"
+path = "fuzz_targets/procfiles.rs"
+test = false
+doc = false
+bench = false
+
+# The serving loop over the control socket, nothing cloned or mounted.
+[[bin]]
+name = "control"
+path = "fuzz_targets/control.rs"
+test = false
+doc = false
+bench = false
+
+# The child's record read off its channel.
+[[bin]]
+name = "identity"
+path = "fuzz_targets/identity.rs"
+test = false
+doc = false
+bench = false
+
+# A park's wait over the channel.
+[[bin]]
+name = "wait"
+path = "fuzz_targets/wait.rs"
+test = false
+doc = false
+bench = false
+
+# The fiber side's state machine against a model.
+[[bin]]
+name = "fiber"
+path = "fuzz_targets/fiber.rs"
+test = false
+doc = false
+bench = false
+
+[profile.release]
+debug = 1
+
+# Its own root, so the core's manifest stays a plain package.
+[workspace]

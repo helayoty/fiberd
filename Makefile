@@ -10,11 +10,12 @@ PKGS    := ./...
 # activation comparison benchmark (bench/compare) is one more.
 EXAMPLES := examples/kubernetes examples/slurm examples/knative examples/kata examples/substrate bench/compare
 
-# Hardening for every build of the zygote, refzygote and the library. The
-# flags are defined here once. The Dockerfiles, hack/gvisor/rootfs.sh, the
-# release workflow and the Go tests that build refzygote mirror these
-# lines, each saying so. The static archive takes the compile flags with
-# -fPIC in place of -fPIE and no link flags. On aarch64 (arm64) every
+# Hardening for every build of the zygote and refzygote. The flags are
+# defined here once. The Dockerfiles, hack/gvisor/rootfs.sh and the Go
+# tests that build refzygote mirror these lines, each saying so. The
+# library itself is Rust, and its archive takes rustc's hardening
+# (docs/design/zygote.md, Build flags), so these flags cover the
+# template's own C and the link. On aarch64 (arm64) every
 # build also takes -mbranch-protection=none. A restored process keeps
 # stale pointer-authentication keys, so a PAC instruction run after a
 # restore traps on a FEAT_FPAC CPU. Some toolchains default to
@@ -24,6 +25,12 @@ ZYGOTE_LDFLAGS := -pie -Wl,-z,relro,-z,now
 ifneq ($(filter aarch64 arm64,$(shell uname -m)),)
 ZYGOTE_CFLAGS += -mbranch-protection=none
 endif
+# The zygote library, a static archive cargo builds from its Rust crate,
+# which every template links. cargo runs in the crate, so rustup takes
+# the toolchain its rust-toolchain.toml pins.
+CARGO    ?= cargo
+CORE_DIR := sdk/c/template/core
+CORE_LIB := $(CORE_DIR)/target/release/libfiberzygote_core.a
 # Seconds per fuzz harness (make fuzz).
 FUZZTIME ?= 120
 # Extra flags for the unit tests (CI passes -cover to print coverage).
@@ -52,7 +59,7 @@ CONFORM_DIR ?= $(BIN)
 endif
 
 .PHONY: all build test integration-tests vet lint proto proto-lint proto-check clean \
-        bench zygote fuzz conform-stub conform-signed conform-logs conform-proc conform-proc-python conform-gvisor conform-gvisor-python conform-runc conform-runc-python conform-hyperlight-fake conform-hyperlight \
+        bench zygote zygote-core zygote-test zygote-check fuzz fuzz-core conform-stub conform-signed conform-logs conform-proc conform-proc-python conform-gvisor conform-gvisor-python conform-runc conform-runc-python conform-hyperlight-fake conform-hyperlight \
         python-build python-test python-dist python-proto python-proto-check \
         typescript-build typescript-skipped typescript-test typescript-proto typescript-proto-check \
         hyperlight-helper linux-hyperlight-check linux-hyperlight-test overcommit kind-up kind-down kind-image conform-kind slurm-up slurm-down conform-slurm example-knative example-knative-kvm example-kata example-substrate \
@@ -254,17 +261,48 @@ python-proto-check: ## fail if the Python messages are out of date (CI, with pro
 ## The zygote library and the reference workload.
 ## Linux only (clone3, close_range); build them inside the dev container.
 
-zygote: ## build bin/refzygote, the reference zygote, with TLS for handoff grants
+zygote: zygote-core ## build bin/refzygote, the reference zygote, with TLS for handoff grants
 	@mkdir -p $(BIN)
-	$(CC) $(ZYGOTE_CFLAGS) $(ZYGOTE_LDFLAGS) -Wall -Wextra -pthread -DFZ_TLS -o $(BIN)/refzygote sdk/c/template/refzygote.c sdk/c/template/libfiberzygote.c -lssl -lcrypto
+	$(CC) $(ZYGOTE_CFLAGS) $(ZYGOTE_LDFLAGS) -Wall -Wextra -pthread -DFZ_TLS -o $(BIN)/refzygote sdk/c/template/refzygote.c $(CORE_LIB) -lssl -lcrypto
 
-fuzz: ## fuzz the zygote's parsers (libFuzzer) and the handoff parser (go test -fuzz), FUZZTIME seconds each, in the dev container on macOS
+zygote-core: ## build the zygote library, $(CORE_LIB), from its Rust crate
+	cd $(CORE_DIR) && $(CARGO) build --release --locked
+
+zygote-test: ## the core's Rust unit tests, clippy and rustfmt (the fuzz targets too, with the core's stable rustfmt, since the fuzz crate's nightly has none)
+	cd $(CORE_DIR) && $(CARGO) test --locked && $(CARGO) clippy --locked --all-targets -- -D warnings && \
+	  $(CARGO) fmt --check && rustfmt --edition 2024 --check fuzz/fuzz_targets/*.rs
+
+zygote-check: zygote-core ## check the core archive's undefined symbols against the allowlist and count its PAC instructions
+	$(CORE_DIR)/check.sh $(CORE_LIB)
+
+fuzz: ## fuzz the zygote library (the core's cargo-fuzz targets), the reference workload's parsers (a C libFuzzer harness) and the handoff parser (go test -fuzz), FUZZTIME seconds each, in the dev container on macOS
 ifeq ($(shell uname -s),Darwin)
 	hack/dev/run.sh make fuzz FUZZTIME=$(FUZZTIME)
 else
 	FUZZTIME=$(FUZZTIME) FUZZ_OUT=$(BIN)/fuzz sdk/c/template/fuzz/run.sh
+	$(MAKE) fuzz-core
 	$(GO) test -run='^$$' -fuzz=FuzzServerName -fuzztime=$(FUZZTIME)s ./pkg/handoff/
 endif
+
+# Every cargo-fuzz target of the core, on the nightly its fuzz crate pins,
+# so cargo runs in core/fuzz. The targets build the core with its fuzzshim
+# feature, so control and procfiles shim its mounts and clones. Inputs
+# reach 70000 bytes, past the 64 KiB line and record buffers. New inputs
+# land in $(BIN)/fuzz/corpus, never in the seeds (corpus/<target>, some of
+# them links to sdk/c/template/fuzz/corpus), and a crash leaves its input
+# under $(BIN)/fuzz/crashes/ as the C harness does.
+fuzz-core:
+	@out=$(CURDIR)/$(BIN)/fuzz; mkdir -p "$$out/crashes"; failed=""; \
+	targets=$$(cd $(CORE_DIR)/fuzz && $(CARGO) fuzz list) || exit 1; \
+	for t in $$targets; do \
+	  echo "--- core $$t for $(FUZZTIME)s"; mkdir -p "$$out/corpus/core-$$t"; \
+	  seeds=""; [ ! -d $(CORE_DIR)/fuzz/corpus/$$t ] || seeds=corpus/$$t; \
+	  (cd $(CORE_DIR)/fuzz && $(CARGO) fuzz run "$$t" "$$out/corpus/core-$$t" $$seeds -- \
+	    -max_total_time=$(FUZZTIME) -timeout=10 -rss_limit_mb=2048 -max_len=70000 -artifact_prefix="$$out/crashes/core-$$t-") \
+	    > "$$out/core-$$t.log" 2>&1 || failed="$$failed $$t"; \
+	  grep -E '^(#[0-9]+\s+(DONE|INITED)|==|SUMMARY|Test unit written)' "$$out/core-$$t.log" || true; \
+	done; \
+	[ -z "$$failed" ] || { echo "fuzz-core: crashes in$$failed; inputs under $$out/crashes/, logs under $$out/core-*.log" >&2; exit 1; }
 
 ## The Python SDK (sdk/python). Its extension needs Linux, so it is built
 ## and its unit tests run inside the dev container.
@@ -275,7 +313,7 @@ python-build: ## build the fiberd._zygote extension in place (sdk/python/src/fib
 python-test: ## the Python unit tests (pytest, no process started), after the build, inside the dev container
 	hack/dev/run.sh sh -ec 'hack/python/build.sh; cd sdk/python && PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q -p no:cacheprovider'
 
-python-dist: ## build the sdist and a wheel from it, then run the unit tests against the installed wheel, offline in the dev container, keeping nothing
+python-dist: ## build the sdist and, offline, a wheel from it, then run the unit tests against the installed wheel, in the dev container, keeping nothing
 	hack/dev/run.sh hack/python/dist.sh
 
 ## Linux-only work runs in the dev container (hack/dev): privileged,

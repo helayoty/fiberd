@@ -1,0 +1,5 @@
+# cargo-fuzz needs a nightly for the sanitizers and coverage. This pin is
+# for the fuzz targets only, the core itself builds on the stable the
+# parent crate pins. The dev image installs both (docker/dev/Dockerfile).
+[toolchain]
+channel = "nightly-2026-10-08"
