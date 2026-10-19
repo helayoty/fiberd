@@ -287,3 +287,72 @@ func TestSetupPhase(t *testing.T) {
 		})
 	}
 }
+
+// TestSetupPathTooLong pins that the zygote keeps a HIDE or DROP path
+// whole or refuses it, never cuts it. A path of PATH_MAX (4096) bytes or
+// more is refused as it arrives, with a reason naming the line, and the
+// warm fails closed, as it does for more paths than the zygote holds. A
+// path one byte shorter is kept whole, so a fiber is born. The stage 4
+// zygote kept every path in a slot the size of a line, so a long one got
+// as far as the mounts and failed there with "File name too long".
+// Since the slot is PATH_MAX now, the refusal pins that nothing is cut
+// to fit it.
+func TestSetupPathTooLong(t *testing.T) {
+	// below is an absolute path of exactly n bytes under dir, made of
+	// components short enough for the kernel, which need not exist.
+	below := func(dir string, n int) string {
+		p := dir
+		for len(p)+1+200 < n-1 {
+			p += "/" + strings.Repeat("d", 200)
+		}
+		return p + "/" + strings.Repeat("e", n-len(p)-1)
+	}
+	cases := []struct {
+		name string
+		// setup is sent before READY, with %s the path of n bytes under
+		// the test's directory.
+		setup string
+		n     int
+		// want is the zygote's first line. On READY a mntns CLONE
+		// follows, which must be born.
+		want string
+	}{
+		{name: "a HIDE path of 4095 bytes is kept whole", setup: "HIDE %s\nPREPARE mntns\n", n: 4095, want: "READY"},
+		{name: "a HIDE path of 4096 bytes is refused", setup: "HIDE %s\nPREPARE mntns\n", n: 4096, want: "ERROR ? HIDE: path too long"},
+		{name: "a HIDE path of 5000 bytes is refused", setup: "HIDE %s\nPREPARE mntns\n", n: 5000, want: "ERROR ? HIDE: path too long"},
+		{name: "a HIDE path of 5000 bytes is refused without a namespace too", setup: "HIDE %s\nPREPARE none\n", n: 5000, want: "ERROR ? HIDE: path too long"},
+		{name: "a DROP path of 4096 bytes is refused", setup: "DROP %s\nPREPARE mntns\n", n: 4096, want: "ERROR ? DROP: path too long"},
+		{name: "a DROP path of 5000 bytes is refused", setup: "DROP %s\nPREPARE mntns\n", n: 5000, want: "ERROR ? DROP: path too long"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := below(dir, tc.n)
+			if len(path) != tc.n {
+				t.Fatalf("the path is %d bytes, want %d", len(path), tc.n)
+			}
+			uc, rd := rawZygoteWith(t, dir, nil, "")
+			if _, err := uc.Write([]byte(fmt.Sprintf(tc.setup, path))); err != nil {
+				t.Fatal(err)
+			}
+			if got := readLine(t, uc, rd); got != tc.want {
+				t.Fatalf("first line %.300q, want %q", got, tc.want)
+			}
+			if tc.want == "READY" {
+				send(t, uc, fmt.Sprintf("CLONE a %s/a.sock 2000 - - pidns,mntns", dir))
+				if got := readLine(t, uc, rd); !strings.HasPrefix(got, "CLONED a ") {
+					t.Fatalf("reply %.300q to a mntns CLONE, want CLONED a", got)
+				}
+				return
+			}
+			// The zygote ends on the refusal, and its log names it.
+			if got := readLine(t, uc, rd); got != "" {
+				t.Fatalf("reply %.300q after the refusal, want the zygote gone", got)
+			}
+			b, _ := os.ReadFile(filepath.Join(dir, "zygote.log"))
+			if why := strings.TrimPrefix(tc.want, "ERROR ? "); !strings.Contains(string(b), why+" refused") {
+				t.Fatalf("zygote log %.300q, want it to say %q", b, why+" refused")
+			}
+		})
+	}
+}
