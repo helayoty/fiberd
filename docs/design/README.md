@@ -18,7 +18,7 @@ A suggested order is fiberd, home, grant, core, audit, runtime-host, backends, z
 | [resources.md](resources.md) | The cgroup hierarchy, the memory formula and sizing | `pkg/runtime/host`, `pkg/sys/cgroup` |
 | [backends.md](backends.md) | The backend interface and how proc, runc, gVisor and Hyperlight make a fiber | `pkg/backend`, `pkg/backend/proc`, `pkg/backend/runc`, `pkg/backend/gvisor`, `pkg/backend/hyperlight` |
 | [sys.md](sys.md) | Cgroup delegation, [CRIU](../glossary.md#criu) dump and restore, capability narrowing and network namespaces | `pkg/sys/caps`, `pkg/sys/cgroup`, `pkg/sys/criu`, `pkg/sys/netns` |
-| [zygote.md](zygote.md) | The C library a template links to, its wire protocol and how a [zygote](../glossary.md#zygote) forks a fiber | `sdk/c/template` |
+| [zygote.md](zygote.md) | The library a template links to, its wire protocol and how a [zygote](../glossary.md#zygote) forks a fiber | `sdk/c/template` |
 | [sdk.md](sdk.md) | The SDK's four languages, how the Python binding brings the interpreter through a raw fork, and the rules it enforces | `sdk/python`, `sdk/go/client`, `sdk/typescript` |
 | [user-namespaces.md](user-namespaces.md) | Why runc fibers get a user namespace per grant, and how their ids are assigned | `pkg/backend/runc` |
 | [readiness.md](readiness.md) | The acceptance gates a deployment passes before production | none |

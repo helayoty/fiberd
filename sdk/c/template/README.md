@@ -1,12 +1,12 @@
 # libfiberzygote
 
-The C library a [template](../../../docs/glossary.md#template) links to become a fiberd [zygote](../../../docs/glossary.md#zygote). fiberd starts the template, which warms up once and then forks a [fiber](../../../docs/glossary.md#fiber) for every [Clone](../../../docs/glossary.md#clone). `libfiberzygote.h` is the API, `refzygote.c` is the reference template the tests and images use, `core/` is the library's Rust core, and `fuzz/` and `core/fuzz/` hold the libFuzzer harnesses.
+The library a [template](../../../docs/glossary.md#template) links to become a fiberd [zygote](../../../docs/glossary.md#zygote). fiberd starts the template, which warms up once and then forks a [fiber](../../../docs/glossary.md#fiber) for every [Clone](../../../docs/glossary.md#clone). `libfiberzygote.h` is the C API, `core/` is the library itself, a Rust crate that builds a static archive with that API, and `refzygote.c` is the reference template the tests and images use. `core/fuzz/` holds the library's cargo-fuzz targets, and `fuzz/` the libFuzzer harness of refzygote.
 
-Build a template from source. The core needs cargo, which takes the toolchain `core/rust-toolchain.toml` pins.
+Build a template from source. The library needs cargo.
 
 ```bash
 (cd core && cargo build --release --locked)
-cc -O2 -pthread -o mytemplate main.c libfiberzygote.c core/target/release/libfiberzygote_core.a
+cc -O2 -pthread -o mytemplate main.c core/target/release/libfiberzygote_core.a
 ```
 
 Or link the prebuilt static library from a release.
@@ -16,6 +16,14 @@ cc -O2 -pthread -o mytemplate main.c -L. -lfiberzygote
 ```
 
 On arm64, add `-mbranch-protection=none` to the whole program.
+
+An engine template formats its report line itself and hands it to `fz_report_line`, which adds the newline.
+
+```c
+char line[FZ_REPORT_MAX];
+snprintf(line, sizeof line, "DEVICE %s %llu 0", fence, bytes);
+fz_report_line(line);
+```
 
 fiberd launches the template itself. Map the grant's template digest to its command with `-template`, such as `-template "default=/path/to/mytemplate --flag"`, where `default` matches any digest. `zygotectl build` and `zygotectl push` instead publish it as an artifact that a home pulls by digest.
 

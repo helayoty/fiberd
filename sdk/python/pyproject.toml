@@ -68,7 +68,7 @@ py-limited-api = "cp314"
 build = ["cp314-manylinux_*", "cp315-manylinux_*"]
 manylinux-x86_64-image = "manylinux_2_28"
 manylinux-aarch64-image = "manylinux_2_28"
-# The extension links the zygote library's Rust core, and the manylinux
+# The extension links the zygote library, a Rust crate, and the manylinux
 # images have no Rust. Each gets rustup-init, the pinned release of
 # docker/dev/Dockerfile checked against its published sha256, and the
 # toolchain the crate's rust-toolchain.toml pins. The sdist vendors libc,

@@ -12,6 +12,10 @@ In scope is the code in this repository and what the releases ship. That is the 
 
 The gaps that [docs/production-readiness.md](docs/production-readiness.md) lists are known and need no report. [docs/security.md](docs/security.md) states the trust boundaries, and a way across one is a vulnerability.
 
+## The zygote library's hardening
+
+libfiberzygote is built with stable Rust, which has no stack protector, so its frames carry no canary. Safe Rust makes no unchecked stack write, and its unsafe code is libc calls with explicit lengths. This gap is known and needs no report.
+
 ## What to expect
 
 A maintainer acknowledges the report within a week. Fixes ship in a new release with an advisory that credits you, unless you ask otherwise. Only the latest release gets fixes.

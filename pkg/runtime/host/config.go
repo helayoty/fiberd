@@ -41,7 +41,7 @@ type Config struct {
 	// template between the host's check and the exec, or read another
 	// grant's. A proc fiber still sees its own template's executable,
 	// bound back read-only at its path inside the cover, because CRIU
-	// names a mapped file by its path (sdk/c/template/libfiberzygote.c).
+	// names a mapped file by its path (sdk/c/template/core/src/mounts.rs).
 	TemplateCache string
 	// CgroupRoot is the delegated cgroup v2 subtree (from the home).
 	CgroupRoot string

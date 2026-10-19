@@ -5,7 +5,8 @@
 // socketpair inherited as fd 3. CRIU checkpoints them. It is the reference
 // backend that the conformance suite runs against.
 //
-// The control socket carries lines. The zygote side is libfiberzygote.c.
+// The control socket carries lines. The zygote side is libfiberzygote
+// (sdk/c/template).
 // The host speaks first.
 //
 //	host   -> zygote HIDE <dir> | DROP <path> | RUNDIR <parent> <own>   (any number)
