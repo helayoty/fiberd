@@ -1,29 +1,14 @@
-//! The fiber-side API, what a fiber calls once on_fiber runs, and the
-//! gVisor side, what a sandbox calls in place of a birth. fz_fiber_ready,
-//! fz_accept, fz_quiesce, fz_incarnation_wait and fz_seed_forget, then
-//! fz_gvisor_identity and fz_gvisor_ack, each with the signature
-//! libfiberzygote.h gives it.
+//! The fiber-side API a fiber calls once on_fiber runs (fz_fiber_ready,
+//! fz_accept, fz_quiesce, fz_incarnation_wait, fz_seed_forget), and the
+//! gVisor side a sandbox calls in place of a birth (fz_gvisor_identity,
+//! fz_gvisor_ack). The calls share state, so they must never overlap (see
+//! Global). A park's SIGUSR1 may end a poll, and with no handler of the
+//! library's the EINTR goes back to the template's loop. Every entry sets
+//! errno once, at the boundary, as libfiberzygote.h promises.
 //!
-//! They run in a fiber, after scrub_and_run. libfiberzygote.h (at
-//! FZ_CHANNEL_FD) says these calls share the library's state, so they
-//! must never overlap: one at a time, never from a signal handler, and
-//! any thread may make the next once the last has returned. A park's
-//! SIGUSR1 may interrupt them. The library installs no handler,
-//! so a poll the signal ends returns EINTR, and the entry hands it to
-//! the template's loop as the C did. Every entry sets errno once, at the
-//! boundary, to what the header promises (EBADF, EPROTO, ECONNRESET,
-//! EINTR, EMSGSIZE, ENOENT) or to what the failing call left.
-//!
-//! The state is the core's own and nothing in C touches it. The small
-//! fields are one State. The two record stores, the message buffer and
-//! the spec environment's read buffer are zero statics, so they sit in
-//! bss as the C's did, and a fiber's copy-on-write cost is the pages a
-//! record touches. The child's path (child.rs) resets State and reads
-//! the birth record into its store, through reset_for_child and born.
-//!
-//! The functions take the state as a Fiber of references, so the unit
-//! tests drive them over a socketpair with state of their own. The
-//! entries build that Fiber from the statics, once per call.
+//! The big buffers are zero statics in bss, so a fiber's copy-on-write
+//! cost is the pages a record touches. The functions take the state as a
+//! Fiber of references, so the unit tests can drive them over a socketpair.
 #![deny(
     clippy::indexing_slicing,
     clippy::arithmetic_side_effects,
@@ -50,7 +35,7 @@ use crate::sys::{self, Errno};
 pub const READY_BYTE: u8 = b'r';
 /// The longest FIBERD_TOKEN a sandbox claims with.
 pub const GVISOR_TOKEN_MAX: usize = 64;
-/// The spec environment's read buffer, 64 KiB as the C's was.
+/// The size of the spec environment's read buffer.
 pub const SPEC_ENV_MAX: usize = 65536;
 /// The sandbox's spec environment, KEY=VALUE entries.
 const GVISOR_SPEC_ENV: &CStr = c"/proc/gvisor/spec_environ";
@@ -63,16 +48,13 @@ const CONNECT_TRIES: u32 = 2000;
 const TRY_EVERY_US: libc::useconds_t = 1000;
 
 /// A static the header's rule guards. libfiberzygote.h (at FZ_CHANNEL_FD)
-/// says the fiber-side calls must never overlap: one at a time, never
-/// from a signal handler, and any thread may make the next once the
-/// last has returned. The child's path runs before any of them, as the
-/// process's one thread.
+/// says the fiber-side calls run one at a time, never from a signal
+/// handler, and any thread may make the next once the last returned. The
+/// child's path runs before any of them, as the process's one thread.
 pub struct Global<T>(UnsafeCell<T>);
 
-// SAFETY: by the header's rule above, no two calls overlap, so no two
-// threads touch the value at once. A call on another thread comes once
-// the last has returned, which the template orders as the header asks,
-// so each access happens after the last.
+// SAFETY: by the header's rule above no two calls overlap, and the
+// template orders a call on another thread after the last one returned.
 unsafe impl<T> Sync for Global<T> {}
 
 impl<T> Global<T> {
@@ -87,7 +69,8 @@ impl<T> Global<T> {
     }
 }
 
-/// The fiber's small state, the C file's statics of the same names.
+/// The fiber's small state. Its layout is pinned below, since
+/// fuzz/fuzz_wait.c reads it as struct fz_rs_fiber_state.
 #[repr(C)]
 pub struct State {
     /// FZ_CHANNEL_FD in a fiber, -1 in the zygote and in a gVisor
@@ -165,8 +148,7 @@ static STATE: Global<State> = Global::new(State::new());
 /// handoff fiber's TLS library points into it, and a sandbox's record
 /// lands here too.
 // SAFETY: a RecordStore is integers, byte arrays and raw pointers, for
-// which all zero bits are a value (null for the pointers), as C's bss
-// gave it.
+// which all zero bits are a value (null for the pointers).
 static BORN: Global<RecordStore> = Global::new(unsafe { core::mem::zeroed() });
 /// A record that arrives later, a resume's.
 // SAFETY: as BORN.
@@ -238,10 +220,8 @@ pub unsafe fn set_served_generation(generation: c_uint) {
     unsafe { (*STATE.get()).served_generation = generation };
 }
 
-/// Zeroes buf so the stores are not optimised out. Volatile writes, one
-/// byte each, then a compiler fence, so no later access moves above
-/// them. A secret wiped here is never read again, which is exactly the
-/// store a compiler may drop, and a volatile write it may not.
+/// Zeroes buf with volatile writes and a compiler fence. A secret wiped
+/// here is never read again, so a plain store could be optimised out.
 pub fn wipe(buf: &mut [u8]) {
     for b in buf.iter_mut() {
         // SAFETY: b is a live, aligned byte of buf.
@@ -250,10 +230,9 @@ pub fn wipe(buf: &mut [u8]) {
     compiler_fence(Ordering::SeqCst);
 }
 
-/// forget_seed zeroes a store's seed, in its decoded form and in the
-/// record, once nothing should be reseeded from it again. The record's
-/// copy is found by its offset in buf, so the write stays inside buf
-/// and is made through it.
+/// Zeroes a store's seed, decoded and in the record, once nothing should
+/// be reseeded from it. The record's copy is found by its offset in buf,
+/// so the write stays inside buf.
 pub fn forget_seed(st: &mut RecordStore) {
     wipe(&mut st.seed);
     if !st.seed_hex.is_null() {
@@ -266,11 +245,10 @@ pub fn forget_seed(st: &mut RecordStore) {
     st.inc.seed_len = 0;
 }
 
-/// The fence a store's record names, from its NUL-ended field in buf,
-/// at most FENCE_MAX bytes. The parser keeps it shorter. A store whose
-/// buf was overwritten after its parse (a refused record) is cut there,
-/// where the C read on and overflowed its ack buffer. A resume's ack
-/// does not read it at all, but the snapshot in State.
+/// The fence a store's record names, at most FENCE_MAX bytes. The cap
+/// matters for a buf overwritten after its parse (a refused record),
+/// which may hold no NUL there. A resume's ack uses State's snapshot
+/// instead.
 fn fence_of(st: &RecordStore) -> &[u8] {
     let off = (st.inc.fence as usize).wrapping_sub(st.buf.as_ptr() as usize);
     let Some(rest) = st.buf.get(off..) else {
@@ -329,7 +307,7 @@ fn recv(fd: c_int, flags: c_int, buf: &mut [u8]) -> Result<(usize, c_int), Errno
     }
 }
 
-/// close(2), whose answer nobody here looks at, as in C.
+/// close(2), whose answer nobody here looks at.
 fn close(fd: c_int) {
     // SAFETY: an integer argument alone.
     unsafe { libc::close(fd) };
@@ -425,7 +403,7 @@ impl Fiber<'_> {
     pub fn ready(&mut self) {
         if self.st.ready_fd >= 0 {
             // SAFETY: integer arguments alone. The answer is not looked
-            // at, as in C.
+            // at.
             unsafe { libc::dup2(0, 2) };
             forget_seed(self.born);
             let rec = READY_BYTE;
@@ -474,8 +452,9 @@ impl Fiber<'_> {
 
     /// fz_quiesce. Takes whatever fiberd queued before its signal, the
     /// round and the carry-on of a round that already gave up on this
-    /// fiber, then says 'q'. A descriptor is closed, and any other
-    /// message is wiped, since it may be a record with a seed.
+    /// fiber, then says 'q'. A descriptor is closed, and every message
+    /// but a round is wiped, the one it rode with too, since it may be a
+    /// record with a seed. One too long for msg is wiped by channel_recv.
     pub fn quiesce(&mut self) -> Result<(), Errno> {
         if self.st.channel_fd < 0 {
             return Err(Errno(libc::EBADF));
@@ -485,7 +464,11 @@ impl Fiber<'_> {
                 Err(Errno(libc::EAGAIN)) => break,
                 Err(e) => return Err(e),
                 Ok((0, _)) => return Err(Errno(libc::ECONNRESET)),
-                Ok((_, fd)) if fd >= 0 => close(fd),
+                Ok((n, fd)) if fd >= 0 => {
+                    // The message is nobody's, and may be a record.
+                    wipe(self.msg.get_mut(..n).unwrap_or(&mut []));
+                    close(fd);
+                }
                 Ok((n, _)) => {
                     if !self.take_round(n) {
                         wipe(self.msg.get_mut(..n).unwrap_or(&mut []));
@@ -497,9 +480,8 @@ impl Fiber<'_> {
     }
 
     /// fz_incarnation_wait. Some with a resume's record, None when the
-    /// park ended without one (serve on). Whatever a call does not hand
-    /// over goes with the seed it may have left in polled (wait_none in
-    /// C), and so does the seed the last call handed over.
+    /// park ended without one (serve on). A seed the call does not hand
+    /// over is forgotten, and so is the one the last call handed over.
     pub fn wait(&mut self) -> Result<Option<Incarnation>, Errno> {
         if self.st.channel_fd < 0 {
             return Err(Errno(libc::EBADF));
@@ -703,10 +685,9 @@ impl Fiber<'_> {
     }
 }
 
-/// spec_token copies FIBERD_TOKEN out of the spec environment into out,
-/// read whole into env first (at most env.len() - 1 bytes, as the C
-/// read it). False when the file or the token is not there. The search
-/// is procfiles::spec_token.
+/// Copies FIBERD_TOKEN out of the spec environment into out, reading the
+/// file into env first (at most env.len() - 1 bytes). False when the
+/// file or the token is not there.
 fn read_spec_token(env: &mut [u8], out: &mut [u8]) -> bool {
     // SAFETY: a static NUL-ended path.
     let fd = unsafe { sys::open(GVISOR_SPEC_ENV.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
@@ -717,7 +698,7 @@ fn read_spec_token(env: &mut [u8], out: &mut [u8]) -> bool {
     let mut got = 0usize;
     while let Some(room) = env.get_mut(got..cap) {
         // SAFETY: read writes at most room.len() bytes of room, which is
-        // live. An empty room reads 0 and ends the loop, as in C.
+        // live. An empty room reads 0 and ends the loop.
         let r = unsafe { libc::read(fd, room.as_mut_ptr().cast(), room.len()) };
         let Some(r) = usize::try_from(r).ok().filter(|&r| r > 0) else {
             break;
@@ -767,8 +748,7 @@ pub extern "C" fn fz_quiesce() -> c_int {
 /// serve on, or -1 with errno.
 ///
 /// # Safety
-/// inc is writable, or null, which the C would have crashed on and
-/// which is then not written.
+/// inc is writable, or null, which is then not written.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fz_incarnation_wait(inc: *mut Incarnation) -> c_int {
     // SAFETY: an entry, which overlaps no other (see Global).
@@ -818,13 +798,13 @@ pub extern "C" fn fz_gvisor_ack() -> c_int {
     at_boundary(unsafe { global() }.gvisor_ack().map(|()| 0))
 }
 
-/// The C fuzz harnesses' view of the state (fuzz/fuzz_wait.c and
-/// fuzz/fuzz_identity.c), in the fuzzshim archive alone, so a harness
-/// sets up and checks what the C file's statics held.
+/// The fuzz targets' view of the state (fuzz/fuzz_targets/wait.rs and
+/// fiber.rs), with the fuzzshim feature alone, so a target sets up and
+/// checks what the entries work on.
 #[cfg(feature = "fuzzshim")]
-mod fuzz {
-    use super::{BORN, POLLED, STATE, State};
-    use crate::abi::RecordStore;
+pub mod fuzz {
+    use super::{BORN, CHANNEL_MSG, POLLED, STATE, State};
+    use crate::abi::{RECORD_MAX, RecordStore};
 
     /// The fiber's small state.
     #[unsafe(no_mangle)]
@@ -842,6 +822,12 @@ mod fuzz {
     #[unsafe(no_mangle)]
     pub extern "C" fn fz_rs_fuzz_polled() -> *mut RecordStore {
         POLLED.get()
+    }
+
+    /// Where a channel message lands first.
+    #[unsafe(no_mangle)]
+    pub extern "C" fn fz_rs_fuzz_msg() -> *mut [u8; RECORD_MAX] {
+        CHANNEL_MSG.get()
     }
 }
 
@@ -1600,12 +1586,9 @@ mod tests {
         // fz_incarnation_wait hands over a resume, the template waits
         // again, fiberd's next message is refused after it was copied
         // over the store's buffer, and then the template calls
-        // fz_fiber_ready. The refused message is the worst one, RECORD_MAX
-        // bytes with no NUL, so the old record's fence and seed pointers
-        // name bytes that run to the end of buf. Main's C (HEAD before
-        // stage 4) ran strlen there. Its ack memcpy overflowed the stack
-        // (ASan: stack-buffer-overflow in fz_fiber_ready), and its
-        // forget_seed zeroed the handed-over payload past buf.
+        // fz_fiber_ready. The refused message is RECORD_MAX bytes with no
+        // NUL, so the old fence and seed pointers name bytes that run to
+        // the end of buf. Neither the ack nor forget_seed may run past it.
         struct Case {
             name: &'static str,
             first: Vec<u8>,
@@ -1615,9 +1598,8 @@ mod tests {
         }
         let cases = [
             Case {
-                // The seed's field sits 600 bytes past the fence, so the
-                // C's wipe of it left more than FENCE_MAX bytes with no
-                // NUL where the fence was, and its ack overflowed.
+                // The seed's field sits 600 bytes past the fence, so more
+                // than FENCE_MAX bytes with no NUL lie where the fence was.
                 name: "the ack after a refusal names the record handed over",
                 first: record_with("2", "g/1/2", &"e".repeat(600), "-"),
                 ready: true,
@@ -1691,9 +1673,8 @@ mod tests {
     #[test]
     fn the_ack_names_the_record_handed_over() {
         // fz_incarnation_wait hands over g/3/3, then the template waits
-        // again before fz_fiber_ready. The C acked whatever bytes then
-        // lay at the old fence's offset in polled.buf, so a refused
-        // record of the same shape made it ack "ag/X/X".
+        // again before fz_fiber_ready. The ack still names g/3/3, not
+        // what a later record left at the old fence's offset.
         struct Case {
             name: &'static str,
             then: Vec<Q>,
@@ -1755,23 +1736,33 @@ mod tests {
 
     #[test]
     fn no_seed_stays_in_a_message_buffer() {
-        // Each case leaves a record's seed where the C left it: a record
-        // that reached fz_accept stayed in channel_msg, a refused one in
-        // polled.buf, a replay's past the end of the shorter record that
-        // followed it, and one riding with a descriptor in channel_msg.
+        // Each case puts a record's seed where it could linger. A record
+        // that reaches fz_accept, a refused one, a replay's past the end
+        // of the shorter record that follows it, and one riding with a
+        // descriptor in wait and in quiesce. A message longer than
+        // RECORD_MAX is EPROTO, and its first RECORD_MAX bytes land in
+        // channel_msg in all three calls (found by the fiber fuzz target).
+        #[derive(Clone, Copy)]
+        enum Call {
+            Wait,
+            Accept,
+            Quiesce,
+        }
         struct Case {
             name: &'static str,
-            accept: bool,
+            call: Call,
             served: c_uint,
             queue: Vec<Q>,
-            want: Result<Option<c_uint>, Errno>, // Ok(None) for accept's descriptor
+            want: Result<Option<c_uint>, Errno>, // Ok(None): accept's descriptor, quiesce's 0
             gone: &'static [u8],
         }
         let long = "e".repeat(300);
+        let mut too_long = record("2", "g/1/2");
+        too_long.resize(RECORD_MAX + 100, b'x');
         let cases = [
             Case {
                 name: "a record that reaches accept",
-                accept: true,
+                call: Call::Accept,
                 served: 1,
                 queue: vec![Q::M(record("2", "g/1/2")), Q::Fd(msg(b'x', ""))],
                 want: Ok(None),
@@ -1779,7 +1770,7 @@ mod tests {
             },
             Case {
                 name: "a record refused in wait",
-                accept: false,
+                call: Call::Wait,
                 served: 1,
                 queue: vec![Q::M(record("0", "g/1/0"))],
                 want: Err(Errno(libc::EPROTO)),
@@ -1787,7 +1778,7 @@ mod tests {
             },
             Case {
                 name: "a replay before a shorter fresh record",
-                accept: false,
+                call: Call::Wait,
                 served: 5,
                 queue: vec![
                     Q::M(record_seeded("3", "g/1/3", &long, "-", OTHER_SEED_HEX)),
@@ -1798,7 +1789,7 @@ mod tests {
             },
             Case {
                 name: "a record riding with a descriptor in wait",
-                accept: false,
+                call: Call::Wait,
                 served: 5,
                 queue: vec![
                     Q::Fd(record_seeded("7", "g/1/7", &long, "-", OTHER_SEED_HEX)),
@@ -1807,18 +1798,50 @@ mod tests {
                 want: Ok(Some(6)),
                 gone: OTHER_SEED_HEX,
             },
+            Case {
+                name: "a record riding with a descriptor in quiesce",
+                call: Call::Quiesce,
+                served: 1,
+                queue: vec![Q::Fd(record("2", "g/1/2"))],
+                want: Ok(None),
+                gone: SEED_HEX,
+            },
+            Case {
+                name: "a message too long for wait",
+                call: Call::Wait,
+                served: 1,
+                queue: vec![Q::M(too_long.clone())],
+                want: Err(Errno(libc::EPROTO)),
+                gone: SEED_HEX,
+            },
+            Case {
+                name: "a message too long for accept",
+                call: Call::Accept,
+                served: 1,
+                queue: vec![Q::M(too_long.clone())],
+                want: Err(Errno(libc::EPROTO)),
+                gone: SEED_HEX,
+            },
+            Case {
+                name: "a message too long for quiesce",
+                call: Call::Quiesce,
+                served: 1,
+                queue: vec![Q::M(too_long)],
+                want: Err(Errno(libc::EPROTO)),
+                gone: SEED_HEX,
+            },
         ];
         for tc in cases {
             let mut rig = Rig::new();
             rig.st.served_generation = tc.served;
             close_all(rig.queue(&tc.queue));
-            let got = if tc.accept {
-                rig.fiber().accept().map(|fd| {
+            let got = match tc.call {
+                Call::Accept => rig.fiber().accept().map(|fd| {
                     close_all(vec![fd]);
                     None
-                })
-            } else {
-                rig.fiber().wait().map(|r| r.map(|inc| inc.generation))
+                }),
+                Call::Wait => rig.fiber().wait().map(|r| r.map(|inc| inc.generation)),
+                Call::Quiesce => rig.fiber().quiesce().map(|()| None),
             };
             assert_eq!(got, tc.want, "{}", tc.name);
             for (place, buf) in [
@@ -1836,8 +1859,8 @@ mod tests {
 
     #[test]
     fn a_refused_identity_leaves_no_seed() {
-        // fz_gvisor_identity reads the pool's record into born.buf. The C
-        // left one it refused there, seed and all.
+        // fz_gvisor_identity reads the pool's record into born.buf. One it
+        // refuses must not stay there, seed and all.
         struct Case {
             name: &'static str,
             send: Vec<u8>,

@@ -1,5 +1,6 @@
 # The sdist keeps the extension's sources on every host, and the unit tests
 # with wheel-test.sh, which cibuildwheel runs against each wheel. setup.py
-# adds the C library, its Rust core with libc vendored, LICENSE and NOTICE.
+# adds the library's header and crate with libc vendored, LICENSE and
+# NOTICE.
 include src/fiberd/*.c wheel-test.sh
 recursive-include src/fiberd *_test.py conftest.py _test*.py

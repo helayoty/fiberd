@@ -21,10 +21,11 @@ import (
 // with it every grant's clones.
 func TestWaitBoundedNeverBlocks(t *testing.T) {
 	bin := filepath.Join(filepath.Dir(zygoteBin), "waitbounded")
-	// The probe includes the library source, so it is built with the
-	// Makefile's ZYGOTE_CFLAGS and ZYGOTE_LDFLAGS, and links the core
-	// archive, as the zygote is.
-	core, err := testenv.CoreArchive()
+	// The probe calls the core's wait_bounded through fz_rs_wait_bounded,
+	// which the library exports with its testhooks feature alone. It is
+	// built with the Makefile's ZYGOTE_CFLAGS and ZYGOTE_LDFLAGS, as the
+	// zygote is.
+	core, err := testenv.TesthooksArchive()
 	if err != nil {
 		t.Fatal(err)
 	}

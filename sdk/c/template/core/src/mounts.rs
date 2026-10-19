@@ -1,11 +1,9 @@
-//! The mount steps of a fiber's namespace, as mount_ns and prepare_ns
-//! take them. mount_ns runs in the child, right after its clone, so
-//! everything here keeps the rule at the top of child.rs. Nothing
-//! allocates, locks or formats, every path is a NUL-ended string in
-//! fixed storage, and every mount, umount2, mkdir and open goes through
-//! the sys seam so the fuzz harnesses can shim it. The order of the
-//! system calls in each function is the C's, since the exit codes and
-//! the strace budgets of tests/integration/proc pin it.
+//! The mount steps of a fiber's namespace, for mount_ns and prepare_ns.
+//! mount_ns runs in the child right after its clone, so nothing here
+//! allocates, locks or formats. Every mount, umount2, mkdir and open
+//! goes through the sys seam so the fuzz harnesses can shim it. The exit
+//! codes and the strace budgets of tests/integration/proc pin the order
+//! of the system calls in each function.
 #![deny(
     clippy::indexing_slicing,
     clippy::arithmetic_side_effects,
@@ -17,13 +15,13 @@
 use core::ffi::{CStr, c_char, c_int, c_ulong};
 use core::ptr;
 
-use crate::abi::{KEEP_MAX, RUNDIR_MAX};
+use crate::abi::{Kept, RUNDIR_MAX};
 use crate::child::{EX_MNT_DROP, EX_MNT_HIDE, EX_MNT_PRIVATE, EX_MNT_PROC, EX_MNT_RO};
 use crate::sys;
 
-/// The steps of prepare_ns and mount_ns that can fail, as bits, for
-/// their results, the reason every mntns CLONE is refused and the
-/// child's exit code. The C enum has the same values.
+/// The failure bits of prepare_ns and mount_ns, which pick the reason a
+/// mntns CLONE is refused and the child's exit code. This one is / made
+/// private.
 pub const F_PRIVATE: c_int = 1;
 /// The fiber's own /proc.
 pub const F_PROC: c_int = 2;
@@ -45,16 +43,16 @@ const NOSUID_NODEV_NOEXEC: c_ulong = libc::MS_NOSUID | libc::MS_NODEV | libc::MS
 
 /// What the zygote's namespace holds for mount_ns: the executable's
 /// path and the HIDE and DROP tables, each path NUL-ended in KEEP_MAX
-/// bytes of the C's storage.
+/// bytes of the zygote's storage (zygote.rs).
 pub struct Tables<'a> {
     /// The zygote's own executable, empty when unknown.
     pub self_exe: *const c_char,
     /// The HIDE paths.
-    pub hide: &'a [[c_char; KEEP_MAX]],
+    pub hide: &'a [Kept],
     /// Which of them prepare_ns covered, one byte each.
     pub hide_covered: &'a [u8],
     /// The DROP paths.
-    pub drop: &'a [[c_char; KEEP_MAX]],
+    pub drop: &'a [Kept],
 }
 
 /// ro_remount makes the mount at path read-only in this namespace
@@ -128,7 +126,7 @@ pub unsafe fn cover_empty(path: *const c_char) -> c_int {
 }
 
 /// A bind of path onto itself, so there is a mount to make read-only,
-/// then the remount. -1 when either refused, as the C's || gave it.
+/// then the remount. -1 when either is refused.
 ///
 /// # Safety
 /// path is NUL-ended and live for the call.
@@ -142,15 +140,12 @@ unsafe fn bind_ro(path: *const c_char) -> c_int {
     0
 }
 
-/// lock_procsys takes away the fiber's write access to the kernel's
-/// knobs under /proc/sys. The fiber is euid 0 in the initial user
-/// namespace with every capability dropped, and sysctl checks the owner
-/// write bit for euid 0 and asks for no capability. /proc/sys is a
-/// directory of the proc mount, not a mount of its own, so it is bound
-/// onto itself to have a mount to make read-only. A first MS_BIND
-/// ignores MS_RDONLY and only the remount applies it. This is per fiber,
-/// after its fresh /proc, because a pidns fiber's /proc is a mount of
-/// its own that covers whatever the zygote bound on its /proc/sys.
+/// Takes away the fiber's write access to /proc/sys. The fiber is euid 0
+/// with every capability dropped, and sysctl checks only the owner write
+/// bit for euid 0. /proc/sys is no mount of its own, so it is bound onto
+/// itself first, and only the remount applies MS_RDONLY. This is per
+/// fiber, after its fresh /proc, because a pidns fiber's /proc covers
+/// whatever the zygote bound on its /proc/sys.
 fn lock_procsys() -> c_int {
     // SAFETY: a static string.
     unsafe { bind_ro(c"/proc/sys".as_ptr()) }
@@ -159,11 +154,10 @@ fn lock_procsys() -> c_int {
 /// The paths runc and Docker list for a container, made read-only on
 /// the fiber's fresh /proc. /proc/sysrq-trigger is root-owned 0200 and
 /// its write asks for no capability, so without this a euid-0 fiber
-/// with every capability dropped reboots, crashes or powers off the node
-/// wherever kernel.sysrq allows it. The same owner-bit rule writes the
-/// smp_affinity files under /proc/irq and what is under /proc/bus and
-/// /proc/fs (nfsd). /proc/latency_stats is the one writable file among
-/// runc's masked ones.
+/// could reboot or crash the node wherever kernel.sysrq allows it. The
+/// same owner-bit rule opens /proc/irq, /proc/bus and /proc/fs.
+/// /proc/latency_stats is the one writable file among runc's masked
+/// ones.
 const PROC_RO: [&CStr; 5] = [
     c"/proc/sysrq-trigger",
     c"/proc/bus",
@@ -177,20 +171,15 @@ const PROC_RO: [&CStr; 5] = [
 /// host and /proc/acpi's wakeup rewires the host's wakeup devices.
 const PROC_MASKED: [&CStr; 2] = [c"/proc/scsi", c"/proc/acpi"];
 
-/// lock_proc takes away the rest of what a fiber could write or see
-/// under its fresh /proc. Each PROC_RO path is bound onto itself and
-/// made read-only, as /proc/sys is, and each PROC_MASKED one is covered.
-/// A path this kernel does not have is skipped, as runc skips it. One
-/// that exists and cannot be locked fails the birth, since a fiber must
-/// not run with it writable. Every path is tried whatever happened to
-/// the ones before it. Returns 0, or -1 when any step failed.
+/// Takes away the rest of what a fiber could write or see under its
+/// fresh /proc. A path this kernel lacks is skipped, as runc skips it.
+/// One that exists and cannot be locked fails the birth. Every path is
+/// tried whatever happened before. 0, or -1 when any step failed.
 ///
-/// runc's other masked files are not covered. /proc/kcore and
-/// /proc/kmsg ask for a capability the fiber lacks (CAP_SYS_RAWIO,
-/// CAP_SYSLOG). /proc/keys, /proc/timer_list and /proc/sched_debug are
-/// read-only to begin with, and a mask would be a bind of another file,
-/// which CRIU restores as the host's own path, so a resumed fiber would
-/// see them again.
+/// runc's other masked files are left alone. /proc/kcore and /proc/kmsg
+/// need a capability the fiber lacks, and /proc/keys, /proc/timer_list
+/// and /proc/sched_debug are read-only already. A mask would be a bind
+/// of another file, which CRIU restores as the host's own path.
 fn lock_proc() -> c_int {
     let mut rc = 0;
     for path in PROC_RO {
@@ -219,11 +208,11 @@ fn lock_proc() -> c_int {
 /// The bytes fd_path needs: the prefix, ten digits and the NUL.
 pub const FD_PATH_MAX: usize = 32;
 
-/// fd_path writes "/proc/self/fd/<fd>" into buf, NUL-ended, and returns
-/// the path. By hand, because the child uses no stdio.
+/// Writes "/proc/self/fd/<fd>" into buf, NUL-ended, and returns it. By
+/// hand, because the child uses no stdio.
 pub fn fd_path(buf: &mut [u8; FD_PATH_MAX], fd: c_int) -> *const c_char {
     let n = sys::append(buf, 0, b"/proc/self/fd/");
-    // A descriptor is never negative here, and C cast it to unsigned.
+    // A descriptor is never negative here.
     let n = sys::append_decimal(buf, n, fd as u32);
     if let Some(end) = buf.get_mut(n) {
         *end = 0;
@@ -231,21 +220,14 @@ pub fn fd_path(buf: &mut [u8; FD_PATH_MAX], fd: c_int) -> *const c_char {
     buf.as_ptr().cast()
 }
 
-/// narrow_rundir leaves the zygote, and so every fiber, one directory
-/// of fiberd's run directory, its own grant's. Every grant's directory
-/// (endpoint sockets, the zygote's log) sits under one parent, and a
-/// fiber is euid 0, so without this a fiber of one grant could unlink
-/// or rebind another grant's sockets. The parent is covered with an
-/// empty read-only tmpfs, in the zygote's own namespace alone, and the
-/// grant's own directory is bound back at its place from a descriptor
-/// opened before the cover. What a fiber creates there (its endpoint)
-/// lands in fiberd's real directory. The cwd is moved onto the bind,
-/// and every fiber inherits it there, so a checkpoint names it through
-/// the mount that will exist on restore. CRIU dumps the tmpfs with its
-/// one empty directory and the bind as an external mount fiberd names
-/// on restore, so a resumed fiber is bound to the resuming grant's
-/// directory. Runs once, from prepare_ns. Returns 0, or -1, and every
-/// mntns CLONE is then refused.
+/// Leaves the zygote, and so every fiber, only its own grant's directory
+/// of fiberd's run directory. A fiber is euid 0, so otherwise it could
+/// unlink or rebind another grant's sockets. The parent is covered with
+/// an empty read-only tmpfs and the own directory bound back from a
+/// descriptor opened before the cover. The cwd moves onto the bind, so
+/// a checkpoint names it through a mount fiberd names again on restore.
+/// Runs once, from prepare_ns. 0, or -1, and every mntns CLONE is then
+/// refused.
 ///
 /// # Safety
 /// parent and own are NUL-ended and live for the call.
@@ -277,7 +259,7 @@ pub unsafe fn narrow_rundir(parent: *const c_char, own: *const c_char) -> c_int 
     let mut rc = 0;
     // SAFETY: by the contract above, src is NUL-ended in a live buffer
     // and the rest are static strings. Each step runs only when the
-    // one before it went through, as the C's || had it.
+    // one before it went through.
     let failed = unsafe {
         sys::mkdir(own, 0o755) < 0
             || sys::mount(src, own, ptr::null(), libc::MS_BIND, ptr::null()) < 0
@@ -303,26 +285,17 @@ pub fn under(path: &[u8], dir: &[u8]) -> bool {
     !dir.is_empty() && path.get(..dir.len()) == Some(dir) && path.get(dir.len()) == Some(&b'/')
 }
 
-/// bind_exe_back makes the zygote's executable visible again at its own
-/// path inside the tmpfs just mounted over dir, and nothing else of dir.
-/// The directories between are made in the tmpfs, an empty file stands
-/// as the mount point, and the executable is bound onto it read-only,
-/// with no setuid and no device nodes honoured, from src, a descriptor
-/// of it opened by path before the cover. The descriptor matters:
-/// /proc/self/exe still names the mount of the namespace the zygote was
-/// started in, and a bind from another namespace's mount is EINVAL.
-/// Fibers are forked from the zygote and map the same file, and CRIU
-/// names a mapped file by its path, which must resolve in the fiber's
-/// namespace to the file it maps, so a fiber whose executable sat under
-/// a plain cover could not be parked. The bind is a mount fiberd names
-/// on restore, like the run directory's.
+/// Makes the zygote's executable visible again at its own path inside
+/// the tmpfs just mounted over dir. An empty file stands as the mount
+/// point, and the executable is bound onto it read-only from src, a
+/// descriptor opened before the cover. A bind from /proc/self/exe would
+/// be EINVAL, since it names a mount of the zygote's first namespace.
+/// CRIU names a mapped file by its path, so without this a fiber whose
+/// executable sat under a cover could not be parked.
 ///
-/// The directories are made 0755, like the run directory's cover
-/// (narrow_rundir), never 0555. The zygote runs with fiberd's narrow
-/// capability set, which has no CAP_DAC_OVERRIDE, so uid 0 cannot
-/// create anything in a directory without its owner's write bit. What
-/// seals the cover is the read-only remount cover_hide ends with, which
-/// no fiber can undo. Returns 0 or -1.
+/// The directories are made 0755, never 0555. The zygote has no
+/// CAP_DAC_OVERRIDE, so even uid 0 needs the owner's write bit to build
+/// here. cover_hide's read-only remount seals the cover. 0 or -1.
 fn bind_exe_back(dir: &[u8], self_exe: &[u8], src: c_int) -> c_int {
     let mut path = [0u8; RUNDIR_MAX];
     let n = self_exe.len();
@@ -393,16 +366,11 @@ fn bind_exe_back(dir: &[u8], self_exe: &[u8], src: c_int) -> c_int {
     0
 }
 
-/// cover_hide covers the HIDE path with an empty read-only tmpfs.
-/// Returns 1 when it did, 0 when the path does not exist (nothing to
-/// hide yet) and -1 when it exists and could not be covered, with errno
-/// set. A path that is not a directory fails, because a file cannot be
-/// covered without CRIU binding the original back on restore. A path
-/// that holds the zygote's own executable (self_exe) gets the executable
-/// bound back inside the cover (bind_exe_back) before the cover is made
-/// read-only. That cover is mounted 0755, so the zygote can build in it
-/// without CAP_DAC_OVERRIDE (see bind_exe_back), and sealed by the
-/// remount.
+/// Covers the HIDE path with an empty read-only tmpfs. 1 when it did, 0
+/// when the path does not exist yet, -1 with errno when it could not. A
+/// non-directory fails, because CRIU would bind the original file back
+/// on restore. A cover over the zygote's own executable gets it bound
+/// back inside (bind_exe_back) before the read-only remount.
 ///
 /// # Safety
 /// path and self_exe are NUL-ended and live for the call.
@@ -471,11 +439,11 @@ pub unsafe fn cover_hide(path: *const c_char, self_exe: *const c_char) -> c_int 
 /// drop_paths_now unmounts every DROP path from the calling namespace.
 /// Returns 0, or -1 when one that is mounted would not go. A path that
 /// is no mount point, or does not exist, has nothing to drop.
-pub fn drop_paths_now(drop: &[[c_char; KEEP_MAX]]) -> c_int {
+pub fn drop_paths_now(drop: &[Kept]) -> c_int {
     let mut rc = 0;
     for path in drop {
         // SAFETY: each kept path is NUL-ended within its storage.
-        if unsafe { sys::umount2(path.as_ptr(), MNT_DETACH) } < 0 {
+        if unsafe { sys::umount2(path.as_ptr().cast(), MNT_DETACH) } < 0 {
             let e = sys::errno();
             if e != libc::EINVAL && e != libc::ENOENT {
                 rc = -1;
@@ -485,25 +453,16 @@ pub fn drop_paths_now(drop: &[[c_char; KEEP_MAX]]) -> c_int {
     rc
 }
 
-/// mount_ns finishes the child's mount namespace, a copy of the
-/// zygote's prepared one (prepare_ns in C). What is grant-wide is
-/// already there, /sys read-only, the run directory narrowed and the
-/// HIDE directories covered, so what remains is the fiber's own. Its
-/// /proc shows only its pid namespace, /proc/sys and the other host
-/// controls on that fresh /proc are read-only or covered (lock_proc),
-/// the DROP paths are gone, and a HIDE directory that did not exist at
-/// PREPARE is covered now if it has appeared. Returns the F_ bits of
-/// the steps that failed, 0 when all went through, and the child ends
-/// on any of them.
+/// Finishes the child's mount namespace, a copy of the zygote's prepared
+/// one (prepare_ns). What is grant-wide is already there, so what
+/// remains is the fiber's own /proc and its locks, the DROP paths, and
+/// any HIDE directory that appeared since PREPARE. Returns the F_ bits
+/// of the failed steps, and the child ends on any of them.
 ///
-/// The copy is already private, since every mount in the zygote's
-/// namespace is, and MS_REC|MS_PRIVATE on / restates it. When even that
-/// is refused nothing is mounted or unmounted at all, since a change to
-/// a shared mount would propagate back into the zygote's namespace.
-/// DROP is repeated here, after the zygote dropped the same paths at
-/// PREPARE, for a mount at that path the zygote's namespace holds all
-/// the same (a restore root bound before the warm, dropped at PREPARE,
-/// cannot reappear, but the step is one system call and fails closed).
+/// MS_REC|MS_PRIVATE on / restates what the copy already is. When even
+/// that is refused nothing is mounted, since a change to a shared mount
+/// would propagate back into the zygote's namespace. DROP repeats the
+/// zygote's PREPARE drop because it is one system call and fails closed.
 ///
 /// # Safety
 /// t.self_exe is NUL-ended and live, as is every path in its tables.
@@ -536,8 +495,8 @@ pub unsafe fn mount_ns(own_pidns: bool, t: &Tables<'_>) -> c_int {
     {
         failed |= F_PROC;
     }
-    // lock_proc runs only when lock_procsys went through, as the C's ||
-    // had it. The child ends on either, so nothing is lost.
+    // lock_proc runs only when lock_procsys went through. The child ends
+    // on either, so nothing is lost.
     if lock_procsys() < 0 || lock_proc() < 0 {
         failed |= F_RO;
     }
@@ -549,7 +508,7 @@ pub unsafe fn mount_ns(own_pidns: bool, t: &Tables<'_>) -> c_int {
             continue;
         }
         // SAFETY: by the contract above.
-        if unsafe { cover_hide(path.as_ptr(), t.self_exe) } < 0 {
+        if unsafe { cover_hide(path.as_ptr().cast(), t.self_exe) } < 0 {
             failed |= F_HIDE;
         }
     }
@@ -572,71 +531,6 @@ pub fn mount_exit(failed: c_int) -> c_int {
         return EX_MNT_DROP;
     }
     EX_MNT_HIDE
-}
-
-/// ro_remount, for lock_sys in the C shim.
-///
-/// # Safety
-/// As ro_remount.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn fz_rs_ro_remount(path: *const c_char) -> c_int {
-    // SAFETY: by the contract above.
-    unsafe { ro_remount(path) }
-}
-
-/// cover_empty, for lock_sys in the C shim.
-///
-/// # Safety
-/// As cover_empty.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn fz_rs_cover_empty(path: *const c_char) -> c_int {
-    // SAFETY: by the contract above.
-    unsafe { cover_empty(path) }
-}
-
-/// narrow_rundir, for prepare_ns in the C shim.
-///
-/// # Safety
-/// As narrow_rundir.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn fz_rs_narrow_rundir(parent: *const c_char, own: *const c_char) -> c_int {
-    // SAFETY: by the contract above.
-    unsafe { narrow_rundir(parent, own) }
-}
-
-/// cover_hide, for prepare_ns in the C shim.
-///
-/// # Safety
-/// As cover_hide.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn fz_rs_cover_hide(path: *const c_char, self_exe: *const c_char) -> c_int {
-    // SAFETY: by the contract above.
-    unsafe { cover_hide(path, self_exe) }
-}
-
-/// drop_paths_now, for prepare_ns in the C shim, over the first n
-/// paths of the DROP table.
-///
-/// # Safety
-/// paths points at n kept paths of KEEP_MAX bytes each, NUL-ended, or
-/// n is 0.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn fz_rs_drop_paths_now(paths: *const [c_char; KEEP_MAX], n: c_int) -> c_int {
-    // SAFETY: by the contract above.
-    drop_paths_now(unsafe { kept(paths, n) })
-}
-
-/// The first n kept paths at p as a slice, none when p is null.
-///
-/// # Safety
-/// p points at n paths of KEEP_MAX bytes each, or is null.
-pub unsafe fn kept<'a>(p: *const [c_char; KEEP_MAX], n: c_int) -> &'a [[c_char; KEEP_MAX]] {
-    if p.is_null() {
-        return &[];
-    }
-    let n = usize::try_from(n).unwrap_or(0).min(crate::abi::MAX_PATHS);
-    // SAFETY: by the contract above.
-    unsafe { core::slice::from_raw_parts(p, n) }
 }
 
 #[cfg(test)]
@@ -751,21 +645,19 @@ mod tests {
 
     #[test]
     fn drop_paths_now_skips_what_is_not_there() {
-        fn kept_of(paths: &[&str]) -> Vec<[c_char; KEEP_MAX]> {
+        fn kept_of(paths: &[&str]) -> Vec<Kept> {
             paths
                 .iter()
                 .map(|p| {
-                    let mut k = [0 as c_char; KEEP_MAX];
-                    for (i, b) in p.bytes().enumerate() {
-                        k[i] = b as c_char;
-                    }
+                    let mut k = [0u8; crate::abi::KEEP_MAX];
+                    k[..p.len()].copy_from_slice(p.as_bytes());
                     k
                 })
                 .collect()
         }
         let missing = scratch("gone");
         let missing = missing.to_str().unwrap();
-        let cases: &[(&str, Vec<[c_char; KEEP_MAX]>)] = &[
+        let cases: &[(&str, Vec<Kept>)] = &[
             ("no paths", kept_of(&[])),
             ("one missing path", kept_of(&[missing])),
             (
@@ -775,13 +667,6 @@ mod tests {
         ];
         for (name, drop) in cases {
             assert_eq!(drop_paths_now(drop), 0, "{name}");
-            // SAFETY: drop holds that many kept paths.
-            let n = drop.len() as c_int;
-            assert_eq!(
-                unsafe { fz_rs_drop_paths_now(drop.as_ptr(), n) },
-                0,
-                "{name} through the entry"
-            );
         }
     }
 

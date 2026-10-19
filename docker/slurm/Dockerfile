@@ -17,8 +17,8 @@ WORKDIR /src
 COPY . .
 # Go binaries are static and reproducible. The reference zygote is built
 # with TLS (-DFZ_TLS) so it can serve handoff grants, with ZYGOTE_CFLAGS and
-# ZYGOTE_LDFLAGS from the Makefile, and links the library's Rust core,
-# which the dev image's cargo builds. On aarch64 it is built without PAC
+# ZYGOTE_LDFLAGS from the Makefile, and links the zygote library's
+# archive, which the dev image's cargo builds. On aarch64 it is built without PAC
 # branch protection (see docker/dev/Dockerfile).
 # fiberd is built with the fiberd_testhooks tag, since the conformance run
 # drives the test-only admin controls (-admin-unsafe). The release image
@@ -37,7 +37,7 @@ RUN set -eu; mkdir -p /out; \
     [ ! -d "$sysroot/usr/include" ] || sr="--sysroot=$sysroot -B$sysroot/usr/lib/$(gcc -print-multiarch)"; \
     gcc $sr -D_FORTIFY_SOURCE=3 -O2 -fstack-protector-strong -fstack-clash-protection -fPIE -Wformat=2 -Werror=format-security \
       -pie -Wl,-z,relro,-z,now -Wall -Wextra -pthread $flags -DFZ_TLS -o /out/refzygote \
-      sdk/c/template/refzygote.c sdk/c/template/libfiberzygote.c sdk/c/template/core/target/release/libfiberzygote_core.a -lssl -lcrypto; \
+      sdk/c/template/refzygote.c sdk/c/template/core/target/release/libfiberzygote_core.a -lssl -lcrypto; \
     need=$(objdump -T /out/refzygote | grep -o "GLIBC_2\.[0-9]*" | sort -t. -k2 -n | tail -1); \
     [ "${need#GLIBC_2.}" -le 36 ] || { echo "refzygote needs $need, newer than the bookworm runtime" >&2; exit 1; }
 

@@ -1,9 +1,8 @@
-//! What the zygote reads out of files the kernel and the sandbox hand
-//! it, taken apart as the C file took them apart: the mount points of
-//! /proc/self/mountinfo for lock_sys, /proc/self/uid_map for
-//! in_child_userns and the gVisor spec environment for spec_token. The
-//! open, the read and every mount stay in C. Only buffer logic is here,
-//! and the child-path rules hold as in line.rs.
+//! Parsers for files the kernel and the sandbox hand the zygote:
+//! /proc/self/mountinfo, /proc/self/uid_map and the gVisor spec
+//! environment. Only buffer logic is here. The open, the read and every
+//! mount are the callers' (prepare.rs, fiber.rs). The child-path rules of
+//! line.rs hold.
 #![deny(
     clippy::indexing_slicing,
     clippy::arithmetic_side_effects,
@@ -33,22 +32,20 @@ fn octal_at(s: &[u8], at: usize) -> Option<u8> {
         .wrapping_mul(64)
         .wrapping_add(digit(2)?.wrapping_mul(8))
         .wrapping_add(digit(3)?);
-    // C stores it through a char, so 8 bits of it.
+    // Escapes past \377 keep their low 8 bits.
     Some(v as u8)
 }
 
-/// unescape_mount in C: undoes mountinfo's octal escapes (\040 for a
-/// space) in place, over s up to its first NUL, and NUL-ends the result.
-/// Returns the new length, the NUL not counted. A backslash that starts
-/// no escape stays.
+/// Undoes mountinfo's octal escapes (\040 for a space) in place, up to
+/// s's first NUL, and NUL-ends the result. Returns the new length. A
+/// backslash that starts no escape stays.
 pub fn unescape_mount(s: &mut [u8]) -> usize {
     let end = sys::nul_at(s);
     let (mut r, mut w) = (0usize, 0usize);
     loop {
         let rest = s.get(r..end).unwrap_or(&[]);
         let run = sys::byte_at(rest, b'\\');
-        // The bytes before the backslash move down as one, which the
-        // common line, with no escape at all, never needs.
+        // The common line has no escape, so nothing moves.
         if w != r
             && let Some(stop) = r.checked_add(run)
         {
@@ -75,12 +72,12 @@ pub fn unescape_mount(s: &mut [u8]) -> usize {
     w
 }
 
-/// lock_sys's line loop in C: the next mount point under /sys among the
-/// complete lines of buf[..have] from *start, which it moves past them.
-/// The mount point is the fifth field, unescaped in place and NUL-ended,
-/// so the caller hands it to mount as a C string. None when no complete
-/// line is left. Every newline passed becomes a NUL, and a line that
-/// began before the buffer (*skipping) is dropped and clears the flag.
+/// The next mount point under /sys among the complete lines of
+/// buf[..have] from *start, which moves past them. The mount point (the
+/// fifth field) is unescaped in place and NUL-ended, ready for mount.
+/// None when no complete line is left. Every newline passed becomes a
+/// NUL. A line that began before the buffer (*skipping) is dropped and
+/// clears the flag.
 pub fn mountinfo_next_sys(
     buf: &mut [u8],
     have: usize,
@@ -105,8 +102,8 @@ pub fn mountinfo_next_sys(
             continue;
         }
         // 36 35 98:0 /mnt1 /mnt2 rw,noatime master:1 - ext3 /dev/root rw
-        // (0)(1)(2)  (3)   (4) is the mount point. strtok_r stops at a
-        // NUL inside the line, as it did.
+        // (0)(1)(2)  (3)   (4) is the mount point. A NUL inside the line
+        // ends it.
         let line = buf.get(line_start..line_end).unwrap_or(&[]);
         let nul = line_start.wrapping_add(sys::nul_at(line));
         let mut t = Tokens::within(line_start, nul, b' ');
@@ -118,10 +115,10 @@ pub fn mountinfo_next_sys(
             }
         }
         let Some(mp) = mp else { continue };
-        // The token ends in a NUL, the one strtok_r wrote or the line's.
+        // The token ends in a NUL, the tokenizer's or the line's.
         let field = buf.get_mut(mp.off..).unwrap_or(&mut []);
         let len = unescape_mount(field);
-        // An escaped NUL cuts the C string the mount sees.
+        // An escaped NUL cuts the path the mount sees.
         let len = sys::nul_at(field.get(..len).unwrap_or(&[]));
         let path = field.get(..len).unwrap_or(&[]);
         if path == b"/sys" || path.starts_with(b"/sys/") {
@@ -130,11 +127,10 @@ pub fn mountinfo_next_sys(
     }
 }
 
-/// lock_sys's carry in C, after the complete lines of buf[..have] are
-/// done at start. The partial line left moves to the front and its
-/// length is returned. A full buffer with no newline in it is dropped
-/// instead, with *skipping set, so the rest of that line is skipped to
-/// its newline rather than read as lines of its own.
+/// Moves the partial line left at start of buf[..have] to the front and
+/// returns its length. A full buffer with no newline is dropped instead,
+/// with *skipping set, so the rest of that line is skipped rather than
+/// read as lines of its own.
 pub fn mountinfo_carry(buf: &mut [u8], have: usize, start: usize, skipping: &mut bool) -> usize {
     let have = have.min(buf.len());
     if start == 0 && have == buf.len() {
@@ -146,10 +142,10 @@ pub fn mountinfo_carry(buf: &mut [u8], have: usize, start: usize, skipping: &mut
     have.wrapping_sub(start)
 }
 
-/// One %lu of sscanf in C: white space, a sign, digits, read as strtoul
-/// reads them. The magnitude clamps at ULONG_MAX before the sign is
-/// applied, so "-1" is ULONG_MAX. None when there is no number there.
-fn scan_ulong(s: &[u8], i: &mut usize) -> Option<u64> {
+/// One number as sscanf's %lu reads it: white space, a sign, digits. The
+/// magnitude clamps at ULONG_MAX before the sign applies, so "-1" is
+/// ULONG_MAX. None when there is no number.
+pub(crate) fn scan_ulong(s: &[u8], i: &mut usize) -> Option<u64> {
     while s.get(*i).is_some_and(|&c| is_space(c)) {
         *i = i.wrapping_add(1);
     }
@@ -195,8 +191,8 @@ fn scan_ulong(s: &[u8], i: &mut usize) -> Option<u64> {
     })
 }
 
-/// sscanf(buf, "%lu %lu %lu") in C over a uid_map read up to its first
-/// NUL: the three numbers, or None when fewer convert.
+/// The first three numbers of a uid_map, up to its first NUL, as
+/// sscanf("%lu %lu %lu") reads them. None when fewer convert.
 pub fn uid_map(s: &[u8]) -> Option<[u64; 3]> {
     let s = s.get(..sys::nul_at(s)).unwrap_or(&[]);
     let mut i = 0usize;
@@ -206,20 +202,19 @@ pub fn uid_map(s: &[u8]) -> Option<[u64; 3]> {
     Some([inside, outside, count])
 }
 
-/// in_child_userns in C, on the bytes read from /proc/self/uid_map:
-/// whether they name a user namespace other than the initial one, which
-/// maps everything to itself in one line. False when they do not parse.
+/// Whether /proc/self/uid_map names a user namespace other than the
+/// initial one, which maps everything to itself in one line. False when
+/// it does not parse.
 pub fn in_child_userns(s: &[u8]) -> bool {
     uid_map(s).is_some_and(|[inside, outside, count]| {
         !(inside == 0 && outside == 0 && count == 4_294_967_295)
     })
 }
 
-/// spec_token in C: finds FIBERD_TOKEN in env, the spec environment as
-/// read, KEY=VALUE entries separated by NUL or newline. Every newline
-/// becomes a NUL. True with the token NUL-ended in out, or false when it
-/// is not there, is empty or does not fit, which ends the search as it
-/// did in C.
+/// Finds FIBERD_TOKEN in the spec environment, KEY=VALUE entries split
+/// by NUL or newline. Every newline becomes a NUL. True with the token
+/// NUL-ended in out. False when it is missing, empty or too long, and
+/// the first FIBERD_TOKEN entry ends the search either way.
 pub fn spec_token(env: &mut [u8], out: &mut [u8]) -> bool {
     let mut i = 0usize;
     while let Some(rest) = env.get(i..) {
@@ -251,9 +246,7 @@ pub fn spec_token(env: &mut [u8], out: &mut [u8]) -> bool {
     false
 }
 
-/// lock_sys's line loop in C: the next mount point under /sys among the
-/// complete lines of buf[..have] from *start, unescaped in place and
-/// NUL-ended, or null when none is left. See mountinfo_next_sys.
+/// mountinfo_next_sys over a raw buffer. Null when no mount is left.
 ///
 /// # Safety
 /// buf holds have live bytes nothing else touches, and start and
@@ -281,9 +274,7 @@ pub unsafe extern "C" fn fz_rs_mountinfo_sys_mount(
     })
 }
 
-/// lock_sys's carry in C: moves the partial line at start of buf[..have]
-/// (cap bytes) to the front and returns its length, or drops a full
-/// buffer with no newline, sets *skipping and returns 0.
+/// mountinfo_carry over a raw buffer of cap bytes.
 ///
 /// # Safety
 /// buf holds cap live bytes nothing else touches, and skipping is
@@ -309,8 +300,8 @@ pub unsafe extern "C" fn fz_rs_mountinfo_carry(
     left
 }
 
-/// in_child_userns in C, on uid_map as a C string: 1 for a user
-/// namespace other than the initial one, else 0.
+/// in_child_userns on a NUL-ended uid_map. 1 for a child namespace,
+/// else 0.
 ///
 /// # Safety
 /// s is a live NUL-ended string.
@@ -320,11 +311,8 @@ pub unsafe extern "C" fn fz_rs_in_child_userns(s: *const c_char) -> c_int {
     c_int::from(in_child_userns(unsafe { sys::c_bytes(s) }))
 }
 
-/// spec_token in C: finds FIBERD_TOKEN in the got bytes of env, which it
-/// cuts up in place, and copies it NUL-ended into out, n bytes. Returns
-/// 1, or 0 when it is not there, is empty or does not fit. Only the
-/// tests and the line fuzz targets call it, since fiber.rs calls
-/// spec_token directly.
+/// spec_token over got bytes of env and n bytes of out. Returns 1 or 0.
+/// Only the tests and the line fuzz targets call it.
 ///
 /// # Safety
 /// env holds got live bytes nothing else touches, and out has room for
@@ -384,8 +372,7 @@ mod tests {
     }
 
     /// lock_sys's loop over data read chunk bytes at a time into a buffer
-    /// of cap bytes, as the C did: the mount points it would remount, in
-    /// order.
+    /// of cap bytes. Returns the mount points it would remount, in order.
     fn mountinfo_mounts(data: &[u8], chunk: usize, cap: usize) -> Vec<Vec<u8>> {
         let mut buf = vec![0u8; cap];
         let mut have = 0usize;

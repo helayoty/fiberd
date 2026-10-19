@@ -104,8 +104,8 @@ impl Parsed {
 }
 
 /// Takes rec apart, decoding the session, seed and payload into the
-/// buffers given, which are a record_store's. Err carries the reason the
-/// C file gave, as a C string the caller may keep.
+/// buffers given, which are a record_store's. Err carries a static
+/// reason the caller may keep.
 pub fn parse(
     rec: &[u8],
     session: &mut [u8; ENV_VALUE_MAX],
@@ -197,9 +197,8 @@ pub fn parse(
     })
 }
 
-/// parse_incarnation in C: takes the record in st->buf, n bytes, apart
-/// into the store and fills st->inc from it. Returns 0, or -1 with *why
-/// set, and st->inc is then untouched.
+/// Takes the record in st->buf, n bytes, apart into the store and fills
+/// st->inc. Returns 0, or -1 with *why set and st->inc untouched.
 ///
 /// # Safety
 /// st points at a live record_store nothing else touches, with n bytes
@@ -226,11 +225,9 @@ pub unsafe extern "C" fn fz_rs_parse_incarnation(
     }
 }
 
-/// parse_incarnation on a store the caller holds: the record in
-/// st.buf, n bytes, taken apart into the store, with st.inc filled from
-/// it. Err carries the reason, and st.inc is then untouched. The
-/// fiber-side API (fiber.rs) parses a resume's record and a gVisor
-/// sandbox's with it.
+/// Takes the record in st.buf, n bytes, apart into the store and fills
+/// st.inc. On Err st.inc is untouched. fiber.rs parses a resume's record
+/// and a gVisor sandbox's with it.
 pub fn parse_store(st: &mut RecordStore, n: usize) -> Result<(), &'static CStr> {
     let n = n.min(RECORD_MAX);
     let parsed = {
@@ -276,7 +273,7 @@ pub fn parse_store(st: &mut RecordStore, n: usize) -> Result<(), &'static CStr> 
     Ok(())
 }
 
-/// parse_generation in C, on a NUL-ended string.
+/// parse_generation on a NUL-ended string.
 ///
 /// # Safety
 /// s is a live NUL-ended string.
@@ -286,8 +283,7 @@ pub unsafe extern "C" fn fz_rs_parse_generation(s: *const c_char) -> c_uint {
     parse_generation(unsafe { sys::c_bytes(s) })
 }
 
-/// unhex in C: decodes the NUL-ended hex string s into out, cap bytes,
-/// and returns the bytes written.
+/// unhex on the NUL-ended hex string s, into out of cap bytes.
 ///
 /// # Safety
 /// s is a live NUL-ended string and out has room for cap bytes.
@@ -653,8 +649,7 @@ mod tests {
 
     #[test]
     fn the_corpus_parses_as_c_did() {
-        // The verdict the C parser of main 4afa97c gave each seed, recorded
-        // once with bin/rust-core's oracle. A bare `cargo fuzz run` adds
+        // Each seed's verdict is pinned here. A bare `cargo fuzz run` adds
         // what it finds beside the seeds, with no verdict recorded.
         let cases: &[(&str, &str)] = &[
             ("clone", "ok"),

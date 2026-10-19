@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Build the sdist, then a wheel from that sdist, and test the installed
-# wheel, as the release does with cibuildwheel. The sdist vendors the Rust
-# core's libc, from cargo's registry or crates.io. Everything after it is
-# offline, inside the dev container. Nothing is written into the tree,
+# wheel, as the release does with cibuildwheel. The sdist vendors the
+# zygote library's libc, from cargo's registry or crates.io. Everything
+# after it is offline, inside the dev container. Nothing is written into the tree,
 # since it builds from a copy.
 # The wheel is linux_<arch> here. auditwheel makes it manylinux in CI.
 #
@@ -17,7 +17,7 @@ mkdir -p "$out" "$work/repo/sdk/c/template/core" "$work/sdist"
 
 # What setup.py reads, laid out as in the tree.
 cp LICENSE NOTICE "$work/repo/"
-cp sdk/c/template/libfiberzygote.c sdk/c/template/libfiberzygote.h "$work/repo/sdk/c/template/"
+cp sdk/c/template/libfiberzygote.h "$work/repo/sdk/c/template/"
 (cd sdk/c/template/core && cp -R Cargo.toml Cargo.lock rust-toolchain.toml build.rs src "$work/repo/sdk/c/template/core/")
 tar -C sdk -cf - --exclude=build --exclude='*.so' --exclude=__pycache__ --exclude='*.egg-info' python |
   tar -C "$work/repo/sdk" -xf -

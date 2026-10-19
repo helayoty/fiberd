@@ -1,19 +1,16 @@
 //! The libc calls the core makes, each behind a safe shape. Byte scans go
-//! through libc, whose memchr and strlen are the SIMD loops the C file
-//! had. A Rust byte loop measured 8x slower on a 4 KB handoff record
-//! (bin/rust-core/DESIGN.md, section 5).
+//! through libc, whose memchr and strlen are SIMD loops. A Rust byte loop
+//! measured 8x slower on a 4 KB handoff record (bin/rust-core/DESIGN.md,
+//! section 5).
 //!
-//! The second half is the seam for the calls the C fuzz harnesses shim
-//! with a #define (fuzz/fuzz_control.c, fuzz/fuzz_procfiles.c). With the
-//! `fuzzshim` feature each one calls the `fz_fuzz_*` hook a harness
-//! defines, with the C signature the harness gives it, so no harness
-//! really clones or mounts. Without the feature each is the libc call.
 //! Every mount, umount2, mkdir, open and raw syscall of the core goes
-//! through here, so one feature flag covers them all.
+//! through here. With the `fuzzshim` feature each one calls the target's
+//! `fz_fuzz_*` hook (fuzz/fuzz_targets/hooks.rs) instead, so no fuzz
+//! target really clones or mounts.
 
 use core::ffi::{c_char, c_int, c_long, c_ulong, c_void};
 
-/// The hooks the harnesses define, with exactly their C signatures.
+/// The hooks the fuzz targets define, with exactly their C signatures.
 #[cfg(feature = "fuzzshim")]
 mod hook {
     use core::ffi::{c_char, c_int, c_long, c_ulong, c_void};
@@ -33,10 +30,8 @@ mod hook {
     }
 }
 
-/// syscall(2) with up to five arguments, as the C file makes its raw
-/// calls (clone3, clone, capset, unshare, close_range). The wrapper sets
-/// errno and returns -1 as glibc's does. Missing arguments are zero,
-/// which the kernel ignores and the C passed for clone's tids and tls.
+/// syscall(2) with up to five arguments, -1 with errno on failure.
+/// Arguments a call does not take are zero, which the kernel ignores.
 ///
 /// # Safety
 /// The arguments must be what system call nr takes, pointers live for
@@ -150,7 +145,7 @@ pub unsafe fn open_mode(path: *const c_char, flags: c_int, mode: libc::mode_t) -
 }
 
 /// An errno value carried inside the crate, set on the thread once, at
-/// the C boundary.
+/// the extern boundary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Errno(pub c_int);
 
@@ -235,7 +230,8 @@ pub fn append(buf: &mut [u8], off: usize, src: &[u8]) -> usize {
 }
 
 /// Writes v in decimal into buf at off, as far as it fits, and returns
-/// the new offset. No formatting machinery, as child_say in C.
+/// the new offset. No formatting machinery, so the child may use it
+/// after the clone.
 pub fn append_decimal(buf: &mut [u8], off: usize, v: u32) -> usize {
     let mut digits = [0u8; 10];
     let mut i = digits.len();

@@ -10,11 +10,12 @@ PKGS    := ./...
 # activation comparison benchmark (bench/compare) is one more.
 EXAMPLES := examples/kubernetes examples/slurm examples/knative examples/kata examples/substrate bench/compare
 
-# Hardening for every build of the zygote, refzygote and the library. The
-# flags are defined here once. The Dockerfiles, hack/gvisor/rootfs.sh, the
-# release workflow and the Go tests that build refzygote mirror these
-# lines, each saying so. The static archive takes the compile flags with
-# -fPIC in place of -fPIE and no link flags. On aarch64 (arm64) every
+# Hardening for every build of the zygote and refzygote. The flags are
+# defined here once. The Dockerfiles, hack/gvisor/rootfs.sh and the Go
+# tests that build refzygote mirror these lines, each saying so. The
+# library itself is Rust, and its archive takes rustc's hardening
+# (docs/design/zygote.md, Build flags), so these flags cover the
+# template's own C and the link. On aarch64 (arm64) every
 # build also takes -mbranch-protection=none. A restored process keeps
 # stale pointer-authentication keys, so a PAC instruction run after a
 # restore traps on a FEAT_FPAC CPU. Some toolchains default to
@@ -24,9 +25,9 @@ ZYGOTE_LDFLAGS := -pie -Wl,-z,relro,-z,now
 ifneq ($(filter aarch64 arm64,$(shell uname -m)),)
 ZYGOTE_CFLAGS += -mbranch-protection=none
 endif
-# The zygote library's Rust core, a static archive every build of the
-# library links after libfiberzygote.c. cargo runs in the crate, so rustup
-# takes the toolchain its rust-toolchain.toml pins.
+# The zygote library, a static archive cargo builds from its Rust crate,
+# which every template links. cargo runs in the crate, so rustup takes
+# the toolchain its rust-toolchain.toml pins.
 CARGO    ?= cargo
 CORE_DIR := sdk/c/template/core
 CORE_LIB := $(CORE_DIR)/target/release/libfiberzygote_core.a
@@ -262,9 +263,9 @@ python-proto-check: ## fail if the Python messages are out of date (CI, with pro
 
 zygote: zygote-core ## build bin/refzygote, the reference zygote, with TLS for handoff grants
 	@mkdir -p $(BIN)
-	$(CC) $(ZYGOTE_CFLAGS) $(ZYGOTE_LDFLAGS) -Wall -Wextra -pthread -DFZ_TLS -o $(BIN)/refzygote sdk/c/template/refzygote.c sdk/c/template/libfiberzygote.c $(CORE_LIB) -lssl -lcrypto
+	$(CC) $(ZYGOTE_CFLAGS) $(ZYGOTE_LDFLAGS) -Wall -Wextra -pthread -DFZ_TLS -o $(BIN)/refzygote sdk/c/template/refzygote.c $(CORE_LIB) -lssl -lcrypto
 
-zygote-core: ## build the library's Rust core, $(CORE_LIB)
+zygote-core: ## build the zygote library, $(CORE_LIB), from its Rust crate
 	cd $(CORE_DIR) && $(CARGO) build --release --locked
 
 zygote-test: ## the core's Rust unit tests, clippy and rustfmt (the fuzz targets too, with the core's stable rustfmt, since the fuzz crate's nightly has none)
@@ -274,7 +275,7 @@ zygote-test: ## the core's Rust unit tests, clippy and rustfmt (the fuzz targets
 zygote-check: zygote-core ## check the core archive's undefined symbols against the allowlist and count its PAC instructions
 	$(CORE_DIR)/check.sh $(CORE_LIB)
 
-fuzz: ## fuzz the zygote's parsers (libFuzzer, the C harnesses and the core's cargo-fuzz targets) and the handoff parser (go test -fuzz), FUZZTIME seconds each, in the dev container on macOS
+fuzz: ## fuzz the zygote library (the core's cargo-fuzz targets), the reference workload's parsers (a C libFuzzer harness) and the handoff parser (go test -fuzz), FUZZTIME seconds each, in the dev container on macOS
 ifeq ($(shell uname -s),Darwin)
 	hack/dev/run.sh make fuzz FUZZTIME=$(FUZZTIME)
 else
@@ -284,10 +285,12 @@ else
 endif
 
 # Every cargo-fuzz target of the core, on the nightly its fuzz crate pins,
-# so cargo runs in core/fuzz. Inputs reach 70000 bytes, past the 64 KiB
-# line and record buffers. New inputs land in $(BIN)/fuzz/corpus, never in
-# the seeds, and a crash leaves its input under $(BIN)/fuzz/crashes/ as
-# the C harnesses do.
+# so cargo runs in core/fuzz. The targets build the core with its fuzzshim
+# feature, so control and procfiles shim its mounts and clones. Inputs
+# reach 70000 bytes, past the 64 KiB line and record buffers. New inputs
+# land in $(BIN)/fuzz/corpus, never in the seeds (corpus/<target>, some of
+# them links to sdk/c/template/fuzz/corpus), and a crash leaves its input
+# under $(BIN)/fuzz/crashes/ as the C harness does.
 fuzz-core:
 	@out=$(CURDIR)/$(BIN)/fuzz; mkdir -p "$$out/crashes"; failed=""; \
 	targets=$$(cd $(CORE_DIR)/fuzz && $(CARGO) fuzz list) || exit 1; \

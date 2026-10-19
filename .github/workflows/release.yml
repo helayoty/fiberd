@@ -328,20 +328,22 @@ jobs:
             pack "fiberd_${VERSION}_${GOOS}_${GOARCH}.tar.gz" "$staging"
             rm -rf "$staging"
           done
-          # Ship the zygote library that templates link, as source (the C
-          # and the Rust core's crate) and as a static library per Linux
+          # Ship the zygote library that templates link, as source (the
+          # header and the Rust crate) and as a static library per Linux
           # architecture.
           lib="$(mktemp -d)"
-          cp sdk/c/template/libfiberzygote.c sdk/c/template/libfiberzygote.h LICENSE NOTICE "$lib/"
+          cp sdk/c/template/libfiberzygote.h LICENSE NOTICE "$lib/"
           mkdir "$lib/core"
           (cd sdk/c/template/core && cp -R Cargo.toml Cargo.lock rust-toolchain.toml build.rs src "$lib/core/")
           readme sdk/c/template/README.md sdk/c/template/ "$lib/README.md"
           pack "libfiberzygote_${VERSION}_src.tar.gz" "$lib"
-          rm -r "$lib/libfiberzygote.c" "$lib/core"
-          # The Rust core per architecture. A staticlib needs no cross
-          # linker. cargo runs in the crate, so rustup takes the toolchain
-          # its rust-toolchain.toml pins, and writes outside the checkout.
-          # Rust emits no pointer authentication unless asked.
+          rm -r "$lib/core"
+          # The library per architecture is cargo's archive alone, since no
+          # C is left in it. A staticlib needs no cross linker. cargo runs
+          # in the crate, so rustup takes the toolchain its
+          # rust-toolchain.toml pins, and writes outside the checkout.
+          # Rust emits no pointer authentication unless asked, which CRIU
+          # restores cannot use.
           core="$RUNNER_TEMP/core"
           root="$PWD"
           (cd sdk/c/template/core && cargo --version &&
@@ -350,32 +352,10 @@ jobs:
               RUSTFLAGS="--remap-path-prefix=$root=. --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo" \
                 cargo build --release --locked --target "$triple" --target-dir "$core"
             done)
-          # The C object, built on Debian 12 (glibc 2.36) so the archive
-          # links on older glibc too, is added to each core archive. arm64
-          # builds without pointer authentication, which CRIU restores
-          # cannot use.
-          image="$(sed -n 's/^ARG DEV_IMAGE=//p' docker/fiberd/Dockerfile)"
-          objects="$RUNNER_TEMP/zygote"
-          mkdir "$objects"
-          # shellcheck disable=SC2016 # expanded by the container's bash
-          docker run --rm --platform linux/amd64 -e DEBIAN_FRONTEND=noninteractive \
-            -v "$PWD:/src:ro" -v "$core:/core:ro" -v "$objects:/out" -w /src "$image" bash -euo pipefail -c '
-              apt-get update -qq
-              apt-get install -y -qq --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross >/dev/null
-              for arch in amd64 arm64; do
-                cc=gcc ar=ar flags="" triple=x86_64-unknown-linux-gnu
-                if [[ "$arch" == arm64 ]]; then
-                  cc=aarch64-linux-gnu-gcc ar=aarch64-linux-gnu-ar flags=-mbranch-protection=none triple=aarch64-unknown-linux-gnu
-                fi
-                mkdir "/out/$arch"
-                "$cc" -D_FORTIFY_SOURCE=3 -O2 -fstack-protector-strong -fstack-clash-protection -fPIC \
-                  -Wformat=2 -Werror=format-security -Wall -Wextra -pthread $flags -ffile-prefix-map=/src=. \
-                  -c sdk/c/template/libfiberzygote.c -o /tmp/libfiberzygote.o
-                cp "/core/$triple/release/libfiberzygote_core.a" "/out/$arch/libfiberzygote.a"
-                "$ar" rcsD "/out/$arch/libfiberzygote.a" /tmp/libfiberzygote.o
-              done'
           for arch in amd64 arm64; do
-            cp "$objects/$arch/libfiberzygote.a" "$lib/"
+            triple=x86_64-unknown-linux-gnu
+            if [[ "$arch" == arm64 ]]; then triple=aarch64-unknown-linux-gnu; fi
+            cp "$core/$triple/release/libfiberzygote_core.a" "$lib/libfiberzygote.a"
             pack "libfiberzygote_${VERSION}_linux_${arch}.tar.gz" "$lib"
           done
           rm -rf "$lib"

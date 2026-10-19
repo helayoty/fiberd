@@ -1,10 +1,8 @@
 #!/usr/bin/env bash
-# Checks the Rust core's archive for what the link cannot. The archive
-# must need nothing from libc beyond the few calls on its allowlist, so no
-# allocator can have crept in, and it must carry no pointer authentication
-# instruction on aarch64, since a checkpoint restored on a FEAT_FPAC CPU
-# would trap on one (hack/gvisor/rootfs.sh counts the same way, with one
-# exemption for libgcc's unwinder that does not apply here).
+# Checks the zygote library's archive for what the link cannot. It must
+# need nothing from libc beyond its allowlist, so no allocator creeps in,
+# and carry no pointer authentication instruction on aarch64, since a
+# checkpoint restored on a FEAT_FPAC CPU would trap on one.
 #
 #   sdk/c/template/core/check.sh sdk/c/template/core/target/release/libfiberzygote_core.a
 set -euo pipefail
@@ -19,30 +17,24 @@ done
 # finding, and an allocator is one by name even if it were on this list.
 allow="abort getauxval memchr memcpy memset memcmp bcmp strlen write __errno_location"
 allow="$allow __addtf3 __multf3 __subtf3 __unordtf2 __udivti3"
-# memmove is copy_within, which moves mountinfo's partial line to the
-# front and an unescaped mount point down, as lock_sys did in C.
+# memmove is copy_within, which lock_sys uses on mountinfo.
 allow="$allow memmove"
-# The child's path (child.rs, mounts.rs) and the sys seam make the system
-# calls the C made there: the raw syscall for clone3, clone, capset and
-# close_range, prctl for the filter and the capability drop, openat,
-# write, close and _exit in the legacy clone's child, mount, umount2,
-# mkdir and open behind the seam, stat and chdir for the mount steps,
-# dup2, fcntl, socketpair and recvmsg for the descriptors and the record,
-# setsid, signal, sigemptyset and sigprocmask for the session and the
-# mask, and strcmp for the fence check.
+# The child's path (child.rs, mounts.rs) and the sys seam.
 allow="$allow syscall prctl openat close _exit mount umount2 mkdir open"
 allow="$allow stat chdir dup2 fcntl socketpair recvmsg setsid signal sigemptyset sigprocmask strcmp"
-# The fiber-side API and the gVisor side (fiber.rs) make the calls the C
-# made there: poll and send on the channel, socket, connect and usleep
-# for the pool socket, and read for the spec environment.
+# The fiber side and the gVisor side (fiber.rs).
 allow="$allow poll send socket connect usleep read"
+# The zygote side (zygote.rs, prepare.rs, ctl.rs). __xpg_strerror_r is
+# glibc's strerror_r, and environ is what the child points at the fiber's
+# environment.
+allow="$allow pthread_mutex_lock pthread_mutex_unlock pthread_sigmask sigaddset sigismember signalfd"
+allow="$allow personality execv getenv clock_gettime nanosleep waitpid kill pipe2 readlink realpath"
+allow="$allow mkdtemp rmdir __xpg_strerror_r environ"
 deny_re='^(malloc|calloc|realloc|free|__rust_alloc.*)$'
 
-# The symbol tables of every member. readelf rather than nm, because GNU
-# nm hands any member with an embedded .llvmbc section to the LLVM gold
-# plugin, which cannot read rustc's bitcode and then reports no symbols
-# for that member. Column 7 is the section index, UND for an undefined
-# symbol, and column 8 the name.
+# readelf rather than nm, because GNU nm hands a member with an .llvmbc
+# section to the gold plugin, which then reports no symbols for it.
+# Column 7 is the section index (UND when undefined), column 8 the name.
 syms=$(readelf -sW "$archive")
 undefined=$(printf '%s\n' "$syms" | awk '$7 == "UND" && $8 != "" {print $8}' | sort -u)
 defined=$(printf '%s\n' "$syms" | awk '$7 != "UND" && $7 ~ /^[0-9]+$/ && $8 != "" {print $8}' | sort -u)

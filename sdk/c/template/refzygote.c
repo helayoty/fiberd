@@ -1,137 +1,74 @@
 /* refzygote: the reference workload for fiberd's process runtime and the
  * conformance suite's template.
  *
- * Init (paid once, in the zygote): allocate --heap-mb and touch every page,
- * then burn some CPU to stand in for a JIT or graph build. Every fiber is a
- * copy-on-write fork of that.
+ * Init, paid once in the zygote, allocates --heap-mb, touches every page
+ * and burns some CPU to stand in for a JIT or graph build. Every fiber
+ * is a copy-on-write fork of that.
  *
- * Each fiber serves a line protocol on its unix-socket endpoint:
+ * Each fiber serves a line protocol on its unix-socket endpoint. The
+ * probes exist so the runtime's tests can see what a fiber sees.
  *
  *   ping            -> pong
- *   dirty <bytes>   -> ok        (grows the working set by that much: CoW
- *                                 faults on the inherited heap after a fork,
- *                                 new allocations in a restored sandbox;
- *                                 either way charged to the fiber as W)
- *   incr            -> <n>       (per-fiber counter; state that must survive
- *                                 a park/resume, see phase 6)
+ *   dirty <bytes>   -> ok        (grows the working set, charged as W)
+ *   incr            -> <n>       (per-fiber counter, survives a park)
  *   get             -> <n>
- *   random          -> <n>       (libc random(), reseeded in every new
- *                                 incarnation: at the fork and after a
- *                                 restore from the record's seed mixed
- *                                 with the kernel's, and from a resume's
- *                                 record the same way, so no two copies
- *                                 draw the same sequence)
- *   seed            -> <hex>     (the record's 32-byte seed, kept only
- *                                 when the payload set "keep_seed", for
- *                                 the runtime's own tests; "-" otherwise,
- *                                 since the library zeroes it at ready)
- *   getrandom       -> <hex>     (8 bytes straight from getrandom(2):
- *                                 shows whether the kernel's entropy is
- *                                 fresh in a copy, with no template
- *                                 state in between)
- *   fence           -> <fence>   (the current one: a resume's record
- *                                 names the new fence, read off the
- *                                 channel before each connection)
- *   getenv <NAME>   -> value or "-" (proves the scrub: only FIBERD_* exist)
+ *   random          -> <n>       (libc random(), reseeded in every
+ *                                 incarnation, so no two copies agree)
+ *   seed            -> <hex>     (the record's seed under "keep_seed",
+ *                                 else "-")
+ *   getrandom       -> <hex>     (8 bytes straight from getrandom(2))
+ *   fence           -> <fence>   (the current one, renewed by a resume)
+ *   getenv <NAME>   -> value or "-" (proves the scrub)
  *   session         -> the session the caller named, or "-"
- *   generation      -> fiberd's count of this fiber's lineage (1 at
- *                      birth, the parked one plus one after a resume)
+ *   generation      -> the lineage count from the record
  *   kind            -> the current record's kind, "fork" or "resume"
- *   borrow <pid> <fd> -> "ok" when pidfd_open plus pidfd_getfd reach
- *                      that descriptor of that pid from this fiber,
- *                      else the errno's name (proves another grant's
- *                      fiber cannot take this one's channel as fiberd does)
+ *   borrow <pid> <fd> -> "ok" or the errno's name (proves a fiber cannot
+ *                      take another's channel as fiberd does)
  *   payload         -> the birth payload in hex (up to 127 bytes), or "-"
  *   status <Key>    -> that field of /proc/self/status, or "-"
- *                      (CapEff and NoNewPrivs prove the privilege drop)
- *   read <path>     -> the file's first line, or "-" when it cannot be
- *                      read (proves what the mount namespace hides)
- *   wopen <path>    -> "ok" when open(path, O_WRONLY) succeeds, else the
- *                      errno's name (EROFS, EACCES, EPERM, ENOENT, or
- *                      "errno <n>"). Nothing is ever written.
- *                      (proves which host controls are read-only)
- *   stat <path>     -> what stat(path) finds, "dir", "file", "sock" or
- *                      "other", else the errno's name (ENOENT, EACCES,
- *                      or "errno <n>"). Nothing is opened or changed.
- *                      (proves what the mount namespace shows of other
- *                      grants' directories)
- *   remount <path>  -> "ok" when a read-write remount of the mount at
- *                      path succeeds (undone at once), else the errno's
- *                      name (proves whether a fiber may lift a read-only
- *                      bind it was given)
- *   rdonly <path>   -> "ro" or "rw", what statvfs says of the mount that
- *                      holds path, else the errno's name (proves which
- *                      host controls sit under a read-only mount)
+ *   read <path>     -> the file's first line, or "-"
+ *   wopen <path>    -> "ok" or the errno's name of open(O_WRONLY). Nothing
+ *                      is ever written.
+ *   stat <path>     -> "dir", "file", "sock", "other" or the errno's name
+ *   remount <path>  -> "ok" when a read-write remount succeeds (undone at
+ *                      once), else the errno's name
+ *   rdonly <path>   -> "ro" or "rw" for the mount holding path
  *
  * A handoff fiber (its record carries an identity) serves the same
- * protocol inside TLS 1.3 on the connections fiberd passes it through
- * fz_accept(), instead of a listener of its own. It serves the grant's
- * identity (on the record at birth, never a file) and fails the
- * handshake for any client certificate but the one whose x5t#S256 that
- * identity names. That needs a build with -DFZ_TLS and
- * OpenSSL 3. Without it a handoff fiber refuses to start.
+ * protocol inside TLS 1.3 on the connections fz_accept() hands it, and
+ * fails the handshake for any client certificate but the one the
+ * identity names. That needs -DFZ_TLS and OpenSSL 3. Without it a
+ * handoff fiber refuses to start.
  *
- * The clone payload, if any, is JSON with an optional "dirty_bytes": the
- * fiber dirties that much right after reporting ready, which is how
- * conformance case C6 drives a fiber over its W budget; and an optional
- * "device_bytes", reserved from the engine the same way. Two keys are
- * for the runtime's own tests. "ready_delay_ms" delays the ready report,
- * for a fiber that misses its deadline. "keep_seed" keeps a copy of the
- * record's seed for the "seed" command, which the tests use to see that
- * siblings get seeds of their own and that no seed is logged. "ready_misuse" makes a fiber
- * misuse the readiness pipe at fd 3 the way a buggy workload would. 1
- * writes a stray byte on it before reporting, 2 closes it and never
- * reports, and 3 calls fz_report, which must fail in a fiber. The zygote
- * must refuse such a fiber and go on serving. "exit_after_ready" has the
- * fiber end with exit 0 right after reporting ready, for the zygote's
- * CLONED then EXITED. "park_ignore" has the fiber serve on through a
- * park's SIGUSR1, so fiberd must fail the park by name and leave it
- * serving. "reply_delay_ms" has the fiber pause that long between a
- * reply and its next read, where a park's signal may land and must
- * still cut the connection. "park_delay_ms" has the fiber answer the signal that much
- * later, as a long request would, so a fiber that answers after
- * fiberd's deadline must meet the round's carry-on and serve again.
- * "ack_skip" has a resumed fiber listen again and never ack its
- * record, so fiberd must end it and route nothing to it.
+ * The clone payload, if any, is JSON. "dirty_bytes" and "device_bytes"
+ * grow the fiber right after ready, which is how conformance case C6
+ * drives a fiber over its W budget. The other keys are test knobs, read
+ * where they act (ready_delay_ms, keep_seed, ready_misuse,
+ * exit_after_ready, park_ignore, reply_delay_ms, park_delay_ms,
+ * ack_skip).
  *
- * A park is cooperative (libfiberzygote.h). On SIGUSR1 the accept loop
- * finishes the connection it is serving, closes it and the listener,
- * says so with fz_quiesce and blocks in fz_incarnation_wait. It comes
- * back with the resume's record, reseeds, listens again under the
- * record's endpoint and acks with fz_fiber_ready, or with fiberd's word
- * that the park failed, and then just listens again. A fiber whose
- * wait fails ends with 122, the code for a lost record on every path.
+ * A park follows libfiberzygote.h. A fiber whose wait fails ends with
+ * 122, the code for a lost record on every path.
  *
- * --http makes every fiber serve HTTP/1.1 on its endpoint instead of the
- * line protocol, for consumers that route web traffic to fibers (an
- * ingress proxy in front of the endpoint): GET /readyz -> "ok", GET / or
- * GET /count -> the counter, POST / or POST /incr -> the counter after
- * one increment, GET /fence -> the fence, POST /dirty?bytes=N -> "ok N".
- * The same counter, the same fence, the same working set: only the
- * framing differs.
+ * --http serves HTTP/1.1 instead of the line protocol, over the same
+ * state. GET /readyz -> "ok", GET / or /count -> the counter, POST / or
+ * /incr -> the counter after one increment, GET /fence -> the fence,
+ * POST /dirty?bytes=N -> "ok N".
  *
  * --device-mb N makes the zygote an engine with a simulated device of N
- * MiB: the GPU model in miniature. The zygote owns the device; fibers are
- * its clients over the unix socket named by FIBERD_ENGINE, holding slices
- * ("reserve <bytes>" on the fiber sets its slice; "devfree" drops it).
- * The engine reports every slice to fiberd (DEVICE lines) and drops a
- * slice on EVICT, which is what a park does before the CPU checkpoint; a
- * resumed fiber renegotiates by reserving again. A real CUDA engine is a
- * drop-in that speaks the same lines.
+ * MiB, the GPU model in miniature. Fibers hold slices over FIBERD_ENGINE
+ * ("reserve <bytes>", "devfree"), the engine reports them in DEVICE
+ * lines and drops one on EVICT.
  *
  * Build: (cd core && cargo build --release --locked)
- *        gcc -O2 -pthread -o refzygote refzygote.c libfiberzygote.c core/target/release/libfiberzygote_core.a
+ *        gcc -O2 -pthread -o refzygote refzygote.c core/target/release/libfiberzygote_core.a
  *        (add -DFZ_TLS ... -lssl -lcrypto to serve handoff grants)
  * Run:   fiberd starts it; by hand: refzygote --heap-mb 64 3<>/dev/null
  *
- * --gvisor runs the same workload as the init process of a gVisor sandbox
- * (fiberd's gvisor backend). There is no fork: after init the process
- * triggers its own checkpoint through /proc/gvisor/checkpoint; every fiber
- * is a sandbox restored from that image, which learns its record, fence,
- * endpoint, payload and a fresh seed, on fiberd's channel (fz_gvisor_identity),
- * serves on /host (the grant's run directory, bind-mounted), closes its
- * endpoint on SIGUSR1 so the sandbox can be checkpointed, and re-binds
- * under the next fence when restored again. --http applies there too.
+ * --gvisor runs the same workload as a gVisor sandbox's init. There is
+ * no fork. Every fiber is a sandbox restored from the template's
+ * checkpoint, learns its record through fz_gvisor_identity, serves under
+ * /host and closes its endpoint on SIGUSR1 so it can be checkpointed.
  */
 #define _GNU_SOURCE
 #include "libfiberzygote.h"
@@ -184,18 +121,10 @@ static void heavy_init(size_t mb) {
 
 static int gvisor_mode;
 
-/* Grow the fiber's working set by bytes. Under a fork this writes to the
- * inherited heap: every page touched becomes a private copy, charged to
- * the fiber's cgroup as W. In a restored sandbox there is no shared page
- * to break, the whole heap is already the fiber's own, so growing W means
- * allocating new memory; the kept allocations add up the same way. */
 /* The park's signal. SIGUSR1 stays blocked while a fiber runs and is
- * let through only inside ppoll, in wait_readable, which every blocking
- * wait goes through: the accept, the channel, each read on a
- * connection. So the signal cannot land between a look at the flag and
- * a wait that nothing else would end. No SA_RESTART, so the ppoll
- * returns EINTR once the handler has run. A long request (dirty) looks
- * at the pending signal as it goes. */
+ * let through only inside wait_readable's ppoll, which every blocking
+ * wait goes through. So it cannot land between a look at the flag and a
+ * wait nothing else would end. No SA_RESTART, so ppoll returns EINTR. */
 static volatile sig_atomic_t park_requested;
 static sigset_t serve_mask; /* the fiber's mask with SIGUSR1 let through */
 static void on_usr1(int s) { (void)s; park_requested = 1; }
@@ -213,22 +142,24 @@ static void park_arm(void) {
     park_requested = 0;
 }
 
-/* park_pending says whether a park is asked for: the flag, or the
- * signal waiting behind the block. */
+/* park_pending sees the flag or the signal still waiting behind the
+ * block. */
 static int park_pending(void) {
     sigset_t s;
     return park_requested || (sigpending(&s) == 0 && sigismember(&s, SIGUSR1));
 }
 
 /* wait_readable waits for fd with the park's signal let through. 0 when
- * fd is readable, -1 with EINTR when the park was asked for (the flag
- * is set), -1 with another errno on failure. */
+ * readable, -1 with EINTR when a park was asked for. */
 static int wait_readable(int fd) {
     if (park_requested) { errno = EINTR; return -1; }
     struct pollfd p = { .fd = fd, .events = POLLIN };
     return ppoll(&p, 1, NULL, &serve_mask) < 0 ? -1 : 0;
 }
 
+/* dirty grows the working set by bytes, charged as W. Under a fork each
+ * touched heap page becomes a private copy. A restored sandbox already
+ * owns its heap, so it maps new memory instead. */
 static size_t dirty(size_t bytes) {
     if (gvisor_mode) {
         char *p = mmap(NULL, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -237,9 +168,9 @@ static size_t dirty(size_t bytes) {
         return bytes; /* kept on purpose */
     }
     if (bytes > heap_sz) bytes = heap_sz;
-    /* A long request looks at the park flag, as any should: under memory
-     * pressure each page costs a throttled fault, and the park's signal
-     * comes exactly then. What was done is answered. */
+    /* A long request looks at the park flag. Under memory pressure each
+     * page is a throttled fault, and the park's signal comes exactly then.
+     * What was done is answered. */
     size_t i;
     for (i = 0; i < bytes && !park_pending(); i += 4096) heap[i] ^= 1;
     return i < bytes ? i : bytes;
@@ -287,8 +218,12 @@ static const char *dev_set(const char *fence, unsigned long long bytes) {
         dev_slices[i].bytes = bytes;
     }
     dev_used = dev_used - had + bytes;
-    fz_report("DEVICE %s %llu 0", fence, bytes);
-    fz_report("DEVICE - %llu %llu", dev_used, dev_cap);
+    /* A fence is at most 127 characters, so both lines fit. */
+    char line[FZ_REPORT_MAX];
+    snprintf(line, sizeof line, "DEVICE %s %llu 0", fence, bytes);
+    fz_report_line(line);
+    snprintf(line, sizeof line, "DEVICE - %llu %llu", dev_used, dev_cap);
+    fz_report_line(line);
     return "ok";
 }
 
@@ -300,13 +235,18 @@ static void on_control(const char *line) {
     }
 }
 
-/* One request per connection: "reserve <fence> <bytes>", "release <fence>"
- * or "stat"; the reply is one line. */
+/* One request per connection, "reserve <fence> <bytes>", "release
+ * <fence>" or "stat", and a one-line reply. */
 static void *engine_thread(void *arg) {
     (void)arg;
     int s = engine_fd;
     /* fiberd learns of the device once the channel is up. */
-    while (fz_report("DEVICE - %llu %llu", dev_used, dev_cap) < 0) usleep(5000);
+    for (;;) {
+        char first[FZ_REPORT_MAX];
+        snprintf(first, sizeof first, "DEVICE - %llu %llu", dev_used, dev_cap);
+        if (fz_report_line(first) == 0) break;
+        usleep(5000);
+    }
     for (;;) {
         int c = accept4(s, NULL, NULL, SOCK_CLOEXEC);
         if (c < 0) { if (errno == EINTR) continue; break; }
@@ -345,12 +285,12 @@ static void engine_start(size_t mb) {
 /* ---- the fiber's side of the device ----------------------------------- */
 
 static const fz_incarnation_t *cur_fiber; /* this fiber's birth record, for session and payload */
-/* The record's seed in hex, kept only under the "keep_seed" payload key
- * for the tests, since the library zeroes the record's copy at ready. */
+/* The record's seed in hex, kept only under "keep_seed" for the tests,
+ * since the library zeroes its copy at ready. */
 static char kept_seed[2 * 32 + 1];
-/* The fence, endpoint, kind and generation this process serves as, from
- * the birth record and then from each resume's record (park). They are
- * copied, since a resume's record is valid only until the next wait. */
+/* What this process serves as, from the birth record and then each
+ * resume's. Copied, since a resume's record lives only until the next
+ * wait. */
 static char cur_fence[128];
 static char cur_endpoint[1024];
 static char cur_kind[16];
@@ -359,8 +299,8 @@ static unsigned cur_generation;
 /* The fence the engine should file the slice under. */
 static const char *current_fence(void) { return cur_fence[0] ? cur_fence : "?"; }
 
-/* device_reserve asks the engine for a slice of bytes (0 releases it) and
- * returns the engine's reply line. */
+/* device_reserve asks the engine for a slice (0 releases it) and returns
+ * the engine's reply. */
 static const char *device_reserve(unsigned long long bytes, char *reply, size_t n) {
     const char *eng = getenv("FIBERD_ENGINE");
     if (!eng) return "err no engine";
@@ -412,10 +352,9 @@ static void errname(int e, char *out, size_t n) {
     }
 }
 
-/* wopen_errno writes "ok" when open(path, O_WRONLY) succeeds (the
- * descriptor is closed at once), else the errno's name. It never writes
- * a byte, so it is safe to point at a sysctl or a cgroup control. The
- * open alone tells whether the mount is read-only. */
+/* wopen_errno writes "ok" when open(path, O_WRONLY) succeeds, else the
+ * errno's name. It never writes a byte, so it is safe to point at a
+ * sysctl or a cgroup control. */
 static void wopen_errno(const char *path, char *out, size_t n) {
     int fd = open(path, O_WRONLY | O_CLOEXEC | O_NOCTTY);
     if (fd >= 0) { close(fd); snprintf(out, n, "ok\n"); return; }
@@ -423,9 +362,8 @@ static void wopen_errno(const char *path, char *out, size_t n) {
 }
 
 /* connect_errno writes "ok" when a TCP connect to "a.b.c.d:port"
- * succeeds within two seconds (the socket is closed at once), else the
- * errno's name. It is the one way a fiber can show whether a host
- * listener is reachable from its network namespace. */
+ * succeeds within two seconds, else the errno's name. It shows whether a
+ * host listener is reachable from the fiber's network namespace. */
 static void connect_errno(const char *addr, char *out, size_t n) {
     char host[64]; unsigned port;
     if (sscanf(addr, "%63[^:]:%u", host, &port) != 2) { errname(EINVAL, out, n); return; }
@@ -447,8 +385,8 @@ static void connect_errno(const char *addr, char *out, size_t n) {
     if (rc == 0) snprintf(out, n, "ok\n"); else errname(saved, out, n);
 }
 
-/* unshare_errno writes what unshare(CLONE_NEWUSER) answers in a child
- * process, so this fiber's own namespaces stay as they are. */
+/* unshare_errno tries unshare(CLONE_NEWUSER) in a child, so this
+ * fiber's own namespaces stay as they are. */
 static void unshare_errno(char *out, size_t n) {
     pid_t pid = fork();
     if (pid < 0) { errname(errno, out, n); return; }
@@ -478,9 +416,8 @@ static void getrandom_fork(char *out, size_t n) {
              p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]);
 }
 
-/* mount_errno writes what mounting a fresh instance of fstype at a
- * scratch directory under /tmp answers. A mount that succeeds is undone
- * at once. The probe for a filesystem a fiber must not be able to mount. */
+/* mount_errno tries a fresh fstype mount on a scratch directory under
+ * /tmp, undone at once, for a filesystem a fiber must not mount. */
 static void mount_errno(const char *fstype, char *out, size_t n) {
     char dir[] = "/tmp/.probe-XXXXXX";
     if (!mkdtemp(dir)) { errname(errno, out, n); return; }
@@ -491,8 +428,8 @@ static void mount_errno(const char *fstype, char *out, size_t n) {
     if (rc == 0) snprintf(out, n, "ok\n"); else errname(saved, out, n);
 }
 
-/* remount_errno writes what a read-write bind remount of the mount at
- * path answers. One that succeeds is put back read-only at once. */
+/* remount_errno tries a read-write bind remount of path. One that
+ * succeeds is put back read-only at once. */
 static void remount_errno(const char *path, char *out, size_t n) {
     if (mount(NULL, path, NULL, MS_REMOUNT | MS_BIND, NULL) == 0) {
         mount(NULL, path, NULL, MS_REMOUNT | MS_BIND | MS_RDONLY, NULL);
@@ -502,23 +439,20 @@ static void remount_errno(const char *path, char *out, size_t n) {
     errname(errno, out, n);
 }
 
-/* rdonly_errno writes "ro" or "rw" for the mount holding path, as
- * statvfs reports its flags, else the errno's name. */
+/* rdonly_errno writes "ro" or "rw" for the mount holding path. */
 static void rdonly_errno(const char *path, char *out, size_t n) {
     struct statvfs sv;
     if (statvfs(path, &sv) < 0) { errname(errno, out, n); return; }
     snprintf(out, n, "%s\n", (sv.f_flag & ST_RDONLY) ? "ro" : "rw");
 }
 
-/* mkdir_errno writes what mkdir(path) answers, removing a directory it
- * managed to make. */
+/* mkdir_errno tries mkdir(path) and removes what it made. */
 static void mkdir_errno(const char *path, char *out, size_t n) {
     if (mkdir(path, 0755) == 0) { rmdir(path); snprintf(out, n, "ok\n"); return; }
     errname(errno, out, n);
 }
 
-/* stat_kind writes what stat(path) finds, by file type, or the errno's
- * name when it fails. It opens nothing and changes nothing. */
+/* stat_kind writes stat(path)'s file type, or the errno's name. */
 static void stat_kind(const char *path, char *out, size_t n) {
     struct stat st;
     if (stat(path, &st) == 0) {
@@ -606,9 +540,8 @@ static void conn_close(conn_t *c) {
 }
 
 #ifdef FZ_TLS
-/* The handoff fiber's TLS server, loaded after the fork from the identity
- * fiberd sent down the fiber's channel, so the key never sits in the
- * zygote's memory or in a file another grant's fibers could read. */
+/* The handoff fiber's TLS server, loaded after the fork from the record,
+ * so the key is never in the zygote's memory or in a file. */
 static SSL_CTX *tls_ctx;
 static const char *tls_caller;
 
@@ -626,12 +559,9 @@ static int tls_is_caller(X509 *x) {
     return strcmp(b64, tls_caller) == 0;
 }
 
-/* The caller's certificate is self-signed, or issued by a CA the fiber
- * has no store for. What makes it trusted is the pin, so the verify
- * callback checks the leaf against it inside the handshake and fails
- * the handshake for any other certificate, sending the client an alert
- * before it is ever served. Whatever chain the client sent above the
- * leaf is ignored. */
+/* The fiber has no CA store, so the pin is the trust. The callback
+ * checks the leaf against it inside the handshake, so any other client
+ * gets an alert before it is served. A chain above the leaf is ignored. */
 static int tls_verify_leaf(int ok, X509_STORE_CTX *x) {
     (void)ok;
     if (X509_STORE_CTX_get_error_depth(x) != 0) return 1;
@@ -687,8 +617,8 @@ static const char *tls_load(const fz_identity_t *id) {
     return NULL;
 }
 
-/* tls_caller_ok is the second look, after the handshake, at the
- * certificate tls_verify_leaf already pinned. */
+/* tls_caller_ok looks again, after the handshake, at the certificate
+ * tls_verify_leaf pinned. */
 static int tls_caller_ok(SSL *s) {
     X509 *peer = SSL_get1_peer_certificate(s);
     if (!peer) return 0;
@@ -697,11 +627,9 @@ static int tls_caller_ok(SSL *s) {
     return ok;
 }
 
-/* tls_reseed mixes fresh kernel entropy, and the host's seed when there
- * is one, into both of OpenSSL's DRBGs. Forked fibers and fibers
- * restored from one checkpoint start with the same DRBG state, and a
- * CRIU resume keeps the pid, so OpenSSL's own fork check never notices
- * a copy. */
+/* tls_reseed mixes kernel entropy, and the host's seed if any, into
+ * both OpenSSL DRBGs. Copies share DRBG state, and a CRIU resume keeps
+ * the pid, so OpenSSL's own fork check never notices a copy. */
 static int tls_reseed(const unsigned char *host, size_t hn) {
     unsigned char seed[64];
     if (hn > 32) hn = 32;
@@ -713,9 +641,8 @@ static int tls_reseed(const unsigned char *host, size_t hn) {
     return 0;
 }
 
-/* tls_start runs the handshake on c, which pins the caller, and looks
- * at the caller once more, after a reseed of its own (see tls_reseed).
- * A caller that stalls the handshake is dropped after 5 s. */
+/* tls_start reseeds, runs the handshake and checks the caller. A caller
+ * that stalls the handshake is dropped after 5 s. */
 static int tls_start(conn_t *c) {
     if (tls_reseed(NULL, 0) < 0) return -1;
     struct timeval tv = { .tv_sec = 5 }, none = { 0 };
@@ -731,15 +658,12 @@ static int tls_start(conn_t *c) {
 }
 #endif
 
-/* reseed_rngs_from gives every generator this template owns a fresh seed
- * from the kernel, mixed with the host's seed when there is one (every
- * incarnation record carries 32 bytes). It runs once per incarnation:
- * in the child at the fork, after a restore returns (gVisor), and when a
- * resumed fiber sees a new fence (CRIU keeps the pid and the parked RNG
- * state, so nothing else marks the copy, and no seed comes yet). Both
- * libc generators are seeded, since rand() keeps its own state on some
- * libcs. OpenSSL's DRBGs are reseeded once they exist, which is in a
- * handoff fiber; tls_start does it again per handshake. */
+/* reseed_rngs_from reseeds every generator this template owns from the
+ * kernel mixed with the host's seed. It runs once per incarnation, at
+ * the fork, after a gVisor restore and after a resume. Both libc
+ * generators are seeded, since rand() keeps its own state on some libcs.
+ * OpenSSL's DRBGs exist only in a handoff fiber, and tls_start reseeds
+ * them per handshake too. */
 static void reseed_rngs_from(const unsigned char *host, size_t hn) {
     unsigned seed[2] = { 0, 0 };
     if (getrandom(seed, sizeof seed, 0) == (ssize_t)sizeof seed) {
@@ -753,8 +677,8 @@ static void reseed_rngs_from(const unsigned char *host, size_t hn) {
 #endif
 }
 
-/* set_incarnation records what this process serves as, from a record,
- * and keeps the seed under "keep_seed" for the tests. */
+/* set_incarnation records what this process serves as, and keeps the
+ * seed under "keep_seed". */
 static void set_incarnation(const fz_incarnation_t *inc) {
     snprintf(cur_fence, sizeof cur_fence, "%s", inc->fence);
     snprintf(cur_endpoint, sizeof cur_endpoint, "%s", inc->endpoint);
@@ -764,9 +688,8 @@ static void set_incarnation(const fz_incarnation_t *inc) {
         for (size_t i = 0; i < inc->seed_len; i++) snprintf(kept_seed + 2 * i, 3, "%02x", inc->seed[i]);
 }
 
-/* borrow_errno is what pidfd_open plus pidfd_getfd of fd in pid answer
- * from inside this fiber, "ok" or the errno's name. It shows whether a
- * fiber can reach another's channel the way fiberd does. */
+/* borrow_errno tries pidfd_open plus pidfd_getfd of fd in pid, to show
+ * whether a fiber can reach another's channel the way fiberd does. */
 #ifndef SYS_pidfd_open
 #define SYS_pidfd_open 434
 #endif
@@ -890,10 +813,9 @@ static int serve_http(conn_t *c, const char *fence, unsigned long *counter) {
     return 0;
 }
 
-/* Listen on an endpoint as fiberd spells it: a unix socket path, or
- * "tcp://host:port" (the host is the address fiberd advertises; the
- * listener binds the wildcard of that address family so it is reachable
- * however the home is addressed). Returns the listening fd, or -1. */
+/* Listen on a unix socket path or "tcp://host:port". A TCP listener
+ * binds the wildcard of the host's family, so it is reachable however
+ * the home is addressed. Returns the listening fd, or -1. */
 static int listen_endpoint(const char *ep) {
     if (strncmp(ep, "tcp://", 6) == 0) {
         const char *hp = ep + 6;
@@ -927,13 +849,10 @@ static int listen_endpoint(const char *ep) {
     return s;
 }
 
-/* park answers a park's SIGUSR1 in a forked fiber. Nothing is being
- * served (the caller closed its connection and listener). It tells
- * fiberd, blocks until the tree is dumped and resumed or the park
- * failed, reseeds from a resume's record and listens again, on the
- * record's endpoint or the one it had. ack_skip is the test knob that
- * never acks. Returns the new listener, or -1 when the fiber must end
- * with 122, since it has no record to serve under. */
+/* park answers a park's SIGUSR1 in a forked fiber, with nothing being
+ * served. After a resume it reseeds and listens on the record's
+ * endpoint, after a failed park on the one it had. ack_skip is the test
+ * knob that never acks. Returns -1 when the fiber must end with 122. */
 static int park(int handoff, int ack_skip, int *listener) {
     *listener = -1;
     if (fz_quiesce() < 0) return -1;
@@ -983,12 +902,18 @@ static int on_fiber(const fz_incarnation_t *f) {
     /* "ready_delay_ms" lets tests make a fiber miss its deadline. */
     unsigned long long delay = payload_num(f->payload, f->payload_len, "\"ready_delay_ms\"");
     if (delay) usleep((useconds_t)(delay * 1000));
-    /* "ready_misuse" is a buggy workload's treatment of fd 3, for tests
-     * that the zygote refuses the fiber and keeps serving. */
+    /* "ready_misuse" misuses fd 3 as a buggy workload would, so tests see
+     * the zygote refuse the fiber and serve on. 1 writes a stray byte, 2
+     * closes it, 3 tries fz_report_line, which must fail in a fiber. */
     switch (payload_num(f->payload, f->payload_len, "\"ready_misuse\"")) {
     case 1: (void)!write(3, "x", 1); break;
     case 2: close(3); break;
-    case 3: if (fz_report("DEVICE %s 1 0", f->fence) == 0) return 7; break;
+    case 3: {
+        char line[FZ_REPORT_MAX];
+        snprintf(line, sizeof line, "DEVICE %s 1 0", f->fence);
+        if (fz_report_line(line) == 0) return 7;
+        break;
+    }
     default: break;
     }
     fz_fiber_ready();
@@ -1006,13 +931,10 @@ static int on_fiber(const fz_incarnation_t *f) {
 
     unsigned long counter = 0;
     for (;;) {
-        if (park_requested && park_ignore) park_requested = 0; /* the test knob: serve on */
+        if (park_requested && park_ignore) park_requested = 0; /* test knob: fiberd must fail the park */
         if (park_requested) {
-            /* Between connections, with the last one closed. The
-             * listener goes too, so a connection that arrives now is
-             * refused rather than left waiting in a queue the dump
-             * would find. The unix socket is unlinked, since the
-             * resume binds it afresh. */
+            /* The listener closes too, so a new connection is refused
+             * rather than left in a queue the dump would find. */
             park_requested = 0;
             /* "park_delay_ms" is a request that takes this long to end,
              * for a fiber that answers after fiberd's deadline. */
@@ -1042,11 +964,8 @@ static int on_fiber(const fz_incarnation_t *f) {
 /* ---- gVisor mode ------------------------------------------------------ */
 
 /* Blocks until the next checkpoint of this sandbox completes. Returns 1
- * when this process is running in a sandbox restored from that image,
- * 0 when it is the original resumed in place (or the checkpoint failed).
- * Opening registers interest in the next checkpoint; the read answers
- * "resume", "restore" or "error" and the file must be reopened to wait
- * again. */
+ * in a sandbox restored from that image, 0 in the original (or on a
+ * failed checkpoint). Each wait needs a fresh open. */
 static int wait_checkpoint(void) {
     int fd = open("/proc/gvisor/checkpoint", O_RDONLY);
     if (fd < 0) { perror("refzygote: /proc/gvisor/checkpoint"); exit(6); }
@@ -1058,8 +977,9 @@ static int wait_checkpoint(void) {
     return strncmp(buf, "restore", 7) == 0;
 }
 
-/* Serve one incarnation on ep until SIGUSR1; returns with the endpoint
- * closed and unlinked (the host waits for that before checkpointing). */
+/* Serve one incarnation on ep until SIGUSR1. It returns with the
+ * endpoint closed and unlinked, which the host waits for before
+ * checkpointing. */
 static int gvisor_serve_once(const char *fence, const char *ep, const unsigned char *payload, size_t plen, unsigned long *counter) {
     /* Readiness here is the endpoint accepting connections, so the delay
      * a test asks for comes before the bind. */
@@ -1096,14 +1016,10 @@ static int gvisor_serve_once(const char *fence, const char *ep, const unsigned c
 
 static int gvisor_main(void) {
     park_arm();
-    /* Init is done: tell the backend, which takes the template checkpoint
-     * from outside (runsc checkpoint --leave-running) while this process
-     * is blocked in wait_checkpoint(). That blocking read is gVisor's
-     * documented sync point: it is where every sandbox restored from the
-     * image resumes, and it returns once the restore is complete and the
-     * new spec's environment is in place. Nothing else tells an original
-     * and a restored copy apart: a restored sandbox even sees the
-     * filesystem as it was at checkpoint time. */
+    /* Init is done. The backend checkpoints from outside while this
+     * process blocks in wait_checkpoint(), gVisor's documented sync point,
+     * where every restored sandbox resumes. Nothing else tells an original
+     * from a copy, since a copy even sees the filesystem as it was. */
     int m = open("/host/warm.ready", O_CREAT | O_WRONLY, 0644);
     if (m < 0) { perror("refzygote: /host/warm.ready"); return 6; }
     close(m);
@@ -1111,17 +1027,13 @@ static int gvisor_main(void) {
     static unsigned long counter;
     for (;;) {
         if (!wait_checkpoint()) {
-            /* "resume": the original (or a fiber parked with sync) goes
-             * on in place. Nothing to serve; the host ends it or, for
-             * the template, it just keeps standing by. */
+            /* The original goes on in place, with nothing to serve. */
             fprintf(stderr, "refzygote: checkpointed, resumed in place\n");
             continue;
         }
-        /* "restore": running in a freshly restored sandbox. Its identity
-         * comes on fiberd's channel, and a pooled sandbox waits there
-         * until it is handed one. Every sandbox restored from one image
-         * holds the same RNG state, so reseed from the seed it brings
-         * before anything draws from it. */
+        /* A restored sandbox. Its identity comes on fiberd's channel,
+         * where a pooled one waits. Every copy holds the same RNG state,
+         * so reseed before anything draws. */
         fz_incarnation_t id;
         if (fz_gvisor_identity(&id) < 0) {
             fprintf(stderr, "refzygote: restored without an identity: %s\n", strerror(errno));
@@ -1154,9 +1066,9 @@ int main(int argc, char **argv) {
         else { fprintf(stderr, "usage: %s [--heap-mb N] [--device-mb N] [--log PATH] [--gvisor] [--http]\n", argv[0]); return 2; }
     }
     if (logpath) {
-        /* Reopen stdio from inside: a zygote that is a container's init
-         * inherits descriptors opened outside its mount namespace, which
-         * criu cannot map when it checkpoints the zygote's pages. */
+        /* Reopen stdio from inside. A container's init inherits
+         * descriptors opened outside its mount namespace, which criu
+         * cannot map when it checkpoints the zygote. */
         int lf = open(logpath, O_WRONLY | O_CREAT | O_APPEND, 0644);
         int nf = open("/dev/null", O_RDONLY);
         if (lf < 0 || nf < 0) { perror("refzygote: --log"); return 2; }

@@ -10,7 +10,7 @@ import (
 
 // TestMisusedReadinessPipeDoesNotWedgeZygote pins that a fiber which
 // writes to or closes the readiness pipe at its fd 3 is refused, and that
-// fz_report from a fiber fails instead of reaching the pipe. The zygote
+// fz_report_line from a fiber fails instead of reaching the pipe. The zygote
 // must not block in waitpid on a live child, so each case ends with a plain
 // clone on the same zygote, bounded by the clone deadline.
 func TestMisusedReadinessPipeDoesNotWedgeZygote(t *testing.T) {
@@ -23,7 +23,7 @@ func TestMisusedReadinessPipeDoesNotWedgeZygote(t *testing.T) {
 	}{
 		{name: "stray byte on fd 3", payload: `{"ready_misuse": 1}`, wantErr: "readiness pipe instead of reporting ready"},
 		{name: "fd 3 closed without reporting", payload: `{"ready_misuse": 2}`, wantErr: "closed the readiness pipe without reporting ready"},
-		{name: "fz_report from a fiber fails instead of reaching the pipe", payload: `{"ready_misuse": 3}`},
+		{name: "fz_report_line from a fiber fails instead of reaching the pipe", payload: `{"ready_misuse": 3}`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

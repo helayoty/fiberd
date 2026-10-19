@@ -33,8 +33,7 @@ func earlyThread(t *testing.T) string {
 			earlyThreadErr = err
 			return
 		}
-		build := exec.Command("gcc", "-O2", "-pthread", "-o", earlyThreadBin, "testdata/earlythread.c",
-			filepath.Join(testenv.RepoRoot(), "sdk", "c", "template", "libfiberzygote.c"), core)
+		build := exec.Command("gcc", "-O2", "-pthread", "-o", earlyThreadBin, "testdata/earlythread.c", core)
 		if out, err := build.CombinedOutput(); err != nil {
 			earlyThreadErr = fmt.Errorf("%w: %s", err, out)
 		}

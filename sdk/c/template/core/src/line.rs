@@ -1,11 +1,9 @@
 //! The lines fiberd sends the zygote on its control socket, and the park
-//! messages it sends a fiber, taken apart as the C file took them apart.
-//! Only the parsing is here. The replies, the mounts and every error
-//! line stay in C, which chooses them from what these return. A line is
-//! cut up in place as strtok_r cut it, so the C side keeps its fields as
-//! C strings. A fiber runs take_round, so the child-path rules hold
-//! throughout: nothing allocates, every index goes through get and
-//! every sum is checked.
+//! messages it sends a fiber. Only the parsing is here. The replies and
+//! error lines are the callers' (zygote.rs, prepare.rs). A line is cut
+//! up in place as strtok_r cuts it, so each field stays a NUL-ended
+//! string. A fiber runs take_round, so nothing here allocates, every
+//! index goes through get and every sum is checked.
 #![deny(
     clippy::indexing_slicing,
     clippy::arithmetic_side_effects,
@@ -56,8 +54,7 @@ impl Tokens {
         Tokens::within(0, sys::nul_at(line), sep)
     }
 
-    /// Over line[from..to], which strtok_r on a token already cut out
-    /// of the line sees, since that token ends in a NUL.
+    /// Over line[from..to], such as a token already cut out of the line.
     pub(crate) fn within(from: usize, to: usize, sep: u8) -> Self {
         Tokens {
             pos: from,
@@ -67,8 +64,6 @@ impl Tokens {
     }
 
     pub(crate) fn next(&mut self, line: &mut [u8]) -> Option<Span> {
-        // The run of separators before the token. strspn in C, a short
-        // loop here, since a line has one space between its fields.
         while self.pos < self.end && line.get(self.pos) == Some(&self.sep) {
             self.pos = self.pos.wrapping_add(1);
         }
@@ -90,14 +85,14 @@ impl Tokens {
     }
 }
 
-/// isspace in the C locale, what strtol and scanf skip.
+/// isspace in the POSIX locale, what strtol skips.
 pub(crate) fn is_space(c: u8) -> bool {
     matches!(c, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r')
 }
 
-/// atoi in C, which is strtol in base 10 cut to int: leading white
-/// space, a sign, then digits, clamped at the ends of long before the
-/// cut, so "2147483648" is -2147483648 and "9223372036854775808" is -1.
+/// glibc's atoi, strtol in base 10 cut to int. It clamps at the ends of
+/// long before the cut, so "2147483648" is -2147483648 and
+/// "9223372036854775808" is -1.
 pub fn atoi(s: &[u8]) -> i32 {
     let mut i = 0usize;
     while s.get(i).is_some_and(|&c| is_space(c)) {
@@ -147,7 +142,7 @@ pub fn atoi(s: &[u8]) -> i32 {
 }
 
 /// Why handle_clone refuses a CLONE line before it looks at the
-/// zygote's own state. The C side sends the ERROR line.
+/// zygote's state. It sends the ERROR line.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(i32)]
 pub enum CloneRefusal {
@@ -162,10 +157,8 @@ pub enum CloneRefusal {
     SessionNul = 4,
 }
 
-/// What handle_clone made of a CLONE line, up to the session's NUL
-/// check. The zygote's state checks (a refused mount namespace, the
-/// channel, the pending table) and the endpoint's length come after,
-/// in C, in the order they always had.
+/// A CLONE line taken apart, up to the session's NUL check. handle_clone
+/// makes its state checks after, in an order its tests pin.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct CloneLine {
     /// Why the line is refused, or None when the state checks are next.
@@ -188,11 +181,10 @@ pub struct CloneLine {
     pub session_len: usize,
 }
 
-/// Takes a CLONE line apart. `CLONE <fence> <endpoint> <deadline_ms>
-/// <hexpayload|-> <hexsession|-> [opt,opt...]`, read up to its first
-/// NUL and cut up in place on spaces. Unknown options are ignored. The
-/// session is decoded into session, ENV_VALUE_MAX bytes in the library,
-/// at most session.len() - 1 of them, and NUL-ended when it passes.
+/// Takes `CLONE <fence> <endpoint> <deadline_ms> <hexpayload|->
+/// <hexsession|-> [opt,opt...]` apart in place, up to its first NUL.
+/// Unknown options are ignored. The session is decoded into session,
+/// NUL-ended, at most session.len() - 1 bytes.
 pub fn parse_clone(line: &mut [u8], session: &mut [u8]) -> CloneLine {
     let mut out = CloneLine::default();
     let mut t = Tokens::new(line, b' ');
@@ -268,11 +260,10 @@ fn has_double_slash(s: &[u8]) -> bool {
     false
 }
 
-/// set_rundir in C: takes "RUNDIR <parent> <own>" apart, cutting the line
-/// up in place, and keeps the two paths, NUL-ended, in parent and own
-/// (RUNDIR_MAX bytes each in the library). Both must be absolute and
-/// clean, and own must be a direct child of parent (one name, not "."
-/// or ".."). Err carries the reason the C file gave.
+/// Takes "RUNDIR <parent> <own>" apart in place and keeps the two paths,
+/// NUL-ended, in parent and own. Both must be absolute and clean, and
+/// own must be a direct child of parent (one name, not "." or "..").
+/// Err carries the reason.
 pub fn parse_rundir(
     line: &mut [u8],
     parent: &mut [u8],
@@ -328,7 +319,7 @@ pub enum Setup {
     Hide = 0,
     /// "DROP /...", kept for the mount namespace.
     Drop = 1,
-    /// "RUNDIR ...", to set_rundir.
+    /// "RUNDIR ...", to parse_rundir.
     Rundir = 2,
     /// "PREPARE mntns", which ends the setup and prepares the namespace.
     PrepareMntns = 3,
@@ -362,8 +353,8 @@ pub fn is_rebind(line: &[u8]) -> bool {
     line.get(..sys::nul_at(line)) == Some(b"REBIND")
 }
 
-/// record_round in C: the one decimal field of a 'p' or 'c' message,
-/// msg as it arrived, or 0 for none.
+/// The one decimal field of a 'p' or 'c' message, msg as it arrived, or
+/// 0 for none.
 pub fn record_round(msg: &[u8]) -> u32 {
     if msg.len() < 3 || msg.last() != Some(&0) {
         return 0;
@@ -372,10 +363,9 @@ pub fn record_round(msg: &[u8]) -> u32 {
     parse_generation(s.get(..sys::nul_at(s)).unwrap_or(&[]))
 }
 
-/// take_round in C: notes a park message in round and over, the
-/// fiber's park state. 'p' names the round to answer, and 'c' ends the
-/// round it names. True when the message was one of those. msg is at
-/// least one byte, since the fiber received it.
+/// Notes a park message in round and over, the fiber's park state. 'p'
+/// names the round to answer, and 'c' ends the round it names. True when
+/// the message was one of those.
 pub fn take_round(msg: &[u8], round: &mut u32, over: &mut bool) -> bool {
     match msg.first() {
         Some(b'p') => {
@@ -398,10 +388,9 @@ fn at(line: &mut [u8], span: Option<Span>) -> *const c_char {
     span.map_or(ptr::null(), |s| line.as_ptr().wrapping_add(s.off).cast())
 }
 
-/// handle_clone's parsing in C: takes the CLONE line apart in place,
-/// decodes the session into session (cap bytes) and fills *out. Returns
-/// 0 when the state checks are next, or the CloneRefusal the C side
-/// answers with. out is filled either way.
+/// parse_clone over raw pointers, filling *out either way. Returns 0 when
+/// the state checks are next, else the CloneRefusal. Only the tests and
+/// the line fuzz targets call it.
 ///
 /// # Safety
 /// line is a live NUL-ended string nothing else touches, session has
@@ -435,8 +424,7 @@ pub unsafe extern "C" fn fz_rs_parse_clone(
     c.refusal.map_or(0, |r| r as c_int)
 }
 
-/// set_rundir in C: takes the RUNDIR line apart in place and copies the
-/// paths, NUL-ended, into parent and own, RUNDIR_MAX bytes each.
+/// parse_rundir over raw pointers, parent and own RUNDIR_MAX bytes each.
 /// Returns 0, or -1 with *why set.
 ///
 /// # Safety
@@ -489,10 +477,9 @@ pub unsafe extern "C" fn fz_rs_is_rebind(line: *const c_char) -> c_int {
     c_int::from(is_rebind(unsafe { sys::c_bytes(line) }))
 }
 
-/// take_round in C, on the n bytes of msg and the fiber's park_round
-/// and park_over. Returns 1 for a 'p' or 'c' message, else 0. Only the
-/// tests and the line_diff fuzz target call it, since fiber.rs calls
-/// take_round directly.
+/// take_round over raw pointers, on the n bytes of msg. Returns 1 for a
+/// 'p' or 'c' message, else 0. Only the tests and the line_diff fuzz
+/// target call it.
 ///
 /// # Safety
 /// msg holds n live bytes, n at least 1, and round and over are
@@ -531,7 +518,7 @@ mod tests {
     use super::*;
     use crate::abi::ENV_VALUE_MAX;
 
-    /// The C string a line is, cut up as strtok_r left it.
+    /// A test line as a buffer the parser may cut up.
     fn cut(line: &[u8]) -> Vec<u8> {
         line.to_vec()
     }
@@ -1120,7 +1107,7 @@ mod tests {
             let (mut r, mut o) = (1u32, false);
             assert_eq!(take_round(msg, &mut r, &mut o), *taken, "{name}");
             assert_eq!((r, o), (*round, *over), "{name}: the state after");
-            // The C entry does the same on the C side's int.
+            // The extern entry does the same on a c_int.
             let (mut cr, mut co): (c_uint, c_int) = (1, 0);
             let rc = unsafe { fz_rs_take_round(msg.as_ptr().cast(), msg.len(), &mut cr, &mut co) };
             assert_eq!(

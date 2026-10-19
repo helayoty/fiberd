@@ -105,8 +105,8 @@ var procZygote = sync.OnceValues(func() (string, error) {
 	if err := os.MkdirAll(work, 0o755); err != nil {
 		return "", err
 	}
-	// The library's Rust core first, run in the crate so rustup takes the
-	// toolchain it pins, then linked after libfiberzygote.c.
+	// The zygote library first, cargo run in its crate so rustup takes the
+	// toolchain it pins, then linked as an archive.
 	core := exec.Command("cargo", "build", "--release", "--locked")
 	core.Dir = "../../../sdk/c/template/core"
 	if out, err := core.CombinedOutput(); err != nil {
@@ -118,7 +118,7 @@ var procZygote = sync.OnceValues(func() (string, error) {
 	if runtime.GOARCH == "arm64" {
 		args = append(args, "-mbranch-protection=none")
 	}
-	build := exec.Command("gcc", append(args, "-o", bin, "../../../sdk/c/template/refzygote.c", "../../../sdk/c/template/libfiberzygote.c",
+	build := exec.Command("gcc", append(args, "-o", bin, "../../../sdk/c/template/refzygote.c",
 		"../../../sdk/c/template/core/target/release/libfiberzygote_core.a")...)
 	build.Stderr = os.Stderr
 	if err := build.Run(); err != nil {

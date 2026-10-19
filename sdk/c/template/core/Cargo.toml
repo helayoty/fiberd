@@ -4,7 +4,7 @@ version = "0.0.0"
 edition = "2024"
 rust-version = "1.99"
 license = "Apache-2.0"
-description = "The core of libfiberzygote, behind its unchanged C ABI"
+description = "libfiberzygote, the zygote library behind the C ABI of libfiberzygote.h"
 publish = false
 
 [lib]
@@ -16,17 +16,19 @@ crate-type = ["staticlib", "rlib"]
 # which a no_std final artifact cannot do. The unit tests are the lib test.
 doctest = false
 
-# libc only, for the system calls the C file makes. No alloc crate and no
-# global allocator, so nothing in the library can allocate.
+# libc only, for the system calls. No alloc crate and no global
+# allocator, so nothing in the library can allocate.
 [dependencies]
 libc = { version = "0.2.191", default-features = false }
 
 [features]
-# fuzzshim routes mount, umount2, mkdir, open and every raw syscall
-# (clone3 among them) to extern "C" fz_fuzz_* hooks the C fuzz harnesses
-# define (fuzz/common.h), so a harness never really mounts or clones.
-# Only fuzz/run.sh turns it on.
+# fuzzshim routes mount, umount2, mkdir, open and every raw syscall to
+# the fz_fuzz_* hooks in fuzz/fuzz_targets/hooks.rs, so a target never
+# really mounts or clones. Only the fuzz crate turns it on.
 fuzzshim = []
+# testhooks exports fz_rs_wait_bounded for the fixtures under
+# tests/integration/proc/testdata. Only reap_linux_test.go turns it on.
+testhooks = []
 
 # cargo-fuzz builds the library with --cfg fuzzing (fuzz/), which leaves
 # the panic handler to the harness.

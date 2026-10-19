@@ -1,25 +1,13 @@
 //! The child's path, from the clone to the application. birth forks the
-//! fiber, scrub_and_run takes it from the clone to on_fiber, with the
-//! mount steps in mounts.rs, userns_filter against nested user
-//! namespaces and drop_caps for its capabilities. The C shim builds a
-//! Child (abi.rs) before the clone, resets its own statics with plain
-//! stores in the child and makes one call here. The fiber's state is
-//! the core's (fiber.rs), reset here and holding the birth record.
+//! fiber and scrub_and_run takes it to on_fiber.
 //!
-//! THE RULE FOR THIS PATH. Nothing here may allocate, free, use stdio
-//! or take a lock before on_fiber runs, on either birth path. The clone
-//! copies one thread of the zygote. The others (an engine) may hold
-//! malloc's lock, a stream's lock, the locale's or libc's random state
-//! lock at that instant, and the copy of such a lock is held forever.
-//! glibc's fork() reinitialises those for its child and the raw clone
-//! does not, which is also why nothing here relies on what fork() would
-//! have reset (the thread descriptor's cached tid, the robust list).
-//! Only system calls and pure string functions are used. Everything the
-//! fiber needs built (its environment, its record) is built by the
-//! parent before the clone or read into static storage with raw
-//! syscalls, and errors are written with write(2) (child_say). The
-//! lints below make an index or a sum a compile error unless it is
-//! checked.
+//! THE RULE FOR THIS PATH. Nothing here may allocate, free, use stdio or
+//! take a lock before on_fiber runs. The raw clone copies one thread, and
+//! a lock another thread held then (malloc's, a stream's, the locale's)
+//! stays held forever. Unlike fork(), the raw clone resets none of that,
+//! nor the cached tid or the robust list. Only system calls and pure
+//! string functions run here, errors go out with write(2), and the lints
+//! below make an unchecked index or sum a compile error.
 #![deny(
     clippy::indexing_slicing,
     clippy::arithmetic_side_effects,
@@ -32,16 +20,52 @@ use core::ffi::{CStr, c_char, c_int, c_long, c_ulong, c_ulonglong, c_void};
 use core::mem::{offset_of, size_of};
 use core::ptr;
 
-use crate::abi::{Child, FZ_CHANNEL_FD, FZ_CHANNEL_PEER_FD, RECORD_MAX, RecordStore};
+use crate::abi::{FZ_CHANNEL_FD, FZ_CHANNEL_PEER_FD, OnFiber, RECORD_MAX, RecordStore};
+use crate::ctl;
 use crate::fiber;
 use crate::mounts::{self, Tables};
 use crate::sys;
+use crate::zygote;
 
-/// Exit codes of a child that could not be confined or set up. New codes
-/// go at the end, because fiberd's tests name the existing ones. 116
-/// (the run directory) is retired and not reused. The C enum has the
-/// same values, pinned there with _Static_assert, and exit_why in C
-/// says what each stands for.
+unsafe extern "C" {
+    /// The process's environment, repointed by the child.
+    static mut environ: *mut *mut c_char;
+}
+
+/// What the child's path needs from the zygote, built by handle_clone
+/// before the clone. The pointers and slices name the zygote's statics,
+/// which the child's copy of memory holds at the same addresses.
+pub struct Child<'a> {
+    /// The ready pipe's read end, the zygote's, closed first.
+    pub ready_r: c_int,
+    /// The ready pipe's write end, moved to fd 3.
+    pub ready_w: c_int,
+    /// fiberd's channel end as passed on the CLONE line.
+    pub channel: c_int,
+    /// The zygote's SIGCHLD descriptor, or -1.
+    pub sigchld_fd: c_int,
+    /// The pidns option.
+    pub pidns: bool,
+    /// The mntns option.
+    pub mntns: bool,
+    /// The nocaps option.
+    pub nocaps: bool,
+    /// FIBERD_USERNS_NESTED=deny was given.
+    pub deny_nested_userns: bool,
+    /// The fence the CLONE named, NUL-ended in the line.
+    pub fence: *const c_char,
+    /// The template's entry.
+    pub on_fiber: OnFiber,
+    /// The fiber's environment, null-ended, built by the parent.
+    pub environ: *mut *mut c_char,
+    /// The executable's path and the HIDE and DROP tables, for mount_ns.
+    pub tables: Tables<'a>,
+}
+
+/// The child could not make its mount namespace private. This and the
+/// codes below are the exits of a child that could not be confined or
+/// set up. New codes go at the end, because fiberd's tests name the
+/// existing ones. 116 is retired and not reused.
 pub const EX_MNT_PRIVATE: c_int = 110;
 /// The child could not mount its own /proc.
 pub const EX_MNT_PROC: c_int = 111;
@@ -62,33 +86,27 @@ pub const EX_IDENTITY: c_int = 121;
 /// The child could not join its cgroup leaf after the legacy clone.
 pub const EX_CGROUP: c_int = 125;
 
-/// CLONE_INTO_CGROUP, as linux/sched.h of 5.7 spells it. Not libc's,
-/// which types it as a C int it does not fit.
+/// CLONE_INTO_CGROUP from linux/sched.h of 5.7. libc's is an int, which
+/// cannot hold it.
 pub const CLONE_INTO_CGROUP: c_ulonglong = 0x2_0000_0000;
 
-/// birth forks the fiber straight into its leaf cgroup. With pidns in
-/// want the child is the init of its own pid namespace, so a checkpoint
-/// of it restores anywhere without colliding with a live pid. With mntns
-/// it gets a mount namespace of its own. Both need CAP_SYS_ADMIN, and a
-/// namespace the kernel refuses fails the birth. No fiber runs without
-/// one it was asked to have.
+/// birth forks the fiber straight into its leaf cgroup. With pidns the
+/// child is the init of its own pid namespace, so a checkpoint of it
+/// restores without colliding with a live pid. A namespace the kernel
+/// refuses fails the birth, so no fiber runs without one it asked for.
 ///
-/// A kernel without clone3, or without CLONE_INTO_CGROUP (before 5.7),
-/// gets the legacy clone with the same namespace flags. The child then
-/// moves itself into its leaf before it touches memory, so the window
-/// is its first instructions only. A child that cannot reach its leaf
-/// ends there with EX_CGROUP, because it must not run charged to the
-/// zygote's cgroup. Any other refusal of clone3 (EPERM for a namespace,
-/// EBADF for a descriptor that is no cgroup) is the answer, with no
-/// second try. Both calls are the raw syscall, so the child runs on a
-/// copy of this stack with no atfork handlers, under the rule above.
+/// Without clone3 or CLONE_INTO_CGROUP (before 5.7), the legacy clone
+/// runs and the child moves itself into its leaf in its first
+/// instructions, or ends with EX_CGROUP rather than run charged to the
+/// zygote's cgroup. Any other refusal of clone3 is the answer, with no
+/// second try. Both are raw syscalls, so the child runs on a copy of
+/// this stack with no atfork handlers.
 ///
-/// Returns the child's pid, 0 in the child, or -1 with errno set by the
-/// call that refused.
+/// Returns the child's pid, 0 in the child, or -1 with errno.
 ///
 /// # Safety
-/// The caller is the zygote's serving thread, and in the child it goes
-/// on under the rule above.
+/// The caller is the zygote's serving thread, and the child keeps to the
+/// rule at the top of this module.
 pub unsafe fn birth(cgroup_fd: c_int, want: c_ulonglong) -> libc::pid_t {
     let mut args: libc::clone_args = zeroed();
     args.exit_signal = libc::SIGCHLD as c_ulonglong;
@@ -118,11 +136,10 @@ pub unsafe fn birth(cgroup_fd: c_int, want: c_ulonglong) -> libc::pid_t {
     if e != libc::ENOSYS && e != libc::EINVAL && e != libc::E2BIG {
         return -1;
     }
-    // Flags, then a zero stack (the child's is this one, copied) and
-    // zero tids and tls. x86_64 takes (ptid, ctid, tls) and arm64
-    // (ptid, tls, ctid). All three are zero, so the order is moot.
-    // SAFETY: a raw clone with no stack of its own, as the C made it,
-    // under the caller's contract.
+    // A zero stack (the child copies this one) and zero tids and tls, so
+    // the arch's order of ptid, ctid and tls is moot.
+    // SAFETY: a raw clone with no stack of its own, under the caller's
+    // contract.
     let pid = unsafe {
         sys::syscall(
             libc::SYS_clone,
@@ -156,18 +173,15 @@ pub unsafe fn birth(cgroup_fd: c_int, want: c_ulonglong) -> libc::pid_t {
     pid as libc::pid_t
 }
 
-/// An all-zero value of a plain C struct, as memset gave the C.
+/// An all-zero value of a plain repr(C) struct.
 pub(crate) fn zeroed<T: Copy>() -> T {
     // SAFETY: every caller's T is a repr(C) struct of integers, for which
     // all zero bits are a value.
     unsafe { core::mem::zeroed() }
 }
 
-/// The seccomp program's arch-specific words. The audit arch the kernel
-/// reports, whether an x32 table hides behind it, and the numbers of
-/// the four calls the filter matches. The tables are pinned against
-/// libc's numbers for the native arch in the tests, and against the C
-/// program for both.
+/// The seccomp program's arch-specific words. The tests pin the native
+/// arch's numbers against libc's.
 pub struct Arch {
     /// AUDIT_ARCH_* for this arch.
     pub audit: u32,
@@ -209,9 +223,8 @@ const NATIVE: Arch = X86_64;
 #[cfg(target_arch = "aarch64")]
 const NATIVE: Arch = AARCH64;
 
-/// On x86_64 a number with this bit set selects the x32 table under the
-/// same AUDIT_ARCH_X86_64, where unshare and friends have other numbers
-/// than the ones matched below. The kernel calls it __X32_SYSCALL_BIT.
+/// __X32_SYSCALL_BIT. On x86_64 it selects the x32 table under the same
+/// audit arch, where unshare and friends have other numbers.
 const X32_SYSCALL_BIT: u32 = 0x4000_0000;
 
 /// The most words a program has, the x86_64 one with its x32 check.
@@ -256,9 +269,8 @@ const EPERM: u32 = libc::SECCOMP_RET_ERRNO | libc::EPERM as u32;
 const ENOSYS: u32 = libc::SECCOMP_RET_ERRNO | libc::ENOSYS as u32;
 const NEWUSER: u32 = libc::CLONE_NEWUSER as u32;
 
-/// The offsets the program loads from, FZ_ARG_LO(i) in C: the low
-/// 32 bits of argument i, which on these little-endian arches are the
-/// first four bytes of it.
+/// The offsets the program loads from. ARGn_LO is the low 32 bits of
+/// argument n, its first four bytes on a little-endian arch.
 const NR_OFF: u32 = offset_of!(libc::seccomp_data, nr) as u32;
 const ARCH_OFF: u32 = offset_of!(libc::seccomp_data, arch) as u32;
 const ARG0_LO: u32 = offset_of!(libc::seccomp_data, args) as u32;
@@ -269,18 +281,16 @@ const _: () = assert!(
 );
 
 impl Filter {
-    /// userns_filter's table in C, for arch. It refuses the system calls
-    /// that make or join a user namespace. unshare and clone with
-    /// CLONE_NEWUSER, and setns onto a user namespace (or onto whatever
-    /// the descriptor is), get EPERM. clone3 gets ENOSYS, as a kernel
-    /// without it would answer, because its flags sit in a struct
-    /// seccomp cannot read, and libc then falls back to clone. On x86_64
-    /// an x32 number kills the process, as libseccomp and Docker do, so
-    /// the matches cannot be sidestepped through the other table.
-    /// Everything else passes.
+    /// The program for arch, which refuses to make or join a user
+    /// namespace. unshare and clone with CLONE_NEWUSER, and setns onto a
+    /// user namespace (or onto whatever the descriptor is), get EPERM.
+    /// clone3 gets ENOSYS, as an older kernel would answer, because
+    /// seccomp cannot read its flags and libc then falls back to clone.
+    /// On x86_64 an x32 number kills the process, as libseccomp and
+    /// Docker do, so the other table cannot sidestep the matches.
     ///
-    /// The index and the count are checked at compile time, where a slip
-    /// is a build error, not a panic on the child path.
+    /// Built at compile time, so an index slip is a build error, not a
+    /// panic on the child path.
     #[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
     pub const fn build(a: &Arch) -> Filter {
         let mut f = Filter {
@@ -355,7 +365,7 @@ impl Filter {
     }
 }
 
-/// The program for this arch, in bss as C's static table was.
+/// The program for this arch, static so the child allocates nothing.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 static FILTER: Filter = Filter::build(&NATIVE);
 
@@ -388,13 +398,12 @@ pub fn userns_filter() -> c_int {
     }
 }
 
-/// prctl(2) with two arguments, the other two zero, as every call here
-/// makes it.
+/// prctl(2) with two arguments, the other two zero.
 ///
 /// # Safety
 /// What option does with a and b must be safe for this process, and a
 /// pointer among them live for the call.
-unsafe fn prctl(option: c_int, a: c_ulong, b: c_ulong) -> c_int {
+pub(crate) unsafe fn prctl(option: c_int, a: c_ulong, b: c_ulong) -> c_int {
     let zero: c_ulong = 0;
     // SAFETY: by the contract above.
     unsafe { libc::prctl(option, a, b, zero, zero) }
@@ -404,23 +413,23 @@ unsafe fn prctl(option: c_int, a: c_ulong, b: c_ulong) -> c_int {
 /// does not carry.
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct CapHeader {
-    version: u32,
-    pid: c_int,
+pub(crate) struct CapHeader {
+    pub(crate) version: u32,
+    pub(crate) pid: c_int,
 }
 
 /// struct __user_cap_data_struct, one per 32 capabilities.
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct CapData {
-    effective: u32,
-    permitted: u32,
-    inheritable: u32,
+pub(crate) struct CapData {
+    pub(crate) effective: u32,
+    pub(crate) permitted: u32,
+    pub(crate) inheritable: u32,
 }
 
 /// _LINUX_CAPABILITY_VERSION_3 and _LINUX_CAPABILITY_U32S_3.
-const CAPABILITY_VERSION_3: u32 = 0x2008_0522;
-const CAPABILITY_U32S_3: usize = 2;
+pub(crate) const CAPABILITY_VERSION_3: u32 = 0x2008_0522;
+pub(crate) const CAPABILITY_U32S_3: usize = 2;
 
 const _: () = {
     assert!(size_of::<CapHeader>() == 8);
@@ -491,8 +500,8 @@ pub fn drop_caps() -> c_int {
     rc
 }
 
-/// Room for four descriptors in one SCM_RIGHTS control message, as the
-/// C's cbuf had, aligned as a cmsghdr is.
+/// Room for four descriptors in one SCM_RIGHTS control message, in u64
+/// words so it is aligned as a cmsghdr is.
 const CMSG_WORDS: usize = 4;
 const _: () = {
     // SAFETY: CMSG_SPACE is arithmetic on its argument.
@@ -503,12 +512,11 @@ const _: () = {
     );
 };
 
-/// channel_recv takes one message off fd into buf, cap bytes, with
-/// flags added to recvmsg's. The first descriptor passed with it goes to
+/// channel_recv takes one message off fd into buf (cap bytes), with
+/// flags added to recvmsg's. The first descriptor passed goes to
 /// *fd_out, -1 for none, and any other is closed. Returns the byte
-/// count, 0 at EOF, or -1 with errno, EPROTO for a message longer than
-/// a record. A zero-length message reads as EOF, and its descriptors
-/// are closed. EINTR is retried, which cannot block a non-blocking read.
+/// count, 0 at EOF, or -1 with errno. A message longer than cap is
+/// EPROTO, with buf wiped. EINTR is retried.
 ///
 /// # Safety
 /// buf has cap writable bytes and fd_out is writable.
@@ -585,20 +593,27 @@ pub unsafe fn channel_recv(
             unsafe { libc::close(*fd_out) };
             *fd_out = -1;
         }
+        // The refused message's first bytes may hold a seed, so buf is
+        // wiped here for every caller.
+        // SAFETY: buf has cap writable bytes, by the contract above.
+        fiber::wipe(unsafe { core::slice::from_raw_parts_mut(buf.cast::<u8>(), cap) });
         sys::set_errno(libc::EPROTO);
         return -1;
     }
     r
 }
 
-/// read_incarnation takes the birth record off the channel into born.
-/// fiberd queues it before the CLONE, so it is there to read. Returns
-/// 0, or -1 with a reason for the zygote's log. Anything passed with it
-/// is not ours to keep.
+/// read_incarnation takes the birth record, which fiberd queues before
+/// the CLONE, off the channel into born. Any descriptor passed with it
+/// is closed. Returns 0, or -1 with a reason for the zygote's log.
 ///
 /// # Safety
 /// born is live and nothing else touches it.
-unsafe fn read_incarnation(fd: c_int, born: *mut RecordStore, why: &mut *const c_char) -> c_int {
+pub unsafe fn read_incarnation(
+    fd: c_int,
+    born: *mut RecordStore,
+    why: &mut *const c_char,
+) -> c_int {
     let mut passed = -1;
     // SAFETY: born's buf has RECORD_MAX bytes, by the contract above.
     let r = unsafe {
@@ -630,13 +645,11 @@ unsafe fn read_incarnation(fd: c_int, born: *mut RecordStore, why: &mut *const c
     unsafe { crate::record::fz_rs_parse_incarnation(born, r as usize, why) }
 }
 
-/// own_pair replaces fiberd's channel end, which the fiber is done with,
-/// by a pair of the fiber's own at FZ_CHANNEL_FD and FZ_CHANNEL_PEER_FD.
-/// The fiber reads the first and never the second, which it holds so the
-/// pair is whole inside its tree: a park dumps both ends and a restore
-/// remakes them in the fiber's namespaces, and fiberd then borrows the
-/// peer to send the resume's record. System calls only, under the rule
-/// above. Returns 0 or -1.
+/// own_pair replaces fiberd's channel end by a pair of the fiber's own
+/// at FZ_CHANNEL_FD and FZ_CHANNEL_PEER_FD. The fiber reads the first
+/// and only holds the second, so a park dumps the pair whole and a
+/// restore remakes it in the fiber's namespaces. fiberd then borrows the
+/// peer to send the resume's record. Returns 0 or -1.
 fn own_pair() -> c_int {
     let mut sv: [c_int; 2] = [-1, -1];
     // SAFETY: sv is live for the call.
@@ -667,8 +680,7 @@ fn own_pair() -> c_int {
     0
 }
 
-/// The seven pieces of a child_say line, written one write(2) each, as
-/// the C did.
+/// The seven pieces of a child_say line, which the tests below pin.
 fn say_parts<'a>(fence: &'a [u8], what: &'a [u8], why: &'a [u8]) -> [&'a [u8]; 7] {
     [b"libfiberzygote ", fence, b": ", what, b": ", why, b"\n"]
 }
@@ -682,8 +694,7 @@ unsafe fn child_say(fence: *const c_char, what: &CStr, why: *const c_char) {
     // SAFETY: by the contract above.
     let (fence, why) = unsafe { (sys::c_bytes(fence), sys::c_bytes(why)) };
     for part in say_parts(fence, what.to_bytes(), why) {
-        // SAFETY: write reads part.len() bytes of part, which is live. One
-        // write per part with no retry, as the C made it.
+        // SAFETY: write reads part.len() bytes of part, which is live.
         unsafe { libc::write(2, part.as_ptr().cast(), part.len()) };
     }
 }
@@ -692,7 +703,6 @@ unsafe fn child_say(fence: *const c_char, what: &CStr, why: *const c_char) {
 fn errno_why(e: c_int) -> [u8; 18] {
     let mut why = [0u8; 18];
     let n = sys::append(&mut why, 0, b"errno ");
-    // C cast the value to unsigned.
     let n = sys::append_decimal(&mut why, n, e as u32);
     if let Some(end) = why.get_mut(n) {
         *end = 0;
@@ -713,55 +723,27 @@ unsafe fn child_say_errno(fence: *const c_char, what: &CStr, e: c_int) {
 }
 
 /// scrub_and_run is the child between the clone and the application,
-/// under the rule at the top of this module. The C shim has already
-/// reset its own statics with plain stores (the control descriptor and
-/// handler, the report mutex, the SIGCHLD descriptor and environ). The
-/// fiber's state is reset here first, with plain stores too (the
-/// channel and park state and ready_fd, fiber::reset_for_child). None
-/// of it is read before on_fiber. What is known only once the record is
-/// read, the served generation, is noted then.
-///
-/// Descriptors first. The ready pipe's read end is the zygote's. The
-/// zygote's SIGCHLD descriptor goes, wherever it sits. The readiness
-/// pipe is parked at fd 3 (over the inherited control descriptor), the
-/// fiber's channel to fiberd at FZ_CHANNEL_FD, everything above is
-/// closed, and the standard three point at /dev/null (stderr once
-/// ready). Nothing else a ready fiber holds leads outside its own tree,
-/// and a handoff fiber's channel is the one socket CRIU is told is
-/// external.
-///
-/// The fiber's record is the channel's first message, read here into
-/// this child's memory so no application code runs without it and no
-/// checkpoint is taken before it is consumed. It names the fence the
-/// CLONE did, or the child is not the fiber fiberd asked for. A handoff
-/// fiber keeps the channel for the connections fiberd passes it. Any
-/// other fiber is done with fiberd's end and takes a pair of its own in
-/// its place, which a park carries whole and a resume's record arrives
-/// on. stderr stays the zygote's log until fz_fiber_ready, so a fiber
-/// that fails to start can say why. No fiber is checkpointed before
-/// then.
-///
-/// Session and signals. The mask is emptied, so SIGCHLD, blocked in the
-/// zygote for its descriptor, reaches the fiber as usual. No
-/// PR_SET_PDEATHSIG, because a resumed fiber has a different parent, and
-/// the runtime kills leaves through the cgroup when the zygote or fiberd
-/// goes away. No reseeding of anything, because srandom takes libc's
-/// lock on the random state, which falls under the rule above, so the
-/// template reseeds in on_fiber (see fz_on_fiber).
-///
-/// Mounts first, since they need the capabilities dropped right after.
-/// A fiber that cannot be confined as fiberd asked does not run. The
-/// child ends, its exit code naming the step that failed. The filter
-/// goes on before the capabilities, since installing may need
-/// CAP_SYS_ADMIN.
+/// under the rule at the top of this module. A fiber that cannot be set
+/// up or confined as fiberd asked does not run. The child ends, its exit
+/// code naming the step that failed.
 ///
 /// # Safety
 /// The caller is the child of birth, c is a live Child whose pointers
-/// are what abi.rs says, and the whole process is this path's.
-pub unsafe fn scrub_and_run(c: &Child) -> ! {
+/// name the zygote's statics, and the whole process is this path's.
+pub unsafe fn scrub_and_run(c: &Child<'_>) -> ! {
+    // The zygote's state the child must not keep goes first, with plain
+    // stores. Its control channel is not this child's, so fz_report_line
+    // must fail rather than write into fd 3, and its report mutex may be
+    // held by a thread that is not here (ctl.rs). None of it is read
+    // before on_fiber, so the order against the calls below is moot.
     // SAFETY: the child is the process's one thread, by the contract
-    // above.
-    unsafe { fiber::reset_for_child() };
+    // above, and c.environ is the null-ended array the parent built.
+    unsafe {
+        ctl::reset_for_child();
+        zygote::reset_for_child();
+        environ = c.environ;
+        fiber::reset_for_child();
+    }
     let born_store = fiber::born();
     // SAFETY: integer arguments alone, descriptors the zygote held.
     unsafe {
@@ -782,6 +764,10 @@ pub unsafe fn scrub_and_run(c: &Child) -> ! {
             unsafe { libc::_exit(EX_FDS) }
         }
     }
+    // The readiness pipe goes to fd 3, over the inherited control
+    // descriptor, and the channel to FZ_CHANNEL_FD. All above is closed,
+    // so nothing a ready fiber holds leads outside its tree except a
+    // handoff fiber's channel, the one socket CRIU is told is external.
     // SAFETY: integer arguments alone.
     if unsafe { libc::dup2(c.ready_w, 3) } < 0 {
         // SAFETY: _exit ends the child and never returns.
@@ -792,8 +778,8 @@ pub unsafe fn scrub_and_run(c: &Child) -> ! {
         // SAFETY: _exit ends the child and never returns.
         unsafe { libc::_exit(EX_FDS) }
     }
-    // The raw syscall, since glibc has a wrapper only from 2.34 and musl
-    // has none. ~0U as the last descriptor, as the C passed it.
+    // The raw syscall, since glibc wraps it only from 2.34 and musl not
+    // at all.
     // SAFETY: integer arguments alone.
     if unsafe {
         sys::syscall(
@@ -813,6 +799,10 @@ pub unsafe fn scrub_and_run(c: &Child) -> ! {
             unsafe { libc::close(fd) };
         }
     }
+    // The record, TLS identity included, is read into this child's memory
+    // before any application code runs, so no checkpoint precedes it.
+    // stderr stays the zygote's log until fz_fiber_ready, so a fiber that
+    // fails to start can say why.
     let mut why: *const c_char = ptr::null();
     // SAFETY: the birth record's store is live and this path's alone.
     if unsafe { read_incarnation(FZ_CHANNEL_FD, born_store, &mut why) } < 0 {
@@ -825,6 +815,8 @@ pub unsafe fn scrub_and_run(c: &Child) -> ! {
     // SAFETY: the store is live and parsed, so inc.fence is a NUL-ended
     // field in its buf, and c.fence is NUL-ended.
     let born = unsafe { &*born_store };
+    // A record for another fence means this is not the fiber fiberd
+    // asked for.
     // SAFETY: both NUL-ended, as above.
     if unsafe { libc::strcmp(born.inc.fence, c.fence) } != 0 {
         // SAFETY: fence by the contract above, the reason is static.
@@ -839,6 +831,8 @@ pub unsafe fn scrub_and_run(c: &Child) -> ! {
     }
     // SAFETY: the process's one thread, by the contract above.
     unsafe { fiber::set_served_generation(born.inc.generation) };
+    // A handoff fiber keeps fiberd's channel for the connections it
+    // passes. Any other takes a pair of its own.
     if born.inc.identity.is_null() && own_pair() < 0 {
         // SAFETY: _exit ends the child and never returns.
         unsafe { libc::_exit(EX_FDS) }
@@ -855,6 +849,11 @@ pub unsafe fn scrub_and_run(c: &Child) -> ! {
             }
         }
     }
+    // An empty mask, so SIGCHLD (blocked in the zygote) reaches the
+    // fiber. No PR_SET_PDEATHSIG, since a resumed fiber has another
+    // parent and the runtime kills leaves through the cgroup. No
+    // reseeding, since srandom takes libc's lock. The template reseeds
+    // in on_fiber.
     let mut none: libc::sigset_t = zeroed();
     // SAFETY: none is live for both calls, the rest are integers.
     unsafe {
@@ -863,31 +862,26 @@ pub unsafe fn scrub_and_run(c: &Child) -> ! {
         libc::sigemptyset(&raw mut none);
         libc::sigprocmask(libc::SIG_SETMASK, &raw const none, ptr::null_mut());
     }
-    if c.mntns != 0 {
-        // SAFETY: the tables are the C's statics, by the contract above.
-        let tables = unsafe {
-            Tables {
-                self_exe: c.self_exe,
-                hide: mounts::kept(c.hide, c.nhide),
-                hide_covered: covered(c.hide_covered, c.nhide),
-                drop: mounts::kept(c.drop, c.ndrop),
-            }
-        };
-        // SAFETY: as above.
-        let failed = unsafe { mounts::mount_ns(c.pidns != 0, &tables) };
+    // Mounts first, while the capabilities they need are held. The
+    // filter goes on before the drop, since installing may need
+    // CAP_SYS_ADMIN.
+    if c.mntns {
+        // SAFETY: the tables name the zygote's statics, by the contract
+        // above.
+        let failed = unsafe { mounts::mount_ns(c.pidns, &c.tables) };
         if failed != 0 {
             // SAFETY: _exit ends the child and never returns.
             unsafe { libc::_exit(mounts::mount_exit(failed)) }
         }
     }
-    if c.deny_nested_userns != 0 && userns_filter() < 0 {
+    if c.deny_nested_userns && userns_filter() < 0 {
         // SAFETY: fence by the contract above.
         unsafe {
             child_say_errno(c.fence, c"deny nested user namespaces", sys::errno());
             libc::_exit(EX_USERNS)
         }
     }
-    if c.nocaps != 0 && drop_caps() < 0 {
+    if c.nocaps && drop_caps() < 0 {
         // SAFETY: _exit ends the child and never returns.
         unsafe { libc::_exit(EX_CAPS) }
     }
@@ -899,43 +893,15 @@ pub unsafe fn scrub_and_run(c: &Child) -> ! {
     let rc = match c.on_fiber {
         // SAFETY: the template's entry, with the record it was promised.
         Some(on_fiber) => unsafe { on_fiber(inc) },
-        // No template passes a null entry, and the C would have crashed
-        // on the call. abort takes nothing and never returns.
+        // No template passes a null entry. abort takes nothing and never
+        // returns.
         None => unsafe { libc::abort() },
     };
     // SAFETY: _exit ends the child and never returns.
     unsafe { libc::_exit(rc & 0xff) }
 }
 
-/// The first n covered flags at p as a slice, none when p is null.
-///
-/// # Safety
-/// p points at n bytes, or is null.
-unsafe fn covered<'a>(p: *const u8, n: c_int) -> &'a [u8] {
-    if p.is_null() {
-        return &[];
-    }
-    let n = usize::try_from(n).unwrap_or(0).min(crate::abi::MAX_PATHS);
-    // SAFETY: by the contract above.
-    unsafe { core::slice::from_raw_parts(p, n) }
-}
-
-/// scrub_and_run, for the C shim. Never returns.
-///
-/// # Safety
-/// As scrub_and_run, and c is a live struct fz_rs_child.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn fz_rs_scrub_and_run(c: *const Child) -> ! {
-    // SAFETY: by the contract above.
-    unsafe {
-        match c.as_ref() {
-            Some(c) => scrub_and_run(c),
-            None => libc::abort(),
-        }
-    }
-}
-
-/// channel_recv, for the C fuzz harnesses (fuzz/fuzz_identity.c).
+/// channel_recv as an extern entry, which the unit tests below drive.
 ///
 /// # Safety
 /// As channel_recv, and fd_out is writable.
@@ -957,16 +923,6 @@ pub unsafe extern "C" fn fz_rs_channel_recv(
     r
 }
 
-/// birth, for the C shim. The pid, 0 in the child, or -1 with errno.
-///
-/// # Safety
-/// As birth.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn fz_rs_birth(cgroup_fd: c_int, want: c_ulonglong) -> libc::pid_t {
-    // SAFETY: by the contract above.
-    unsafe { birth(cgroup_fd, want) }
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(
@@ -980,7 +936,7 @@ mod tests {
     use super::*;
     use core::mem::size_of_val;
 
-    /// A word as (code, jt, jf, k), which is how the C program reads.
+    /// A word as (code, jt, jf, k), in BPF_JUMP's order.
     fn words(f: &Filter) -> Vec<(u16, u8, u8, u32)> {
         f.words()
             .iter()
@@ -990,11 +946,8 @@ mod tests {
 
     #[test]
     fn filter_is_the_c_program_word_for_word() {
-        // The C program's words, as the BPF_STMT and BPF_JUMP lines of
-        // userns_filter in main's C encode them with the kernel headers'
-        // values (the aarch64 table dumped from that C, the x86_64 one
-        // from the same lines with its numbers). BPF_LD|BPF_W|BPF_ABS is
-        // 0x20, BPF_JMP|BPF_JEQ|BPF_K 0x15, BPF_JGE 0x35, BPF_JSET 0x45
+        // The words with the kernel headers' values. BPF_LD|BPF_W|BPF_ABS
+        // is 0x20, BPF_JMP|BPF_JEQ|BPF_K 0x15, BPF_JGE 0x35, BPF_JSET 0x45
         // and BPF_RET|BPF_K 0x06.
         let common_head: &[(u16, u8, u8, u32)] = &[(0x20, 0, 0, 4)];
         let x86_64_tail: &[(u16, u8, u8, u32)] = &[
@@ -1258,6 +1211,10 @@ mod tests {
                 );
             }
             assert_eq!(got_fd >= 0, tc.want_fd, "{}: fd_out {got_fd}", tc.name);
+            if tc.want_errno == libc::EPROTO {
+                // The refused message's first bytes are not kept.
+                assert!(buf.iter().all(|&b| b == 0), "{}: buf wiped", tc.name);
+            }
             if got_fd >= 0 {
                 assert!(is_open(got_fd), "{}: the kept descriptor is open", tc.name);
                 // SAFETY: got_fd is the descriptor the message passed.
@@ -1320,6 +1277,7 @@ mod tests {
 
     #[test]
     fn birth_refuses_as_clone3_did() {
+        let _serial = crate::serial();
         // CLONE_NEWUSER with CLONE_FS is EINVAL from the kernel before
         // any child exists, on clone3 and on the clone it falls back to,
         // so the test stays one process. A seccomp profile that hides
@@ -1344,10 +1302,10 @@ mod tests {
 
     #[test]
     fn a_zero_length_message_leaks_no_descriptor() {
-        // A zero-length seqpacket message reads as EOF, and the C kept
-        // the descriptors it carried open behind it. Each is a pipe's
-        // write end here, so the read end sees EOF only once every copy
-        // of it is closed.
+        // A zero-length seqpacket message reads as EOF, and the
+        // descriptors it carries must not stay open behind it. Each is a
+        // pipe's write end, so the read end sees EOF only once every copy
+        // is closed.
         let cases: &[(&str, usize)] = &[("one descriptor", 1), ("two descriptors", 2)];
         for (name, n) in cases {
             let [ours, theirs] = pair();

@@ -1,35 +1,49 @@
-//! The core of libfiberzygote, the zygote side of fiberd's process
-//! runtime, behind the C ABI of libfiberzygote.h. The C file calls the
-//! `fz_rs_*` entries for what has moved here, one concern per stage
-//! (bin/rust-core/DESIGN.md). The record parser came first, then the
-//! line parsers (line, procfiles), then the child's path (child, with
-//! its mount steps in mounts), whose system calls go through the sys
-//! seam, then the fiber-side API (fiber), whose fz_* entries are
-//! exported from here directly.
+//! libfiberzygote, the zygote side of fiberd's process runtime. It
+//! exports every `fz_*` entry of libfiberzygote.h.
 //!
-//! No standard library, no allocator and no lock. A fiber runs this code
-//! right after its clone, where C's rule is the same. The unit tests and
-//! the fuzz targets (fuzz/) link std, since their harness owns the panic,
-//! and the archive check.sh guards the product build.
+//! Modules: record, line and procfiles parse. child and mounts are the
+//! child's path. fiber is the fiber-side API and gVisor. ctl is the
+//! control channel. prepare sets up the namespace before READY. zygote
+//! is the serving loop. sys is the one seam for system calls.
+//!
+//! No std, no allocator and one lock, the fz_report_line mutex. The
+//! child never takes it before on_fiber. Tests and fuzz targets link std.
 #![cfg_attr(not(any(test, fuzzing)), no_std)]
 #![deny(unsafe_op_in_unsafe_fn, missing_docs)]
 
 pub mod abi;
 pub mod child;
+pub mod ctl;
 pub mod fiber;
 pub mod line;
 pub mod mounts;
+pub mod prepare;
 pub mod procfiles;
 pub mod record;
 pub mod sys;
+pub mod zygote;
+
+/// Runs the unit tests that make or reap child processes, or set the
+/// process-wide control channel, one at a time. reap takes any child
+/// with waitpid(-1), so beside a test that forks it would answer for
+/// that test's children, and fz_report_line writes to whatever channel
+/// the last test set. Every such test holds this guard for its whole
+/// run. A test that panics while holding it leaves it usable.
+#[cfg(test)]
+pub(crate) fn serial() -> std::sync::MutexGuard<'static, ()> {
+    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 /// The ABI the core is written for. The header's own number is read by
 /// build.rs, and the two must agree.
-pub const ABI_VERSION: u32 = 9;
+pub const ABI_VERSION: u32 = 10;
 
 const _: () = assert!(
     parse_decimal(env!("FZ_HEADER_ABI_VERSION")) == ABI_VERSION,
-    "libfiberzygote.h moved FZ_ABI_VERSION, the core is written for 9"
+    "libfiberzygote.h moved FZ_ABI_VERSION, the core is written for 10"
 );
 
 /// A non-negative decimal, as a const for the assert above.

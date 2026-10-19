@@ -1,9 +1,10 @@
-"""The one extension, fiberd._zygote, over sdk/c/template/libfiberzygote.c.
+"""The one extension, fiberd._zygote, over the zygote library (sdk/c/template).
 
 The extension is built against the limited API (abi3, CPython 3.14 and
-later) and compiled with the Makefile's ZYGOTE_CFLAGS, with -fPIC in place
-of -fPIE since it is a shared object. It links the library's Rust core
-(sdk/c/template/core), which cargo builds first, so a build needs cargo.
+later) and its C glue is compiled with the Makefile's ZYGOTE_CFLAGS, with
+-fPIC in place of -fPIE since it is a shared object. It links the
+library's archive, which cargo builds first from the Rust crate in
+sdk/c/template/core, so a build needs cargo.
 Off Linux there is no extension, and fiberd.template says so when it is
 used. The unit tests beside the sources
 and their conftest are left out of the wheel. The sdist keeps them, for the
@@ -32,14 +33,15 @@ from setuptools.command.sdist import sdist as _sdist
 HERE = os.path.abspath(os.path.dirname(__file__))
 REPO = os.path.normpath(os.path.join(HERE, "..", ".."))
 
-# The C library is sdk/c/template in the tree. An sdist holds nothing outside
-# this directory, so it carries a copy in libfiberzygote/.
+# The library is sdk/c/template in the tree, its header and its crate. An
+# sdist holds nothing outside this directory, so it carries a copy in
+# libfiberzygote/.
 C_SDIST = "libfiberzygote"
 C_DIR = os.path.join(HERE, C_SDIST)
 if not os.path.isdir(C_DIR):
     C_DIR = os.path.join(REPO, "sdk", "c", "template")
-C_FILES = ("libfiberzygote.c", "libfiberzygote.h")
-# The Rust core is the crate in core/ beside the C. An sdist carries the
+HEADERS = ("libfiberzygote.h",)
+# The library is the crate in core/ beside the header. An sdist carries the
 # crate with libc vendored into core/vendor and a core/.cargo/config.toml
 # that points cargo there, so a build from it needs no network. cargo runs
 # in the crate, so rustup takes the toolchain its rust-toolchain.toml pins
@@ -95,7 +97,7 @@ class build_py(_build_py):
 
 
 class build_ext(_build_ext):
-    """Builds the Rust core into the build directory and links its archive."""
+    """Builds the library's crate into the build directory and links its archive."""
 
     def build_extension(self, ext):
         target = os.path.abspath(os.path.join(self.build_temp, "core"))
@@ -109,13 +111,13 @@ class build_ext(_build_ext):
 
 
 class sdist(_sdist):
-    """Adds the C library and its Rust core with libc vendored, LICENSE and
-    NOTICE, which live outside this directory."""
+    """Adds the header and the library's crate with libc vendored, LICENSE
+    and NOTICE, which live outside this directory."""
 
     def make_release_tree(self, base_dir, files):
         super().make_release_tree(base_dir, files)
         self.mkpath(os.path.join(base_dir, C_SDIST))
-        for name in C_FILES:
+        for name in HEADERS:
             shutil.copyfile(os.path.join(C_DIR, name), os.path.join(base_dir, C_SDIST, name))
         core = os.path.join(base_dir, C_SDIST, "core")
         self.mkpath(core)
@@ -141,12 +143,12 @@ if sys.platform == "linux":
     ext_modules.append(Extension(
         "fiberd._zygote",
         # Relative and inside the package, since setuptools refuses absolute
-        # sources in a wheel. _libfiberzygote.c includes the library source.
-        sources=["src/fiberd/_zygote.c", "src/fiberd/_libfiberzygote.c"],
-        # The library is included, not listed, and the core is linked, so
+        # sources in a wheel.
+        sources=["src/fiberd/_zygote.c"],
+        # The header is included and the library's archive is linked, so
         # both are named here, or an in-place build keeps an extension older
         # than the library.
-        depends=[os.path.join(C_DIR, name) for name in C_FILES]
+        depends=[os.path.join(C_DIR, name) for name in HEADERS]
         + [os.path.join(CORE_DIR, name) for name in ("Cargo.toml", "Cargo.lock", "build.rs")]
         + sorted(glob.glob(os.path.join(CORE_DIR, "src", "**", "*.rs"), recursive=True)),
         include_dirs=[C_DIR],

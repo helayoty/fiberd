@@ -30,7 +30,7 @@ RUN if ! command -v criu >/dev/null 2>&1; then \
       && CRIU_VERSION="${CRIU_VERSION}" sh /tmp/fiberd-criu/install-criu.sh; \
     fi \
     && rm -rf /tmp/fiberd-criu
-# Rust for the zygote library's core (sdk/c/template/core), with the pins
+# Rust for the zygote library (sdk/c/template/core), with the pins
 # of docker/dev/Dockerfile. rustup-init is a pinned release checked
 # against its published sha256, and rustup checks the toolchain against
 # the signed channel manifest. The toolchain is the one the crate's
@@ -55,32 +55,21 @@ RUN set -eu; if ! command -v cargo >/dev/null 2>&1; then \
     fi; cargo --version
 WORKDIR /src
 COPY . .
-# fiberd is static and reproducible. The zygote library is the core's
-# archive with the C object added to it. The C takes ZYGOTE_CFLAGS from
-# the Makefile with -fPIC in place of -fPIE, since the archive links into
-# PIE templates and shared objects alike, and no link flags, since an
-# archive is not linked. On aarch64 it is built without PAC branch
-# protection, because a process restored from a checkpoint keeps stale PAC
-# keys (see docker/dev/Dockerfile). Rust emits none unless asked, and its
-# objects are PIC. The source paths are remapped in both.
-# With the dev image the C is compiled against its Debian 12 sysroot,
-# since the dev image's live glibc is newer than this runtime base.
+# fiberd is static and reproducible. The zygote library is cargo's
+# archive of its Rust crate, with no C in it. Rust emits no pointer
+# authentication unless asked, which a process restored from a checkpoint
+# cannot use (see docker/dev/Dockerfile), and its objects are PIC, so the
+# archive links into PIE templates and shared objects alike. The source
+# paths are remapped.
 ENV CGO_ENABLED=0 GOFLAGS=-trimpath
 ARG VERSION=""
 RUN set -eu; mkdir -p /out/bin /out/lib /out/doc; \
     go build -ldflags "-s -w -buildid= -X main.version=${VERSION}" -o /out/bin/fiberd ./cmd/fiberd; \
     hack/release/third-party-notices.sh ./cmd/fiberd > /out/doc/THIRD_PARTY_NOTICES; \
     cp LICENSE NOTICE /out/doc/; \
-    flags=""; if [ "$(uname -m)" = aarch64 ]; then flags="-mbranch-protection=none"; fi; \
-    sysroot=/usr/local/sysroot-nopac; sr=""; \
-    [ ! -d "$sysroot/usr/include" ] || sr="--sysroot=$sysroot -B$sysroot/usr/lib/$(gcc -print-multiarch)"; \
-    gcc $sr -D_FORTIFY_SOURCE=3 -O2 -fstack-protector-strong -fstack-clash-protection -fPIC -Wformat=2 -Werror=format-security \
-      -Wall -Wextra -pthread $flags -ffile-prefix-map="$PWD"=. \
-      -c sdk/c/template/libfiberzygote.c -o /tmp/libfiberzygote.o; \
     (cd sdk/c/template/core && RUSTFLAGS="--remap-path-prefix=/src=. --remap-path-prefix=$CARGO_HOME=/cargo" \
       cargo build --release --locked --target-dir /tmp/core); \
-    cp /tmp/core/release/libfiberzygote_core.a /out/lib/libfiberzygote.a; \
-    ar rcsD /out/lib/libfiberzygote.a /tmp/libfiberzygote.o
+    cp /tmp/core/release/libfiberzygote_core.a /out/lib/libfiberzygote.a
 
 FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587
 # Labels for local builds. The release workflow adds the rest.

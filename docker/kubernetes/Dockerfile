@@ -51,7 +51,7 @@ RUN set -eu; if ! command -v runsc >/dev/null 2>&1; then \
       echo "$sum  /usr/local/bin/runsc" | sha512sum -c - >/dev/null; \
       chmod 0755 /usr/local/bin/runsc; \
     fi; runsc --version
-# Rust for the zygote library's core (sdk/c/template/core), with the pins
+# Rust for the zygote library (sdk/c/template/core), with the pins
 # of docker/dev/Dockerfile. rustup-init is a pinned release checked
 # against its published sha256, and rustup checks the toolchain against
 # the signed channel manifest. The toolchain is the one the crate's
@@ -79,7 +79,7 @@ COPY . .
 # Go binaries are static and reproducible. The reference zygote is built
 # with TLS (-DFZ_TLS) because handoff fibers must serve the TLS identity
 # they receive, with ZYGOTE_CFLAGS and ZYGOTE_LDFLAGS from the Makefile,
-# and links the library's Rust core. On aarch64 it is built without PAC
+# and links the zygote library's archive. On aarch64 it is built without PAC
 # branch protection, because a process restored from a checkpoint keeps
 # stale PAC keys (see docker/dev/Dockerfile).
 # fiberd is built with the fiberd_testhooks tag, since kind conformance
@@ -104,7 +104,7 @@ RUN set -eu; mkdir -p /out; \
     [ ! -d "$sysroot/usr/include" ] || sr="--sysroot=$sysroot -B$sysroot/usr/lib/$(gcc -print-multiarch)"; \
     gcc $sr -D_FORTIFY_SOURCE=3 -O2 -fstack-protector-strong -fstack-clash-protection -fPIE -Wformat=2 -Werror=format-security \
       -pie -Wl,-z,relro,-z,now -Wall -Wextra -pthread $flags -DFZ_TLS -o /out/refzygote \
-      sdk/c/template/refzygote.c sdk/c/template/libfiberzygote.c sdk/c/template/core/target/release/libfiberzygote_core.a -lssl -lcrypto; \
+      sdk/c/template/refzygote.c sdk/c/template/core/target/release/libfiberzygote_core.a -lssl -lcrypto; \
     need=$(objdump -T /out/refzygote | grep -o "GLIBC_2\.[0-9]*" | sort -t. -k2 -n | tail -1); \
     [ "${need#GLIBC_2.}" -le 36 ] || { echo "refzygote needs $need, newer than the bookworm runtime" >&2; exit 1; }
 
