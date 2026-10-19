@@ -1,11 +1,11 @@
-//! The Rust line parsers alone, on inputs in the format csrc/line.c's
-//! header defines, checked for what each answer promises, as
-//! sdk/c/template/fuzz/fuzz_rundir.c checks set_rundir. A panic anywhere
-//! is a crash too.
+//! The line parsers alone, on inputs in the format csrc/line.c's header
+//! defines, checked for what each answer promises.
 #![no_main]
 
 #[path = "line_common.rs"]
 mod common;
+#[path = "hooks.rs"]
+mod hooks;
 
 use common::{
     Input, MOUNTINFO_BUF, TOKEN_CAP, cbytes, decode, off_in, rs_clone, rs_mountinfo, rs_rundir,
@@ -35,7 +35,7 @@ fn check_clone(line: Vec<u8>) {
     let before = line.clone();
     let mut line = line;
     let r = rs_clone(&mut line);
-    // The cut only turns separators into NULs, within the C string.
+    // The cut only turns separators into NULs.
     assert_eq!(line.len(), before.len());
     for (a, b) in before.iter().zip(&line) {
         assert!(

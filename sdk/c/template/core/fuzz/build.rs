@@ -1,6 +1,6 @@
-//! Compiles the frozen C parsers of main, csrc/record.c for the
-//! record_diff target and csrc/line.c for the line_diff target. record.c
-//! reads the live header, so a header change rebuilds it too.
+//! Compiles the C reference in csrc/, record.c for record_diff and
+//! line.c for line_diff. record.c reads the live header, so a header
+//! change rebuilds it too.
 
 fn main() {
     println!("cargo:rerun-if-changed=csrc/record.c");

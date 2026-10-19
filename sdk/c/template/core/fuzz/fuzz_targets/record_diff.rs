@@ -1,11 +1,13 @@
-//! The Rust record parser against the C one of main (csrc/record.c), on
-//! every input: the same verdict, the same reason, the same bytes in the
-//! store and the same pointers as offsets. The two small entries get the
-//! input as a C string too.
+//! The record parser against the C reference in csrc/record.c, on every
+//! input. Both must give the same verdict, reason, store bytes and
+//! pointers as offsets. The two small entries get the input as a
+//! NUL-terminated string too.
 #![no_main]
 
 #[path = "common.rs"]
 mod common;
+#[path = "hooks.rs"]
+mod hooks;
 
 use common::{cstr, shape, store_with};
 use fiberzygote_core::abi::RecordStore;
@@ -51,7 +53,7 @@ fuzz_target!(|data: &[u8]| {
         assert!(c.payload[..len] == r.payload[..len], "payload");
     }
 
-    // parse_generation and unhex on the input as a C string.
+    // parse_generation and unhex on the input as a NUL-terminated string.
     let mut s = data.to_vec();
     s.push(0);
     // SAFETY: s is NUL-ended and outlives the calls.

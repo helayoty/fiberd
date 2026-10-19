@@ -1,64 +1,44 @@
 #!/usr/bin/env bash
-# Build the libFuzzer harnesses in this directory with clang and run each
-# one for FUZZTIME seconds (default 120) over its seed corpus. Needs clang
-# with libFuzzer, which Debian and Ubuntu ship as libclang-rt-<N>-dev.
-# Exits non-zero when any harness crashes, and leaves the crashing input
-# under $FUZZ_OUT/crashes/ (default bin/fuzz/crashes/).
+# Build the libFuzzer harness of the reference workload (fuzz_refzygote,
+# refzygote.c's own parsers) with clang and run it for FUZZTIME seconds
+# (default 120) over its seed corpus. Needs clang with libFuzzer, which
+# Debian and Ubuntu ship as libclang-rt-<N>-dev. Exits non-zero when it
+# crashes, and leaves the crashing input under $FUZZ_OUT/crashes/
+# (default bin/fuzz/crashes/). The zygote library itself is fuzzed by
+# the cargo-fuzz targets of its Rust crate (core/fuzz, make fuzz-core).
 #
-#   sdk/c/template/fuzz/run.sh                     build and run every harness
+#   sdk/c/template/fuzz/run.sh                     build and run
 #   sdk/c/template/fuzz/run.sh build               build only
-#   FUZZTIME=10 sdk/c/template/fuzz/run.sh fuzz_rundir fuzz_control
+#   FUZZTIME=10 sdk/c/template/fuzz/run.sh fuzz_refzygote
 set -euo pipefail
 cd "$(dirname "$0")/../../../.."
 
 CLANG=${CLANG:-clang}
 OUT=${FUZZ_OUT:-bin/fuzz}
 FUZZTIME=${FUZZTIME:-120}
-# No FORTIFY, because it would redefine the libc calls the harnesses
-# shim, and ASan covers what it checks.
 CFLAGS="-g -O1 -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer \
-  -U_FORTIFY_SOURCE -Wall -Wextra -pthread"
+  -Wall -Wextra -pthread"
 
-all=(fuzz_recv_line fuzz_identity fuzz_gvrecord fuzz_wait fuzz_procfiles fuzz_rundir fuzz_control fuzz_refzygote)
-# Every harness includes libfiberzygote.c, which calls the Rust core for
-# what has moved there (sdk/c/template/core), so each links an archive of
-# it. Not the product one. This one is built with the fuzzshim feature,
-# so the core makes mount, umount2, mkdir, open and its raw system calls
-# (clone3 among them) through the fz_fuzz_* hooks the harnesses define
-# (common.h), and a harness that shims those calls in the C shims them in
-# the Rust too. Its own target directory keeps it apart from the product
-# archive.
-CORE=sdk/c/template/core/target/fuzzshim/release/libfiberzygote_core.a
+all=(fuzz_refzygote)
+# refzygote.c calls the library, so the harness links the core's product
+# archive (sdk/c/template/core), as make zygote does. The harness reaches
+# none of it, since it never calls fz_init or fz_serve.
+CORE=sdk/c/template/core/target/release/libfiberzygote_core.a
 mode=run
 if [ "${1:-}" = build ]; then mode=build; shift; fi
 harnesses=("$@")
 [ ${#harnesses[@]} -gt 0 ] || harnesses=("${all[@]}")
 
 mkdir -p "$OUT/crashes"
-(cd sdk/c/template/core && cargo build --release --locked --features fuzzshim --target-dir target/fuzzshim)
+(cd sdk/c/template/core && cargo build --release --locked)
 for h in "${harnesses[@]}"; do
-  extra=()
-  # The reference workload includes only refzygote.c; the library is a
-  # second translation unit beside it.
-  [ "$h" = fuzz_refzygote ] && extra=(sdk/c/template/libfiberzygote.c)
   # shellcheck disable=SC2086  # $CFLAGS is a list
-  if ! $CLANG $CFLAGS -o "$OUT/$h" "sdk/c/template/fuzz/$h.c" "${extra[@]}" "$CORE"; then
+  if ! $CLANG $CFLAGS -o "$OUT/$h" "sdk/c/template/fuzz/$h.c" "$CORE"; then
     echo "run.sh: $h did not build; is libFuzzer installed (libclang-rt-<N>-dev)?" >&2
     exit 1
   fi
 done
 [ "$mode" = run ] || exit 0
-
-# Inputs long enough to pass each parser's buffer, where the code has a
-# branch for it.
-max_len() {
-  case $1 in
-    fuzz_recv_line|fuzz_control) echo 70000 ;; # MAX_LINE is 65536
-    fuzz_identity|fuzz_wait) echo 70000 ;;     # RECORD_MAX is 65536
-    fuzz_procfiles) echo 20000 ;;              # lock_sys buffers 8192
-    *) echo 4096 ;;
-  esac
-}
 
 failed=()
 for h in "${harnesses[@]}"; do
@@ -66,7 +46,7 @@ for h in "${harnesses[@]}"; do
   # New inputs land in the work corpus, never in the seeds.
   mkdir -p "$OUT/corpus/$h"
   if ! "$OUT/$h" -max_total_time="$FUZZTIME" -timeout=10 -rss_limit_mb=2048 \
-      -max_len="$(max_len "$h")" -artifact_prefix="$OUT/crashes/$h-" \
+      -max_len=4096 -artifact_prefix="$OUT/crashes/$h-" \
       "$OUT/corpus/$h" "sdk/c/template/fuzz/corpus/$h" 2>&1 | tee "$OUT/$h.log" | grep -E '^(#[0-9]+\s+(DONE|INITED)|==|SUMMARY|Test unit written|MS: )' ; then
     failed+=("$h")
   fi

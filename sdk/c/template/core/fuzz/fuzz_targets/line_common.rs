@@ -1,6 +1,6 @@
-//! Shared by the line targets: the input format csrc/line.c's header
-//! defines, and the Rust side of each parser driven as the library
-//! drives it, through the fz_rs_* entries.
+//! Shared by the line targets. The input format is the one csrc/line.c's
+//! header defines, and each parser is driven through its fz_rs_* entry
+//! as the library drives it.
 #![allow(dead_code)]
 
 use fiberzygote_core::abi::{CloneOut, ENV_VALUE_MAX, RECORD_MAX, RUNDIR_MAX};
@@ -174,9 +174,8 @@ pub fn rs_rundir(line: &mut [u8]) -> RsRundir {
     }
 }
 
-/// lock_sys's loop as libfiberzygote.c drives it, over file read chunk
-/// bytes at a time: every mount point it would remount, in order, and its
-/// rc when each remount answers refused or not.
+/// lock_sys's loop over file read chunk bytes at a time. Every mount
+/// point it would remount, in order, and its rc.
 pub fn rs_mountinfo(file: &[u8], chunk: usize, refuse: bool) -> (Vec<Vec<u8>>, c_int) {
     let mut buf = [0u8; MOUNTINFO_BUF];
     let mut have = 0usize;
@@ -224,8 +223,8 @@ pub fn rs_mountinfo(file: &[u8], chunk: usize, refuse: bool) -> (Vec<Vec<u8>>, c
     (mounts, rc)
 }
 
-/// in_child_userns as libfiberzygote.c drives it: one read of at most
-/// 127 bytes, NUL-ended.
+/// in_child_userns as prepare.rs drives it, one read of at most 127
+/// bytes, NUL-ended.
 pub fn rs_uid_map(file: &[u8]) -> c_int {
     let mut buf = [0u8; 128];
     let n = file.len().min(buf.len() - 1);
@@ -238,9 +237,8 @@ pub fn rs_uid_map(file: &[u8]) -> c_int {
     unsafe { fz_rs_in_child_userns(buf.as_ptr().cast()) }
 }
 
-/// spec_token as fz_gvisor_identity drives it (fiber.rs), reading at
-/// most 65535 bytes into a static buffer, which keeps what an earlier
-/// read left past them, into out.
+/// spec_token as fz_gvisor_identity drives it (fiber.rs). Its static
+/// buffer keeps what an earlier read left past the bytes read.
 pub fn rs_spec_token(file: &[u8], out: &mut [u8]) -> c_int {
     let mut buf = vec![0x5au8; 65536];
     let got = file.len().min(buf.len() - 1);

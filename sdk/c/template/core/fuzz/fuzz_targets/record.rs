@@ -1,11 +1,14 @@
-//! The Rust record parser alone, on any input, checked as
-//! sdk/c/template/fuzz/fuzz_identity.c checks the C one: a refusal names
-//! a known reason and leaves inc untouched, and an accepted record's
-//! fields lie back to back in buf with the seed last.
+//! The record parser alone, on any input. It is also what a gVisor
+//! sandbox runs on what the pool socket hands it. A refusal names a known
+//! reason and leaves inc untouched. An accepted record starts with 'i',
+//! its fields lie back to back in buf with the seed last, and no
+//! identity field is "-".
 #![no_main]
 
 #[path = "common.rs"]
 mod common;
+#[path = "hooks.rs"]
+mod hooks;
 
 use common::{REASONS, cstr, store_with};
 use fiberzygote_core::abi::{ENV_VALUE_MAX, FENCE_MAX, Incarnation, RECORD_MAX, SEED_LEN};
@@ -37,6 +40,7 @@ fuzz_target!(|data: &[u8]| {
         return;
     }
     assert!(why.is_null(), "why set on an accepted record");
+    assert_eq!(st.buf[0], b'i', "an accepted record not starting with 'i'");
     let buf = st.buf.as_ptr() as usize;
     let inc = &st.inc;
     // SAFETY: every pointer below was set by the parser into this store,
@@ -79,7 +83,9 @@ fuzz_target!(|data: &[u8]| {
     let caller = unsafe { cstr(id.caller) };
     let caller_pem = unsafe { cstr(id.caller_pem) };
     assert!(!key.is_empty() && !cert.is_empty() && !caller.is_empty() && !caller_pem.is_empty());
-    assert_ne!(key, b"-");
+    for f in [key, cert, caller, caller_pem] {
+        assert_ne!(f, b"-", "an identity field of -");
+    }
     assert_eq!(id.cert_pem as usize, id.key_pem as usize + key.len() + 1);
     assert_eq!(id.caller as usize, id.cert_pem as usize + cert.len() + 1);
     assert_eq!(

@@ -33,9 +33,9 @@ jobs:
         run: |
           (cd sdk/c/template/core/fuzz && cargo --version)
           cargo install --locked cargo-fuzz --version "$CARGO_FUZZ_VERSION"
-      # 60 seconds per harness and per cargo-fuzz target. A crash fails the
-      # job and leaves its input under bin/fuzz/crashes/ (the Go fuzzer
-      # writes to testdata/fuzz/).
+      # 60 seconds per cargo-fuzz target (ten) and for the C harness and the
+      # Go fuzzer. A crash fails the job and leaves its input under
+      # bin/fuzz/crashes/ (the Go fuzzer writes to testdata/fuzz/).
       - run: make fuzz FUZZTIME=60
       - name: keep the crashing inputs
         if: failure()

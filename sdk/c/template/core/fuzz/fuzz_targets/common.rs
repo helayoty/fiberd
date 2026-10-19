@@ -6,7 +6,7 @@ use fiberzygote_core::abi::{RECORD_MAX, RecordStore};
 use std::ffi::{CStr, c_char};
 use std::mem::size_of;
 
-/// Every reason the parser can give, as libfiberzygote.c gave them.
+/// Every reason the parser can give.
 pub const REASONS: &[&str] = &[
     "not an incarnation record",
     "record has too few fields",

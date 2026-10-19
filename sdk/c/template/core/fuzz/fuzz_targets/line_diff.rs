@@ -1,11 +1,12 @@
-//! The Rust line parsers against the C ones of main (csrc/line.c), on
-//! every input in the format line.c's header defines. Each side gets the
-//! same bytes and must give the same answer, cut its line up the same
-//! way and keep the same bytes.
+//! The line parsers against the C reference in csrc/line.c, on every
+//! input in the format line.c's header defines. Both must give the same
+//! answer, cut the line up the same way and keep the same bytes.
 #![no_main]
 
 #[path = "line_common.rs"]
 mod common;
+#[path = "hooks.rs"]
+mod hooks;
 
 use common::{
     Input, MAX_LINE, cbytes, decode, off_in, rs_clone, rs_mountinfo, rs_rundir, rs_spec_token,
@@ -76,7 +77,7 @@ unsafe extern "C" {
     fn c_line_spec_token(data: *const u8, n: usize, out: *mut c_char, cap: usize) -> c_int;
 }
 
-/// What the C remount callback saw, and how it answers.
+/// What the reference's remount callback saw, and how it answers.
 struct Seen {
     mounts: Vec<Vec<u8>>,
     refuse: bool,
