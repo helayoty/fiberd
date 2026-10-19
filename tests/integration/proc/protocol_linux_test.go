@@ -332,7 +332,7 @@ func TestSetupPathTooLong(t *testing.T) {
 				t.Fatalf("the path is %d bytes, want %d", len(path), tc.n)
 			}
 			uc, rd := rawZygoteWith(t, dir, nil, "")
-			if _, err := uc.Write([]byte(fmt.Sprintf(tc.setup, path))); err != nil {
+			if _, err := fmt.Fprintf(uc, tc.setup, path); err != nil {
 				t.Fatal(err)
 			}
 			if got := readLine(t, uc, rd); got != tc.want {

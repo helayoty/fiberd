@@ -50,7 +50,10 @@ jobs:
           persist-credentials: false
       - name: runner facts (shared runners are noisy, so they go on the record)
         run: |
-          { echo "### runner"; uname -srm; nproc; free -h | head -2; cat /proc/loadavg; git rev-parse HEAD; } | tee -a "$GITHUB_STEP_SUMMARY"
+          # The THP mode decides what a touched bss page costs a park. Under
+          # "always" a write faults in its whole 2 MiB window.
+          { echo "### runner"; uname -srm; nproc; free -h | head -2; cat /proc/loadavg
+            echo "THP $(cat /sys/kernel/mm/transparent_hugepage/enabled)"; git rev-parse HEAD; } | tee -a "$GITHUB_STEP_SUMMARY"
       - name: the old tree
         env:
           BASE: ${{ inputs.base || github.event.pull_request.base.sha }}
