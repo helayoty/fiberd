@@ -22,8 +22,8 @@ import (
 // timeout, and Release of a lone fiber took about 100ms every time. The
 // bound is generous and taken on the median of several releases, so a
 // loaded host does not fail it. The fiber must start with the signal
-// unblocked and without the descriptor, on the clone3 birth and on the
-// legacy clone alike.
+// unblocked and without the descriptor, under the fiber filter and under
+// noclone3's filter alike.
 func TestExitWakesZygote(t *testing.T) {
 	const releases = 7
 	const bound = 30 * time.Millisecond
@@ -31,8 +31,8 @@ func TestExitWakesZygote(t *testing.T) {
 		name     string
 		template func(t *testing.T) string
 	}{
-		{name: "clone3 birth", template: func(*testing.T) string { return zygoteBin + " --heap-mb 16" }},
-		{name: "legacy clone without clone3", template: func(t *testing.T) string { return noClone3(t) + " " + zygoteBin + " --heap-mb 16" }},
+		{name: "under the fiber filter", template: func(*testing.T) string { return zygoteBin + " --heap-mb 16" }},
+		{name: "under noclone3", template: func(t *testing.T) string { return noClone3(t) + " " + zygoteBin + " --heap-mb 16" }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

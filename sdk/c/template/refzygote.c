@@ -33,6 +33,9 @@
  *   remount <path>  -> "ok" when a read-write remount succeeds (undone at
  *                      once), else the errno's name
  *   rdonly <path>   -> "ro" or "rw" for the mount holding path
+ *   probe <name>    -> "ok", the errno's name, or the signal that ended
+ *                      it ("SIGSYS"), for one call the fiber filter
+ *                      refuses or lets through (see probes[] below)
  *
  * A handoff fiber (its record carries an identity) serves the same
  * protocol inside TLS 1.3 on the connections fz_accept() hands it, and
@@ -94,6 +97,12 @@
 #include <sched.h>
 #include <sys/mount.h>
 #include <sys/wait.h>
+#include <sys/klog.h>
+#include <sys/personality.h>
+#include <sys/ptrace.h>
+#include <sys/syscall.h>
+#include <sys/uio.h>
+#include <linux/netlink.h>
 
 #ifdef FZ_TLS
 #include <openssl/bio.h>
@@ -348,6 +357,11 @@ static void errname(int e, char *out, size_t n) {
     case ETIMEDOUT: snprintf(out, n, "ETIMEDOUT\n"); break;
     case EINVAL: snprintf(out, n, "EINVAL\n"); break;
     case ESRCH: snprintf(out, n, "ESRCH\n"); break;
+    case EBADF: snprintf(out, n, "EBADF\n"); break;
+    case EFAULT: snprintf(out, n, "EFAULT\n"); break;
+    case ENOSYS: snprintf(out, n, "ENOSYS\n"); break;
+    case EAFNOSUPPORT: snprintf(out, n, "EAFNOSUPPORT\n"); break;
+    case EPROTONOSUPPORT: snprintf(out, n, "EPROTONOSUPPORT\n"); break;
     default: snprintf(out, n, "errno %d\n", e); break;
     }
 }
@@ -709,6 +723,149 @@ static void borrow_errno(const char *arg, char *out, size_t n) {
     snprintf(out, n, "ok\n");
 }
 
+/* The probes behind "probe <name>". Each makes one call the fiber filter
+ * refuses, or an allowed neighbour of one, and returns 0 or -1 with
+ * errno. The arguments are harmless when the call goes through, and
+ * each runs in a child, so nothing it changes reaches the fiber. */
+#ifndef SYS_clone3
+#define SYS_clone3 435
+#endif
+#ifndef SYS_io_uring_setup
+#define SYS_io_uring_setup 425
+#endif
+#ifndef SYS_memfd_secret
+#define SYS_memfd_secret 447
+#endif
+#ifndef NETLINK_SOCK_DIAG
+#define NETLINK_SOCK_DIAG 4
+#endif
+
+static int probe_sock(int family, int type, int proto) {
+    int s = socket(family, type | SOCK_CLOEXEC, proto);
+    if (s < 0) return -1;
+    close(s);
+    return 0;
+}
+
+/* A raw clone with flags, as the filter sees one. Its child ends at once. */
+static int clone_with(unsigned long flags) {
+    long pid = syscall(SYS_clone, flags | SIGCHLD, 0, 0, 0, 0);
+    if (pid == 0) _exit(0);
+    if (pid < 0) return -1;
+    waitpid((pid_t)pid, NULL, 0);
+    return 0;
+}
+
+static int p_unshare_user(void) { return unshare(CLONE_NEWUSER); }
+static int p_unshare_net(void) { return unshare(CLONE_NEWNET); }
+static int p_unshare_fs(void) { return unshare(CLONE_FS); }
+static int p_clone_newuser(void) { return clone_with(CLONE_NEWUSER); }
+static int p_clone3(void) { return (int)syscall(SYS_clone3, NULL, 0); }
+static int p_setns(void) { return setns(-1, 0); }
+static int p_af_alg(void) { return probe_sock(AF_ALG, SOCK_SEQPACKET, 0); }
+static int p_af_packet(void) { return probe_sock(AF_PACKET, SOCK_RAW, 0); }
+static int p_af_vsock(void) { return probe_sock(AF_VSOCK, SOCK_STREAM, 0); }
+static int p_af_unix(void) { return probe_sock(AF_UNIX, SOCK_STREAM, 0); }
+static int p_af_inet(void) { return probe_sock(AF_INET, SOCK_STREAM, 0); }
+static int p_af_inet6(void) { return probe_sock(AF_INET6, SOCK_STREAM, 0); }
+static int p_nl_route(void) { return probe_sock(AF_NETLINK, SOCK_RAW, NETLINK_ROUTE); }
+static int p_nl_generic(void) { return probe_sock(AF_NETLINK, SOCK_RAW, NETLINK_GENERIC); }
+static int p_nl_sock_diag(void) { return probe_sock(AF_NETLINK, SOCK_RAW, NETLINK_SOCK_DIAG); }
+static int p_nl_audit(void) { return probe_sock(AF_NETLINK, SOCK_RAW, NETLINK_AUDIT); }
+static int p_per_query(void) { return personality(0xffffffff) == -1 ? -1 : 0; }
+static int p_per_uname26(void) { return personality(PER_LINUX | UNAME26) == -1 ? -1 : 0; }
+static int p_io_uring(void) { return (int)syscall(SYS_io_uring_setup, 1, NULL); }
+static int p_userfaultfd(void) { return (int)syscall(SYS_userfaultfd, O_CLOEXEC) < 0 ? -1 : 0; }
+static int p_bpf(void) { return (int)syscall(SYS_bpf, 5 /* BPF_PROG_LOAD */, NULL, 0); }
+static int p_perf(void) { return (int)syscall(SYS_perf_event_open, NULL, 0, -1, -1, 0); }
+static int p_keyctl(void) { return (int)syscall(SYS_keyctl, 0 /* GET_KEYRING_ID */, -3 /* session */, 0) < 0 ? -1 : 0; }
+static int p_memfd_secret(void) { return (int)syscall(SYS_memfd_secret, 0) < 0 ? -1 : 0; }
+static int p_ptrace(void) { return (int)ptrace(PTRACE_TRACEME, 0, NULL, NULL); }
+static int p_vm_readv(void) {
+    char a = 1, b = 0;
+    struct iovec l = { &b, 1 }, r = { &a, 1 };
+    return process_vm_readv(getpid(), &l, 1, &r, 1, 0) < 0 ? -1 : 0;
+}
+static int p_kcmp(void) { return (int)syscall(SYS_kcmp, getpid(), getpid(), 1 /* KCMP_VM */, 0, 0) < 0 ? -1 : 0; }
+static int p_pidfd_getfd(void) {
+    int pidfd = (int)syscall(SYS_pidfd_open, getpid(), 0);
+    if (pidfd < 0) return -1;
+    return (int)syscall(SYS_pidfd_getfd, pidfd, 0, 0) < 0 ? -1 : 0;
+}
+static int p_syslog(void) { return klogctl(10 /* SIZE_BUFFER */, NULL, 0) < 0 ? -1 : 0; }
+/* The hostname it already has, so a call that goes through changes nothing. */
+static int p_sethostname(void) {
+    char h[65] = {0};
+    if (gethostname(h, sizeof h - 1) < 0) return -1;
+    return sethostname(h, strlen(h));
+}
+static void *probe_idle(void *a) { return a; }
+static int p_thread(void) {
+    pthread_t t;
+    int e = pthread_create(&t, NULL, probe_idle, NULL);
+    if (e) { errno = e; return -1; }
+    return pthread_join(t, NULL);
+}
+/* A fresh tmpfs on a scratch directory, undone at once. */
+static int p_mount(void) {
+    char dir[] = "/tmp/.probe-XXXXXX";
+    if (!mkdtemp(dir)) return -1;
+    int rc = mount("tmpfs", dir, "tmpfs", 0, NULL);
+    int e = errno;
+    if (rc == 0) umount2(dir, MNT_DETACH);
+    rmdir(dir);
+    errno = e;
+    return rc;
+}
+/* A missing new root, so a pivot_root that passes the capability check
+ * answers ENOENT and moves nothing. */
+static int p_pivot_root(void) { return (int)syscall(SYS_pivot_root, "/.probe-none", "/.probe-none"); }
+static int p_chroot(void) { return chroot("/"); }
+/* getpid through the x32 table, which a fiber has no use for. */
+static int p_x32(void) {
+#if defined(__x86_64__)
+    return (int)syscall(0x40000000 | SYS_getpid) < 0 ? -1 : 0;
+#else
+    errno = ENOSYS;
+    return -1;
+#endif
+}
+
+static const struct { const char *name; int (*fn)(void); } probes[] = {
+    { "unshare-user", p_unshare_user }, { "unshare-net", p_unshare_net }, { "unshare-fs", p_unshare_fs },
+    { "clone-newuser", p_clone_newuser }, { "clone3", p_clone3 }, { "setns", p_setns },
+    { "af-alg", p_af_alg }, { "af-packet", p_af_packet }, { "af-vsock", p_af_vsock },
+    { "af-unix", p_af_unix }, { "af-inet", p_af_inet }, { "af-inet6", p_af_inet6 },
+    { "netlink-route", p_nl_route }, { "netlink-generic", p_nl_generic },
+    { "netlink-sock-diag", p_nl_sock_diag }, { "netlink-audit", p_nl_audit },
+    { "personality-query", p_per_query }, { "personality-uname26", p_per_uname26 },
+    { "io-uring", p_io_uring }, { "userfaultfd", p_userfaultfd }, { "bpf", p_bpf }, { "perf", p_perf },
+    { "keyctl", p_keyctl }, { "memfd-secret", p_memfd_secret },
+    { "ptrace", p_ptrace }, { "process-vm-readv", p_vm_readv }, { "kcmp", p_kcmp }, { "pidfd-getfd", p_pidfd_getfd },
+    { "syslog", p_syslog }, { "sethostname", p_sethostname },
+    { "thread", p_thread }, { "x32", p_x32 },
+    { "mount", p_mount }, { "pivot-root", p_pivot_root }, { "chroot", p_chroot },
+};
+
+/* probe runs the named probe in a child and writes its answer. */
+static void probe(const char *name, char *out, size_t n) {
+    int (*fn)(void) = NULL;
+    for (size_t i = 0; i < sizeof probes / sizeof probes[0]; i++)
+        if (strcmp(name, probes[i].name) == 0) fn = probes[i].fn;
+    if (!fn) { snprintf(out, n, "err unknown probe\n"); return; }
+    pid_t pid = fork();
+    if (pid < 0) { errname(errno, out, n); return; }
+    if (pid == 0) _exit(fn() == 0 ? 0 : (errno & 0xff));
+    int st = 0;
+    if (waitpid(pid, &st, 0) < 0) { errname(errno, out, n); return; }
+    if (WIFSIGNALED(st)) {
+        if (WTERMSIG(st) == SIGSYS) snprintf(out, n, "SIGSYS\n");
+        else snprintf(out, n, "signal %d\n", WTERMSIG(st));
+        return;
+    }
+    if (WEXITSTATUS(st) == 0) snprintf(out, n, "ok\n"); else errname(WEXITSTATUS(st), out, n);
+}
+
 static unsigned long long reply_delay;
 
 static int serve_client(conn_t *c, const char *fence, unsigned long *counter) {
@@ -756,6 +913,7 @@ static int serve_client(conn_t *c, const char *fence, unsigned long *counter) {
         else if (strncmp(line, "mkdir ", 6) == 0) mkdir_errno(line + 6, out, sizeof out);
         else if (strncmp(line, "remount ", 8) == 0) remount_errno(line + 8, out, sizeof out);
         else if (strncmp(line, "rdonly ", 7) == 0) rdonly_errno(line + 7, out, sizeof out);
+        else if (strncmp(line, "probe ", 6) == 0) probe(line + 6, out, sizeof out);
         else if (strncmp(line, "reserve ", 8) == 0) { char rp[128]; snprintf(out, sizeof out, "%s\n", device_reserve(strtoull(line + 8, NULL, 10), rp, sizeof rp)); }
         else if (strcmp(line, "devfree") == 0) { char rp[128]; snprintf(out, sizeof out, "%s\n", device_reserve(0, rp, sizeof rp)); }
         else snprintf(out, sizeof out, "err unknown command\n");
