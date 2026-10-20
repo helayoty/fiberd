@@ -50,8 +50,6 @@ pub struct Child<'a> {
     pub mntns: bool,
     /// The nocaps option.
     pub nocaps: bool,
-    /// FIBERD_USERNS_NESTED=deny was given.
-    pub deny_nested_userns: bool,
     /// The fence the CLONE named, NUL-ended in the line.
     pub fence: *const c_char,
     /// The template's entry.
@@ -65,7 +63,7 @@ pub struct Child<'a> {
 /// The child could not make its mount namespace private. This and the
 /// codes below are the exits of a child that could not be confined or
 /// set up. New codes go at the end, because fiberd's tests name the
-/// existing ones. 116 is retired and not reused.
+/// existing ones. 116 and 117 are retired and not reused.
 pub const EX_MNT_PRIVATE: c_int = 110;
 /// The child could not mount its own /proc.
 pub const EX_MNT_PROC: c_int = 111;
@@ -77,8 +75,6 @@ pub const EX_MNT_HIDE: c_int = 113;
 pub const EX_CAPS: c_int = 114;
 /// The child could not make the host controls under /proc read-only.
 pub const EX_MNT_RO: c_int = 115;
-/// The child could not install the user namespace filter.
-pub const EX_USERNS: c_int = 117;
 /// The child could not set up its descriptors.
 pub const EX_FDS: c_int = 120;
 /// The child did not get its incarnation record.
@@ -98,9 +94,10 @@ pub const CLONE_INTO_CGROUP: c_ulonglong = 0x2_0000_0000;
 /// Without clone3 or CLONE_INTO_CGROUP (before 5.7), the legacy clone
 /// runs and the child moves itself into its leaf in its first
 /// instructions, or ends with EX_CGROUP rather than run charged to the
-/// zygote's cgroup. Any other refusal of clone3 is the answer, with no
-/// second try. Both are raw syscalls, so the child runs on a copy of
-/// this stack with no atfork handlers.
+/// zygote's cgroup. Under the fiber filter (seccomp.rs) clone3 is always
+/// ENOSYS, so this is every birth. Any other refusal of clone3 is the
+/// answer, with no second try. Both are raw syscalls, so the child runs
+/// on a copy of this stack with no atfork handlers.
 ///
 /// Returns the child's pid, 0 in the child, or -1 with errno.
 ///
@@ -180,224 +177,6 @@ pub(crate) fn zeroed<T: Copy>() -> T {
     unsafe { core::mem::zeroed() }
 }
 
-/// The seccomp program's arch-specific words. The tests pin the native
-/// arch's numbers against libc's.
-pub struct Arch {
-    /// AUDIT_ARCH_* for this arch.
-    pub audit: u32,
-    /// x86_64 alone has a second table under the same audit arch.
-    pub x32: bool,
-    /// __NR_unshare.
-    pub unshare: u32,
-    /// __NR_clone.
-    pub clone: u32,
-    /// __NR_clone3, the same everywhere.
-    pub clone3: u32,
-    /// __NR_setns.
-    pub setns: u32,
-}
-
-/// x86_64, AUDIT_ARCH_X86_64 is EM_X86_64 with the 64-bit and
-/// little-endian bits.
-pub const X86_64: Arch = Arch {
-    audit: 0xC000_003E,
-    x32: true,
-    unshare: 272,
-    clone: 56,
-    clone3: 435,
-    setns: 308,
-};
-
-/// aarch64, AUDIT_ARCH_AARCH64 is EM_AARCH64 with the same two bits.
-pub const AARCH64: Arch = Arch {
-    audit: 0xC000_00B7,
-    x32: false,
-    unshare: 97,
-    clone: 220,
-    clone3: 435,
-    setns: 268,
-};
-
-#[cfg(target_arch = "x86_64")]
-const NATIVE: Arch = X86_64;
-#[cfg(target_arch = "aarch64")]
-const NATIVE: Arch = AARCH64;
-
-/// __X32_SYSCALL_BIT. On x86_64 it selects the x32 table under the same
-/// audit arch, where unshare and friends have other numbers.
-const X32_SYSCALL_BIT: u32 = 0x4000_0000;
-
-/// The most words a program has, the x86_64 one with its x32 check.
-pub const FILTER_MAX: usize = 25;
-
-/// A seccomp program in fixed storage, built at compile time.
-pub struct Filter {
-    /// The words, the first len of them live.
-    pub words: [libc::sock_filter; FILTER_MAX],
-    /// How many words the program has.
-    pub len: u16,
-}
-
-/// A BPF statement, BPF_STMT in linux/filter.h.
-const fn stmt(code: u32, k: u32) -> libc::sock_filter {
-    libc::sock_filter {
-        code: code as u16,
-        jt: 0,
-        jf: 0,
-        k,
-    }
-}
-
-/// A BPF jump, BPF_JUMP in linux/filter.h.
-const fn jump(code: u32, k: u32, jt: u8, jf: u8) -> libc::sock_filter {
-    libc::sock_filter {
-        code: code as u16,
-        jt,
-        jf,
-        k,
-    }
-}
-
-const LD_W_ABS: u32 = libc::BPF_LD | libc::BPF_W | libc::BPF_ABS;
-const JEQ_K: u32 = libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K;
-const JGE_K: u32 = libc::BPF_JMP | libc::BPF_JGE | libc::BPF_K;
-const JSET_K: u32 = libc::BPF_JMP | libc::BPF_JSET | libc::BPF_K;
-const RET_K: u32 = libc::BPF_RET | libc::BPF_K;
-const KILL: u32 = libc::SECCOMP_RET_KILL_PROCESS;
-const ALLOW: u32 = libc::SECCOMP_RET_ALLOW;
-const EPERM: u32 = libc::SECCOMP_RET_ERRNO | libc::EPERM as u32;
-const ENOSYS: u32 = libc::SECCOMP_RET_ERRNO | libc::ENOSYS as u32;
-const NEWUSER: u32 = libc::CLONE_NEWUSER as u32;
-
-/// The offsets the program loads from. ARGn_LO is the low 32 bits of
-/// argument n, its first four bytes on a little-endian arch.
-const NR_OFF: u32 = offset_of!(libc::seccomp_data, nr) as u32;
-const ARCH_OFF: u32 = offset_of!(libc::seccomp_data, arch) as u32;
-const ARG0_LO: u32 = offset_of!(libc::seccomp_data, args) as u32;
-const ARG1_LO: u32 = ARG0_LO + 8;
-const _: () = assert!(
-    cfg!(target_endian = "little"),
-    "FZ_ARG_LO adds 4 on a big-endian arch"
-);
-
-impl Filter {
-    /// The program for arch, which refuses to make or join a user
-    /// namespace. unshare and clone with CLONE_NEWUSER, and setns onto a
-    /// user namespace (or onto whatever the descriptor is), get EPERM.
-    /// clone3 gets ENOSYS, as an older kernel would answer, because
-    /// seccomp cannot read its flags and libc then falls back to clone.
-    /// On x86_64 an x32 number kills the process, as libseccomp and
-    /// Docker do, so the other table cannot sidestep the matches.
-    ///
-    /// Built at compile time, so an index slip is a build error, not a
-    /// panic on the child path.
-    #[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
-    pub const fn build(a: &Arch) -> Filter {
-        let mut f = Filter {
-            words: [stmt(0, 0); FILTER_MAX],
-            len: 0,
-        };
-        let mut n = 0usize;
-        f.words[n] = stmt(LD_W_ABS, ARCH_OFF);
-        n += 1;
-        f.words[n] = jump(JEQ_K, a.audit, 1, 0);
-        n += 1;
-        f.words[n] = stmt(RET_K, KILL);
-        n += 1;
-        f.words[n] = stmt(LD_W_ABS, NR_OFF);
-        n += 1;
-        if a.x32 {
-            // nr >= X32_SYSCALL_BIT is an x32 call, not one of ours
-            f.words[n] = jump(JGE_K, X32_SYSCALL_BIT, 0, 1);
-            n += 1;
-            f.words[n] = stmt(RET_K, KILL);
-            n += 1;
-        }
-        // unshare(flags)
-        f.words[n] = jump(JEQ_K, a.unshare, 0, 4);
-        n += 1;
-        f.words[n] = stmt(LD_W_ABS, ARG0_LO);
-        n += 1;
-        f.words[n] = jump(JSET_K, NEWUSER, 0, 1);
-        n += 1;
-        f.words[n] = stmt(RET_K, EPERM);
-        n += 1;
-        f.words[n] = stmt(RET_K, ALLOW);
-        n += 1;
-        // clone(flags, ...)
-        f.words[n] = jump(JEQ_K, a.clone, 0, 4);
-        n += 1;
-        f.words[n] = stmt(LD_W_ABS, ARG0_LO);
-        n += 1;
-        f.words[n] = jump(JSET_K, NEWUSER, 0, 1);
-        n += 1;
-        f.words[n] = stmt(RET_K, EPERM);
-        n += 1;
-        f.words[n] = stmt(RET_K, ALLOW);
-        n += 1;
-        // clone3(struct clone_args *)
-        f.words[n] = jump(JEQ_K, a.clone3, 0, 1);
-        n += 1;
-        f.words[n] = stmt(RET_K, ENOSYS);
-        n += 1;
-        // setns(fd, nstype)
-        f.words[n] = jump(JEQ_K, a.setns, 0, 5);
-        n += 1;
-        f.words[n] = stmt(LD_W_ABS, ARG1_LO);
-        n += 1;
-        f.words[n] = jump(JEQ_K, 0, 2, 0);
-        n += 1;
-        f.words[n] = jump(JSET_K, NEWUSER, 1, 0);
-        n += 1;
-        f.words[n] = stmt(RET_K, ALLOW);
-        n += 1;
-        f.words[n] = stmt(RET_K, EPERM);
-        n += 1;
-        f.words[n] = stmt(RET_K, ALLOW);
-        n += 1;
-        f.len = n as u16;
-        f
-    }
-
-    /// The live words.
-    pub fn words(&self) -> &[libc::sock_filter] {
-        self.words.get(..usize::from(self.len)).unwrap_or(&[])
-    }
-}
-
-/// The program for this arch, static so the child allocates nothing.
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-static FILTER: Filter = Filter::build(&NATIVE);
-
-/// userns_filter installs the program above on the calling process.
-/// Installing needs CAP_SYS_ADMIN in the caller's user namespace or
-/// no_new_privs. Returns prctl's answer, 0 or -1 with errno, and ENOSYS
-/// on an arch the table does not cover.
-pub fn userns_filter() -> c_int {
-    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-    {
-        sys::set_errno(libc::ENOSYS);
-        -1
-    }
-    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-    {
-        let prog = libc::sock_fprog {
-            len: FILTER.len,
-            // The kernel copies the program and writes nothing through
-            // the pointer, whose type is sock_fprog's.
-            filter: FILTER.words.as_ptr().cast_mut(),
-        };
-        // SAFETY: prog is live for the call, and the kernel only reads it.
-        unsafe {
-            prctl(
-                libc::PR_SET_SECCOMP,
-                libc::SECCOMP_MODE_FILTER as c_ulong,
-                (&raw const prog) as c_ulong,
-            )
-        }
-    }
-}
-
 /// prctl(2) with two arguments, the other two zero.
 ///
 /// # Safety
@@ -440,8 +219,6 @@ const _: () = {
         size_of::<libc::clone_args>() == 88,
         "struct clone_args is the 5.7 layout"
     );
-    assert!(size_of::<libc::sock_filter>() == 8);
-    assert!(FILTER_MAX <= u16::MAX as usize);
 };
 
 /// drop_caps leaves the child with no capability it can use or regain.
@@ -699,29 +476,6 @@ unsafe fn child_say(fence: *const c_char, what: &CStr, why: *const c_char) {
     }
 }
 
-/// "errno <e>" for child_say_errno, NUL-ended in a fixed buffer.
-fn errno_why(e: c_int) -> [u8; 18] {
-    let mut why = [0u8; 18];
-    let n = sys::append(&mut why, 0, b"errno ");
-    let n = sys::append_decimal(&mut why, n, e as u32);
-    if let Some(end) = why.get_mut(n) {
-        *end = 0;
-    }
-    why
-}
-
-/// child_say_errno is child_say with an errno value as the reason, as a
-/// number. strerror translates through the locale under a lock the
-/// child must not take.
-///
-/// # Safety
-/// fence is NUL-ended and live for the call.
-unsafe fn child_say_errno(fence: *const c_char, what: &CStr, e: c_int) {
-    let why = errno_why(e);
-    // SAFETY: fence by the contract above, why is NUL-ended.
-    unsafe { child_say(fence, what, why.as_ptr().cast()) }
-}
-
 /// scrub_and_run is the child between the clone and the application,
 /// under the rule at the top of this module. A fiber that cannot be set
 /// up or confined as fiberd asked does not run. The child ends, its exit
@@ -863,8 +617,7 @@ pub unsafe fn scrub_and_run(c: &Child<'_>) -> ! {
         libc::sigprocmask(libc::SIG_SETMASK, &raw const none, ptr::null_mut());
     }
     // Mounts first, while the capabilities they need are held. The
-    // filter goes on before the drop, since installing may need
-    // CAP_SYS_ADMIN.
+    // seccomp filter is the zygote's, inherited at the clone.
     if c.mntns {
         // SAFETY: the tables name the zygote's statics, by the contract
         // above.
@@ -872,13 +625,6 @@ pub unsafe fn scrub_and_run(c: &Child<'_>) -> ! {
         if failed != 0 {
             // SAFETY: _exit ends the child and never returns.
             unsafe { libc::_exit(mounts::mount_exit(failed)) }
-        }
-    }
-    if c.deny_nested_userns && userns_filter() < 0 {
-        // SAFETY: fence by the contract above.
-        unsafe {
-            child_say_errno(c.fence, c"deny nested user namespaces", sys::errno());
-            libc::_exit(EX_USERNS)
         }
     }
     if c.nocaps && drop_caps() < 0 {
@@ -935,123 +681,6 @@ mod tests {
     )]
     use super::*;
     use core::mem::size_of_val;
-
-    /// A word as (code, jt, jf, k), in BPF_JUMP's order.
-    fn words(f: &Filter) -> Vec<(u16, u8, u8, u32)> {
-        f.words()
-            .iter()
-            .map(|w| (w.code, w.jt, w.jf, w.k))
-            .collect()
-    }
-
-    #[test]
-    fn filter_is_the_c_program_word_for_word() {
-        // The words with the kernel headers' values. BPF_LD|BPF_W|BPF_ABS
-        // is 0x20, BPF_JMP|BPF_JEQ|BPF_K 0x15, BPF_JGE 0x35, BPF_JSET 0x45
-        // and BPF_RET|BPF_K 0x06.
-        let common_head: &[(u16, u8, u8, u32)] = &[(0x20, 0, 0, 4)];
-        let x86_64_tail: &[(u16, u8, u8, u32)] = &[
-            (0x15, 1, 0, 0xC000003E),
-            (0x06, 0, 0, 0x80000000),
-            (0x20, 0, 0, 0),
-            (0x35, 0, 1, 0x40000000),
-            (0x06, 0, 0, 0x80000000),
-            (0x15, 0, 4, 272),
-            (0x20, 0, 0, 16),
-            (0x45, 0, 1, 0x10000000),
-            (0x06, 0, 0, 0x00050001),
-            (0x06, 0, 0, 0x7fff0000),
-            (0x15, 0, 4, 56),
-            (0x20, 0, 0, 16),
-            (0x45, 0, 1, 0x10000000),
-            (0x06, 0, 0, 0x00050001),
-            (0x06, 0, 0, 0x7fff0000),
-            (0x15, 0, 1, 435),
-            (0x06, 0, 0, 0x00050026),
-            (0x15, 0, 5, 308),
-            (0x20, 0, 0, 24),
-            (0x15, 2, 0, 0),
-            (0x45, 1, 0, 0x10000000),
-            (0x06, 0, 0, 0x7fff0000),
-            (0x06, 0, 0, 0x00050001),
-            (0x06, 0, 0, 0x7fff0000),
-        ];
-        let aarch64_tail: &[(u16, u8, u8, u32)] = &[
-            (0x15, 1, 0, 0xC00000B7),
-            (0x06, 0, 0, 0x80000000),
-            (0x20, 0, 0, 0),
-            (0x15, 0, 4, 97),
-            (0x20, 0, 0, 16),
-            (0x45, 0, 1, 0x10000000),
-            (0x06, 0, 0, 0x00050001),
-            (0x06, 0, 0, 0x7fff0000),
-            (0x15, 0, 4, 220),
-            (0x20, 0, 0, 16),
-            (0x45, 0, 1, 0x10000000),
-            (0x06, 0, 0, 0x00050001),
-            (0x06, 0, 0, 0x7fff0000),
-            (0x15, 0, 1, 435),
-            (0x06, 0, 0, 0x00050026),
-            (0x15, 0, 5, 268),
-            (0x20, 0, 0, 24),
-            (0x15, 2, 0, 0),
-            (0x45, 1, 0, 0x10000000),
-            (0x06, 0, 0, 0x7fff0000),
-            (0x06, 0, 0, 0x00050001),
-            (0x06, 0, 0, 0x7fff0000),
-        ];
-        let cases: &[(&str, &Arch, &[(u16, u8, u8, u32)], usize)] = &[
-            ("x86_64", &X86_64, x86_64_tail, 25),
-            ("aarch64", &AARCH64, aarch64_tail, 23),
-        ];
-        for (name, arch, tail, len) in cases {
-            let f = Filter::build(arch);
-            let want: Vec<_> = common_head.iter().chain(tail.iter()).copied().collect();
-            assert_eq!(usize::from(f.len), *len, "{name}: length");
-            assert_eq!(words(&f), want, "{name}");
-        }
-    }
-
-    #[test]
-    fn native_arch_numbers_are_libcs() {
-        let cases: &[(&str, u32, c_long)] = &[
-            ("unshare", NATIVE.unshare, libc::SYS_unshare),
-            ("clone", NATIVE.clone, libc::SYS_clone),
-            ("clone3", NATIVE.clone3, libc::SYS_clone3),
-            ("setns", NATIVE.setns, libc::SYS_setns),
-        ];
-        for (name, got, want) in cases {
-            assert_eq!(c_long::from(*got), *want, "{name}");
-        }
-        assert_eq!(
-            NATIVE.x32,
-            cfg!(target_arch = "x86_64"),
-            "x86_64 alone has an x32 table"
-        );
-    }
-
-    #[test]
-    fn filter_fits_its_storage_and_prog() {
-        let cases: &[(&str, &Arch)] = &[("x86_64", &X86_64), ("aarch64", &AARCH64)];
-        for (name, arch) in cases {
-            let f = Filter::build(arch);
-            assert!(usize::from(f.len) <= FILTER_MAX, "{name}");
-            assert_eq!(f.words().len(), usize::from(f.len), "{name}");
-            // Every jump lands inside the program, as the kernel checks.
-            for (i, w) in f.words().iter().enumerate() {
-                if w.code == 0x15 || w.code == 0x35 || w.code == 0x45 {
-                    for off in [w.jt, w.jf] {
-                        assert!(
-                            i + 1 + usize::from(off) < f.words().len(),
-                            "{name}: word {i} jumps out"
-                        );
-                    }
-                }
-            }
-            // The last word returns, so no run falls off the end.
-            assert_eq!(f.words().last().map(|w| w.code), Some(0x06), "{name}");
-        }
-    }
 
     /// A SOCK_SEQPACKET pair, as the channel is.
     fn pair() -> [c_int; 2] {
@@ -1258,20 +887,6 @@ mod tests {
         for (name, fence, what, why, want) in cases {
             let line: Vec<u8> = say_parts(fence, what, why).concat();
             assert_eq!(line, want.as_bytes(), "{name}");
-        }
-    }
-
-    #[test]
-    fn errno_why_is_the_number() {
-        let cases: &[(&str, c_int, &str)] = &[
-            ("EPERM", libc::EPERM, "errno 1"),
-            ("ENOSYS", libc::ENOSYS, "errno 38"),
-            ("the largest int", c_int::MAX, "errno 2147483647"),
-        ];
-        for (name, e, want) in cases {
-            let why = errno_why(*e);
-            let got = CStr::from_bytes_until_nul(&why).unwrap();
-            assert_eq!(got.to_bytes(), want.as_bytes(), "{name}");
         }
     }
 

@@ -145,9 +145,10 @@ func births(t *testing.T, trace string) (clone3, legacy int) {
 // of the bounding set, so the zygote has lost it after exec, and strace
 // -f records the clone calls to count.
 //
-// Two refusals meet here. The kernel refuses CLONE_NEWPID with EPERM, and
-// birth asks once, never retrying with fewer namespaces or falling back
-// to the legacy clone (a property the old code had too). And the zygote,
+// Two refusals meet here. The fiber filter answers clone3 with ENOSYS, so
+// birth takes the legacy clone with the same flags, the kernel refuses
+// its CLONE_NEWPID with EPERM, and birth never retries with fewer
+// namespaces. And the zygote,
 // refused its own mount namespace in fz_init, ends at PREPARE mntns with
 // the reason instead of READY, before any birth, so no clone3 is even
 // asked for and fiberd fails the warm. The oldest code asked the
@@ -178,12 +179,12 @@ func TestRefusedNamespacesRefuseClone(t *testing.T) {
 		// it has no mount namespace of its own, and nothing is born.
 		setup, wantFirst string
 		// opts are the CLONE options sent after READY, wantErr what the
-		// ERROR line must contain, and births how many clone3 calls
-		// each CLONE costs.
-		opts, wantErr string
-		births        int
+		// ERROR line must contain, and clone3 and legacy how many of each
+		// call every CLONE costs.
+		opts, wantErr  string
+		clone3, legacy int
 	}{
-		{name: "the kernel refuses the pid namespace once per CLONE", setup: "PREPARE none\n", opts: "pidns", wantErr: "clone: Operation not permitted", births: 1},
+		{name: "the kernel refuses the pid namespace once per CLONE", setup: "PREPARE none\n", opts: "pidns", wantErr: "clone: Operation not permitted", clone3: 1, legacy: 1},
 		{name: "the zygote without a namespace of its own ends at PREPARE mntns before any birth", setup: "PREPARE mntns\n",
 			wantFirst: "ERROR ? the zygote could not take a mount namespace of its own: unshare: errno 1"},
 	}
@@ -214,7 +215,7 @@ func TestRefusedNamespacesRefuseClone(t *testing.T) {
 			}
 			// The clones share the zygote on purpose and run in order,
 			// each one more clone of it.
-			seen := 0
+			seen3, seen := 0, 0
 			for _, fence := range []string{"gr/1-1", "gr/1-2"} {
 				sendClone(t, uc, fmt.Sprintf("CLONE %s %s/%s.sock 2000 - - %s", fence, dir, strings.ReplaceAll(fence, "/", "-"), tc.opts))
 				got := readLine(t, uc, rd)
@@ -227,11 +228,11 @@ func TestRefusedNamespacesRefuseClone(t *testing.T) {
 				// strace prints a call before the tracee runs on, so every
 				// call of this birth is in the file before ERROR was sent.
 				c3, legacy := births(t, trace)
-				if c3-seen != tc.births || legacy != 0 {
+				if c3-seen3 != tc.clone3 || legacy-seen != tc.legacy {
 					b, _ := os.ReadFile(trace)
-					t.Fatalf("births for %s: clone3 %d, legacy clone %d, want %d clone3 and no legacy clone; trace so far:\n%s", fence, c3-seen, legacy, tc.births, b)
+					t.Fatalf("births for %s: clone3 %d, legacy clone %d, want %d and %d; trace so far:\n%s", fence, c3-seen3, legacy-seen, tc.clone3, tc.legacy, b)
 				}
-				seen = c3
+				seen3, seen = c3, legacy
 			}
 		})
 	}

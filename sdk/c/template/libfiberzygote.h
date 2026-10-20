@@ -12,7 +12,10 @@
  *     (stderr once the child is ready), the environment is emptied and
  *     the child gets a new session.
  *   - When asked, the child gets a private mount namespace, a /proc of
- *     its own pid namespace, and no capabilities under no_new_privs.
+ *     its own pid namespace, and no capabilities.
+ *   - The zygote and every child run under no_new_privs and the fiber
+ *     filter, a seccomp program fz_serve installs before READY. A
+ *     zygote that cannot install it never says READY.
  *   - Identity (the fence, the seed, a handoff fiber's key) reaches the
  *     child after the fork, on its channel, and is never baked into the
  *     template.
@@ -31,11 +34,11 @@
  *                        is refused.
  *   FIBERD_USERNS_NESTED=deny
  *                        fz_serve sets user.max_user_namespaces to 0 in
- *                        the zygote's user namespace and drops
- *                        CAP_SYS_RESOURCE, and every fiber gets a seccomp
- *                        filter refusing a new user namespace. It does
- *                        not serve in the initial user namespace or when
- *                        the limit cannot be set.
+ *                        the zygote's user namespace, keeps CAP_SYS_ADMIN
+ *                        alone on the serving thread, and installs the
+ *                        fiber filter with the mount family refused too.
+ *                        It does not serve in the initial user namespace
+ *                        or when any step is refused.
  *
  * Wire protocol on the control descriptor, one line per message. fiberd
  * speaks first, and its setup lines, ended by PREPARE, come before READY.

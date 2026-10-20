@@ -27,6 +27,8 @@ use crate::ctl::{self, Line, STRERROR_MAX, deadline_of, ms_until, now_ts, recv_l
 use crate::fiber::{Global, READY_BYTE};
 use crate::line::{self, CloneRefusal, Setup};
 use crate::mounts;
+use crate::prepare::keep_only_sys_admin;
+use crate::seccomp;
 use crate::sys::{self, Errno};
 
 /// The reason the zygote refuses every mntns CLONE, or ends on instead
@@ -65,8 +67,6 @@ pub struct State {
     pub have_own_ns: bool,
     /// prepare_ns went through, so mntns fibers may be born.
     pub ns_prepared: bool,
-    /// fiberd asked for nested user namespaces to be denied.
-    pub deny_nested_userns: bool,
     /// How many HIDE paths Tables.hide holds.
     pub nhide: usize,
     /// How many DROP paths Tables.drop holds.
@@ -87,7 +87,6 @@ impl State {
             paths_refused: None,
             have_own_ns: false,
             ns_prepared: false,
-            deny_nested_userns: false,
             nhide: 0,
             ndrop: 0,
             nkids: 0,
@@ -263,7 +262,6 @@ pub fn exit_why(code: c_int) -> Option<&'static [u8]> {
         child::EX_MNT_HIDE => b"could not cover a HIDE path that appeared after READY",
         child::EX_CAPS => b"could not drop its capabilities",
         child::EX_MNT_RO => b"could not make the host controls under /proc read-only",
-        child::EX_USERNS => b"could not install the user namespace filter",
         child::EX_FDS => b"could not set up its descriptors",
         child::EX_IDENTITY => b"did not get its incarnation record",
         child::EX_CGROUP => b"could not join its cgroup leaf",
@@ -896,7 +894,6 @@ impl Zygote<'_> {
             pidns: cl.pidns,
             mntns: cl.mntns,
             nocaps: cl.nocaps,
-            deny_nested_userns: st.deny_nested_userns,
             fence: fence.as_ptr().cast(),
             on_fiber,
             environ: env.environ.as_mut_ptr(),
@@ -991,7 +988,6 @@ impl Zygote<'_> {
         }
         if env_is(c"FIBERD_USERNS_NESTED", b"deny") {
             self.cap_nested_userns()?;
-            self.st.deny_nested_userns = true;
         }
         // The setup lines and their namespace come before READY, so READY
         // means every mntns fiber's namespace is ready to copy. Every fiber
@@ -1002,6 +998,46 @@ impl Zygote<'_> {
         }
         if let Some(why) = self.refused() {
             Line::new().s(b"ERROR ? ").s(why).send(ctl_fd);
+            return Err(Errno(libc::ENOTRECOVERABLE));
+        }
+        // A runc zygote (FIBERD_USERNS_NESTED=deny, what fiberd sets when
+        // the zygote keeps capabilities in a user namespace of its own)
+        // serves no mntns fiber, so its fibers keep CAP_SYS_ADMIN alone
+        // and may not mount. The drop acts on this thread, the one every
+        // fiber is forked from. An engine thread started before fz_serve
+        // keeps the container's capabilities and no fiber inherits them.
+        // Fail closed, as cap_nested_userns.
+        let runc = env_is(c"FIBERD_USERNS_NESTED", b"deny");
+        if runc && let Err(Errno(e)) = keep_only_sys_admin() {
+            let (text, n) = errno_text(e);
+            Line::new()
+                .s(b"ERROR ? capabilities: ")
+                .s(text.get(..n).unwrap_or(&[]))
+                .send(ctl_fd);
+            return Err(Errno(libc::ENOTRECOVERABLE));
+        }
+        // The fiber filter, last so the proc mounts above ran without
+        // it, on every thread so an engine thread is covered. Fibers
+        // inherit it at the clone. Fail closed, as cap_nested_userns.
+        let program = if runc {
+            seccomp::Program::Runc
+        } else {
+            seccomp::Program::Fiber
+        };
+        if let Err(refusal) = seccomp::install(program) {
+            let mut why = Line::new();
+            why.s(b"seccomp filter: ");
+            match refusal {
+                seccomp::Refusal::Errno(e) => {
+                    let (text, n) = errno_text(e);
+                    why.s(text.get(..n).unwrap_or(&[]));
+                }
+                seccomp::Refusal::Thread(tid) => {
+                    why.s(b"thread ").int(tid).s(b" would not take it");
+                }
+            }
+            Line::new().s(b"libfiberzygote: ").s(why.bytes()).stderr();
+            Line::new().s(b"ERROR ? ").s(why.bytes()).send(ctl_fd);
             return Err(Errno(libc::ENOTRECOVERABLE));
         }
         if Line::new().s(b"READY").send(ctl_fd) < 0 {
@@ -1416,11 +1452,7 @@ mod tests {
                 Some("could not make the host controls under /proc read-only"),
             ),
             ("116 is retired", 116, None),
-            (
-                "117",
-                117,
-                Some("could not install the user namespace filter"),
-            ),
+            ("117 is retired", 117, None),
             ("120", 120, Some("could not set up its descriptors")),
             ("121", 121, Some("did not get its incarnation record")),
             ("125", 125, Some("could not join its cgroup leaf")),
@@ -2371,6 +2403,134 @@ mod tests {
             close(ours);
             close(theirs);
         }
+        ctl::set_ctl_fd(-1);
+        // SAFETY: old is live for the call.
+        unsafe { libc::pthread_sigmask(libc::SIG_SETMASK, &raw const old, ptr::null_mut()) };
+    }
+
+    #[test]
+    fn serve_does_not_serve_without_the_filter() {
+        // A refused install ends serve with ERROR ? and no READY, so
+        // fiberd fails the warm.
+        let _serial = crate::serial();
+        let mut chld: libc::sigset_t = zeroed();
+        let mut old: libc::sigset_t = zeroed();
+        // SAFETY: both sets are live for the calls.
+        unsafe {
+            libc::sigemptyset(&raw mut chld);
+            libc::sigaddset(&raw mut chld, libc::SIGCHLD);
+            libc::pthread_sigmask(libc::SIG_BLOCK, &raw const chld, &raw mut old);
+        }
+        let cases: &[(&str, (c_long, c_int), &str)] = &[
+            (
+                "the kernel refused the program",
+                (-1, libc::EINVAL),
+                "ERROR ? seccomp filter: Invalid argument",
+            ),
+            (
+                "no_new_privs or the install was not permitted",
+                (-1, libc::EACCES),
+                "ERROR ? seccomp filter: Permission denied",
+            ),
+            (
+                "a thread TSYNC could not cover",
+                (4242, 0),
+                "ERROR ? seccomp filter: thread 4242 would not take it",
+            ),
+        ];
+        for (name, fake, want) in cases {
+            *seccomp::tests::FAKE.lock().unwrap() = Some(*fake);
+            let mut rig = Rig::new();
+            let [ours, theirs] = pair();
+            write(theirs, b"PREPARE none\n");
+            let got = rig.z().serve(ours, None);
+            assert_eq!(got, Err(Errno(libc::ENOTRECOVERABLE)), "{name}");
+            assert_eq!(lines(theirs), vec![(*want).to_owned()], "{name}: no READY");
+            close(rig.st.sigchld_fd);
+            close(ours);
+            close(theirs);
+        }
+        *seccomp::tests::FAKE.lock().unwrap() = Some((0, 0));
+        ctl::set_ctl_fd(-1);
+        // SAFETY: old is live for the call.
+        unsafe { libc::pthread_sigmask(libc::SIG_SETMASK, &raw const old, ptr::null_mut()) };
+    }
+
+    #[test]
+    fn a_runc_zygote_keeps_sys_admin_and_takes_the_runc_program() {
+        // With FIBERD_USERNS_NESTED=deny serve narrows its capabilities
+        // and installs the runc program. A refused drop is ERROR ? and
+        // no READY, like a refused install.
+        let _serial = crate::serial();
+        let mut chld: libc::sigset_t = zeroed();
+        let mut old: libc::sigset_t = zeroed();
+        // SAFETY: both sets are live for the calls.
+        unsafe {
+            libc::sigemptyset(&raw mut chld);
+            libc::sigaddset(&raw mut chld, libc::SIGCHLD);
+            libc::pthread_sigmask(libc::SIG_BLOCK, &raw const chld, &raw mut old);
+        }
+        // SAFETY: under serial, and nothing else reads the environment
+        // meanwhile.
+        unsafe { std::env::set_var("FIBERD_USERNS_NESTED", "deny") };
+        *crate::prepare::tests::FAKE_NESTED.lock().unwrap() = Some(0);
+        let runc_len = seccomp::Prog::build(&seccomp::NATIVE, seccomp::Program::Runc).len;
+        struct Case {
+            name: &'static str,
+            caps: c_int,
+            install: (c_long, c_int),
+            want: Result<c_int, Errno>,
+            lines: &'static [&'static str],
+        }
+        let cases = [
+            Case {
+                name: "the drop is refused",
+                caps: libc::EPERM,
+                install: (0, 0),
+                want: Err(Errno(libc::ENOTRECOVERABLE)),
+                lines: &["ERROR ? capabilities: Operation not permitted"],
+            },
+            Case {
+                name: "the drop passes and the install is refused",
+                caps: 0,
+                install: (-1, libc::EINVAL),
+                want: Err(Errno(libc::ENOTRECOVERABLE)),
+                lines: &["ERROR ? seccomp filter: Invalid argument"],
+            },
+            Case {
+                name: "both pass and the zygote serves",
+                caps: 0,
+                install: (0, 0),
+                want: Ok(0),
+                lines: &["READY"],
+            },
+        ];
+        for tc in &cases {
+            *crate::prepare::tests::FAKE_CAPS.lock().unwrap() = Some(tc.caps);
+            *seccomp::tests::FAKE.lock().unwrap() = Some(tc.install);
+            seccomp::tests::SEEN_LEN.store(0, std::sync::atomic::Ordering::Relaxed);
+            let mut rig = Rig::new();
+            let [ours, theirs] = pair();
+            write(theirs, b"PREPARE none\n");
+            // fiberd gone after the setup, so a serving zygote returns.
+            // SAFETY: integer arguments alone.
+            unsafe { libc::shutdown(theirs, libc::SHUT_WR) };
+            let got = rig.z().serve(ours, None);
+            assert_eq!(got, tc.want, "{}", tc.name);
+            assert_eq!(lines(theirs), tc.lines.to_vec(), "{}", tc.name);
+            if tc.want.is_ok() {
+                let seen = seccomp::tests::SEEN_LEN.load(std::sync::atomic::Ordering::Relaxed);
+                assert_eq!(seen, runc_len, "{}: the runc program", tc.name);
+            }
+            close(rig.st.sigchld_fd);
+            close(ours);
+            close(theirs);
+        }
+        // SAFETY: as above.
+        unsafe { std::env::remove_var("FIBERD_USERNS_NESTED") };
+        *crate::prepare::tests::FAKE_NESTED.lock().unwrap() = None;
+        *crate::prepare::tests::FAKE_CAPS.lock().unwrap() = Some(0);
+        *seccomp::tests::FAKE.lock().unwrap() = Some((0, 0));
         ctl::set_ctl_fd(-1);
         // SAFETY: old is live for the call.
         unsafe { libc::pthread_sigmask(libc::SIG_SETMASK, &raw const old, ptr::null_mut()) };

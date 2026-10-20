@@ -26,7 +26,8 @@ import (
 // names nothing, so pidfd_open answers ESRCH before any ptrace check,
 // and its user namespace is the grant's, where it is capable over
 // nothing of another grant's. The rows ask fiber B to borrow fiber A's
-// channel ends, as fiberd would, by A's host pid.
+// channel ends, as fiberd would, by A's host pid. The fiber filter
+// refuses pidfd_getfd to every fiber besides.
 func TestChannelBorrowedByFiberdAlone(t *testing.T) {
 	ctx := context.Background()
 	rt := newRuntime(t)
@@ -80,8 +81,11 @@ func TestChannelBorrowedByFiberdAlone(t *testing.T) {
 			if got := talk(t, hb.Endpoint, fmt.Sprintf("borrow %d %d", pidA, tc.fd)); got != "ESRCH" {
 				t.Fatalf("B borrowing fd %d of A's host pid %d = %q, want ESRCH (A does not exist in B's pid namespace)", tc.fd, pidA, got)
 			}
-			if got := talk(t, hb.Endpoint, "borrow 1 "+strconv.Itoa(tc.fd)); got != "ok" {
-				t.Fatalf("B borrowing fd %d of its own pid 1 = %q, want ok (the call itself works, the boundary is the namespace)", tc.fd, got)
+			// Nor from itself, since the fiber filter refuses
+			// pidfd_getfd to every fiber. fiberd's own call, from
+			// outside the filter, is the one that works.
+			if got := talk(t, hb.Endpoint, "borrow 1 "+strconv.Itoa(tc.fd)); got != "EPERM" {
+				t.Fatalf("B borrowing fd %d of its own pid 1 = %q, want EPERM (the fiber filter refuses pidfd_getfd)", tc.fd, got)
 			}
 		})
 	}

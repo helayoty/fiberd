@@ -23,7 +23,12 @@ use libfuzzer_sys::fuzz_target;
 use std::ffi::{CStr, c_char, c_int, c_long, c_ulong, c_void};
 use std::sync::Mutex;
 
-fn refuse_syscall(_nr: c_long, _args: [c_long; 5]) -> c_long {
+fn refuse_syscall(nr: c_long, _args: [c_long; 5]) -> c_long {
+    // The fiber filter's install answers as if it took, so serve
+    // reaches its loop and nothing filters the fuzzer.
+    if nr == libc::SYS_seccomp {
+        return 0;
+    }
     // Not ENOSYS, or birth would fall back to a real clone.
     c_long::from(hooks::fail(libc::EPERM))
 }
