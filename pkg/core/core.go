@@ -485,7 +485,8 @@ func (a *Core) locate(ctx context.Context, g Grant, session string) (StatusCode,
 			return a.missCode(err), err
 		}
 		log.Printf("mobility: find %s/%s: %v", g.UID, session, err)
-		return OK, nil // the store is unreachable; create fresh, as any home without a store would
+		err = fmt.Errorf("%w: find %s/%s: %w", ErrNotReady, g.UID, session, err)
+		return a.missCode(err), err
 	}
 	if !found {
 		return OK, nil
@@ -885,10 +886,16 @@ func (a *Core) Park(ctx context.Context, fiberID string, sync bool) (string, Sta
 	aerr := a.audit(ctx, a.durability(fence.GrantUID), AuditRecord{Event: "park", Fence: fence, FiberID: fiberID, Session: session, Detail: ref})
 	// A named session's delta is published so any home can claim it;
 	// failure to publish leaves it resumable here only.
-	if pub, ok := a.Runtime.(DeltaPublisher); ok && session != "" {
+	var puberr error
+	pub, publishes := a.Runtime.(DeltaPublisher)
+	if policy, ok := a.Runtime.(DeltaPublicationPolicy); ok {
+		publishes = publishes && policy.PublishesDeltas()
+	}
+	if publishes && session != "" {
 		g, _ := a.Ledger.Grant(fence.GrantUID)
 		if remote, err := pub.PublishDelta(ctx, ref, g, session); err != nil {
 			log.Printf("mobility: publish %s/%s: %v", fence.GrantUID, session, err)
+			puberr = fmt.Errorf("park: publish %s/%s: %w", fence.GrantUID, session, err)
 		} else {
 			_ = a.audit(ctx, BestEffort, AuditRecord{Event: "publish", Fence: fence, Session: session, Detail: remote})
 		}
@@ -900,11 +907,8 @@ func (a *Core) Park(ctx context.Context, fiberID string, sync bool) (string, Sta
 	}
 	a.persist()
 	a.notify()
-	switch {
-	case perr != nil:
-		return ref, Internal, perr
-	case aerr != nil:
-		return ref, Internal, aerr
+	if err := errors.Join(perr, aerr, puberr); err != nil {
+		return ref, Internal, err
 	}
 	return ref, OK, nil
 }

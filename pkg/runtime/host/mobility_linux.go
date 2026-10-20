@@ -55,6 +55,10 @@ func (r *Runtime) domainRepo(g core.Grant) (repo, domain string, err error) {
 	return domainRepoFor(r.cfg.DeltaRegistry, domain), domain, nil
 }
 
+// PublishesDeltas implements core.DeltaPublicationPolicy. A configured
+// registry is enabled even if it is currently unreachable.
+func (r *Runtime) PublishesDeltas() bool { return r.cfg.DeltaRegistry != "" }
+
 // PublishDelta implements core.DeltaPublisher.
 func (r *Runtime) PublishDelta(ctx context.Context, deltaRef string, g core.Grant, session string) (string, error) {
 	if err := r.cfg.checkDeltaRegistry(); err != nil {

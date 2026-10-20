@@ -21,6 +21,8 @@ stateDiagram-v2
 - **Ends.** A running fiber ends by [release](../glossary.md#release), its own exit, a [yield](../glossary.md#yield) of its grant or an epoch bump. A parked one leaves when another home claims its [delta](../glossary.md#delta). A resumed delta is consumed by its resume. It stays on disk only while that fiber runs, and goes however the fiber ends, including a restart that finds the session was running. Parked deltas stay.
 - **Session gates.** Every Clone of one session name runs under that name's gate, so concurrent Clones and retries attach instead of creating a twin.
 - **Exits.** A fiber that dies on its own frees its slot and its session is forgotten. Its state is gone, so the ledger never calls it [parked](../glossary.md#park).
+- **Park publication.** A checkpoint returned by the runtime is recorded locally even if its publication fails. Park returns the local ref with an error, not success implying remote durability. The checkpoint stays available for a local resume and in the ledger snapshot. Runtimes that implement `DeltaPublicationPolicy` may explicitly disable publication; the host does so when no delta registry is configured, and local-only Park still succeeds. An enabled policy reports configuration, not reachability or durability, so failures of a configured publisher remain errors.
+- **Remote lookup.** A failed lookup is not evidence that a session is new. Clone returns a not-ready miss (or sheds while the issuer is unreachable), never a fresh fiber in place of state it could not look up.
 
 ```mermaid
 flowchart TD

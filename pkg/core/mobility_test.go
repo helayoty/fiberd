@@ -275,8 +275,9 @@ func TestSessionDomain(t *testing.T) {
 	}
 }
 
-// TestParkedSessionPickup has home A park session S, which succeeds even
-// when publishing fails, and then clones S again from a home. A delta over
+// TestParkedSessionPickup has home A park session S, retaining the local
+// checkpoint even when publishing fails, and then clones S again from a
+// home. A delta over
 // the mobility budget, or one parity refuses, is deferred to its preferred
 // home and stays in the store. Otherwise it is claimed and resumed. An
 // unpublished session resumes locally.
@@ -343,9 +344,10 @@ func TestParkedSessionPickup(t *testing.T) {
 			wantCode: core.OK, wantKind: core.ActResume},
 		{name: "a failed sync audit of the move refuses the clone", budget: 8 << 20, from: "B", failAudit: "migrate-in",
 			wantCode: core.Internal, wantErr: core.ErrAudit, wantClaims: 1},
-		// Like a home without a store, it creates a fresh session.
-		{name: "an unreachable store creates the session fresh", budget: 8 << 20, from: "B", findErr: errors.New("registry: connection refused"),
-			wantCode: core.OK, wantKind: core.ActCreate, wantStored: true},
+		{name: "an unreachable store refuses to create fresh state", budget: 8 << 20, from: "B", findErr: errors.New("registry: connection refused"),
+			wantCode: core.DeferredFallback, wantErr: core.ErrNotReady, wantStored: true},
+		{name: "an unreachable store with the issuer unreachable is shed", budget: 8 << 20, from: "B", issuerDown: true, findErr: errors.New("registry: connection refused"),
+			wantCode: core.Shed, wantErr: core.ErrNotReady, wantStored: true},
 		{name: "a pull that fails is deferred with the preferred home and stays stored", budget: 8 << 20, from: "B", claimErr: errors.New("registry: 503"),
 			wantCode: core.DeferredFallback, wantErr: core.ErrNotReady, wantPreferred: "A", wantStored: true},
 		{name: "a claimed copy that cannot be dropped does not stop the resume", budget: 8 << 20, from: "B", midClaim: arrive,
@@ -364,8 +366,12 @@ func TestParkedSessionPickup(t *testing.T) {
 			ra.deltaW, ra.pubErr = tc.deltaW, tc.pubErr
 			req := core.CloneRequest{GrantJWT: []byte("g1"), Session: "S", Deadline: time.Second}
 			r1, _, _ := a.Clone(ctx, req)
-			if _, code, err := a.Park(ctx, r1.FiberID, true); err != nil || code != core.OK {
-				t.Fatalf("park must succeed even when publishing fails: %v %d", err, code)
+			parkCode := core.OK
+			if tc.pubErr != nil {
+				parkCode = core.Internal
+			}
+			if ref, code, err := a.Park(ctx, r1.FiberID, true); ref == "" || code != parkCode || !errors.Is(err, tc.pubErr) {
+				t.Fatalf("park = %q, %d, %v; want a local ref, %d, %v", ref, code, err, parkCode, tc.pubErr)
 			}
 			picker, prt := b, rb
 			if tc.from == "A" {
@@ -447,6 +453,48 @@ func (e eventAuditor) Append(_ context.Context, d core.Durability, r core.AuditR
 		return core.ErrAudit
 	}
 	return nil
+}
+
+func TestParkPublicationFailure(t *testing.T) {
+	for _, failAudit := range []bool{false, true} {
+		t.Run(fmt.Sprintf("audit_failure=%v", failAudit), func(t *testing.T) {
+			g := core.Grant{UID: "g1", Tenant: "acme", Audience: "A", FiberMax: 1, Policy: core.Policy{Durability: core.Sync}}
+			st := &store{deltas: map[string]published{}}
+			a, rt := newMobileCore(t, "A", st, g)
+			a.Store = &core.SnapshotStore{Path: filepath.Join(t.TempDir(), "ledger.json")}
+			ctx := context.Background()
+			req := core.CloneRequest{GrantJWT: []byte("g1"), Session: "S", Deadline: time.Second}
+			first, code, err := a.Clone(ctx, req)
+			if code != core.OK || err != nil {
+				t.Fatalf("Clone = %d, %v", code, err)
+			}
+			rt.pubErr = errors.New("registry: publish failed")
+			if failAudit {
+				a.Audit = eventAuditor{"park"}
+			}
+			ref, code, err := a.Park(ctx, first.FiberID, true)
+			if ref == "" || code != core.Internal || !errors.Is(err, rt.pubErr) ||
+				(failAudit && !errors.Is(err, core.ErrAudit)) {
+				t.Fatalf("Park = %q, %d, %v", ref, code, err)
+			}
+			state, savedRef, known := a.Ledger.SessionState("g1", "S")
+			if !known || state != core.StateParked || savedRef != ref {
+				t.Fatalf("local session = %v, %q, %v", state, savedRef, known)
+			}
+			snap, err := a.Store.Load()
+			if err != nil || len(snap.Sessions) != 1 || snap.Sessions[0].DeltaRef != ref ||
+				snap.Sessions[0].State != core.StateParked {
+				t.Fatalf("snapshot = %+v, %v", snap, err)
+			}
+			if _, running := a.Ledger.Fiber(first.FiberID); running || len(st.deltas) != 0 {
+				t.Fatal("failed publication must leave only the local parked checkpoint")
+			}
+			resumed, code, err := a.Clone(ctx, req)
+			if code != core.OK || err != nil || resumed.Kind != core.ActResume {
+				t.Fatalf("local resume = %+v, %d, %v", resumed, code, err)
+			}
+		})
+	}
 }
 
 // TestConcurrentClaims clones a session parked on A from several callers
