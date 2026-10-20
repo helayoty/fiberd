@@ -1332,9 +1332,9 @@ func (b *Backend) Clone(ctx context.Context, warmID string, spec backend.FiberSp
 		session = hex.EncodeToString([]byte(spec.Session))
 	}
 	// A launcher's fibers already live in its container's mount
-	// namespace, which holds none of fiberd's paths. They keep the
-	// container's capabilities, because CRIU will not dump a fiber without
-	// capabilities whose /proc is not its own pid namespace's.
+	// namespace, which holds none of fiberd's paths. They get no nocaps,
+	// because CRIU will not dump a fiber without CAP_SYS_ADMIN whose /proc
+	// is not its own pid namespace's. Their zygote keeps that one alone.
 	var opts []string
 	if spec.OwnPIDNS {
 		opts = append(opts, "pidns")

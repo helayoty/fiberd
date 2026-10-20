@@ -282,7 +282,7 @@ type Isolator interface {
 // in a user namespace of the grant's own, mapped to a range of host ids
 // with the grant's root at its start. The host hands that uid the one
 // thing the instance must write on its own, the cgroup.procs of the
-// grant's cgroup and of each fiber leaf, so clone3 into a leaf works.
+// grant's cgroup and of each fiber leaf, so a birth into a leaf works.
 // Every limit stays the host's.
 type IDMapper interface {
 	// MappedRoot is the host uid the grant's root maps to. It fails when

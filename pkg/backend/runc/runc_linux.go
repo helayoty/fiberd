@@ -354,12 +354,12 @@ func cgroupPath(fd int, mount string) (string, error) {
 // outside the container, named for criu on both sides of a checkpoint.
 var deviceBinds = []string{"null", "zero", "full", "random", "urandom", "tty"}
 
-// containerCaps is what the zygote holds inside its user namespace. They
-// are capabilities over the namespace's own resources only. SYS_ADMIN
-// for clone3 into a pid namespace and the mounts, SYS_RESOURCE for the
-// zygote to cap nested user namespaces at init (it drops it before
-// serving, see sdk/c/template/core/src/prepare.rs), and the rest as runc's defaults
-// for an init that forks and signals children.
+// containerCaps is what the zygote starts with inside its user namespace.
+// They are capabilities over the namespace's own resources only.
+// SYS_RESOURCE lets the zygote cap nested user namespaces, and the rest
+// are runc's defaults for an init. The zygote keeps SYS_ADMIN alone
+// before it serves (sdk/c/template/core/src/prepare.rs), for the birth
+// into a pid namespace and for CRIU's dump of its fibers.
 var containerCaps = []string{"CAP_SYS_ADMIN", "CAP_KILL", "CAP_SETPCAP", "CAP_SETUID", "CAP_SETGID", "CAP_SYS_PTRACE",
 	"CAP_DAC_OVERRIDE", "CAP_CHOWN", "CAP_FOWNER", "CAP_SYS_RESOURCE"}
 
@@ -545,7 +545,7 @@ func (l *launcher) bundleConfig(spec backend.WarmSpec, argv []string, rootfs, cg
 		"hostname": "fiber",
 		"mounts":   mounts,
 		"linux": map[string]any{
-			// No cgroup namespace, since the zygote's clone3 into a leaf
+			// No cgroup namespace, since the zygote's birth into a leaf
 			// needs to see the host's hierarchy. The network namespace is
 			// new and empty but for the loopback runc brings up.
 			"namespaces":  []map[string]string{{"type": "user"}, {"type": "pid"}, {"type": "mount"}, {"type": "network"}, {"type": "ipc"}, {"type": "uts"}},
@@ -916,10 +916,10 @@ func (l *launcher) Endpoint(spec backend.WarmSpec, hostPath string) string {
 // tunnel devices the kernel puts in every new network namespace, so the
 // restored tree gets a fresh, empty one of its own, never the host's, and
 // Restored brings its loopback up. Its user namespace is new too, a
-// sibling of the container's, so the fiber's own seccomp filter is what
+// sibling of the container's, so the fiber filter it carries is what
 // keeps nested user namespaces denied after a resume (see
-// sdk/c/template/core/src/child.rs). The dump skips the network lock, which needs
-// iptables and only guards TCP peers. A fiber's endpoints are unix sockets.
+// sdk/c/template/core/src/seccomp.rs). The dump skips the network lock,
+// which needs iptables and only guards TCP peers. A fiber's endpoints are unix sockets.
 // A fiber's channel is a socket pair it holds both ends of, so a dump
 // carries it whole and a restore remakes it inside the fresh namespace.
 var (

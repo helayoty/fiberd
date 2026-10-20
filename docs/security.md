@@ -66,7 +66,8 @@ An `UNTRUSTED` grant, the default, is admitted only on a backend that isolates t
 ## Fiber isolation
 
 - Every proc and runc fiber is born in its own cgroup leaf and pid namespace. A proc fiber also gets a private mount namespace with fiberd's private paths covered, the run directory narrowed to its own grant's, and `/sys` and the host controls under `/proc` read-only. Confinement fails closed ([zygote.md](design/zygote.md)).
-- proc fibers run as uid 0 with every capability dropped under `no_new_privs`.
+- proc fibers run as uid 0 with every capability dropped. runc fibers keep CAP_SYS_ADMIN alone, inside their user namespace.
+- Every proc and runc fiber, and its zygote, runs under `no_new_privs` and the fiber filter, a seccomp program that refuses new namespaces, uncommon socket families, io_uring, bpf, the keyrings, ptrace and the host's own calls ([seccomp.md](design/seccomp.md)).
 - runc fibers are an unprivileged host uid in a per-grant user namespace, whose ids come from a pool far above ordinary users', with a loopback-only network namespace and nested user namespaces denied ([user-namespaces.md](design/user-namespaces.md)).
 - Every copy of a template gets one incarnation record before it serves, with its generation and a fresh 32-byte seed from fiberd, on every backend. That is the fork, a gVisor restore or pool hand-out, a proc, runc or gVisor resume, and a Hyperlight clone or resume, where the helper calls `Incarnate` first. A park is cooperative on proc and runc as on gVisor, and a resume is routed only after the fiber acks its record. The seed is never logged and is zeroed once used. The template's duty is to reseed every generator it owns from that seed and `getrandom` ([zygote.md](design/zygote.md), [sdk/c/template/README.md](../sdk/c/template/README.md)). fiberd parks only with CRIU 4.2 or later, which leaves the `getrandom` state a glibc of 2.41 or later keeps in user memory out of the dump ([backends.md](design/backends.md)).
 
@@ -91,7 +92,8 @@ Every state transition appends a hash-chained record to fiberd's private spool, 
 - `SYS_ADMIN` is broad.
 - Unmeasured runtimes keep every capability.
 - Only the template can reseed. A template that ignores its record serves the random state its copy carries. A park image holds the state the last seed produced, so two resumes of one park start alike until each reseeds from its own record. A Python template's fibers share one string hash seed ([sdk.md](design/sdk.md)). The aarch64 Hyperlight guest mixes no hardware entropy into the host's seed ([PROTOCOL.md](../hack/hyperlight/PROTOCOL.md)).
-- Fibers have no general system-call filter. runc fibers cannot create user namespaces, but proc fibers can, though the read-only `/sys` and `/proc` locks still hold inside them ([zygote.md](design/zygote.md)).
+- The fiber filter is a denylist, so a kernel call nobody has named yet is allowed, and `ioctl` is not filtered ([seccomp.md](design/seccomp.md)).
+- On runc, an engine thread a template starts before `fz_serve` keeps the container's capabilities. Its fibers do not ([seccomp.md](design/seccomp.md)).
 - Template images are signed but not sealed, so whatever a template holds in memory when it is checkpointed leaves the home in the clear. Keep secrets out of templates ([artifact.md](design/artifact.md)).
 - Address-space layout randomisation (ASLR) is off for every [zygote](glossary.md#zygote) and its fibers, so the fibers of a template share one fixed memory layout on every home. A memory-corruption exploit inside a fiber is easier, because an address learned in one fiber holds in all of them.
 - Whoever can write the grant directory can deny a grant UID on that home ([home.md](design/home.md)).
