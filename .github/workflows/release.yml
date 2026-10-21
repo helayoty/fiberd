@@ -7,20 +7,32 @@ on:
   # A manual run releases the commit it starts from under the tag it is
   # given, creating the tag if it is new. An existing tag is released by
   # a run started from that tag.
+  #
+  # A dry run builds and checks the archives and SDK packages and
+  # publishes nothing. It makes no tag, release, image or package, and
+  # attests nothing. The image is not built, since its job pushes it. The
+  # tag only names the files, so any valid one will do, from any branch.
+  # The files are kept as the release-assets artifact.
   workflow_dispatch:
     inputs:
       tag:
         description: "Release tag, for example v0.1.0, v1.9.2 or v2.0.0-rc.1"
         required: true
         type: string
+      dry_run:
+        description: "Build and check only, publish nothing"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 # One release at a time. Cleanup deletes every image version pushed since
-# its run started, so no other run may push in that window.
+# its run started, so no other run may push in that window. A dry run
+# pushes nothing, so it waits in its own group.
 concurrency:
-  group: release
+  group: ${{ inputs.dry_run && 'release-dry-run' || 'release' }}
   cancel-in-progress: false
 
 env:
@@ -52,6 +64,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
+          DRY_RUN: ${{ inputs.dry_run == true }}
         run: |
           set -euo pipefail
           echo "started=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
@@ -62,28 +75,34 @@ jobs:
             exit 1
           fi
           major=${BASH_REMATCH[1]} minor=${BASH_REMATCH[2]} pre=${BASH_REMATCH[4]}
-          # Fail before building if the tag is already released, for example by
-          # a tag push and a manual run for the same tag.
-          if [[ $(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null) == false ]]; then
-            echo "$TAG is already released" >&2
-            exit 1
-          fi
-          # A new tag is created only when the release is published, so a
-          # failed run leaves no tag.
-          if tagged=$(git rev-parse --verify --quiet "refs/tags/$TAG^{commit}"); then
-            if [[ "$tagged" != "$GITHUB_SHA" ]]; then
-              echo "$TAG points at $tagged, but this run started from $GITHUB_SHA ($GITHUB_REF_NAME): start the run from the tag" >&2
+          if [[ "$DRY_RUN" == true ]]; then
+            # A dry run publishes nothing, so the tag is not checked against
+            # releases, tags or main.
+            echo "dry run of $TAG at $GITHUB_SHA ($GITHUB_REF_NAME): nothing will be published"
+          else
+            # Fail before building if the tag is already released, for example by
+            # a tag push and a manual run for the same tag.
+            if [[ $(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null) == false ]]; then
+              echo "$TAG is already released" >&2
               exit 1
             fi
-            echo "new-tag=false" >> "$GITHUB_OUTPUT"
-            echo "releasing existing tag $TAG at $GITHUB_SHA"
-          else
-            echo "new-tag=true" >> "$GITHUB_OUTPUT"
-            echo "tag $TAG does not exist yet: it will be created at $GITHUB_SHA ($GITHUB_REF_NAME)"
-          fi
-          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
-            echo "$TAG would release $GITHUB_SHA, which is not on main: start the run from main" >&2
-            exit 1
+            # A new tag is created only when the release is published, so a
+            # failed run leaves no tag.
+            if tagged=$(git rev-parse --verify --quiet "refs/tags/$TAG^{commit}"); then
+              if [[ "$tagged" != "$GITHUB_SHA" ]]; then
+                echo "$TAG points at $tagged, but this run started from $GITHUB_SHA ($GITHUB_REF_NAME): start the run from the tag" >&2
+                exit 1
+              fi
+              echo "new-tag=false" >> "$GITHUB_OUTPUT"
+              echo "releasing existing tag $TAG at $GITHUB_SHA"
+            else
+              echo "new-tag=true" >> "$GITHUB_OUTPUT"
+              echo "tag $TAG does not exist yet: it will be created at $GITHUB_SHA ($GITHUB_REF_NAME)"
+            fi
+            if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+              echo "$TAG would release $GITHUB_SHA, which is not on main: start the run from main" >&2
+              exit 1
+            fi
           fi
           version=${TAG#v}
           echo "version=$version" >> "$GITHUB_OUTPUT"
@@ -303,10 +322,13 @@ jobs:
           # would stamp every later go build as modified (+dirty).
           dist="$RUNNER_TEMP/dist"
           mkdir "$dist"
-          # pack <archive> <dir> writes the archive and its SPDX SBOM.
+          # pack <archive> <dir> writes the archive and its SPDX SBOM. The
+          # modes are set, not taken from disk. <dir> comes from mktemp -d,
+          # so its ./ entry would be 0700 and unpacking into the current
+          # directory would make that directory owner-only.
           pack() {
             tar -C "$2" --sort=name --mtime="@$SOURCE_DATE_EPOCH" \
-              --owner=0 --group=0 --numeric-owner -cf - . | gzip -9n > "$dist/$1"
+              --owner=0 --group=0 --numeric-owner --mode=u+rwX,go+rX,go-w -cf - . | gzip -9n > "$dist/$1"
             syft scan "dir:$2" --quiet --source-name "${1%%_*}" --source-version "$VERSION" \
               --output "spdx-json=$dist/$1.spdx.json"
           }
@@ -361,7 +383,21 @@ jobs:
           rm -rf "$lib"
           cp "$RUNNER_TEMP"/python/fiberd-*.tar.gz "$RUNNER_TEMP"/python/fiberd-*.whl "$RUNNER_TEMP"/npm/fiberd-client-*.tgz "$dist/"
           (cd "$dist" && sha256sum -- *.tar.gz *.whl *.tgz *.spdx.json > SHA256SUMS)
+      # The names, both zygote libraries (no pointer authentication on
+      # arm64) and a build from the source archive. This runner's objdump
+      # cannot read aarch64 code, so the cross binutils are installed.
+      - name: check archives
+        env:
+          VERSION: ${{ needs.validate-tag.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends binutils-aarch64-linux-gnu
+          hack/release/check-assets.sh "$RUNNER_TEMP/dist" "$VERSION"
+      # An attestation is public and permanent, so a dry run makes none.
       - name: attest archive provenance
+        if: ${{ !inputs.dry_run }}
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-checksums: ${{ runner.temp }}/dist/SHA256SUMS
@@ -372,9 +408,12 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  # This job and every one after it publish, so a dry run skips them all.
   build-image:
     name: build image ${{ matrix.platform }}
     needs: [validate-tag, ci, integration, conformance, examples, fuzz]
+    # It pushes the image by digest.
+    if: ${{ !inputs.dry_run }}
     # Each platform builds on a native runner. Emulating arm64 under QEMU
     # makes the image's CRIU build many times slower.
     runs-on: ${{ matrix.runner }}
@@ -446,6 +485,7 @@ jobs:
   release-draft:
     name: draft GitHub release
     needs: [validate-tag, build-assets, build-image]
+    if: ${{ !inputs.dry_run }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -476,6 +516,7 @@ jobs:
   publish-image:
     name: publish multi-arch image
     needs: [validate-tag, build-image, release-draft]
+    if: ${{ !inputs.dry_run }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -549,6 +590,7 @@ jobs:
   publish-release:
     name: publish GitHub release
     needs: [validate-tag, release-draft, publish-image]
+    if: ${{ !inputs.dry_run }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -611,6 +653,7 @@ jobs:
   publish-pypi:
     name: publish to PyPI
     needs: [validate-tag, python-sdist, python-wheels, publish-release]
+    if: ${{ !inputs.dry_run }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     environment:
@@ -639,6 +682,7 @@ jobs:
   publish-npm:
     name: publish to npm
     needs: [validate-tag, npm-package, publish-release]
+    if: ${{ !inputs.dry_run }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     environment:
@@ -683,8 +727,9 @@ jobs:
   cleanup:
     name: clean up a failed or cancelled release
     needs: [validate-tag, ci, integration, conformance, examples, fuzz, python-sdist, python-wheels, npm-package, build-assets, build-image, release-draft, publish-image, publish-release, publish-pypi, publish-npm]
+    # A dry run left nothing to clean up, and its tag may name a real draft.
     if: >-
-      always() && needs.validate-tag.result == 'success' &&
+      always() && !inputs.dry_run && needs.validate-tag.result == 'success' &&
       (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled'))
     runs-on: ubuntu-24.04
     timeout-minutes: 15
