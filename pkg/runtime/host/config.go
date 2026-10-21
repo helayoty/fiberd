@@ -56,6 +56,14 @@ type Config struct {
 	Endpoints endpoint.Policy
 	// DeltaDir holds parked images: <DeltaDir>/<grant>/<epoch>-<seq>/.
 	DeltaDir string
+	// WorkspaceDir holds the workspace of every running fiber whose
+	// grant has a disk budget, <WorkspaceDir>/<grant>/<epoch>-<seq>/,
+	// with the fiber's tree under root/ and fiberd's staging beside it
+	// (default workspaces/ beside DeltaDir, so /var/lib/fiberd/workspaces
+	// under the default DeltaDir). It is fiberd's alone, mode
+	// 0700, and hidden from fibers like DeltaDir. Each fiber sees its
+	// own tree alone, mounted at backend.WorkspaceMount.
+	WorkspaceDir string
 	// DeltaRegistry, when set, is the OCI repository prefix (host/prefix)
 	// under which parked deltas are published (one repository per session
 	// domain, one tag per session) and looked up by other homes. A prefix
@@ -140,19 +148,20 @@ const (
 var DefaultFiberHide = []string{"/var/run/secrets/kubernetes.io/serviceaccount"}
 
 // fiberHide lists what fibers must not see. That is the defaults,
-// DeltaDir, PrivateDir, TemplateCache and FiberHide, cleaned and without
-// duplicates. Relative paths and extra directories holding RunDir are
-// returned as skipped. DeltaDir, PrivateDir or TemplateCache holding
-// RunDir is an error, because fiber endpoints live in RunDir and the
-// deltas, keys or templates would be visible.
+// DeltaDir, WorkspaceDir, PrivateDir, TemplateCache and FiberHide,
+// cleaned and without duplicates. Relative paths and extra directories
+// holding RunDir are returned as skipped. DeltaDir, WorkspaceDir,
+// PrivateDir or TemplateCache holding RunDir is an error, because fiber
+// endpoints live in RunDir and the deltas, workspaces, keys or templates
+// would be visible.
 func (c Config) fiberHide() (hide, skipped []string, err error) {
-	for _, d := range []struct{ name, path string }{{"DeltaDir", c.DeltaDir}, {"PrivateDir", c.PrivateDir}, {"TemplateCache", c.TemplateCache}} {
+	for _, d := range []struct{ name, path string }{{"DeltaDir", c.DeltaDir}, {"WorkspaceDir", c.WorkspaceDir}, {"PrivateDir", c.PrivateDir}, {"TemplateCache", c.TemplateCache}} {
 		if filepath.IsAbs(d.path) && holds(filepath.Clean(d.path), c.RunDir) {
 			return nil, nil, fmt.Errorf("host: RunDir %s is inside %s %s, which fibers must not see; move it out", c.RunDir, d.name, d.path)
 		}
 	}
 	seen := map[string]bool{}
-	for _, p := range append(append(append([]string{}, DefaultFiberHide...), c.DeltaDir, c.PrivateDir, c.TemplateCache), c.FiberHide...) {
+	for _, p := range append(append(append([]string{}, DefaultFiberHide...), c.DeltaDir, c.WorkspaceDir, c.PrivateDir, c.TemplateCache), c.FiberHide...) {
 		if p == "" {
 			continue
 		}

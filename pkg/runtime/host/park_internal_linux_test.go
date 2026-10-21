@@ -109,8 +109,9 @@ func TestPark(t *testing.T) {
 				if _, err := time.Parse(time.RFC3339Nano, m.ParkedAt); err != nil {
 					t.Fatalf("parked_at %q: %v", m.ParkedAt, err)
 				}
-				if parks := f.fake().parked(); len(parks) != 1 || parks[0] != (backend.ParkSpec{Dir: ref, Sync: false, Deadline: core.DefaultResumeDeadline}) {
-					t.Fatalf("backend parks = %+v", parks)
+				if parks := f.fake().parked(); len(parks) != 1 || parks[0].Dir != ref || parks[0].Sync || parks[0].Deadline != core.DefaultResumeDeadline ||
+					parks[0].Capture != nil || parks[0].CgroupFD != -1 {
+					t.Fatalf("backend parks = %+v, want %s async under the default deadline with no capture and no leaf", parks, ref)
 				}
 				if !f.r.HasDelta(ref) || !exists(filepath.Join(ref, fakeDeltaFile)) {
 					t.Fatal("the delta is not there")

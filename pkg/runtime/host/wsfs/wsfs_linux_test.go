@@ -1363,3 +1363,68 @@ func TestCaptureMemory(t *testing.T) {
 		})
 	}
 }
+
+// TestSize checks that Size counts the tree as Capture would, without
+// reading a file: apparent bytes of regular files, a file with several
+// names once, every name as an entry, and nothing of what is not a
+// regular file. A tree past the entry ceiling is refused.
+func TestSize(t *testing.T) {
+	cases := []struct {
+		name        string
+		limits      Limits
+		build       func(t *testing.T, fx *fixture)
+		wantBytes   int64
+		wantEntries int64
+		wantErr     error
+	}{
+		{name: "empty", limits: Limits{Bytes: 1 << 20}},
+		{name: "files and directories", limits: Limits{Bytes: 1 << 20}, build: func(t *testing.T, fx *fixture) {
+			fx.write(t, "a", "12345")
+			fx.write(t, "d/b", "123")
+			fx.write(t, "d/e/c", "")
+		}, wantBytes: 8, wantEntries: 5},
+		{name: "a hard link counts its bytes once and its names twice", limits: Limits{Bytes: 1 << 20}, build: func(t *testing.T, fx *fixture) {
+			fx.write(t, "a", "1234")
+			if err := os.Link(fx.in("a"), fx.in("b")); err != nil {
+				t.Fatal(err)
+			}
+		}, wantBytes: 4, wantEntries: 2},
+		{name: "a symlink, a FIFO and a socket are entries without bytes", limits: Limits{Bytes: 1 << 20}, build: func(t *testing.T, fx *fixture) {
+			fx.write(t, "a", "12")
+			fx.symlink(t, "l", "a")
+			fx.fifo(t, "f")
+			fx.socket(t, "s")
+		}, wantBytes: 2, wantEntries: 4},
+		{name: "a symlink to a directory is never followed", limits: Limits{Bytes: 1 << 20}, build: func(t *testing.T, fx *fixture) {
+			fx.symlink(t, "out", fx.outside)
+		}, wantBytes: 0, wantEntries: 1},
+		{name: "a sparse file counts by apparent size", limits: Limits{Bytes: 1 << 20}, build: func(t *testing.T, fx *fixture) {
+			if err := os.Truncate(fx.in("hole"), 1<<30); err != nil {
+				fx.write(t, "hole", "")
+				if err := os.Truncate(fx.in("hole"), 1<<30); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}, wantBytes: 1 << 30, wantEntries: 1},
+		{name: "too many entries", limits: Limits{Bytes: 1 << 20, Entries: 3}, build: func(t *testing.T, fx *fixture) {
+			for i := range 4 {
+				fx.write(t, fmt.Sprintf("f%d", i), "")
+			}
+		}, wantErr: ErrEntries},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fx := newFixture(t, tc.limits)
+			if tc.build != nil {
+				tc.build(t, fx)
+			}
+			bytes, entries, err := fx.ws.Size()
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("Size = %v, want %v", err, tc.wantErr)
+			}
+			if err == nil && (bytes != tc.wantBytes || entries != tc.wantEntries) {
+				t.Fatalf("Size = %d bytes, %d entries, want %d, %d", bytes, entries, tc.wantBytes, tc.wantEntries)
+			}
+		})
+	}
+}

@@ -306,6 +306,9 @@ func (r *Runtime) sweepStores() {
 	}
 	notScratch := func(name string) bool { return !strings.HasPrefix(name, ".") }
 	removeAll(r.zygoteImagesDir(), nil)
+	// No fiber outlives the fiberd that made its workspace, so every
+	// tree there is a dead fiber's.
+	removeAll(r.cfg.WorkspaceDir, nil)
 	removeAll(r.cfg.DeltaDir, notScratch)
 	grants, _ := os.ReadDir(r.cfg.DeltaDir)
 	for _, g := range grants {

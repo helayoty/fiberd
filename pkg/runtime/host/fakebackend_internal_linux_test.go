@@ -295,6 +295,13 @@ func (b *fakeBackend) Park(_ context.Context, fiberID string, spec backend.ParkS
 			}
 		}
 	}
+	if spec.Capture != nil {
+		// The real backend runs it with the tree stopped, between the
+		// dump and the tree's end.
+		if err := spec.Capture(); err != nil {
+			return err
+		}
+	}
 	if !spec.Sync && !b.noExit {
 		f.end()
 		b.exits <- backend.Exit{FiberID: fiberID, Status: "exit:0"}
@@ -868,6 +875,17 @@ func newCodecBackend(tier core.Tier) *codecBackend {
 	return &codecBackend{newFakeBackend(tier), &codecMixin{}, &selfCheckpointMixin{}}
 }
 
+// workspaceCodecBackend is a codec backend whose fibers hold a
+// workspace, as the proc backend does.
+type workspaceCodecBackend struct {
+	*codecBackend
+	workspaceMixin
+}
+
+func newWorkspaceBackend(tier core.Tier) workspaceCodecBackend {
+	return workspaceCodecBackend{newCodecBackend(tier), workspaceMixin{true}}
+}
+
 // sandboxBackend is a backend whose fibers are sandboxes. It has a fixed
 // footprint, reports W and devices itself, isolates tenants, and offers
 // handoff and tcp endpoints.
@@ -1125,7 +1143,7 @@ func testConfig(t *testing.T, be backend.Backend) Config {
 	root := t.TempDir()
 	return Config{Backend: be, Templates: map[string]string{"default": "/bin/true --template"},
 		CgroupRoot: testCgroupRoot(t), RunDir: filepath.Join(root, "run"), DeltaDir: filepath.Join(root, "deltas"),
-		TemplateCache: filepath.Join(root, "cache"), Platform: testPlatform}
+		WorkspaceDir: filepath.Join(root, "workspaces"), TemplateCache: filepath.Join(root, "cache"), Platform: testPlatform}
 }
 
 // newTestRuntime opens a runtime over be, closed when the test ends.

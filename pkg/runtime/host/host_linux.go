@@ -181,7 +181,12 @@ type fiber struct {
 	// relay is the tcp listener in front of a fiber that serves a unix
 	// socket on a tcp home. It is nil for every other fiber.
 	relay *relay
-	done  chan struct{}
+	// ws is the fiber's workspace, nil for a fiber of a grant with no
+	// disk budget. It is made before the backend is asked for the fiber
+	// and removed when the fiber ends, parked or not, since a park
+	// carries it in the delta.
+	ws   *workspace
+	done chan struct{}
 	// exit is what finish would have reported, kept when a park or
 	// release withheld it, so a park that fails after the fiber died can
 	// still report the death.
@@ -209,9 +214,14 @@ func New(cfg Config) (*Runtime, error) {
 	if cfg.TemplateCache == "" {
 		cfg.TemplateCache = "/var/lib/fiberd/templates"
 	}
+	if cfg.WorkspaceDir == "" {
+		// Beside the deltas, so a runtime that keeps its deltas apart
+		// keeps its workspaces apart too.
+		cfg.WorkspaceDir = filepath.Join(filepath.Dir(cfg.DeltaDir), "workspaces")
+	}
 	// Restores change directory, so every path handed down must be
 	// absolute; RunDir too, since endpoints are recorded in manifests.
-	for _, p := range []*string{&cfg.RunDir, &cfg.DeltaDir, &cfg.CgroupRoot, &cfg.TemplateCache, &cfg.PrivateDir} {
+	for _, p := range []*string{&cfg.RunDir, &cfg.DeltaDir, &cfg.CgroupRoot, &cfg.TemplateCache, &cfg.PrivateDir, &cfg.WorkspaceDir} {
 		if *p == "" {
 			continue // PrivateDir is optional, and the others have defaults above
 		}
@@ -236,8 +246,9 @@ func New(cfg Config) (*Runtime, error) {
 		}
 	}
 	// Template memory in the clear, fiberd's alone, also when an earlier
-	// fiberd left the stores open.
-	for _, d := range []string{filepath.Join(cfg.TemplateCache, "parents"), filepath.Join(cfg.TemplateCache, "zygote-images")} {
+	// fiberd left the stores open. Workspaces too, which fibers see only
+	// through their own mount.
+	for _, d := range []string{filepath.Join(cfg.TemplateCache, "parents"), filepath.Join(cfg.TemplateCache, "zygote-images"), cfg.WorkspaceDir} {
 		if err := ownerDir(d); err != nil {
 			return nil, err
 		}
@@ -1176,6 +1187,10 @@ func (r *Runtime) finish(f *fiber, reason, detail string) {
 	if f.channel != nil {
 		_ = f.channel.Close()
 	}
+	// The workspace goes with the fiber. A park captured it into the
+	// delta before the fiber ended, and an anonymous fiber's is nobody's
+	// to resume.
+	f.ws.remove()
 	// The leaf may still be tearing down, so retry briefly.
 	_ = removeSoon(f.cg)
 	// A parked fiber keeps its port: the restored listener needs the same
@@ -1423,11 +1438,25 @@ func (r *Runtime) start(ctx context.Context, z *warm, spec core.CloneSpec, p *po
 			return core.FiberHandle{}, err
 		}
 	}
+	// A fiber of a grant with a disk budget gets an empty workspace,
+	// made before the backend is asked so the birth mounts it.
+	var ws *workspace
+	if spec.Grant.DiskBudgetBytes > 0 {
+		if ws, err = r.newWorkspace(spec.Fence, spec.Grant); err != nil {
+			if rl != nil {
+				rl.Close()
+			}
+			r.freeSocket(sock, spec.Fence.String())
+			r.freePort(port, spec.Fence.String())
+			giveUp()
+			return core.FiberHandle{}, err
+		}
+	}
 	// A fiber born from the warm instance, forked or restored from its
 	// image, starts its lineage at generation 1.
 	f := &fiber{id: spec.Fence.String(), grantUID: spec.Grant.UID, cg: leaf, endpoint: url, port: port, sock: sock, birth: spec.Fence.String(),
 		generation: 1, budget: spec.Grant.WBudgetBytes, devMax: spec.Grant.DeviceBudget.Bytes,
-		quota: deltaQuota(spec.Grant), handoff: handoff, relay: rl, done: make(chan struct{}), pooled: p != nil}
+		quota: deltaQuota(spec.Grant), handoff: handoff, relay: rl, ws: ws, done: make(chan struct{}), pooled: p != nil}
 	// Registered before the backend answers so an exit that races the
 	// reply is not lost.
 	r.mu.Lock()
@@ -1436,6 +1465,7 @@ func (r *Runtime) start(ctx context.Context, z *warm, spec core.CloneSpec, p *po
 	fspec := backend.FiberSpec{
 		Fence: f.id, Endpoint: bind, CgroupFD: int(lfd.Fd()), Deadline: spec.Deadline,
 		Payload: spec.Payload, Session: spec.Session, Generation: f.generation, OwnPIDNS: true, Identity: identity,
+		Workspace: ws.root(),
 	}
 	var fb backend.Fiber
 	if p != nil {
@@ -1456,6 +1486,7 @@ func (r *Runtime) start(ctx context.Context, z *warm, spec core.CloneSpec, p *po
 		if rl != nil {
 			rl.Close()
 		}
+		ws.remove()
 		r.freeSocket(sock, f.id)
 		r.freePort(port, f.id)
 		if p != nil || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
@@ -1553,13 +1584,22 @@ func (r *Runtime) Park(ctx context.Context, fiberID string, sync bool) (string, 
 	_ = os.RemoveAll(dir)
 	w, _ := r.wBytes(f)
 	// Checked before the dump. An async park ends the fiber, so a delta
-	// refused afterwards would take the session with it. W is roughly what
-	// the delta will weigh.
+	// refused afterwards would take the session with it. W plus the
+	// workspace's apparent size is roughly what the delta will weigh.
 	if f.quota > 0 {
-		if used := treeBytes(filepath.Join(r.cfg.DeltaDir, f.grantUID)); used+w > f.quota {
+		var wsBytes uint64
+		if f.ws != nil {
+			b, _, err := f.ws.size()
+			if err != nil {
+				r.unpark(f)
+				return "", fmt.Errorf("host: park %s: size its workspace: %w", fiberID, err)
+			}
+			wsBytes = b
+		}
+		if used := treeBytes(filepath.Join(r.cfg.DeltaDir, f.grantUID)); used+w+wsBytes > f.quota {
 			r.unpark(f)
 			return "", fmt.Errorf("%w: grant %s holds %d bytes, parking %s adds about %d, quota %d",
-				core.ErrDeltaQuota, f.grantUID, used, fiberID, w, f.quota)
+				core.ErrDeltaQuota, f.grantUID, used, fiberID, w+wsBytes, f.quota)
 		}
 	}
 	// Devices are renegotiated on resume: the engine drops the slice
@@ -1582,7 +1622,20 @@ func (r *Runtime) Park(ctx context.Context, fiberID string, sync bool) (string, 
 	// number for a wait on a fiber, and a handoff fiber answers on the
 	// channel the host holds.
 	_, deadline := core.GrantDeadlines(r, f.grantUID)
-	if err := r.be.Park(ctx, f.id, backend.ParkSpec{Dir: dir, Sync: sync, Deadline: deadline, Channel: channel}); err != nil {
+	pspec := backend.ParkSpec{Dir: dir, Sync: sync, Deadline: deadline, Channel: channel, CgroupFD: -1}
+	if f.ws != nil {
+		// The workspace is captured while the fiber is stopped, so the
+		// archive holds what the images saw. The leaf lets the backend
+		// continue or end every process of the tree afterwards.
+		pspec.Capture = func() error { return f.ws.capture(dir) }
+		lfd, err := f.cg.Open()
+		if err != nil {
+			return giveBack(err)
+		}
+		defer func() { _ = lfd.Close() }()
+		pspec.CgroupFD = int(lfd.Fd())
+	}
+	if err := r.be.Park(ctx, f.id, pspec); err != nil {
 		return giveBack(err)
 	}
 	// A sync park's fiber runs until the delta is durable, so a failure
@@ -1828,19 +1881,35 @@ func (r *Runtime) resume(ctx context.Context, spec core.CloneSpec) (core.FiberHa
 			return core.FiberHandle{}, err
 		}
 	}
+	// The parked workspace, when the delta carries one, fills a fresh
+	// workspace of the resuming fiber before the restore, so every file
+	// the images name is there. A delta with a workspace under a grant
+	// without a disk budget, or the other way round, is refused rather
+	// than resumed into a fiber whose tree does not match its images.
+	ws, err := r.unpackWorkspace(dir, spec.Fence, spec.Grant)
+	if err != nil {
+		if rl != nil {
+			rl.Close()
+		}
+		r.freeSocket(sock, spec.Fence.String())
+		r.freePort(port, spec.Fence.String())
+		_ = rmdir(leaf)
+		return core.FiberHandle{}, err
+	}
 	// The resumed fiber is the next generation of the parked one's
 	// lineage, whichever home parked it. The backend tells it so on its
 	// channel, and a handoff fiber gets a fresh channel from the backend
 	// in place of its parked one, with that record first on it.
 	f := &fiber{id: spec.Fence.String(), grantUID: spec.Grant.UID, cg: leaf, port: port, sock: sock, birth: birth.String(),
 		generation: m.Generation + 1, endpoint: served, budget: spec.Grant.WBudgetBytes, devMax: spec.Grant.DeviceBudget.Bytes,
-		quota: deltaQuota(spec.Grant), handoff: m.Handoff, relay: rl, done: make(chan struct{})}
+		quota: deltaQuota(spec.Grant), handoff: m.Handoff, relay: rl, ws: ws, done: make(chan struct{})}
 	r.mu.Lock()
 	r.fibers[f.id] = f
 	r.mu.Unlock()
 	refused := r.pidsHits(gcg)
 	fb, err := r.be.Resume(ctx, backend.ResumeSpec{Dir: dir, Fence: f.id, Endpoint: bind, CgroupFD: int(lfd.Fd()), Deadline: spec.Deadline,
-		WarmID: spec.Grant.UID, WorkDir: workDir, Session: spec.Session, Generation: f.generation, Handoff: m.Handoff})
+		WarmID: spec.Grant.UID, WorkDir: workDir, Session: spec.Session, Generation: f.generation, Handoff: m.Handoff,
+		Workspace: ws.root()})
 	if err != nil {
 		err = r.pidsPressure(gcg, refused, spec.Grant.UID, err)
 		r.mu.Lock()
@@ -1851,6 +1920,7 @@ func (r *Runtime) resume(ctx context.Context, spec core.CloneSpec) (core.FiberHa
 		if rl != nil {
 			rl.Close()
 		}
+		ws.remove()
 		r.freeSocket(sock, f.id)
 		r.freePort(port, f.id)
 		_ = leaf.Kill()

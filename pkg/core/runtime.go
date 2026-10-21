@@ -3,6 +3,8 @@ package core
 import (
 	"context"
 	"fmt"
+	"io"
+	"io/fs"
 	"time"
 )
 
@@ -118,6 +120,47 @@ type Isolator interface {
 // this answers true. A runtime that does not implement it has none.
 type WorkspaceHolder interface {
 	HoldsWorkspaces() bool
+}
+
+// FileStore is implemented by runtimes that hold a workspace per fiber
+// and move files into and out of it from the host side, never through
+// the fiber. Paths are relative to the workspace. A fiber this runtime
+// does not know answers ErrFiberUnknown, and one without a workspace
+// ErrNoWorkspace. Any other error wraps a sentinel of the workspace
+// file layer (pkg/runtime/host/wsfs) or fs.ErrNotExist, which the
+// transport maps to its codes.
+type FileStore interface {
+	// Upload writes one regular file of size bytes read from r, with
+	// the permission bits of mode, checked against sum when it is
+	// not nil. Nothing of it appears until every check passed.
+	Upload(ctx context.Context, fiberID, path string, size int64, mode fs.FileMode, sum []byte, r io.Reader) (FileInfo, error)
+	// Download opens one regular file at offset. The reader ends at
+	// the size the file had when opened.
+	Download(ctx context.Context, fiberID, path string, offset int64) (FileReader, error)
+	// ListFiles lists the regular files and directories of one
+	// directory, "" for the workspace itself.
+	ListFiles(ctx context.Context, fiberID, dir string) ([]FileInfo, error)
+}
+
+// FileInfo describes one entry of a fiber's workspace.
+type FileInfo struct {
+	// Path is relative to the workspace, with forward slashes.
+	Path string
+	// Size is the apparent size in bytes, zero for a directory.
+	Size int64
+	// Mode holds the permission bits, and fs.ModeDir for a directory.
+	Mode fs.FileMode
+	// ModTime is the last modification time.
+	ModTime time.Time
+	// SHA256 is the content hash, set by Upload only.
+	SHA256 []byte
+}
+
+// FileReader is a downloaded file, its bytes and what it was when
+// opened.
+type FileReader interface {
+	io.ReadCloser
+	Info() FileInfo
 }
 
 // FiberExit is reported when a fiber dies on its own: the kernel killed it

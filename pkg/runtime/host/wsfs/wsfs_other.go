@@ -22,3 +22,4 @@ func (*Workspace) Download(string, int64) (*File, error) { return nil, ErrUnsupp
 func (*Workspace) List(string) ([]Info, error)           { return nil, ErrUnsupported }
 func (*Workspace) Capture(io.Writer) error               { return ErrUnsupported }
 func (*Workspace) Unpack(io.Reader) error                { return ErrUnsupported }
+func (*Workspace) Size() (int64, int64, error)           { return 0, 0, ErrUnsupported }
