@@ -323,6 +323,11 @@ type tmpfsOps struct {
 	unmount func(dir string) error
 }
 
+// templatesSource is the mount source of the templates tmpfs. It starts
+// with backend.MountSourcePrefix, which is how a proc zygote in the same
+// mount namespace knows to drop it before its fibers copy it.
+const templatesSource = backend.MountSourcePrefix + "templates"
+
 // sysTmpfs is the real tmpfsOps. The mount is nosuid and nodev. It is not
 // noexec, since the staged template executable under it is what every
 // sandbox of the instance runs.
@@ -335,7 +340,7 @@ var sysTmpfs = tmpfsOps{
 		return st.Type == unix.TMPFS_MAGIC, nil
 	},
 	mount: func(dir string) error {
-		return unix.Mount("fiberd-templates", dir, "tmpfs", unix.MS_NOSUID|unix.MS_NODEV, "mode=0700")
+		return unix.Mount(templatesSource, dir, "tmpfs", unix.MS_NOSUID|unix.MS_NODEV, "mode=0700")
 	},
 	unmount: func(dir string) error { return unix.Unmount(dir, unix.MNT_DETACH) },
 }

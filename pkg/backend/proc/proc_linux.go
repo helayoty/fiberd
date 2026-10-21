@@ -20,7 +20,12 @@
 // grant's own. A fiber with a mount namespace sees the parent covered and
 // only its own directory bound back. PREPARE mntns has the zygote build
 // that view once, in a mount namespace of its own, before it says READY,
-// and every fiber's namespace is a copy of it. The namespace itself is
+// and every fiber's namespace is a copy of it. The zygote also drops
+// every mount another fiberd home made, which it copied from the host at
+// fz_init: a file system whose source starts with
+// backend.MountSourcePrefix, and any bind of / (a restore root). fiberd
+// need not name them, so a home needs no knowledge of other homes'
+// paths, and DROP still names this backend's own restore root. The namespace itself is
 // taken at fz_init, before any thread, when FIBERD_OWN_MNTNS is in the
 // zygote's environment. A launcher's fibers get no mount namespace, so
 // its zygote is started without the variable and sent PREPARE none and
@@ -85,7 +90,8 @@ type Options struct {
 	// restored fiber's mount namespace, on the first resume that needs it
 	// (default fiberd-root-<pid> under the temp directory). Every later
 	// fiber unmounts it from its own namespace, because the bind would show
-	// what HIDE covers. The backend makes the leaf directory and removes it
+	// what HIDE covers, and a zygote of any other home drops it as a bind
+	// of /. The backend makes the leaf directory and removes it
 	// at Close, so its parent must be a place only fiberd writes. It
 	// refuses a symlink or another user's directory there, and unmounts a
 	// stale bind at the same path when it opens.

@@ -438,3 +438,28 @@ func TestCloseEndsWarms(t *testing.T) {
 		})
 	}
 }
+
+// TestTemplatesSourceNamesFiberd pins the templates tmpfs's mount source
+// to the prefix a proc zygote drops (backend.MountSourcePrefix), so a
+// proc home in the same mount namespace never carries this backend's
+// template images into a fiber (regression: the source was a literal,
+// and fibers parked on a mixed host could not be resumed once the tmpfs
+// was gone).
+func TestTemplatesSourceNamesFiberd(t *testing.T) {
+	cases := []struct {
+		name   string
+		source string
+		want   bool
+	}{
+		{name: "the templates tmpfs", source: templatesSource, want: true},
+		{name: "a plain tmpfs", source: "tmpfs", want: false},
+		{name: "the prefix inside a name", source: "my-fiberd-templates", want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := strings.HasPrefix(tc.source, backend.MountSourcePrefix); got != tc.want {
+				t.Fatalf("HasPrefix(%q, %q) = %v, want %v", tc.source, backend.MountSourcePrefix, got, tc.want)
+			}
+		})
+	}
+}
