@@ -59,6 +59,12 @@ const (
 	NeedsTier
 	// NotFound: no such fiber in this epoch.
 	NotFound
+	// NoWorkspace: a file call on a fiber whose grant has no workspace.
+	// Not a tier gap, since the grant itself asked for none.
+	NoWorkspace
+	// OverBudget: a file larger than the grant's disk budget. Not a
+	// miss, so it carries no Miss detail.
+	OverBudget
 	// Internal: the runtime or audit spool failed in a way that is not a
 	// capacity question.
 	Internal
@@ -560,6 +566,11 @@ func (a *Core) Admit(ctx context.Context, g Grant) (StatusCode, error) {
 			return NeedsTier, fmt.Errorf("%w: grant %s", ErrNeedsHandoff, g.UID)
 		}
 	}
+	if g.DiskBudgetBytes > 0 {
+		if wh, ok := a.Runtime.(WorkspaceHolder); !ok || !wh.HoldsWorkspaces() {
+			return NeedsTier, fmt.Errorf("%w: grant %s", ErrNeedsWorkspace, g.UID)
+		}
+	}
 	if g.Expired(a.Ledger.Now()) {
 		// Capacity the home does not hold; the miss code follows issuer
 		// reachability like any other capacity miss.
@@ -812,10 +823,10 @@ func (a *Core) BumpEpoch(ctx context.Context, reason string) (uint64, error) {
 // home" (unknown, full, expired, not ready) is SHED while the issuer
 // is unreachable and DEFERRED_FALLBACK while it is reachable, since a miss
 // must not queue into a dead control plane. Nil Health fails toward healthy,
-// matching boot bias. A tier, device, isolation or handoff gap is
-// neither. It is FailedPrecondition.
+// matching boot bias. A tier, device, isolation, handoff or workspace
+// gap is neither. It is FailedPrecondition.
 func (a *Core) missCode(err error) StatusCode {
-	if errors.Is(err, ErrNeedsTier) || errors.Is(err, ErrNeedsDevice) || errors.Is(err, ErrNeedsIsolation) || errors.Is(err, ErrNeedsHandoff) || errors.Is(err, ErrNoTenant) {
+	if errors.Is(err, ErrNeedsTier) || errors.Is(err, ErrNeedsDevice) || errors.Is(err, ErrNeedsIsolation) || errors.Is(err, ErrNeedsHandoff) || errors.Is(err, ErrNeedsWorkspace) || errors.Is(err, ErrNoTenant) {
 		return NeedsTier
 	}
 	if a.Health != nil && !a.Health.Healthy(time.Now()) {

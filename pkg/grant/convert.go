@@ -16,15 +16,16 @@ import (
 // FromProto converts the wire message to the home-invariant core type.
 func FromProto(p *grantv1.CapacityGrant) core.Grant {
 	g := core.Grant{
-		UID:            p.GetGrantUid(),
-		Issuer:         p.GetIssuer(),
-		Audience:       p.GetAudience(),
-		TemplateDigest: p.GetTemplateDigest(),
-		Tenant:         p.GetTenant(),
-		FiberMax:       int(p.GetFibers().GetMax()),
-		FiberWarm:      int(p.GetFibers().GetWarm()),
-		WBudgetBytes:   p.GetWBudgetBytes(),
-		MinTier:        core.Tier(p.GetMinTier()),
+		UID:             p.GetGrantUid(),
+		Issuer:          p.GetIssuer(),
+		Audience:        p.GetAudience(),
+		TemplateDigest:  p.GetTemplateDigest(),
+		Tenant:          p.GetTenant(),
+		FiberMax:        int(p.GetFibers().GetMax()),
+		FiberWarm:       int(p.GetFibers().GetWarm()),
+		WBudgetBytes:    p.GetWBudgetBytes(),
+		MinTier:         core.Tier(p.GetMinTier()),
+		DiskBudgetBytes: p.GetDiskBudgetBytes(),
 	}
 	if ts := p.GetLeaseExpiry(); ts != nil && ts.IsValid() {
 		g.LeaseExpiry = ts.AsTime()
@@ -49,14 +50,15 @@ func FromProto(p *grantv1.CapacityGrant) core.Grant {
 // ToProto converts the core type back to the wire message.
 func ToProto(g core.Grant) *grantv1.CapacityGrant {
 	p := &grantv1.CapacityGrant{
-		GrantUid:       g.UID,
-		Issuer:         g.Issuer,
-		Audience:       g.Audience,
-		TemplateDigest: g.TemplateDigest,
-		Tenant:         g.Tenant,
-		Fibers:         &grantv1.FiberLimits{Max: uint32(g.FiberMax), Warm: uint32(g.FiberWarm)},
-		WBudgetBytes:   g.WBudgetBytes,
-		MinTier:        grantv1.Tier(g.MinTier),
+		GrantUid:        g.UID,
+		Issuer:          g.Issuer,
+		Audience:        g.Audience,
+		TemplateDigest:  g.TemplateDigest,
+		Tenant:          g.Tenant,
+		Fibers:          &grantv1.FiberLimits{Max: uint32(g.FiberMax), Warm: uint32(g.FiberWarm)},
+		WBudgetBytes:    g.WBudgetBytes,
+		MinTier:         grantv1.Tier(g.MinTier),
+		DiskBudgetBytes: g.DiskBudgetBytes,
 		Policy: &grantv1.Policy{
 			Durability:       grantv1.Durability(g.Policy.Durability),
 			SessionClass:     g.Policy.SessionClass,

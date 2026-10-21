@@ -13,6 +13,7 @@ The runtime host ([runtime-host.md](runtime-host.md)) decides when a [fiber](../
 | Interface | A backend implements it when |
 | --- | --- |
 | `Isolator` | its fibers run behind a kernel of their own. Only these serve untrusted grants |
+| `WorkspaceHolder` | it gives each fiber a private workspace. Only these serve a grant with a [disk budget](../protocol.md#grant-fields), and no reference backend implements it |
 | `EndpointSchemer` | its fibers can serve more than unix sockets under the run directory |
 | `Handoffer` | its fibers read their incarnation record off a channel at birth, and a [handoff](../glossary.md#handoff) fiber keeps that channel for the connections the host passes it ([handoff.md](handoff.md)). The backend makes the pair where the fiber's checkpoint can carry it, and hands the host its end for a handoff fiber |
 | `IDMapper` | its fibers run in a user namespace mapped to a range of host ids |

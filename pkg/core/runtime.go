@@ -113,6 +113,13 @@ type Isolator interface {
 	IsolatesTenants() bool
 }
 
+// WorkspaceHolder is implemented by runtimes that can give each fiber a
+// private workspace. A grant with a disk budget is admitted only where
+// this answers true. A runtime that does not implement it has none.
+type WorkspaceHolder interface {
+	HoldsWorkspaces() bool
+}
+
 // FiberExit is reported when a fiber dies on its own: the kernel killed it
 // for exceeding its W budget (Reason "oom"), it exited, or was signalled.
 type FiberExit struct {

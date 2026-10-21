@@ -290,6 +290,14 @@ type Isolator interface {
 	IsolatesTenants() bool
 }
 
+// WorkspaceHolder is implemented by backends that give each fiber a
+// private workspace at /workspace. Only these serve a grant with a disk
+// budget. A backend that does not implement it has none. Hyperlight
+// never will, since its guest has no file system.
+type WorkspaceHolder interface {
+	HoldsWorkspaces() bool
+}
+
 // IDMapper is implemented by backends whose warm instance and fibers run
 // in a user namespace of the grant's own, mapped to a range of host ids
 // with the grant's root at its start. The host hands that uid the one
