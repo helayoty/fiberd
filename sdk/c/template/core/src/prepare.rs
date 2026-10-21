@@ -18,8 +18,8 @@ use core::ptr;
 
 use crate::child::{CAPABILITY_U32S_3, CAPABILITY_VERSION_3, CapData, CapHeader, prctl};
 use crate::ctl::{self, Line, STRERROR_MAX};
-use crate::mounts::{self, F_DROP, F_HIDE, F_RO, F_RUNDIR};
-use crate::procfiles::{self, mountinfo_carry, mountinfo_next_sys};
+use crate::mounts::{self, F_DROP, F_FOREIGN, F_HIDE, F_RO, F_RUNDIR};
+use crate::procfiles::{self, MountLine, RootId, Unread, stream_mounts};
 use crate::sys::{self, Errno};
 use crate::zygote::{Refused, Zygote, c_str, env_set, set_cstr};
 
@@ -133,12 +133,44 @@ pub fn thread_count() -> c_int {
 /// binds keeps the tree CRIU dumps the same shape, and CRIU restores the
 /// flags, so a resumed fiber is as closed as a born one.
 ///
-/// mountinfo is read into a stack buffer, allocating nothing. A line
-/// longer than the buffer is skipped rather than misread as several.
-/// Every mount is tried even after a refusal, so as little as possible
-/// stays writable. Returns 0, or -1 when any step failed.
+/// mountinfo is read into a stack buffer, allocating nothing
+/// (each_mount). Every mount is tried even after a refusal, so as
+/// little as possible stays writable. Returns 0, or -1 when any step
+/// failed or a line could not be read, since a mount missed would stay
+/// writable.
 pub fn lock_sys() -> c_int {
     let mut rc = 0;
+    if each_mount(|buf, m| {
+        let path = m.point.of(buf);
+        if path == b"/sys" || path.starts_with(b"/sys/") {
+            // SAFETY: the mount point is NUL-ended in buf, which is live.
+            if unsafe { mounts::ro_remount(buf.as_ptr().wrapping_add(m.point.off).cast()) } < 0 {
+                rc = -1;
+            }
+        }
+        false
+    })
+    .is_err()
+    {
+        rc = -1;
+    }
+    // /sys/firmware (DMI, EFI, ACPI tables) says what the node is.
+    // Covered, as runc and Docker mask it.
+    // SAFETY: a static NUL-ended path.
+    if unsafe { mounts::cover_empty(c"/sys/firmware".as_ptr()) } < 0 {
+        rc = -1;
+    }
+    rc
+}
+
+/// Calls f with each line of /proc/self/mountinfo until f returns true,
+/// and reports whether it did. Reads into a stack buffer, allocating
+/// nothing. A line longer than the buffer is read as far as its source
+/// field, which is all a caller looks at. Err when the file cannot be
+/// opened or read, or a line's fields do not fit the buffer, so every
+/// caller fails closed rather than decide on a table with a line
+/// missing.
+fn each_mount(f: impl FnMut(&mut [u8], &MountLine) -> bool) -> Result<bool, Unread> {
     // SAFETY: a static NUL-ended path.
     let fd = unsafe {
         sys::open(
@@ -147,49 +179,80 @@ pub fn lock_sys() -> c_int {
         )
     };
     if fd < 0 {
-        return -1;
+        return Err(Unread::Read);
     }
     let mut buf = [0u8; 8192];
-    let mut have = 0usize;
-    let mut skipping = false; // inside a line too long for buf
-    loop {
-        let room = buf.get_mut(have..).unwrap_or(&mut []);
-        // SAFETY: read writes at most room.len() bytes of room, which is
-        // live. An empty room reads 0 and ends the loop.
-        let n = unsafe { libc::read(fd, room.as_mut_ptr().cast(), room.len()) };
-        if n < 0 {
-            if sys::errno() == libc::EINTR {
+    let rc = stream_mounts(
+        &mut buf,
+        |room| loop {
+            // SAFETY: read writes at most room.len() bytes of room, which
+            // is live. An empty room reads 0.
+            let n = unsafe { libc::read(fd, room.as_mut_ptr().cast(), room.len()) };
+            if n < 0 && sys::errno() == libc::EINTR {
                 continue;
             }
-            rc = -1;
-            break;
-        }
-        let Some(n) = usize::try_from(n).ok().filter(|&n| n > 0) else {
-            break; // EOF. mountinfo ends every line with '\n'
-        };
-        have = have.wrapping_add(n);
-        // Remount each complete line's mount point under /sys, then
-        // carry the partial line to the front.
-        let mut start = 0usize;
-        while let Some(mp) = mountinfo_next_sys(&mut buf, have, &mut start, &mut skipping) {
-            // SAFETY: the mount point is NUL-ended in buf, which is live.
-            if unsafe { mounts::ro_remount(buf.as_ptr().wrapping_add(mp.off).cast()) } < 0 {
-                rc = -1;
-            }
-        }
-        have = mountinfo_carry(&mut buf, have, start, &mut skipping);
-    }
+            return n;
+        },
+        f,
+    );
     let e = sys::errno();
     // SAFETY: the descriptor opened above.
     unsafe { libc::close(fd) };
     sys::set_errno(e);
-    // /sys/firmware (DMI, EFI, ACPI tables) says what the node is.
-    // Covered, as runc and Docker mask it.
-    // SAFETY: a static NUL-ended path.
-    if unsafe { mounts::cover_empty(c"/sys/firmware".as_ptr()) } < 0 {
-        rc = -1;
-    }
     rc
+}
+
+/// How many other homes' mounts drop_fiberd_mounts takes off before it
+/// gives up, each one a read of mountinfo.
+const FOREIGN_MAX: usize = 256;
+
+/// drop_fiberd_mounts unmounts, from the zygote's namespace, every mount
+/// another fiberd home made before the zygote copied the host's table at
+/// fz_init (procfiles::fiberd_mount says which). None is a fiber's to
+/// keep. One a home takes down later cannot be restored under a parked
+/// fiber, and a tmpfs another home detached stays alive in every fiber
+/// that holds it, with its contents, which the next park would then
+/// write out. The namespace is private, so nothing arrives after this.
+///
+/// Each pass reads the table afresh, takes the first such mount off and
+/// starts over, so a table that changes under the read is never misread.
+/// Returns 0, or -1 when the table cannot be read, a mount would not
+/// go, or FOREIGN_MAX did not suffice. Fails closed either way.
+pub fn drop_fiberd_mounts() -> c_int {
+    let mut root = RootId::new();
+    if each_mount(|buf, m| {
+        root.note(buf, m);
+        false
+    })
+    .is_err()
+    {
+        return -1;
+    }
+    for _ in 0..FOREIGN_MAX {
+        let mut rc = 0;
+        let found = each_mount(|buf, m| {
+            if !procfiles::fiberd_mount(buf, m, &root) {
+                return false;
+            }
+            // SAFETY: the mount point is NUL-ended in buf, which is live.
+            if unsafe {
+                sys::umount2(
+                    buf.as_ptr().wrapping_add(m.point.off).cast(),
+                    libc::MNT_DETACH,
+                )
+            } < 0
+            {
+                rc = -1;
+            }
+            true
+        });
+        match (found, rc) {
+            (Err(_), _) | (_, -1) => return -1,
+            (Ok(false), _) => return 0,
+            (Ok(true), _) => {}
+        }
+    }
+    -1
 }
 
 /// Whether this process runs in a user namespace other than the
@@ -556,6 +619,9 @@ impl Zygote<'_> {
         if failed & F_DROP != 0 {
             return Refused::Text(c"the zygote could not unmount a DROP path");
         }
+        if failed & F_FOREIGN != 0 {
+            return Refused::Text(c"the zygote could not drop other fiberd homes' mounts");
+        }
         if failed & F_RUNDIR != 0 {
             return Refused::Text(c"the zygote could not narrow the run directory");
         }
@@ -578,14 +644,16 @@ impl Zygote<'_> {
     }
 
     /// prepare_ns fills the zygote's namespace once, at PREPARE mntns.
-    /// /sys goes read-only, DROP paths are unmounted, the run directory
-    /// shows this grant's alone and HIDE directories are emptied (but
-    /// for the zygote's own executable). Fibers copy the result, so a
-    /// birth pays for nothing grant-wide.
+    /// /sys goes read-only, DROP paths and other fiberd homes' mounts
+    /// are unmounted, the run directory shows this grant's alone and
+    /// HIDE directories are emptied (but for the zygote's own
+    /// executable). Fibers copy the result, so a birth pays for nothing
+    /// grant-wide.
     ///
-    /// DROP comes before RUNDIR, so the restore root is gone before
-    /// anything is mounted under it. RUNDIR comes before HIDE, so a HIDE
-    /// path under another grant's directory is already gone.
+    /// DROP and the other homes' mounts come before RUNDIR, so every
+    /// restore root is gone before anything is mounted under it. RUNDIR
+    /// comes before HIDE, so a HIDE path under another grant's directory
+    /// is already gone.
     ///
     /// Fails closed. Any refused step, or no namespace of its own, sets
     /// paths_refused and fz_serve answers ERROR instead of READY. A line
@@ -628,6 +696,9 @@ impl Zygote<'_> {
         }
         if mounts::drop_paths_now(self.t.drop.get(..self.st.ndrop).unwrap_or(&[])) < 0 {
             failed |= F_DROP;
+        }
+        if drop_fiberd_mounts() < 0 {
+            failed |= F_FOREIGN;
         }
         if self.t.rundir_parent.first() != Some(&0) {
             // SAFETY: both are NUL-ended in their RUNDIR_MAX buffers.
@@ -939,6 +1010,13 @@ pub(crate) mod tests {
                 Some(0),
                 libc::EPERM,
                 "the zygote could not unmount a DROP path",
+            ),
+            (
+                "foreign",
+                F_FOREIGN | F_RUNDIR,
+                None,
+                0,
+                "the zygote could not drop other fiberd homes' mounts",
             ),
             (
                 "rundir",
