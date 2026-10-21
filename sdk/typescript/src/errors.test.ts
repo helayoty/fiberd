@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { status } from "@grpc/grpc-js";
-import { Deferred, FiberdError, Shed } from "./index.js";
+import { Deferred, FiberdError, NoWorkspace, Shed, TierGap } from "./index.js";
 import { classify } from "./errors.js";
 import { Miss, MissCode } from "./generated/grant/v1/grant.js";
 import { Status } from "./generated/google/rpc/status.js";
@@ -75,4 +75,41 @@ test("a zero-valued Miss is SHED, not an absent miss", () => {
   assert.ok(classified instanceof Shed);
   assert.equal(classified.retryAfterSeconds, 0);
   assert.equal(classified.message, "shed: busy, retry after 0s");
+});
+
+test("a FailedPrecondition with a NoWorkspace detail is NoWorkspace, and any other is a tier gap", async (t) => {
+  const noWorkspace = { typeUrl: "type.googleapis.com/fiberd.grant.v1.NoWorkspace", value: Buffer.alloc(0) };
+  const cases: Record<string, { envelope?: Status; want: typeof NoWorkspace | typeof TierGap; message: string }> = {
+    "a NoWorkspace detail": {
+      envelope: Status.fromPartial({ code: status.FAILED_PRECONDITION, details: [noWorkspace] }),
+      want: NoWorkspace, message: "no workspace: why",
+    },
+    "a NoWorkspace detail after another detail, under another prefix": {
+      envelope: Status.fromPartial({ code: status.FAILED_PRECONDITION, details: [
+        { typeUrl: "type.googleapis.com/google.rpc.RetryInfo", value: Buffer.from([10, 0]) },
+        { typeUrl: "other/fiberd.grant.v1.NoWorkspace", value: Buffer.alloc(0) },
+      ] }),
+      want: NoWorkspace, message: "no workspace: why",
+    },
+    "no trailer": { want: TierGap, message: "tier gap: why" },
+    "another detail only": {
+      envelope: Status.fromPartial({ code: status.FAILED_PRECONDITION, details: [{ typeUrl: "other", value: Buffer.alloc(0) }] }),
+      want: TierGap, message: "tier gap: why",
+    },
+    "a NoWorkspace detail in a mismatched envelope": {
+      envelope: Status.fromPartial({ code: status.UNAVAILABLE, details: [noWorkspace] }),
+      want: TierGap, message: "tier gap: why",
+    },
+  };
+  for (const [name, { envelope, want, message }] of Object.entries(cases)) {
+    await t.test(name, () => {
+      const error = rpcError(status.FAILED_PRECONDITION, "why");
+      if (envelope) error.metadata.set("grpc-status-details-bin", Buffer.from(Status.encode(envelope).finish()));
+      const classified = classify(error);
+      assert.ok(classified instanceof want && classified instanceof FiberdError);
+      assert.equal(classified.name, want.name);
+      assert.equal(classified.message, message);
+      assert.equal(classified.cause, error);
+    });
+  }
 });

@@ -57,7 +57,7 @@ try {
 
 `Client.dial(target)` is the plaintext form for a home started with `-insecure-plaintext`. TLS options take PEM buffers, not paths. `await fiber.dial()` connects to a direct Unix or TCP endpoint. A [handoff](../../docs/glossary.md#handoff) fiber uses `await fiber.dialHandoff({ cert, key })`, with the same caller certificate as the control API. It trusts the Clone's certificate and checks its key pin before returning the TLS socket. Attach an `error` listener immediately after awaiting either dial method. Later I/O errors belong to the socket, not the dialing promise. The caller closes the socket.
 
-`TierGap` and `NotFound` are the other typed RPC outcomes. Other failures remain gRPC errors. The token may be a string or a sync/async function returning one, and is never retained or logged. The client does not retry automatically.
+`TierGap`, `NotFound` and `NoWorkspace` are the other typed RPC outcomes. `NoWorkspace` is a file call on a fiber whose grant has no workspace. Other failures remain gRPC errors. The token may be a string or a sync/async function returning one, and is never retained or logged. The client does not retry automatically.
 
 Omit `session` for an anonymous fiber. Park waits for durability by default (`sync: true`). Release keeps parked state unless `discard: true`. Both accept a fiber or its ID. `client.watch()` is an async iterator of per-grant status. Breaking the loop cancels the RPC. Fence epochs/sequences and status `wUsedBytes` are `bigint`, so convert them to strings for JSON.
 
