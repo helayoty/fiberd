@@ -9,7 +9,8 @@
 #
 # RUNS (default 3), HARNESSES (default "clone storm park"). AB_MAX_LOAD,
 # when set, makes each run wait for the host's 1-minute load to fall under
-# it, 30 minutes of waiting at most across the script.
+# it, 30 minutes of waiting at most across the script. Each log's first
+# line has the load the run started at, after that wait, and the wait.
 set -uo pipefail
 OLD=$(cd "$1" && pwd) NEW=$(cd "$2" && pwd) OUT=$3
 RUNS=${RUNS:-3}
@@ -18,13 +19,15 @@ mkdir -p "$OUT"
 rm -rf "$OLD/tests/bench"
 cp -R "$NEW/tests/bench" "$OLD/tests/bench"
 
-waited=0
+waited=0 lastwait=0
 hostload() { if [ -r /proc/loadavg ]; then cut -d' ' -f1 /proc/loadavg; else sysctl -n vm.loadavg | awk '{print $2}'; fi; }
 wait_load() {
+  local from=$waited
+  lastwait=0
   [ -n "${AB_MAX_LOAD:-}" ] || return 0
   while awk "BEGIN{exit !($(hostload) >= $AB_MAX_LOAD)}"; do
     [ "$waited" -ge 1800 ] && { echo "ab: load wait budget spent at $(hostload)" >&2; return 0; }
-    sleep 20; waited=$((waited + 20))
+    sleep 20; waited=$((waited + 20)) lastwait=$((waited - from))
   done
 }
 
@@ -43,12 +46,12 @@ one() { # harness side label
   local cmd
   read -ra cmd <<<"$(cmd_for "$h")"
   {
-    echo "### $h $side $label $(date -u +%Y-%m-%dT%H:%M:%SZ) hostload=$(hostload) vmload=$(docker run --rm --entrypoint cat fiberd-dev:local /proc/loadavg 2>/dev/null | cut -d' ' -f1)"
+    echo "### $h $side $label $(date -u +%Y-%m-%dT%H:%M:%SZ) hostload=$(hostload) waited=${lastwait}s vmload=$(docker run --rm --entrypoint cat fiberd-dev:local /proc/loadavg 2>/dev/null | cut -d' ' -f1)"
     (cd "$tree" && FIBERD_DEV_NAME="fiberd-ab-$side" \
       hack/dev/run.sh env FIBERD_BENCH=1 "${cmd[@]}") 2>&1
     echo "### exit $?"
   } > "$OUT/$h-$side-$label.log"
-  echo "ab: $h $side $label done"
+  echo "ab: $h $side $label done, after ${lastwait}s of waiting"
 }
 
 for h in $HARNESSES; do

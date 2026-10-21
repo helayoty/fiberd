@@ -2,9 +2,9 @@
 # refs, on demand only. Run it by hand, or add the bench-ab label to a pull
 # request to compare its base with its head. Both refs run on ONE runner
 # in ONE job, old and new alternating, so the runner's noise lands on both
-# sides. Both run the head ref's harness. The median table goes to the job
-# summary and the raw logs to an artifact. Numbers compare only within one
-# run.
+# sides. Both run the head ref's harness. Each run first waits for a quiet
+# host. The median table goes to the job summary and the raw logs to an
+# artifact. Numbers compare only within one run.
 name: bench-ab
 
 on:
@@ -41,7 +41,17 @@ jobs:
     name: "A/B ${{ inputs.base || github.base_ref }} against ${{ inputs.head || github.head_ref || github.ref_name }}"
     if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'bench-ab'
     runs-on: ubuntu-24.04
+    # About 11 minutes of build and benchmarks at 3 runs, plus 30 minutes
+    # of load wait at most.
     timeout-minutes: 180
+    env:
+      # Each run waits for the host's 1-minute load to fall under this.
+      # 4 is the runner's vCPU count. PR 20's storm runs started at a load
+      # of 30 to 70, left by the run before. The 1-minute average falls by
+      # e each idle minute, so 50 takes about 150 s to reach 4. Six storm
+      # runs then wait about 15 minutes of the 30-minute budget. A lower
+      # bar risks spending it mid-table, which leaves later runs unwaited.
+      AB_MAX_LOAD: "4"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -51,15 +61,23 @@ jobs:
       - name: runner facts (shared runners are noisy, so they go on the record)
         run: |
           # The THP mode decides what a touched bss page costs a park. Under
-          # "always" a write faults in its whole 2 MiB window.
-          { echo "### runner"; uname -srm; nproc; free -h | head -2; cat /proc/loadavg
-            echo "THP $(cat /sys/kernel/mm/transparent_hugepage/enabled)"; git rev-parse HEAD; } | tee -a "$GITHUB_STEP_SUMMARY"
+          # "always" a write faults in its whole 2 MiB window. The summary
+          # shows these folded, under the tables.
+          mkdir -p "$RUNNER_TEMP/ab"
+          { uname -srm; echo "$(nproc) vCPU"; free -h | head -2; echo "load $(cat /proc/loadavg)"
+            echo "THP $(cat /sys/kernel/mm/transparent_hugepage/enabled)"
+            echo "each run waits for a 1-minute load under $AB_MAX_LOAD"; } | tee "$RUNNER_TEMP/ab/runner.txt"
       - name: the old tree
         env:
           BASE: ${{ inputs.base || github.event.pull_request.base.sha }}
+          OLD_NAME: ${{ inputs.base || github.base_ref }}
+          NEW_NAME: ${{ inputs.head || github.head_ref || github.ref_name }}
         run: |
           mkdir -p "$RUNNER_TEMP/old"
-          git archive "$(git rev-parse --verify "origin/$BASE^{commit}" 2>/dev/null || git rev-parse --verify "$BASE^{commit}")" | tar -x -C "$RUNNER_TEMP/old"
+          old=$(git rev-parse --verify "origin/$BASE^{commit}" 2>/dev/null || git rev-parse --verify "$BASE^{commit}")
+          git archive "$old" | tar -x -C "$RUNNER_TEMP/old"
+          # The summary's header names each side by ref and short commit.
+          { echo "AB_OLD=$OLD_NAME ${old:0:7}"; echo "AB_NEW=$NEW_NAME $(git rev-parse --short=7 HEAD)"; } >> "$GITHUB_ENV"
       - name: build the dev image
         run: hack/dev/run.sh true
       - name: run the A/B
@@ -69,7 +87,10 @@ jobs:
         run: hack/bench/ab.sh "$RUNNER_TEMP/old" . "$RUNNER_TEMP/ab"
       - name: median table
         if: always()
-        run: python3 hack/bench/ab-table.py "$RUNNER_TEMP/ab" | tee -a "$GITHUB_STEP_SUMMARY"
+        run: |
+          python3 hack/bench/ab-table.py "$RUNNER_TEMP/ab" | tee -a "$GITHUB_STEP_SUMMARY"
+          # Slower rows and failed tests also show on the checks page.
+          python3 hack/bench/ab-table.py --annotate "$RUNNER_TEMP/ab"
       - name: keep the raw logs
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
