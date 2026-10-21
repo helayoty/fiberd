@@ -30,7 +30,7 @@ func checkpointZygote(ctx context.Context, o BuildOptions, imagesDir string) err
 		if ino, err := criu.SocketInode(pid, 3); err == nil {
 			extra = []string{"--external", "unix[" + ino + "]"}
 		}
-		return o.CRIU.DumpWith(ctx, pid, imagesDir, true, extra)
+		return o.CRIU.DumpWith(ctx, pid, imagesDir, criu.LeaveRunning, extra)
 	})
 }
 
