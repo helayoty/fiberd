@@ -48,11 +48,17 @@ The state layout keeps what fibers must never read under one hidden directory.
     admin.sock          the admin socket
     *-key.json          generated audit, delta, seal and handoff keys
   templates/            the pulled template cache, hidden from fibers
+    parents/            parent checkpoints, mode 0700
+    zygote-images/      self-checkpoints not yet filed, mode 0700
+    <digest>/images/    author images opened for a warm, mode 0700, pruned
+                        once no warm instance or delta names them
   deltas/               parked deltas, also hidden from fibers
   run/                  fiber endpoints (unix sockets) and zygote logs, one
                         directory per grant, which fibers see
   runc/, gvisor/        backend state, with each grant's staged template copy
                         and, on gVisor, each warm instance's pool socket
+  gvisor/templates/     gVisor's template images, mode 0700, on a tmpfs
+                        unless -gvisor-templates-on-disk
 ```
 
 The private directory is hidden rather than protected by file modes, and so are the [template](../glossary.md#template) cache and the deltas. A proc fiber warmed from a registry template still sees its own executable, bound back read-only inside the cache's cover, because [CRIU](../glossary.md#criu) needs the path to resolve. The full list of what fibers cannot see is in [runtime-host.md](runtime-host.md).

@@ -24,7 +24,7 @@ On proc and runc the grant's cgroup starts to throttle at `1.25 Ã— (fibers.max Ã
 
 ## Sizing a home
 
-1. Measure the warm template's resident footprint.
+1. Measure the warm template's resident footprint. On gVisor it includes the template image, which is held in RAM by default ([design/backends.md](design/backends.md)).
 2. Measure a fiber's W after representative requests, and set `wBudget` above it.
 3. Choose `fibers.max` from the concurrency the home should serve and the CPU it has.
 4. Give the home the template, `fibers.max` working sets, backend and fiberd overhead, and headroom. Provision for every fiber at its budget if that must never shed, and for less if the pressure ladder may park and shed under contention.

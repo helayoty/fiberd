@@ -22,3 +22,4 @@ This page lists what stands between the reference implementation and a productio
 ## Operations
 
 - fiberd's open-file limit (`RLIMIT_NOFILE`) must cover the [relay](glossary.md#relay). Each relayed connection takes two descriptors and each relayed fiber one more, with up to 256 connections per fiber and 4,096 per home ([networking.md](design/networking.md)).
+- A proc or runc home that warms a registry template from its images needs the fleet's master seal key in `-delta-seal-key`, with or without a delta registry. A home without it, or with another fleet's, refuses the template ([artifact.md](design/artifact.md)).
