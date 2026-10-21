@@ -5,11 +5,16 @@
 # checkpoint restored on a FEAT_FPAC CPU would trap on one.
 #
 #   sdk/c/template/core/check.sh sdk/c/template/core/target/release/libfiberzygote_core.a
+#
+# OBJDUMP names the objdump to disassemble with. An x86_64 host's own
+# objdump cannot read aarch64 code, so the release checks the arm64
+# archive with OBJDUMP=aarch64-linux-gnu-objdump.
 set -euo pipefail
 
 archive=${1:?usage: check.sh <libfiberzygote_core.a>}
+objdump=${OBJDUMP:-objdump}
 [ -r "$archive" ] || { echo "check.sh: $archive: not readable" >&2; exit 1; }
-for tool in readelf objdump; do
+for tool in readelf "$objdump"; do
   command -v "$tool" >/dev/null || { echo "check.sh: $tool is needed" >&2; exit 1; }
 done
 
@@ -64,7 +69,7 @@ fi
 machine=$(readelf -h "$archive" | awk -F: '/Machine:/ && !seen {seen = 1; gsub(/^[ \t]+/, "", $2); print $2}')
 case "$machine" in
   AArch64)
-    n=$(objdump -d "$archive" | awk '$3 ~ /^(pac|aut|reta|bra|blra)/ {n++} END {print n+0}')
+    n=$("$objdump" -d "$archive" | awk '$3 ~ /^(pac|aut|reta|bra|blra)/ {n++} END {print n+0}')
     if [ "$n" != 0 ]; then
       echo "check.sh: $n PAC instructions in $archive; a restore would trap on a FEAT_FPAC CPU" >&2
       rc=1
