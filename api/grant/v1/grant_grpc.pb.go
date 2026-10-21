@@ -30,10 +30,13 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	Fibers_Clone_FullMethodName   = "/fiberd.grant.v1.Fibers/Clone"
-	Fibers_Park_FullMethodName    = "/fiberd.grant.v1.Fibers/Park"
-	Fibers_Release_FullMethodName = "/fiberd.grant.v1.Fibers/Release"
-	Fibers_Watch_FullMethodName   = "/fiberd.grant.v1.Fibers/Watch"
+	Fibers_Clone_FullMethodName     = "/fiberd.grant.v1.Fibers/Clone"
+	Fibers_Park_FullMethodName      = "/fiberd.grant.v1.Fibers/Park"
+	Fibers_Release_FullMethodName   = "/fiberd.grant.v1.Fibers/Release"
+	Fibers_Watch_FullMethodName     = "/fiberd.grant.v1.Fibers/Watch"
+	Fibers_Upload_FullMethodName    = "/fiberd.grant.v1.Fibers/Upload"
+	Fibers_Download_FullMethodName  = "/fiberd.grant.v1.Fibers/Download"
+	Fibers_ListFiles_FullMethodName = "/fiberd.grant.v1.Fibers/ListFiles"
 )
 
 // FibersClient is the client API for Fibers service.
@@ -49,6 +52,15 @@ type FibersClient interface {
 	Park(ctx context.Context, in *ParkRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	Release(ctx context.Context, in *ReleaseRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	Watch(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (grpc.ServerStreamingClient[Status], error)
+	// Upload writes one file into a running fiber's workspace. The first
+	// message is the header. Each file call is authorized like Park, so
+	// another caller's fiber answers NotFound.
+	Upload(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[UploadRequest, FileInfo], error)
+	// Download reads one regular file from a running fiber's workspace.
+	// The first chunk carries its FileInfo.
+	Download(ctx context.Context, in *DownloadRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[FileChunk], error)
+	// ListFiles lists one directory of a running fiber's workspace.
+	ListFiles(ctx context.Context, in *ListFilesRequest, opts ...grpc.CallOption) (*ListFilesResponse, error)
 }
 
 type fibersClient struct {
@@ -108,6 +120,48 @@ func (c *fibersClient) Watch(ctx context.Context, in *emptypb.Empty, opts ...grp
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type Fibers_WatchClient = grpc.ServerStreamingClient[Status]
 
+func (c *fibersClient) Upload(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[UploadRequest, FileInfo], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &Fibers_ServiceDesc.Streams[1], Fibers_Upload_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[UploadRequest, FileInfo]{ClientStream: stream}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Fibers_UploadClient = grpc.ClientStreamingClient[UploadRequest, FileInfo]
+
+func (c *fibersClient) Download(ctx context.Context, in *DownloadRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[FileChunk], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &Fibers_ServiceDesc.Streams[2], Fibers_Download_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[DownloadRequest, FileChunk]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Fibers_DownloadClient = grpc.ServerStreamingClient[FileChunk]
+
+func (c *fibersClient) ListFiles(ctx context.Context, in *ListFilesRequest, opts ...grpc.CallOption) (*ListFilesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListFilesResponse)
+	err := c.cc.Invoke(ctx, Fibers_ListFiles_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // FibersServer is the server API for Fibers service.
 // All implementations must embed UnimplementedFibersServer
 // for forward compatibility.
@@ -121,6 +175,15 @@ type FibersServer interface {
 	Park(context.Context, *ParkRequest) (*emptypb.Empty, error)
 	Release(context.Context, *ReleaseRequest) (*emptypb.Empty, error)
 	Watch(*emptypb.Empty, grpc.ServerStreamingServer[Status]) error
+	// Upload writes one file into a running fiber's workspace. The first
+	// message is the header. Each file call is authorized like Park, so
+	// another caller's fiber answers NotFound.
+	Upload(grpc.ClientStreamingServer[UploadRequest, FileInfo]) error
+	// Download reads one regular file from a running fiber's workspace.
+	// The first chunk carries its FileInfo.
+	Download(*DownloadRequest, grpc.ServerStreamingServer[FileChunk]) error
+	// ListFiles lists one directory of a running fiber's workspace.
+	ListFiles(context.Context, *ListFilesRequest) (*ListFilesResponse, error)
 	mustEmbedUnimplementedFibersServer()
 }
 
@@ -142,6 +205,15 @@ func (UnimplementedFibersServer) Release(context.Context, *ReleaseRequest) (*emp
 }
 func (UnimplementedFibersServer) Watch(*emptypb.Empty, grpc.ServerStreamingServer[Status]) error {
 	return status.Error(codes.Unimplemented, "method Watch not implemented")
+}
+func (UnimplementedFibersServer) Upload(grpc.ClientStreamingServer[UploadRequest, FileInfo]) error {
+	return status.Error(codes.Unimplemented, "method Upload not implemented")
+}
+func (UnimplementedFibersServer) Download(*DownloadRequest, grpc.ServerStreamingServer[FileChunk]) error {
+	return status.Error(codes.Unimplemented, "method Download not implemented")
+}
+func (UnimplementedFibersServer) ListFiles(context.Context, *ListFilesRequest) (*ListFilesResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListFiles not implemented")
 }
 func (UnimplementedFibersServer) mustEmbedUnimplementedFibersServer() {}
 func (UnimplementedFibersServer) testEmbeddedByValue()                {}
@@ -229,6 +301,42 @@ func _Fibers_Watch_Handler(srv interface{}, stream grpc.ServerStream) error {
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type Fibers_WatchServer = grpc.ServerStreamingServer[Status]
 
+func _Fibers_Upload_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(FibersServer).Upload(&grpc.GenericServerStream[UploadRequest, FileInfo]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Fibers_UploadServer = grpc.ClientStreamingServer[UploadRequest, FileInfo]
+
+func _Fibers_Download_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(DownloadRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(FibersServer).Download(m, &grpc.GenericServerStream[DownloadRequest, FileChunk]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Fibers_DownloadServer = grpc.ServerStreamingServer[FileChunk]
+
+func _Fibers_ListFiles_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListFilesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(FibersServer).ListFiles(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Fibers_ListFiles_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(FibersServer).ListFiles(ctx, req.(*ListFilesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Fibers_ServiceDesc is the grpc.ServiceDesc for Fibers service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -248,11 +356,25 @@ var Fibers_ServiceDesc = grpc.ServiceDesc{
 			MethodName: "Release",
 			Handler:    _Fibers_Release_Handler,
 		},
+		{
+			MethodName: "ListFiles",
+			Handler:    _Fibers_ListFiles_Handler,
+		},
 	},
 	Streams: []grpc.StreamDesc{
 		{
 			StreamName:    "Watch",
 			Handler:       _Fibers_Watch_Handler,
+			ServerStreams: true,
+		},
+		{
+			StreamName:    "Upload",
+			Handler:       _Fibers_Upload_Handler,
+			ClientStreams: true,
+		},
+		{
+			StreamName:    "Download",
+			Handler:       _Fibers_Download_Handler,
 			ServerStreams: true,
 		},
 	},

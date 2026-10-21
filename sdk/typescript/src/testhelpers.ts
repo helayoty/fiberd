@@ -54,6 +54,10 @@ export async function home(
     park: (_call, done) => done(null, {}),
     release: (_call, done) => done(null, {}),
     watch: (call) => call.end(),
+    // The client has no file calls yet, so the test home serves none.
+    upload: (_call, done) => done({ code: status.UNIMPLEMENTED, details: "not served" }),
+    download: (call) => call.emit("error", { code: status.UNIMPLEMENTED, details: "not served" }),
+    listFiles: (_call, done) => done({ code: status.UNIMPLEMENTED, details: "not served" }),
     ...handlers,
   };
   server.addService(FibersService, implementation);

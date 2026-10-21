@@ -598,9 +598,16 @@ type CapacityGrant struct {
 	LeaseExpiry  *timestamppb.Timestamp `protobuf:"bytes,8,opt,name=lease_expiry,json=leaseExpiry,proto3" json:"lease_expiry,omitempty"`
 	Policy       *Policy                `protobuf:"bytes,9,opt,name=policy,proto3" json:"policy,omitempty"`
 	// Absent or zero bytes: the grant needs no device.
-	DeviceBudget  *DeviceBudget `protobuf:"bytes,10,opt,name=device_budget,json=deviceBudget,proto3" json:"device_budget,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	DeviceBudget *DeviceBudget `protobuf:"bytes,10,opt,name=device_budget,json=deviceBudget,proto3" json:"device_budget,omitempty"`
+	// Per-fiber workspace ceiling in bytes. Each fiber gets a private
+	// workspace at /workspace that Upload, Download and ListFiles reach.
+	// Zero means no workspace, and every file call on the grant's fibers
+	// fails with FailedPrecondition and a NoWorkspace detail. A home whose
+	// runtime offers no workspace refuses a grant that sets it, with
+	// FailedPrecondition.
+	DiskBudgetBytes uint64 `protobuf:"varint,12,opt,name=disk_budget_bytes,json=diskBudgetBytes,proto3" json:"disk_budget_bytes,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *CapacityGrant) Reset() {
@@ -708,6 +715,13 @@ func (x *CapacityGrant) GetDeviceBudget() *DeviceBudget {
 		return x.DeviceBudget
 	}
 	return nil
+}
+
+func (x *CapacityGrant) GetDiskBudgetBytes() uint64 {
+	if x != nil {
+		return x.DiskBudgetBytes
+	}
+	return 0
 }
 
 // Fence identifies one run of a fiber: (grant, fiberd epoch, seq).
@@ -1212,6 +1226,508 @@ func (x *Status) GetPooled() uint32 {
 	return 0
 }
 
+// NoWorkspace is attached as a detail to the FailedPrecondition a file
+// call gets when its fiber's grant has no workspace (disk_budget_bytes is
+// zero). It tells that refusal apart from a tier gap.
+type NoWorkspace struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *NoWorkspace) Reset() {
+	*x = NoWorkspace{}
+	mi := &file_grant_v1_grant_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *NoWorkspace) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*NoWorkspace) ProtoMessage() {}
+
+func (x *NoWorkspace) ProtoReflect() protoreflect.Message {
+	mi := &file_grant_v1_grant_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use NoWorkspace.ProtoReflect.Descriptor instead.
+func (*NoWorkspace) Descriptor() ([]byte, []int) {
+	return file_grant_v1_grant_proto_rawDescGZIP(), []int{11}
+}
+
+// UploadHeader opens an Upload. It is the stream's first message and the
+// only header.
+type UploadHeader struct {
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	FiberId string                 `protobuf:"bytes,1,opt,name=fiber_id,json=fiberId,proto3" json:"fiber_id,omitempty"`
+	// The file's path, relative to the fiber's /workspace.
+	Path string `protobuf:"bytes,2,opt,name=path,proto3" json:"path,omitempty"`
+	// The file's size in bytes, declared up front so the budget is
+	// reserved before any byte lands. The data chunks add up to it
+	// exactly. It must be set, and zero is an empty file.
+	Size *uint64 `protobuf:"varint,3,opt,name=size,proto3,oneof" json:"size,omitempty"`
+	// The file's permission bits. Zero means 0644.
+	Mode uint32 `protobuf:"varint,4,opt,name=mode,proto3" json:"mode,omitempty"`
+	// Optional SHA-256 of the content, checked before the file appears.
+	Sha256        []byte `protobuf:"bytes,5,opt,name=sha256,proto3" json:"sha256,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *UploadHeader) Reset() {
+	*x = UploadHeader{}
+	mi := &file_grant_v1_grant_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *UploadHeader) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*UploadHeader) ProtoMessage() {}
+
+func (x *UploadHeader) ProtoReflect() protoreflect.Message {
+	mi := &file_grant_v1_grant_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use UploadHeader.ProtoReflect.Descriptor instead.
+func (*UploadHeader) Descriptor() ([]byte, []int) {
+	return file_grant_v1_grant_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *UploadHeader) GetFiberId() string {
+	if x != nil {
+		return x.FiberId
+	}
+	return ""
+}
+
+func (x *UploadHeader) GetPath() string {
+	if x != nil {
+		return x.Path
+	}
+	return ""
+}
+
+func (x *UploadHeader) GetSize() uint64 {
+	if x != nil && x.Size != nil {
+		return *x.Size
+	}
+	return 0
+}
+
+func (x *UploadHeader) GetMode() uint32 {
+	if x != nil {
+		return x.Mode
+	}
+	return 0
+}
+
+func (x *UploadHeader) GetSha256() []byte {
+	if x != nil {
+		return x.Sha256
+	}
+	return nil
+}
+
+// UploadRequest is one message of an Upload stream. The first carries
+// the header and every later one a data chunk of at most 1 MiB.
+type UploadRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Types that are valid to be assigned to Part:
+	//
+	//	*UploadRequest_Header
+	//	*UploadRequest_Data
+	Part          isUploadRequest_Part `protobuf_oneof:"part"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *UploadRequest) Reset() {
+	*x = UploadRequest{}
+	mi := &file_grant_v1_grant_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *UploadRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*UploadRequest) ProtoMessage() {}
+
+func (x *UploadRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_grant_v1_grant_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use UploadRequest.ProtoReflect.Descriptor instead.
+func (*UploadRequest) Descriptor() ([]byte, []int) {
+	return file_grant_v1_grant_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *UploadRequest) GetPart() isUploadRequest_Part {
+	if x != nil {
+		return x.Part
+	}
+	return nil
+}
+
+func (x *UploadRequest) GetHeader() *UploadHeader {
+	if x != nil {
+		if x, ok := x.Part.(*UploadRequest_Header); ok {
+			return x.Header
+		}
+	}
+	return nil
+}
+
+func (x *UploadRequest) GetData() []byte {
+	if x != nil {
+		if x, ok := x.Part.(*UploadRequest_Data); ok {
+			return x.Data
+		}
+	}
+	return nil
+}
+
+type isUploadRequest_Part interface {
+	isUploadRequest_Part()
+}
+
+type UploadRequest_Header struct {
+	Header *UploadHeader `protobuf:"bytes,1,opt,name=header,proto3,oneof"`
+}
+
+type UploadRequest_Data struct {
+	Data []byte `protobuf:"bytes,2,opt,name=data,proto3,oneof"`
+}
+
+func (*UploadRequest_Header) isUploadRequest_Part() {}
+
+func (*UploadRequest_Data) isUploadRequest_Part() {}
+
+type DownloadRequest struct {
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	FiberId string                 `protobuf:"bytes,1,opt,name=fiber_id,json=fiberId,proto3" json:"fiber_id,omitempty"`
+	// The file's path, relative to the fiber's /workspace.
+	Path string `protobuf:"bytes,2,opt,name=path,proto3" json:"path,omitempty"`
+	// Where to start reading, in bytes.
+	Offset        uint64 `protobuf:"varint,3,opt,name=offset,proto3" json:"offset,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DownloadRequest) Reset() {
+	*x = DownloadRequest{}
+	mi := &file_grant_v1_grant_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DownloadRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DownloadRequest) ProtoMessage() {}
+
+func (x *DownloadRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_grant_v1_grant_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DownloadRequest.ProtoReflect.Descriptor instead.
+func (*DownloadRequest) Descriptor() ([]byte, []int) {
+	return file_grant_v1_grant_proto_rawDescGZIP(), []int{14}
+}
+
+func (x *DownloadRequest) GetFiberId() string {
+	if x != nil {
+		return x.FiberId
+	}
+	return ""
+}
+
+func (x *DownloadRequest) GetPath() string {
+	if x != nil {
+		return x.Path
+	}
+	return ""
+}
+
+func (x *DownloadRequest) GetOffset() uint64 {
+	if x != nil {
+		return x.Offset
+	}
+	return 0
+}
+
+// FileInfo describes one entry of a workspace.
+type FileInfo struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Relative to the fiber's /workspace.
+	Path string `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
+	Size uint64 `protobuf:"varint,2,opt,name=size,proto3" json:"size,omitempty"`
+	// The permission bits.
+	Mode      uint32 `protobuf:"varint,3,opt,name=mode,proto3" json:"mode,omitempty"`
+	Directory bool   `protobuf:"varint,4,opt,name=directory,proto3" json:"directory,omitempty"`
+	// SHA-256 of the content. Set in Upload's reply only.
+	Sha256        []byte `protobuf:"bytes,5,opt,name=sha256,proto3" json:"sha256,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *FileInfo) Reset() {
+	*x = FileInfo{}
+	mi := &file_grant_v1_grant_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *FileInfo) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*FileInfo) ProtoMessage() {}
+
+func (x *FileInfo) ProtoReflect() protoreflect.Message {
+	mi := &file_grant_v1_grant_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use FileInfo.ProtoReflect.Descriptor instead.
+func (*FileInfo) Descriptor() ([]byte, []int) {
+	return file_grant_v1_grant_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *FileInfo) GetPath() string {
+	if x != nil {
+		return x.Path
+	}
+	return ""
+}
+
+func (x *FileInfo) GetSize() uint64 {
+	if x != nil {
+		return x.Size
+	}
+	return 0
+}
+
+func (x *FileInfo) GetMode() uint32 {
+	if x != nil {
+		return x.Mode
+	}
+	return 0
+}
+
+func (x *FileInfo) GetDirectory() bool {
+	if x != nil {
+		return x.Directory
+	}
+	return false
+}
+
+func (x *FileInfo) GetSha256() []byte {
+	if x != nil {
+		return x.Sha256
+	}
+	return nil
+}
+
+// FileChunk is one message of a Download stream. The first carries info
+// and every chunk carries at most 1 MiB of data.
+type FileChunk struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Info          *FileInfo              `protobuf:"bytes,1,opt,name=info,proto3" json:"info,omitempty"`
+	Data          []byte                 `protobuf:"bytes,2,opt,name=data,proto3" json:"data,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *FileChunk) Reset() {
+	*x = FileChunk{}
+	mi := &file_grant_v1_grant_proto_msgTypes[16]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *FileChunk) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*FileChunk) ProtoMessage() {}
+
+func (x *FileChunk) ProtoReflect() protoreflect.Message {
+	mi := &file_grant_v1_grant_proto_msgTypes[16]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use FileChunk.ProtoReflect.Descriptor instead.
+func (*FileChunk) Descriptor() ([]byte, []int) {
+	return file_grant_v1_grant_proto_rawDescGZIP(), []int{16}
+}
+
+func (x *FileChunk) GetInfo() *FileInfo {
+	if x != nil {
+		return x.Info
+	}
+	return nil
+}
+
+func (x *FileChunk) GetData() []byte {
+	if x != nil {
+		return x.Data
+	}
+	return nil
+}
+
+type ListFilesRequest struct {
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	FiberId string                 `protobuf:"bytes,1,opt,name=fiber_id,json=fiberId,proto3" json:"fiber_id,omitempty"`
+	// The directory to list, relative to the fiber's /workspace. Empty is
+	// the workspace itself.
+	Dir           string `protobuf:"bytes,2,opt,name=dir,proto3" json:"dir,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListFilesRequest) Reset() {
+	*x = ListFilesRequest{}
+	mi := &file_grant_v1_grant_proto_msgTypes[17]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListFilesRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListFilesRequest) ProtoMessage() {}
+
+func (x *ListFilesRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_grant_v1_grant_proto_msgTypes[17]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListFilesRequest.ProtoReflect.Descriptor instead.
+func (*ListFilesRequest) Descriptor() ([]byte, []int) {
+	return file_grant_v1_grant_proto_rawDescGZIP(), []int{17}
+}
+
+func (x *ListFilesRequest) GetFiberId() string {
+	if x != nil {
+		return x.FiberId
+	}
+	return ""
+}
+
+func (x *ListFilesRequest) GetDir() string {
+	if x != nil {
+		return x.Dir
+	}
+	return ""
+}
+
+type ListFilesResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The directory's entries, not recursive.
+	Files         []*FileInfo `protobuf:"bytes,1,rep,name=files,proto3" json:"files,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListFilesResponse) Reset() {
+	*x = ListFilesResponse{}
+	mi := &file_grant_v1_grant_proto_msgTypes[18]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListFilesResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListFilesResponse) ProtoMessage() {}
+
+func (x *ListFilesResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_grant_v1_grant_proto_msgTypes[18]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListFilesResponse.ProtoReflect.Descriptor instead.
+func (*ListFilesResponse) Descriptor() ([]byte, []int) {
+	return file_grant_v1_grant_proto_rawDescGZIP(), []int{18}
+}
+
+func (x *ListFilesResponse) GetFiles() []*FileInfo {
+	if x != nil {
+		return x.Files
+	}
+	return nil
+}
+
 var File_grant_v1_grant_proto protoreflect.FileDescriptor
 
 const file_grant_v1_grant_proto_rawDesc = "" +
@@ -1233,7 +1749,7 @@ const file_grant_v1_grant_proto_rawDesc = "" +
 	"\x04warm\x18\x02 \x01(\rR\x04warm\":\n" +
 	"\fDeviceBudget\x12\x14\n" +
 	"\x05bytes\x18\x01 \x01(\x04R\x05bytes\x12\x14\n" +
-	"\x05class\x18\x02 \x01(\tR\x05class\"\xe3\x03\n" +
+	"\x05class\x18\x02 \x01(\tR\x05class\"\x8f\x04\n" +
 	"\rCapacityGrant\x12\x1b\n" +
 	"\tgrant_uid\x18\x01 \x01(\tR\bgrantUid\x12\x16\n" +
 	"\x06issuer\x18\x02 \x01(\tR\x06issuer\x12\x1a\n" +
@@ -1246,7 +1762,8 @@ const file_grant_v1_grant_proto_rawDesc = "" +
 	"\flease_expiry\x18\b \x01(\v2\x1a.google.protobuf.TimestampR\vleaseExpiry\x12/\n" +
 	"\x06policy\x18\t \x01(\v2\x17.fiberd.grant.v1.PolicyR\x06policy\x12B\n" +
 	"\rdevice_budget\x18\n" +
-	" \x01(\v2\x1d.fiberd.grant.v1.DeviceBudgetR\fdeviceBudget\"L\n" +
+	" \x01(\v2\x1d.fiberd.grant.v1.DeviceBudgetR\fdeviceBudget\x12*\n" +
+	"\x11disk_budget_bytes\x18\f \x01(\x04R\x0fdiskBudgetBytes\"L\n" +
 	"\x05Fence\x12\x1b\n" +
 	"\tgrant_uid\x18\x01 \x01(\tR\bgrantUid\x12\x14\n" +
 	"\x05epoch\x18\x02 \x01(\x04R\x05epoch\x12\x10\n" +
@@ -1284,7 +1801,37 @@ const file_grant_v1_grant_proto_rawDesc = "" +
 	"\fw_used_bytes\x18\x04 \x01(\x04R\n" +
 	"wUsedBytes\x12.\n" +
 	"\x06latest\x18\x05 \x01(\v2\x16.fiberd.grant.v1.FenceR\x06latest\x12\x16\n" +
-	"\x06pooled\x18\x06 \x01(\rR\x06pooled*g\n" +
+	"\x06pooled\x18\x06 \x01(\rR\x06pooled\"\r\n" +
+	"\vNoWorkspace\"\x8b\x01\n" +
+	"\fUploadHeader\x12\x19\n" +
+	"\bfiber_id\x18\x01 \x01(\tR\afiberId\x12\x12\n" +
+	"\x04path\x18\x02 \x01(\tR\x04path\x12\x17\n" +
+	"\x04size\x18\x03 \x01(\x04H\x00R\x04size\x88\x01\x01\x12\x12\n" +
+	"\x04mode\x18\x04 \x01(\rR\x04mode\x12\x16\n" +
+	"\x06sha256\x18\x05 \x01(\fR\x06sha256B\a\n" +
+	"\x05_size\"f\n" +
+	"\rUploadRequest\x127\n" +
+	"\x06header\x18\x01 \x01(\v2\x1d.fiberd.grant.v1.UploadHeaderH\x00R\x06header\x12\x14\n" +
+	"\x04data\x18\x02 \x01(\fH\x00R\x04dataB\x06\n" +
+	"\x04part\"X\n" +
+	"\x0fDownloadRequest\x12\x19\n" +
+	"\bfiber_id\x18\x01 \x01(\tR\afiberId\x12\x12\n" +
+	"\x04path\x18\x02 \x01(\tR\x04path\x12\x16\n" +
+	"\x06offset\x18\x03 \x01(\x04R\x06offset\"|\n" +
+	"\bFileInfo\x12\x12\n" +
+	"\x04path\x18\x01 \x01(\tR\x04path\x12\x12\n" +
+	"\x04size\x18\x02 \x01(\x04R\x04size\x12\x12\n" +
+	"\x04mode\x18\x03 \x01(\rR\x04mode\x12\x1c\n" +
+	"\tdirectory\x18\x04 \x01(\bR\tdirectory\x12\x16\n" +
+	"\x06sha256\x18\x05 \x01(\fR\x06sha256\"N\n" +
+	"\tFileChunk\x12-\n" +
+	"\x04info\x18\x01 \x01(\v2\x19.fiberd.grant.v1.FileInfoR\x04info\x12\x12\n" +
+	"\x04data\x18\x02 \x01(\fR\x04data\"?\n" +
+	"\x10ListFilesRequest\x12\x19\n" +
+	"\bfiber_id\x18\x01 \x01(\tR\afiberId\x12\x10\n" +
+	"\x03dir\x18\x02 \x01(\tR\x03dir\"D\n" +
+	"\x11ListFilesResponse\x12/\n" +
+	"\x05files\x18\x01 \x03(\v2\x19.fiberd.grant.v1.FileInfoR\x05files*g\n" +
 	"\x04Tier\x12\x14\n" +
 	"\x10TIER_UNSPECIFIED\x10\x00\x12\x0f\n" +
 	"\vFIBER_BASIC\x10\x01\x12\x0e\n" +
@@ -1314,12 +1861,15 @@ const file_grant_v1_grant_proto_rawDesc = "" +
 	"\x06RESUME\x10\x02*+\n" +
 	"\bMissCode\x12\b\n" +
 	"\x04SHED\x10\x00\x12\x15\n" +
-	"\x11DEFERRED_FALLBACK\x10\x012\x8e\x02\n" +
+	"\x11DEFERRED_FALLBACK\x10\x012\xf5\x03\n" +
 	"\x06Fibers\x12F\n" +
 	"\x05Clone\x12\x1d.fiberd.grant.v1.CloneRequest\x1a\x1e.fiberd.grant.v1.CloneResponse\x12<\n" +
 	"\x04Park\x12\x1c.fiberd.grant.v1.ParkRequest\x1a\x16.google.protobuf.Empty\x12B\n" +
 	"\aRelease\x12\x1f.fiberd.grant.v1.ReleaseRequest\x1a\x16.google.protobuf.Empty\x12:\n" +
-	"\x05Watch\x12\x16.google.protobuf.Empty\x1a\x17.fiberd.grant.v1.Status0\x01B1Z/github.com/helayoty/fiberd/api/grant/v1;grantv1b\x06proto3"
+	"\x05Watch\x12\x16.google.protobuf.Empty\x1a\x17.fiberd.grant.v1.Status0\x01\x12E\n" +
+	"\x06Upload\x12\x1e.fiberd.grant.v1.UploadRequest\x1a\x19.fiberd.grant.v1.FileInfo(\x01\x12J\n" +
+	"\bDownload\x12 .fiberd.grant.v1.DownloadRequest\x1a\x1a.fiberd.grant.v1.FileChunk0\x01\x12R\n" +
+	"\tListFiles\x12!.fiberd.grant.v1.ListFilesRequest\x1a\".fiberd.grant.v1.ListFilesResponseB1Z/github.com/helayoty/fiberd/api/grant/v1;grantv1b\x06proto3"
 
 var (
 	file_grant_v1_grant_proto_rawDescOnce sync.Once
@@ -1334,7 +1884,7 @@ func file_grant_v1_grant_proto_rawDescGZIP() []byte {
 }
 
 var file_grant_v1_grant_proto_enumTypes = make([]protoimpl.EnumInfo, 6)
-var file_grant_v1_grant_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
+var file_grant_v1_grant_proto_msgTypes = make([]protoimpl.MessageInfo, 19)
 var file_grant_v1_grant_proto_goTypes = []any{
 	(Tier)(0),                     // 0: fiberd.grant.v1.Tier
 	(Durability)(0),               // 1: fiberd.grant.v1.Durability
@@ -1353,8 +1903,16 @@ var file_grant_v1_grant_proto_goTypes = []any{
 	(*ParkRequest)(nil),           // 14: fiberd.grant.v1.ParkRequest
 	(*ReleaseRequest)(nil),        // 15: fiberd.grant.v1.ReleaseRequest
 	(*Status)(nil),                // 16: fiberd.grant.v1.Status
-	(*timestamppb.Timestamp)(nil), // 17: google.protobuf.Timestamp
-	(*emptypb.Empty)(nil),         // 18: google.protobuf.Empty
+	(*NoWorkspace)(nil),           // 17: fiberd.grant.v1.NoWorkspace
+	(*UploadHeader)(nil),          // 18: fiberd.grant.v1.UploadHeader
+	(*UploadRequest)(nil),         // 19: fiberd.grant.v1.UploadRequest
+	(*DownloadRequest)(nil),       // 20: fiberd.grant.v1.DownloadRequest
+	(*FileInfo)(nil),              // 21: fiberd.grant.v1.FileInfo
+	(*FileChunk)(nil),             // 22: fiberd.grant.v1.FileChunk
+	(*ListFilesRequest)(nil),      // 23: fiberd.grant.v1.ListFilesRequest
+	(*ListFilesResponse)(nil),     // 24: fiberd.grant.v1.ListFilesResponse
+	(*timestamppb.Timestamp)(nil), // 25: google.protobuf.Timestamp
+	(*emptypb.Empty)(nil),         // 26: google.protobuf.Empty
 }
 var file_grant_v1_grant_proto_depIdxs = []int32{
 	1,  // 0: fiberd.grant.v1.Policy.durability:type_name -> fiberd.grant.v1.Durability
@@ -1362,27 +1920,36 @@ var file_grant_v1_grant_proto_depIdxs = []int32{
 	3,  // 2: fiberd.grant.v1.Policy.endpoint_mode:type_name -> fiberd.grant.v1.EndpointMode
 	7,  // 3: fiberd.grant.v1.CapacityGrant.fibers:type_name -> fiberd.grant.v1.FiberLimits
 	0,  // 4: fiberd.grant.v1.CapacityGrant.min_tier:type_name -> fiberd.grant.v1.Tier
-	17, // 5: fiberd.grant.v1.CapacityGrant.lease_expiry:type_name -> google.protobuf.Timestamp
+	25, // 5: fiberd.grant.v1.CapacityGrant.lease_expiry:type_name -> google.protobuf.Timestamp
 	6,  // 6: fiberd.grant.v1.CapacityGrant.policy:type_name -> fiberd.grant.v1.Policy
 	8,  // 7: fiberd.grant.v1.CapacityGrant.device_budget:type_name -> fiberd.grant.v1.DeviceBudget
-	17, // 8: fiberd.grant.v1.CloneRequest.deadline:type_name -> google.protobuf.Timestamp
+	25, // 8: fiberd.grant.v1.CloneRequest.deadline:type_name -> google.protobuf.Timestamp
 	10, // 9: fiberd.grant.v1.CloneResponse.fence:type_name -> fiberd.grant.v1.Fence
 	4,  // 10: fiberd.grant.v1.CloneResponse.kind:type_name -> fiberd.grant.v1.CloneKind
 	5,  // 11: fiberd.grant.v1.Miss.code:type_name -> fiberd.grant.v1.MissCode
 	10, // 12: fiberd.grant.v1.Status.latest:type_name -> fiberd.grant.v1.Fence
-	11, // 13: fiberd.grant.v1.Fibers.Clone:input_type -> fiberd.grant.v1.CloneRequest
-	14, // 14: fiberd.grant.v1.Fibers.Park:input_type -> fiberd.grant.v1.ParkRequest
-	15, // 15: fiberd.grant.v1.Fibers.Release:input_type -> fiberd.grant.v1.ReleaseRequest
-	18, // 16: fiberd.grant.v1.Fibers.Watch:input_type -> google.protobuf.Empty
-	12, // 17: fiberd.grant.v1.Fibers.Clone:output_type -> fiberd.grant.v1.CloneResponse
-	18, // 18: fiberd.grant.v1.Fibers.Park:output_type -> google.protobuf.Empty
-	18, // 19: fiberd.grant.v1.Fibers.Release:output_type -> google.protobuf.Empty
-	16, // 20: fiberd.grant.v1.Fibers.Watch:output_type -> fiberd.grant.v1.Status
-	17, // [17:21] is the sub-list for method output_type
-	13, // [13:17] is the sub-list for method input_type
-	13, // [13:13] is the sub-list for extension type_name
-	13, // [13:13] is the sub-list for extension extendee
-	0,  // [0:13] is the sub-list for field type_name
+	18, // 13: fiberd.grant.v1.UploadRequest.header:type_name -> fiberd.grant.v1.UploadHeader
+	21, // 14: fiberd.grant.v1.FileChunk.info:type_name -> fiberd.grant.v1.FileInfo
+	21, // 15: fiberd.grant.v1.ListFilesResponse.files:type_name -> fiberd.grant.v1.FileInfo
+	11, // 16: fiberd.grant.v1.Fibers.Clone:input_type -> fiberd.grant.v1.CloneRequest
+	14, // 17: fiberd.grant.v1.Fibers.Park:input_type -> fiberd.grant.v1.ParkRequest
+	15, // 18: fiberd.grant.v1.Fibers.Release:input_type -> fiberd.grant.v1.ReleaseRequest
+	26, // 19: fiberd.grant.v1.Fibers.Watch:input_type -> google.protobuf.Empty
+	19, // 20: fiberd.grant.v1.Fibers.Upload:input_type -> fiberd.grant.v1.UploadRequest
+	20, // 21: fiberd.grant.v1.Fibers.Download:input_type -> fiberd.grant.v1.DownloadRequest
+	23, // 22: fiberd.grant.v1.Fibers.ListFiles:input_type -> fiberd.grant.v1.ListFilesRequest
+	12, // 23: fiberd.grant.v1.Fibers.Clone:output_type -> fiberd.grant.v1.CloneResponse
+	26, // 24: fiberd.grant.v1.Fibers.Park:output_type -> google.protobuf.Empty
+	26, // 25: fiberd.grant.v1.Fibers.Release:output_type -> google.protobuf.Empty
+	16, // 26: fiberd.grant.v1.Fibers.Watch:output_type -> fiberd.grant.v1.Status
+	21, // 27: fiberd.grant.v1.Fibers.Upload:output_type -> fiberd.grant.v1.FileInfo
+	22, // 28: fiberd.grant.v1.Fibers.Download:output_type -> fiberd.grant.v1.FileChunk
+	24, // 29: fiberd.grant.v1.Fibers.ListFiles:output_type -> fiberd.grant.v1.ListFilesResponse
+	23, // [23:30] is the sub-list for method output_type
+	16, // [16:23] is the sub-list for method input_type
+	16, // [16:16] is the sub-list for extension type_name
+	16, // [16:16] is the sub-list for extension extendee
+	0,  // [0:16] is the sub-list for field type_name
 }
 
 func init() { file_grant_v1_grant_proto_init() }
@@ -1390,13 +1957,18 @@ func file_grant_v1_grant_proto_init() {
 	if File_grant_v1_grant_proto != nil {
 		return
 	}
+	file_grant_v1_grant_proto_msgTypes[12].OneofWrappers = []any{}
+	file_grant_v1_grant_proto_msgTypes[13].OneofWrappers = []any{
+		(*UploadRequest_Header)(nil),
+		(*UploadRequest_Data)(nil),
+	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_grant_v1_grant_proto_rawDesc), len(file_grant_v1_grant_proto_rawDesc)),
 			NumEnums:      6,
-			NumMessages:   11,
+			NumMessages:   19,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
