@@ -36,7 +36,7 @@ type Server struct {
 func NewGRPCServer(s *Server, opts ...grpc.ServerOption) *grpc.Server {
 	opts = append(opts,
 		grpc.ChainUnaryInterceptor(CallerInterceptor(), AdmissionInterceptor()),
-		grpc.ChainStreamInterceptor(CallerStreamInterceptor()))
+		grpc.ChainStreamInterceptor(CallerStreamInterceptor(), AdmissionStreamInterceptor()))
 	gs := grpc.NewServer(opts...)
 	grantv1.RegisterFibersServer(gs, s)
 	return gs
