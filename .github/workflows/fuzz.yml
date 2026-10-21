@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   fuzz:
-    name: fuzz the zygote's parsers (libFuzzer, C harnesses and the core's cargo-fuzz targets) and the handoff SNI parser (go test -fuzz)
+    name: fuzz the zygote's parsers (libFuzzer, C harnesses and the core's cargo-fuzz targets), the handoff SNI parser and the workspace path and archive readers (go test -fuzz)
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -33,9 +33,10 @@ jobs:
         run: |
           (cd sdk/c/template/core/fuzz && cargo --version)
           cargo install --locked cargo-fuzz --version "$CARGO_FUZZ_VERSION"
-      # 60 seconds per cargo-fuzz target (ten) and for the C harness and the
-      # Go fuzzer. A crash fails the job and leaves its input under
-      # bin/fuzz/crashes/ (the Go fuzzer writes to testdata/fuzz/).
+      # 60 seconds per cargo-fuzz target (ten), for the C harness and for
+      # each of the three Go fuzzers. A crash fails the job and leaves its
+      # input under bin/fuzz/crashes/ (a Go fuzzer writes to its package's
+      # testdata/fuzz/).
       - run: make fuzz FUZZTIME=60
       - name: keep the crashing inputs
         if: failure()
@@ -47,4 +48,5 @@ jobs:
             bin/fuzz/crashes/
             bin/fuzz/*.log
             pkg/handoff/testdata/fuzz/
+            pkg/runtime/host/wsfs/testdata/fuzz/
           if-no-files-found: ignore
