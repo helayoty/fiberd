@@ -1,9 +1,10 @@
 //! The fiber seccomp filter (docs/design/seccomp.md). One program,
 //! default allow, that the zygote installs once before READY and every
 //! fiber inherits by reference at the clone. Calls that need no
-//! capability yet reach deep kernel code answer an errno, four calls
-//! have an argument checked, and a foreign arch or an x32 number kills
-//! the process. clone3 passes from one address alone, birth's own
+//! capability yet reach deep kernel code answer an errno, five calls
+//! have an argument checked, including the two ioctl commands that would
+//! move a file out of its project quota, and a foreign arch or an x32
+//! number kills the process. clone3 passes from one address alone, birth's own
 //! syscall instruction, and every child stacks a second filter that
 //! closes it. A runc zygote, whose fibers keep CAP_SYS_ADMIN and never
 //! get a mount namespace, takes a second program that also refuses the
@@ -39,6 +40,9 @@ pub struct Arch {
     pub socket: u32,
     /// __NR_personality, the persona in argument 0.
     pub personality: u32,
+    /// __NR_ioctl, its command in argument 1. The quota commands alone
+    /// are refused, so a proc fiber cannot retag its workspace files.
+    pub ioctl: u32,
     /// The calls refused outright with EPERM, sorted by number.
     pub plain: &'static [u32],
     /// The mount family, sorted by number, refused by the runc program
@@ -56,6 +60,7 @@ pub const X86_64: Arch = Arch {
     unshare: 272,
     socket: 41,
     personality: 135,
+    ioctl: 16,
     plain: &[
         101, // ptrace
         103, // syslog
@@ -104,6 +109,7 @@ pub const X86_64: Arch = Arch {
         443, // quotactl_fd
         447, // memfd_secret
         460, // lsm_set_self_attr
+        469, // file_setattr, FS_IOC_FSSETXATTR's syscall twin
     ],
     mounts: &[
         155, // pivot_root
@@ -131,6 +137,7 @@ pub const AARCH64: Arch = Arch {
     unshare: 97,
     socket: 198,
     personality: 92,
+    ioctl: 29,
     plain: &[
         18,  // lookup_dcookie
         42,  // nfsservctl
@@ -170,6 +177,7 @@ pub const AARCH64: Arch = Arch {
         443, // quotactl_fd
         447, // memfd_secret
         460, // lsm_set_self_attr
+        469, // file_setattr, FS_IOC_FSSETXATTR's syscall twin
     ],
     mounts: &[
         39,  // umount2
@@ -217,6 +225,25 @@ const CLONE3: u32 = 435;
 /// audit arch, where the numbers above mean other calls.
 const X32_SYSCALL_BIT: u32 = 0x4000_0000;
 
+/// The two ioctl commands that move a file between project quotas,
+/// refused so a proc fiber cannot leave its workspace disk quota. A proc
+/// fiber owns its files in the initial user namespace, where
+/// `fs/fileattr.c`'s `fileattr_set_prepare` lets an owner change
+/// `fsx_projid` and `FS_XFLAG_PROJINHERIT`. Both commands are
+/// asm-generic `_IOW` encodings, the same on x86_64 and aarch64 since
+/// `struct fsxattr` is 28 bytes and `long` is 8 on both. The syscall
+/// twin of FS_IOC_FSSETXATTR, `file_setattr` (nr 469), is in the plain
+/// list. runc fibers are in a nested user namespace, where the kernel
+/// refuses the change with EINVAL, so they need neither, but their
+/// program is the fiber program plus the mount family and refuses these
+/// too.
+///
+/// FS_IOC_FSSETXATTR = _IOW('X', 32, struct fsxattr), sets fsx_projid.
+const FS_IOC_FSSETXATTR: u32 = 0x401c_5820;
+/// FS_IOC_SETFLAGS = _IOW('f', 2, long), clears FS_PROJINHERIT_FL on a
+/// directory so new files there land in project 0.
+const FS_IOC_SETFLAGS: u32 = 0x4008_6602;
+
 /// The six CLONE_NEW* flags a fiber may not use. CLONE_NEWPID and
 /// CLONE_NEWNS pass, since birth's legacy clone carries them.
 const NEW_NS_REFUSED: u32 = 0x80 // CLONE_NEWTIME
@@ -259,6 +286,7 @@ const EPROTONOSUPPORT: u32 = libc::SECCOMP_RET_ERRNO | libc::EPROTONOSUPPORT as 
 const NR_OFF: u32 = offset_of!(libc::seccomp_data, nr) as u32;
 const ARCH_OFF: u32 = offset_of!(libc::seccomp_data, arch) as u32;
 const ARG0_LO: u32 = offset_of!(libc::seccomp_data, args) as u32;
+const ARG1_LO: u32 = ARG0_LO + 8;
 const ARG2_LO: u32 = ARG0_LO + 16;
 /// The caller's instruction pointer, the address after its syscall
 /// instruction, in two words.
@@ -350,9 +378,11 @@ impl Prog {
             Program::Runc => merge(a.plain, a.mounts),
         };
         // Where the shared returns land, so every jump to one is
-        // absolute.
+        // absolute. The sections, in order: the plain chain (n), the
+        // clone3 gate (5), clone and unshare (4), socket (11),
+        // personality (7) and ioctl (4).
         let head = if a.x32 { 6 } else { 4 };
-        let allow = head + n + 5 + 4 + 11 + 7;
+        let allow = head + n + 5 + 4 + 11 + 7 + 4;
         let eperm = allow + 1;
         let enosys = allow + 2;
 
@@ -411,6 +441,16 @@ impl Prog {
         p.jmp(JEQ_K, PER_LINUX32, allow, p.next());
         p.jmp(JEQ_K, PER_LINUX | ADDR_NO_RANDOMIZE, allow, p.next());
         p.jmp(JEQ_K, PER_LINUX32 | ADDR_NO_RANDOMIZE, allow, eperm);
+        // ioctl(fd, cmd, ...). The command is argument 1, a register
+        // seccomp reads, so the two quota commands are refused by number
+        // and every other ioctl passes. FS_IOC_FSSETXATTR would set a
+        // workspace file's project id, FS_IOC_SETFLAGS would clear
+        // PROJINHERIT on its directory, and either leaves the disk quota.
+        let after = p.len as usize + 4;
+        p.jmp(JEQ_K, a.ioctl, p.next(), after);
+        p.ld(ARG1_LO);
+        p.jmp(JEQ_K, FS_IOC_FSSETXATTR, eperm, p.next());
+        p.jmp(JEQ_K, FS_IOC_SETFLAGS, eperm, allow);
         assert!(
             p.len as usize == allow,
             "the sections are not the size the layout says"
@@ -754,12 +794,39 @@ pub(crate) mod tests {
                 ALLOW,
             ),
             case(
-                "ioctl",
-                Nr::Per {
-                    x86_64: 16,
-                    aarch64: 29,
-                },
+                "ioctl(TIOCGWINSZ), a neighbour the filter passes",
+                Nr::Of(|a| a.ioctl),
                 [1, 0x5413, 0, 0, 0, 0],
+                ALLOW,
+            ),
+            case(
+                "ioctl(FS_IOC_FSSETXATTR), the project-id escape",
+                Nr::Of(|a| a.ioctl),
+                [1, 0x401c_5820, 0, 0, 0, 0],
+                EPERM,
+            ),
+            case(
+                "ioctl(FS_IOC_SETFLAGS), clears PROJINHERIT",
+                Nr::Of(|a| a.ioctl),
+                [1, 0x4008_6602, 0, 0, 0, 0],
+                EPERM,
+            ),
+            case(
+                "ioctl(FS_IOC_FSGETXATTR), the read side, passes",
+                Nr::Of(|a| a.ioctl),
+                [1, 0x801c_581f, 0, 0, 0, 0],
+                ALLOW,
+            ),
+            case(
+                "file_setattr, the syscall twin of FS_IOC_FSSETXATTR",
+                Nr::Both(469),
+                arg0(0),
+                EPERM,
+            ),
+            case(
+                "file_getattr, the read side, passes",
+                Nr::Both(468),
+                arg0(0),
                 ALLOW,
             ),
             case(
@@ -1162,10 +1229,10 @@ pub(crate) mod tests {
     #[test]
     fn the_programs_are_short_and_checked() {
         let cases: &[(&str, &Arch, Program, usize)] = &[
-            ("x86_64 fiber", &X86_64, Program::Fiber, 83),
-            ("x86_64 runc", &X86_64, Program::Runc, 97),
-            ("aarch64 fiber", &AARCH64, Program::Fiber, 72),
-            ("aarch64 runc", &AARCH64, Program::Runc, 86),
+            ("x86_64 fiber", &X86_64, Program::Fiber, 88),
+            ("x86_64 runc", &X86_64, Program::Runc, 102),
+            ("aarch64 fiber", &AARCH64, Program::Fiber, 77),
+            ("aarch64 runc", &AARCH64, Program::Runc, 91),
         ];
         for (name, arch, which, len) in cases {
             let p = Prog::build(arch, *which);
@@ -1273,6 +1340,9 @@ pub(crate) mod tests {
             ("memfd_secret", libc::SYS_memfd_secret),
             // libc 0.2.191 has no SYS_lsm_set_self_attr. 460 on every arch.
             ("lsm_set_self_attr", 460),
+            // libc 0.2.191 has no SYS_file_setattr. 469 on every arch,
+            // the x32 table included (it has no separate number).
+            ("file_setattr", 469),
             #[cfg(target_arch = "x86_64")]
             ("uselib", libc::SYS_uselib),
             #[cfg(target_arch = "x86_64")]
@@ -1329,11 +1399,22 @@ pub(crate) mod tests {
             ("unshare", NATIVE.unshare, libc::SYS_unshare),
             ("socket", NATIVE.socket, libc::SYS_socket),
             ("personality", NATIVE.personality, libc::SYS_personality),
+            ("ioctl", NATIVE.ioctl, libc::SYS_ioctl),
             ("clone3", CLONE3, libc::SYS_clone3),
         ];
         for (name, got, want) in checked {
             assert_eq!(c_long::from(*got), *want, "{name}");
         }
+        // The two refused ioctl commands, recomputed from the
+        // asm-generic _IOW(dir, type, nr, size) layout so a typo in the
+        // hex is a test failure. struct fsxattr is 28 bytes, long is 8.
+        let iow = |ty: u32, nr: u32, size: u32| (1u32 << 30) | (ty << 8) | nr | (size << 16);
+        assert_eq!(
+            FS_IOC_FSSETXATTR,
+            iow(b'X' as u32, 32, 28),
+            "FS_IOC_FSSETXATTR"
+        );
+        assert_eq!(FS_IOC_SETFLAGS, iow(b'f' as u32, 2, 8), "FS_IOC_SETFLAGS");
         assert_eq!(
             NATIVE.x32,
             cfg!(target_arch = "x86_64"),
@@ -1546,6 +1627,30 @@ pub(crate) mod tests {
                 gate: false,
                 nr: libc::SYS_personality,
                 args: [0x0002_0000, 0, 0, 0, 0],
+                want: libc::EPERM,
+            },
+            // seccomp answers before the kernel reads fd 0, so a null
+            // argument is safe and the errno is the filter's, on any
+            // kernel.
+            Live {
+                name: "ioctl(FS_IOC_FSSETXATTR)",
+                gate: false,
+                nr: libc::SYS_ioctl,
+                args: [0, 0x401c_5820, 0, 0, 0],
+                want: libc::EPERM,
+            },
+            Live {
+                name: "ioctl(FS_IOC_SETFLAGS)",
+                gate: false,
+                nr: libc::SYS_ioctl,
+                args: [0, 0x4008_6602, 0, 0, 0],
+                want: libc::EPERM,
+            },
+            Live {
+                name: "file_setattr",
+                gate: false,
+                nr: 469,
+                args: [0, 0, 0, 0, 0],
                 want: libc::EPERM,
             },
         ];

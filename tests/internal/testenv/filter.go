@@ -37,6 +37,12 @@ var filterProbes = []struct {
 	{probe: "pidfd-getfd", want: "EPERM"},
 	{probe: "syslog", want: "EPERM"},
 	{probe: "sethostname", want: "EPERM"},
+	// The quota-escape routes. A proc fiber owns its workspace files in
+	// the initial user namespace, so without these it could retag them
+	// out of their project quota.
+	{probe: "fssetxattr", want: "EPERM"},
+	{probe: "setflags", want: "EPERM"},
+	{probe: "file-setattr", want: "EPERM"},
 	{probe: "x32", want: "SIGSYS", amd64: true},
 	{probe: "unshare-fs", want: "ok"},
 	{probe: "af-unix", want: "ok"},
