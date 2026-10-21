@@ -265,6 +265,7 @@ pub fn exit_why(code: c_int) -> Option<&'static [u8]> {
         child::EX_FDS => b"could not set up its descriptors",
         child::EX_IDENTITY => b"did not get its incarnation record",
         child::EX_CGROUP => b"could not join its cgroup leaf",
+        child::EX_FILTER => b"could not stack its clone3 filter",
         _ => return None,
     })
 }
@@ -1456,6 +1457,7 @@ mod tests {
             ("120", 120, Some("could not set up its descriptors")),
             ("121", 121, Some("did not get its incarnation record")),
             ("125", 125, Some("could not join its cgroup leaf")),
+            ("126", 126, Some("could not stack its clone3 filter")),
             ("the template's own", 3, None),
             ("zero", 0, None),
         ];

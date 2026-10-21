@@ -15,7 +15,8 @@
  *     its own pid namespace, and no capabilities.
  *   - The zygote and every child run under no_new_privs and the fiber
  *     filter, a seccomp program fz_serve installs before READY. A
- *     zygote that cannot install it never says READY.
+ *     zygote that cannot install it never says READY. Each child adds a
+ *     filter that refuses clone3 before any application code runs.
  *   - Identity (the fence, the seed, a handoff fiber's key) reaches the
  *     child after the fork, on its channel, and is never baked into the
  *     template.
@@ -77,10 +78,10 @@
  *   zygote -> fiberd  CLONED <fence> <pid>
  *   zygote -> fiberd  ERROR <fence> <reason>
  *                     A child that ended before ready gets "died before
- *                     ready: exit:<code>". Codes 110-125 are the
- *                     library's own (confinement, descriptors, the
- *                     incarnation record, the cgroup leaf), and the
- *                     reason then says which.
+ *                     ready: exit:<code>". Codes 110-126 are the
+ *                     library's own (confinement, the child's filter,
+ *                     descriptors, the incarnation record, the cgroup
+ *                     leaf), and the reason then says which.
  *   zygote -> fiberd  EXITED <pid> exit:<code>|signal:<num>
  *
  * On every fiber's channel the first message, queued by fiberd before

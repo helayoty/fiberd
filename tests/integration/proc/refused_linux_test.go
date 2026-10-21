@@ -145,10 +145,10 @@ func births(t *testing.T, trace string) (clone3, legacy int) {
 // of the bounding set, so the zygote has lost it after exec, and strace
 // -f records the clone calls to count.
 //
-// Two refusals meet here. The fiber filter answers clone3 with ENOSYS, so
-// birth takes the legacy clone with the same flags, the kernel refuses
-// its CLONE_NEWPID with EPERM, and birth never retries with fewer
-// namespaces. And the zygote,
+// Two refusals meet here. birth's clone3 passes the fiber filter's gate,
+// the kernel refuses its CLONE_NEWPID with EPERM, and birth makes no
+// second try, neither the legacy clone nor fewer namespaces. And the
+// zygote,
 // refused its own mount namespace in fz_init, ends at PREPARE mntns with
 // the reason instead of READY, before any birth, so no clone3 is even
 // asked for and fiberd fails the warm. The oldest code asked the
@@ -184,7 +184,7 @@ func TestRefusedNamespacesRefuseClone(t *testing.T) {
 		opts, wantErr  string
 		clone3, legacy int
 	}{
-		{name: "the kernel refuses the pid namespace once per CLONE", setup: "PREPARE none\n", opts: "pidns", wantErr: "clone: Operation not permitted", clone3: 1, legacy: 1},
+		{name: "the kernel refuses the pid namespace once per CLONE", setup: "PREPARE none\n", opts: "pidns", wantErr: "clone: Operation not permitted", clone3: 1, legacy: 0},
 		{name: "the zygote without a namespace of its own ends at PREPARE mntns before any birth", setup: "PREPARE mntns\n",
 			wantFirst: "ERROR ? the zygote could not take a mount namespace of its own: unshare: errno 1"},
 	}

@@ -113,6 +113,13 @@ func TestChildExitCodes(t *testing.T) {
 			nr:   unix.SYS_RECVMSG, arg: 0, value: 4, mask: 0xffffffff,
 			want: "died before ready: exit:121 (did not get its incarnation record)",
 		},
+		{
+			// The child's clone3 filter, its first act. The zygote's own
+			// install is a zygote thread's call and runs.
+			name: "126 its clone3 filter refused",
+			nr:   unix.SYS_SECCOMP, arg: anyArg,
+			want: "died before ready: exit:126 (could not stack its clone3 filter)",
+		},
 	}
 	for i, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

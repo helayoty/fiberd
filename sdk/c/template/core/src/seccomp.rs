@@ -3,7 +3,9 @@
 //! fiber inherits by reference at the clone. Calls that need no
 //! capability yet reach deep kernel code answer an errno, four calls
 //! have an argument checked, and a foreign arch or an x32 number kills
-//! the process. A runc zygote, whose fibers keep CAP_SYS_ADMIN and never
+//! the process. clone3 passes from one address alone, birth's own
+//! syscall instruction, and every child stacks a second filter that
+//! closes it. A runc zygote, whose fibers keep CAP_SYS_ADMIN and never
 //! get a mount namespace, takes a second program that also refuses the
 //! mount family. Both are built and checked at compile time, so a jump
 //! that lands outside the program is a build error.
@@ -17,6 +19,7 @@
 
 use core::ffi::{c_int, c_long, c_ulong};
 use core::mem::offset_of;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::child::prctl;
 use crate::sys;
@@ -257,20 +260,33 @@ const NR_OFF: u32 = offset_of!(libc::seccomp_data, nr) as u32;
 const ARCH_OFF: u32 = offset_of!(libc::seccomp_data, arch) as u32;
 const ARG0_LO: u32 = offset_of!(libc::seccomp_data, args) as u32;
 const ARG2_LO: u32 = ARG0_LO + 16;
+/// The caller's instruction pointer, the address after its syscall
+/// instruction, in two words.
+const IP_LO: u32 = offset_of!(libc::seccomp_data, instruction_pointer) as u32;
+const IP_HI: u32 = IP_LO + 4;
 const _: () = assert!(
     cfg!(target_endian = "little"),
-    "ARGn_LO adds 4 on a big-endian arch"
+    "ARGn_LO and IP_LO add 4 on a big-endian arch"
 );
+
+/// What the gate compares against until gated writes the address. No
+/// user instruction sits at !0, so the built program lets no clone3
+/// through.
+const NO_GATE: u32 = u32::MAX;
 
 /// The most words a program has.
 pub const PROG_MAX: usize = 112;
 
 /// A seccomp program in fixed storage, built at compile time.
+#[derive(Clone, Copy)]
 pub struct Prog {
     /// The words, the first len of them live.
     pub words: [libc::sock_filter; PROG_MAX],
     /// How many words the program has.
     pub len: u16,
+    /// The two compares that hold the gate address, low word then
+    /// high, which gated writes.
+    pub gate: [u16; 2],
 }
 
 /// A BPF statement, BPF_STMT in linux/filter.h.
@@ -327,6 +343,7 @@ impl Prog {
         let mut p = Prog {
             words: [stmt(0, 0); PROG_MAX],
             len: 0,
+            gate: [0, 0],
         };
         let (chain, n) = match which {
             Program::Fiber => merge(a.plain, &[]),
@@ -335,7 +352,7 @@ impl Prog {
         // Where the shared returns land, so every jump to one is
         // absolute.
         let head = if a.x32 { 6 } else { 4 };
-        let allow = head + n + 1 + 4 + 11 + 7;
+        let allow = head + n + 5 + 4 + 11 + 7;
         let eperm = allow + 1;
         let enosys = allow + 2;
 
@@ -352,9 +369,17 @@ impl Prog {
             p.jmp(JEQ_K, chain[i], eperm, p.next());
             i += 1;
         }
-        // clone3's flags sit in a struct seccomp cannot read. ENOSYS, as
-        // an old kernel answers, so libc falls back to clone.
-        p.jmp(JEQ_K, CLONE3, enosys, p.next());
+        // clone3's flags sit in a struct seccomp cannot read, so it
+        // passes from birth's gate alone (child.rs), whose 64-bit address
+        // gated writes into the two compares. From anywhere else it is
+        // ENOSYS, as an old kernel answers, so libc falls back to clone.
+        p.jmp(JEQ_K, CLONE3, p.next(), p.next() + 4);
+        p.ld(IP_LO);
+        p.gate[0] = p.len;
+        p.jmp(JEQ_K, NO_GATE, p.next(), enosys);
+        p.ld(IP_HI);
+        p.gate[1] = p.len;
+        p.jmp(JEQ_K, NO_GATE, allow, enosys);
         // clone and unshare. The kernel reads clone's low 32 bits alone,
         // and refuses unshare any high bit with EINVAL, so the low word
         // is the whole check.
@@ -424,6 +449,15 @@ impl Prog {
     pub fn words(&self) -> &[libc::sock_filter] {
         self.words.get(..usize::from(self.len)).unwrap_or(&[])
     }
+
+    /// A copy with gate, the address seccomp reports for birth's clone3,
+    /// in the two compares.
+    pub fn gated(&self, gate: u64) -> Prog {
+        let mut p = *self;
+        p.words[usize::from(self.gate[0])].k = gate as u32;
+        p.words[usize::from(self.gate[1])].k = (gate >> 32) as u32;
+        p
+    }
 }
 
 /// Two sorted lists as one sorted list and its length. Both must be
@@ -472,8 +506,9 @@ pub enum Refusal {
 }
 
 /// install puts the program on every thread of the process, under
-/// no_new_privs so no capability is needed. Fibers inherit it at the
-/// clone. A refusal means the zygote must not serve.
+/// no_new_privs so no capability is needed, with the gate's address
+/// read here so ASLR is moot. Fibers inherit it at the clone. A refusal
+/// means the zygote must not serve.
 pub fn install(which: Program) -> Result<(), Refusal> {
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     {
@@ -485,7 +520,8 @@ pub fn install(which: Program) -> Result<(), Refusal> {
         let p = match which {
             Program::Fiber => &PROG,
             Program::Runc => &PROG_RUNC,
-        };
+        }
+        .gated(crate::child::gate_addr());
         let prog = libc::sock_fprog {
             len: p.len,
             // The kernel copies the program and writes nothing through
@@ -497,6 +533,51 @@ pub fn install(which: Program) -> Result<(), Refusal> {
             r if r < 0 => Err(Refusal::Errno(sys::errno())),
             tid => Err(Refusal::Thread(tid as c_int)),
         }
+    }
+}
+
+/// Whether the real program is on this process, so a child stacks the
+/// clone3 refusal. The faked installs of the unit tests leave it clear,
+/// since their children have no no_new_privs to stack under.
+pub static INSTALLED: AtomicBool = AtomicBool::new(false);
+
+/// The child's filter. clone3 is ENOSYS from any address, so a fiber
+/// cannot reach the gate, by a jump or by an exec that puts a syscall
+/// at its address. Every other call passes to the zygote's program
+/// beneath, and the strictest answer wins.
+pub static CHILD: [libc::sock_filter; 4] = [
+    stmt(LD_W_ABS, NR_OFF),
+    libc::sock_filter {
+        code: JEQ_K as u16,
+        jt: 0,
+        jf: 1,
+        k: CLONE3,
+    },
+    stmt(RET_K, ENOSYS),
+    stmt(RET_K, ALLOW),
+];
+
+/// refuse_clone3 stacks CHILD on the calling thread, a fresh child's
+/// only one, under the no_new_privs the zygote set. 0, or -1 with
+/// errno.
+pub fn refuse_clone3() -> c_long {
+    let prog = libc::sock_fprog {
+        len: CHILD.len() as u16,
+        filter: CHILD.as_ptr().cast_mut(),
+    };
+    // SAFETY: prog and its words are live for the call, and the kernel
+    // only reads them.
+    unsafe {
+        sys::syscall(
+            libc::SYS_seccomp,
+            [
+                c_long::from(libc::SECCOMP_SET_MODE_FILTER),
+                0,
+                (&raw const prog) as c_long,
+                0,
+                0,
+            ],
+        )
     }
 }
 
@@ -516,7 +597,8 @@ fn apply(prog: &libc::sock_fprog) -> c_long {
     apply_real(prog)
 }
 
-/// no_new_privs, then seccomp(SET_MODE_FILTER, TSYNC).
+/// no_new_privs, then seccomp(SET_MODE_FILTER, TSYNC), and INSTALLED on
+/// success.
 fn apply_real(prog: &libc::sock_fprog) -> c_long {
     let (zero, one): (c_ulong, c_ulong) = (0, 1);
     // SAFETY: integer arguments alone.
@@ -525,7 +607,7 @@ fn apply_real(prog: &libc::sock_fprog) -> c_long {
     }
     // SAFETY: prog and its words are live for the call, and the kernel
     // only reads them.
-    unsafe {
+    let r = unsafe {
         sys::syscall(
             libc::SYS_seccomp,
             [
@@ -536,7 +618,11 @@ fn apply_real(prog: &libc::sock_fprog) -> c_long {
                 0,
             ],
         )
+    };
+    if r == 0 {
+        INSTALLED.store(true, Ordering::Relaxed);
     }
+    r
 }
 
 #[cfg(test)]
@@ -550,6 +636,7 @@ pub(crate) mod tests {
         clippy::type_complexity
     )]
     use super::*;
+    use core::ptr;
     use std::sync::Mutex;
 
     /// What apply answers under test: (return, errno). None runs the real
@@ -558,12 +645,26 @@ pub(crate) mod tests {
     /// The length of the program the faked apply was given.
     pub(crate) static SEEN_LEN: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
 
+    /// A gate address with distinct words, as a text address has.
+    const GATE: u64 = 0x0000_7f3a_1b2c_4d58;
+    /// Some other address in the library, where the vectors run from.
+    const ELSEWHERE: u64 = GATE + 0x1000;
+
+    /// CHILD as a Prog, for the interpreter.
+    fn child_prog() -> Prog {
+        let mut p = Prog::build(&NATIVE, Program::Fiber);
+        p.words[..CHILD.len()].copy_from_slice(&CHILD);
+        p.len = CHILD.len() as u16;
+        p
+    }
+
     /// A cBPF interpreter for the five codes the program uses, over a
-    /// seccomp_data of nr, arch and args.
-    fn run(p: &Prog, arch: u32, nr: u32, args: [u64; 6]) -> u32 {
+    /// seccomp_data of nr, arch, instruction pointer and args.
+    fn run(p: &Prog, arch: u32, nr: u32, ip: u64, args: [u64; 6]) -> u32 {
         let mut data = [0u8; 64];
         data[..4].copy_from_slice(&nr.to_le_bytes());
         data[4..8].copy_from_slice(&arch.to_le_bytes());
+        data[8..16].copy_from_slice(&ip.to_le_bytes());
         for (i, a) in args.iter().enumerate() {
             data[16 + 8 * i..24 + 8 * i].copy_from_slice(&a.to_le_bytes());
         }
@@ -918,15 +1019,15 @@ pub(crate) mod tests {
             .iter()
             .flat_map(|a| programs.iter().map(move |w| (a, *w)))
         {
-            let p = Prog::build(a, which);
+            let p = Prog::build(a, which).gated(GATE);
             for tc in &cases {
-                let got = run(&p, a.audit, tc.nr.on(a), tc.args);
+                let got = run(&p, a.audit, tc.nr.on(a), ELSEWHERE, tc.args);
                 assert_eq!(got, tc.want, "{arch_name} {which:?}: {}", tc.name);
             }
             // One case per plain refusal, whatever the arguments.
             for &nr in a.plain {
                 assert_eq!(
-                    run(&p, a.audit, nr, [u64::MAX; 6]),
+                    run(&p, a.audit, nr, ELSEWHERE, [u64::MAX; 6]),
                     EPERM,
                     "{arch_name} {which:?}: nr {nr}"
                 );
@@ -935,7 +1036,7 @@ pub(crate) mod tests {
             let mounts = if which == Program::Runc { EPERM } else { ALLOW };
             for &nr in a.mounts {
                 assert_eq!(
-                    run(&p, a.audit, nr, [u64::MAX; 6]),
+                    run(&p, a.audit, nr, ELSEWHERE, [u64::MAX; 6]),
                     mounts,
                     "{arch_name} {which:?}: mount nr {nr}"
                 );
@@ -943,19 +1044,19 @@ pub(crate) mod tests {
             // The other arch's table is foreign, and i386's too.
             let other = if a.x32 { AARCH64.audit } else { X86_64.audit };
             assert_eq!(
-                run(&p, other, 39, arg0(0)),
+                run(&p, other, 39, ELSEWHERE, arg0(0)),
                 KILL,
                 "{arch_name} {which:?}: a foreign arch"
             );
             assert_eq!(
-                run(&p, 0x4000_0003, 39, arg0(0)),
+                run(&p, 0x4000_0003, 39, ELSEWHERE, arg0(0)),
                 KILL,
                 "{arch_name} {which:?}: i386"
             );
             // x86_64 alone has an x32 table under its audit arch.
             let x32 = if a.x32 { KILL } else { ALLOW };
             assert_eq!(
-                run(&p, a.audit, X32_SYSCALL_BIT | 39, arg0(0)),
+                run(&p, a.audit, X32_SYSCALL_BIT | 39, ELSEWHERE, arg0(0)),
                 x32,
                 "{arch_name} {which:?}: an x32 number"
             );
@@ -963,19 +1064,136 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn clone3_passes_from_the_gate_alone() {
+        // Where clone3 is called from, and what each zygote program and
+        // the child's filter answer.
+        let cases: &[(&str, u64, u32, u32)] = &[
+            ("at the gate", GATE, ALLOW, ENOSYS),
+            ("one byte past the gate", GATE + 1, ENOSYS, ENOSYS),
+            ("one byte before the gate", GATE - 1, ENOSYS, ENOSYS),
+            (
+                "the gate's low word under another high word",
+                GATE ^ (1 << 40),
+                ENOSYS,
+                ENOSYS,
+            ),
+            (
+                "the gate's high word over another low word",
+                GATE ^ (1 << 12),
+                ENOSYS,
+                ENOSYS,
+            ),
+            ("elsewhere in the library", ELSEWHERE, ENOSYS, ENOSYS),
+            ("address zero", 0, ENOSYS, ENOSYS),
+            ("the unwritten compare's address", u64::MAX, ENOSYS, ENOSYS),
+        ];
+        let arches: &[(&str, &Arch)] = &[("x86_64", &X86_64), ("aarch64", &AARCH64)];
+        let child = child_prog();
+        for (arch_name, a) in arches {
+            for which in [Program::Fiber, Program::Runc] {
+                let p = Prog::build(a, which).gated(GATE);
+                for (name, ip, want, _) in cases {
+                    assert_eq!(
+                        run(&p, a.audit, CLONE3, *ip, arg0(0)),
+                        *want,
+                        "{arch_name} {which:?}: clone3 {name}"
+                    );
+                }
+                // Before gated, nothing in user space passes.
+                let built = Prog::build(a, which);
+                for ip in [0, GATE, ELSEWHERE] {
+                    assert_eq!(
+                        run(&built, a.audit, CLONE3, ip, arg0(0)),
+                        ENOSYS,
+                        "{arch_name} {which:?}: clone3 from {ip:#x} before gated"
+                    );
+                }
+            }
+            for (name, ip, _, want) in cases {
+                assert_eq!(
+                    run(&child, a.audit, CLONE3, *ip, arg0(0)),
+                    *want,
+                    "{arch_name} child: clone3 {name}"
+                );
+            }
+        }
+        // The child's filter lets everything else through, the zygote's
+        // program beneath answers for it.
+        let pass: &[(&str, Nr, [u64; 6])] = &[
+            (
+                "getpid",
+                Nr::Per {
+                    x86_64: 39,
+                    aarch64: 172,
+                },
+                arg0(0),
+            ),
+            ("clone of a fork", Nr::Of(|a| a.clone), arg0(SIGCHLD)),
+            (
+                "clone into a user namespace",
+                Nr::Of(|a| a.clone),
+                arg0(CLONE_NEWUSER | SIGCHLD),
+            ),
+            (
+                "unshare of a user namespace",
+                Nr::Of(|a| a.unshare),
+                arg0(CLONE_NEWUSER),
+            ),
+            ("io_uring_setup", Nr::Both(425), arg0(1)),
+            ("socket(AF_ALG)", Nr::Of(|a| a.socket), [38, 5, 0, 0, 0, 0]),
+            ("a foreign arch's getpid", Nr::Both(39), arg0(0)),
+        ];
+        for (arch_name, a) in arches {
+            for (name, nr, args) in pass {
+                let arch = if *name == "a foreign arch's getpid" {
+                    0x4000_0003
+                } else {
+                    a.audit
+                };
+                assert_eq!(
+                    run(&child, arch, nr.on(a), GATE, *args),
+                    ALLOW,
+                    "{arch_name} child: {name}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn the_programs_are_short_and_checked() {
         let cases: &[(&str, &Arch, Program, usize)] = &[
-            ("x86_64 fiber", &X86_64, Program::Fiber, 79),
-            ("x86_64 runc", &X86_64, Program::Runc, 93),
-            ("aarch64 fiber", &AARCH64, Program::Fiber, 68),
-            ("aarch64 runc", &AARCH64, Program::Runc, 82),
+            ("x86_64 fiber", &X86_64, Program::Fiber, 83),
+            ("x86_64 runc", &X86_64, Program::Runc, 97),
+            ("aarch64 fiber", &AARCH64, Program::Fiber, 72),
+            ("aarch64 runc", &AARCH64, Program::Runc, 86),
         ];
         for (name, arch, which, len) in cases {
             let p = Prog::build(arch, *which);
             assert_eq!(usize::from(p.len), *len, "{name}: length");
             assert_eq!(p.words().len(), *len, "{name}: live words");
             assert!(p.check(), "{name}");
+            // The gate's two compares, low then high, hold NO_GATE until
+            // gated writes the address.
+            let [lo, hi] = p.gate.map(usize::from);
+            assert_eq!(hi, lo + 2, "{name}: the compares sit two words apart");
+            for (what, i) in [("low", lo), ("high", hi)] {
+                let w = p.words[i];
+                assert_eq!(
+                    u32::from(w.code),
+                    JEQ_K,
+                    "{name}: the {what} compare's code"
+                );
+                assert_eq!(w.k, NO_GATE, "{name}: the {what} compare before gated");
+            }
+            let g = p.gated(GATE);
+            assert_eq!(g.len, p.len, "{name}: gated keeps the length");
+            assert_eq!(g.words[lo].k, GATE as u32, "{name}: the low word");
+            assert_eq!(g.words[hi].k, (GATE >> 32) as u32, "{name}: the high word");
+            assert!(g.check(), "{name}: gated");
         }
+        let child = child_prog();
+        assert_eq!(child.len, 4, "the child's filter is four words");
+        assert!(child.check(), "the child's filter");
     }
 
     #[test]
@@ -1143,126 +1361,42 @@ pub(crate) mod tests {
         status
     }
 
-    #[test]
-    fn the_kernel_takes_the_program_and_answers_as_the_vectors_say() {
-        let _serial = crate::serial();
-        // Each case is a raw call made under the real filter in a forked
-        // child, and the child's exit code is the first case that did
-        // not answer as expected, or 0. Only system calls run there.
-        struct Live {
-            name: &'static str,
-            nr: c_long,
-            args: [c_long; 5],
-            want: c_int, // 0 for success, else the errno
-        }
-        let live = [
-            Live {
-                name: "getpid",
-                nr: libc::SYS_getpid,
-                args: [0; 5],
-                want: 0,
-            },
-            Live {
-                name: "io_uring_setup",
-                nr: libc::SYS_io_uring_setup,
-                args: [1, 0, 0, 0, 0],
-                want: libc::EPERM,
-            },
-            Live {
-                name: "kcmp",
-                nr: libc::SYS_kcmp,
-                args: [0; 5],
-                want: libc::EPERM,
-            },
-            Live {
-                name: "clone3",
-                nr: libc::SYS_clone3,
-                args: [0; 5],
-                want: libc::ENOSYS,
-            },
-            Live {
-                name: "unshare(CLONE_NEWUSER)",
-                nr: libc::SYS_unshare,
-                args: [c_long::from(libc::CLONE_NEWUSER), 0, 0, 0, 0],
-                want: libc::EPERM,
-            },
-            Live {
-                name: "unshare(CLONE_FS)",
-                nr: libc::SYS_unshare,
-                args: [c_long::from(libc::CLONE_FS), 0, 0, 0, 0],
-                want: 0,
-            },
-            Live {
-                name: "socket(AF_ALG)",
-                nr: libc::SYS_socket,
-                args: [38, c_long::from(libc::SOCK_SEQPACKET), 0, 0, 0],
-                want: libc::EAFNOSUPPORT,
-            },
-            Live {
-                name: "socket(AF_NETLINK, NETLINK_SOCK_DIAG)",
-                nr: libc::SYS_socket,
-                args: [
-                    c_long::from(libc::AF_NETLINK),
-                    c_long::from(libc::SOCK_RAW),
-                    4,
-                    0,
-                    0,
-                ],
-                want: libc::EPROTONOSUPPORT,
-            },
-            Live {
-                name: "socket(AF_NETLINK, NETLINK_ROUTE)",
-                nr: libc::SYS_socket,
-                args: [
-                    c_long::from(libc::AF_NETLINK),
-                    c_long::from(libc::SOCK_RAW),
-                    0,
-                    0,
-                    0,
-                ],
-                want: 0,
-            },
-            Live {
-                name: "socket(AF_UNIX)",
-                nr: libc::SYS_socket,
-                args: [
-                    c_long::from(libc::AF_UNIX),
-                    c_long::from(libc::SOCK_STREAM),
-                    0,
-                    0,
-                    0,
-                ],
-                want: 0,
-            },
-            Live {
-                name: "personality query",
-                nr: libc::SYS_personality,
-                args: [0xFFFF_FFFF, 0, 0, 0, 0],
-                want: 0,
-            },
-            Live {
-                name: "personality(UNAME26)",
-                nr: libc::SYS_personality,
-                args: [0x0002_0000, 0, 0, 0, 0],
-                want: libc::EPERM,
-            },
-        ];
-        // SAFETY: the child makes raw system calls and _exits.
+    /// A raw call made under the real filter in a forked child. Only
+    /// system calls run there, and the child's exit code is the first
+    /// case that did not answer as expected, or 0.
+    struct Live {
+        name: &'static str,
+        /// clone3 through birth's gate, with no args and a zero size,
+        /// which the kernel refuses with EINVAL once the filter lets it
+        /// through. nr and args are unused.
+        gate: bool,
+        nr: c_long,
+        args: [c_long; 5],
+        want: c_int, // 0 for success, else the errno
+    }
+
+    /// Forks, runs setup then the cases in the child, and names the
+    /// case that failed. setup's answer 0 means the kernel refused a
+    /// program.
+    fn live(setup: fn() -> c_int, cases: &[Live]) {
+        // SAFETY: the child installs filters, makes raw calls and _exits.
         let pid = unsafe { libc::fork() };
         assert!(pid >= 0, "fork");
         if pid == 0 {
-            let prog = libc::sock_fprog {
-                len: PROG.len,
-                filter: PROG.words.as_ptr().cast_mut(),
-            };
-            if apply_real(&prog) != 0 {
+            if setup() != 0 {
                 // SAFETY: _exit ends the child.
                 unsafe { libc::_exit(100) };
             }
-            for (i, tc) in live.iter().enumerate() {
+            for (i, tc) in cases.iter().enumerate() {
                 // SAFETY: each call takes integers, a null pointer where
                 // one is read (clone3, io_uring_setup) fails before use.
-                let r = unsafe { sys::syscall(tc.nr, tc.args) };
+                let r = unsafe {
+                    if tc.gate {
+                        crate::child::clone3(ptr::null_mut(), 0)
+                    } else {
+                        sys::syscall(tc.nr, tc.args)
+                    }
+                };
                 let ok = if tc.want == 0 {
                     r >= 0
                 } else {
@@ -1282,13 +1416,192 @@ pub(crate) mod tests {
             "the child died: status {status:#x}"
         );
         let code = libc::WEXITSTATUS(status);
-        assert_ne!(code, 100, "the kernel refused the program");
+        assert_ne!(code, 100, "the kernel refused a program");
         if code != 0 {
             panic!(
                 "{}: not the answer expected",
-                live[(code - 1) as usize].name
+                cases[(code - 1) as usize].name
             );
         }
+    }
+
+    /// The zygote's program with the real gate, as install puts it on.
+    fn install_zygote() -> c_int {
+        let p = PROG.gated(crate::child::gate_addr());
+        let prog = libc::sock_fprog {
+            len: p.len,
+            filter: p.words.as_ptr().cast_mut(),
+        };
+        apply_real(&prog) as c_int
+    }
+
+    #[test]
+    fn the_kernel_takes_the_program_and_answers_as_the_vectors_say() {
+        let _serial = crate::serial();
+        let cases = [
+            Live {
+                name: "getpid",
+                gate: false,
+                nr: libc::SYS_getpid,
+                args: [0; 5],
+                want: 0,
+            },
+            Live {
+                name: "io_uring_setup",
+                gate: false,
+                nr: libc::SYS_io_uring_setup,
+                args: [1, 0, 0, 0, 0],
+                want: libc::EPERM,
+            },
+            Live {
+                name: "kcmp",
+                gate: false,
+                nr: libc::SYS_kcmp,
+                args: [0; 5],
+                want: libc::EPERM,
+            },
+            Live {
+                name: "clone3 from libc's syscall",
+                gate: false,
+                nr: libc::SYS_clone3,
+                args: [0; 5],
+                want: libc::ENOSYS,
+            },
+            Live {
+                name: "clone3 from the gate reaches the kernel",
+                gate: true,
+                nr: 0,
+                args: [0; 5],
+                want: libc::EINVAL,
+            },
+            Live {
+                name: "unshare(CLONE_NEWUSER)",
+                gate: false,
+                nr: libc::SYS_unshare,
+                args: [c_long::from(libc::CLONE_NEWUSER), 0, 0, 0, 0],
+                want: libc::EPERM,
+            },
+            Live {
+                name: "unshare(CLONE_FS)",
+                gate: false,
+                nr: libc::SYS_unshare,
+                args: [c_long::from(libc::CLONE_FS), 0, 0, 0, 0],
+                want: 0,
+            },
+            Live {
+                name: "socket(AF_ALG)",
+                gate: false,
+                nr: libc::SYS_socket,
+                args: [38, c_long::from(libc::SOCK_SEQPACKET), 0, 0, 0],
+                want: libc::EAFNOSUPPORT,
+            },
+            Live {
+                name: "socket(AF_NETLINK, NETLINK_SOCK_DIAG)",
+                gate: false,
+                nr: libc::SYS_socket,
+                args: [
+                    c_long::from(libc::AF_NETLINK),
+                    c_long::from(libc::SOCK_RAW),
+                    4,
+                    0,
+                    0,
+                ],
+                want: libc::EPROTONOSUPPORT,
+            },
+            Live {
+                name: "socket(AF_NETLINK, NETLINK_ROUTE)",
+                gate: false,
+                nr: libc::SYS_socket,
+                args: [
+                    c_long::from(libc::AF_NETLINK),
+                    c_long::from(libc::SOCK_RAW),
+                    0,
+                    0,
+                    0,
+                ],
+                want: 0,
+            },
+            Live {
+                name: "socket(AF_UNIX)",
+                gate: false,
+                nr: libc::SYS_socket,
+                args: [
+                    c_long::from(libc::AF_UNIX),
+                    c_long::from(libc::SOCK_STREAM),
+                    0,
+                    0,
+                    0,
+                ],
+                want: 0,
+            },
+            Live {
+                name: "personality query",
+                gate: false,
+                nr: libc::SYS_personality,
+                args: [0xFFFF_FFFF, 0, 0, 0, 0],
+                want: 0,
+            },
+            Live {
+                name: "personality(UNAME26)",
+                gate: false,
+                nr: libc::SYS_personality,
+                args: [0x0002_0000, 0, 0, 0, 0],
+                want: libc::EPERM,
+            },
+        ];
+        live(install_zygote, &cases);
+    }
+
+    #[test]
+    fn the_childs_filter_closes_the_gate() {
+        let _serial = crate::serial();
+        // The zygote's program, then the child's filter on top, as a
+        // fiber has them. clone3 is ENOSYS from the gate too, and the
+        // zygote's answers still stand.
+        fn setup() -> c_int {
+            if install_zygote() != 0 {
+                return -1;
+            }
+            refuse_clone3() as c_int
+        }
+        let cases = [
+            Live {
+                name: "clone3 from the gate",
+                gate: true,
+                nr: 0,
+                args: [0; 5],
+                want: libc::ENOSYS,
+            },
+            Live {
+                name: "clone3 from libc's syscall",
+                gate: false,
+                nr: libc::SYS_clone3,
+                args: [0; 5],
+                want: libc::ENOSYS,
+            },
+            Live {
+                name: "getpid",
+                gate: false,
+                nr: libc::SYS_getpid,
+                args: [0; 5],
+                want: 0,
+            },
+            Live {
+                name: "unshare(CLONE_NEWUSER), the zygote's program beneath",
+                gate: false,
+                nr: libc::SYS_unshare,
+                args: [c_long::from(libc::CLONE_NEWUSER), 0, 0, 0, 0],
+                want: libc::EPERM,
+            },
+            Live {
+                name: "kcmp, the zygote's program beneath",
+                gate: false,
+                nr: libc::SYS_kcmp,
+                args: [0; 5],
+                want: libc::EPERM,
+            },
+        ];
+        live(setup, &cases);
     }
 
     #[cfg(target_arch = "x86_64")]
@@ -1299,11 +1612,7 @@ pub(crate) mod tests {
         let pid = unsafe { libc::fork() };
         assert!(pid >= 0, "fork");
         if pid == 0 {
-            let prog = libc::sock_fprog {
-                len: PROG.len,
-                filter: PROG.words.as_ptr().cast_mut(),
-            };
-            if apply_real(&prog) != 0 {
+            if install_zygote() != 0 {
                 // SAFETY: _exit ends the child.
                 unsafe { libc::_exit(100) };
             }

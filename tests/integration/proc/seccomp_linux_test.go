@@ -44,9 +44,9 @@ func noSeccomp(t *testing.T) string {
 // TestFiberFilter pins the fiber filter on a real fiber. The zygote
 // installs it before READY and every fiber inherits it, so a fiber
 // answers each refused class with its errno, lets the neighbours
-// through, and keeps all of it across a park and resume. clone3 is
-// ENOSYS under it, so every birth takes the legacy clone and the child
-// joins its leaf itself.
+// through, and keeps all of it across a park and resume. The birth's
+// clone3 passes the filter's gate straight into the leaf, and the fiber
+// stacks its own clone3 refusal.
 func TestFiberFilter(t *testing.T) {
 	needRoot(t)
 	rt := newRuntime(t)
@@ -75,7 +75,7 @@ func TestFiberFilter(t *testing.T) {
 		testenv.CheckFilter(t, when, func(t *testing.T, line string) string { return talk(t, ep, line) })
 	}
 	check("born", h.Endpoint)
-	t.Run("born/in its leaf by the legacy clone, under the zygote's filter", func(t *testing.T) {
+	t.Run("born/in its leaf by clone3, under the zygote's filter", func(t *testing.T) {
 		pid := peerPID(t, h.Endpoint)
 		zygotePID := atoiOrFatal(t, "fiber's PPid", procStatus(t, pid, "PPid"))
 		if got := procStatus(t, zygotePID, "Seccomp"); got != "2" {

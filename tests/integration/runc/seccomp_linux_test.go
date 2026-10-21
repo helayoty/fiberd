@@ -54,8 +54,8 @@ func TestFiberFilter(t *testing.T) {
 			})
 		}
 		testenv.CheckFilter(t, when, func(t *testing.T, line string) string { return talk(t, h.Endpoint, line) })
-		// fiberPID finds the fiber in its own leaf, where the legacy
-		// clone's child put itself.
+		// fiberPID finds the fiber in its own leaf, where the birth's
+		// clone3 put it.
 		t.Run(when+"/in its leaf", func(t *testing.T) { hm.fiberPID(t, fence) })
 	}
 	check("born", h, fence)

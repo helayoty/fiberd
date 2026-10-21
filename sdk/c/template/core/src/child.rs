@@ -19,11 +19,13 @@
 use core::ffi::{CStr, c_char, c_int, c_long, c_ulong, c_ulonglong, c_void};
 use core::mem::{offset_of, size_of};
 use core::ptr;
+use core::sync::atomic::Ordering;
 
 use crate::abi::{FZ_CHANNEL_FD, FZ_CHANNEL_PEER_FD, OnFiber, RECORD_MAX, RecordStore};
 use crate::ctl;
 use crate::fiber;
 use crate::mounts::{self, Tables};
+use crate::seccomp;
 use crate::sys;
 use crate::zygote;
 
@@ -81,23 +83,107 @@ pub const EX_FDS: c_int = 120;
 pub const EX_IDENTITY: c_int = 121;
 /// The child could not join its cgroup leaf after the legacy clone.
 pub const EX_CGROUP: c_int = 125;
+/// The child could not stack its clone3 filter.
+pub const EX_FILTER: c_int = 126;
 
 /// CLONE_INTO_CGROUP from linux/sched.h of 5.7. libc's is an int, which
 /// cannot hold it.
 pub const CLONE_INTO_CGROUP: c_ulonglong = 0x2_0000_0000;
+
+// birth's clone3 gate, the one syscall instruction the fiber filter lets
+// clone3 through. fz_clone3_gate_ret is the word after it, what
+// seccomp_data.instruction_pointer holds for the call.
+#[cfg(target_arch = "aarch64")]
+core::arch::global_asm!(
+    ".section .text.fz_clone3_gate,\"ax\",%progbits",
+    ".balign 4",
+    ".globl fz_clone3_gate",
+    ".hidden fz_clone3_gate",
+    ".type fz_clone3_gate,%function",
+    "fz_clone3_gate:",
+    "mov x8, #435",
+    "svc #0",
+    ".globl fz_clone3_gate_ret",
+    ".hidden fz_clone3_gate_ret",
+    "fz_clone3_gate_ret:",
+    "ret",
+    ".size fz_clone3_gate, .-fz_clone3_gate",
+);
+#[cfg(target_arch = "x86_64")]
+core::arch::global_asm!(
+    ".section .text.fz_clone3_gate,\"ax\",@progbits",
+    ".balign 16",
+    ".globl fz_clone3_gate",
+    ".hidden fz_clone3_gate",
+    ".type fz_clone3_gate,@function",
+    "fz_clone3_gate:",
+    "mov eax, 435",
+    "syscall",
+    ".globl fz_clone3_gate_ret",
+    ".hidden fz_clone3_gate_ret",
+    "fz_clone3_gate_ret:",
+    "ret",
+    ".size fz_clone3_gate, .-fz_clone3_gate",
+);
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+unsafe extern "C" {
+    /// clone3(args, size), the raw answer: a pid, 0, or -errno.
+    #[cfg(not(feature = "fuzzshim"))]
+    fn fz_clone3_gate(args: *mut libc::clone_args, size: usize) -> c_long;
+    static fz_clone3_gate_ret: u8;
+}
+
+/// The address seccomp reports for a clone3 from the gate, read at run
+/// time so ASLR is moot.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+pub fn gate_addr() -> u64 {
+    (&raw const fz_clone3_gate_ret) as u64
+}
+
+/// clone3 through the gate, as libc's syscall answers: a pid, 0 in the
+/// child, or -1 with errno. Under the fuzzshim it is the hook's call,
+/// so a target never clones.
+///
+/// # Safety
+/// args is live with size bytes, or null with a size the kernel refuses
+/// before reading, and the clone returns twice.
+pub(crate) unsafe fn clone3(args: *mut libc::clone_args, size: usize) -> c_long {
+    #[cfg(all(
+        not(feature = "fuzzshim"),
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    {
+        // SAFETY: by the contract above.
+        let raw = unsafe { fz_clone3_gate(args, size) };
+        if (-4095..0).contains(&raw) {
+            sys::set_errno(raw.wrapping_neg() as c_int);
+            return -1;
+        }
+        raw
+    }
+    #[cfg(not(all(
+        not(feature = "fuzzshim"),
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )))]
+    // SAFETY: by the contract above.
+    unsafe {
+        sys::syscall(libc::SYS_clone3, [args as c_long, size as c_long, 0, 0, 0])
+    }
+}
 
 /// birth forks the fiber straight into its leaf cgroup. With pidns the
 /// child is the init of its own pid namespace, so a checkpoint of it
 /// restores without colliding with a live pid. A namespace the kernel
 /// refuses fails the birth, so no fiber runs without one it asked for.
 ///
-/// Without clone3 or CLONE_INTO_CGROUP (before 5.7), the legacy clone
-/// runs and the child moves itself into its leaf in its first
-/// instructions, or ends with EX_CGROUP rather than run charged to the
-/// zygote's cgroup. Under the fiber filter (seccomp.rs) clone3 is always
-/// ENOSYS, so this is every birth. Any other refusal of clone3 is the
-/// answer, with no second try. Both are raw syscalls, so the child runs
-/// on a copy of this stack with no atfork handlers.
+/// The clone3 goes through the gate above, the one address the fiber
+/// filter (seccomp.rs) lets it pass from. Without clone3 or
+/// CLONE_INTO_CGROUP (before 5.7, or a filter outside the library that
+/// hides it), the legacy clone runs and the child moves itself into its
+/// leaf in its first instructions, or ends with EX_CGROUP rather than
+/// run charged to the zygote's cgroup. Any other refusal of clone3 is
+/// the answer, with no second try. Both are raw syscalls, so the child
+/// runs on a copy of this stack with no atfork handlers.
 ///
 /// Returns the child's pid, 0 in the child, or -1 with errno.
 ///
@@ -114,18 +200,7 @@ pub unsafe fn birth(cgroup_fd: c_int, want: c_ulonglong) -> libc::pid_t {
     }
     // SAFETY: args is a live clone_args of the 5.7 size, and the clone
     // returns twice, which the caller's contract covers.
-    let pid = unsafe {
-        sys::syscall(
-            libc::SYS_clone3,
-            [
-                (&raw mut args) as c_long,
-                size_of::<libc::clone_args>() as c_long,
-                0,
-                0,
-                0,
-            ],
-        )
-    };
+    let pid = unsafe { clone3(&raw mut args, size_of::<libc::clone_args>()) };
     if pid >= 0 {
         return pid as libc::pid_t;
     }
@@ -485,7 +560,14 @@ unsafe fn child_say(fence: *const c_char, what: &CStr, why: *const c_char) {
 /// The caller is the child of birth, c is a live Child whose pointers
 /// name the zygote's statics, and the whole process is this path's.
 pub unsafe fn scrub_and_run(c: &Child<'_>) -> ! {
-    // The zygote's state the child must not keep goes first, with plain
+    // The clone3 refusal first, so no instruction of the fiber's runs
+    // with the zygote's gate open. It needs the no_new_privs the real
+    // install set, which is what INSTALLED says.
+    if seccomp::INSTALLED.load(Ordering::Relaxed) && seccomp::refuse_clone3() != 0 {
+        // SAFETY: _exit ends the child and never returns.
+        unsafe { libc::_exit(EX_FILTER) }
+    }
+    // The zygote's state the child must not keep goes next, with plain
     // stores. Its control channel is not this child's, so fz_report_line
     // must fail rather than write into fd 3, and its report mutex may be
     // held by a thread that is not here (ctl.rs). None of it is read
@@ -617,7 +699,7 @@ pub unsafe fn scrub_and_run(c: &Child<'_>) -> ! {
         libc::sigprocmask(libc::SIG_SETMASK, &raw const none, ptr::null_mut());
     }
     // Mounts first, while the capabilities they need are held. The
-    // seccomp filter is the zygote's, inherited at the clone.
+    // zygote's program, inherited at the clone, lets a proc fiber mount.
     if c.mntns {
         // SAFETY: the tables name the zygote's statics, by the contract
         // above.
