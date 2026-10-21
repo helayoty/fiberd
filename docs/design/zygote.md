@@ -44,7 +44,7 @@ sequenceDiagram
 | EXITED | zygote | A fiber ended, with its exit code or signal |
 | DEVICE, EVICT | zygote, fiberd | An [engine](../glossary.md#engine) reports each fiber's device slice with `fz_report_line`, and drops one on EVICT. The template formats the line and the library adds the newline |
 
-**Fork into the leaf.** The fiber filter answers `clone3` with ENOSYS, so every birth is the legacy `clone` with the namespace flags, not `clone3` with `CLONE_INTO_CGROUP`. The child writes itself into the leaf's `cgroup.procs` as its first act. A child that cannot ends with exit 125, and no fiber runs charged to the zygote's cgroup.
+**Fork into the leaf.** Every birth is `clone3` with the namespace flags and `CLONE_INTO_CGROUP`, so the child starts in its leaf. The fiber filter lets `clone3` through only from the library's own instruction in birth ([seccomp.md](seccomp.md#why-clone3-is-gated)). On a kernel before 5.7 the birth is the legacy `clone`, and the child writes itself into the leaf's `cgroup.procs` as its first act. A child that cannot ends with exit 125, and no fiber runs charged to the zygote's cgroup.
 
 **Scrub.** Before confinement the child closes the zygote's `SIGCHLD` descriptor and every descriptor above its channel, replaces its environment with the few `FIBERD_` entries the zygote built for this fiber, starts a new session and empties its signal mask. A handoff fiber's channel is the one socket a park names external, and a resume gives it a fresh pair end at the same descriptor. Any other fiber's pair is its own, dumped whole. Its queues are empty at every park, since the fiber has taken and acked every record before it says it serves nothing, so no seed lands in the images.
 
@@ -59,10 +59,10 @@ sequenceDiagram
 | `MS_REC` `MS_PRIVATE` on `/` | each fiber | The copy is private already. The call restates it, and a refusal ends the child before anything else is mounted |
 | fresh `/proc` for the pid namespace | each fiber | Its own |
 | `/proc/sys`, `/proc/sysrq-trigger`, `/proc/bus`, `/proc/fs` and `/proc/irq` bound onto themselves and read-only, `/proc/scsi` and `/proc/acpi` covered | each fiber, after its `/proc` | A fiber's fresh `/proc` is a mount of its own and would cover a bind the zygote made, leaving the fiber's `/proc/sys` writable. The list is runc's for a container, and `/proc/sysrq-trigger` takes a write from euid 0 with no capability |
-| fiber filter, and on runc CAP_SYS_ADMIN alone | zygote, before READY | Inherited at the clone, so a birth pays nothing for them ([seccomp.md](seccomp.md)) |
+| fiber filter, and on runc CAP_SYS_ADMIN alone | zygote, before READY | Inherited at the clone. Each fiber adds its own `clone3` refusal before template code ([seccomp.md](seccomp.md)) |
 | capabilities dropped (`nocaps`, every proc fiber) | each fiber | Its own |
 
-**Confinement fails closed.** When a step fiberd asked for is refused, no fiber runs short of it. A step that fails at PREPARE, or a zygote with no namespace of its own (`FIBERD_OWN_MNTNS` unset, `fz_init` skipped, a thread before it, `unshare` refused), sets one reason, and every mount-namespace CLONE is answered with an ERROR naming it, while fibers without a mount namespace are still served. A step that fails in the child ends it before any application code, with an exit code from 110 to 125 for that step, and the CLONE is answered with an ERROR naming the step (`exit_why` in `core/src/zygote.rs`).
+**Confinement fails closed.** When a step fiberd asked for is refused, no fiber runs short of it. A step that fails at PREPARE, or a zygote with no namespace of its own (`FIBERD_OWN_MNTNS` unset, `fz_init` skipped, a thread before it, `unshare` refused), sets one reason, and every mount-namespace CLONE is answered with an ERROR naming it, while fibers without a mount namespace are still served. A step that fails in the child ends it before any application code, with an exit code from 110 to 126 for that step, and the CLONE is answered with an ERROR naming the step (`exit_why` in `core/src/zygote.rs`).
 
 **The fiber filter.** Before READY every zygote installs a seccomp program its fibers inherit, and a runc zygote first keeps CAP_SYS_ADMIN alone ([seccomp.md](seccomp.md)).
 
