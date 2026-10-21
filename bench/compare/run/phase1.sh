@@ -33,7 +33,8 @@ push_templates() {
   local templates="/src/${STATE#"$ROOT"/}/templates"
   mkdir -p "$STATE/templates"
   hack/dev/run.sh env TEMPLATES="$templates" sh -c 'go build -o bin/ ./cmd/zygotectl && for t in http:"--heap-mb 32" line:"--heap-mb 32 --framing line" gvisor:"--heap-mb 32 --gvisor"; do
-      bin/zygotectl build -zygote bin/compare-bin/counter-static -args "${t#*:}" -skip-images -out "$TEMPLATES/${t%%:*}" >/dev/null; done'
+      case "$t" in *--gvisor*) s=-no-smoke ;; *) s= ;; esac; \
+      bin/zygotectl build -zygote bin/compare-bin/counter-static -args "${t#*:}" -skip-images $s -out "$TEMPLATES/${t%%:*}" >/dev/null; done'
   : >"$TEMPLATES_ENV"
   for t in http line gvisor; do
     digest=$(cd "$ROOT" && "$GO" run ./cmd/zygotectl push -dir "$STATE/templates/$t" -ref "http://$REG/zygotes/counter:$t")

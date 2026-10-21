@@ -64,7 +64,7 @@ func TestLinking(t *testing.T) {
 				return
 			}
 			out := filepath.Join(root, "out")
-			if _, err := artifact.Build(context.Background(), artifact.BuildOptions{Zygote: zygote, Out: out, SkipImages: true}); err != nil {
+			if _, err := artifact.Build(context.Background(), artifact.BuildOptions{Zygote: zygote, Out: out, SkipImages: true, NoSmoke: true}); err != nil {
 				t.Fatalf("Build: %v", err)
 			}
 			cfg, err := artifact.ReadConfig(out)

@@ -103,8 +103,13 @@ func (r *Runtime) PublishDelta(ctx context.Context, deltaRef string, g core.Gran
 }
 
 // publishParent pushes a zygote checkpoint once, so a claiming home that
-// was not warmed from the same artifact can still merge the delta.
+// was not warmed from the same artifact can still merge the delta. It is
+// template memory, so it is sealed under the master and its own hash
+// first, into a scratch directory beside the store whose leading dot lets
+// the prune take what a crash leaves. The push reads the store entry, so
+// it is a section the prune waits out.
 func (r *Runtime) publishParent(ctx context.Context, repo, sha string) error {
+	defer r.useParents()()
 	ref := repo + ":" + parentTag(sha)
 	if _, found, err := artifact.Resolve(ctx, ref); err != nil {
 		return err
@@ -115,13 +120,22 @@ func (r *Runtime) publishParent(ctx context.Context, repo, sha string) error {
 	if _, err := os.Stat(dir); err != nil {
 		return fmt.Errorf("parent %s not in the store: %w", sha[:12], err)
 	}
-	ann := map[string]string{artifact.AnnotationParent: sha, artifact.AnnotationHome: r.cfg.HomeID}
-	r.host.Annotate(ann)
-	_, err := artifact.PushDir(ctx, dir, ref, artifact.ArtifactTypeParent, ann, r.cfg.DeltaKeys.Signer)
-	if err == nil {
-		log.Printf("host: published parent checkpoint %s", sha[:12])
+	tmp, err := os.MkdirTemp(r.parentsDir(), "."+sha[:12]+".seal-")
+	if err != nil {
+		return err
 	}
-	return err
+	defer func() { _ = os.RemoveAll(tmp) }()
+	if err := artifact.SealParentDir(dir, tmp, r.cfg.DeltaKeys.Seal, sha); err != nil {
+		return err
+	}
+	ann := map[string]string{artifact.AnnotationParent: sha, artifact.AnnotationHome: r.cfg.HomeID,
+		artifact.AnnotationSealKey: r.cfg.DeltaKeys.Seal.ID}
+	r.host.Annotate(ann)
+	if _, err := artifact.PushDir(ctx, tmp, ref, artifact.ArtifactTypeParent, ann, r.cfg.DeltaKeys.Signer); err != nil {
+		return err
+	}
+	log.Printf("host: published parent checkpoint %s, sealed", sha[:12])
+	return nil
 }
 
 // FindDelta implements core.DeltaFinder: the manifest only.
@@ -205,11 +219,12 @@ func (r *Runtime) ClaimDelta(ctx context.Context, g core.Grant, session string, 
 			_ = os.RemoveAll(dst)
 			return "", err
 		}
-		if _, err := r.parent(info.ParentSHA256); err != nil {
-			if err := r.pullParent(ctx, repo, info.ParentSHA256); err != nil {
-				_ = os.RemoveAll(dst)
-				return "", fmt.Errorf("host: delta needs its parent: %w", err)
-			}
+		// The claimed delta's manifest names the parent from here on. It
+		// was written before this section, so a prune that missed it
+		// may have taken the parent, which is then pulled again.
+		if err := r.ensureParent(ctx, repo, info.ParentSHA256); err != nil {
+			_ = os.RemoveAll(dst)
+			return "", fmt.Errorf("host: delta needs its parent: %w", err)
 		}
 	}
 	// The claim: the tag must still point at what we pulled, and its
@@ -251,17 +266,35 @@ func (r *Runtime) DiscardDelta(_ context.Context, ref string) error {
 	if err := readJSON(filepath.Join(ref, "manifest.json"), &m); err == nil && m.Fence != "" {
 		r.freePorts(m.Fence)
 	}
-	return os.RemoveAll(ref)
+	err = os.RemoveAll(ref)
+	r.pokePrune() // its parent, unless something else names it
+	return err
 }
 
-// pullParent fetches a zygote checkpoint into the store and verifies it
-// hashes to what the delta expects.
+// ensureParent finds the parent sha in the store, or pulls it, in one
+// section.
+func (r *Runtime) ensureParent(ctx context.Context, repo, sha string) error {
+	defer r.useParents()()
+	if _, err := r.parent(sha); err == nil {
+		return nil
+	}
+	return r.pullParent(ctx, repo, sha)
+}
+
+// pullParent fetches a zygote checkpoint into the store, opens it, and
+// verifies it hashes to what the delta expects. The manifest must be
+// signed as that checkpoint and sealed under this home's master, and the
+// files must open as parent:<sha>, so a parent in the clear or one copied
+// to another sha's tag is refused before any pagemap is parsed. The pull
+// directory and the entry it becomes are fiberd's alone. The caller holds
+// a section (useParents), so the prune never takes a pull in flight for
+// one a crash left.
 func (r *Runtime) pullParent(ctx context.Context, repo, sha string) error {
 	if !isHex64(sha) {
 		return fmt.Errorf("parent hash %q is not a sha256", sha)
 	}
 	dst := filepath.Join(r.parentsDir(), sha)
-	if err := os.MkdirAll(r.parentsDir(), 0o755); err != nil {
+	if err := ownerDir(r.parentsDir()); err != nil {
 		return err
 	}
 	// A directory of this pull's own: concurrent claims of deltas over
@@ -287,9 +320,17 @@ func (r *Runtime) pullParent(ctx context.Context, repo, sha string) error {
 		_ = os.RemoveAll(tmp)
 		return fmt.Errorf("parent %s: %w", sha[:12], err)
 	}
+	if err := checkParentSigned(loc.Annotations, sha, r.cfg.DeltaKeys.Seal); err != nil {
+		_ = os.RemoveAll(tmp)
+		return err
+	}
 	if _, err := artifact.PullDir(ctx, repo+"@"+loc.Digest, tmp); err != nil {
 		_ = os.RemoveAll(tmp)
 		return err
+	}
+	if err := artifact.OpenParentDir(tmp, r.cfg.DeltaKeys.Seal, sha); err != nil {
+		_ = os.RemoveAll(tmp)
+		return fmt.Errorf("parent %s: %w", sha[:12], err)
 	}
 	codec := r.codec()
 	if codec == nil {
@@ -306,6 +347,10 @@ func (r *Runtime) pullParent(ctx context.Context, repo, sha string) error {
 	if got != sha {
 		_ = os.RemoveAll(tmp)
 		return fmt.Errorf("pulled parent hashes to %s, want %s", got[:12], sha[:12])
+	}
+	if err := ownerOnly(tmp); err != nil {
+		_ = os.RemoveAll(tmp)
+		return err
 	}
 	// A link an earlier warm left to an artifact's images since removed
 	// would make the rename fail forever; it is a dangling store entry.

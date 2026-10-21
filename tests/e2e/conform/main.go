@@ -16,6 +16,10 @@
 //	-audit-file    alternative to -audit-cmd: grep this JSONL spool locally
 //	-engine-kill-cmd $1 grant uid: end the grant's warm template (engine) as a crash would
 //	-scope-cmd     the home's scope is lost while it runs; it must revoke every fence
+//	-seal-check-cmd exit non-zero if the shared registry holds template memory in the clear (C11)
+//
+// -peer-target and -peer-node-id name a second home that shares the
+// target's delta registry and keys. C11 moves a session to it and back.
 //
 // Cases whose hook is missing are skipped, and say so.
 package main

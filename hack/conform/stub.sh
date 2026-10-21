@@ -4,6 +4,7 @@
 #   hack/conform/stub.sh run            build, start, conform, stop
 #   hack/conform/stub.sh start|stop|restart
 #   hack/conform/stub.sh issuer-reachable up|down   flip whether the issuer is reachable (admin socket)
+#   hack/conform/stub.sh seal-check     check the shared registry holds no template memory in the clear
 #
 # CONFORM_SIGNED=1 runs the signed-grant mode: a grant-issuer serves the
 # JWKS, fiberd verifies with -verifier=jwks, and grant-conform mints real
@@ -19,6 +20,15 @@
 #
 # State lives in $CONFORM_STATE (default bin/conform-state), so the
 # restart hook keeps the epoch file and the audit spool across restarts.
+#
+# The proc runtime with its own reference template runs the mobility
+# setup too (CONFORM_MOBILITY=0 turns it off). A local OCI registry keeps
+# its blobs on disk, zygotectl builds the template with its images sealed
+# to the fleet's public wrap key and pushes it, and the target pulls it
+# by digest, so C1-C10 warm from author images. A second home, the peer,
+# shares the registry and the delta keys. C11 moves a session to it and
+# back. seal-check then reads every blob the registry holds. Each must be
+# sealed, or be the zygote or its config.
 #
 # fiberd is bin/fiberd-testhooks, fiberd built with -tags
 # fiberd_testhooks so -admin-unsafe and the issuer and scope-lost hooks exist.
@@ -38,6 +48,13 @@ ISSUER_URL="http://$ISSUER_ADDR"
 GVISOR_ROOTFS=${CONFORM_GVISOR_ROOTFS:-/var/lib/fiberd/gvisor-rootfs}
 ROOTFS_SH=${CONFORM_ROOTFS_SH:-hack/gvisor/rootfs.sh}
 CGROOT=${FIBERD_CGROUP_ROOT:-/sys/fs/cgroup/fiberd}
+MOBILITY=0
+if [ "$RUNTIME" = proc ] && [ -z "${CONFORM_TEMPLATE:-}" ]; then MOBILITY=${CONFORM_MOBILITY:-1}; fi
+REG_ADDR=${CONFORM_REGISTRY_ADDR:-127.0.0.1:18500}
+PEER_ADDR=${CONFORM_PEER_ADDR:-127.0.0.1:18488}
+PEER_NODE=${CONFORM_PEER_NODE:-conform-peer}
+PEER_STATE=$STATE-peer
+MOB=$STATE-mobility   # the registry's blobs, the shared keys, the artifact
 # The engine-loss hook (C9) reaches the zygote through its cgroup leaf:
 # fork backends only. --device-mb gives the reference zygote a simulated
 # device, which is what C8 budgets.
@@ -48,6 +65,10 @@ if [ "$RUNTIME" = proc ] || [ "$RUNTIME" = runc ]; then ISOLATION=TRUSTED; fi
 if [ "$RUNTIME" = proc ]; then
   TIER=${CONFORM_TIER:-FIBER_CHECKPOINT}   # what proc offers when criu check passes
   RUNTIME_FLAGS=(-runtime proc -template "default=${CONFORM_TEMPLATE:-$PWD/bin/refzygote --heap-mb 32 --device-mb 64}")
+  if [ "$MOBILITY" = 1 ]; then
+    RUNTIME_FLAGS=(-runtime proc -registry "http://$REG_ADDR/zygotes/ref" -delta-registry "http://$REG_ADDR/deltas"
+      -delta-key "$MOB/delta-key.json" -delta-seal-key "$MOB/delta-seal-key.json")
+  fi
   ENGINE_HOOK=(-engine-kill-cmd "$0 engine-kill \$1")
 elif [ "$RUNTIME" = gvisor ]; then
   TIER=${CONFORM_TIER:-FIBER_SNAPSHOT}
@@ -70,12 +91,13 @@ else
   RUNTIME_FLAGS=(-runtime stub -runtime-tier "$TIER")
 fi
 
-wait_healthy() {
+wait_healthy() { # [state dir] [log]
+  local state=${1:-$STATE} log=${2:-$LOG}
   for _ in $(seq 1 100); do
-    if curl -sf --unix-socket "$STATE/private/admin.sock" http://x/healthz >/dev/null 2>&1; then return 0; fi
+    if curl -sf --unix-socket "$state/private/admin.sock" http://x/healthz >/dev/null 2>&1; then return 0; fi
     sleep 0.1
   done
-  echo "fiberd did not become healthy; log:" >&2; tail -20 "$LOG" >&2; return 1
+  echo "fiberd did not become healthy; log:" >&2; tail -20 "$log" >&2; return 1
 }
 
 start_issuer() {
@@ -89,17 +111,63 @@ start_issuer() {
   echo "issuer did not come up" >&2; return 1
 }
 
+verify_flags() {
+  if [ "$SIGNED" = 1 ]; then
+    echo -verifier jwks -issuer "$ISSUER_URL" -jwks-max-stale 10m
+  else
+    echo -verifier insecure-json -issuer https://issuer.conform
+  fi
+}
+
 start() {
   mkdir -p "$STATE"
-  local verify=(-verifier insecure-json -issuer https://issuer.conform)
-  if [ "$SIGNED" = 1 ]; then
-    verify=(-verifier jwks -issuer "$ISSUER_URL" -jwks-max-stale 10m)
-  fi
+  local verify; read -ra verify <<<"$(verify_flags)"
   bin/fiberd-testhooks -state "$STATE" -node-id "$NODE" "${verify[@]}" -insecure-plaintext \
     -listen "$ADDR" "${RUNTIME_FLAGS[@]}" -admin-unsafe \
     -stale-ttl 5s -status-interval 50ms >>"$LOG" 2>&1 &
   echo $! >"$STATE/pid"
   wait_healthy
+}
+
+# The peer: a second home over the same runtime, registry and delta keys,
+# under a state directory and cgroup subtree of its own.
+start_peer() {
+  mkdir -p "$PEER_STATE"
+  local verify; read -ra verify <<<"$(verify_flags)"
+  bin/fiberd-testhooks -state "$PEER_STATE" -node-id "$PEER_NODE" -cgroup-root "$CGROOT-peer" "${verify[@]}" -insecure-plaintext \
+    -listen "$PEER_ADDR" "${RUNTIME_FLAGS[@]}" -stale-ttl 5s -status-interval 50ms >>"$PEER_STATE.log" 2>&1 &
+  echo $! >"$STATE/peer.pid"
+  wait_healthy "$PEER_STATE" "$PEER_STATE.log"
+}
+
+# The registry, the shared keys, and the template: the reference zygote
+# built with its images sealed to the fleet's public wrap key, which the
+# seal key's keygen writes beside it. Prints the template digest.
+mobility_setup() {
+  mkdir -p "$MOB"
+  bin/conform-registry -addr "$REG_ADDR" -dir "$MOB/blobs" >>"$MOB/registry.log" 2>&1 &
+  echo $! >"$STATE/registry.pid"
+  for _ in $(seq 1 50); do curl -sf "http://$REG_ADDR/v2/" >/dev/null 2>&1 && break; sleep 0.1; done
+  bin/grant-issuer keygen -alg EdDSA -out "$MOB/delta-key.json" >/dev/null
+  bin/grant-issuer keygen -alg A256GCM -out "$MOB/delta-seal-key.json" >/dev/null
+  bin/zygotectl build -zygote bin/refzygote -args "--heap-mb 32 --device-mb 64" -seal-to "$MOB/fleet-pub.json" -out "$MOB/art" >/dev/null
+  bin/zygotectl push -dir "$MOB/art" -ref "http://$REG_ADDR/zygotes/ref:conform"
+}
+
+# seal-check: every blob the registry holds is sealed, or is the zygote,
+# its config or the empty OCI config. Code and config may be read, the
+# template's memory (author images, parents, deltas) may not.
+seal_check() {
+  local allowed sealed=0 f
+  allowed=" $(sha256sum "$MOB/art/zygote" "$MOB/art/config.json" | cut -d' ' -f1 | tr '\n' ' ')$(printf '{}' | sha256sum | cut -d' ' -f1) "
+  for f in "$MOB/blobs/sha256"/*; do
+    if cmp -s -n 15 "$f" <(printf 'fiberd-seal-v1\n'); then sealed=$((sealed + 1)); continue; fi
+    case "$allowed" in *" ${f##*/} "*) continue ;; esac
+    echo "seal-check: $f ($(wc -c <"$f") bytes) is in the registry in the clear" >&2
+    return 1
+  done
+  echo "seal-check: $sealed blobs sealed, and only the zygote and its config in the clear" >&2
+  [ "$sealed" -ge 3 ] || { echo "seal-check: want the images, a parent and a delta sealed at least" >&2; return 1; }
 }
 
 stop_pidfile() {
@@ -142,8 +210,9 @@ case "${1:-}" in
   issuer-reachable) issuer_reachable "$2" ;;
   engine-kill) engine_kill "$2" ;;
   scope-lost) scope_lost ;;
+  seal-check) seal_check ;;
   run)
-    rm -rf "$STATE"; mkdir -p "$STATE"
+    rm -rf "$STATE" "$PEER_STATE" "$PEER_STATE.log" "$MOB"; mkdir -p "$STATE"
     go build -o bin/ ./cmd/grant-issuer
     go build -tags fiberd_testhooks -o bin/fiberd-testhooks ./cmd/fiberd
     # bin/ is shared between the macOS host and the Linux container; go
@@ -155,23 +224,33 @@ case "${1:-}" in
     if [ "$RUNTIME" = hyperlight ] && [ -z "${CONFORM_HL_HELPER:-}" ]; then
       go build -o bin/fakehelper ./hack/hyperlight/fakehelper; echo "fake guest" > bin/fake-guest.bin
     fi
+    trap 'stop; for p in issuer peer registry; do stop_pidfile "$STATE/$p.pid"; done' EXIT
     mint=(-mint insecure-json)
     if [ "$SIGNED" = 1 ]; then
       start_issuer
-      trap 'stop; stop_pidfile "$STATE/issuer.pid"' EXIT
       mint=(-mint jwt -issuer-key "$STATE/issuer-key.json" -issuer "$ISSUER_URL")
-    else
-      trap stop EXIT
+    fi
+    MOB_FLAGS=()
+    if [ "$MOBILITY" = 1 ]; then
+      go build -o bin/ ./cmd/zygotectl
+      go build -o bin/conform-registry ./hack/conform/registry
+      TEMPLATE=$(mobility_setup)
+      echo "template $TEMPLATE, its images sealed to the fleet key in $MOB/fleet-pub.json"
+      start_peer
+      MOB_FLAGS=(-template "$TEMPLATE" -peer-target "$PEER_ADDR" -peer-node-id "$PEER_NODE" -seal-check-cmd "$0 seal-check")
     fi
     start
     bin/grant-conform -test.v -target "$ADDR" -target-tier "$TIER" -node-id "$NODE" -isolation "$ISOLATION" -fiber-warm "$WARM" -w-budget "$W_BUDGET" "${mint[@]}" \
       -restart-cmd "$0 restart" -cp-health-cmd "$0 issuer-reachable \$1" -audit-file "$STATE/private/audit.jsonl" \
-      -scope-cmd "$0 scope-lost" ${ENGINE_HOOK[@]+"${ENGINE_HOOK[@]}"} "${@:2}"
+      -scope-cmd "$0 scope-lost" ${ENGINE_HOOK[@]+"${ENGINE_HOOK[@]}"} ${MOB_FLAGS[@]+"${MOB_FLAGS[@]}"} "${@:2}"
+    if [ "$MOBILITY" = 1 ]; then
+      grep -h 'published parent checkpoint\|claimed\|pulled parent' "$LOG" "$PEER_STATE.log" | sed 's/^/mobility: /' || true
+    fi
     if [ "$WARM" -gt 0 ]; then
       pooled=$(grep -c '"detail":"pooled"' "$STATE/private/audit.jsonl" || true)
       echo "pool: $pooled clones served from the pool (fibers.warm=$WARM)"
       [ "$pooled" -gt 0 ] || { echo "pool: fibers.warm=$WARM but no clone was served from the pool" >&2; exit 1; }
     fi
     ;;
-  *) echo "usage: $0 run|start|stop|restart|issuer-reachable up|down" >&2; exit 2 ;;
+  *) echo "usage: $0 run|start|stop|restart|issuer-reachable up|down|seal-check" >&2; exit 2 ;;
 esac

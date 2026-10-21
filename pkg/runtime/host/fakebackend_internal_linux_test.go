@@ -729,6 +729,13 @@ func pagesSHA(dir string) (string, error) {
 
 func (c *codecMixin) ImageBytes(string) (uint64, error) { return c.imageBytes, c.imageErr }
 
+// loadCount is how many times LoadParent was called.
+func (c *codecMixin) loadCount() int {
+	c.cmu.Lock()
+	defer c.cmu.Unlock()
+	return c.loads
+}
+
 func (c *codecMixin) LoadParent(dir string) (backend.Parent, error) {
 	c.cmu.Lock()
 	defer c.cmu.Unlock()
@@ -802,14 +809,18 @@ func (c *codecMixin) loadedParents() []*fakeParent {
 }
 
 type selfCheckpointMixin struct {
-	err   error
-	pages string // what the checkpoint's pages hold ("" = derived from the warm id)
-	calls atomic.Int32
+	err     error
+	partial bool   // a failing checkpoint leaves what it wrote, as criu can
+	pages   string // what the checkpoint's pages hold ("" = derived from the warm id)
+	calls   atomic.Int32
 }
 
 func (m *selfCheckpointMixin) CheckpointWarm(_ context.Context, warmID, dir string) error {
 	m.calls.Add(1)
 	if m.err != nil {
+		if m.partial {
+			_ = writeParentDir(dir, "half a dump")
+		}
 		return m.err
 	}
 	pages := m.pages

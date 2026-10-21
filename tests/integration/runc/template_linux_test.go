@@ -180,11 +180,18 @@ func TestRegistryTemplate(t *testing.T) {
 			_ = a.rt.Release(ctx, h2.ID, false)
 		}},
 		{"another home pulls the rewritten entry again before it stages it", func(t *testing.T) {
-			b := registryHome(t, repo, func(cfg *host.Config) { cfg.TemplateCache = filepath.Join(a.stateDir, "cache") })
+			// B's cache starts with a copy of A's rewritten entry. A's
+			// cache itself is A's alone, since a home prunes the parent
+			// store under it of what its own warms and deltas do not name.
+			var cacheB string
+			b := registryHome(t, repo, func(cfg *host.Config) {
+				cacheB = filepath.Join(cfg.TemplateCache, filepath.Base(cacheA))
+				copyTree(t, cacheA, cacheB)
+			})
 			if err := b.rt.PrepareTemplate(ctx, g); err != nil {
 				t.Fatalf("prepare on the second home: %v", err)
 			}
-			if sum := sha256File(t, artifact.ZygotePath(cacheA)); sum != zygoteSum {
+			if sum := sha256File(t, artifact.ZygotePath(cacheB)); sum != zygoteSum {
 				t.Fatalf("cache entry hashes to %s after the second warm, want it pulled again to %s", sum, zygoteSum)
 			}
 			if sum := sha256File(t, stagedCopy(b, "rt1")); sum != zygoteSum {
@@ -215,10 +222,11 @@ func TestRegistryTemplate(t *testing.T) {
 			}
 			// The park is a delta over A's zygote self-checkpoint, which
 			// travels to another home through the delta registry as
-			// p-<sha> (artifact.md). Here it is copied into C's parent
-			// store by hand, since every home's zygote pages differ in
-			// their stack and data pages. The template bind is C's own.
-			copyParent(t, filepath.Join(a.stateDir, "cache", "parents"), filepath.Join(c.stateDir, "cache", "parents"), ref)
+			// p-<sha> (artifact.md). Here C adopts the delta and its
+			// parent by hand, as a claim would leave them, since every
+			// home's zygote pages differ in their stack and data pages.
+			// The template bind is C's own.
+			ref = c.adopt(t, a, ref)
 			t0 := time.Now()
 			h3, err := c.rt.Clone(ctx, core.CloneSpec{Grant: g, Source: core.SourceDelta, Ref: ref, Fence: core.Fence{GrantUID: "rt1", Epoch: 2, Seq: 1}, Deadline: 10 * time.Second})
 			if err != nil {
@@ -280,6 +288,36 @@ func TestBakedSpecUnchanged(t *testing.T) {
 // copyParent copies the parent checkpoint the delta at ref names from
 // one home's parent store into another's, as a claim through the delta
 // registry would.
+// copyTree copies the regular files and directories under from to to.
+func copyTree(t *testing.T, from, to string) {
+	t.Helper()
+	err := filepath.WalkDir(from, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(from, p)
+		if err != nil {
+			return err
+		}
+		dst := filepath.Join(to, rel)
+		if d.IsDir() {
+			return os.MkdirAll(dst, 0o755)
+		}
+		info, err := d.Info()
+		if err != nil || !info.Mode().IsRegular() {
+			return err
+		}
+		data, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(dst, data, info.Mode().Perm())
+	})
+	if err != nil {
+		t.Fatalf("copy %s: %v", from, err)
+	}
+}
+
 func copyParent(t *testing.T, from, to, ref string) {
 	t.Helper()
 	var info struct {

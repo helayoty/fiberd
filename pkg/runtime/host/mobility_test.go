@@ -54,6 +54,81 @@ func sealFor(t *testing.T, cfg Config, g core.Grant, session, fence string, now 
 	return sc
 }
 
+// pushParent seals the parent checkpoint in src as sha under seal and
+// pushes it to ref with ann, signed by signer, as publishParent does.
+func pushParent(t *testing.T, src, ref, sha string, seal *artifact.SealKey, signer *jose.JSONWebKey, ann map[string]string) {
+	t.Helper()
+	sealed := filepath.Join(t.TempDir(), "sealed")
+	if err := artifact.SealParentDir(src, sealed, seal, sha); err != nil {
+		t.Fatal(err)
+	}
+	ann = maps.Clone(ann)
+	if ann == nil {
+		ann = map[string]string{}
+	}
+	ann[artifact.AnnotationParent] = sha
+	ann[artifact.AnnotationSealKey] = seal.ID
+	if _, err := artifact.PushDir(context.Background(), sealed, ref, artifact.ArtifactTypeParent, ann, signer); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// sealMagic is how every sealed file starts.
+const sealMagic = "fiberd-seal-v1\n"
+
+// scanSealed walks a file registry. Every file an artifact carries must
+// be sealed, and no file of the tree may hold any of the plaintexts. It
+// returns how many files it found sealed.
+func scanSealed(t *testing.T, root string, plaintexts ...string) int {
+	t.Helper()
+	n := 0
+	err := filepath.WalkDir(root, func(path string, e os.DirEntry, err error) error {
+		if err != nil || e.IsDir() {
+			return err
+		}
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		for _, p := range plaintexts {
+			if strings.Contains(string(b), p) {
+				t.Errorf("%s holds the plaintext %q", path, p)
+			}
+		}
+		if filepath.Base(filepath.Dir(path)) == "files" {
+			if !strings.HasPrefix(string(b), sealMagic) {
+				t.Errorf("%s is not sealed", path)
+			}
+			n++
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+// criuParent writes a parent checkpoint in CRIU's format, the one the
+// codec of an import without a backend loads. One pagemap names pages-1,
+// whose content is pages, so the parent's hash is sha256(pages).
+func criuParent(t *testing.T, dir, pages string) string {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// The 8 magic bytes, then a size-prefixed head message {1: pages_id}.
+	pagemap := []byte{0x19, 0x43, 0x56, 0x54, 0x01, 0x00, 0x00, 0x00, 2, 0, 0, 0, 1 << 3, 1}
+	if err := os.WriteFile(filepath.Join(dir, "pagemap-1.img"), pagemap, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "pages-1.img"), []byte(pages), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256([]byte(pages))
+	return hex.EncodeToString(sum[:])
+}
+
 func write(t *testing.T, dir string, files map[string]string) {
 	t.Helper()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -89,13 +164,9 @@ func TestExportImportDelta(t *testing.T) {
 	g2 := core.Grant{UID: "g2", Tenant: "acme", TemplateDigest: "sha256:tmpl"}                                                    // another grant, same domain
 	g3 := core.Grant{UID: "g3", Tenant: "acme", TemplateDigest: "sha256:tmpl", Policy: core.Policy{SessionClass: "other-domain"}} // another domain
 
-	parentSHA := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	repo := domainRepoFor(a.DeltaRegistry, domainOf(t, g))
-	write(t, filepath.Join(root, "parent"), map[string]string{"pages-1.img": "template pages"})
-	if _, err := artifact.PushDir(ctx, filepath.Join(root, "parent"), repo+":"+parentTag(parentSHA), artifact.ArtifactTypeParent,
-		map[string]string{artifact.AnnotationParent: parentSHA}, keyA); err != nil {
-		t.Fatal(err)
-	}
+	parentSHA := criuParent(t, filepath.Join(root, "parent"), "template pages")
+	pushParent(t, filepath.Join(root, "parent"), repo+":"+parentTag(parentSHA), parentSHA, sealAB, keyA, nil)
 	write(t, filepath.Join(root, "delta"), map[string]string{"pages-1.img": "dirty pages", "manifest.json": `{"fence":"g1/1/1"}`, "dump.log": "x"})
 	ann := map[string]string{artifact.AnnotationGrant: "g1", artifact.AnnotationHome: "home-a",
 		artifact.AnnotationParent: parentSHA, artifact.AnnotationWBytes: "11", "io.fiberd.arch": "arm64"}
@@ -145,18 +216,9 @@ func TestExportImportDelta(t *testing.T) {
 				})
 			}
 		}},
-		{"the registry holds no plaintext of the delta", func(t *testing.T) {
-			err := filepath.WalkDir(filepath.Join(root, "a"), func(path string, e os.DirEntry, err error) error {
-				if err != nil || e.IsDir() {
-					return err
-				}
-				if b, err := os.ReadFile(path); err != nil || strings.Contains(string(b), "dirty pages") {
-					t.Errorf("%s holds the delta's plaintext (%v)", path, err)
-				}
-				return nil
-			})
-			if err != nil {
-				t.Fatal(err)
+		{"the registry holds no plaintext of the delta or its parent", func(t *testing.T) {
+			if scanSealed(t, filepath.Join(root, "a"), "dirty pages", "template pages") == 0 {
+				t.Fatal("scanned no sealed files")
 			}
 		}},
 		// Someone who can write the registry but holds no key copies a
@@ -207,10 +269,13 @@ func TestExportImportDelta(t *testing.T) {
 				sha      string
 				signedAs string // the checkpoint the parent's manifest names ("" = sha)
 				signer   *jose.JSONWebKey
+				want     error // ErrUntrusted when nil
 			}{
 				{name: "an unsigned parent", sha: strings.Repeat("1", 64)},
 				{name: "a parent signed by a home not trusted here", sha: strings.Repeat("2", 64), signer: keyC},
 				{name: "a signed parent copied onto another checkpoint's tag", sha: strings.Repeat("3", 64), signedAs: parentSHA, signer: keyA},
+				// Regression: a parent in the clear was exported.
+				{name: "a parent pushed in the clear", sha: strings.Repeat("4", 64), signer: keyA, want: artifact.ErrSealed},
 			}
 			for i, tc := range cases {
 				t.Run(tc.name, func(t *testing.T) {
@@ -228,8 +293,12 @@ func TestExportImportDelta(t *testing.T) {
 					if _, err := pushDelta(ctx, a, filepath.Join(root, "delta"), repo+":"+sessionTag(session), dann, sealFor(t, a, g, session, "g1/1/1", time.Now())); err != nil {
 						t.Fatal(err)
 					}
-					if _, err := ExportDelta(ctx, a, g, session, t.TempDir()); !errors.Is(err, artifact.ErrUntrusted) {
-						t.Fatalf("export = %v, want ErrUntrusted", err)
+					want := tc.want
+					if want == nil {
+						want = artifact.ErrUntrusted
+					}
+					if _, err := ExportDelta(ctx, a, g, session, t.TempDir()); !errors.Is(err, want) {
+						t.Fatalf("export = %v, want %v", err, want)
 					}
 					if _, found, _ := artifact.Resolve(ctx, repo+":"+sessionTag(session)); !found {
 						t.Fatal("a refused export retired the session")
@@ -254,6 +323,14 @@ func TestExportImportDelta(t *testing.T) {
 			}
 			if len(want) > 0 {
 				t.Errorf("missing export files: %v", want)
+			}
+			// The parent leaves as the registry holds it, sealed.
+			parent := filepath.Join(t.TempDir(), "parent")
+			if err := artifact.Untar(filepath.Join(out, ExportParentFile), filepath.Join(parent, "files")); err != nil {
+				t.Fatal(err)
+			}
+			if scanSealed(t, parent, "template pages") == 0 {
+				t.Fatal("the exported parent holds no files")
 			}
 			if _, found, _ := artifact.Resolve(ctx, repo+":"+sessionTag("S")); found {
 				t.Fatal("the exporting home still holds the session")
@@ -383,8 +460,12 @@ func TestExportImportDelta(t *testing.T) {
 			if err != nil || !found || ploc.ArtifactType != artifact.ArtifactTypeParent {
 				t.Fatalf("parent not imported: found=%v %+v %v", found, ploc, err)
 			}
-			if err := b.DeltaKeys.Verify(ploc); err != nil {
-				t.Fatalf("imported parent: %v", err)
+			if err := b.DeltaKeys.Verify(ploc); err != nil || ploc.Annotations[artifact.AnnotationSealKey] != sealAB.ID {
+				t.Fatalf("imported parent: %v, annotations %v", err, ploc.Annotations)
+			}
+			// Opened to check its hash, and pushed as it came, sealed.
+			if scanSealed(t, filepath.Join(root, "b"), "template pages", "dirty pages") == 0 {
+				t.Fatal("scanned no sealed files")
 			}
 		}},
 		{"the imported delta is resealed for its new name and opens with its pages and without logs", func(t *testing.T) {
@@ -561,8 +642,7 @@ func TestExportImportRefusals(t *testing.T) {
 	a := Config{DeltaRegistry: artifact.FileScheme + filepath.Join(root, "a"), DeltaKeys: artifact.Keys{Signer: keyA, Seal: seal}, HomeID: "home-a"}
 	g := core.Grant{UID: "g1", Tenant: "acme", TemplateDigest: "sha256:tmpl"}
 	repo := domainRepoFor(a.DeltaRegistry, domainOf(t, g))
-	parentSHA := strings.Repeat("ab", 32)
-	write(t, filepath.Join(root, "parent"), map[string]string{"pages-1.img": "template pages"})
+	parentSHA := criuParent(t, filepath.Join(root, "parent"), "template pages")
 	write(t, filepath.Join(root, "delta"), map[string]string{"pages-1.img": "dirty pages", "manifest.json": `{"fence":"g1/1/1"}`})
 	// A session whose tag holds a parent, not a delta.
 	if _, err := artifact.PushDir(ctx, filepath.Join(root, "parent"), repo+":"+sessionTag("P"), artifact.ArtifactTypeParent, nil, keyA); err != nil {
@@ -596,13 +676,18 @@ func TestExportImportRefusals(t *testing.T) {
 	// A session with a parent that carries platform facts of its own,
 	// exported in full, and the same parent signed under another hash.
 	withParent := "WP"
-	parentAnn := map[string]string{artifact.AnnotationParent: parentSHA, artifact.AnnotationArch: "arm64", artifact.AnnotationKernel: "6.10.0"}
-	if _, err := artifact.PushDir(ctx, filepath.Join(root, "parent"), repo+":"+parentTag(parentSHA), artifact.ArtifactTypeParent, parentAnn, keyA); err != nil {
+	sealedParent := filepath.Join(root, "sealed-parent")
+	if err := artifact.SealParentDir(filepath.Join(root, "parent"), sealedParent, seal, parentSHA); err != nil {
+		t.Fatal(err)
+	}
+	parentAnn := map[string]string{artifact.AnnotationParent: parentSHA, artifact.AnnotationSealKey: seal.ID,
+		artifact.AnnotationArch: "arm64", artifact.AnnotationKernel: "6.10.0"}
+	if _, err := artifact.PushDir(ctx, sealedParent, repo+":"+parentTag(parentSHA), artifact.ArtifactTypeParent, parentAnn, keyA); err != nil {
 		t.Fatal(err)
 	}
 	otherSHA := strings.Repeat("ef", 32)
-	if _, err := artifact.PushDir(ctx, filepath.Join(root, "parent"), repo+":"+parentTag(otherSHA), artifact.ArtifactTypeParent,
-		map[string]string{artifact.AnnotationParent: otherSHA}, keyA); err != nil {
+	if _, err := artifact.PushDir(ctx, sealedParent, repo+":"+parentTag(otherSHA), artifact.ArtifactTypeParent,
+		map[string]string{artifact.AnnotationParent: otherSHA, artifact.AnnotationSealKey: seal.ID}, keyA); err != nil {
 		t.Fatal(err)
 	}
 	otherLoc, _, err := artifact.Resolve(ctx, repo+":"+parentTag(otherSHA))
@@ -616,6 +701,38 @@ func TestExportImportRefusals(t *testing.T) {
 	exported := filepath.Join(root, "exported")
 	if _, err := ExportDelta(ctx, a, g, withParent, exported); err != nil {
 		t.Fatalf("export %s: %v", withParent, err)
+	}
+	// Sessions whose parents a trusted home signed and sealed wrongly,
+	// exported as they are, since an export opens nothing: pages that
+	// hash to another checkpoint than their label, and files sealed for
+	// another checkpoint than their manifest names.
+	evil, evilSHA := filepath.Join(root, "evil"), strings.Repeat("e1", 32)
+	criuParent(t, evil, "evil pages")
+	pushParent(t, evil, repo+":"+parentTag(evilSHA), evilSHA, seal, keyA, nil)
+	relabelledSHA := strings.Repeat("e2", 32)
+	if _, err := artifact.PushDir(ctx, sealedParent, repo+":"+parentTag(relabelledSHA), artifact.ArtifactTypeParent,
+		map[string]string{artifact.AnnotationParent: relabelledSHA, artifact.AnnotationSealKey: seal.ID}, keyA); err != nil {
+		t.Fatal(err)
+	}
+	// And one in the clear.
+	plainSHA := strings.Repeat("e3", 32)
+	if _, err := artifact.PushDir(ctx, filepath.Join(root, "parent"), repo+":"+parentTag(plainSHA), artifact.ArtifactTypeParent,
+		map[string]string{artifact.AnnotationParent: plainSHA}, keyA); err != nil {
+		t.Fatal(err)
+	}
+	wrongly := map[string]string{}
+	for session, sha := range map[string]string{"EV": evilSHA, "RL": relabelledSHA, "PL": plainSHA} {
+		if _, err := pushDelta(ctx, a, filepath.Join(root, "delta"), repo+":"+sessionTag(session),
+			map[string]string{artifact.AnnotationParent: sha}, sealFor(t, a, g, session, "g1/1/1", time.Now())); err != nil {
+			t.Fatal(err)
+		}
+		if session == "PL" {
+			continue
+		}
+		wrongly[session] = filepath.Join(root, "exported-"+session)
+		if _, err := ExportDelta(ctx, a, g, session, wrongly[session]); err != nil {
+			t.Fatalf("export %s: %v", session, err)
+		}
 	}
 	// A home that trusts a, with a registry of its own, and one whose
 	// registry cannot be reached.
@@ -702,11 +819,26 @@ func TestExportImportRefusals(t *testing.T) {
 			if err != nil || !found {
 				return fmt.Errorf("imported parent: found %v: %w", found, err)
 			}
-			if ploc.Annotations[artifact.AnnotationArch] != "arm64" || ploc.Annotations[artifact.AnnotationKernel] != "6.10.0" || ploc.Annotations[artifact.AnnotationLibc] != "glibc" {
-				return fmt.Errorf("imported parent annotations = %v, want the parent's arch and kernel and the delta's libc", ploc.Annotations)
+			if ploc.Annotations[artifact.AnnotationArch] != "arm64" || ploc.Annotations[artifact.AnnotationKernel] != "6.10.0" || ploc.Annotations[artifact.AnnotationLibc] != "glibc" ||
+				ploc.Annotations[artifact.AnnotationSealKey] != seal.ID {
+				return fmt.Errorf("imported parent annotations = %v, want the parent's arch and kernel, the delta's libc and the seal key", ploc.Annotations)
 			}
 			return errors.New("imported")
 		}, errText: "imported"},
+		// Regressions: an import re-signed a parent it never opened.
+		{name: "import: a parent whose pages hash to another checkpoint", run: func(t *testing.T) error {
+			_, err := ImportDelta(ctx, b, g, "S", wrongly["EV"])
+			return err
+		}, wantErr: artifact.ErrUntrusted, errText: "hash to"},
+		{name: "import: a parent sealed for another checkpoint than it is signed as", run: func(t *testing.T) error {
+			_, err := ImportDelta(ctx, b, g, "S", wrongly["RL"])
+			return err
+		}, wantErr: artifact.ErrSealed, errText: "not parent"},
+		// Regression: a parent in the clear was exported.
+		{name: "export: a parent in the clear", run: func(t *testing.T) error {
+			_, err := ExportDelta(ctx, a, g, "PL", t.TempDir())
+			return err
+		}, wantErr: artifact.ErrSealed, errText: "not sealed"},
 		{name: "export: the delta's files are gone from the registry", run: func(t *testing.T) error {
 			if _, err := pushDelta(ctx, a, filepath.Join(root, "delta"), repo+":"+sessionTag("LD"), map[string]string{}, sealFor(t, a, g, "LD", "g1/1/1", time.Now())); err != nil {
 				t.Fatal(err)
@@ -717,10 +849,7 @@ func TestExportImportRefusals(t *testing.T) {
 		}, errText: "pull"},
 		{name: "export: the parent's files are gone from the registry", run: func(t *testing.T) error {
 			lost := strings.Repeat("1a", 32)
-			if _, err := artifact.PushDir(ctx, filepath.Join(root, "parent"), repo+":"+parentTag(lost), artifact.ArtifactTypeParent,
-				map[string]string{artifact.AnnotationParent: lost}, keyA); err != nil {
-				t.Fatal(err)
-			}
+			pushParent(t, filepath.Join(root, "parent"), repo+":"+parentTag(lost), lost, seal, keyA, nil)
 			if _, err := pushDelta(ctx, a, filepath.Join(root, "delta"), repo+":"+sessionTag("LP"), map[string]string{artifact.AnnotationParent: lost}, sealFor(t, a, g, "LP", "g1/1/1", time.Now())); err != nil {
 				t.Fatal(err)
 			}

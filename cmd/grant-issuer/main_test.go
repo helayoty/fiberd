@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"os"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 
+	"github.com/helayoty/fiberd/pkg/artifact"
 	"github.com/helayoty/fiberd/pkg/core"
 	"github.com/helayoty/fiberd/pkg/grant"
 	"github.com/helayoty/fiberd/pkg/tlsconf"
@@ -89,18 +91,25 @@ func TestRunDispatch(t *testing.T) {
 }
 
 // keygen writes an owner-only private JWK of the asked algorithm and
-// names it on stdout.
+// names it on stdout. A seal key comes with the fleet's public wrap key
+// beside it, which authors seal images to and which opens nothing.
 func TestKeygen(t *testing.T) {
 	cases := []struct {
 		name       string
 		alg        string
+		extra      []string // more flags, with %s for the case's directory
 		out        func(dir string) string
+		fleetPub   string // where the public wrap key goes, relative to the case's directory
 		wantKty    string
 		wantStderr string
 	}{
 		{name: "an EdDSA signing key", alg: "EdDSA", wantKty: "OKP"},
 		{name: "an ES256 signing key", alg: "ES256", wantKty: "EC"},
-		{name: "an A256GCM seal key", alg: "A256GCM", wantKty: "oct"},
+		{name: "an A256GCM seal key and the fleet's public half beside it", alg: "A256GCM", wantKty: "oct", fleetPub: "fleet-pub.json"},
+		{name: "-fleet-pub names where the public half goes", alg: "A256GCM", wantKty: "oct",
+			extra: []string{"-fleet-pub", "%s/pub/authors.json"}, fleetPub: "pub/authors.json"},
+		{name: "-fleet-pub with a signing key is refused", alg: "EdDSA", extra: []string{"-fleet-pub", "%s/x.json"}, wantStderr: "-alg A256GCM"},
+		{name: "an unwritable -fleet-pub fails", alg: "A256GCM", extra: []string{"-fleet-pub", "%s/missing/dir/x.json"}, wantStderr: "no such file"},
 		{name: "an unsupported algorithm fails", alg: "RS256", wantStderr: "unsupported algorithm"},
 		{name: "an unwritable path fails", alg: "EdDSA", wantStderr: "no such file",
 			out: func(dir string) string { return filepath.Join(dir, "missing", "key.json") }},
@@ -108,11 +117,18 @@ func TestKeygen(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(dir, "pub"), 0o755); err != nil {
+				t.Fatal(err)
+			}
 			out := filepath.Join(dir, "key.json")
 			if tc.out != nil {
 				out = tc.out(dir)
 			}
-			code, stdout, stderr := call(context.Background(), "keygen", "-alg", tc.alg, "-out", out)
+			args := []string{"keygen", "-alg", tc.alg, "-out", out}
+			for _, a := range tc.extra {
+				args = append(args, strings.ReplaceAll(a, "%s", dir))
+			}
+			code, stdout, stderr := call(context.Background(), args...)
 			if tc.wantStderr != "" {
 				if code != 1 || !strings.Contains(stderr, tc.wantStderr) {
 					t.Fatalf("exit %d, stderr %q, want 1 with %q", code, stderr, tc.wantStderr)
@@ -133,11 +149,39 @@ func TestKeygen(t *testing.T) {
 			if k["kty"] != tc.wantKty || k["alg"] != tc.alg || k["kid"] == "" {
 				t.Fatalf("key = %s, want kty %s alg %s with a kid", b, tc.wantKty, tc.alg)
 			}
-			if want := "wrote " + out + " kid=" + k["kid"].(string) + " alg=" + tc.alg + "\n"; stdout != want {
-				t.Fatalf("stdout = %q, want %q", stdout, want)
-			}
+			want := "wrote " + out + " kid=" + k["kid"].(string) + " alg=" + tc.alg + "\n"
 			if fi, err := os.Stat(out); err != nil || fi.Mode().Perm() != 0o600 {
 				t.Fatalf("mode = %v, %v, want 0600", fi.Mode().Perm(), err)
+			}
+			if tc.fleetPub == "" {
+				if stdout != want {
+					t.Fatalf("stdout = %q, want %q", stdout, want)
+				}
+				if _, err := os.Stat(filepath.Join(dir, "fleet-pub.json")); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("a signing key came with a fleet key: %v", err)
+				}
+				return
+			}
+			// The public half is the one the master derives.
+			seal, err := artifact.LoadSealKey(out)
+			if err != nil {
+				t.Fatal(err)
+			}
+			w, err := artifact.DeriveWrapKey(seal)
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(dir, tc.fleetPub)
+			pub, err := artifact.LoadWrapPublicKey(path)
+			if err != nil || pub.ID != w.ID {
+				t.Fatalf("fleet key %v, %v; want the master's, kid %s", pub, err, w.ID)
+			}
+			if fi, err := os.Stat(path); err != nil || fi.Mode().Perm() != 0o644 {
+				t.Fatalf("fleet key mode = %v, %v, want 0644", fi.Mode().Perm(), err)
+			}
+			want += "wrote " + path + " kid=" + w.ID + " (the fleet's public wrap key, for zygotectl build -seal-to)\n"
+			if stdout != want {
+				t.Fatalf("stdout = %q, want %q", stdout, want)
 			}
 		})
 	}

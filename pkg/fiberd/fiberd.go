@@ -148,10 +148,20 @@ type Runtime struct {
 // Gvisor, Runc and Hyperlight are what only that backend needs. The
 // backends find their criu, runsc and runc binaries on PATH.
 type (
-	Gvisor     struct{ Rootfs string }             // -gvisor-rootfs
+	Gvisor struct {
+		Rootfs          string // -gvisor-rootfs
+		TemplatesOnDisk bool   // -gvisor-templates-on-disk
+	}
 	Runc       struct{ Rootfs, UsernsPool string } // -runc-rootfs, -userns-pool
 	Hyperlight struct{ Helper, Guest string }      // -hyperlight-helper, -hyperlight-guest
 )
+
+// gvisorOptions configures the gVisor backend. Its state lives under the
+// home's own state directory.
+func (c *Config) gvisorOptions() gvisorbackend.Options {
+	return gvisorbackend.Options{Rootfs: c.Runtime.Gvisor.Rootfs, StateDir: filepath.Join(c.Node.StateDir, "gvisor"),
+		TemplatesOnDisk: c.Runtime.Gvisor.TemplatesOnDisk}
+}
 
 // Endpoint is the address family fibers are served on.
 type Endpoint struct{ Family, Host string } // -endpoint-family, -endpoint-host
@@ -218,6 +228,7 @@ func (c *Config) Bind(fs *flag.FlagSet) {
 	fs.Func("fiber-hide", "proc: directory fibers must not see, besides the service-account token, <state>/private, <state>/deltas and -grants-dir (repeatable)",
 		func(v string) error { c.Runtime.FiberHide = append(c.Runtime.FiberHide, v); return nil })
 	fs.StringVar(&c.Runtime.Gvisor.Rootfs, "gvisor-rootfs", "", "gvisor: rootfs directory every sandbox runs in; -template commands are paths inside it")
+	fs.BoolVar(&c.Runtime.Gvisor.TemplatesOnDisk, "gvisor-templates-on-disk", false, "gvisor: keep template images under <state>/gvisor/templates on disk. By default fiberd mounts a tmpfs there, so a warm template's memory never reaches a disk, at the cost of about one template image of RAM per warm grant")
 	fs.StringVar(&c.Runtime.Runc.Rootfs, "runc-rootfs", "", "runc: rootfs directory the zygote container runs in; -template commands are paths inside it")
 	fs.StringVar(&c.Runtime.Runc.UsernsPool, "userns-pool", runcbackend.DefaultPool, "runc: START:SLOTS host id pool that grants' user namespaces take 65536-id slots from, picked by a hash of the grant uid. A pool overlapping /etc/subuid or /etc/subgid is refused")
 	fs.StringVar(&c.Runtime.Hyperlight.Helper, "hyperlight-helper", "", "hyperlight: helper executable speaking hack/hyperlight/PROTOCOL.md (the Rust helper, or fakehelper)")
@@ -233,7 +244,7 @@ func (c *Config) Bind(fs *flag.FlagSet) {
 	fs.StringVar(&c.Registry.Deltas, "delta-registry", "", "proc: OCI repository prefix (host/prefix, or http://host/prefix for plain HTTP) where parked sessions are published and claimed by other homes")
 	fs.StringVar(&c.Registry.Keys.Sign, "delta-key", "", "proc: private Ed25519 JWK that signs every published delta (grant-issuer keygen -alg EdDSA). Default <state>/private/delta-key.json, generated when missing")
 	fs.StringVar(&c.Registry.Keys.Trust, "delta-trust", "", "proc: JWKS of further public keys whose deltas this home claims and imports (-delta-key's own is always trusted)")
-	fs.StringVar(&c.Registry.Keys.Seal, "delta-seal-key", "", "proc: 32-byte symmetric JWK that encrypts every delta before it leaves the home (grant-issuer keygen -alg A256GCM). Homes that move sessions between them share it. Default <state>/private/delta-seal-key.json, generated when missing")
+	fs.StringVar(&c.Registry.Keys.Seal, "delta-seal-key", "", "proc: the fleet's 32-byte symmetric master seal key (grant-issuer keygen -alg A256GCM). It encrypts every delta and parent checkpoint before it leaves the home, and opens the author images of -registry templates, which zygotectl build -seal-to sealed to its public half. Homes that move sessions between them share it. With -delta-registry the default is <state>/private/delta-seal-key.json, generated when missing")
 
 	fs.StringVar(&c.Audit.Key, "audit-key", "", "private Ed25519 JWK that signs the audit spool's checkpoints (grant-issuer keygen -alg EdDSA). Default <state>/private/audit-key.json, generated when missing")
 
@@ -279,13 +290,22 @@ var (
 	capsNarrow = caps.Narrow
 )
 
-// LoadDeltaKeys reads -delta-key, -delta-trust and -delta-seal-key. It
-// returns no keys without a delta registry, since nothing is signed or
-// sealed. A missing key is generated under -state on first use, and no
-// other home trusts or opens with it until it is shared.
+// LoadDeltaKeys reads -delta-key, -delta-trust and -delta-seal-key. A
+// missing key is generated under -state on first use, and no other home
+// trusts or opens with it until it is shared. Without a delta registry
+// nothing is signed, and the seal key is read only when -delta-seal-key
+// names one, since it also opens the author images of templates a home
+// pulls with -registry.
 func (c *Config) LoadDeltaKeys() (artifact.Keys, error) {
 	if c.Registry.Deltas == "" {
-		return artifact.Keys{}, nil
+		if c.Registry.Keys.Seal == "" {
+			return artifact.Keys{}, nil
+		}
+		seal, err := artifact.LoadSealKey(c.Registry.Keys.Seal)
+		if err != nil {
+			return artifact.Keys{}, fmt.Errorf("-delta-seal-key: %w", err)
+		}
+		return artifact.Keys{Seal: seal}, nil
 	}
 	path, err := c.stateKey(c.Registry.Keys.Sign, "delta-key.json", func() (*jose.JSONWebKey, error) { return grant.GenerateKey(jose.EdDSA) },
 		"delta signing key", "share one with -delta-key or trust each other's with -delta-trust")
@@ -508,7 +528,7 @@ func RunContext(ctx context.Context, c *Config, newHome HomeFactory) error {
 			if c.Runtime.Gvisor.Rootfs == "" {
 				return errors.New("-runtime=gvisor needs -gvisor-rootfs (hack/gvisor/rootfs.sh builds one)")
 			}
-			be = gvisorbackend.New(gvisorbackend.Options{Rootfs: c.Runtime.Gvisor.Rootfs, StateDir: filepath.Join(c.Node.StateDir, "gvisor")})
+			be = gvisorbackend.New(c.gvisorOptions())
 		}
 		parity, err := artifact.ParseParity(c.Runtime.Parity)
 		if err != nil {

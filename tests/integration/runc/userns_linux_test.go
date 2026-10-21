@@ -41,6 +41,8 @@ type home struct {
 	cgRoot   string
 	stateDir string
 	runDir   string
+	deltaDir string
+	cache    string // the template cache, which holds the parent store
 }
 
 // newHome opens a runc runtime of its own. mod, when set, adjusts the
@@ -58,6 +60,9 @@ func newHome(t *testing.T, mod func(*runcbackend.Options, *host.Config)) *home {
 		CgroupRoot: filepath.Join(cgRoot, name),
 		RunDir:     filepath.Join("/tmp", "fz-"+name),
 		DeltaDir:   filepath.Join(work, name, "deltas"),
+		// The home's own, since a home prunes the parent store under it
+		// of what its own warms and deltas do not name.
+		TemplateCache: filepath.Join(work, name, "templates"),
 		// Routes handoff fibers without listening. Tests hand them
 		// connections through Deliver.
 		Handoff:    &handoff.Router{},
@@ -79,7 +84,24 @@ func newHome(t *testing.T, mod func(*runcbackend.Options, *host.Config)) *home {
 	if rt.Tier() < core.TierCheckpoint {
 		t.Skip("criu not usable here")
 	}
-	return &home{rt: rt, be: be, cgRoot: hc.CgroupRoot, stateDir: ro.StateDir, runDir: hc.RunDir}
+	return &home{rt: rt, be: be, cgRoot: hc.CgroupRoot, stateDir: ro.StateDir, runDir: hc.RunDir, deltaDir: hc.DeltaDir, cache: hc.TemplateCache}
+}
+
+// adopt hands h the delta another home parked at ref, as a claim would:
+// the delta moves into h's delta store and its parent checkpoint is
+// copied into h's parent store, the delta first, so h never holds the
+// parent without a delta that names it. It returns the delta's new ref.
+func (h *home) adopt(t *testing.T, from *home, ref string) string {
+	t.Helper()
+	moved := filepath.Join(h.deltaDir, filepath.Base(filepath.Dir(ref)), "claimed-"+filepath.Base(ref))
+	if err := os.MkdirAll(filepath.Dir(moved), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(ref, moved); err != nil {
+		t.Fatalf("move the delta: %v", err)
+	}
+	copyParent(t, filepath.Join(from.cache, "parents"), filepath.Join(h.cache, "parents"), moved)
+	return moved
 }
 
 // mappedRoot is the host uid the grant's root runs as.
@@ -523,6 +545,7 @@ func TestResumeOnSecondHome(t *testing.T) {
 			if err != nil {
 				t.Fatalf("park: %v", err)
 			}
+			ref = b.adopt(t, a, ref)
 			h2, err := b.rt.Clone(ctx, core.CloneSpec{Grant: g, Source: core.SourceDelta, Ref: ref,
 				Fence: core.Fence{GrantUID: g.UID, Epoch: 1, Seq: 2}, Deadline: 5 * time.Second})
 			if err != nil {

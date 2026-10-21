@@ -99,7 +99,7 @@ conform-stub: ## run C1-C10 against a stub-runtime fiberd (all hooks wired)
 conform-signed: ## same, over real signed grants: grant-issuer serve + -verifier=jwks
 	CONFORM_SIGNED=1 CONFORM_STATE=$(BIN)/conform-state-signed hack/conform/stub.sh run
 
-conform-proc: ## C1-C10 against the fork runtime with real cgroups, inside the Linux dev container
+conform-proc: ## C1-C10 against the fork runtime with real cgroups, warmed from an artifact with sealed images, and C11 moving a session to a peer home and back, inside the Linux dev container
 	hack/dev/run.sh env CONFORM_RUNTIME=proc CONFORM_SIGNED=1 CONFORM_STATE=$(CONFORM_DIR)/conform-state-proc hack/conform/stub.sh run
 
 conform-proc-python: ## C1-C10 against the fork runtime with the Python reference template (sdk/python), inside the Linux dev container

@@ -47,10 +47,13 @@ rootfs() {
 # push_counter packs the static counter as a zygote artifact (no CRIU
 # images: the backend checkpoints the warm template itself) with the
 # given arguments and pushes it to the registry under tag. It prints the
-# digest the grant names.
+# digest the grant names. A --gvisor counter waits on a file only a
+# sandbox has, so it skips the build's smoke test.
 push_counter() { # push_counter <tag> <args>
   curl -sf "http://$REG/v2/" >/dev/null || { echo "registry $REG not reachable: make registry-start" >&2; exit 1; }
-  bin/zygotectl build -zygote bin/counter-static -args "$2" -skip-images -out "$STATE/counter-art-$1" >/dev/null
+  local smoke=""
+  case "$2" in *--gvisor*) smoke=-no-smoke ;; esac
+  bin/zygotectl build -zygote bin/counter-static -args "$2" -skip-images ${smoke:+"$smoke"} -out "$STATE/counter-art-$1" >/dev/null
   bin/zygotectl push -dir "$STATE/counter-art-$1" -ref "http://$REG/zygotes/counter:$1"
 }
 

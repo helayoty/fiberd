@@ -5,9 +5,11 @@
 // Layout (one manifest, three layers, all titled):
 //
 //	zygote       the executable, application/vnd.fiberd.zygote.bin.v1
-//	config.json  argv, arch, kernel and libc of the build host, digests
+//	config.json  argv, arch, kernel and libc of the build host, digests,
+//	             and how images.tar is sealed
 //	images.tar   CRIU images of the zygote taken right after READY: the
-//	             parent pages that fiber deltas are computed against
+//	             parent pages that fiber deltas are computed against.
+//	             Sealed to the fleet's wrap key (wrap.go), never plain
 //
 // The manifest digest is the template digest a grant carries.
 package artifact
@@ -60,14 +62,19 @@ type Config struct {
 	// refuses a dynamic one, since it cannot tell whether that
 	// filesystem holds the libc. Empty in a config written before the
 	// fact was recorded, which counts as dynamic.
-	Linking   string    `json:"linking,omitempty"`
-	HasImages bool      `json:"has_images"`
-	BuiltAt   time.Time `json:"built_at"`
+	Linking string `json:"linking,omitempty"`
+	// Images says how images.tar is sealed. Nil when the artifact has no
+	// images. An artifact never carries images in the clear.
+	Images  *ImagesSeal `json:"images,omitempty"`
+	BuiltAt time.Time   `json:"built_at"`
 	// Digest is the manifest digest. It is never stored in config.json
 	// (it is a layer); Pull fills it from the transfer, and ReadDigest
 	// reads the DIGEST side file Pack and Pull write.
 	Digest string `json:"-"`
 }
+
+// HasImages reports whether the artifact carries a sealed images.tar.
+func (c Config) HasImages() bool { return c.Images != nil }
 
 // ReadConfig loads config.json from an artifact directory.
 func ReadConfig(dir string) (Config, error) {
@@ -157,6 +164,9 @@ func pack(ctx context.Context, fs *file.Store, dir string, cfg Config) (ocispec.
 	if err := add(fileConfig, MediaTypeConfig, true); err != nil {
 		return ocispec.Descriptor{}, err
 	}
+	if err := checkImagesLayer(dir, cfg); err != nil {
+		return ocispec.Descriptor{}, err
+	}
 	if err := add(fileImages, MediaTypeImages, false); err != nil {
 		return ocispec.Descriptor{}, err
 	}
@@ -203,8 +213,9 @@ func Push(ctx context.Context, dir, ref string) (string, error) {
 	return desc.Digest.String(), nil
 }
 
-// Pull downloads the artifact at repo@digest (or repo:tag) into dst and
-// unpacks images.tar. The manifest digest is verified by the transfer.
+// Pull downloads the artifact at repo@digest (or repo:tag) into dst. The
+// manifest digest is verified by the transfer. Sealed images stay sealed.
+// A home opens them with UnpackImages.
 func Pull(ctx context.Context, ref, dst string) (Config, error) {
 	repo, target, err := repository(ref)
 	if err != nil {
@@ -257,10 +268,8 @@ func Pull(ctx context.Context, ref, dst string) (Config, error) {
 	if sum != cfg.ZygoteSHA256 {
 		return Config{}, fmt.Errorf("artifact: pulled zygote sha256 %s does not match config %s", sum, cfg.ZygoteSHA256)
 	}
-	if cfg.HasImages {
-		if err := untar(filepath.Join(dst, fileImages), ImagesDir(dst)); err != nil {
-			return Config{}, err
-		}
+	if err := checkImagesLayer(dst, cfg); err != nil {
+		return Config{}, err
 	}
 	if err := writeDigest(dst, desc.Digest.String()); err != nil {
 		return Config{}, err
@@ -271,9 +280,9 @@ func Pull(ctx context.Context, ref, dst string) (Config, error) {
 
 // Reverify re-checks a template cache entry a previous Pull left. The
 // directory must still pack to digest and its zygote still hash to its
-// config. It then replaces images/ with a fresh unpack of the verified
-// images.tar. Without this, anything that can write the cache could change
-// what every later warm runs.
+// config. A home then unpacks the verified images.tar afresh with
+// UnpackImages. Without this, anything that can write the cache could
+// change what every later warm runs.
 func Reverify(ctx context.Context, dir, digest string) (Config, error) {
 	dir, err := filepath.Abs(dir)
 	if err != nil {
@@ -305,28 +314,70 @@ func Reverify(ctx context.Context, dir, digest string) (Config, error) {
 	if err := os.Chmod(ZygotePath(dir), 0o755); err != nil {
 		return Config{}, err
 	}
-	if cfg.HasImages {
-		// Unpack beside, then swap. A parent already mapped from the old
-		// files keeps them until it is closed.
-		fresh := ImagesDir(dir) + ".verified"
-		_ = os.RemoveAll(fresh)
-		if err := untar(filepath.Join(dir, fileImages), fresh); err != nil {
-			_ = os.RemoveAll(fresh)
-			return Config{}, err
-		}
-		old := ImagesDir(dir) + ".old"
-		_ = os.RemoveAll(old)
-		if err := os.Rename(ImagesDir(dir), old); err != nil && !errors.Is(err, os.ErrNotExist) {
-			_ = os.RemoveAll(fresh)
-			return Config{}, err
-		}
-		if err := os.Rename(fresh, ImagesDir(dir)); err != nil {
-			return Config{}, err
-		}
-		_ = os.RemoveAll(old)
-	}
 	cfg.Digest = digest
 	return cfg, nil
+}
+
+// checkImagesLayer refuses an artifact directory whose images.tar and
+// config disagree. images.tar is there exactly when config.json says how
+// it is sealed, and it must be sealed. So no template memory is packed,
+// pushed or pulled in the clear.
+func checkImagesLayer(dir string, cfg Config) error {
+	f, err := os.Open(filepath.Join(dir, fileImages))
+	switch {
+	case errors.Is(err, os.ErrNotExist) && cfg.Images == nil:
+		return nil
+	case errors.Is(err, os.ErrNotExist):
+		return fmt.Errorf("artifact: config names sealed images but there is no %s", fileImages)
+	case err != nil:
+		return err
+	}
+	defer func() { _ = f.Close() }()
+	if cfg.Images == nil {
+		return fmt.Errorf("artifact: %s without a seal in config.json; images are only packed sealed (zygotectl build -seal-to)", fileImages)
+	}
+	magic := make([]byte, len(sealMagic))
+	if _, err := io.ReadFull(f, magic); err != nil || string(magic) != sealMagic {
+		return fmt.Errorf("artifact: %s is not sealed", fileImages)
+	}
+	return nil
+}
+
+// UnpackImages opens the sealed images.tar of the verified artifact in
+// dir with the fleet key derived from k, checks it hashes to what cfg
+// names, and unpacks it into ImagesDir(dir), owner-only. The unpack goes
+// beside and is swapped in, so a parent already mapped from the old files
+// keeps them until it is closed. Without k it says the home needs the
+// fleet's seal key.
+func UnpackImages(dir string, cfg Config, k *SealKey) error {
+	if cfg.Images == nil {
+		return errors.New("artifact: no images to unpack")
+	}
+	if k == nil {
+		return fmt.Errorf("artifact: images sealed to fleet key %q, and this home has no seal key (-delta-seal-key)", cfg.Images.KeyID)
+	}
+	open := filepath.Join(dir, fileImages+".open")
+	defer func() { _ = os.Remove(open) }()
+	if err := OpenImages(filepath.Join(dir, fileImages), open, k, *cfg.Images); err != nil {
+		return err
+	}
+	fresh := ImagesDir(dir) + ".verified"
+	_ = os.RemoveAll(fresh)
+	if err := untar(open, fresh); err != nil {
+		_ = os.RemoveAll(fresh)
+		return err
+	}
+	old := ImagesDir(dir) + ".old"
+	_ = os.RemoveAll(old)
+	if err := os.Rename(ImagesDir(dir), old); err != nil && !errors.Is(err, os.ErrNotExist) {
+		_ = os.RemoveAll(fresh)
+		return err
+	}
+	if err := os.Rename(fresh, ImagesDir(dir)); err != nil {
+		_ = os.RemoveAll(fresh)
+		return err
+	}
+	return os.RemoveAll(old)
 }
 
 // repository is the remote repository ref names and its tag or digest.
@@ -435,7 +486,8 @@ func untar(src, dst string) error {
 		return err
 	}
 	defer func() { _ = f.Close() }()
-	if err := os.MkdirAll(dst, 0o755); err != nil {
+	// Owner-only. What is unpacked is template memory or a delta.
+	if err := os.MkdirAll(dst, 0o700); err != nil {
 		return err
 	}
 	tr := tar.NewReader(f)
@@ -455,7 +507,7 @@ func untar(src, dst string) error {
 		if err := checkEntryName(hdr.Name); err != nil {
 			return err
 		}
-		out, err := os.OpenFile(filepath.Join(dst, hdr.Name), os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+		out, err := os.OpenFile(filepath.Join(dst, hdr.Name), os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
 		if err != nil {
 			return err
 		}

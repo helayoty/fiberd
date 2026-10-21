@@ -213,4 +213,19 @@ func TestSessionExportImport(t *testing.T) {
 		t.Fatalf("count of S3 on B = %d %q, want 3", st, body)
 	}
 	_, _ = b.Release(ctx, r4.FiberID, true)
+	// Both registries and the shipped parent hold the template's memory
+	// sealed only. The import opened the parent to check its hash and
+	// pushed it as it came.
+	for _, dir := range []string{filepath.Join(root, "reg-a"), filepath.Join(root, "reg-b")} {
+		if requireSealed(t, dir, nil) == 0 {
+			t.Fatalf("%s holds nothing sealed", dir)
+		}
+	}
+	shipped := filepath.Join(t.TempDir(), "files")
+	if err := artifact.Untar(filepath.Join(out, host.ExportParentFile), shipped); err != nil {
+		t.Fatal(err)
+	}
+	if requireSealed(t, shipped, nil) == 0 {
+		t.Fatal("the shipped parent holds no files")
+	}
 }

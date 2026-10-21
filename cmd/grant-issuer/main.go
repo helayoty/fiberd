@@ -3,6 +3,7 @@
 // that homes verify against.
 //
 //	grant-issuer keygen -alg EdDSA -out key.json
+//	grant-issuer keygen -alg A256GCM -out seal.json   also writes fleet-pub.json beside it
 //	grant-issuer mint   -key key.json -issuer http://issuer:8686 -aud node-a \
 //	                    -tenant team-a -template sha256:... -max 8 -warm 2 -w-budget 64Mi \
 //	                    -min-tier FIBER_WARM -isolation TRUSTED -ttl 10m > grant.jwt
@@ -25,6 +26,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -69,23 +71,55 @@ func keygen(args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("keygen", flag.ContinueOnError)
 	alg := fs.String("alg", "EdDSA", "signature algorithm, EdDSA or ES256. A256GCM writes a delta seal key (-delta-seal-key) instead")
 	out := fs.String("out", "key.json", "where to write the private JWK (mode 0600)")
+	fleetPub := fs.String("fleet-pub", "", "A256GCM: where to write the fleet's public wrap key, which authors pass to zygotectl build -seal-to (default fleet-pub.json beside -out)")
 	if err := cli.ParseFlags(fs, args, stderr); err != nil {
 		return err
 	}
-	var key *jose.JSONWebKey
-	var err error
-	if *alg == "A256GCM" {
-		key, err = artifact.GenerateSealKey()
-	} else {
-		key, err = grant.GenerateKey(jose.SignatureAlgorithm(*alg))
+	if *alg != "A256GCM" {
+		if *fleetPub != "" {
+			return errors.New("keygen: -fleet-pub goes with -alg A256GCM")
+		}
+		key, err := grant.GenerateKey(jose.SignatureAlgorithm(*alg))
+		if err != nil {
+			return err
+		}
+		if err := grant.SaveKey(*out, key); err != nil {
+			return err
+		}
+		_, _ = fmt.Fprintf(stdout, "wrote %s kid=%s alg=%s\n", *out, key.KeyID, key.Algorithm)
+		return nil
 	}
+	key, err := artifact.GenerateSealKey()
 	if err != nil {
 		return err
+	}
+	// The fleet's wrap key derives from the master. Authors seal images
+	// to its public half, and only a home that holds the master opens
+	// them. go-jose has no X25519 JWK, so the file is written here.
+	seal, err := artifact.SealKeyFromJWK(key)
+	if err != nil {
+		return err
+	}
+	w, err := artifact.DeriveWrapKey(seal)
+	if err != nil {
+		return err
+	}
+	pub, err := w.PublicJWK()
+	if err != nil {
+		return err
+	}
+	if *fleetPub == "" {
+		*fleetPub = filepath.Join(filepath.Dir(*out), "fleet-pub.json")
 	}
 	if err := grant.SaveKey(*out, key); err != nil {
 		return err
 	}
+	// Public, so readable by anyone. It opens nothing.
+	if err := os.WriteFile(*fleetPub, append(pub, '\n'), 0o644); err != nil {
+		return err
+	}
 	_, _ = fmt.Fprintf(stdout, "wrote %s kid=%s alg=%s\n", *out, key.KeyID, key.Algorithm)
+	_, _ = fmt.Fprintf(stdout, "wrote %s kid=%s (the fleet's public wrap key, for zygotectl build -seal-to)\n", *fleetPub, w.ID)
 	return nil
 }
 

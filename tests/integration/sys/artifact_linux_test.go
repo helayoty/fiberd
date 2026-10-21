@@ -53,6 +53,46 @@ func tarEntries(t *testing.T, path string) map[string]string {
 	}
 }
 
+// fleet is a master seal key and the public wrap key authors seal images
+// to.
+func fleet(t *testing.T) (*artifact.SealKey, *artifact.WrapPublicKey) {
+	t.Helper()
+	jwk, err := artifact.GenerateSealKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	k, err := artifact.SealKeyFromJWK(jwk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, err := artifact.DeriveWrapKey(k)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return k, w.Public()
+}
+
+// openedImages opens the sealed images.tar of the artifact in out with
+// the master and lists its entries. The build must have left nothing of
+// the images in the clear.
+func openedImages(t *testing.T, out string, k *artifact.SealKey) map[string]string {
+	t.Helper()
+	for _, left := range []string{artifact.ImagesDir(out), filepath.Join(out, "images.tar.plain")} {
+		if _, err := os.Stat(left); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("the build left %s in the clear: %v", left, err)
+		}
+	}
+	cfg, err := artifact.ReadConfig(out)
+	if err != nil || cfg.Images == nil {
+		t.Fatalf("config = %+v, %v; want sealed images", cfg, err)
+	}
+	opened := filepath.Join(t.TempDir(), "images.tar")
+	if err := artifact.OpenImages(filepath.Join(out, "images.tar"), opened, k, *cfg.Images); err != nil {
+		t.Fatal(err)
+	}
+	return tarEntries(t, opened)
+}
+
 // Zygotes speak on fd 3, as a home's do. The second moves its channel
 // off fd 3 before it is ready.
 const (
@@ -137,9 +177,10 @@ func TestArtifactBuildCheckpoint(t *testing.T) {
 				d   string
 				err error
 			}
+			k, pub := fleet(t)
 			done := make(chan result, 1)
 			go func() {
-				d, err := artifact.Build(ctx, artifact.BuildOptions{Zygote: zygote, Args: []string{"-x"}, Out: out,
+				d, err := artifact.Build(ctx, artifact.BuildOptions{Zygote: zygote, Args: []string{"-x"}, Out: out, SealTo: pub,
 					CRIU: criu.Options{Commander: fake}, ReadyTimeout: tc.timeout})
 				done <- result{d, err}
 			}()
@@ -159,10 +200,10 @@ func TestArtifactBuildCheckpoint(t *testing.T) {
 				t.Fatal(r.err)
 			}
 			cfg, err := artifact.ReadConfig(out)
-			if err != nil || !cfg.HasImages || cfg.Arch != runtime.GOARCH {
+			if err != nil || !cfg.HasImages() || cfg.Arch != runtime.GOARCH {
 				t.Fatalf("config = %+v, %v", cfg, err)
 			}
-			if got := tarEntries(t, filepath.Join(out, "images.tar")); got["pages-1.img"] != "pages\n" {
+			if got := openedImages(t, out, k); got["pages-1.img"] != "pages\n" {
 				t.Fatalf("images.tar holds %v", got)
 			}
 			args := strings.Join(fake.args, " ")
@@ -194,11 +235,12 @@ func TestArtifactBuildWithCRIU(t *testing.T) {
 			zygote := filepath.Join(root, "zygote.sh")
 			mustWrite(t, zygote, []byte(tc.zygote))
 			out := filepath.Join(root, "out")
-			d, err := artifact.Build(ctx, artifact.BuildOptions{Zygote: zygote, Out: out})
+			k, pub := fleet(t)
+			d, err := artifact.Build(ctx, artifact.BuildOptions{Zygote: zygote, Out: out, SealTo: pub})
 			if err != nil {
 				t.Fatal(err)
 			}
-			got := tarEntries(t, filepath.Join(out, "images.tar"))
+			got := openedImages(t, out, k)
 			pages := 0
 			for name := range got {
 				if strings.HasPrefix(name, "pages-") {
@@ -208,11 +250,23 @@ func TestArtifactBuildWithCRIU(t *testing.T) {
 			if pages == 0 {
 				t.Fatalf("images.tar holds no pages: %v", len(got))
 			}
-			if again, err := artifact.Reverify(ctx, out, d); err != nil || !again.HasImages {
+			if again, err := artifact.Reverify(ctx, out, d); err != nil || !again.HasImages() {
 				t.Fatalf("Reverify = %+v, %v", again, err)
+			}
+			if err := artifact.UnpackImages(out, cfgOf(t, out), k); err != nil {
+				t.Fatalf("UnpackImages: %v", err)
 			}
 		})
 	}
+}
+
+func cfgOf(t *testing.T, dir string) artifact.Config {
+	t.Helper()
+	c, err := artifact.ReadConfig(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
 }
 
 // TestArtifactHostInfo checks the parity facts against the kernel and a

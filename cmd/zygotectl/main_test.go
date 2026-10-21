@@ -57,6 +57,11 @@ func TestRunDispatch(t *testing.T) {
 		{name: "pull needs -ref and -out", args: []string{"pull", "-ref", "x"}, want: 1, wantStderr: "-ref and -out are required"},
 		{name: "inspect needs -dir", args: []string{"inspect"}, want: 1, wantStderr: "-dir is required"},
 		{name: "build rejects a bad flag", args: []string{"build", "-skip-images=maybe"}, want: 2, wantStderr: "invalid boolean value"},
+		{name: "build -h names -no-smoke", args: []string{"build", "-h"}, want: 0, wantStderr: "-no-smoke"},
+		// Regression: a build with images packed them in the clear.
+		{name: "build with images needs -seal-to", args: []string{"build", "-zygote", "z", "-out", "x"}, want: 1, wantStderr: "-seal-to fleet-pub.json is required"},
+		{name: "build -seal-to a missing file", args: []string{"build", "-zygote", "z", "-out", "x", "-seal-to", "/nonexistent/fleet-pub.json"},
+			want: 1, wantStderr: "-seal-to: open /nonexistent/fleet-pub.json"},
 		{name: "inspect rejects a bad flag", args: []string{"inspect", "-dir"}, want: 2, wantStderr: "flag needs an argument"},
 		{name: "-version prints the version", args: []string{"-version"}, want: 0, wantStdout: "zygotectl "},
 		{name: "--version prints the version", args: []string{"--version"}, want: 0, wantStdout: "zygotectl "},
@@ -97,9 +102,9 @@ func TestBuildPushPullInspect(t *testing.T) {
 		wantStderr string // on failure
 		check      func(t *testing.T, stdout string)
 	}{
-		{name: "build without images prints the digest",
+		{name: "build without images or smoke test prints the digest",
 			args: func() []string {
-				return []string{"build", "-zygote", zygote, "-args", "--heap-mb  32", "-out", art, "-skip-images"}
+				return []string{"build", "-zygote", zygote, "-args", "--heap-mb  32", "-out", art, "-skip-images", "-no-smoke"}
 			},
 			check: func(t *testing.T, stdout string) {
 				digest = strings.TrimSpace(stdout)
@@ -118,9 +123,9 @@ func TestBuildPushPullInspect(t *testing.T) {
 				var got struct {
 					Digest string `json:"digest"`
 					Config struct {
-						Args      []string `json:"args"`
-						Arch      string   `json:"arch"`
-						HasImages bool     `json:"has_images"`
+						Args   []string `json:"args"`
+						Arch   string   `json:"arch"`
+						Images any      `json:"images"`
 					} `json:"config"`
 					Host   artifact.Platform `json:"host"`
 					Parity string            `json:"parity"`
@@ -129,7 +134,7 @@ func TestBuildPushPullInspect(t *testing.T) {
 				if err := json.Unmarshal([]byte(stdout), &got); err != nil {
 					t.Fatalf("inspect output %q: %v", stdout, err)
 				}
-				if got.Digest != digest || got.Parity != strict || got.Usable != "ok" || got.Config.Arch != here.Arch ||
+				if got.Digest != digest || got.Parity != strict || got.Usable != "ok" || got.Config.Arch != here.Arch || got.Config.Images != nil ||
 					got.Host != here || strings.Join(got.Config.Args, " ") != "--heap-mb 32" {
 					t.Fatalf("inspect = %+v, want digest %s, %s parity, usable on %s, args --heap-mb 32", got, digest, strict, here)
 				}
@@ -203,6 +208,119 @@ func TestBuildPushPullInspect(t *testing.T) {
 				t.Fatalf("exit %d: %s", code, stderr)
 			}
 			st.check(t, stdout)
+		})
+	}
+}
+
+// TestSealTo checks what build makes of -seal-to before it runs
+// anything, and that inspect shows how an artifact's images are sealed.
+func TestSealTo(t *testing.T) {
+	jwk, err := artifact.GenerateSealKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	master, err := artifact.SealKeyFromJWK(jwk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, err := artifact.DeriveWrapKey(master)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	pub := filepath.Join(dir, "fleet-pub.json")
+	b, err := w.PublicJWK()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pub, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	seal := filepath.Join(dir, "seal.json")
+	sb, err := json.Marshal(jwk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(seal, sb, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	zygote := filepath.Join(dir, "z")
+	if err := os.WriteFile(zygote, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// An artifact with sealed images, made by hand since building one
+	// needs criu.
+	art := filepath.Join(dir, "art")
+	if err := os.MkdirAll(filepath.Join(dir, "pages"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "pages", "pages-1.img"), []byte("pages"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := artifact.Build(context.Background(), artifact.BuildOptions{Zygote: zygote, Out: art, SkipImages: true, NoSmoke: true, Platform: here}); err != nil {
+		t.Fatal(err)
+	}
+	if err := artifact.TarDir(filepath.Join(dir, "pages"), filepath.Join(dir, "images.tar")); err != nil {
+		t.Fatal(err)
+	}
+	s, err := artifact.SealImages(filepath.Join(dir, "images.tar"), filepath.Join(art, "images.tar"), w.Public())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := artifact.ReadConfig(art)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Images = &s
+	cb, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(art, "config.json"), cb, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name       string
+		args       []string
+		want       int
+		wantStderr string
+		check      func(t *testing.T, stdout string)
+	}{
+		{name: "a seal key is not the fleet's public half", args: []string{"build", "-zygote", zygote, "-out", filepath.Join(dir, "x"), "-seal-to", seal},
+			want: 1, wantStderr: "OKP X25519"},
+		{name: "-skip-images needs no key", args: []string{"build", "-zygote", zygote, "-out", filepath.Join(dir, "y"), "-skip-images", "-no-smoke"},
+			check: func(t *testing.T, stdout string) {
+				if !strings.HasPrefix(stdout, "sha256:") {
+					t.Fatalf("stdout %q, want the digest", stdout)
+				}
+			}},
+		{name: "inspect names the fleet key and the hash", args: []string{"inspect", "-dir", art},
+			check: func(t *testing.T, stdout string) {
+				var got struct {
+					Config struct {
+						Images struct {
+							WrapKey string `json:"wrap_key"`
+							SHA256  string `json:"sha256"`
+						} `json:"images"`
+					} `json:"config"`
+				}
+				if err := json.Unmarshal([]byte(stdout), &got); err != nil {
+					t.Fatal(err)
+				}
+				if got.Config.Images.WrapKey != w.ID || got.Config.Images.SHA256 != s.SHA256 {
+					t.Fatalf("inspect images = %+v, want wrap key %s and sha256 %s", got.Config.Images, w.ID, s.SHA256)
+				}
+			}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			code, stdout, stderr := call(tc.args...)
+			if code != tc.want || !strings.Contains(stderr, tc.wantStderr) {
+				t.Fatalf("exit %d, stdout %q, stderr %q, want %d with %q", code, stdout, stderr, tc.want, tc.wantStderr)
+			}
+			if tc.check != nil {
+				tc.check(t, stdout)
+			}
 		})
 	}
 }

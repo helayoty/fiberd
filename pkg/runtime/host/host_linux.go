@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/helayoty/fiberd/pkg/artifact"
@@ -86,13 +87,26 @@ type Runtime struct {
 	// <TemplateCache>/parents/<sha256>/ (a self-checkpoint, or a symlink
 	// to an artifact's images). A delta names its parent by hash, so a
 	// parent kept here stays usable across template restarts and, when
-	// the same artifact warmed another home, across homes.
+	// the same artifact warmed another home, across homes, for as long as
+	// a warm instance or a delta here names it (parents_linux.go).
 	parentsMu sync.Mutex
 	parents   map[string]backend.Parent
+	// storeMu is held for reading by every section that uses the store
+	// (useParents) and for writing by the prune. storeUses counts the
+	// sections that ended. prune pokes the pruner, which closes
+	// pruneDone when it ends.
+	storeMu   sync.RWMutex
+	storeUses atomic.Uint64
+	prune     chan struct{}
+	pruneDone chan struct{}
 
 	// templateMu serialises pulls and re-verification of the template
 	// cache, which replace files other warms of the same digest read.
+	// imagesHeld counts, per unpacked images directory, the warms in
+	// the making between their resolve and the link that names the
+	// images, so the prune leaves those images (parents_linux.go).
 	templateMu sync.Mutex
+	imagesHeld map[string]int
 
 	devicesMu      sync.Mutex
 	deviceChannels map[string]core.DeviceChannel // grant uid -> what the home provisioned
@@ -221,6 +235,13 @@ func New(cfg Config) (*Runtime, error) {
 			return nil, err
 		}
 	}
+	// Template memory in the clear, fiberd's alone, also when an earlier
+	// fiberd left the stores open.
+	for _, d := range []string{filepath.Join(cfg.TemplateCache, "parents"), filepath.Join(cfg.TemplateCache, "zygote-images")} {
+		if err := ownerDir(d); err != nil {
+			return nil, err
+		}
+	}
 	// What this home believes about its host. The configuration's facts
 	// win, then the backend's, and what neither names is detected.
 	host := artifact.Platform{Arch: cfg.Platform.Arch, Kernel: cfg.Platform.Kernel, Libc: cfg.Platform.Libc}
@@ -276,9 +297,15 @@ func New(cfg Config) (*Runtime, error) {
 		poolExits: make(chan string, 64),
 		stop:      make(chan struct{}),
 		parents:   map[string]backend.Parent{},
+		prune:     make(chan struct{}, 1),
+		pruneDone: make(chan struct{}),
 	}
 	r.sweepPools()
+	r.sweepStores()
 	go r.pump()
+	// What an earlier fiberd left in the store that no delta names.
+	go r.pruneLoop()
+	r.pokePrune()
 	_, overhead := cfg.Backend.(backend.Overheader)
 	_, reports := cfg.Backend.(backend.WReporter)
 	_, devices := cfg.Backend.(backend.DeviceReporter)
@@ -413,8 +440,9 @@ func (r *Runtime) codec() backend.DeltaCodec {
 func (r *Runtime) parentsDir() string { return filepath.Join(r.cfg.TemplateCache, "parents") }
 
 // registerParent loads a checkpoint directory, files it under its hash in
-// the parent store (moving a self-checkpoint, linking an artifact's
-// images) and returns the hash.
+// the parent store (moving a self-checkpoint, made fiberd's alone first,
+// linking an artifact's images) and returns the hash. The caller holds a
+// section (useParents) until the parent's use is recorded.
 func (r *Runtime) registerParent(dir string, move bool) (string, error) {
 	codec := r.codec()
 	if codec == nil {
@@ -426,9 +454,15 @@ func (r *Runtime) registerParent(dir string, move bool) (string, error) {
 	}
 	sha := p.SHA256()
 	dst := filepath.Join(r.parentsDir(), sha)
-	if err := os.MkdirAll(r.parentsDir(), 0o755); err != nil {
+	if err := ownerDir(r.parentsDir()); err != nil {
 		p.Close()
 		return "", err
+	}
+	if move {
+		if err := ownerOnly(dir); err != nil {
+			p.Close()
+			return "", err
+		}
 	}
 	if _, err := os.Lstat(dst); err != nil {
 		if move {
@@ -774,6 +808,18 @@ func (r *Runtime) PrepareTemplate(ctx context.Context, g core.Grant) error {
 	if err != nil {
 		return err
 	}
+	// The images a resolve unpacked are held until the warm names them
+	// through a store link. Images a warm never came to name are left
+	// for the prune.
+	linked := false
+	defer func() {
+		if tpl.ImagesDir != "" {
+			r.releaseImages(tpl.ImagesDir)
+			if !linked {
+				r.pokePrune()
+			}
+		}
+	}()
 
 	gcg, err := r.grantCgroup(g)
 	if err != nil {
@@ -811,9 +857,14 @@ func (r *Runtime) PrepareTemplate(ctx context.Context, g core.Grant) error {
 	// The parent pages for deltas: the artifact's checkpoint when there
 	// is one; otherwise checkpoint the warm instance now, leaving it
 	// running. Deltas over a self-checkpoint are exact on this home and
-	// portable to any home whose template pages hash the same.
-	if r.codec() != nil && r.tier >= core.TierCheckpoint {
+	// portable to any home whose template pages hash the same. Filing
+	// the parent and publishing the warm that names it are one section,
+	// so the prune never sees the entry without its name.
+	parentsDone := func() {}
+	defer func() { parentsDone() }()
+	if r.usesImages() {
 		if tpl.ImagesDir != "" {
+			parentsDone = r.useParents()
 			sha, err := r.registerParent(tpl.ImagesDir, false)
 			if err != nil {
 				log.Printf("host: artifact images for %s unusable as a parent; parks will be full images: %v", g.UID, err)
@@ -821,14 +872,23 @@ func (r *Runtime) PrepareTemplate(ctx context.Context, g core.Grant) error {
 				z.parentSHA = sha
 			}
 		} else if sc, ok := r.be.(backend.SelfCheckpointer); ok {
-			dir := filepath.Join(r.cfg.TemplateCache, "zygote-images", g.UID)
+			// Whatever is left of a checkpoint that is not filed goes,
+			// since it is the template's memory in the clear.
+			dir := filepath.Join(r.zygoteImagesDir(), g.UID)
 			_ = os.RemoveAll(dir)
-			if err := sc.CheckpointWarm(ctx, w.ID, dir); err != nil {
+			if err := ownerDir(r.zygoteImagesDir()); err != nil {
+				log.Printf("host: self-checkpoint for %s has no store; parks will be full images: %v", g.UID, err)
+			} else if err := sc.CheckpointWarm(ctx, w.ID, dir); err != nil {
+				_ = os.RemoveAll(dir)
 				log.Printf("host: self-checkpoint for %s failed; parks will be full images: %v", g.UID, err)
-			} else if sha, err := r.registerParent(dir, true); err != nil {
-				log.Printf("host: self-checkpoint for %s unusable; parks will be full images: %v", g.UID, err)
 			} else {
-				z.parentSHA = sha
+				parentsDone = r.useParents()
+				if sha, err := r.registerParent(dir, true); err != nil {
+					_ = os.RemoveAll(dir)
+					log.Printf("host: self-checkpoint for %s unusable; parks will be full images: %v", g.UID, err)
+				} else {
+					z.parentSHA = sha
+				}
 			}
 		}
 	}
@@ -856,6 +916,9 @@ func (r *Runtime) PrepareTemplate(ctx context.Context, g core.Grant) error {
 	r.mu.Lock()
 	r.warms[g.UID] = z
 	r.mu.Unlock()
+	parentsDone() // the warm names its parent now
+	parentsDone = func() {}
+	linked = z.parentSHA != ""
 	r.protectTemplates()
 
 	// The block ceiling, now that the warm instance's footprint is known.
@@ -906,12 +969,28 @@ func (r *Runtime) resolveTemplate(ctx context.Context, digest string) (backend.T
 			return backend.Template{}, fmt.Errorf("%w %q: %w", ErrNoTemplate, digest, err)
 		}
 	}
+	// Author images are sealed to the fleet. A home that makes parents
+	// from them opens them with the master, checks their hash, and
+	// unpacks them owner-only, afresh on every resolve. Other homes leave
+	// them sealed. The unpacked images are held for the caller, since
+	// the prune takes images nothing names (releaseImages).
+	unpacked := false
+	if cfg.HasImages() && r.usesImages() {
+		if err := artifact.UnpackImages(dir, cfg, r.cfg.DeltaKeys.Seal); err != nil {
+			return backend.Template{}, fmt.Errorf("%w %q: cannot open its images: %w", ErrNoTemplate, digest, err)
+		}
+		unpacked = true
+		if r.imagesHeld == nil {
+			r.imagesHeld = map[string]int{}
+		}
+		r.imagesHeld[artifact.ImagesDir(dir)]++
+	}
 	// The parity gate. The executable must be for this instruction set,
 	// and if the artifact carries images (the template's pages, which
 	// every delta is computed against and every restore starts from) they
 	// must be from a host this one can restore them on.
 	want := cfg.Platform()
-	if !cfg.HasImages {
+	if !cfg.HasImages() {
 		// A bare template brings an executable and no pages, so the
 		// kernel does not matter. Neither does libc when the executable
 		// runs on this host: the loader here loads it or fails plainly.
@@ -929,10 +1008,16 @@ func (r *Runtime) resolveTemplate(ctx context.Context, digest string) (backend.T
 		return backend.Template{}, fmt.Errorf("%w: template %s built on %s: %w", ErrParity, digest[:19], cfg.Platform(), err)
 	}
 	tpl := backend.Template{Argv: append([]string{artifact.ZygotePath(dir)}, cfg.Args...), Digest: digest, Dir: dir, ZygoteSHA256: cfg.ZygoteSHA256}
-	if cfg.HasImages {
+	if unpacked {
 		tpl.ImagesDir = artifact.ImagesDir(dir)
 	}
 	return tpl, nil
+}
+
+// usesImages reports whether this home makes parents for deltas, from an
+// artifact's images or by checkpointing its warm instance.
+func (r *Runtime) usesImages() bool {
+	return r.codec() != nil && r.tier >= core.TierCheckpoint
 }
 
 // sha256Hex returns the hex of a digest that is exactly "sha256:" and 64
@@ -1028,6 +1113,7 @@ func (r *Runtime) warmGone(grantUID string) {
 		_ = f.cg.Kill()
 		r.finish(f, "signal", "template instance exited")
 	}
+	r.pokePrune() // its parent, unless a delta names it
 	log.Printf("host: warm instance gone grant=%s", grantUID)
 }
 
@@ -1054,6 +1140,7 @@ func (r *Runtime) DropTemplate(grantUID string) {
 		}
 	}
 	r.protectTemplates()
+	r.pokePrune() // its parent, unless a delta names it
 	log.Printf("host: warm instance dropped grant=%s", grantUID)
 }
 
@@ -1500,6 +1587,9 @@ func (r *Runtime) Park(ctx context.Context, fiberID string, sync bool) (string, 
 	if f.relay != nil {
 		m.Relay = f.relay.sock
 	}
+	// From the warm that names the parent to the manifest that names it
+	// next, one section, so the prune cannot take the parent between.
+	parentsDone := r.useParents()
 	z := r.warmOf(f.grantUID)
 	if z != nil {
 		m.Template = z.digest
@@ -1525,7 +1615,9 @@ func (r *Runtime) Park(ctx context.Context, fiberID string, sync bool) (string, 
 			log.Printf("host: delta for %s failed, keeping the full image: %v", fiberID, err)
 		}
 	}
-	if err := writeJSON(filepath.Join(dir, "manifest.json"), m); err != nil {
+	err = writeJSON(filepath.Join(dir, "manifest.json"), m)
+	parentsDone()
+	if err != nil {
 		err = fmt.Errorf("host: %s parked to %s, but its manifest: %w", fiberID, dir, err)
 		if sync {
 			return giveBack(err)
@@ -1591,12 +1683,8 @@ func (r *Runtime) resume(ctx context.Context, spec core.CloneSpec) (core.FiberHa
 		if err != nil {
 			return core.FiberHandle{}, err
 		}
-		parent, err := r.parent(info.ParentSHA256)
-		if err != nil {
-			return core.FiberHandle{}, fmt.Errorf("host: resume of a delta: %w", err)
-		}
-		if err := codec.Merge(dir, parent); err != nil {
-			return core.FiberHandle{}, fmt.Errorf("host: merge delta %s: %w", dir, err)
+		if err := r.merge(codec, dir, info.ParentSHA256); err != nil {
+			return core.FiberHandle{}, err
 		}
 	}
 	gcg, err := r.grantCgroup(spec.Grant)
@@ -1788,6 +1876,21 @@ func (r *Runtime) resume(ctx context.Context, spec core.CloneSpec) (core.FiberHa
 	return core.FiberHandle{ID: f.id, Endpoint: f.endpoint}, nil
 }
 
+// merge rebuilds the full checkpoint in dir from its delta and the
+// parent sha, in one section, so the prune does not close the parent
+// while the codec reads it.
+func (r *Runtime) merge(codec backend.DeltaCodec, dir, sha string) error {
+	defer r.useParents()()
+	parent, err := r.parent(sha)
+	if err != nil {
+		return fmt.Errorf("host: resume of a delta: %w", err)
+	}
+	if err := codec.Merge(dir, parent); err != nil {
+		return fmt.Errorf("host: merge delta %s: %w", dir, err)
+	}
+	return nil
+}
+
 // HasDelta implements core.DeltaChecker: a parked ref is usable while its
 // manifest exists.
 func (r *Runtime) HasDelta(ref string) bool {
@@ -1812,6 +1915,7 @@ func (r *Runtime) Release(ctx context.Context, fiberID string, discard bool) err
 	fence, ferr := core.ParseFence(fiberID)
 	if discard && ferr == nil {
 		_ = os.RemoveAll(r.deltaDir(fence))
+		r.pokePrune() // its parent, unless something else names it
 		// A discarded delta gives its port back. A running fiber's port
 		// is freed by finish, once its listener or relay has closed, so
 		// a clone meanwhile cannot be handed a port still bound.
@@ -2064,6 +2168,9 @@ func (r *Runtime) Exits() <-chan core.FiberExit { return r.exits }
 // fiberd's relays.
 func (r *Runtime) Close() {
 	r.stopOnce.Do(func() { close(r.stop) })
+	if r.pruneDone != nil {
+		<-r.pruneDone
+	}
 	r.mu.Lock()
 	var ps []*pooled
 	for _, z := range r.warms {

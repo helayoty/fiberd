@@ -1,11 +1,16 @@
 // Command zygotectl builds, pushes, pulls and inspects zygote artifacts.
 //
-//	zygotectl build -zygote bin/refzygote -args "--heap-mb 32" -out out/ref
+//	zygotectl build -zygote bin/refzygote -args "--heap-mb 32" -seal-to fleet-pub.json -out out/ref
+//	zygotectl build -zygote bin/refzygote -skip-images -out out/bare   runs it to READY, no criu, no key
 //	zygotectl push  -dir out/ref -ref http://127.0.0.1:5000/zygotes/ref:v1
 //	zygotectl pull  -ref http://127.0.0.1:5000/zygotes/ref@sha256:... -out /tmp/ref
 //	zygotectl inspect -dir out/ref
 //
-// The digest build and push print is the grant's template_digest.
+// The digest build and push print is the grant's template_digest. The
+// images a build takes are sealed to the fleet's public wrap key
+// (fleet-pub.json, from grant-issuer keygen -alg A256GCM). The author
+// holds nothing that opens them. Only homes, which hold the fleet's seal
+// key, do.
 package main
 
 import (
@@ -56,7 +61,9 @@ func build(ctx context.Context, host artifact.Platform, args []string, stdout, s
 	zygote := fs.String("zygote", "", "zygote executable (linked with libfiberzygote)")
 	argv := fs.String("args", "", "arguments the home passes to the zygote")
 	out := fs.String("out", "", "artifact directory to write")
-	skip := fs.Bool("skip-images", false, "do not checkpoint the zygote (no criu here)")
+	skip := fs.Bool("skip-images", false, "do not checkpoint the zygote (no criu here). It is still run to READY once, as a smoke test")
+	noSmoke := fs.Bool("no-smoke", false, "with -skip-images, do not run the zygote at all (a slow warm-up, or a zygote this host cannot run)")
+	sealTo := fs.String("seal-to", "", "the fleet's public wrap key (fleet-pub.json, from grant-issuer keygen -alg A256GCM) the images are sealed to. Required unless -skip-images")
 	criuBin := fs.String("criu", "criu", "criu binary")
 	if err := cli.ParseFlags(fs, args, stderr); err != nil {
 		return err
@@ -64,9 +71,19 @@ func build(ctx context.Context, host artifact.Platform, args []string, stdout, s
 	if *zygote == "" || *out == "" {
 		return fmt.Errorf("build: -zygote and -out are required")
 	}
+	if !*skip && *sealTo == "" {
+		return fmt.Errorf("build: images are sealed to the fleet's wrap key, so -seal-to fleet-pub.json is required (or -skip-images)")
+	}
+	var pub *artifact.WrapPublicKey
+	if *sealTo != "" {
+		var err error
+		if pub, err = artifact.LoadWrapPublicKey(*sealTo); err != nil {
+			return fmt.Errorf("build: -seal-to: %w", err)
+		}
+	}
 	digest, err := artifact.Build(ctx, artifact.BuildOptions{
-		Zygote: *zygote, Args: strings.Fields(*argv), Out: *out, SkipImages: *skip,
-		CRIU: criu.Options{Bin: *criuBin}, Platform: host,
+		Zygote: *zygote, Args: strings.Fields(*argv), Out: *out, SkipImages: *skip, NoSmoke: *noSmoke,
+		SealTo: pub, CRIU: criu.Options{Bin: *criuBin}, Platform: host,
 	})
 	if err != nil {
 		return err
@@ -96,7 +113,7 @@ func push(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 func pull(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("pull", flag.ContinueOnError)
 	ref := fs.String("ref", "", "registry reference host/repo@digest or host/repo:tag (http://host/... for a plain-http registry)")
-	out := fs.String("out", "", "directory to unpack into")
+	out := fs.String("out", "", "directory to pull into. Sealed images stay sealed")
 	if err := cli.ParseFlags(fs, args, stderr); err != nil {
 		return err
 	}
@@ -133,7 +150,7 @@ func inspect(host artifact.Platform, args []string, stdout, stderr io.Writer) er
 	}
 	// The verdict a home with this parity level would reach on this host.
 	want := cfg.Platform()
-	if !cfg.HasImages {
+	if !cfg.HasImages() {
 		want.Kernel, want.Libc = "", ""
 	}
 	host = host.Complete()

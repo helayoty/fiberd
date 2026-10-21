@@ -51,7 +51,10 @@ func TestBind(t *testing.T) {
 			"Runtime.GrantCeiling": uint64(0), "Node.AllCaps": false, "Runtime.Runc.UsernsPool": runcbackend.DefaultPool,
 			"Runtime.FiberHide": []string(nil), "Runtime.Parity": "strict", "API.TLS.InsecurePlaintext": false,
 			"Node.Devices": []string(nil), "Node.StaleTTL": 30 * time.Second, "Timing": fiberd.Timing{},
+			"Runtime.Gvisor.TemplatesOnDisk": false,
 		}},
+		{name: "gvisor templates on disk", args: []string{"-gvisor-rootfs", "/r", "-gvisor-templates-on-disk"},
+			want: map[string]any{"Runtime.Gvisor.Rootfs": "/r", "Runtime.Gvisor.TemplatesOnDisk": true}},
 		{name: "templates repeat and later ones win", args: []string{"-template", "sha256:a=/bin/a --x", "-template", " default = /bin/d ", "-template", "sha256:a=/bin/b"},
 			want: map[string]any{"Runtime.Templates": map[string]string{"sha256:a": "/bin/b", "default": "/bin/d"}}},
 		{name: "a template without a command is refused", args: []string{"-template", "sha256:a="}, wantErr: "want digest=path"},
@@ -195,6 +198,10 @@ func TestLoadDeltaKeys(t *testing.T) {
 		wantErr                 string
 	}{
 		{name: "no registry, no keys"},
+		// A home that pulls templates with sealed images and moves no
+		// sessions still opens them with the fleet's seal key.
+		{name: "no registry, the flag's seal key only", sealed: seal, wantSeal: sealKID},
+		{name: "no registry, a missing seal key", sealed: missing, wantErr: "-delta-seal-key"},
 		{name: "generated on first use", registry: "r/d", wantSigner: "gen", wantSeal: "gen"},
 		{name: "the flags' keys", registry: "r/d", deltaKey: signer, sealed: seal, trust: trust,
 			wantSigner: signerKID, wantSeal: sealKID, wantTrust: 1},
@@ -226,8 +233,8 @@ func TestLoadDeltaKeys(t *testing.T) {
 				t.Fatal(err)
 			}
 			if tc.registry == "" {
-				if k.Signer != nil || k.Seal != nil {
-					t.Fatalf("keys without a registry: %+v", k)
+				if k.Signer != nil || (k.Seal == nil) != (tc.wantSeal == "") || (k.Seal != nil && k.Seal.ID != tc.wantSeal) {
+					t.Fatalf("keys without a registry: %+v, want seal %q only", k, tc.wantSeal)
 				}
 				if _, err := os.Stat(state); !errors.Is(err, os.ErrNotExist) {
 					t.Fatalf("state touched without a registry: %v", err)

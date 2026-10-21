@@ -71,6 +71,10 @@ func newHost(c host.Config) (core.Runtime, error) {
 	if c.DeltaRegistry != "" && c.DeltaKeys.Signer == nil {
 		c.DeltaKeys = deltaKeys
 	}
+	// Every home holds the fleet's master, which opens author images.
+	if c.DeltaKeys.Seal == nil {
+		c.DeltaKeys.Seal = deltaKeys.Seal
+	}
 	return host.New(c)
 }
 
@@ -789,10 +793,7 @@ func TestResumeOnAnotherRuntimeFromSameArtifact(t *testing.T) {
 	// as the parent the delta was taken over.
 	ctx := context.Background()
 	out := filepath.Join(t.TempDir(), "art")
-	digest, err := artifact.Build(ctx, artifact.BuildOptions{Zygote: zygoteBin, Args: []string{"--heap-mb", "16"}, Out: out})
-	if err != nil {
-		t.Fatalf("build artifact: %v", err)
-	}
+	digest := buildArtifact(t, out)
 	srv := httptest.NewServer(registry.New())
 	defer srv.Close()
 	reg := srv.URL
@@ -879,13 +880,10 @@ func (v tokenVerifier) Verify(_ context.Context, tok []byte) (core.Grant, error)
 func TestSessionMovesThroughRegistry(t *testing.T) {
 	ctx := context.Background()
 	out := filepath.Join(t.TempDir(), "art")
-	digest, err := artifact.Build(ctx, artifact.BuildOptions{Zygote: zygoteBin, Args: []string{"--heap-mb", "16"}, Out: out})
-	if err != nil {
-		t.Fatal(err)
-	}
-	srv := httptest.NewServer(registry.New())
-	defer srv.Close()
-	reg := srv.URL
+	digest := buildArtifact(t, out)
+	// Blobs on disk, so the end of the test can read everything the
+	// registry holds.
+	reg, blobs := diskRegistry(t)
 	if _, err := artifact.Push(ctx, out, reg+"/zygotes/ref:v1"); err != nil {
 		t.Fatal(err)
 	}
@@ -936,6 +934,11 @@ func TestSessionMovesThroughRegistry(t *testing.T) {
 	}
 	if _, found, err := artifact.Resolve(ctx, domainRepo+":"+sessionTag("S")); err != nil || !found {
 		t.Fatalf("delta not published at %s: found=%v err=%v", domainRepo, found, err)
+	}
+	// The registry holds the template's code and config in the clear, and
+	// its memory (the author's images, the parent, the delta) sealed.
+	if n := requireSealed(t, blobs, plainBlobs(t, out)); n < 3 {
+		t.Fatalf("%d sealed blobs, want the images, the parent and the delta at least", n)
 	}
 
 	// A home with a key of its own does not trust A's. It finds S, will
@@ -1006,6 +1009,7 @@ func TestSessionMovesThroughRegistry(t *testing.T) {
 		t.Fatalf("counter back on A = %q, want 4", got)
 	}
 	_, _ = a.Release(ctx, r4.FiberID, true)
+	requireSealed(t, blobs, plainBlobs(t, out))
 }
 
 // TestTemplateParityGate: an artifact's images are only warmed on a host
@@ -1014,10 +1018,7 @@ func TestSessionMovesThroughRegistry(t *testing.T) {
 func TestTemplateParityGate(t *testing.T) {
 	ctx := context.Background()
 	out := filepath.Join(t.TempDir(), "art")
-	digest, err := artifact.Build(ctx, artifact.BuildOptions{Zygote: zygoteBin, Args: []string{"--heap-mb", "16"}, Out: out})
-	if err != nil {
-		t.Fatal(err)
-	}
+	digest := buildArtifact(t, out)
 	srv := httptest.NewServer(registry.New())
 	defer srv.Close()
 	reg := srv.URL
@@ -1080,10 +1081,7 @@ func TestTemplateParityGate(t *testing.T) {
 func TestMobilityParityGate(t *testing.T) {
 	ctx := context.Background()
 	out := filepath.Join(t.TempDir(), "art")
-	digest, err := artifact.Build(ctx, artifact.BuildOptions{Zygote: zygoteBin, Args: []string{"--heap-mb", "16"}, Out: out})
-	if err != nil {
-		t.Fatal(err)
-	}
+	digest := buildArtifact(t, out)
 	srv := httptest.NewServer(registry.New())
 	defer srv.Close()
 	reg := srv.URL
@@ -1176,16 +1174,19 @@ func TestTemplateFromRegistryArtifact(t *testing.T) {
 	ctx := context.Background()
 	// Build the reference zygote into an artifact, with its CRIU images.
 	out := filepath.Join(t.TempDir(), "art")
-	digest, err := artifact.Build(ctx, artifact.BuildOptions{Zygote: zygoteBin, Args: []string{"--heap-mb", "16"}, Out: out})
-	if err != nil {
-		t.Fatalf("build artifact: %v", err)
-	}
+	digest := buildArtifact(t, out)
 	cfg, _ := artifact.ReadConfig(out)
-	if !cfg.HasImages {
-		t.Fatal("artifact has no images")
+	if !cfg.HasImages() || cfg.Images.KeyID != fleetPub(t).ID {
+		t.Fatalf("artifact images = %+v, want them sealed to the fleet", cfg.Images)
 	}
-	if _, err := os.Stat(filepath.Join(artifact.ImagesDir(out), "inventory.img")); err != nil {
-		t.Fatalf("zygote images missing: %v", err)
+	// The build keeps only the sealed tar. Its plaintext images are gone.
+	if b, err := os.ReadFile(filepath.Join(out, "images.tar")); err != nil || !strings.HasPrefix(string(b), sealMagic) {
+		t.Fatalf("images.tar is not sealed: %v", err)
+	}
+	for _, left := range []string{artifact.ImagesDir(out), filepath.Join(out, "images.tar.plain")} {
+		if _, err := os.Stat(left); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("the build left %s: %v", left, err)
+		}
 	}
 	t.Logf("artifact %s kernel=%s libc=%s", digest, cfg.Kernel, cfg.Libc)
 
@@ -1219,8 +1220,11 @@ func TestTemplateFromRegistryArtifact(t *testing.T) {
 	if _, err := os.Stat(artifact.ZygotePath(pulled)); err != nil {
 		t.Fatalf("template not in cache: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(artifact.ImagesDir(pulled), "inventory.img")); err != nil {
-		t.Fatalf("images not unpacked in cache: %v", err)
+	// Opened with the master and unpacked owner-only.
+	for path, want := range map[string]os.FileMode{artifact.ImagesDir(pulled): 0o700, filepath.Join(artifact.ImagesDir(pulled), "inventory.img"): 0o600} {
+		if st, err := os.Stat(path); err != nil || st.Mode().Perm() != want {
+			t.Fatalf("%s: %v %v, want %v", path, st, err, want)
+		}
 	}
 	h, err := rt.Clone(ctx, core.CloneSpec{Grant: g, Fence: core.Fence{GrantUID: "g7", Epoch: 1, Seq: 1}, Deadline: 2 * time.Second})
 	if err != nil {
@@ -1235,6 +1239,31 @@ func TestTemplateFromRegistryArtifact(t *testing.T) {
 	bogus := core.Grant{UID: "g8", TemplateDigest: "sha256:" + strings.Repeat("1", 64)}
 	if err := rt.PrepareTemplate(ctx, bogus); err == nil {
 		t.Fatal("unknown digest prepared")
+	}
+
+	// A home of another fleet cannot open the images, says so, and warms
+	// nothing.
+	sk, err := artifact.GenerateSealKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := artifact.SealKeyFromJWK(sk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreign, err := newHost(host.Config{
+		Registry: reg + "/zygotes/ref", TemplateCache: t.TempDir(), DeltaKeys: artifact.Keys{Seal: other},
+		CgroupRoot: filepath.Join(cgRoot, "tf"+fmt.Sprint(time.Now().UnixNano()%1_000_000)),
+		RunDir:     filepath.Join("/tmp", "fz-art-f"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer foreign.(interface{ Close() }).Close()
+	if foreign.Tier() >= core.TierCheckpoint {
+		if err := foreign.PrepareTemplate(ctx, core.Grant{UID: "g9", TemplateDigest: digest}); !errors.Is(err, host.ErrNoTemplate) || !strings.Contains(err.Error(), "this home derives") {
+			t.Fatalf("prepare with another fleet's master = %v, want ErrNoTemplate naming the key", err)
+		}
 	}
 }
 
@@ -1329,10 +1358,7 @@ func TestDeadlineIsEnforced(t *testing.T) {
 func TestResumedDeltaRetiredAndDiscarded(t *testing.T) {
 	ctx := context.Background()
 	out := filepath.Join(t.TempDir(), "art")
-	digest, err := artifact.Build(ctx, artifact.BuildOptions{Zygote: zygoteBin, Args: []string{"--heap-mb", "16"}, Out: out})
-	if err != nil {
-		t.Fatal(err)
-	}
+	digest := buildArtifact(t, out)
 	srv := httptest.NewServer(registry.New())
 	defer srv.Close()
 	reg := srv.URL
