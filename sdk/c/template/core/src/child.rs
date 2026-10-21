@@ -44,6 +44,9 @@ pub struct Child<'a> {
     pub ready_w: c_int,
     /// fiberd's channel end as passed on the CLONE line.
     pub channel: c_int,
+    /// The workspace tree passed on the CLONE line (ws), a detached
+    /// mount the child moves to /workspace, or -1.
+    pub ws_fd: c_int,
     /// The zygote's SIGCHLD descriptor, or -1.
     pub sigchld_fd: c_int,
     /// The pidns option.
@@ -85,6 +88,14 @@ pub const EX_IDENTITY: c_int = 121;
 pub const EX_CGROUP: c_int = 125;
 /// The child could not stack its clone3 filter.
 pub const EX_FILTER: c_int = 126;
+/// The child could not mount its workspace at /workspace.
+pub const EX_WORKSPACE: c_int = 127;
+
+/// Where a fiber's workspace is mounted, fixed for every fiber.
+pub const WORKSPACE: &CStr = c"/workspace";
+/// MOVE_MOUNT_F_EMPTY_PATH from linux/mount.h: the source is the
+/// descriptor itself.
+const MOVE_MOUNT_F_EMPTY_PATH: c_long = 0x4;
 
 /// CLONE_INTO_CGROUP from linux/sched.h of 5.7. libc's is an int, which
 /// cannot hold it.
@@ -588,6 +599,21 @@ pub unsafe fn scrub_and_run(c: &Child<'_>) -> ! {
             libc::close(c.sigchld_fd);
         }
     }
+    // The workspace goes in first, while the descriptor is still open
+    // and the capabilities it needs are held. The child's namespace is
+    // a copy of the zygote's private one, so the mount propagates
+    // nowhere. The descriptor is closed with everything else below.
+    if c.ws_fd >= 0 && mount_workspace(c.ws_fd) < 0 {
+        // SAFETY: fence by the contract above, the reason is static.
+        unsafe {
+            child_say(
+                c.fence,
+                c"workspace",
+                c"move_mount to /workspace failed".as_ptr(),
+            );
+            libc::_exit(EX_WORKSPACE)
+        }
+    }
     let mut channel = c.channel;
     if channel == 3 || channel == FZ_CHANNEL_FD {
         // Sitting where one of the two dup2 below lands, so it moves
@@ -727,6 +753,26 @@ pub unsafe fn scrub_and_run(c: &Child<'_>) -> ! {
     };
     // SAFETY: _exit ends the child and never returns.
     unsafe { libc::_exit(rc & 0xff) }
+}
+
+/// mount_workspace moves the detached tree at fd to WORKSPACE in the
+/// calling namespace, as move_mount(2) with MOVE_MOUNT_F_EMPTY_PATH does.
+/// The raw syscall, which glibc wraps only from 2.36. Returns 0 or -1.
+pub fn mount_workspace(fd: c_int) -> c_int {
+    // SAFETY: integer arguments and static strings alone.
+    let rc = unsafe {
+        sys::syscall(
+            libc::SYS_move_mount,
+            [
+                c_long::from(fd),
+                c"".as_ptr() as c_long,
+                c_long::from(libc::AT_FDCWD),
+                WORKSPACE.as_ptr() as c_long,
+                MOVE_MOUNT_F_EMPTY_PATH,
+            ],
+        )
+    };
+    if rc < 0 { -1 } else { 0 }
 }
 
 /// channel_recv as an extern entry, which the unit tests below drive.

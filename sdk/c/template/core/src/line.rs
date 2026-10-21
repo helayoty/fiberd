@@ -155,6 +155,12 @@ pub enum CloneRefusal {
     SessionTooLong = 3,
     /// "ERROR %s session holds a NUL byte".
     SessionNul = 4,
+    /// "ERROR %s unknown CLONE option <opt>". An option this core does
+    /// not know is refused, never skipped, since a fiber born without
+    /// what the option asked for would run with less than fiberd
+    /// believes (a workspace, say, and its writes would land on a
+    /// shared path).
+    UnknownOption = 5,
 }
 
 /// A CLONE line taken apart, up to the session's NUL check. handle_clone
@@ -176,6 +182,11 @@ pub struct CloneLine {
     pub mntns: bool,
     /// The nocaps option.
     pub nocaps: bool,
+    /// The ws option: the line carries a workspace tree, a descriptor
+    /// before the channel's, for the child to mount at /workspace.
+    pub ws: bool,
+    /// The first option this core does not know, when the line has one.
+    pub unknown: Option<Span>,
     /// The decoded session's length in the session buffer, set once the
     /// session is decoded.
     pub session_len: usize,
@@ -183,8 +194,9 @@ pub struct CloneLine {
 
 /// Takes `CLONE <fence> <endpoint> <deadline_ms> <hexpayload|->
 /// <hexsession|-> [opt,opt...]` apart in place, up to its first NUL.
-/// Unknown options are ignored. The session is decoded into session,
-/// NUL-ended, at most session.len() - 1 bytes.
+/// An unknown option is refused once the fence is known to fit. The
+/// session is decoded into session, NUL-ended, at most session.len() - 1
+/// bytes.
 pub fn parse_clone(line: &mut [u8], session: &mut [u8]) -> CloneLine {
     let mut out = CloneLine::default();
     let mut t = Tokens::new(line, b' ');
@@ -202,7 +214,12 @@ pub fn parse_clone(line: &mut [u8], session: &mut [u8]) -> CloneLine {
                 b"pidns" => out.pidns = true,
                 b"mntns" => out.mntns = true,
                 b"nocaps" => out.nocaps = true,
-                _ => {}
+                b"ws" => out.ws = true,
+                _ => {
+                    if out.unknown.is_none() {
+                        out.unknown = Some(opt);
+                    }
+                }
             }
         }
     }
@@ -215,6 +232,10 @@ pub fn parse_clone(line: &mut [u8], session: &mut [u8]) -> CloneLine {
     };
     if fence.len >= FENCE_MAX {
         out.refusal = Some(CloneRefusal::FenceTooLong);
+        return out;
+    }
+    if out.unknown.is_some() {
+        out.refusal = Some(CloneRefusal::UnknownOption);
         return out;
     }
     let deadline_ms = atoi(dl.of(line));
@@ -419,6 +440,7 @@ pub unsafe extern "C" fn fz_rs_parse_clone(
         pidns: c_int::from(c.pidns),
         mntns: c_int::from(c.mntns),
         nocaps: c_int::from(c.nocaps),
+        ws: c_int::from(c.ws),
         session_len: c.session_len,
     };
     c.refusal.map_or(0, |r| r as c_int)
@@ -664,6 +686,30 @@ mod tests {
                 Some(b"s5"),
             ),
             (
+                "an unknown option",
+                b"CLONE u1 e 50 - - mntns,foo".to_vec(),
+                Some(CloneRefusal::UnknownOption),
+                Some(b"u1"),
+            ),
+            (
+                "an empty option between commas is no option, as strtok_r read it",
+                b"CLONE u2 e 50 - - mntns,,nocaps".to_vec(),
+                None,
+                Some(b"u2"),
+            ),
+            (
+                "an unknown option on a long fence is the fence's refusal",
+                [b"CLONE ".as_slice(), &[b'g'; FENCE_MAX], b" e 50 - - foo"].concat(),
+                Some(CloneRefusal::FenceTooLong),
+                Some(&[b'g'; FENCE_MAX]),
+            ),
+            (
+                "an unknown option before a bad session is the option's refusal",
+                b"CLONE u3 e 50 - 6100 foo".to_vec(),
+                Some(CloneRefusal::UnknownOption),
+                Some(b"u3"),
+            ),
+            (
                 "the least line",
                 b"CLONE f e 1 - -".to_vec(),
                 None,
@@ -683,7 +729,7 @@ mod tests {
             fence: &'static [u8],
             endpoint: &'static [u8],
             deadline_ms: i32,
-            opts: (bool, bool, bool),
+            opts: (bool, bool, bool, bool),
             session: &'static [u8],
         }
         let longest_fence = [b"CLONE ".as_slice(), &[b'f'; FENCE_MAX - 1], b" e 50 - -"].concat();
@@ -695,29 +741,29 @@ mod tests {
                     fence: b"g/1/7",
                     endpoint: b"/run/f/7.sock",
                     deadline_ms: 50,
-                    opts: (false, false, false),
+                    opts: (false, false, false, false),
                     session: b"",
                 },
             ),
             (
                 "every option",
-                b"CLONE f e 250 68690a 7365737331 pidns,mntns,nocaps",
+                b"CLONE f e 250 68690a 7365737331 pidns,mntns,nocaps,ws",
                 Want {
                     fence: b"f",
                     endpoint: b"e",
                     deadline_ms: 250,
-                    opts: (true, true, true),
+                    opts: (true, true, true, true),
                     session: b"sess1",
                 },
             ),
             (
-                "unknown options are ignored",
-                b"CLONE f e 50 - - foo,mntns,,bar",
+                "ws alone",
+                b"CLONE f e 50 - - ws",
                 Want {
                     fence: b"f",
                     endpoint: b"e",
                     deadline_ms: 50,
-                    opts: (false, true, false),
+                    opts: (false, false, false, true),
                     session: b"",
                 },
             ),
@@ -728,7 +774,7 @@ mod tests {
                     fence: b"f",
                     endpoint: b"e",
                     deadline_ms: 50,
-                    opts: (true, false, false),
+                    opts: (true, false, false, false),
                     session: b"",
                 },
             ),
@@ -739,7 +785,7 @@ mod tests {
                     fence: b"f",
                     endpoint: b"e",
                     deadline_ms: 50,
-                    opts: (false, false, true),
+                    opts: (false, false, true, false),
                     session: b"",
                 },
             ),
@@ -750,7 +796,7 @@ mod tests {
                     fence: b"f",
                     endpoint: b"e",
                     deadline_ms: 50,
-                    opts: (false, false, false),
+                    opts: (false, false, false, false),
                     session: b"",
                 },
             ),
@@ -761,7 +807,7 @@ mod tests {
                     fence: b"f",
                     endpoint: b"e",
                     deadline_ms: 50,
-                    opts: (false, false, false),
+                    opts: (false, false, false, false),
                     session: b"",
                 },
             ),
@@ -772,7 +818,7 @@ mod tests {
                     fence: b"f",
                     endpoint: b"e",
                     deadline_ms: 50,
-                    opts: (false, false, false),
+                    opts: (false, false, false, false),
                     session: b"",
                 },
             ),
@@ -783,7 +829,7 @@ mod tests {
                     fence: b"f",
                     endpoint: b"e",
                     deadline_ms: 100,
-                    opts: (false, false, false),
+                    opts: (false, false, false, false),
                     session: b"",
                 },
             ),
@@ -794,7 +840,7 @@ mod tests {
                     fence: b"f",
                     endpoint: b"e",
                     deadline_ms: 50,
-                    opts: (false, false, false),
+                    opts: (false, false, false, false),
                     session: b"hi",
                 },
             ),
@@ -805,7 +851,7 @@ mod tests {
                     fence: &[b'f'; FENCE_MAX - 1],
                     endpoint: b"e",
                     deadline_ms: 50,
-                    opts: (false, false, false),
+                    opts: (false, false, false, false),
                     session: b"",
                 },
             ),
@@ -820,7 +866,11 @@ mod tests {
                 "{name}: endpoint"
             );
             assert_eq!(c.deadline_ms, want.deadline_ms, "{name}: deadline");
-            assert_eq!((c.pidns, c.mntns, c.nocaps), want.opts, "{name}: options");
+            assert_eq!(
+                (c.pidns, c.mntns, c.nocaps, c.ws),
+                want.opts,
+                "{name}: options"
+            );
             assert_eq!(c.session_len, want.session.len(), "{name}: session length");
             assert_eq!(&session[..c.session_len], want.session, "{name}: session");
             assert_eq!(
@@ -838,6 +888,13 @@ mod tests {
             ("malformed with a fence", b"CLONE f", 1, true, 0),
             ("malformed without one", b"CLONE", 1, false, 0),
             ("session with a NUL", b"CLONE f e 50 - 00", 4, true, 0),
+            (
+                "an unknown option",
+                b"CLONE f e 50 - - mntns,foo",
+                5,
+                true,
+                0,
+            ),
         ];
         for (name, line, want, has_fence, slen) in cases {
             let mut line = [line, b"\0".as_slice()].concat();

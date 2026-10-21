@@ -266,6 +266,7 @@ pub fn exit_why(code: c_int) -> Option<&'static [u8]> {
         child::EX_IDENTITY => b"did not get its incarnation record",
         child::EX_CGROUP => b"could not join its cgroup leaf",
         child::EX_FILTER => b"could not stack its clone3 filter",
+        child::EX_WORKSPACE => b"could not mount its workspace at /workspace",
         _ => return None,
     })
 }
@@ -757,6 +758,18 @@ impl Zygote<'_> {
             return;
         }
         let fence = fence_raw;
+        if cl.refusal == Some(CloneRefusal::UnknownOption) {
+            // Refused, never skipped. A fiber born without what an option
+            // asked for would run with less than fiberd believes.
+            let opt: &[u8] = cl.unknown.map_or(b"", |o| o.of(line));
+            Line::new()
+                .s(b"ERROR ")
+                .s(fence)
+                .s(b" unknown CLONE option ")
+                .s(opt)
+                .send(ctl_fd);
+            return;
+        }
         if cl.mntns
             && let Some(refused) = st.paths_refused
         {
@@ -782,19 +795,34 @@ impl Zygote<'_> {
                 .send(ctl_fd);
             return;
         }
-        // The channel is the last descriptor passed, after the cgroup's
-        // when there is one.
-        let [first, second] = *passed;
-        let (cgroup_fd, channel) = if second < 0 {
-            (-1, first)
-        } else {
-            (first, second)
-        };
+        // The channel is the last descriptor passed. Before it, with ws,
+        // comes the workspace tree, and before that the cgroup's when
+        // there is one. The ws option says whether the tree is there,
+        // so a line with two descriptors is read right either way.
+        let (cgroup_fd, ws_fd, channel) = sort_passed(passed, cl.ws);
         if channel < 0 {
             Line::new()
                 .s(b"ERROR ")
                 .s(fence)
                 .s(b" CLONE without a channel")
+                .send(ctl_fd);
+            return;
+        }
+        if cl.ws && ws_fd < 0 {
+            Line::new()
+                .s(b"ERROR ")
+                .s(fence)
+                .s(b" CLONE with ws but no workspace descriptor")
+                .send(ctl_fd);
+            return;
+        }
+        if cl.ws && !cl.mntns {
+            // The tree goes into the child's own namespace. Without one
+            // it would land in the zygote's, in front of every sibling.
+            Line::new()
+                .s(b"ERROR ")
+                .s(fence)
+                .s(b" CLONE with ws needs mntns")
                 .send(ctl_fd);
             return;
         }
@@ -891,6 +919,7 @@ impl Zygote<'_> {
             ready_r,
             ready_w,
             channel,
+            ws_fd,
             sigchld_fd: st.sigchld_fd,
             pidns: cl.pidns,
             mntns: cl.mntns,
@@ -1189,6 +1218,23 @@ impl Zygote<'_> {
     }
 }
 
+/// sort_passed names the descriptors a CLONE line carried: the cgroup's,
+/// the workspace tree and the channel, each -1 when the line carried
+/// none. The channel is always the last one. With ws the tree is the one
+/// before it, and the cgroup's comes first only when all three are
+/// there. Without ws the cgroup's is the first of two.
+pub fn sort_passed(passed: &[c_int; MAX_PASSED], ws: bool) -> (c_int, c_int, c_int) {
+    let n = passed.iter().take_while(|&&fd| fd >= 0).count();
+    let at = |i: usize| passed.get(i).copied().unwrap_or(-1);
+    match (ws, n) {
+        (_, 0) => (-1, -1, -1),
+        (false, 1) | (true, 1) => (-1, -1, at(0)),
+        (false, _) => (at(0), -1, at(n.wrapping_sub(1))),
+        (true, 2) => (-1, at(0), at(1)),
+        (true, _) => (at(0), at(1), at(2)),
+    }
+}
+
 /// Closes every descriptor a line carried.
 fn close_passed(passed: &[c_int; MAX_PASSED]) {
     for &fd in passed {
@@ -1458,6 +1504,11 @@ mod tests {
             ("121", 121, Some("did not get its incarnation record")),
             ("125", 125, Some("could not join its cgroup leaf")),
             ("126", 126, Some("could not stack its clone3 filter")),
+            (
+                "127",
+                127,
+                Some("could not mount its workspace at /workspace"),
+            ),
             ("the template's own", 3, None),
             ("zero", 0, None),
         ];
@@ -2127,12 +2178,42 @@ mod tests {
     }
 
     #[test]
+    fn sort_passed_names_each_descriptor() {
+        let cases: &[(&str, [c_int; MAX_PASSED], bool, (c_int, c_int, c_int))] = &[
+            ("nothing", [-1, -1, -1], false, (-1, -1, -1)),
+            ("nothing with ws", [-1, -1, -1], true, (-1, -1, -1)),
+            ("the channel alone", [7, -1, -1], false, (-1, -1, 7)),
+            (
+                "the channel alone with ws is no tree",
+                [7, -1, -1],
+                true,
+                (-1, -1, 7),
+            ),
+            ("cgroup and channel", [5, 7, -1], false, (5, -1, 7)),
+            ("tree and channel", [6, 7, -1], true, (-1, 6, 7)),
+            ("cgroup, tree and channel", [5, 6, 7], true, (5, 6, 7)),
+            (
+                "three without ws keep the ends",
+                [5, 6, 7],
+                false,
+                (5, -1, 7),
+            ),
+        ];
+        for (name, passed, ws, want) in cases {
+            assert_eq!(sort_passed(passed, *ws), *want, "{name}");
+        }
+    }
+
+    #[test]
     fn handle_clone_refuses_in_the_cs_order() {
         let _serial = crate::serial();
         struct Case {
             name: &'static str,
             line: &'static str,
             channel: bool,
+            // The workspace tree rides before the channel. Here it is a
+            // pipe end, which stands in for the descriptor.
+            ws: bool,
             refused: Option<Refused>,
             prepared: bool,
             npending: usize,
@@ -2158,6 +2239,7 @@ mod tests {
                 name: "malformed",
                 line: "CLONE s5 e",
                 channel: true,
+                ws: false,
                 refused: None,
                 prepared: true,
                 npending: 0,
@@ -2167,6 +2249,7 @@ mod tests {
                 name: "malformed without a fence",
                 line: "CLONE",
                 channel: true,
+                ws: false,
                 refused: None,
                 prepared: true,
                 npending: 0,
@@ -2176,6 +2259,7 @@ mod tests {
                 name: "a fence of 128 is too long, and named cut to 127",
                 line: long_fence,
                 channel: true,
+                ws: false,
                 refused: None,
                 prepared: true,
                 npending: 0,
@@ -2185,15 +2269,37 @@ mod tests {
                 name: "a longer fence is cut on the line",
                 line: cut_fence,
                 channel: true,
+                ws: false,
                 refused: None,
                 prepared: true,
                 npending: 0,
                 want: "ERROR ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc fence too long (at most 127 characters)",
             },
             Case {
+                name: "an unknown option is refused before the state checks",
+                line: "CLONE f e 50 - 00 mntns,foo",
+                channel: true,
+                ws: false,
+                refused: Some(Refused::Text(c"RUNDIR refused")),
+                prepared: true,
+                npending: 0,
+                want: "ERROR f unknown CLONE option foo",
+            },
+            Case {
+                name: "an unknown option on a long fence is the fence's refusal",
+                line: "CLONE ddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd e 50 - - foo",
+                channel: true,
+                ws: false,
+                refused: None,
+                prepared: true,
+                npending: 0,
+                want: "ERROR ddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd fence too long (at most 127 characters)",
+            },
+            Case {
                 name: "mntns with a refusal",
                 line: "CLONE f e 50 - 00 mntns",
                 channel: true,
+                ws: false,
                 refused: Some(Refused::Text(c"RUNDIR refused")),
                 prepared: true,
                 npending: 0,
@@ -2203,6 +2309,7 @@ mod tests {
                 name: "mntns with fz_init's refusal",
                 line: "CLONE f e 50 - - mntns",
                 channel: true,
+                ws: false,
                 refused: Some(Refused::OwnNs),
                 prepared: false,
                 npending: 0,
@@ -2212,6 +2319,7 @@ mod tests {
                 name: "mntns unprepared",
                 line: "CLONE f e 50 - - mntns",
                 channel: false,
+                ws: false,
                 refused: None,
                 prepared: false,
                 npending: 0,
@@ -2221,15 +2329,47 @@ mod tests {
                 name: "no channel",
                 line: "CLONE f e 50 - 00",
                 channel: false,
+                ws: false,
                 refused: None,
                 prepared: true,
                 npending: 0,
                 want: "ERROR f CLONE without a channel",
             },
             Case {
+                name: "ws with the channel alone",
+                line: "CLONE f e 50 - 00 mntns,ws",
+                channel: true,
+                ws: false,
+                refused: None,
+                prepared: true,
+                npending: 0,
+                want: "ERROR f CLONE with ws but no workspace descriptor",
+            },
+            Case {
+                name: "ws without mntns",
+                line: "CLONE f e 50 - 00 ws",
+                channel: true,
+                ws: true,
+                refused: None,
+                prepared: true,
+                npending: 0,
+                want: "ERROR f CLONE with ws needs mntns",
+            },
+            Case {
+                name: "ws with mntns reaches the session check",
+                line: "CLONE s6 e 50 - 6100 mntns,ws",
+                channel: true,
+                ws: true,
+                refused: None,
+                prepared: true,
+                npending: 0,
+                want: "ERROR s6 session holds a NUL byte",
+            },
+            Case {
                 name: "session with a NUL",
                 line: "CLONE s4 e 50 - 6100",
                 channel: true,
+                ws: false,
                 refused: None,
                 prepared: true,
                 npending: 0,
@@ -2239,6 +2379,7 @@ mod tests {
                 name: "too many in flight",
                 line: "CLONE f e 50 - -",
                 channel: true,
+                ws: false,
                 refused: None,
                 prepared: true,
                 npending: MAX_PENDING,
@@ -2248,6 +2389,7 @@ mod tests {
                 name: "endpoint too long",
                 line: long_endpoint,
                 channel: true,
+                ws: false,
                 refused: None,
                 prepared: true,
                 npending: 0,
@@ -2262,13 +2404,19 @@ mod tests {
             rig.st.npending = tc.npending;
             let [ours, theirs] = pair();
             let [chan, chan_peer] = pair();
-            let passed = [if tc.channel { chan } else { -1 }, -1];
+            let [tree, tree_peer] = pair();
+            let passed = match (tc.ws, tc.channel) {
+                (true, true) => [tree, chan, -1],
+                (true, false) => [tree, -1, -1],
+                (false, true) => [chan, -1, -1],
+                (false, false) => [-1, -1, -1],
+            };
             rig.t.line[..tc.line.len()].copy_from_slice(tc.line.as_bytes());
             rig.t.line[tc.line.len()] = 0;
             rig.z().handle_clone(ours, &passed, None);
             assert_eq!(lines(theirs), vec![tc.want], "{}", tc.name);
             assert_eq!(rig.st.npending, tc.npending, "{}: nothing forked", tc.name);
-            for fd in [ours, theirs, chan, chan_peer] {
+            for fd in [ours, theirs, chan, chan_peer, tree, tree_peer] {
                 close(fd);
             }
         }
@@ -2322,7 +2470,7 @@ mod tests {
             // A cgroup descriptor that is not open, so clone3 refuses
             // with EBADF before any child exists, root or not, and the
             // channel is a socket that is.
-            let passed = [1 << 20, ours];
+            let passed = [1 << 20, ours, -1];
             rig.z().handle_clone(ours, &passed, None);
             let got = lines(theirs);
             assert_eq!(got.len(), 1, "{}: {got:?}", tc.name);

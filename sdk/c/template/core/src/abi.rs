@@ -38,9 +38,9 @@ pub const MAX_LINE: usize = 65536;
 pub const MAX_KIDS: usize = 4096;
 /// How many children may be forked and not yet ready at once.
 pub const MAX_PENDING: usize = 1024;
-/// How many descriptors a control line may carry, the cgroup's and the
-/// channel.
-pub const MAX_PASSED: usize = 2;
+/// How many descriptors a control line may carry: the cgroup's, the
+/// workspace tree and the channel.
+pub const MAX_PASSED: usize = 3;
 /// A line the zygote sends is at most SEND_MAX - 1 characters. The
 /// longest is the ERROR naming a HIDE path that could not be covered
 /// (prepare_why), which must reach fiberd whole rather than be dropped.
@@ -77,6 +77,8 @@ pub struct CloneOut {
     pub mntns: c_int,
     /// The nocaps option.
     pub nocaps: c_int,
+    /// The ws option, a workspace tree to mount at /workspace.
+    pub ws: c_int,
     /// The decoded session's length in the session buffer.
     pub session_len: usize,
 }
@@ -167,7 +169,7 @@ const _: () = {
     assert!(offset_of!(RecordStore, inc) == 1096);
     assert!(offset_of!(RecordStore, buf) == 1176);
     assert!(offset_of!(RecordStore, payload) == 66712);
-    assert!(size_of::<CloneOut>() == 48);
+    assert!(size_of::<CloneOut>() == 56);
     assert!(offset_of!(CloneOut, fence) == 0);
     assert!(offset_of!(CloneOut, endpoint) == 8);
     assert!(offset_of!(CloneOut, endpoint_len) == 16);
@@ -175,7 +177,8 @@ const _: () = {
     assert!(offset_of!(CloneOut, pidns) == 28);
     assert!(offset_of!(CloneOut, mntns) == 32);
     assert!(offset_of!(CloneOut, nocaps) == 36);
-    assert!(offset_of!(CloneOut, session_len) == 40);
+    assert!(offset_of!(CloneOut, ws) == 40);
+    assert!(offset_of!(CloneOut, session_len) == 48);
     assert!(
         KEEP_MAX >= 4096,
         "a realpath result (PATH_MAX) must fit a kept path"

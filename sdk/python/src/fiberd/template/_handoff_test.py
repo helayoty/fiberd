@@ -210,7 +210,7 @@ def test_server_context_trusts_the_caller_certificate_alone(world):
 class HandoffExt:
     """The C binding of a handoff fiber: accept() hands out the server ends queued, then the channel's close. waits is what each incarnation_wait answers."""
 
-    ABI_VERSION = 10
+    ABI_VERSION = 11
 
     def __init__(self, waits=()):
         self.calls = []

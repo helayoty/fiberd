@@ -29,8 +29,8 @@
 
 #include "libfiberzygote.h"
 
-#if FZ_ABI_VERSION != 10
-#error "fiberd._zygote binds FZ_ABI_VERSION 10; rebuild it against this header"
+#if FZ_ABI_VERSION != 11
+#error "fiberd._zygote binds FZ_ABI_VERSION 11; rebuild it against this header"
 #endif
 #ifdef Py_GIL_DISABLED
 #error "fiberd._zygote needs the GIL; the fork rules assume it and abi3 does not cover a free-threaded build"

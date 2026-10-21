@@ -23,7 +23,7 @@ from fiberd.template import _rules
 class FakeExt:
     """The C binding as a recorder. waits is what each incarnation_wait answers: a record, None for a park that failed, or an exception to raise."""
 
-    ABI_VERSION = 10
+    ABI_VERSION = 11
 
     def __init__(self, waits=()):
         self.calls = []
