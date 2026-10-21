@@ -9,7 +9,8 @@
  *                           init and nothing else exists.
  *   (default)               a fiberd zygote: fz_init first, warm once,
  *                           fz_serve on fd 3, and each fiber serves the
- *                           endpoint it is given (proc, runc).
+ *                           endpoint it is given (proc, runc), and
+ *                           answers a park's SIGUSR1 (on_fiber).
  *   --gvisor                the init of a gVisor sandbox: warm, then the
  *                           self-checkpoint loop refzygote uses, serving
  *                           the endpoint fiberd hands it on its
@@ -204,14 +205,40 @@ static int plain_main(int port) {
 
 /* ---- zygote mode -------------------------------------------------------- */
 
+/* A fiber serves until a park's SIGUSR1. Then it closes its listener,
+ * says it serves nothing (fz_quiesce) and waits for fiberd's answer. A
+ * resume listens on the record's endpoint, a failed park on the old
+ * one, and both say so with fz_fiber_ready. The counter lives on the
+ * stack, so a resumed fiber keeps its count. No SA_RESTART, so the
+ * signal ends a blocking poll or read at once, and serve_loop's poll
+ * timeout bounds the one that lands between its look at the flag and
+ * the poll. */
 static int on_fiber(const fz_incarnation_t *f) {
+    struct sigaction sa = { .sa_handler = on_usr1 };
+    sigaction(SIGUSR1, &sa, NULL);
     reseed_rngs(f->seed, f->seed_len);
-    int s = listen_endpoint(f->endpoint);
-    if (s < 0) { fprintf(stderr, "counter %s: listen %s: %s\n", f->fence, f->endpoint, strerror(errno)); return 4; }
-    fz_fiber_ready();
+    char ep[256], fence[128];
+    snprintf(ep, sizeof ep, "%s", f->endpoint); /* the record is valid only until the next call */
+    snprintf(fence, sizeof fence, "%s", f->fence);
     unsigned long counter = 0;
-    serve_loop(s, &counter);
-    return 0;
+    for (;;) {
+        int s = listen_endpoint(ep);
+        if (s < 0) { fprintf(stderr, "counter %s: listen %s: %s\n", fence, ep, strerror(errno)); return 4; }
+        fz_fiber_ready();
+        serve_loop(s, &counter);
+        close(s);
+        if (strncmp(ep, "tcp://", 6) != 0) unlink(strncmp(ep, "unix://", 7) == 0 ? ep + 7 : ep);
+        if (fz_quiesce() < 0) { fprintf(stderr, "counter %s: quiesce: %s\n", fence, strerror(errno)); return 122; }
+        fz_incarnation_t inc;
+        int rc;
+        while ((rc = fz_incarnation_wait(&inc)) < 0 && errno == EINTR) {}
+        if (rc < 0) { fprintf(stderr, "counter %s: wait for the resume: %s\n", fence, strerror(errno)); return 122; }
+        if (rc > 0) {
+            reseed_rngs(inc.seed, inc.seed_len);
+            snprintf(ep, sizeof ep, "%s", inc.endpoint);
+            snprintf(fence, sizeof fence, "%s", inc.fence);
+        }
+    }
 }
 
 /* ---- gVisor mode, as refzygote does it ---------------------------------- */
