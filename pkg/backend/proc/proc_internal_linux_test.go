@@ -314,13 +314,14 @@ func TestWarmCommand(t *testing.T) {
 func TestCloneLine(t *testing.T) {
 	identity := &backend.Identity{KeyPEM: "k", CertPEM: "c", Caller: "x5t", CallerPEM: "p"}
 	cases := []struct {
-		name     string
-		spec     backend.FiberSpec
-		cgroup   bool // pass a cgroup fd
-		launcher *fakeLauncher
-		wantLine string // after "CLONE g/1-1 ", with EP for the endpoint path
-		wantFDs  int
-		wantErr  string
+		name      string
+		spec      backend.FiberSpec
+		cgroup    bool // pass a cgroup fd
+		workspace bool // give the fiber a workspace root
+		launcher  *fakeLauncher
+		wantLine  string // after "CLONE g/1-1 ", with EP for the endpoint path
+		wantFDs   int
+		wantErr   string
 	}{
 		{name: "a handoff fiber keeps its channel", spec: backend.FiberSpec{Generation: 1, Deadline: time.Second, Endpoint: "handoff", Identity: identity},
 			wantLine: "handoff 1000 - - mntns,nocaps", wantFDs: 1},
@@ -337,6 +338,14 @@ func TestCloneLine(t *testing.T) {
 			wantLine: "/run/inside/ep.sock 1000 - - pidns", wantFDs: 1},
 		{name: "launcher leaves a tcp endpoint alone", spec: backend.FiberSpec{Generation: 1, Deadline: time.Second, Endpoint: "tcp://0.0.0.0:9000"}, launcher: &fakeLauncher{endpointRoot: "/run/inside"},
 			wantLine: "tcp://0.0.0.0:9000 1000 - -", wantFDs: 1},
+		// The workspace tree rides between the cgroup's descriptor and
+		// the channel, and the ws option says it is there.
+		{name: "workspace tree before the channel", spec: backend.FiberSpec{Generation: 1, Deadline: time.Second}, workspace: true,
+			wantLine: "EP 1000 - - mntns,nocaps,ws", wantFDs: 2},
+		{name: "cgroup, workspace tree and channel", spec: backend.FiberSpec{Generation: 1, Deadline: time.Second, OwnPIDNS: true}, cgroup: true, workspace: true,
+			wantLine: "EP 1000 - - pidns,mntns,nocaps,ws", wantFDs: 3},
+		{name: "launcher gives no workspace", spec: backend.FiberSpec{Generation: 1, Deadline: time.Second}, workspace: true, launcher: &fakeLauncher{endpointRoot: "/run/inside"},
+			wantErr: "gives fibers no workspace"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -361,9 +370,20 @@ func TestCloneLine(t *testing.T) {
 				defer func() { _ = d.Close() }()
 				spec.CgroupFD = int(d.Fd())
 			}
+			if tc.workspace {
+				spec.Workspace = filepath.Join(t.TempDir(), "root")
+				if err := os.Mkdir(spec.Workspace, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			fb, err := b.Clone(ctx, w.ID, spec)
+			if trees, points := f.treesOpened(); tc.workspace && tc.wantErr == "" && (len(trees) != 1 || trees[0] != spec.Workspace || points != 1) {
+				t.Fatalf("trees opened %v, mount point made %d times, want the root %s once and the mount point once", trees, points, spec.Workspace)
+			} else if (!tc.workspace || tc.wantErr != "") && (len(trees) != 0 || points != 0) {
+				t.Fatalf("trees opened %v, mount point made %d times, want none", trees, points)
+			}
 			if tc.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 					t.Fatalf("Clone = %v, want %q", err, tc.wantErr)
@@ -421,6 +441,12 @@ func TestCloneLine(t *testing.T) {
 			}
 			if fdsLine != wantFDs {
 				t.Fatalf("descriptors with CLONE: %q, want %q", fdsLine, wantFDs)
+			}
+			b.mu.Lock()
+			ws := b.fibers[fb.ID] != nil && b.fibers[fb.ID].workspace
+			b.mu.Unlock()
+			if ws != tc.workspace {
+				t.Fatalf("the fiber remembers a workspace: %v, want %v", ws, tc.workspace)
 			}
 		})
 	}
@@ -879,6 +905,9 @@ func TestPark(t *testing.T) {
 		deadline  time.Duration
 		sync      bool
 		fiber     bool   // register the fiber at all
+		workspace bool   // the fiber holds a workspace mount
+		capture   string // "" for no capture, "ok" or "fail"
+		leaf      bool   // hand the park a leaf cgroup holding pid and pid+1
 		dirIs     string // a directory already at this name in the image directory, or "file" for the image directory's parent
 		wantErr   string
 		wantArgs  []string
@@ -886,6 +915,10 @@ func TestPark(t *testing.T) {
 		noFiles   []string
 		wantDumps int
 		carryOn   bool // the fiber is told the park failed
+		// wantSignals is every signal sent, in order, as "PID:NAME",
+		// with PID+1 for the leaf's other process. nil wants the park's
+		// SIGUSR1 alone.
+		wantSignals []string
 	}{
 		{name: "shares the host's mount namespace", fiber: true, pair: true, wantArgs: []string{"dump", "--ext-unix-sk"}, noFiles: []string{runDirFile, criu.MountsFile, handoffFile}, wantDumps: 1},
 		{name: "handoff channel is external and answers on the host's end", fiber: true, handoff: true, channel: true, wantArgs: []string{"--external unix[4711]"}, wantFiles: []string{handoffFile}, wantDumps: 1},
@@ -913,6 +946,23 @@ func TestPark(t *testing.T) {
 		{name: "criu unavailable", fiber: true, pair: true, criu: criuKnobs{checkErr: errors.New("exit status 1")}, wantErr: "park needs FIBER_CHECKPOINT"},
 		{name: "handoff record cannot be written", fiber: true, handoff: true, channel: true, dirIs: handoffFile, wantErr: "is a directory"},
 		{name: "image directory under a file", fiber: true, handoff: true, channel: true, dirIs: "file", wantErr: "not a directory"},
+		// A workspace bind is named external at every dump, by its fixed
+		// key, never left to criu to find.
+		{name: "a workspace is named external at every dump", fiber: true, pair: true, workspace: true,
+			wantArgs: []string{"--external mnt[/workspace]:ws"}, wantDumps: 1},
+		// With a capture the tree is left stopped. The capture sees one
+		// dump and no signal but the park's, and only then is the tree
+		// ended, as criu would have ended it.
+		{name: "a capture runs while the tree is stopped, then the tree is ended", fiber: true, pair: true, workspace: true, capture: "ok",
+			wantArgs: []string{"--leave-stopped", "--external mnt[/workspace]:ws"}, wantDumps: 1, wantSignals: []string{"PID:USR1", "PID:KILL"}},
+		{name: "a sync park continues the tree after the capture", fiber: true, pair: true, workspace: true, capture: "ok", sync: true,
+			wantArgs: []string{"--leave-stopped"}, wantDumps: 1, wantSignals: []string{"PID:USR1", "PID:CONT"}},
+		{name: "a failed capture continues the tree and the fiber carries on", fiber: true, pair: true, workspace: true, capture: "fail",
+			wantErr: "park f: capture: boom", wantDumps: 1, carryOn: true, wantSignals: []string{"PID:USR1", "PID:CONT"}},
+		{name: "every process of the leaf is ended after the capture", fiber: true, pair: true, workspace: true, capture: "ok", leaf: true,
+			wantArgs: []string{"--leave-stopped"}, wantDumps: 1, wantSignals: []string{"PID:USR1", "PID:KILL", "PID+1:KILL"}},
+		{name: "every process of the leaf is continued after a sync capture", fiber: true, pair: true, workspace: true, capture: "ok", leaf: true, sync: true,
+			wantDumps: 1, wantSignals: []string{"PID:USR1", "PID:CONT", "PID+1:CONT"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -962,7 +1012,45 @@ func TestPark(t *testing.T) {
 				}
 			}
 			if tc.fiber {
-				b.fibers["f"] = &fiber{id: "f", pid: pid, warmID: "g", handoff: tc.handoff}
+				b.fibers["f"] = &fiber{id: "f", pid: pid, warmID: "g", handoff: tc.handoff, workspace: tc.workspace}
+			}
+			pspec := backend.ParkSpec{Dir: "", Sync: tc.sync, Deadline: tc.deadline, Channel: hostEnd, CgroupFD: -1}
+			// What the capture saw when it ran: the dumps so far and
+			// every signal so far.
+			var captured []string
+			if tc.capture != "" {
+				pspec.Capture = func() error {
+					dumps := 0
+					for _, c := range f.criu.recorded() {
+						if strings.HasPrefix(c, "dump ") {
+							dumps++
+						}
+					}
+					captured = append(captured, fmt.Sprintf("dumps=%d signals=%v", dumps, f.signalsSent()))
+					if tc.capture == "fail" {
+						return errors.New("boom")
+					}
+					return nil
+				}
+			}
+			if tc.leaf {
+				leaf := t.TempDir()
+				if err := os.WriteFile(filepath.Join(leaf, "cgroup.procs"), []byte(fmt.Sprintf("%d\n%d\n", pid, pid+1)), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				d, err := os.Open(leaf)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer func() { _ = d.Close() }()
+				pspec.CgroupFD = int(d.Fd())
+			}
+			wantSignals := []string{"PID:USR1"}
+			if tc.wantSignals != nil {
+				wantSignals = tc.wantSignals
+			}
+			for i, w := range wantSignals {
+				wantSignals[i] = strings.NewReplacer("PID+1", strconv.Itoa(pid+1), "PID", strconv.Itoa(pid)).Replace(w)
 			}
 			if tc.zygote {
 				// A zygote by record only, for the launcher's arguments.
@@ -999,8 +1087,19 @@ func TestPark(t *testing.T) {
 				silent = false
 			}
 			t0 := time.Now()
-			err := b.Park(context.Background(), "f", backend.ParkSpec{Dir: dir, Sync: tc.sync, Deadline: tc.deadline, Channel: hostEnd})
+			pspec.Dir = dir
+			err := b.Park(context.Background(), "f", pspec)
 			took := time.Since(t0)
+			if tc.capture != "" {
+				// One dump, the park's signal and nothing else before the
+				// capture, whatever came after.
+				if want := []string{fmt.Sprintf("dumps=1 signals=[%d:USR1]", pid)}; !slices.Equal(captured, want) {
+					t.Fatalf("the capture saw %v, want %v", captured, want)
+				}
+				if got := f.signalsSent(); !slices.Equal(got, wantSignals) {
+					t.Fatalf("signals %v, want %v", got, wantSignals)
+				}
+			}
 			if tc.late {
 				// The second round's own messages, and no carry-on for it.
 				if got := nextRecord(t, speaks); got != "" {
@@ -1046,12 +1145,12 @@ func TestPark(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Park: %v", err)
 			}
-			wantSignals := 1
+			nsignals := len(wantSignals)
 			if tc.late {
-				wantSignals = 2 // one per round
+				nsignals = 2 // one per round
 			}
-			if got := f.signalled(); len(got) != wantSignals || got[0] != pid {
-				t.Fatalf("signalled %v, want the fiber %d %d time(s), before the dump", got, pid, wantSignals)
+			if got := f.signalled(); len(got) != nsignals || got[0] != pid {
+				t.Fatalf("signalled %v, want the fiber %d %d time(s), before the dump", got, pid, nsignals)
 			}
 			if tc.pair && (queued(reads) || !f.letGo()) {
 				t.Fatal("a record is still queued on the fiber's channel after the park, or its end is still held")
@@ -1070,6 +1169,12 @@ func TestPark(t *testing.T) {
 			}
 			if !tc.sync && strings.Contains(dump, "--leave-running") {
 				t.Fatalf("criu dump %q leaves the tree running without Sync", dump)
+			}
+			if tc.capture == "" && strings.Contains(dump, "--leave-stopped") {
+				t.Fatalf("criu dump %q leaves the tree stopped without a capture", dump)
+			}
+			if tc.capture != "" && strings.Contains(dump, "--leave-running") {
+				t.Fatalf("criu dump %q leaves the tree running with a capture to run first", dump)
 			}
 			for _, name := range tc.wantFiles {
 				data, err := os.ReadFile(filepath.Join(dir, name))
@@ -1173,13 +1278,15 @@ func writeMounts(t *testing.T, dir string) {
 // bind before any mount is refused here.
 func TestResume(t *testing.T) {
 	cases := []struct {
-		name     string
-		criu     criuKnobs
-		launcher *fakeLauncher
-		setup    func(t *testing.T, dir, rootBind string)
-		spec     backend.ResumeSpec
-		record   bool // the checkpoint names a handoff channel
-		noPair   bool // the restored tree holds no pair to borrow
+		name      string
+		criu      criuKnobs
+		launcher  *fakeLauncher
+		setup     func(t *testing.T, dir, rootBind string)
+		spec      backend.ResumeSpec
+		record    bool // the checkpoint names a handoff channel
+		noPair    bool // the restored tree holds no pair to borrow
+		workspace bool // the resume brings a workspace root
+		root      bool // the case binds a restore root, which needs root
 		// ack is the restored fiber's answer to its record: "" acks it
 		// under the new fence, "none" never acks, else acks under that.
 		ack       string
@@ -1243,9 +1350,19 @@ func TestResume(t *testing.T) {
 			wantArgs: []string{"--restore-extra"}, wantExit: "exit:0", wantCalls: "restoreExtra:DIR,restored:PID,restoredGone", wantEndpoint: "ep.sock"},
 		{name: "launcher cannot prepare the restore", launcher: &fakeLauncher{restoreExtraErr: errors.New("no rootfs")}, wantText: "no rootfs", wantCalls: "restoreExtra:DIR"},
 		{name: "launcher prepared, restore fails", launcher: &fakeLauncher{}, criu: criuKnobs{restore: "no"}, wantText: "criu restore failed", wantCalls: "restoreExtra:DIR,restoredGone"},
+		// The parked bind, named by its key, lands on the resuming
+		// fiber's root, in the namespace the mounts record gives the
+		// restore.
+		{name: "a workspace is bound by its key", workspace: true, root: true, setup: func(t *testing.T, dir, _ string) { writeMounts(t, dir) },
+			wantArgs: []string{"--root ROOT", "--external mnt[ws]:WS"}, wantExit: "exit:0"},
+		{name: "a workspace needs a mount namespace in the checkpoint", workspace: true, wantText: "no mount namespace to hold a workspace"},
+		{name: "launcher gives no workspace", launcher: &fakeLauncher{}, workspace: true, wantText: "gives fibers no workspace", wantCalls: ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.root && os.Geteuid() != 0 {
+				t.Skip("binds a restore root, which needs root")
+			}
 			f := newFakes(t)
 			f.criu.criuKnobs = tc.criu
 			var launcher Launcher
@@ -1278,6 +1395,12 @@ func TestResume(t *testing.T) {
 			}
 			if spec.Generation == 0 {
 				spec.Generation = 2
+			}
+			if tc.workspace {
+				spec.Workspace = filepath.Join(t.TempDir(), "root")
+				if err := os.Mkdir(spec.Workspace, 0o700); err != nil {
+					t.Fatal(err)
+				}
 			}
 			// The restored fiber reads its record off the end it holds,
 			// its own pair's or the one the restore was handed, and acks.
@@ -1322,9 +1445,18 @@ func TestResume(t *testing.T) {
 			} else if err != nil {
 				t.Fatalf("Resume: %v", err)
 			}
+			if _, points := f.treesOpened(); points != map[bool]int{true: 1, false: 0}[tc.workspace && err == nil] {
+				t.Fatalf("the mount point was made %d times, want it once for a resume with a workspace", points)
+			}
 			if err == nil {
 				if fb.ID != "g/2-1" || fb.PID != f.criu.restorePID || channelOf(t, fb) != spec.Handoff {
 					t.Fatalf("Resume = %+v, want g/2-1 with the restored pid %d and the host's end of a handoff channel", fb, f.criu.restorePID)
+				}
+				b.mu.Lock()
+				ws := b.fibers[fb.ID] != nil && b.fibers[fb.ID].workspace
+				b.mu.Unlock()
+				if ws != tc.workspace {
+					t.Fatalf("the restored fiber remembers a workspace: %v, want %v", ws, tc.workspace)
 				}
 				var inc backend.Incarnation
 				select {
@@ -1348,7 +1480,7 @@ func TestResume(t *testing.T) {
 				}
 				restore := f.criu.last(t)
 				for _, want := range tc.wantArgs {
-					want = strings.NewReplacer("ROOT", rootBind, "WORK", workDir).Replace(want)
+					want = strings.NewReplacer("ROOT", rootBind, "WORK", workDir, "WS", spec.Workspace).Replace(want)
 					if !strings.Contains(restore, want) {
 						t.Fatalf("criu restore %q lacks %q", restore, want)
 					}
