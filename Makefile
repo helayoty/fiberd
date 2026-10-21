@@ -275,13 +275,15 @@ zygote-test: ## the core's Rust unit tests, clippy and rustfmt (the fuzz targets
 zygote-check: zygote-core ## check the core archive's undefined symbols against the allowlist and count its PAC instructions
 	$(CORE_DIR)/check.sh $(CORE_LIB)
 
-fuzz: ## fuzz the zygote library (the core's cargo-fuzz targets), the reference workload's parsers (a C libFuzzer harness) and the handoff parser (go test -fuzz), FUZZTIME seconds each, in the dev container on macOS
+fuzz: ## fuzz the zygote library (the core's cargo-fuzz targets), the reference workload's parsers (a C libFuzzer harness), the handoff parser and the workspace path and archive readers (go test -fuzz), FUZZTIME seconds each, in the dev container on macOS
 ifeq ($(shell uname -s),Darwin)
 	hack/dev/run.sh make fuzz FUZZTIME=$(FUZZTIME)
 else
 	FUZZTIME=$(FUZZTIME) FUZZ_OUT=$(BIN)/fuzz sdk/c/template/fuzz/run.sh
 	$(MAKE) fuzz-core
 	$(GO) test -run='^$$' -fuzz=FuzzServerName -fuzztime=$(FUZZTIME)s ./pkg/handoff/
+	$(GO) test -run='^$$' -fuzz=FuzzClean -fuzztime=$(FUZZTIME)s ./pkg/runtime/host/wsfs/
+	$(GO) test -run='^$$' -fuzz=FuzzArchive -fuzztime=$(FUZZTIME)s ./pkg/runtime/host/wsfs/
 endif
 
 # Every cargo-fuzz target of the core, on the nightly its fuzz crate pins,
