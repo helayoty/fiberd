@@ -27,6 +27,10 @@ static MOUNTS: AtomicUsize = AtomicUsize::new(0);
 
 const PATHS: [&CStr; 2] = [c"/proc/self/mountinfo", c"/proc/self/uid_map"];
 
+/// The buffer lock_sys reads mountinfo through (core/src/prepare.rs). A
+/// line with its newline longer than this is read by its head alone.
+const LINE_BUF: usize = 8192;
+
 fn open(path: *const c_char, flags: c_int, _mode: libc::mode_t) -> c_int {
     // SAFETY: the core passes a NUL-ended path.
     let path = unsafe { CStr::from_ptr(path) };
@@ -84,9 +88,15 @@ fuzz_target!(
         if mode == 0 {
             let rc = lock_sys();
             let mounts = MOUNTS.load(Ordering::Relaxed);
-            // The file's contents cannot fail lock_sys, only the mounts.
-            assert!(mounts > 0 || rc == 0, "a failure with nothing mounted");
-            assert!(mounts == 0 || (rc == 0) == !refused, "an answer against the verdict");
+            // The file's contents fail lock_sys only through a line too long
+            // for the reader's buffer, whose fields may not fit. It fails
+            // closed then, mounts or not. Anything else fails only by mount.
+            let long = file.split(|&b| b == b'\n').any(|l| l.len() >= LINE_BUF);
+            assert!(mounts > 0 || rc == 0 || long, "a failure with nothing mounted");
+            assert!(
+                mounts == 0 || (rc == 0) == !refused || (rc != 0 && long),
+                "an answer against the verdict"
+            );
         } else {
             in_child_userns();
             assert_eq!(MOUNTS.load(Ordering::Relaxed), 0, "in_child_userns mounted");
