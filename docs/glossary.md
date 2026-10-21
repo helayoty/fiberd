@@ -48,7 +48,7 @@ Save a running [session](#session)'s state as a [delta](#delta) and stop its [fi
 The saved state of a [parked](#park) [session](#session). It is usually only what the fiber changed since it was forked from its [template](#template), so it is small enough to move to another [home](#home).
 
 ## Registry
-The storage between [homes](#home) that holds templates and published [deltas](#delta), such as an OCI registry or a shared directory. fiberd treats it as untrusted, so nothing from it is used before its signature and checks pass.
+The storage between [homes](#home) that holds templates and published [deltas](#delta), such as an OCI registry or a shared directory. fiberd treats it as untrusted, so nothing from it is used before its digest or signature checks pass. It holds template and tenant memory only sealed.
 
 ## Release
 End a [fiber](#fiber) and free its memory and its place under `fibers.max`. The caller may also discard the [session](#session)'s [delta](#delta), so the session cannot be resumed.

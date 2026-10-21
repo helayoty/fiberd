@@ -100,9 +100,10 @@ The conformance suite in `tests/e2e/conform` checks these.
 - The [device budget](glossary.md#device-budget).
 - The loss of the [warm](glossary.md#warm) template.
 - [Scope](glossary.md#scope) loss.
+- A [session](glossary.md#session) that moves to a second home and back, when one is given.
 
 ```bash
 make conform-proc
 ```
 
-That runs it against the fork zygote with real cgroups, in the dev container. `make conform-stub` runs it against the in-memory runtime on any OS. `make conform-runc`, `make conform-gvisor` and `make conform-hyperlight-fake` cover the other backends ([backends.md](design/backends.md)), and each example README names the target for its platform.
+That runs it against the fork zygote with real cgroups, in the dev container. It warms from a template artifact whose images are sealed ([artifact.md](design/artifact.md)), and it starts the second home. `make conform-stub` runs it against the in-memory runtime on any OS. `make conform-runc`, `make conform-gvisor` and `make conform-hyperlight-fake` cover the other backends ([backends.md](design/backends.md)), and each example README names the target for its platform.

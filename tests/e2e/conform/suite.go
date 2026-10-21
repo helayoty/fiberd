@@ -4,7 +4,8 @@
 // any home must pass, driven only through the public gRPC surface plus a
 // few out-of-band hooks (mint a grant, restart the target, flip
 // control-plane health, look up an audit record, end the engine, lose the
-// scope). conform_test.go wraps it as the `go test`-style grant-conform
+// scope). C11 moves a session to a second home and back, when one is
+// given. conform_test.go wraps it as the `go test`-style grant-conform
 // binary; homes provide the hooks as shell commands.
 package main
 
@@ -72,6 +73,12 @@ type Driver struct {
 	ScopeLost func(ctx context.Context) error
 	// Timeout bounds each case (default 15s); Restart gets twice that.
 	Timeout time.Duration
+	// Peer is a second home sharing the target's delta registry and keys.
+	// Nil skips C11.
+	Peer *Peer
+	// SealCheck reports template memory the shared registry holds in the
+	// clear, after C11 moved a session. Nil skips that check.
+	SealCheck func(ctx context.Context) error
 	// WBudget is the w_budget_bytes C6 minds (default 1 MiB). A template
 	// with a runtime dirties more at birth (a CPython fiber about 2 MiB,
 	// from reference counts on the pages it touches), so its
@@ -114,6 +121,7 @@ func Run(t *testing.T, d Driver) {
 	t.Run("C8_DeviceBudget", func(t *testing.T) { c.c8(t) })
 	t.Run("C9_EngineLoss", func(t *testing.T) { c.c9(t) })
 	t.Run("C10_ScopeRevocation", func(t *testing.T) { c.c10(t) })
+	t.Run("C11_SessionMobility", func(t *testing.T) { c.c11(t) })
 	if d.FiberWarm > 0 {
 		t.Run("Pool", func(t *testing.T) { c.pool(t) })
 	}

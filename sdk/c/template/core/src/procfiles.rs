@@ -72,18 +72,96 @@ pub fn unescape_mount(s: &mut [u8]) -> usize {
     w
 }
 
-/// The next mount point under /sys among the complete lines of
-/// buf[..have] from *start, which moves past them. The mount point (the
-/// fifth field) is unescaped in place and NUL-ended, ready for mount.
-/// None when no complete line is left. Every newline passed becomes a
+/// The fields of one mountinfo line the zygote reads, as spans of the
+/// buffer. The mount point is unescaped and NUL-ended, ready for mount.
+/// The others are as the kernel wrote them, since they are only
+/// compared with each other.
+pub struct MountLine {
+    /// The third field, the device as major:minor.
+    pub dev: Span,
+    /// The fourth field, the mount's root within its file system.
+    pub root: Span,
+    /// The fifth field, the mount point.
+    pub point: Span,
+    /// The source, the field after the file system type past the "-"
+    /// separator. Empty when the line has none.
+    pub source: Span,
+}
+
+/// The fields of the line at buf[line_start..line_end], whose newline
+/// is already a NUL. None for fewer than five fields. With whole false
+/// the line is cut at line_end rather than ended there, and the fields
+/// count only when the source token ended before the cut, so that no
+/// field is read short. The mount point is unescaped in place.
+fn line_fields(
+    buf: &mut [u8],
+    line_start: usize,
+    line_end: usize,
+    whole: bool,
+) -> Option<MountLine> {
+    // 36 35 98:0 /mnt1 /mnt2 rw,noatime master:1 - ext3 /dev/root rw
+    // (0)(1)(2)  (3)   (4)   (5)        (6...)   -  type source opts
+    // A NUL inside the line ends it.
+    let line = buf.get(line_start..line_end).unwrap_or(&[]);
+    let nul = line_start.wrapping_add(sys::nul_at(line));
+    let mut t = Tokens::within(line_start, nul, b' ');
+    let (Some(_), Some(_), Some(dev), Some(root), Some(mp)) = (
+        t.next(buf),
+        t.next(buf),
+        t.next(buf),
+        t.next(buf),
+        t.next(buf),
+    ) else {
+        return None;
+    };
+    let mut source = None;
+    while let Some(tok) = t.next(buf) {
+        if tok.of(buf) == b"-" {
+            if let (Some(_), Some(src)) = (t.next(buf), t.next(buf)) {
+                source = Some(src);
+            }
+            break;
+        }
+    }
+    let source = match source {
+        Some(src) => {
+            // A cut line's source is whole only when a separator
+            // followed it inside the buffer.
+            if !whole && src.off.wrapping_add(src.len) >= nul {
+                return None;
+            }
+            src
+        }
+        None if whole => Span {
+            off: mp.off,
+            len: 0,
+        },
+        None => return None,
+    };
+    // The token ends in a NUL, the tokenizer's or the line's.
+    let field = buf.get_mut(mp.off..).unwrap_or(&mut []);
+    let len = unescape_mount(field);
+    // An escaped NUL cuts the path the mount sees.
+    let len = sys::nul_at(field.get(..len).unwrap_or(&[]));
+    Some(MountLine {
+        dev,
+        root,
+        point: Span { off: mp.off, len },
+        source,
+    })
+}
+
+/// The next complete line of buf[..have] from *start, which moves past
+/// it, as its fields. None when no complete line is left. A line with
+/// fewer than five fields is skipped. Every newline passed becomes a
 /// NUL. A line that began before the buffer (*skipping) is dropped and
 /// clears the flag.
-pub fn mountinfo_next_sys(
+pub fn mountinfo_next(
     buf: &mut [u8],
     have: usize,
     start: &mut usize,
     skipping: &mut bool,
-) -> Option<Span> {
+) -> Option<MountLine> {
     let have = have.min(buf.len());
     loop {
         let rest = buf.get(*start..have)?;
@@ -101,36 +179,178 @@ pub fn mountinfo_next_sys(
             *skipping = false;
             continue;
         }
-        // 36 35 98:0 /mnt1 /mnt2 rw,noatime master:1 - ext3 /dev/root rw
-        // (0)(1)(2)  (3)   (4) is the mount point. A NUL inside the line
-        // ends it.
-        let line = buf.get(line_start..line_end).unwrap_or(&[]);
-        let nul = line_start.wrapping_add(sys::nul_at(line));
-        let mut t = Tokens::within(line_start, nul, b' ');
-        let mut mp = None;
-        for _ in 0..5 {
-            mp = t.next(buf);
-            if mp.is_none() {
-                break;
-            }
-        }
-        let Some(mp) = mp else { continue };
-        // The token ends in a NUL, the tokenizer's or the line's.
-        let field = buf.get_mut(mp.off..).unwrap_or(&mut []);
-        let len = unescape_mount(field);
-        // An escaped NUL cuts the path the mount sees.
-        let len = sys::nul_at(field.get(..len).unwrap_or(&[]));
-        let path = field.get(..len).unwrap_or(&[]);
-        if path == b"/sys" || path.starts_with(b"/sys/") {
-            return Some(Span { off: mp.off, len });
+        if let Some(m) = line_fields(buf, line_start, line_end, true) {
+            return Some(m);
         }
     }
+}
+
+/// The fields of a line longer than the buffer, read from the buffer it
+/// fills with no newline. Every field read here comes before the
+/// superoptions, which is what makes an overlay root's line long, so
+/// the fields are there unless the root and mount point paths alone
+/// fill the buffer. None then, and the caller treats the line as
+/// unreadable. The byte at have is overwritten with a NUL, so have is
+/// at most buf.len() - 1.
+pub fn mountinfo_long(buf: &mut [u8], have: usize) -> Option<MountLine> {
+    let end = have.min(buf.len().saturating_sub(1));
+    if let Some(b) = buf.get_mut(end) {
+        *b = 0;
+    }
+    line_fields(buf, 0, end, false)
+}
+
+/// Why stream_mounts could not read the whole table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unread {
+    /// read failed.
+    Read,
+    /// A line's fields did not fit the buffer.
+    Line,
+}
+
+/// Streams a mountinfo table through buf, calling f with each line's
+/// fields until f returns true, and reports whether it did. read fills
+/// a slice and returns the count, 0 at the end, or a negative value on
+/// failure. A line longer than the buffer is read as far as its source
+/// field (mountinfo_long) and the rest of it dropped. Err when read
+/// fails or a line's fields do not fit the buffer, so a caller that
+/// decides by every line fails closed rather than miss one.
+pub fn stream_mounts(
+    buf: &mut [u8],
+    mut read: impl FnMut(&mut [u8]) -> isize,
+    mut f: impl FnMut(&mut [u8], &MountLine) -> bool,
+) -> Result<bool, Unread> {
+    let cap = buf.len();
+    let mut have = 0usize;
+    let mut skipping = false;
+    loop {
+        let room = buf.get_mut(have..).unwrap_or(&mut []);
+        let n = read(room);
+        if n < 0 {
+            return Err(Unread::Read);
+        }
+        let Some(n) = usize::try_from(n).ok().filter(|&n| n > 0) else {
+            return Ok(false); // the end. mountinfo ends every line with '\n'
+        };
+        have = have.wrapping_add(n);
+        let mut start = 0usize;
+        while let Some(m) = mountinfo_next(buf, have, &mut start, &mut skipping) {
+            if f(buf, &m) {
+                return Ok(true);
+            }
+        }
+        if start == 0 && have == cap && !skipping {
+            // A line longer than the buffer. Its fields are read from
+            // the buffer it fills, and the carry drops the rest.
+            let Some(m) = mountinfo_long(buf, have) else {
+                return Err(Unread::Line);
+            };
+            if f(buf, &m) {
+                return Ok(true);
+            }
+        }
+        have = mountinfo_carry(buf, have, start, &mut skipping);
+    }
+}
+
+/// The next mount point under /sys among the complete lines of
+/// buf[..have] from *start, which moves past them, as mountinfo_next
+/// reads them.
+pub fn mountinfo_next_sys(
+    buf: &mut [u8],
+    have: usize,
+    start: &mut usize,
+    skipping: &mut bool,
+) -> Option<Span> {
+    loop {
+        let m = mountinfo_next(buf, have, start, skipping)?;
+        let path = m.point.of(buf);
+        if path == b"/sys" || path.starts_with(b"/sys/") {
+            return Some(m.point);
+        }
+    }
+}
+
+/// What a mount fiberd made is named by: the source of every file system
+/// fiberd mounts starts with it (the gVisor backend's templates tmpfs is
+/// fiberd-templates). pkg/backend names the same prefix.
+pub const FIBERD_SOURCE: &[u8] = b"fiberd-";
+
+/// The largest major:minor the dev field can hold.
+const DEV_MAX: usize = 24;
+
+/// The root mount of a namespace, by the dev and root fields of the
+/// last mountinfo line at /. A bind of / repeats both at another mount
+/// point, which is how a proc home's restore root is known.
+pub struct RootId {
+    dev: [u8; DEV_MAX],
+    dev_len: usize,
+    root: [u8; crate::abi::KEEP_MAX],
+    root_len: usize,
+    /// Whether a line at / was seen at all.
+    pub found: bool,
+}
+
+impl RootId {
+    /// No line at / seen yet.
+    pub const fn new() -> Self {
+        RootId {
+            dev: [0; DEV_MAX],
+            dev_len: 0,
+            root: [0; crate::abi::KEEP_MAX],
+            root_len: 0,
+            found: false,
+        }
+    }
+
+    /// Keeps m's dev and root when m is at /. A later line at / replaces
+    /// an earlier one, since the last is the one a path lookup sees.
+    pub fn note(&mut self, buf: &[u8], m: &MountLine) {
+        if m.point.of(buf) != b"/" {
+            return;
+        }
+        let dev = m.dev.of(buf);
+        let root = m.root.of(buf);
+        if dev.len() > DEV_MAX || root.len() > self.root.len() {
+            return;
+        }
+        self.dev_len = sys::append(&mut self.dev, 0, dev);
+        self.root_len = sys::append(&mut self.root, 0, root);
+        self.found = true;
+    }
+
+    /// Whether m shows the same directory as / does.
+    fn is_bind_of_root(&self, buf: &[u8], m: &MountLine) -> bool {
+        self.found
+            && m.dev.of(buf) == self.dev.get(..self.dev_len).unwrap_or(&[])
+            && m.root.of(buf) == self.root.get(..self.root_len).unwrap_or(&[])
+    }
+}
+
+impl Default for RootId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Whether m is a mount some fiberd home made, which no fiber needs and
+/// which goes away with that home: a file system whose source names
+/// fiberd (FIBERD_SOURCE), or a bind of / (a proc home's restore root,
+/// which besides shows every hidden path uncovered). The root mount
+/// itself is never one.
+pub fn fiberd_mount(buf: &[u8], m: &MountLine, root: &RootId) -> bool {
+    if m.point.of(buf) == b"/" {
+        return false;
+    }
+    m.source.of(buf).starts_with(FIBERD_SOURCE) || root.is_bind_of_root(buf, m)
 }
 
 /// Moves the partial line left at start of buf[..have] to the front and
 /// returns its length. A full buffer with no newline is dropped instead,
 /// with *skipping set, so the rest of that line is skipped rather than
-/// read as lines of its own.
+/// read as lines of its own. stream_mounts reads such a line's head
+/// (mountinfo_long) before it lets the carry drop it.
 pub fn mountinfo_carry(buf: &mut [u8], have: usize, start: usize, skipping: &mut bool) -> usize {
     let have = have.min(buf.len());
     if start == 0 && have == buf.len() {
@@ -463,6 +683,369 @@ mod tests {
                 "{name}: three bytes a read"
             );
         }
+    }
+
+    /// Every line of data as mountinfo_next reads it, read chunk bytes
+    /// at a time into a buffer of cap bytes: (dev, root, point, source).
+    fn mountinfo_lines(data: &[u8], chunk: usize, cap: usize) -> Vec<[Vec<u8>; 4]> {
+        let mut buf = vec![0u8; cap];
+        let mut have = 0usize;
+        let mut skipping = false;
+        let mut fed = 0usize;
+        let mut got = Vec::new();
+        loop {
+            let room = cap - have;
+            let n = (data.len() - fed).min(room).min(chunk);
+            if n == 0 {
+                break;
+            }
+            buf[have..have + n].copy_from_slice(&data[fed..fed + n]);
+            fed += n;
+            have += n;
+            let mut start = 0usize;
+            while let Some(m) = mountinfo_next(&mut buf, have, &mut start, &mut skipping) {
+                assert_eq!(
+                    buf[m.point.off + m.point.len],
+                    0,
+                    "the mount point is NUL-ended"
+                );
+                got.push([
+                    m.dev.of(&buf).to_vec(),
+                    m.root.of(&buf).to_vec(),
+                    m.point.of(&buf).to_vec(),
+                    m.source.of(&buf).to_vec(),
+                ]);
+            }
+            have = mountinfo_carry(&mut buf, have, start, &mut skipping);
+        }
+        got
+    }
+
+    #[test]
+    fn mountinfo_next_reads_the_fields() {
+        fn row(f: [&str; 4]) -> [Vec<u8>; 4] {
+            f.map(|s| s.as_bytes().to_vec())
+        }
+        let cases: &[(&str, &[u8], Vec<[Vec<u8>; 4]>)] = &[
+            (
+                "a full line",
+                b"36 35 98:0 /mnt1 /mnt2 rw,noatime master:1 - ext3 /dev/root rw\n",
+                vec![row(["98:0", "/mnt1", "/mnt2", "/dev/root"])],
+            ),
+            (
+                "the gVisor templates tmpfs",
+                b"233 232 0:66 / /var/lib/fiberd/gvisor/templates rw,nosuid,nodev,relatime - tmpfs fiberd-templates rw,mode=700\n",
+                vec![row(["0:66", "/", "/var/lib/fiberd/gvisor/templates", "fiberd-templates"])],
+            ),
+            (
+                "no optional fields",
+                b"1 0 0:64 / / rw - overlay overlay rw,lowerdir=/a\n",
+                vec![row(["0:64", "/", "/", "overlay"])],
+            ),
+            (
+                "two optional fields",
+                b"1 0 0:64 / / rw shared:1 master:2 - overlay overlay rw\n",
+                vec![row(["0:64", "/", "/", "overlay"])],
+            ),
+            (
+                "no separator leaves the source empty",
+                b"1 2 3:4 /r /p rw\n",
+                vec![row(["3:4", "/r", "/p", ""])],
+            ),
+            (
+                "a separator with the type alone leaves the source empty",
+                b"1 2 3:4 /r /p rw - tmpfs\n",
+                vec![row(["3:4", "/r", "/p", ""])],
+            ),
+            (
+                "exactly five fields",
+                b"1 2 3:4 /r /p\n",
+                vec![row(["3:4", "/r", "/p", ""])],
+            ),
+            ("fewer than five fields is no line", b"1 2 3:4 /r\n", vec![]),
+            (
+                "an escaped mount point, the source as written",
+                b"1 2 3:4 /r /my\\040dir rw - tmpfs my\\040src rw\n",
+                vec![row(["3:4", "/r", "/my dir", "my\\040src"])],
+            ),
+            (
+                "two lines",
+                b"1 0 0:64 / / rw - overlay overlay rw\n2 1 0:64 / /root-bind rw - overlay overlay rw\n",
+                vec![
+                    row(["0:64", "/", "/", "overlay"]),
+                    row(["0:64", "/", "/root-bind", "overlay"]),
+                ],
+            ),
+        ];
+        for (name, data, want) in cases {
+            for chunk in [8192usize, 7, 1] {
+                assert_eq!(
+                    mountinfo_lines(data, chunk, 8192),
+                    *want,
+                    "{name}, {chunk} bytes a read"
+                );
+            }
+        }
+    }
+
+    /// stream_mounts over data fed chunk bytes a read through a buffer of
+    /// cap bytes, as each_mount runs it, collecting every line's fields.
+    fn streamed(data: &[u8], chunk: usize, cap: usize) -> Result<Vec<[Vec<u8>; 4]>, Unread> {
+        let mut buf = vec![0u8; cap];
+        let mut fed = 0usize;
+        let mut got = Vec::new();
+        stream_mounts(
+            &mut buf,
+            |room| {
+                let n = (data.len() - fed).min(room.len()).min(chunk);
+                room[..n].copy_from_slice(&data[fed..fed + n]);
+                fed += n;
+                n as isize
+            },
+            |buf, m| {
+                got.push([
+                    m.dev.of(buf).to_vec(),
+                    m.root.of(buf).to_vec(),
+                    m.point.of(buf).to_vec(),
+                    m.source.of(buf).to_vec(),
+                ]);
+                false
+            },
+        )?;
+        Ok(got)
+    }
+
+    /// An overlay line's superoptions, lowerdir of n bytes.
+    fn lowerdir(n: usize) -> String {
+        format!("rw,lowerdir={}", "x".repeat(n))
+    }
+
+    #[test]
+    fn stream_mounts_reads_a_line_longer_than_its_buffer() {
+        fn row(f: [&str; 4]) -> [Vec<u8>; 4] {
+            f.map(|s| s.as_bytes().to_vec())
+        }
+        let long = format!("1 0 0:64 / / rw - overlay overlay {}\n", lowerdir(9000));
+        let bind = format!(
+            "2 1 0:64 / /var/lib/fiberd/private/root rw - overlay overlay {}\n",
+            lowerdir(9000)
+        );
+        let short = "3 1 0:66 / /x rw - tmpfs fiberd-templates rw\n";
+        let wide_root = format!(
+            "1 0 0:64 /{} /{} rw - ext4 /dev/sda1 rw\n",
+            "r".repeat(4100),
+            "p".repeat(4100)
+        );
+        let cases: &[(&str, String, Result<Vec<[Vec<u8>; 4]>, Unread>)] = &[
+            (
+                "a / line of 9 KiB",
+                long.clone(),
+                Ok(vec![row(["0:64", "/", "/", "overlay"])]),
+            ),
+            (
+                "a long / line, a long bind of /, a short line",
+                [long.as_str(), bind.as_str(), short].concat(),
+                Ok(vec![
+                    row(["0:64", "/", "/", "overlay"]),
+                    row(["0:64", "/", "/var/lib/fiberd/private/root", "overlay"]),
+                    row(["0:66", "/", "/x", "fiberd-templates"]),
+                ]),
+            ),
+            (
+                "a short line, then a long one",
+                [short, long.as_str()].concat(),
+                Ok(vec![
+                    row(["0:66", "/", "/x", "fiberd-templates"]),
+                    row(["0:64", "/", "/", "overlay"]),
+                ]),
+            ),
+            (
+                "a long line with no newline at the end",
+                long[..long.len() - 1].to_string(),
+                Ok(vec![row(["0:64", "/", "/", "overlay"])]),
+            ),
+            (
+                "paths alone fill the buffer",
+                [wide_root.as_str(), short].concat(),
+                Err(Unread::Line),
+            ),
+            (
+                "the source cut by the buffer",
+                format!("1 0 0:64 / / {} - overlay overlay rw\n", "o".repeat(8170)),
+                Err(Unread::Line),
+            ),
+            (
+                "no separator inside the buffer",
+                format!("1 0 0:64 / / {} - overlay overlay rw\n", "o".repeat(9000)),
+                Err(Unread::Line),
+            ),
+        ];
+        for (name, data, want) in cases {
+            for chunk in [8192usize, 4096, 1000, 7] {
+                assert_eq!(
+                    streamed(data.as_bytes(), chunk, 8192),
+                    *want,
+                    "{name}, {chunk} bytes a read"
+                );
+            }
+        }
+        let mut buf = [0u8; 16];
+        assert_eq!(
+            stream_mounts(&mut buf, |_| -1, |_, _| false),
+            Err(Unread::Read),
+            "a failed read"
+        );
+    }
+
+    /// The mount points of lines fiberd_mount says are another home's,
+    /// with the root known from the lines at /, read as
+    /// drop_fiberd_mounts reads them, through an 8 KiB buffer.
+    fn foreign_points(data: &[u8]) -> Result<Vec<Vec<u8>>, Unread> {
+        let mut root = RootId::new();
+        let mut buf = [0u8; 8192];
+        let mut fed = 0usize;
+        stream_mounts(
+            &mut buf,
+            |room| {
+                let n = (data.len() - fed).min(room.len());
+                room[..n].copy_from_slice(&data[fed..fed + n]);
+                fed += n;
+                n as isize
+            },
+            |buf, m| {
+                root.note(buf, m);
+                false
+            },
+        )?;
+        let mut got = Vec::new();
+        let mut fed = 0usize;
+        stream_mounts(
+            &mut buf,
+            |room| {
+                let n = (data.len() - fed).min(room.len());
+                room[..n].copy_from_slice(&data[fed..fed + n]);
+                fed += n;
+                n as isize
+            },
+            |buf, m| {
+                if fiberd_mount(buf, m, &root) {
+                    got.push(m.point.of(buf).to_vec());
+                }
+                false
+            },
+        )?;
+        Ok(got)
+    }
+
+    #[test]
+    fn fiberd_mount_knows_other_homes_mounts() {
+        const ROOT: &[u8] = b"1 0 0:64 / / rw - overlay overlay rw\n";
+        let cases: &[(&str, Vec<u8>, &[&[u8]])] = &[
+            ("the root alone", ROOT.to_vec(), &[]),
+            (
+                "the gVisor templates tmpfs, by its source",
+                [ROOT, b"2 1 0:66 / /var/lib/fiberd/gvisor/templates rw - tmpfs fiberd-templates rw\n"].concat(),
+                &[b"/var/lib/fiberd/gvisor/templates"],
+            ),
+            (
+                "any source fiberd names",
+                [ROOT, b"2 1 0:66 / /x rw - tmpfs fiberd-anything rw\n"].concat(),
+                &[b"/x"],
+            ),
+            (
+                "a tmpfs of anyone else is kept",
+                [ROOT, b"2 1 0:66 / /tmp rw - tmpfs tmpfs rw\n3 1 0:67 / /run rw - tmpfs none rw\n"].concat(),
+                &[],
+            ),
+            (
+                "the prefix inside the source is not the prefix",
+                [ROOT, b"2 1 0:66 / /x rw - tmpfs my-fiberd-thing rw\n"].concat(),
+                &[],
+            ),
+            (
+                "a restore root, a bind of / in the test's name",
+                [ROOT, b"2 1 0:64 / /tmp/fiberd-root-4242 rw - overlay overlay rw\n"].concat(),
+                &[b"/tmp/fiberd-root-4242"],
+            ),
+            (
+                "a restore root in production's name",
+                [ROOT, b"2 1 0:64 / /var/lib/fiberd/private/root rw - overlay overlay rw\n"].concat(),
+                &[b"/var/lib/fiberd/private/root"],
+            ),
+            (
+                "a bind of a directory of / is kept",
+                [ROOT, b"2 1 0:64 /srv /mnt/srv rw - overlay overlay rw\n"].concat(),
+                &[],
+            ),
+            (
+                "the same root path on another device is kept",
+                [ROOT, b"2 1 8:1 / /mnt/disk rw - ext4 /dev/sda1 rw\n"].concat(),
+                &[],
+            ),
+            (
+                "a root with a subvolume, and its bind",
+                b"1 0 0:30 /@ / rw - btrfs /dev/sda2 rw\n2 1 0:30 /@ /tmp/fiberd-root-1 rw - btrfs /dev/sda2 rw\n3 1 0:30 /@home /home rw - btrfs /dev/sda2 rw\n".to_vec(),
+                &[b"/tmp/fiberd-root-1"],
+            ),
+            (
+                "an overmounted root, the last line at / is the root",
+                b"1 0 0:64 / / rw - overlay overlay rw\n2 1 8:1 / / rw - ext4 /dev/sda1 rw\n3 2 8:1 / /mnt/bind rw - ext4 /dev/sda1 rw\n4 2 0:64 / /mnt/old rw - overlay overlay rw\n".to_vec(),
+                &[b"/mnt/bind"],
+            ),
+            (
+                "no line at / leaves only the sources",
+                b"2 1 0:64 / /tmp/fiberd-root-1 rw - overlay overlay rw\n3 1 0:66 / /x rw - tmpfs fiberd-templates rw\n".to_vec(),
+                &[b"/x"],
+            ),
+            (
+                "a root with escapes in its path matches as written",
+                b"1 0 0:30 /my\\040vol / rw - btrfs /dev/sda2 rw\n2 1 0:30 /my\\040vol /tmp/r rw - btrfs /dev/sda2 rw\n".to_vec(),
+                &[b"/tmp/r"],
+            ),
+            (
+                "the zygote's own covers are kept",
+                [ROOT, b"2 1 0:70 / /var/lib/fiberd/private rw - tmpfs tmpfs ro\n3 1 0:71 / /run/fiberd rw - tmpfs tmpfs ro\n"].concat(),
+                &[],
+            ),
+            (
+                "an overlay root whose line passes 8 KiB, and a bind of it",
+                format!(
+                    "1 0 0:64 / / rw - overlay overlay {}\n2 1 0:64 / /var/lib/fiberd/private/root rw - overlay overlay rw\n",
+                    lowerdir(9000)
+                )
+                .into_bytes(),
+                &[b"/var/lib/fiberd/private/root"],
+            ),
+            (
+                "a bind of / whose own line passes 8 KiB",
+                format!(
+                    "1 0 0:64 / / rw - overlay overlay rw\n2 1 0:64 / /tmp/fiberd-root-7 rw - overlay overlay {}\n3 1 0:64 /srv /mnt/srv rw - overlay overlay {}\n",
+                    lowerdir(9000),
+                    lowerdir(9000)
+                )
+                .into_bytes(),
+                &[b"/tmp/fiberd-root-7"],
+            ),
+            (
+                "a fiberd source whose line passes 8 KiB",
+                format!("{}2 1 0:66 / /x rw - tmpfs fiberd-templates {}\n", String::from_utf8_lossy(ROOT), lowerdir(9000)).into_bytes(),
+                &[b"/x"],
+            ),
+        ];
+        for (name, data, want) in cases {
+            let want: Vec<Vec<u8>> = want.iter().map(|w| w.to_vec()).collect();
+            assert_eq!(foreign_points(data), Ok(want), "{name}");
+        }
+        let wide = format!(
+            "1 0 0:64 /{} /{} rw - ext4 /dev/sda1 rw\n",
+            "r".repeat(4100),
+            "p".repeat(4100)
+        );
+        assert_eq!(
+            foreign_points(wide.as_bytes()),
+            Err(Unread::Line),
+            "a line whose fields do not fit fails closed"
+        );
     }
 
     #[test]

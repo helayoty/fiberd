@@ -25,12 +25,13 @@ import (
 const mntnsEnv = "FIBERD_TEST_MNTNS"
 
 // OwnMountNamespace re-executes the test binary in a private mount
-// namespace, so the restore roots and binds one suite mounts never reach
-// the fibers another suite forks beside it. The proc backend binds / at
-// /tmp/fiberd-root-<pid> while a runtime is open, and a fiber forked
-// meanwhile by another suite's zygote copies that bind into its own
-// namespace, where criu records it at park and then cannot restore it
-// once the bind is gone. unshare execs in place, so the pid and the
+// namespace, so the mounts one suite makes never reach the fibers
+// another suite forks beside it, and its unmounts never pull a mount
+// from under another suite's parked fiber. A zygote detaches a restore
+// root or a fiberd-named tmpfs it copied from the host
+// (sdk/c/template/core/src/prepare.rs, drop_fiberd_mounts), but keeps
+// any other mount a suite makes, which criu records at park and cannot
+// restore once it is gone. unshare execs in place, so the pid and the
 // standard streams go test holds stay the same. Call it first in
 // TestMain. Without unshare, or outside the container, the suite goes
 // on in the namespace it has.

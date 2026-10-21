@@ -131,7 +131,9 @@ func pushTemplate(t *testing.T, executable string, args ...string) (repo, digest
 	t.Helper()
 	ctx := context.Background()
 	out := filepath.Join(t.TempDir(), "art")
-	digest, err := artifact.Build(ctx, artifact.BuildOptions{Zygote: executable, Args: args, Out: out, SkipImages: true})
+	// No smoke test: a gVisor-mode template waits on /proc/gvisor/checkpoint,
+	// which only a sandbox has, and never speaks fd 3 on the host.
+	digest, err := artifact.Build(ctx, artifact.BuildOptions{Zygote: executable, Args: args, Out: out, SkipImages: true, NoSmoke: true})
 	if err != nil {
 		t.Fatalf("build artifact: %v", err)
 	}

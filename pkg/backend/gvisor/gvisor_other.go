@@ -13,9 +13,10 @@ import (
 
 // Options configure the gVisor backend.
 type Options struct {
-	Runsc    string
-	Rootfs   string
-	StateDir string
+	Runsc           string
+	Rootfs          string
+	StateDir        string
+	TemplatesOnDisk bool
 }
 
 type unsupported struct{}

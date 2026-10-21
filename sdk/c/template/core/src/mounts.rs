@@ -33,6 +33,8 @@ pub const F_DROP: c_int = 8;
 pub const F_HIDE: c_int = 16;
 /// The run directory narrowed.
 pub const F_RUNDIR: c_int = 32;
+/// Other fiberd homes' mounts dropped (prepare_ns alone).
+pub const F_FOREIGN: c_int = 64;
 
 /// MNT_DETACH, which libc types as a C int.
 const MNT_DETACH: c_int = libc::MNT_DETACH;

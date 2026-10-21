@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"maps"
 	"os"
 	"path/filepath"
@@ -14,7 +15,9 @@ import (
 	"time"
 
 	"github.com/helayoty/fiberd/pkg/artifact"
+	"github.com/helayoty/fiberd/pkg/backend"
 	"github.com/helayoty/fiberd/pkg/core"
+	"github.com/helayoty/fiberd/pkg/sys/criu"
 )
 
 // Where a session lives in the delta registry (see mobility_linux.go for
@@ -165,19 +168,102 @@ func resolveParent(ctx context.Context, cfg Config, repo, sha string) (artifact.
 	if err := cfg.DeltaKeys.Verify(loc); err != nil {
 		return artifact.Located{}, fmt.Errorf("parent %s: %w", sha[:12], err)
 	}
-	if err := checkParentSigned(loc.Annotations, sha); err != nil {
+	if err := checkParentSigned(loc.Annotations, sha, cfg.DeltaKeys.Seal); err != nil {
 		return artifact.Located{}, err
 	}
 	return loc, nil
 }
 
 // checkParentSigned refuses a verified parent manifest that names
-// another checkpoint than the one it stands for.
-func checkParentSigned(ann map[string]string, sha string) error {
+// another checkpoint than the one it stands for, or that was not sealed
+// under the master k. A parent is template memory, so one pushed in the
+// clear, without a seal key, is refused before its files are fetched.
+func checkParentSigned(ann map[string]string, sha string, k *artifact.SealKey) error {
 	if ann[artifact.AnnotationParent] != sha {
 		return fmt.Errorf("%w: parent %s is signed as checkpoint %q", artifact.ErrUntrusted, sha[:12], ann[artifact.AnnotationParent])
 	}
+	switch kid := ann[artifact.AnnotationSealKey]; {
+	case kid == "":
+		return fmt.Errorf("%w: parent %s is not sealed", artifact.ErrSealed, sha[:12])
+	case k == nil || kid != k.ID:
+		return fmt.Errorf("%w: parent %s is sealed with key %q, not this home's", artifact.ErrSealed, sha[:12], kid)
+	}
 	return nil
+}
+
+// loadParent loads a parent checkpoint with the codec that defines its
+// hash. That is the backend's own, else CRIU's, the format of every
+// delta codec fiberd has (proc, and runc through proc's). A caller with
+// no backend, such as a control plane importing snapshots, has CRIU's.
+func loadParent(cfg Config, dir string) (backend.Parent, error) {
+	if c, ok := cfg.Backend.(backend.DeltaCodec); ok {
+		return c.LoadParent(dir)
+	}
+	p, err := criu.LoadParent(dir)
+	if err != nil {
+		return nil, err
+	}
+	return p, nil
+}
+
+// openParentCopy opens a copy of the sealed parent in dir into open,
+// sealed as sha under k, and checks that its plaintext hashes to sha. The
+// sealed files in dir stay as they are. open is removed afterwards.
+func openParentCopy(cfg Config, dir, open, sha string) error {
+	defer func() { _ = os.RemoveAll(open) }()
+	if err := copyFlat(dir, open); err != nil {
+		return err
+	}
+	if err := artifact.OpenParentDir(open, cfg.DeltaKeys.Seal, sha); err != nil {
+		return err
+	}
+	p, err := loadParent(cfg, open)
+	if err != nil {
+		return err
+	}
+	got := p.SHA256()
+	p.Close()
+	if got != sha {
+		return fmt.Errorf("%w: parent opens to pages that hash to %s, not %s", artifact.ErrUntrusted, got[:12], sha[:12])
+	}
+	return nil
+}
+
+// copyFlat copies the regular files of src into a new owner-only dst.
+func copyFlat(src, dst string) error {
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		return err
+	}
+	if err := os.Mkdir(dst, 0o700); err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if !e.Type().IsRegular() {
+			continue
+		}
+		if err := copyFile(filepath.Join(src, e.Name()), filepath.Join(dst, e.Name())); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = in.Close() }()
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		return err
+	}
+	return out.Close()
 }
 
 // ExportDelta moves the published delta of session under grant g from
@@ -229,9 +315,10 @@ func ExportDelta(ctx context.Context, cfg Config, g core.Grant, session, dir str
 	info := ExportInfo{Session: session, Domain: domain, Digest: loc.Digest, Annotations: loc.Annotations,
 		Parent: loc.Annotations[artifact.AnnotationParent]}
 	if info.Parent != "" {
-		// The parent travels with the delta, and so does its signed
-		// manifest. The importing home checks the files against it rather
-		// than trusting this home's word.
+		// The parent travels with the delta, sealed as the registry holds
+		// it, and so does its signed manifest. The importing home checks
+		// the files against it and opens them rather than trusting this
+		// home's word.
 		ploc, err := resolveParent(ctx, cfg, repo, info.Parent)
 		if err != nil {
 			return nil, fmt.Errorf("host: refusing to export %s/%s: delta needs %w", g.UID, session, err)
@@ -306,9 +393,10 @@ func ImportDelta(ctx context.Context, cfg Config, g core.Grant, session, dir str
 	defer func() { _ = os.RemoveAll(tmp) }()
 	// The delta must carry a trusted home's signature over these files and
 	// open with this home's seal key for its exported session before this
-	// home signs it as its own. The parent is template state, so it is not
-	// sealed, but it must be signed too. This home signs what it pushes, so
-	// an unverified parent would become a trusted one here.
+	// home signs it as its own. The parent must be signed too, and sealed
+	// as the checkpoint the signed delta names, and its plaintext must hash
+	// to it. This home signs what it pushes, so a parent it never opened
+	// would become a trusted one here.
 	//
 	// The domain is g's, never the export's. Every home derives seal keys
 	// from one master, so any domain's delta opens here, and the unsigned
@@ -344,12 +432,17 @@ func ImportDelta(ctx context.Context, cfg Config, g core.Grant, session, dir str
 			if err := cfg.DeltaKeys.VerifyDir(filepath.Join(tmp, "parent"), artifact.ArtifactTypeParent, info.ParentAnnotations); err != nil {
 				return Imported{}, fmt.Errorf("host: import %s/%s: parent %s: %w", g.UID, session, info.Parent[:12], err)
 			}
-			if err := checkParentSigned(info.ParentAnnotations, info.Parent); err != nil {
+			if err := checkParentSigned(info.ParentAnnotations, info.Parent, cfg.DeltaKeys.Seal); err != nil {
 				return Imported{}, fmt.Errorf("host: import %s/%s: %w", g.UID, session, err)
+			}
+			if err := openParentCopy(cfg, filepath.Join(tmp, "parent"), filepath.Join(tmp, "parent-open"), info.Parent); err != nil {
+				return Imported{}, fmt.Errorf("host: import %s/%s: parent %s: %w", g.UID, session, info.Parent[:12], err)
 			}
 			// The parent carries the platform facts it was made on, from its
 			// own signed manifest where it has them, else from the delta's.
-			ann := map[string]string{artifact.AnnotationParent: info.Parent, artifact.AnnotationHome: cfg.HomeID}
+			// It is pushed still sealed, as it came.
+			ann := map[string]string{artifact.AnnotationParent: info.Parent, artifact.AnnotationHome: cfg.HomeID,
+				artifact.AnnotationSealKey: cfg.DeltaKeys.Seal.ID}
 			for _, k := range platformAnnotations {
 				if v, ok := info.ParentAnnotations[k]; ok {
 					ann[k] = v

@@ -170,18 +170,11 @@ func TestRegistryMobility(t *testing.T) {
 			}
 			remote = remote2
 		}},
-		{"the registry holds no plaintext", func(t *testing.T) {
-			err := filepath.WalkDir(strings.TrimPrefix(registry, artifact.FileScheme), func(path string, e os.DirEntry, err error) error {
-				if err != nil || e.IsDir() {
-					return err
-				}
-				if b, err := os.ReadFile(path); err != nil || strings.Contains(string(b), "dirty pages") {
-					t.Errorf("%s holds the delta's plaintext (%v)", path, err)
-				}
-				return nil
-			})
-			if err != nil {
-				t.Fatal(err)
+		// Regression: the parent was pushed in the clear, so the
+		// registry held the template's memory.
+		{"the registry holds no plaintext, of the delta or of the parent", func(t *testing.T) {
+			if n := scanSealed(t, strings.TrimPrefix(registry, artifact.FileScheme), "dirty pages", parentPages); n == 0 {
+				t.Fatal("scanned no sealed files")
 			}
 		}},
 		{"owned while the tag holds what was pushed", func(t *testing.T) {
@@ -264,14 +257,63 @@ func TestRegistryMobility(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+			// And parents in the clear, or sealed under another tag than
+			// their own. A trusted home signed every one of them.
+			plain, forged, copied, relabelled := shaOf("plain pages"), shaOf("forged pages"), shaOf("copied"), shaOf("relabelled")
+			for i, sha := range []string{plain, forged, copied, relabelled} {
+				session := "Q" + string(rune('0'+i))
+				dir := filepath.Join(t.TempDir(), "d")
+				parkedDelta(t, dir, m, sha)
+				if _, err := pushDelta(ctx, a.cfg, dir, repo+":"+sessionTag(session), map[string]string{artifact.AnnotationHome: "home-a"},
+					sealFor(t, a.cfg, g, session, "g1/1/1", time.Now())); err != nil {
+					t.Fatal(err)
+				}
+			}
 			pdir := filepath.Join(a.parentsDir(), parentSHA)
 			for _, p := range []struct {
 				sha, typ string
 				key      *jose.JSONWebKey
-			}{{foreign, artifact.ArtifactTypeParent, keyC}, {mistyped, artifact.ArtifactTypeDelta, keyA}, {mismatched, artifact.ArtifactTypeParent, keyA}} {
+			}{{foreign, artifact.ArtifactTypeParent, keyC}, {mistyped, artifact.ArtifactTypeDelta, keyA}} {
 				if _, err := artifact.PushDir(ctx, pdir, repo+":"+parentTag(p.sha), p.typ, map[string]string{artifact.AnnotationParent: p.sha}, p.key); err != nil {
 					t.Fatal(err)
 				}
+			}
+			// Sealed as mismatched, so it opens, but its pages are another
+			// parent's.
+			pushParent(t, pdir, repo+":"+parentTag(mismatched), mismatched, seal, keyA, nil)
+			// Pages that hash to their tag, pushed in the clear, once
+			// without a seal key and once naming one.
+			for _, p := range []struct{ pages, sha, kid string }{{"plain pages", plain, ""}, {"forged pages", forged, seal.ID}} {
+				dir := filepath.Join(t.TempDir(), "p")
+				if err := writeParentDir(dir, p.pages); err != nil {
+					t.Fatal(err)
+				}
+				ann := map[string]string{artifact.AnnotationParent: p.sha}
+				if p.kid != "" {
+					ann[artifact.AnnotationSealKey] = p.kid
+				}
+				if _, err := artifact.PushDir(ctx, dir, repo+":"+parentTag(p.sha), artifact.ArtifactTypeParent, ann, keyA); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// The sealed parent and its signed manifest copied onto another
+			// sha's tag.
+			ploc, _, err := artifact.Resolve(ctx, repo+":"+parentTag(parentSHA))
+			if err != nil {
+				t.Fatal(err)
+			}
+			sealedCopy := filepath.Join(t.TempDir(), "copy")
+			if _, err := artifact.PullDir(ctx, repo+"@"+ploc.Digest, sealedCopy); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := artifact.PushDir(ctx, sealedCopy, repo+":"+parentTag(copied), artifact.ArtifactTypeParent, ploc.Annotations, nil); err != nil {
+				t.Fatal(err)
+			}
+			// The same sealed files under a manifest a trusted home signed
+			// for another sha.
+			if _, err := artifact.PushDir(ctx, sealedCopy, repo+":"+parentTag(relabelled), artifact.ArtifactTypeParent,
+				map[string]string{artifact.AnnotationParent: relabelled, artifact.AnnotationSealKey: seal.ID}, keyA); err != nil {
+				t.Fatal(err)
 			}
 			bInfoErr := mobilityHome(t, "home-b2", newCodecBackend(core.TierCheckpoint), b.cfg.DeltaKeys, platform, registry)
 			bInfoErr.be.(*codecBackend).infoErr = errors.New("fake: bad delta header")
@@ -282,6 +324,8 @@ func TestRegistryMobility(t *testing.T) {
 				rd      func(rd core.RemoteDelta) core.RemoteDelta
 				wantErr error
 				errText string
+				// noLoad: refused before the codec parses any of it.
+				noLoad bool
 			}{
 				{name: "a handle the registry does not hold", home: b, session: "S",
 					rd: func(rd core.RemoteDelta) core.RemoteDelta {
@@ -294,6 +338,13 @@ func TestRegistryMobility(t *testing.T) {
 				{name: "a parent signed by a home not trusted here", home: b, session: "P1", wantErr: artifact.ErrUntrusted},
 				{name: "a parent tag holding a delta", home: b, session: "P2", errText: "not a parent checkpoint"},
 				{name: "a parent whose pages hash differently", home: b, session: "P3", errText: "hashes to"},
+				// Regressions: a parent in the clear was pulled and loaded,
+				// and one under another sha's tag was parsed before the
+				// hash refused it.
+				{name: "a parent pushed in the clear", home: b, session: "Q0", wantErr: artifact.ErrSealed, errText: "not sealed", noLoad: true},
+				{name: "a parent in the clear whose manifest names a seal key", home: b, session: "Q1", wantErr: artifact.ErrSealed, errText: "not sealed", noLoad: true},
+				{name: "a sealed parent copied with its manifest to another sha's tag", home: b, session: "Q2", wantErr: artifact.ErrUntrusted, noLoad: true},
+				{name: "a sealed parent signed for another sha", home: b, session: "Q3", wantErr: artifact.ErrSealed, errText: "not parent", noLoad: true},
 			}
 			for _, tc := range cases {
 				t.Run(tc.name, func(t *testing.T) {
@@ -304,9 +355,16 @@ func TestRegistryMobility(t *testing.T) {
 					if tc.rd != nil {
 						rd = tc.rd(rd)
 					}
+					loads := 0
+					if cb, ok := tc.home.be.(*codecBackend); ok {
+						loads = cb.loadCount()
+					}
 					dst, err := tc.home.ClaimDelta(ctx, g, tc.session, rd)
 					if err == nil || dst != "" || (tc.wantErr != nil && !errors.Is(err, tc.wantErr)) || !strings.Contains(err.Error(), tc.errText) {
 						t.Fatalf("ClaimDelta = %q, %v; want %v mentioning %q", dst, err, tc.wantErr, tc.errText)
+					}
+					if cb, ok := tc.home.be.(*codecBackend); ok && tc.noLoad && cb.loadCount() != loads {
+						t.Fatalf("the codec loaded a refused parent (%d loads)", cb.loadCount()-loads)
 					}
 					entries, _ := os.ReadDir(filepath.Join(tc.home.cfg.DeltaDir, "g1"))
 					if len(entries) != 0 {
@@ -360,6 +418,10 @@ func TestRegistryMobility(t *testing.T) {
 			p, err := b.parent(parentSHA)
 			if err != nil || p.SHA256() != parentSHA || !exists(filepath.Join(b.parentsDir(), parentSHA, fakePagesFile)) {
 				t.Fatalf("parent after the claim: %v %v", p, err)
+			}
+			// Opened once, at the pull: the store holds the plaintext.
+			if pages, _ := os.ReadFile(filepath.Join(b.parentsDir(), parentSHA, fakePagesFile)); string(pages) != parentPages {
+				t.Fatalf("the store holds %q, want the opened parent", pages)
 			}
 			if _, still, _ := artifact.Resolve(ctx, repo+":"+sessionTag("S")); still {
 				t.Fatal("the claimed session is still published")
@@ -427,10 +489,7 @@ func TestRegistryMobility(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := artifact.PushDir(ctx, filepath.Join(a.parentsDir(), parentSHA), repo+":"+parentTag(lost), artifact.ArtifactTypeParent,
-				map[string]string{artifact.AnnotationParent: lost}, keyA); err != nil {
-				t.Fatal(err)
-			}
+			pushParent(t, filepath.Join(a.parentsDir(), parentSHA), repo+":"+parentTag(lost), lost, seal, keyA, nil)
 			lloc, _, err := artifact.Resolve(ctx, repo+":"+parentTag(lost))
 			if err != nil || lloc.Digest == ploc.Digest {
 				t.Fatalf("the lost parent must be its own blob: %v", err)
@@ -448,10 +507,7 @@ func TestRegistryMobility(t *testing.T) {
 		}},
 		{"pulling a parent the codec cannot load, or without a codec", func(t *testing.T) {
 			odd := shaOf("odd")
-			if _, err := artifact.PushDir(ctx, filepath.Join(a.cfg.DeltaDir, "g1", "1-1"), repo+":"+parentTag(odd), artifact.ArtifactTypeParent,
-				map[string]string{artifact.AnnotationParent: odd}, keyA); err != nil {
-				t.Fatal(err)
-			}
+			pushParent(t, filepath.Join(a.cfg.DeltaDir, "g1", "1-1"), repo+":"+parentTag(odd), odd, seal, keyA, nil)
 			if err := b.pullParent(ctx, repo, odd); !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("pullParent of a checkpoint without pages = %v", err)
 			}
@@ -573,7 +629,9 @@ func TestRetireDelta(t *testing.T) {
 // pull of its own in flight for the same parent, a dangling link an
 // earlier warm left where the parent belongs, or the parent filed by
 // another claim meanwhile. The pull ends with the parent in the store
-// either way and touches nothing that is not its own.
+// either way and touches nothing that is not its own. A store left 0755
+// is made 0700, and a parent this pull filed is 0700 with 0600 files
+// (regression: both kept 0755, and the files the pull's 0644).
 func TestPullParentStore(t *testing.T) {
 	ctx := context.Background()
 	registry := artifact.FileScheme + filepath.Join(t.TempDir(), "registry")
@@ -597,16 +655,18 @@ func TestPullParentStore(t *testing.T) {
 		before func(t *testing.T, store string)
 		// kept is a path under the store that must survive the pull.
 		kept string
+		// filed is set when this pull's directory becomes the entry.
+		filed bool
 	}{
-		{name: "an empty store", before: func(*testing.T, string) {}},
+		{name: "an empty store", before: func(*testing.T, string) {}, filed: true},
 		{name: "another pull of the same parent in flight is left alone", before: func(t *testing.T, store string) {
 			write(t, filepath.Join(store, parentSHA+".pull"), map[string]string{"marker": "theirs"})
-		}, kept: filepath.Join(parentSHA+".pull", "marker")},
+		}, kept: filepath.Join(parentSHA+".pull", "marker"), filed: true},
 		{name: "a dangling link where the parent belongs is replaced", before: func(t *testing.T, store string) {
 			if err := os.Symlink("/nonexistent/images", filepath.Join(store, parentSHA)); err != nil {
 				t.Fatal(err)
 			}
-		}},
+		}, filed: true},
 		{name: "the parent another claim filed meanwhile is kept", before: func(t *testing.T, store string) {
 			if err := writeParentDir(filepath.Join(store, parentSHA), parentPages); err != nil {
 				t.Fatal(err)
@@ -636,6 +696,17 @@ func TestPullParentStore(t *testing.T) {
 			}
 			if n := pullsLeft(b); n != boolInt(tc.kept != "") {
 				t.Fatalf("%d pull directories left, want the other pull's alone", n)
+			}
+			if got := permOf(b.parentsDir()); got != 0o700 {
+				t.Errorf("store mode %v, want 0700", got)
+			}
+			if tc.filed {
+				if got := permOf(entry); got != 0o700 {
+					t.Errorf("entry mode %v, want 0700", got)
+				}
+				if got := permOf(filepath.Join(entry, fakePagesFile)); got != 0o600 {
+					t.Errorf("pages mode %v, want 0600", got)
+				}
 			}
 		})
 	}

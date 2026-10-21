@@ -20,17 +20,18 @@ rm -rf "$STATE"; mkdir -p "$STATE"
 curl -sf "http://$REG/v2/" >/dev/null || { echo "registry $REG not reachable (make registry-start on the host)"; exit 1; }
 go build -o bin/ ./cmd/fiberd ./cmd/grant-issuer ./cmd/zygotectl ./hack/fibctl
 make -s zygote
-bin/zygotectl build -zygote bin/refzygote -args "--heap-mb 32" -out "$STATE/art" >/dev/null
-DIGEST=$(bin/zygotectl push -dir "$STATE/art" -ref "http://$REG/zygotes/ref:mob")
-echo "template $DIGEST"
 
 bin/grant-issuer keygen -alg EdDSA -out "$STATE/issuer-key.json" >/dev/null
 # Both homes share one delta key, because each claims only what a key it
 # trusts signed.
 bin/grant-issuer keygen -alg EdDSA -out "$STATE/delta-key.json" >/dev/null
 # Both homes share one seal key, because each opens only what was sealed
-# with it.
+# with it. Its keygen writes the fleet's public wrap key beside it, which
+# the template's images are sealed to.
 bin/grant-issuer keygen -alg A256GCM -out "$STATE/delta-seal-key.json" >/dev/null
+bin/zygotectl build -zygote bin/refzygote -args "--heap-mb 32" -seal-to "$STATE/fleet-pub.json" -out "$STATE/art" >/dev/null
+DIGEST=$(bin/zygotectl push -dir "$STATE/art" -ref "http://$REG/zygotes/ref:mob")
+echo "template $DIGEST"
 bin/grant-issuer serve -key "$STATE/issuer-key.json" -addr "$ISSUER_ADDR" -issuer "$ISSUER_URL" >"$STATE/issuer.log" 2>&1 &
 PIDS=$!
 

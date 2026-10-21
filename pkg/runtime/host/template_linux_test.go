@@ -105,10 +105,15 @@ func TestParentHash(t *testing.T) {
 	}
 }
 
+// templateMaster is the fleet's master seal key in these tests. Author
+// images are sealed to the wrap key it derives.
+var templateMaster = &artifact.SealKey{ID: "template-master", Key: []byte("0123456789abcdef0123456789abcdef")}
+
 // templateArtifact writes a zygote artifact directory by hand (an
-// executable, its config, images when asked) and pushes it to reg,
-// returning its digest. linking is what the config says about the
-// executable ("" for a config from before the fact was recorded).
+// executable, its config, images sealed to templateMaster's fleet key
+// when asked) and pushes it to reg, returning its digest. linking is what
+// the config says about the executable ("" for a config from before the
+// fact was recorded).
 func templateArtifact(t *testing.T, reg string, p artifact.Platform, images bool, linking string) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -118,21 +123,31 @@ func templateArtifact(t *testing.T, reg string, p artifact.Platform, images bool
 		t.Fatal(err)
 	}
 	cfg := map[string]any{"args": []string{"--heap", "8"}, "arch": p.Arch, "kernel": p.Kernel, "libc": p.Libc,
-		"zygote_sha256": hex.EncodeToString(sum[:]), "has_images": images, "built_at": "2026-10-01T00:00:00Z", "linking": linking}
+		"zygote_sha256": hex.EncodeToString(sum[:]), "built_at": "2026-10-01T00:00:00Z", "linking": linking}
+	if images {
+		pages, plain := t.TempDir(), filepath.Join(t.TempDir(), "images.tar")
+		if err := writeParentDir(pages, "artifact pages"); err != nil {
+			t.Fatal(err)
+		}
+		if err := artifact.TarDir(pages, plain); err != nil {
+			t.Fatal(err)
+		}
+		w, err := artifact.DeriveWrapKey(templateMaster)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s, err := artifact.SealImages(plain, filepath.Join(dir, "images.tar"), w.Public())
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg["images"] = s
+	}
 	b, err := json.Marshal(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "config.json"), b, 0o644); err != nil {
 		t.Fatal(err)
-	}
-	if images {
-		if err := writeParentDir(artifact.ImagesDir(dir), "artifact pages"); err != nil {
-			t.Fatal(err)
-		}
-		if err := artifact.TarDir(artifact.ImagesDir(dir), filepath.Join(dir, "images.tar")); err != nil {
-			t.Fatal(err)
-		}
 	}
 	digest, err := artifact.Push(context.Background(), dir, reg+"/tmpl/x:"+fmt.Sprintf("%v-%s-%s", images, p.Kernel, linking))
 	if err != nil {
@@ -158,7 +173,10 @@ func TestResolveTemplateRegistry(t *testing.T) {
 	imaged := templateArtifact(t, reg, host, true, artifact.LinkDynamic)
 	imagedElsewhere := templateArtifact(t, reg, artifact.Platform{Arch: "arm64", Kernel: "6.9.0-elsewhere", Libc: "glibc 2.40"}, true, artifact.LinkDynamic)
 	cache := t.TempDir()
-	r := &Runtime{cfg: Config{Registry: reg + "/tmpl/x", TemplateCache: cache, Templates: map[string]string{"sha256:local": "/zyg/local --x"}}, host: host}
+	// r makes parents for deltas, so it opens author images with the
+	// fleet's master.
+	r := &Runtime{cfg: Config{Registry: reg + "/tmpl/x", TemplateCache: cache, Templates: map[string]string{"sha256:local": "/zyg/local --x"},
+		DeltaKeys: artifact.Keys{Seal: templateMaster}}, host: host, be: newCodecBackend(core.TierCheckpoint), tier: core.TierCheckpoint}
 	cacheDir := func(digest string) string { return filepath.Join(cache, strings.TrimPrefix(digest, "sha256:")) }
 	steps := []struct {
 		name string
@@ -225,10 +243,66 @@ func TestResolveTemplateRegistry(t *testing.T) {
 			if _, err := r.resolveTemplate(ctx, imagedElsewhere); !errors.Is(err, ErrParity) || !strings.Contains(err.Error(), "kernel 6.9.0-elsewhere") {
 				t.Fatalf("resolveTemplate = %v, want ErrParity on the kernel", err)
 			}
-			relaxed := &Runtime{cfg: r.cfg, host: r.host}
+			relaxed := &Runtime{cfg: r.cfg, host: r.host, be: r.be, tier: r.tier}
 			relaxed.cfg.Parity = artifact.Parity{Kernel: artifact.ParityOff, Libc: artifact.ParityOff}
 			if _, err := relaxed.resolveTemplate(ctx, imagedElsewhere); err != nil {
 				t.Fatalf("resolveTemplate with parity off = %v", err)
+			}
+		}},
+		// Author images are sealed to the fleet. Regression: they were
+		// unpacked in the clear, 0755 and 0644, from a plain tar.
+		{"sealed images are opened with the master and unpacked owner-only, or not at all", func(t *testing.T) {
+			other := &artifact.SealKey{ID: "other", Key: []byte("fedcba9876543210fedcba9876543210")}
+			cases := []struct {
+				name     string
+				rt       func() *Runtime
+				wantErr  string // "" opens
+				unpacked bool
+			}{
+				{name: "a home with the master", rt: func() *Runtime { return r }, unpacked: true},
+				{name: "a home without a seal key says which flag it needs", wantErr: "-delta-seal-key", rt: func() *Runtime {
+					c := r.cfg
+					c.DeltaKeys = artifact.Keys{}
+					return &Runtime{cfg: c, host: r.host, be: r.be, tier: r.tier}
+				}},
+				{name: "a home with another master", wantErr: "this home derives", rt: func() *Runtime {
+					c := r.cfg
+					c.DeltaKeys = artifact.Keys{Seal: other}
+					return &Runtime{cfg: c, host: r.host, be: r.be, tier: r.tier}
+				}},
+				{name: "a home that makes no parents leaves them sealed and needs no key", rt: func() *Runtime {
+					c := r.cfg
+					c.DeltaKeys = artifact.Keys{}
+					return &Runtime{cfg: c, host: r.host, tier: core.TierSnapshot}
+				}},
+			}
+			for _, tc := range cases {
+				t.Run(tc.name, func(t *testing.T) {
+					_ = os.RemoveAll(artifact.ImagesDir(cacheDir(imaged)))
+					tpl, err := tc.rt().resolveTemplate(ctx, imaged)
+					if tc.wantErr != "" {
+						if !errors.Is(err, ErrNoTemplate) || !strings.Contains(err.Error(), tc.wantErr) {
+							t.Fatalf("resolveTemplate = %v, want ErrNoTemplate saying %q", err, tc.wantErr)
+						}
+					} else if err != nil {
+						t.Fatalf("resolveTemplate = %v", err)
+					}
+					images := artifact.ImagesDir(cacheDir(imaged))
+					if (tpl.ImagesDir != "") != tc.unpacked || exists(images) != tc.unpacked {
+						t.Fatalf("template images %q, unpacked %v; want unpacked %v", tpl.ImagesDir, exists(images), tc.unpacked)
+					}
+					if !tc.unpacked {
+						return
+					}
+					for path, want := range map[string]os.FileMode{images: 0o700, filepath.Join(images, fakePagesFile): 0o600} {
+						if st, err := os.Stat(path); err != nil || st.Mode().Perm() != want {
+							t.Fatalf("%s: %v %v, want %v", path, st.Mode(), err, want)
+						}
+					}
+					if exists(filepath.Join(cacheDir(imaged), "images.tar.open")) {
+						t.Fatal("the opened tar was left in the cache")
+					}
+				})
 			}
 		}},
 		{"a backend with a root filesystem of its own takes only static bare templates", func(t *testing.T) {
@@ -282,6 +356,7 @@ func TestResolveTemplateRegistry(t *testing.T) {
 			rt := newTestRuntime(t, cb, func(c *Config) {
 				c.Templates, c.Registry = nil, reg+"/tmpl/x"
 				c.Platform = artifact.Platform{Arch: host.Arch, Kernel: host.Kernel, Libc: host.Libc}
+				c.DeltaKeys.Seal = templateMaster
 			})
 			g := core.Grant{UID: "g1", TemplateDigest: imaged, WBudgetBytes: 64 << 20}
 			if err := rt.PrepareTemplate(ctx, g); err != nil {
@@ -305,6 +380,7 @@ func TestResolveTemplateRegistry(t *testing.T) {
 			rt := newTestRuntime(t, cb, func(c *Config) {
 				c.Templates, c.Registry = nil, reg+"/tmpl/x"
 				c.Platform = artifact.Platform{Arch: host.Arch, Kernel: host.Kernel, Libc: host.Libc}
+				c.DeltaKeys.Seal = templateMaster
 			})
 			g := core.Grant{UID: "g1", TemplateDigest: imaged, WBudgetBytes: 64 << 20}
 			if err := rt.PrepareTemplate(ctx, g); err != nil {
@@ -322,5 +398,110 @@ func TestResolveTemplateRegistry(t *testing.T) {
 		if !t.Run(st.name, st.run) {
 			return
 		}
+	}
+}
+
+// TestPruneAuthorImages checks the life of an artifact's unpacked images
+// in the template cache. They go with the last warm that names them and
+// a later resolve unpacks them again (regression: the prune took the
+// store link and left the images in the clear for good). Two grants of
+// one template share them, and the first's drop leaves what the second
+// uses. A resolve in flight keeps them through a prune until its warm
+// names them. Images a warm never came to name go at the next prune.
+func TestPruneAuthorImages(t *testing.T) {
+	ctx := context.Background()
+	srv := httptest.NewServer(registry.New())
+	defer srv.Close()
+	host := artifact.Platform{Arch: "arm64", Kernel: "6.10.0-here", Libc: "glibc 2.40", Backend: "fake"}
+	imaged := templateArtifact(t, srv.URL, host, true, artifact.LinkDynamic)
+	sha := shaOf("artifact pages")
+	grant := func(uid string) core.Grant {
+		return core.Grant{UID: uid, TemplateDigest: imaged, WBudgetBytes: 64 << 20}
+	}
+	home := func(t *testing.T, cb *codecBackend) (*Runtime, string, string) {
+		rt := newTestRuntime(t, cb, func(c *Config) {
+			c.Templates, c.Registry = nil, srv.URL+"/tmpl/x"
+			c.Platform = artifact.Platform{Arch: host.Arch, Kernel: host.Kernel, Libc: host.Libc}
+			c.DeltaKeys.Seal = templateMaster
+		})
+		images := artifact.ImagesDir(filepath.Join(rt.cfg.TemplateCache, strings.TrimPrefix(imaged, "sha256:")))
+		return rt, images, filepath.Join(rt.parentsDir(), sha)
+	}
+	cases := []struct {
+		name     string
+		failLoad bool // the codec cannot read the images, so no warm names them
+		run      func(t *testing.T, rt *Runtime, images, link string)
+	}{
+		{name: "the images go with the last warm that names them, and a resolve unpacks them again", run: func(t *testing.T, rt *Runtime, images, link string) {
+			if err := rt.PrepareTemplate(ctx, grant("g1")); err != nil {
+				t.Fatalf("PrepareTemplate: %v", err)
+			}
+			pruned(t, rt)
+			if !exists(images) || !exists(link) {
+				t.Fatalf("images %v, link %v after a prune with the warm up; want both", exists(images), exists(link))
+			}
+			rt.DropTemplate("g1")
+			waitFor(t, "the images and their link to go", func() bool { return !exists(images) && !exists(link) })
+			if err := rt.PrepareTemplate(ctx, grant("g1")); err != nil {
+				t.Fatalf("PrepareTemplate again: %v", err)
+			}
+			if z := rt.warmOf("g1"); z == nil || z.parentSHA != sha || !exists(images) || !exists(link) {
+				t.Fatalf("after the second warm: parent %q, images %v, link %v", z.parentSHA, exists(images), exists(link))
+			}
+			if got, _ := os.ReadFile(filepath.Join(images, fakePagesFile)); string(got) != "artifact pages" {
+				t.Fatalf("images = %q", got)
+			}
+		}},
+		{name: "two grants of one template: the first's drop leaves what the second uses", run: func(t *testing.T, rt *Runtime, images, link string) {
+			for _, uid := range []string{"g1", "g2"} {
+				if err := rt.PrepareTemplate(ctx, grant(uid)); err != nil {
+					t.Fatalf("PrepareTemplate %s: %v", uid, err)
+				}
+			}
+			rt.DropTemplate("g1")
+			pruned(t, rt)
+			if !exists(images) || !exists(link) {
+				t.Fatalf("images %v, link %v after the first drop; want both for the second warm", exists(images), exists(link))
+			}
+			if p, err := rt.parent(sha); err != nil || p.SHA256() != sha {
+				t.Fatalf("the second warm's parent = %v %v", p, err)
+			}
+			rt.DropTemplate("g2")
+			waitFor(t, "the images to go with the second warm", func() bool { return !exists(images) && !exists(link) })
+		}},
+		{name: "a resolve in flight keeps its images through a prune until its warm names them", run: func(t *testing.T, rt *Runtime, images, _ string) {
+			tpl, err := rt.resolveTemplate(ctx, imaged)
+			if err != nil || tpl.ImagesDir != images {
+				t.Fatalf("resolveTemplate = %+v %v", tpl, err)
+			}
+			pruned(t, rt)
+			if !exists(images) {
+				t.Fatal("a prune took the images of a warm in the making")
+			}
+			rt.releaseImages(images)
+			pruned(t, rt)
+			if exists(images) {
+				t.Fatal("the images stayed after the warm in the making let them go")
+			}
+		}},
+		{name: "images a warm never came to name go at the next prune", failLoad: true, run: func(t *testing.T, rt *Runtime, images, link string) {
+			if err := rt.PrepareTemplate(ctx, grant("g1")); err != nil {
+				t.Fatalf("PrepareTemplate: %v", err)
+			}
+			if z := rt.warmOf("g1"); z == nil || z.parentSHA != "" {
+				t.Fatalf("warm = %+v, want one without a parent", z)
+			}
+			waitFor(t, "the images nothing names to go", func() bool { return !exists(images) && !exists(link) })
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cb := newCodecBackend(core.TierCheckpoint)
+			if tc.failLoad {
+				cb.failLoadAt = 1
+			}
+			rt, images, link := home(t, cb)
+			tc.run(t, rt, images, link)
+		})
 	}
 }

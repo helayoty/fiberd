@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"os"
 	"path/filepath"
@@ -30,6 +31,14 @@ import (
 // dropped, cut short or moved to another file. The file's header (domain,
 // session, fence, expiry) is the associated data of every chunk, so a
 // sealed file opens only for its own session and not after it expires.
+//
+// The same stream format carries two more kinds of template memory, each
+// under its own key. A parent checkpoint (seal_parent.go) is sealed under
+// a key derived from the master and the parent's content hash. An
+// author's images.tar (wrap.go) is sealed under a random content key
+// that is wrapped to the fleet's public key. The HKDF info strings below
+// keep the three kinds of key apart, and every open derives its key from
+// the kind the caller asked for, never from the header.
 
 const (
 	AnnotationDomain  = "io.fiberd.domain"
@@ -39,6 +48,13 @@ const (
 	sealMagic = "fiberd-seal-v1\n"
 	sealChunk = 1 << 20
 	sealKeyID = "fiberd-seal-kid\n"
+
+	// The HKDF info prefixes. One per kind of key, so no two kinds ever
+	// derive the same key from one master.
+	infoDelta  = "fiberd-delta-v1 domain:"
+	infoParent = "fiberd-parent-v1 "
+	infoWrap   = "fiberd-template-wrap-v1"
+	infoImages = "fiberd-images-v1 "
 )
 
 // SealKey is the master key deltas are sealed under.
@@ -47,7 +63,9 @@ type SealKey struct {
 	Key []byte // 32 bytes
 }
 
-// SealContext is what a sealed file is bound to.
+// SealContext is what a sealed file is bound to. A delta's Expires is the
+// instant it stops opening. A parent's is zero, which means never, and a
+// zero expiry is accepted for parent contexts only.
 type SealContext struct {
 	Domain  string    `json:"domain"`
 	Session string    `json:"session"`
@@ -55,10 +73,20 @@ type SealContext struct {
 	Expires time.Time `json:"expires"`
 }
 
+// sealHeader is the plaintext prefix of a sealed file and the associated
+// data of every chunk in it. Wrap is set for an author's images only.
 type sealHeader struct {
 	Key     string      `json:"key"`
 	Salt    []byte      `json:"salt"`
 	Context SealContext `json:"context"`
+	Wrap    *wrapHeader `json:"wrap,omitempty"`
+}
+
+// wrapHeader is the part of a header that is set for author images only,
+// the HPKE encapsulation and the content key wrapped under it.
+type wrapHeader struct {
+	Enc     []byte `json:"enc"`
+	Wrapped []byte `json:"wrapped"`
 }
 
 // GenerateSealKey returns a fresh master seal key as a symmetric JWK.
@@ -103,24 +131,20 @@ func SealKeyFromJWK(jwk *jose.JSONWebKey) (*SealKey, error) {
 }
 
 // SealDir writes every file PushDir would push from src, sealed for c,
-// into dst under the same names.
+// into dst under the same names. A delta always expires, so a zero
+// Expires is refused here rather than sealed as a file nothing opens.
 func SealDir(src, dst string, k *SealKey, c SealContext) error {
 	if k == nil {
 		return errors.New("artifact: no seal key")
 	}
-	names, err := pushableNames(src)
+	if c.Expires.IsZero() {
+		return errors.New("artifact: a delta needs an expiry")
+	}
+	dk, err := deltaKey(k, c.Domain)
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(dst, 0o755); err != nil {
-		return err
-	}
-	for _, n := range names {
-		if err := sealFile(filepath.Join(src, n), filepath.Join(dst, n), k, c); err != nil {
-			return fmt.Errorf("artifact: seal %s: %w", n, err)
-		}
-	}
-	return nil
+	return sealDirWith(src, dst, dk, sealHeader{Key: k.ID, Context: c})
 }
 
 // OpenDir replaces every sealed file in dir by its plaintext. It refuses
@@ -133,6 +157,47 @@ func OpenDir(dir string, k *SealKey, domain, session string, now time.Time) (Sea
 	if k == nil {
 		return SealContext{}, errors.New("artifact: no seal key")
 	}
+	keyFor := func(h sealHeader) ([]byte, error) {
+		switch {
+		case h.Key != k.ID:
+			return nil, fmt.Errorf("%w: sealed with key %q, this home has %q", ErrSealed, h.Key, k.ID)
+		case h.Wrap != nil:
+			return nil, fmt.Errorf("%w: sealed as author images, not a delta", ErrSealed)
+		case h.Context.Domain != domain || h.Context.Session != session:
+			return nil, fmt.Errorf("%w: sealed for %s/%s, not %s/%s", ErrSealed, h.Context.Domain, h.Context.Session, domain, session)
+		case h.Context.Expires.IsZero():
+			// Only a parent never expires, and a parent is never a delta.
+			return nil, fmt.Errorf("%w: a delta without an expiry", ErrExpired)
+		case !now.Before(h.Context.Expires):
+			return nil, fmt.Errorf("%w: at %s", ErrExpired, h.Context.Expires.Format(time.RFC3339))
+		}
+		return deltaKey(k, domain)
+	}
+	return openDirWith(dir, keyFor)
+}
+
+// sealDirWith seals every pushable file of src into dst under the domain
+// key dk, each with a fresh salt under the header h.
+func sealDirWith(src, dst string, dk []byte, h sealHeader) error {
+	names, err := pushableNames(src)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		return err
+	}
+	for _, n := range names {
+		if err := sealFile(filepath.Join(src, n), filepath.Join(dst, n), dk, n, h, nil); err != nil {
+			return fmt.Errorf("artifact: seal %s: %w", n, err)
+		}
+	}
+	return nil
+}
+
+// openDirWith opens every pushable file of dir in place. keyFor judges
+// each file's header and returns the domain key it opens under. All
+// files must carry one context.
+func openDirWith(dir string, keyFor func(sealHeader) ([]byte, error)) (SealContext, error) {
 	names, err := pushableNames(dir)
 	if err != nil {
 		return SealContext{}, err
@@ -143,8 +208,8 @@ func OpenDir(dir string, k *SealKey, domain, session string, now time.Time) (Sea
 	var got SealContext
 	for i, n := range names {
 		path := filepath.Join(dir, n)
-		c, err := openFile(path, path+".open.tmp", k, domain, session, now)
-		if err == nil && i > 0 && !sameSealContext(got, c) {
+		h, err := openFile(path, path+".open.tmp", n, keyFor, nil)
+		if err == nil && i > 0 && !sameSealContext(got, h.Context) {
 			err = fmt.Errorf("%w: sealed for another context than %s", ErrSealed, names[0])
 		}
 		if err != nil {
@@ -154,7 +219,7 @@ func OpenDir(dir string, k *SealKey, domain, session string, now time.Time) (Sea
 		if err := os.Rename(path+".open.tmp", path); err != nil {
 			return SealContext{}, err
 		}
-		got = c
+		got = h.Context
 	}
 	return got, nil
 }
@@ -164,11 +229,15 @@ func sameSealContext(a, b SealContext) bool {
 	return a.Domain == b.Domain && a.Session == b.Session && a.Fence == b.Fence && a.Expires.Equal(b.Expires)
 }
 
-func fileAEAD(k *SealKey, domain, name string, salt []byte) (cipher.AEAD, error) {
-	dk, err := hkdf.Key(sha256.New, k.Key, nil, "fiberd-delta-v1 domain:"+domain, 32)
-	if err != nil {
-		return nil, err
-	}
+// deltaKey is the key every file of a session domain is sealed under.
+func deltaKey(k *SealKey, domain string) ([]byte, error) {
+	return hkdf.Key(sha256.New, k.Key, nil, infoDelta+domain, 32)
+}
+
+// fileAEAD derives a file's own key from the domain key, the file's salt
+// and its name, so no two files share a key and a file does not open
+// under another name.
+func fileAEAD(dk []byte, name string, salt []byte) (cipher.AEAD, error) {
 	fk, err := hkdf.Key(sha256.New, dk, salt, "file:"+name, 32)
 	if err != nil {
 		return nil, err
@@ -189,13 +258,16 @@ func chunkNonce(i uint64, last bool) []byte {
 	return n
 }
 
-func sealFile(src, dst string, k *SealKey, c SealContext) (err error) {
+// sealFile seals src into dst under the domain key dk, bound to name,
+// with the header h after a fresh salt is drawn into it. sum, when set,
+// sees the plaintext as it is read.
+func sealFile(src, dst string, dk []byte, name string, h sealHeader, sum hash.Hash) (err error) {
 	in, err := os.Open(src)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = in.Close() }()
-	h := sealHeader{Key: k.ID, Salt: make([]byte, 32), Context: c}
+	h.Salt = make([]byte, 32)
 	if _, err := rand.Read(h.Salt); err != nil {
 		return err
 	}
@@ -205,7 +277,7 @@ func sealFile(src, dst string, k *SealKey, c SealContext) (err error) {
 	}
 	prefix := binary.BigEndian.AppendUint32([]byte(sealMagic), uint32(len(hb)))
 	prefix = append(prefix, hb...)
-	aead, err := fileAEAD(k, c.Domain, filepath.Base(dst), h.Salt)
+	aead, err := fileAEAD(dk, name, h.Salt)
 	if err != nil {
 		return err
 	}
@@ -236,6 +308,9 @@ func sealFile(src, dst string, k *SealKey, c SealContext) (err error) {
 				last = true
 			}
 		}
+		if sum != nil {
+			sum.Write(buf[:n])
+		}
 		if _, err := w.Write(aead.Seal(sealed[:0], chunkNonce(i, last), buf[:n], prefix)); err != nil {
 			return err
 		}
@@ -265,33 +340,35 @@ func readSealHeader(r *bufio.Reader) (sealHeader, []byte, error) {
 	return h, append(prefix, hb...), nil
 }
 
-func openFile(src, dst string, k *SealKey, domain, session string, now time.Time) (c SealContext, err error) {
+// openFile opens src into dst, which is written owner-only. The magic and
+// the header are read first, then keyFor judges the header and returns
+// the domain key. Nothing in the header is believed until the first
+// chunk opens under that key, since the header is its associated data.
+// sum, when set, sees the plaintext as it is written. On error dst may
+// hold a partial plaintext, and the caller removes it.
+func openFile(src, dst, name string, keyFor func(sealHeader) ([]byte, error), sum hash.Hash) (h sealHeader, err error) {
 	in, err := os.Open(src)
 	if err != nil {
-		return c, err
+		return h, err
 	}
 	defer func() { _ = in.Close() }()
 	r := bufio.NewReaderSize(in, sealChunk+64)
 	h, prefix, err := readSealHeader(r)
 	if err != nil {
-		return c, err
+		return h, err
 	}
-	switch {
-	case h.Key != k.ID:
-		return c, fmt.Errorf("%w: sealed with key %q, this home has %q", ErrSealed, h.Key, k.ID)
-	case h.Context.Domain != domain || h.Context.Session != session:
-		return c, fmt.Errorf("%w: sealed for %s/%s, not %s/%s", ErrSealed, h.Context.Domain, h.Context.Session, domain, session)
-	case !now.Before(h.Context.Expires):
-		return c, fmt.Errorf("%w: at %s", ErrExpired, h.Context.Expires.Format(time.RFC3339))
-	}
-	aead, err := fileAEAD(k, domain, filepath.Base(src), h.Salt)
+	dk, err := keyFor(h)
 	if err != nil {
-		return c, err
+		return h, err
+	}
+	aead, err := fileAEAD(dk, name, h.Salt)
+	if err != nil {
+		return h, err
 	}
 	// Plaintext session state stays owner-only.
 	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
-		return c, err
+		return h, err
 	}
 	defer func() {
 		if cerr := out.Close(); err == nil {
@@ -304,7 +381,7 @@ func openFile(src, dst string, k *SealKey, domain, session string, now time.Time
 	for i := uint64(0); ; i++ {
 		n, err := io.ReadFull(r, buf)
 		if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
-			return c, err
+			return h, err
 		}
 		last := n < len(buf)
 		if !last {
@@ -314,13 +391,16 @@ func openFile(src, dst string, k *SealKey, domain, session string, now time.Time
 		}
 		p, err := aead.Open(plain[:0], chunkNonce(i, last), buf[:n], prefix)
 		if err != nil {
-			return c, fmt.Errorf("%w: chunk %d", ErrSealed, i)
+			return h, fmt.Errorf("%w: chunk %d", ErrSealed, i)
+		}
+		if sum != nil {
+			sum.Write(p)
 		}
 		if _, err := w.Write(p); err != nil {
-			return c, err
+			return h, err
 		}
 		if last {
-			return h.Context, w.Flush()
+			return h, w.Flush()
 		}
 	}
 }

@@ -68,8 +68,8 @@ import (
 
 const (
 	// Every sandbox runs on the systrap platform (no KVM needed), and every
-	// image is written and read with O_DIRECT so its pages are never charged
-	// to the leaf that made it.
+	// image on disk is written and read with O_DIRECT so its pages are never
+	// charged to the leaf that made it (see direct).
 	runscPlatform = "systrap"
 	directIO      = "--direct"
 
@@ -124,9 +124,16 @@ type Options struct {
 	// template commands are paths inside it. Required.
 	Rootfs string
 	// StateDir holds runsc's container state and the template images
-	// (default /var/lib/fiberd/gvisor). Not a tmpfs: images are memory
-	// otherwise.
+	// (default /var/lib/fiberd/gvisor). Park images are written elsewhere,
+	// into the host's delta store.
 	StateDir string
+	// TemplatesOnDisk keeps <StateDir>/templates on StateDir's own file
+	// system. By default New mounts a tmpfs there, so a template image,
+	// the warm template's memory at READY, never reaches a disk. The
+	// tmpfs costs RAM, about one image per warm grant, charged to the
+	// grant's zygote cgroup, since the warm sandbox writes it. A home
+	// with large templates and little memory keeps them on disk.
+	TemplatesOnDisk bool
 	// MaxRestores bounds the `runsc restore` processes that run at once
 	// (default, the CPUs this process may use). Restores are CPU-bound,
 	// so unbounded ones all finish together at the end of a burst.
@@ -143,6 +150,12 @@ type Backend struct {
 
 	// run starts every runsc process. New sets it to execRunsc.
 	run runFunc
+	// fs finds and mounts the tmpfs under <StateDir>/templates. New sets
+	// it to sysTmpfs. onTmpfs is set once the directory is a tmpfs, and
+	// mounted when New mounted it, so Close unmounts it.
+	fs      tmpfsOps
+	onTmpfs bool
+	mounted bool
 	// await blocks until the sandbox process pid has exited and reports
 	// how, or false when it cannot watch it. It is awaitExit, the pidfd
 	// wait, and the fake runsc of the unit tests reports its sandboxes'
@@ -165,6 +178,12 @@ type Backend struct {
 	pooled map[string]*box  // pooled id, sandboxes restored ahead of a fiber
 	gen    uint64           // incarnations started, the suffix of every cid
 	exits  chan backend.Exit
+	// warming is every Warm in flight, by cid, with what ends its wait.
+	// closed is set first by Close. A Warm after it is refused, and one
+	// in flight is ended and waited for before the tmpfs is detached,
+	// so no template image is written to the disk under it.
+	warming map[string]context.CancelFunc
+	closed  bool
 	// reapers counts the waitWarm and waitBox goroutines, each deleting
 	// its container's state once the sandbox has exited, and the pool
 	// socket goroutines. Close waits for them, so nothing of the backend
@@ -181,6 +200,7 @@ type warm struct {
 	// dir is this incarnation's own directory under <state>/templates,
 	// named by its cid, so the reaper that removes it never takes a
 	// successor's. It holds the bundle, the images and the staged copy.
+	// It and the images are fiberd's alone (0700, files 0600).
 	dir    string
 	images string // template checkpoint
 	// template is the host directory bound at backend.TemplateMount in
@@ -238,13 +258,13 @@ type box struct {
 	done  chan struct{} // closed when the sandbox has exited
 }
 
-// New opens the backend. The tier is FIBER_SNAPSHOT when runsc answers
-// and the rootfs exists. Otherwise it offers none, and ProbeErr says why.
-func New(o Options) backend.Backend { return newBackend(o, nil) }
+// New opens the backend. The tier is FIBER_SNAPSHOT when runsc answers,
+// the rootfs exists and the templates directory is ready (a tmpfs unless
+// TemplatesOnDisk). Otherwise it offers none, and ProbeErr says why.
+func New(o Options) backend.Backend { return newBackend(o, nil, nil) }
 
-// newBackend is New with the runsc adapter chosen: nil for the process
-// (execRunsc), or a unit test's in-process fake.
-func newBackend(o Options, run runFunc) *Backend {
+// withDefaults fills in what o leaves unset.
+func (o Options) withDefaults() Options {
 	if o.Runsc == "" {
 		o.Runsc = "runsc"
 	}
@@ -256,10 +276,21 @@ func newBackend(o Options, run runFunc) *Backend {
 		// runs under; NumCPU would count the node's.
 		o.MaxRestores = max(1, runtime.GOMAXPROCS(0))
 	}
-	b := &Backend{opt: o, run: run, warms: map[string]*warm{}, boxes: map[string]*box{}, pooled: map[string]*box{}, exits: make(chan backend.Exit, 1024),
-		restores: make(chan struct{}, o.MaxRestores), quiet: make(chan struct{}), await: awaitExit}
+	return o
+}
+
+// newBackend is New with the runsc adapter chosen, nil for the process
+// (execRunsc) or a unit test's in-process fake, and the same for the
+// tmpfs calls (sysTmpfs), which a test without CAP_SYS_ADMIN fakes.
+func newBackend(o Options, run runFunc, fs *tmpfsOps) *Backend {
+	o = o.withDefaults()
+	b := &Backend{opt: o, run: run, fs: sysTmpfs, warms: map[string]*warm{}, boxes: map[string]*box{}, pooled: map[string]*box{}, exits: make(chan backend.Exit, 1024),
+		warming: map[string]context.CancelFunc{}, restores: make(chan struct{}, o.MaxRestores), quiet: make(chan struct{}), await: awaitExit}
 	if b.run == nil {
 		b.run = b.execRunsc
+	}
+	if fs != nil {
+		b.fs = *fs
 	}
 	out, err := b.runsc(context.Background(), -1, "--version")
 	if err != nil {
@@ -275,8 +306,107 @@ func newBackend(o Options, run runFunc) *Backend {
 		b.why = fmt.Errorf("rootfs %s is not a directory", o.Rootfs)
 		return b
 	}
+	// After the sweep, so whatever a previous life left on disk there is
+	// gone before a tmpfs covers it.
+	if err := b.prepareTemplates(); err != nil {
+		b.why = err
+		return b
+	}
 	b.tier = core.TierSnapshot
 	return b
+}
+
+// tmpfsOps are the kernel calls behind the templates tmpfs.
+type tmpfsOps struct {
+	isTmpfs func(dir string) (bool, error)
+	mount   func(dir string) error
+	unmount func(dir string) error
+}
+
+// templatesSource is the mount source of the templates tmpfs. It starts
+// with backend.MountSourcePrefix, which is how a proc zygote in the same
+// mount namespace knows to drop it before its fibers copy it.
+const templatesSource = backend.MountSourcePrefix + "templates"
+
+// sysTmpfs is the real tmpfsOps. The mount is nosuid and nodev. It is not
+// noexec, since the staged template executable under it is what every
+// sandbox of the instance runs.
+var sysTmpfs = tmpfsOps{
+	isTmpfs: func(dir string) (bool, error) {
+		var st unix.Statfs_t
+		if err := unix.Statfs(dir, &st); err != nil {
+			return false, err
+		}
+		return st.Type == unix.TMPFS_MAGIC, nil
+	},
+	mount: func(dir string) error {
+		return unix.Mount(templatesSource, dir, "tmpfs", unix.MS_NOSUID|unix.MS_NODEV, "mode=0700")
+	},
+	unmount: func(dir string) error { return unix.Unmount(dir, unix.MNT_DETACH) },
+}
+
+// templatesDir holds one directory per warm incarnation.
+func (b *Backend) templatesDir() string { return filepath.Join(b.opt.StateDir, "templates") }
+
+// prepareTemplates makes the templates directory fiberd's alone and,
+// unless TemplatesOnDisk, a tmpfs. A tmpfs already there, which a
+// previous life of fiberd mounted and the sweep has emptied, is kept,
+// and is a tmpfs for direct() also when this life keeps templates on
+// disk. Close unmounts only what this life mounted.
+//
+//	<StateDir>/templates        tmpfs, 0700
+//	  <cid>/                    0700, removed when the warm sandbox exits
+//	    images/                 0700, files 0600, read by every restore
+//	    bundle/, probe-bundle/  0700, config.json 0600
+//	    template/               the staged executable, as StageTemplate made it
+func (b *Backend) prepareTemplates() error {
+	dir := b.templatesDir()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("templates directory: %w", err)
+	}
+	on, err := b.fs.isTmpfs(dir)
+	if err != nil {
+		return fmt.Errorf("templates directory: %w", err)
+	}
+	if !on && !b.opt.TemplatesOnDisk {
+		if err := b.fs.mount(dir); err != nil {
+			return fmt.Errorf("mount a tmpfs on %s for the template images: %w (keep them on disk with -gvisor-templates-on-disk)", dir, err)
+		}
+		b.mounted, on = true, true
+	}
+	b.onTmpfs = on
+	return os.Chmod(dir, 0o700)
+}
+
+// direct is the O_DIRECT flag for a checkpoint or restore of the image in
+// dir. An image on disk is written and read with it, so its pages are not
+// charged as page cache to the sandbox that writes or reads it. A
+// template image on the tmpfs gets none. It is shmem, charged once to the
+// grant's zygote cgroup when the warm sandbox wrote it, a restore that
+// reads it charges its leaf nothing, and kernels before 6.6 refuse
+// O_DIRECT on a tmpfs.
+func (b *Backend) direct(dir string) []string {
+	if b.onTmpfs && strings.HasPrefix(dir, b.templatesDir()+string(filepath.Separator)) {
+		return nil
+	}
+	return []string{directIO}
+}
+
+// ownerOnly makes every directory under dir 0700 and every file 0600.
+// runsc writes its images world-readable.
+func ownerOnly(dir string) error {
+	return filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		switch {
+		case d.IsDir():
+			return os.Chmod(p, 0o700)
+		case d.Type().IsRegular():
+			return os.Chmod(p, 0o600)
+		}
+		return nil
+	})
 }
 
 // ProbeErr is why New found no tier: runsc does not answer, or the
@@ -552,14 +682,16 @@ func (b *Backend) writeBundle(dir string, argv, env []string, workDir, channel, 
 			Type string `json:"type"`
 		}{ns})
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	// A restore's spec carries its one-shot token, so a bundle is
+	// fiberd's alone. runsc reads it as root.
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
 	data, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(dir, "config.json"), data, 0o644)
+	return os.WriteFile(filepath.Join(dir, "config.json"), data, 0o600)
 }
 
 // bundleDir is where a fiber sandbox's bundle is written, under the
@@ -699,12 +831,31 @@ func (b *Backend) Warm(ctx context.Context, sp backend.WarmSpec) (backend.Warm, 
 		return backend.Warm{}, err
 	}
 	w := &warm{id: sp.GrantUID, cid: b.newCID("w", sp.GrantUID), argv: sp.Template.Argv, workDir: sp.WorkDir, pending: map[string]*box{}}
-	w.dir = filepath.Join(b.opt.StateDir, "templates", w.cid)
+	w.dir = filepath.Join(b.templatesDir(), w.cid)
 	w.images = filepath.Join(w.dir, "images")
 	// Named by the incarnation's number alone. A unix socket path is at
 	// most 108 bytes and a cid can be 64.
 	w.channel = filepath.Join(b.opt.StateDir, "channel", w.cid[strings.LastIndex(w.cid, "-")+1:])
-	if err := os.MkdirAll(w.dir, 0o755); err != nil {
+	// In flight from here until the warm is registered or has failed.
+	// Close ends the wait through ctx, kills the cid, and waits for the
+	// reaper count this warm is in before it detaches the tmpfs.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	b.mu.Lock()
+	if b.closed {
+		b.mu.Unlock()
+		return backend.Warm{}, errClosed
+	}
+	b.warming[w.cid] = cancel
+	b.reapers.Add(1)
+	b.mu.Unlock()
+	defer func() {
+		b.mu.Lock()
+		delete(b.warming, w.cid)
+		b.mu.Unlock()
+		b.reapers.Done()
+	}()
+	if err := os.MkdirAll(w.dir, 0o700); err != nil {
 		return backend.Warm{}, err
 	}
 	// The pool socket, in a directory of the instance's own that holds
@@ -767,11 +918,20 @@ func (b *Backend) Warm(ctx context.Context, sp backend.WarmSpec) (backend.Warm, 
 		return backend.Warm{}, fmt.Errorf("gvisor: template did not become ready: %w", err)
 	}
 	time.Sleep(20 * time.Millisecond) // let it reach the read after dropping the marker
-	if _, err := b.runsc(ctx, -1, "checkpoint", "--leave-running", "--image-path", w.images, directIO, w.cid); err != nil {
+	if ctx.Err() != nil {
+		// Close ended the wait: nothing is written where the tmpfs was.
+		_, _ = b.runsc(context.Background(), -1, "delete", "-force", w.cid)
+		return backend.Warm{}, fmt.Errorf("gvisor: template checkpoint: %w", ctx.Err())
+	}
+	ckpt := append(append([]string{"checkpoint", "--leave-running", "--image-path", w.images}, b.direct(w.images)...), w.cid)
+	if _, err := b.runsc(ctx, -1, ckpt...); err != nil {
 		_, _ = b.runsc(context.Background(), -1, "delete", "-force", w.cid)
 		return backend.Warm{}, fmt.Errorf("gvisor: template checkpoint: %w", err)
 	}
-	warmed = true
+	if err := ownerOnly(w.images); err != nil {
+		_, _ = b.runsc(context.Background(), -1, "delete", "-force", w.cid)
+		return backend.Warm{}, fmt.Errorf("gvisor: template image: %w", err)
+	}
 	// The footprint of a sandbox restored from this image, measured by
 	// restoring one into the empty probe cgroup the host offers: a fresh
 	// sandbox (its own sentry, gofer and page tables) costs more than the
@@ -787,12 +947,22 @@ func (b *Backend) Warm(ctx context.Context, sp backend.WarmSpec) (backend.Warm, 
 			sizeDeadline(w.restoreTook, createDeadline), sizeDeadline(w.restoreTook, resumeDeadline))
 	}
 	b.mu.Lock()
+	if b.closed {
+		// Close collected its cids before this one was among them.
+		b.mu.Unlock()
+		_, _ = b.runsc(context.Background(), -1, "delete", "-force", w.cid)
+		return backend.Warm{}, errClosed
+	}
 	b.warms[w.id] = w
-	b.mu.Unlock()
 	b.reapers.Add(1)
+	b.mu.Unlock()
+	warmed = true
 	go b.waitWarm(w)
 	return backend.Warm{ID: w.id, PID: w.pid, Bytes: bytes, TotalBytes: total}, nil
 }
+
+// errClosed is Warm's answer once Close has begun.
+var errClosed = errors.New("gvisor: backend closed")
 
 // probeFootprint restores the template image once into the given empty
 // cgroup exactly as a fiber would be, reads the cgroup (its shmem, the
@@ -1252,7 +1422,8 @@ func (b *Backend) restore(ctx context.Context, w *warm, x *box, images string, a
 	}
 	// The image is read, not cached, in the sandbox's leaf.
 	pidFile := filepath.Join(x.bundle, "pid")
-	_, err = b.runsc(rctx, cgroupFD, "restore", "--detach", "--pid-file", pidFile, "--image-path", images, "--bundle", x.bundle, directIO, x.cid)
+	args := []string{"restore", "--detach", "--pid-file", pidFile, "--image-path", images, "--bundle", x.bundle}
+	_, err = b.runsc(rctx, cgroupFD, append(append(args, b.direct(images)...), x.cid)...)
 	cut := rctx.Err() != nil
 	leave()
 	if err != nil {
@@ -1609,7 +1780,7 @@ func (b *Backend) Park(ctx context.Context, fiberID string, sp backend.ParkSpec)
 	if _, err := b.runsc(ctx, -1, "checkpoint", "--image-path", sp.Dir, directIO, x.cid); err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(sp.Dir, "config.json"), bundle, 0o644)
+	return os.WriteFile(filepath.Join(sp.Dir, "config.json"), bundle, 0o600)
 }
 
 // Resume restores a park image under a new fence and endpoint.
@@ -1665,11 +1836,18 @@ func (b *Backend) Kill(fiberID string) error {
 
 func (b *Backend) Exits() <-chan backend.Exit { return b.exits }
 
-// Close kills every sandbox, pooled ones included, and waits (bounded)
-// for their reapers, so the state directory can go once it returns.
+// Close refuses further warms, ends those in flight, kills every
+// sandbox, pooled ones included, waits (bounded) for their reapers, so
+// the state directory can go once it returns, and unmounts the templates
+// tmpfs New mounted.
 func (b *Backend) Close() {
 	b.mu.Lock()
+	b.closed = true
 	var cids []string
+	for cid, cancel := range b.warming {
+		cancel()
+		cids = append(cids, cid)
+	}
 	for _, w := range b.warms {
 		cids = append(cids, w.cid)
 	}
@@ -1692,6 +1870,17 @@ func (b *Backend) Close() {
 	case <-done:
 	case <-time.After(closeWait):
 		log.Printf("gvisor: close: a reaper is still running after %s", closeWait)
+	}
+	// Detached, so a reaper still running only loses its path. The
+	// memory goes once nothing holds the tmpfs open.
+	b.mu.Lock()
+	mounted := b.mounted
+	b.mounted = false
+	b.mu.Unlock()
+	if mounted {
+		if err := b.fs.unmount(b.templatesDir()); err != nil {
+			log.Printf("gvisor: close: unmount %s: %v", b.templatesDir(), err)
+		}
 	}
 }
 

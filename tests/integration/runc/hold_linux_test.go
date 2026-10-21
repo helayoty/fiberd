@@ -169,6 +169,7 @@ func TestResumeOnlyCopyReleased(t *testing.T) {
 			if !tc.warmSecond && !gone(copyDir) {
 				t.Fatalf("%s has a rootfs copy before anything of the grant ran there", b.stateDir)
 			}
+			ref = b.adopt(t, a, ref)
 			h2, err := b.rt.Clone(ctx, core.CloneSpec{Grant: g, Source: core.SourceDelta, Ref: ref,
 				Fence: core.Fence{GrantUID: g.UID, Epoch: 1, Seq: 2}, Deadline: 5 * time.Second})
 			if err != nil {

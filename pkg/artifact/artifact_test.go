@@ -43,32 +43,66 @@ func writeFile(t *testing.T, path, body string) {
 	}
 }
 
-// imagesArtifact fakes, without CRIU, what a Pull of an artifact with
-// images leaves in the template cache. That is the zygote, its config,
-// the images archive and the unpacked images.
-func imagesArtifact(t *testing.T) (dir, digest string) {
+// fleet is a home's master seal key and the fleet wrap key derived from
+// it, whose public half authors seal images to.
+func fleet(t *testing.T) (*artifact.SealKey, *artifact.WrapPublicKey) {
 	t.Helper()
+	jwk, err := artifact.GenerateSealKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	k, err := artifact.SealKeyFromJWK(jwk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, err := artifact.DeriveWrapKey(k)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return k, w.Public()
+}
+
+// sealedImagesTar seals a tar of files for pub into dir/images.tar and
+// returns what config.json carries about it.
+func sealedImagesTar(t *testing.T, dir string, files map[string]string, pub *artifact.WrapPublicKey) artifact.ImagesSeal {
+	t.Helper()
+	pages := t.TempDir()
+	for n, b := range files {
+		writeFile(t, filepath.Join(pages, n), b)
+	}
+	plain := filepath.Join(t.TempDir(), "images.tar")
+	if err := artifact.TarDir(pages, plain); err != nil {
+		t.Fatal(err)
+	}
+	s, err := artifact.SealImages(plain, filepath.Join(dir, "images.tar"), pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+// imagesArtifact fakes, without CRIU, what a Pull of an artifact with
+// images leaves in the template cache. That is the zygote, its config and
+// the images archive sealed to the fleet key derived from the returned
+// master, and the images a home unpacked from it.
+func imagesArtifact(t *testing.T) (dir, digest string, k *artifact.SealKey) {
+	t.Helper()
+	k, pub := fleet(t)
 	dir = t.TempDir()
 	zygote := "#!/bin/sh\necho READY\n"
 	writeFile(t, artifact.ZygotePath(dir), zygote)
 	sum := sha256.Sum256([]byte(zygote))
-	b, err := json.Marshal(artifact.Config{Args: []string{"--x"}, Arch: runtime.GOARCH, ZygoteSHA256: hex.EncodeToString(sum[:]), HasImages: true})
-	if err != nil {
+	s := sealedImagesTar(t, dir, map[string]string{"pages-1.img": "template pages"}, pub)
+	cfg := artifact.Config{Args: []string{"--x"}, Arch: runtime.GOARCH, ZygoteSHA256: hex.EncodeToString(sum[:]), Images: &s}
+	writeConfig(t, dir, cfg)
+	if err := artifact.UnpackImages(dir, cfg, k); err != nil {
 		t.Fatal(err)
 	}
-	writeFile(t, filepath.Join(dir, "config.json"), string(b))
-	pages := t.TempDir()
-	writeFile(t, filepath.Join(pages, "pages-1.img"), "template pages")
-	if err := artifact.TarDir(pages, filepath.Join(dir, "images.tar")); err != nil {
-		t.Fatal(err)
-	}
-	if err := artifact.Untar(filepath.Join(dir, "images.tar"), artifact.ImagesDir(dir)); err != nil {
-		t.Fatal(err)
-	}
+	var err error
 	if digest, err = artifact.Pack(context.Background(), dir); err != nil {
 		t.Fatal(err)
 	}
-	return dir, digest
+	return dir, digest, k
 }
 
 // TestBuildPushPullRoundTrip builds a zygote into an artifact, pushes it
@@ -103,7 +137,7 @@ func TestBuildPushPullRoundTrip(t *testing.T) {
 	}{
 		{"build into a relative directory records the zygote and its args", func(t *testing.T) {
 			var err error
-			digest, err = artifact.Build(ctx, artifact.BuildOptions{Zygote: src, Args: []string{"--heap-mb", "8"}, Out: out, SkipImages: true})
+			digest, err = artifact.Build(ctx, artifact.BuildOptions{Zygote: src, Args: []string{"--heap-mb", "8"}, Out: out, SkipImages: true, NoSmoke: true})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -113,7 +147,7 @@ func TestBuildPushPullRoundTrip(t *testing.T) {
 			if cfg, err = artifact.ReadConfig(out); err != nil {
 				t.Fatal(err)
 			}
-			if cfg.Platform() != fakePlatform || cfg.ZygoteSHA256 == "" || cfg.HasImages || len(cfg.Args) != 2 {
+			if cfg.Platform() != fakePlatform || cfg.ZygoteSHA256 == "" || cfg.HasImages() || len(cfg.Args) != 2 {
 				t.Fatalf("config = %+v", cfg)
 			}
 		}},
@@ -165,6 +199,7 @@ func TestBuildPushPullRoundTrip(t *testing.T) {
 			}
 		}},
 		{"a cached artifact is reverified and its images unpacked afresh", func(t *testing.T) {
+			_, otherFleet := fleet(t)
 			cases := []struct {
 				name   string
 				mutate func(t *testing.T, dir string, digest *string)
@@ -198,28 +233,41 @@ func TestBuildPushPullRoundTrip(t *testing.T) {
 				{name: "zygote missing", mutate: func(t *testing.T, dir string, _ *string) {
 					remove(t, artifact.ZygotePath(dir))
 				}},
-				// The next two pack to the digest asked for. What fails is
+				// The next ones pack to the digest asked for. What fails is
 				// the content under it.
 				{name: "a config naming another zygote", mutate: func(t *testing.T, dir string, digest *string) {
 					editConfig(t, dir, func(c *artifact.Config) { c.ZygoteSHA256 = strings.Repeat("0", 64) })
 					*digest = repack(t, dir)
 				}},
-				{name: "images.tar that never was an archive", mutate: func(t *testing.T, dir string, digest *string) {
+				{name: "images.tar that never was sealed", mutate: func(t *testing.T, dir string, digest *string) {
 					writeFile(t, filepath.Join(dir, "images.tar"), strings.Repeat("x", 1024))
+					if _, err := artifact.Pack(ctx, dir); err == nil {
+						t.Fatal("packed an images.tar that is not sealed")
+					}
+				}},
+				{name: "images sealed to another fleet", mutate: func(t *testing.T, dir string, digest *string) {
+					s := sealedImagesTar(t, dir, map[string]string{"pages-1.img": "template pages"}, otherFleet)
+					editConfig(t, dir, func(c *artifact.Config) { c.Images = &s })
 					*digest = repack(t, dir)
 				}},
 			}
 			for _, c := range cases {
 				t.Run(c.name, func(t *testing.T) {
-					dir, digest := imagesArtifact(t)
+					dir, digest, k := imagesArtifact(t)
 					if c.mutate != nil {
 						c.mutate(t, dir, &digest)
 					}
 					got, err := artifact.Reverify(ctx, dir, digest)
+					if err == nil {
+						err = artifact.UnpackImages(dir, got, k)
+					}
 					for _, side := range []string{".verified", ".old"} {
 						if _, serr := os.Stat(artifact.ImagesDir(dir) + side); !errors.Is(serr, os.ErrNotExist) {
 							t.Fatalf("images%s left behind: %v", side, serr)
 						}
+					}
+					if _, serr := os.Stat(filepath.Join(dir, "images.tar.open")); !errors.Is(serr, os.ErrNotExist) {
+						t.Fatalf("the opened tar was left behind: %v", serr)
 					}
 					if !c.ok {
 						if err == nil {
@@ -227,7 +275,7 @@ func TestBuildPushPullRoundTrip(t *testing.T) {
 						}
 						return
 					}
-					if err != nil || got.Digest != digest || !got.HasImages {
+					if err != nil || got.Digest != digest || !got.HasImages() {
 						t.Fatalf("reverify = %+v, %v", got, err)
 					}
 					if b, _ := os.ReadFile(filepath.Join(artifact.ImagesDir(dir), "pages-1.img")); string(b) != "template pages" {
@@ -637,9 +685,12 @@ func TestPull(t *testing.T) {
 	}
 	// pushAs pushes only the named files of a zygote directory, as a
 	// directory artifact of type typ.
-	pushAs := func(typ string, names ...string) func(t *testing.T, reg string) {
+	// pushFrom pushes only the named files of the directory src makes, as
+	// a directory artifact of type typ. PushDir does not pack, so it
+	// pushes what Push refuses to.
+	pushFrom := func(src func(t *testing.T) string, typ string, names ...string) func(t *testing.T, reg string) {
 		return func(t *testing.T, reg string) {
-			src, part := zygoteDir(t), t.TempDir()
+			src, part := src(t), t.TempDir()
 			for _, n := range names {
 				b, err := os.ReadFile(filepath.Join(src, n))
 				if err != nil {
@@ -652,15 +703,31 @@ func TestPull(t *testing.T) {
 			}
 		}
 	}
+	pushAs := func(typ string, names ...string) func(t *testing.T, reg string) {
+		return pushFrom(zygoteDir, typ, names...)
+	}
+	// plainImages is a zygote directory with images.tar in the clear and a
+	// config that says nothing about sealing, as a build before sealing
+	// wrote one.
+	plainImages := func(t *testing.T) string {
+		dir := zygoteDir(t)
+		pages := t.TempDir()
+		writeFile(t, filepath.Join(pages, "pages-1.img"), "template pages")
+		if err := artifact.TarDir(pages, filepath.Join(dir, "images.tar")); err != nil {
+			t.Fatal(err)
+		}
+		return dir
+	}
 	cases := []struct {
 		name    string
 		setup   func(t *testing.T, reg string)
 		ref     string // under the registry, z:t by default
 		dstFile bool   // the destination is under a regular file
+		images  bool   // the artifact carries sealed images
 		want    string // a substring of the error, "" for success
 	}{
-		{name: "the images are unpacked beside the zygote", setup: func(t *testing.T, reg string) {
-			dir, _ := imagesArtifact(t)
+		{name: "sealed images are pulled sealed", images: true, setup: func(t *testing.T, reg string) {
+			dir, _, _ := imagesArtifact(t)
 			pushZygote(t, reg, dir)
 		}},
 		{name: "a pull needs a tag or digest", ref: "z", want: "needs repo@digest or repo:tag"},
@@ -678,12 +745,22 @@ func TestPull(t *testing.T) {
 				editConfig(t, dir, func(c *artifact.Config) { c.ZygoteSHA256 = strings.Repeat("0", 64) })
 				pushZygote(t, reg, dir)
 			}},
-		{name: "a config that promises images it does not carry", want: "images.tar",
-			setup: func(t *testing.T, reg string) {
+		{name: "a config that promises images it does not carry", want: "no images.tar",
+			setup: pushFrom(func(t *testing.T) string {
 				dir := zygoteDir(t)
-				editConfig(t, dir, func(c *artifact.Config) { c.HasImages = true })
-				pushZygote(t, reg, dir)
-			}},
+				editConfig(t, dir, func(c *artifact.Config) { c.Images = &artifact.ImagesSeal{SHA256: strings.Repeat("0", 64)} })
+				return dir
+			}, artifact.ArtifactType, "zygote", "config.json")},
+		// Regression: an artifact carried images.tar in the clear and
+		// Pull unpacked it.
+		{name: "images in the clear", want: "without a seal",
+			setup: pushFrom(plainImages, artifact.ArtifactType, "zygote", "config.json", "images.tar")},
+		{name: "images in the clear under a config that names a seal", want: "is not sealed",
+			setup: pushFrom(func(t *testing.T) string {
+				dir := plainImages(t)
+				editConfig(t, dir, func(c *artifact.Config) { c.Images = &artifact.ImagesSeal{SHA256: strings.Repeat("0", 64)} })
+				return dir
+			}, artifact.ArtifactType, "zygote", "config.json", "images.tar")},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -713,12 +790,101 @@ func TestPull(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !cfg.HasImages || cfg.Digest == "" {
+			if cfg.HasImages() != c.images || cfg.Digest == "" {
 				t.Fatalf("Pull = %+v", cfg)
 			}
-			if b, err := os.ReadFile(filepath.Join(artifact.ImagesDir(dst), "pages-1.img")); err != nil || string(b) != "template pages" {
-				t.Fatalf("images/pages-1.img = %q, %v", b, err)
+			// A pull opens nothing. The images stay sealed until a home
+			// unpacks them.
+			if _, err := os.Stat(artifact.ImagesDir(dst)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("Pull unpacked images: %v", err)
 			}
+			if c.images {
+				if b, err := os.ReadFile(filepath.Join(dst, "images.tar")); err != nil || !bytes.HasPrefix(b, []byte("fiberd-seal-v1\n")) {
+					t.Fatalf("pulled images.tar is not sealed: %v", err)
+				}
+			}
+		})
+	}
+}
+
+// TestUnpackImages opens an artifact's sealed images with the home's
+// master and unpacks them owner-only. A home with another master, or
+// none, or a config that does not match the sealed file, gets nothing.
+func TestUnpackImages(t *testing.T) {
+	other, _ := fleet(t)
+	cases := []struct {
+		name  string
+		key   func(k *artifact.SealKey) *artifact.SealKey
+		edit  func(t *testing.T, dir string, cfg *artifact.Config)
+		want  string // a substring of the error, "" for success
+		check func(t *testing.T, dir string)
+	}{
+		// Regression: unpacked images were 0755 and 0644.
+		{name: "unpacked owner-only", check: func(t *testing.T, dir string) {
+			for path, want := range map[string]os.FileMode{
+				artifact.ImagesDir(dir):                               0o700,
+				filepath.Join(artifact.ImagesDir(dir), "pages-1.img"): 0o600,
+			} {
+				if st, err := os.Stat(path); err != nil || st.Mode().Perm() != want {
+					t.Fatalf("%s: %v, %v; want %v", path, st.Mode(), err, want)
+				}
+			}
+		}},
+		{name: "no seal key says which flag", want: "-delta-seal-key",
+			key: func(*artifact.SealKey) *artifact.SealKey { return nil }},
+		{name: "another fleet's master", want: "this home derives",
+			key: func(*artifact.SealKey) *artifact.SealKey { return other }},
+		{name: "a config without images", want: "no images",
+			edit: func(_ *testing.T, _ string, cfg *artifact.Config) { cfg.Images = nil }},
+		{name: "a config naming another hash", want: "sealed",
+			edit: func(_ *testing.T, _ string, cfg *artifact.Config) {
+				s := *cfg.Images
+				s.SHA256 = strings.Repeat("0", 64)
+				cfg.Images = &s
+			}},
+		{name: "a tampered images.tar", want: "chunk 0",
+			edit: func(t *testing.T, dir string, _ *artifact.Config) {
+				b, err := os.ReadFile(filepath.Join(dir, "images.tar"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				b[len(b)-1] ^= 1
+				writeFile(t, filepath.Join(dir, "images.tar"), string(b))
+			}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir, _, k := imagesArtifact(t)
+			if err := os.RemoveAll(artifact.ImagesDir(dir)); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := artifact.ReadConfig(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if c.edit != nil {
+				c.edit(t, dir, &cfg)
+			}
+			if c.key != nil {
+				k = c.key(k)
+			}
+			err = artifact.UnpackImages(dir, cfg, k)
+			if _, serr := os.Stat(filepath.Join(dir, "images.tar.open")); !errors.Is(serr, os.ErrNotExist) {
+				t.Fatalf("the opened tar was left behind: %v", serr)
+			}
+			if c.want != "" {
+				if err == nil || !strings.Contains(err.Error(), c.want) {
+					t.Fatalf("UnpackImages = %v, want an error about %q", err, c.want)
+				}
+				if _, serr := os.Stat(artifact.ImagesDir(dir)); !errors.Is(serr, os.ErrNotExist) {
+					t.Fatalf("a refused unpack left images: %v", serr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			c.check(t, dir)
 		})
 	}
 }

@@ -16,8 +16,9 @@ import (
 // TestParentStoreMovesAcrossFilesystems checks a template cache whose
 // parent store sits on another file system. The warm instance's
 // self-checkpoint cannot be renamed into it, so the template stays warm
-// without a parent and its parks are full images. On one file system
-// the checkpoint is filed and parks are deltas over it.
+// without a parent, its parks are full images, and the checkpoint is
+// removed (regression: it stayed in zygote-images in the clear). On one
+// file system the checkpoint is filed and parks are deltas over it.
 func TestParentStoreMovesAcrossFilesystems(t *testing.T) {
 	if st, err := os.Stat("/dev/shm"); err != nil || !st.IsDir() {
 		t.Skip("no /dev/shm for a store on another file system")
@@ -69,8 +70,8 @@ func TestParentStoreMovesAcrossFilesystems(t *testing.T) {
 			if m.Delta != tc.delta || stored != tc.delta || (tc.delta && m.Parent != shaOf("zygote pages of g1")) {
 				t.Fatalf("manifest = %+v, parent stored %v, want delta %v", m, stored, tc.delta)
 			}
-			if tc.delta && exists(filepath.Join(cache, "zygote-images", "g1")) {
-				t.Fatal("the filed self-checkpoint was left in the cache")
+			if exists(filepath.Join(cache, "zygote-images", "g1")) {
+				t.Fatal("the self-checkpoint was left in the cache")
 			}
 		})
 	}

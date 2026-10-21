@@ -56,7 +56,8 @@
  *                     Ends the setup lines. With mntns the zygote builds,
  *                     once in its own namespace, what every mntns fiber
  *                     sees (read-only /sys, the DROP, RUNDIR and HIDE
- *                     steps). With none a mntns CLONE is refused. A
+ *                     steps, and every mount another fiberd home made
+ *                     detached). With none a mntns CLONE is refused. A
  *                     refused setup line or a failed PREPARE step gets
  *                     ERROR ? <reason> instead of READY and the zygote
  *                     ends. Any other line before PREPARE ends the

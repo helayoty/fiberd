@@ -15,13 +15,13 @@ flowchart LR
   end
   Caller -->|"direct endpoint"| Fiber
   Caller -->|"TLS, handed off by fiberd"| Fiber
-  fiberd <-->|"signed templates, signed and sealed deltas"| Registry
+  fiberd <-->|"templates with sealed images, signed and sealed parents and deltas"| Registry
 ```
 
 - **Caller to [fiberd](glossary.md#fiberd).** Every control call is authenticated with mutual TLS (mTLS), and the [grant](glossary.md#grant) it presents is bound to the caller's certificate.
 - **[Issuer](glossary.md#issuer) to fiberd.** fiberd trusts only keys it finds through OpenID Connect (OIDC) discovery, the standard document in which the configured issuer lists its public keys.
 - **fiberd to [fiber](glossary.md#fiber).** Fibers are kept apart from fiberd and from each other by [cgroups](glossary.md#cgroup), namespaces and a scrubbed process state, with inherited descriptors closed and a fresh environment.
-- **fiberd to registry.** Nothing is restored unless it is signed, and tenant memory never leaves the [home](glossary.md#home) in the clear.
+- **fiberd to registry.** Nothing is restored unless it is signed or pinned by digest, and neither tenant nor template memory reaches the registry in the clear. Only a template's code and config are readable there.
 
 ## Control plane
 
@@ -77,7 +77,9 @@ With proc or runc, fiberd re-executes at start with only the capabilities that r
 
 ## Templates and deltas
 
-A template is pulled by the digest the grant names and checked again on every [warm](glossary.md#warm). Every [delta](glossary.md#delta) a home publishes is signed with `-delta-key` and sealed with AES-256-GCM under a key derived for its session domain, the grant's [tenant](glossary.md#tenant) and [session class](glossary.md#session-class), and it expires 24 hours after the [park](glossary.md#park). A home takes only a delta signed by a key it trusts, for the domain and session it asked for. Import, which takes a session exported as files, needs the signed manifest of the checkpoint the delta builds on, and seals for the importing grant's domain, never the one the export names. [artifact.md](design/artifact.md) has the formats and the key derivation.
+A template is pulled by the digest the grant names and checked again on every [warm](glossary.md#warm). Its images, the zygote's memory at READY, are sealed by `zygotectl build -seal-to` to the fleet's public wrap key, which `grant-issuer keygen -alg A256GCM` writes beside the master seal key. Authors hold only that public half. A home that warms from the images derives the private half from `-delta-seal-key`, opens them, and checks their hash first. Every parent checkpoint a home pushes is sealed under a key derived from the master and the parent's own hash, and signed. A home takes a parent only if it is signed as that checkpoint, opens as that checkpoint, and hashes to it. Every [delta](glossary.md#delta) a home publishes is signed with `-delta-key` and sealed with AES-256-GCM under a key derived for its session domain, the grant's [tenant](glossary.md#tenant) and [session class](glossary.md#session-class), and it expires 24 hours after the [park](glossary.md#park). A home takes only a delta signed by a key it trusts, for the domain and session it asked for. Import, which takes a session exported as files, needs the signed manifest of the checkpoint the delta builds on, opens a copy of that checkpoint to check its hash before it signs it as its own, and seals for the importing grant's domain, never the one the export names. [artifact.md](design/artifact.md) has the formats and the key derivation.
+
+On the home, template memory sits in the clear in fiberd's own stores, the parent store, `zygote-images/` and the unpacked author images under the template cache, and gVisor's `templates/` under its state directory. Each is 0700, and the checkpoints fiberd takes or pulls into them are 0600. The parent store is pruned of every checkpoint no warm instance and no local delta names. gVisor's templates live on a tmpfs by default, so they never reach a disk. A proc zygote that shares the mount namespace with a gVisor home copies that tmpfs at its `unshare`, and a fiber that kept it would keep the tmpfs alive after the gVisor home detached it, so a later park would write the template images into the proc fiber's delta. So the zygote detaches every mount another fiberd home made from its namespace before its first fiber. It knows fiberd's file systems by their `fiberd-` mount source and a restore root by its being a bind of `/` ([zygote.md](design/zygote.md)).
 
 ## Audit
 
@@ -95,7 +97,7 @@ Every state transition appends a hash-chained record to fiberd's private spool, 
 - The fiber filter is a denylist, so a kernel call nobody has named yet is allowed, and `ioctl` is not filtered ([seccomp.md](design/seccomp.md)).
 - On runc, an engine thread a template starts before `fz_serve` keeps the container's capabilities. Its fibers do not ([seccomp.md](design/seccomp.md)).
 - Template code in a zygote that jumps to the library's own `clone3` instruction can still call `clone3` with any flags. Its fibers cannot ([seccomp.md](design/seccomp.md#why-clone3-is-gated)).
-- Template images are signed but not sealed, so whatever a template holds in memory when it is checkpointed leaves the home in the clear. Keep secrets out of templates ([artifact.md](design/artifact.md)).
+- Every home holds the one master seal key, which opens every delta, parent and author image of the fleet. A compromised home reads them all, and rotating the master means every author rebuilds ([artifact.md](design/artifact.md)).
 - Address-space layout randomisation (ASLR) is off for every [zygote](glossary.md#zygote) and its fibers, so the fibers of a template share one fixed memory layout on every home. A memory-corruption exploit inside a fiber is easier, because an address learned in one fiber holds in all of them.
 - Whoever can write the grant directory can deny a grant UID on that home ([home.md](design/home.md)).
 - Running fiberd itself inside a user namespace (a Pod with `hostUsers` set to false) is untested. runc's per-grant user namespace is a different thing and restores fine ([user-namespaces.md](design/user-namespaces.md)).

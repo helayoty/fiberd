@@ -49,7 +49,7 @@ func newFakeMax(t *testing.T, k knobs, maxRestores int) (*Backend, *fakeRunsc) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(state) })
-	b := newBackend(Options{Runsc: "runsc", Rootfs: rootfs, StateDir: filepath.Join(state, "state"), MaxRestores: maxRestores}, f.run)
+	b := newBackend(Options{Runsc: "runsc", Rootfs: rootfs, StateDir: filepath.Join(state, "state"), MaxRestores: maxRestores}, f.run, newFakeTmpfs().ops())
 	b.await = f.awaitExit
 	if b.Tier() != core.TierSnapshot {
 		t.Fatalf("Tier = %s (%v), want FIBER_SNAPSHOT over the fake", b.Tier(), b.ProbeErr())
@@ -248,46 +248,45 @@ func poolSocketOf(t *testing.T, b *Backend, id string) string {
 }
 
 // TestNew checks that the tier is FIBER_SNAPSHOT only with a runsc that
-// answers and a rootfs directory, the version is read from runsc through
-// the seam, and the defaults fill in. The facts the backend states about
-// itself do not depend on either.
+// answers and a rootfs directory, and the version is read from runsc
+// through the seam. The facts the backend states about itself do not
+// depend on either. The templates tmpfs is TestTemplatesTmpfs.
 func TestNew(t *testing.T) {
 	cases := []struct {
 		name        string
 		knobs       knobs
-		opt         func(t *testing.T, rootfs string) Options
+		opt         func(t *testing.T, rootfs, state string) Options
 		wantTier    core.Tier
 		wantVersion string
 		wantRunsc   string
-		wantState   string
 		wantWhy     string // in ProbeErr, "" for none
 		wantSweep   bool   // the root was listed for leftovers
 	}{
-		{name: "runsc and rootfs", opt: func(_ *testing.T, rootfs string) Options {
-			return Options{Runsc: "/opt/runsc", Rootfs: rootfs, StateDir: "/s"}
+		{name: "runsc and rootfs", opt: func(_ *testing.T, rootfs, state string) Options {
+			return Options{Runsc: "/opt/runsc", Rootfs: rootfs, StateDir: state}
 		},
-			wantTier: core.TierSnapshot, wantVersion: fakeVersion, wantRunsc: "/opt/runsc", wantState: "/s", wantSweep: true},
-		{name: "runsc missing", knobs: knobs{Fail: map[string]bool{"version": true}}, opt: func(_ *testing.T, rootfs string) Options {
-			return Options{Runsc: "/nowhere/runsc", Rootfs: rootfs, StateDir: "/s"}
-		}, wantRunsc: "/nowhere/runsc", wantState: "/s", wantWhy: "runsc /nowhere/runsc unavailable"},
-		{name: "rootfs missing", opt: func(t *testing.T, _ string) Options {
-			return Options{Runsc: "/opt/runsc", Rootfs: filepath.Join(t.TempDir(), "none"), StateDir: "/s"}
-		}, wantVersion: fakeVersion, wantRunsc: "/opt/runsc", wantState: "/s", wantWhy: "rootfs unusable", wantSweep: true},
-		{name: "rootfs is a file", opt: func(t *testing.T, _ string) Options {
+			wantTier: core.TierSnapshot, wantVersion: fakeVersion, wantRunsc: "/opt/runsc", wantSweep: true},
+		{name: "runsc missing", knobs: knobs{Fail: map[string]bool{"version": true}}, opt: func(_ *testing.T, rootfs, state string) Options {
+			return Options{Runsc: "/nowhere/runsc", Rootfs: rootfs, StateDir: state}
+		}, wantRunsc: "/nowhere/runsc", wantWhy: "runsc /nowhere/runsc unavailable"},
+		{name: "rootfs missing", opt: func(t *testing.T, _, state string) Options {
+			return Options{Runsc: "/opt/runsc", Rootfs: filepath.Join(t.TempDir(), "none"), StateDir: state}
+		}, wantVersion: fakeVersion, wantRunsc: "/opt/runsc", wantWhy: "rootfs unusable", wantSweep: true},
+		{name: "rootfs is a file", opt: func(t *testing.T, _, state string) Options {
 			f := filepath.Join(t.TempDir(), "file")
 			if err := os.WriteFile(f, nil, 0o600); err != nil {
 				t.Fatal(err)
 			}
-			return Options{Runsc: "/opt/runsc", Rootfs: f, StateDir: "/s"}
-		}, wantVersion: fakeVersion, wantRunsc: "/opt/runsc", wantState: "/s", wantWhy: "is not a directory", wantSweep: true},
-		{name: "defaults", opt: func(_ *testing.T, rootfs string) Options { return Options{Rootfs: rootfs} },
-			wantTier: core.TierSnapshot, wantRunsc: "runsc", wantState: "/var/lib/fiberd/gvisor", wantVersion: fakeVersion, wantSweep: true},
+			return Options{Runsc: "/opt/runsc", Rootfs: f, StateDir: state}
+		}, wantVersion: fakeVersion, wantRunsc: "/opt/runsc", wantWhy: "is not a directory", wantSweep: true},
+		{name: "default runsc", opt: func(_ *testing.T, rootfs, state string) Options { return Options{Rootfs: rootfs, StateDir: state} },
+			wantTier: core.TierSnapshot, wantRunsc: "runsc", wantVersion: fakeVersion, wantSweep: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newFakeRunsc(tc.knobs)
-			opt := tc.opt(t, t.TempDir())
-			b := newBackend(opt, f.run)
+			opt := tc.opt(t, t.TempDir(), t.TempDir())
+			b := newBackend(opt, f.run, newFakeTmpfs().ops())
 			t.Cleanup(b.Close)
 			if b.Tier() != tc.wantTier {
 				t.Fatalf("Tier = %s, want %s", b.Tier(), tc.wantTier)
@@ -305,8 +304,8 @@ func TestNew(t *testing.T) {
 			if b.opt.Runsc != tc.wantRunsc {
 				t.Fatalf("Runsc = %q, want %q", b.opt.Runsc, tc.wantRunsc)
 			}
-			if b.opt.StateDir != tc.wantState {
-				t.Fatalf("StateDir = %q, want %q", b.opt.StateDir, tc.wantState)
+			if b.opt.StateDir != opt.StateDir {
+				t.Fatalf("StateDir = %q, want %q", b.opt.StateDir, opt.StateDir)
 			}
 			calls := f.calls()
 			if findCall(calls, "--version") == "" {
@@ -687,10 +686,11 @@ func TestWarm(t *testing.T) {
 			return filepath.Join(f, "g")
 		}, wantText: "not a directory"},
 		{name: "template directory under a file", argv: []string{"/bin/refzygote"}, tier: core.TierSnapshot, stateDir: func(t *testing.T, b *Backend) {
-			if err := os.MkdirAll(b.opt.StateDir, 0o755); err != nil {
+			// New made the directory. Something replaced it since.
+			if err := os.RemoveAll(b.templatesDir()); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(filepath.Join(b.opt.StateDir, "templates"), nil, 0o600); err != nil {
+			if err := os.WriteFile(b.templatesDir(), nil, 0o600); err != nil {
 				t.Fatal(err)
 			}
 		}, wantText: "not a directory"},
@@ -763,7 +763,7 @@ func TestWarm(t *testing.T) {
 			calls := f.calls()
 			for _, want := range []string{
 				"run --detach --bundle " + filepath.Join(tdir, "bundle") + " " + wc,
-				"checkpoint --leave-running --image-path " + filepath.Join(tdir, "images") + " --direct " + wc,
+				"checkpoint --leave-running --image-path " + filepath.Join(tdir, "images") + " " + wc,
 				"state " + wc,
 			} {
 				if findCall(calls, want) == "" {
@@ -871,7 +871,7 @@ func TestProbeFootprint(t *testing.T) {
 			calls := f.calls()
 			tdir := filepath.Join(b.opt.StateDir, "templates", warmCID(t, b, "g"))
 			probe := warmCID(t, b, "g") + "-probe"
-			restore := "restore --detach --pid-file " + filepath.Join(tdir, "probe-bundle", "pid") + " --image-path " + filepath.Join(tdir, "images") + " --bundle " + filepath.Join(tdir, "probe-bundle") + " --direct " + probe
+			restore := "restore --detach --pid-file " + filepath.Join(tdir, "probe-bundle", "pid") + " --image-path " + filepath.Join(tdir, "images") + " --bundle " + filepath.Join(tdir, "probe-bundle") + " " + probe
 			if findCall(calls, restore) == "" {
 				t.Fatalf("no probe restore among\n%s", strings.Join(calls, "\n"))
 			}
@@ -980,7 +980,10 @@ func TestProbeWithoutABundle(t *testing.T) {
 			if err := os.WriteFile(tdir, nil, 0o600); err != nil {
 				t.Fatal(err)
 			}
-			w := &warm{id: "g", cid: "w-g", argv: []string{"/bin/refzygote"}, workDir: t.TempDir(), images: filepath.Join(tdir, "images"), pending: map[string]*box{}}
+			// The probe's bundle goes under dir, which is a file. Without
+			// dir it would go under the working directory, where the
+			// outcome depends on who may write there.
+			w := &warm{id: "g", cid: "w-g", argv: []string{"/bin/refzygote"}, workDir: t.TempDir(), dir: tdir, images: filepath.Join(tdir, "images"), pending: map[string]*box{}}
 			shmem, total := b.probeFootprint(context.Background(), w, cgroupFiles(t, nil))
 			if shmem != 0 || total != 0 {
 				t.Fatalf("probeFootprint = %d/%d, want nothing", shmem, total)
@@ -1058,7 +1061,7 @@ func TestClone(t *testing.T) {
 			}
 			tdir := filepath.Join(b.opt.StateDir, "templates", warmCID(t, b, "g"))
 			calls := f.calls()
-			if findCall(calls, "restore --detach --pid-file "+filepath.Join(bundle, "pid")+" --image-path "+filepath.Join(tdir, "images")+" --bundle "+bundle+" --direct "+fc) == "" {
+			if findCall(calls, "restore --detach --pid-file "+filepath.Join(bundle, "pid")+" --image-path "+filepath.Join(tdir, "images")+" --bundle "+bundle+" "+fc) == "" {
 				t.Fatalf("no restore among\n%s", strings.Join(calls, "\n"))
 			}
 			if err := b.Kill("nobody"); err != nil {
@@ -1724,7 +1727,7 @@ func TestSweep(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			b := newBackend(Options{Runsc: "runsc", Rootfs: t.TempDir(), StateDir: state}, f.run)
+			b := newBackend(Options{Runsc: "runsc", Rootfs: t.TempDir(), StateDir: state}, f.run, newFakeTmpfs().ops())
 			t.Cleanup(b.Close)
 			left := 0
 			for _, sub := range []string{"bundles", "templates", "channel"} {

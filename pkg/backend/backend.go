@@ -71,6 +71,18 @@ type WarmSpec struct {
 	Hide []string
 }
 
+// MountSourcePrefix starts the source of every file system fiberd
+// mounts, as the gVisor backend's templates tmpfs is mounted from
+// "fiberd-templates". A proc zygote drops every mount whose source
+// starts with it from its namespace before its first fiber, since one
+// home's mount is no fiber's to keep: once that home unmounts it, a
+// parked fiber that carried it cannot be restored, and a detached tmpfs
+// lives on inside the fiber with its contents, which the next park
+// would write out (sdk/c/template/core/src/prepare.rs,
+// drop_fiberd_mounts). A bind of /, a proc home's restore root, is
+// known by what it shows instead.
+const MountSourcePrefix = "fiberd-"
+
 // Warm is a warm template instance.
 type Warm struct {
 	ID  string // backend's handle, passed back to Clone and Unwarm
