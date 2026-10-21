@@ -15,7 +15,7 @@ import (
 )
 
 // stormProc measures fork and copy-on-write through the real runtime
-// path (fiberd-side Clone -> control socket -> clone3 -> scrub ->
+// path (fiberd-side Clone -> control socket -> clone -> scrub ->
 // endpoint bound -> ready): a 50-way concurrent storm, and sustained
 // throughput at W = 1 MiB and W = 4 MiB. It takes a few seconds.
 func stormProc(t *testing.T) {

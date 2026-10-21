@@ -5,7 +5,7 @@
  * setup.py).
  *
  * What it does that Python cannot. The library forks a fiber with a raw
- * clone3 and runs no atfork handler, so the child starts as a byte copy
+ * clone and runs no atfork handler, so the child starts as a byte copy
  * of the one thread that called fz_serve with the GIL released. serve()
  * runs PyOS_BeforeFork once in the zygote, lets go of the GIL and blocks
  * in fz_serve. The trampoline below is the first thing that runs in a

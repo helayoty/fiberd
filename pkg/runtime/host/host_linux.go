@@ -653,7 +653,7 @@ func (r *Runtime) leaf(parent cgroup.Dir, g core.Grant, name string) (cgroup.Dir
 }
 
 // delegateProcs hands the grant's mapped root, when the backend maps
-// one, the cgroup.procs of d and nothing else. clone3 into a leaf needs
+// one, the cgroup.procs of d and nothing else. A birth into a leaf needs
 // write access to it and to the grant cgroup's. The limits stay root's,
 // so a grant cannot raise its own memory.max or make cgroups.
 func (r *Runtime) delegateProcs(grantUID string, d cgroup.Dir) error {

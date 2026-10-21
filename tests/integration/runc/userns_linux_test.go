@@ -356,8 +356,8 @@ func TestFiberIsolation(t *testing.T) {
 }
 
 // TestCgroupDelegationIsProcsOnly pins that, in the grant's cgroup and
-// each fiber leaf, the mapped root owns only cgroup.procs, which clone3
-// into the leaf checks. Writability is asked as that uid with access(2),
+// each fiber leaf, the mapped root owns only cgroup.procs, which the
+// child's join of its leaf writes. Writability is asked as that uid with access(2),
 // which applies the kernel's write checks and changes nothing.
 func TestCgroupDelegationIsProcsOnly(t *testing.T) {
 	if _, err := exec.LookPath("setpriv"); err != nil {

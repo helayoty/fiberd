@@ -33,10 +33,11 @@ func TestCloneSyscallBudget(t *testing.T) {
 		to     *regexp.Regexp // and ends before the line matching this
 		budget int
 	}{
-		// close the ready pipe's read end, close the zygote's SIGCHLD
-		// descriptor, dup the ready pipe to 3 and the channel to 4,
-		// close_range
-		{name: "fork to record", to: regexp.MustCompile(`^recvmsg\(4,`), budget: 5},
+		// stack the clone3 filter (seccomp), close the ready pipe's read
+		// end, close the zygote's SIGCHLD descriptor, dup the ready pipe
+		// to 3 and the channel to 4, close_range. The birth is a clone3
+		// straight into the leaf, so no join
+		{name: "fork to record", to: regexp.MustCompile(`^recvmsg\(4,`), budget: 6},
 		// socketpair, dup2 to 4, dup2 to 5, close the end left over
 		{name: "record to own pair", from: regexp.MustCompile(`^recvmsg\(4,`), to: regexp.MustCompile(`^openat\(AT_FDCWD, "/dev/null"`), budget: 4},
 	}

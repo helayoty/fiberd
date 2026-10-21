@@ -32,8 +32,10 @@ const _: () = assert!(
 
 /// The knob cap_nested_userns writes, under a proc mount.
 const KNOB: &[u8] = b"sys/user/max_user_namespaces";
-/// CAP_SYS_RESOURCE in linux/capability.h, which libc does not carry.
+/// CAP_SYS_RESOURCE and CAP_SYS_ADMIN in linux/capability.h, which libc
+/// does not carry.
 const CAP_SYS_RESOURCE: u32 = 24;
+const CAP_SYS_ADMIN: u32 = 21;
 
 /// Fills buf with the parts, NUL-ended and cut to what fits.
 fn fill(buf: &mut [u8], parts: &[&[u8]]) {
@@ -389,6 +391,84 @@ pub fn cap_nested_userns() -> Result<(), Errno> {
     Ok(())
 }
 
+/// keep_only_sys_admin narrows the calling thread to CAP_SYS_ADMIN,
+/// which every birth's CLONE_NEWPID needs and criu's parasite runs
+/// with. The bounding set first, so no exec regains another, then the
+/// ambient set cleared, then the effective and permitted sets to it
+/// alone with inheritable empty. It acts on this thread, the one every
+/// fiber is forked from, so an engine thread started before fz_serve
+/// keeps the container's capabilities and no fiber inherits them. Ok,
+/// or the errno with a line on stderr.
+pub fn keep_only_sys_admin() -> Result<(), Errno> {
+    #[cfg(test)]
+    if let Some(e) = *tests::FAKE_CAPS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+    {
+        return if e == 0 { Ok(()) } else { Err(Errno(e)) };
+    }
+    narrow_to_sys_admin()
+}
+
+/// keep_only_sys_admin's work.
+fn narrow_to_sys_admin() -> Result<(), Errno> {
+    let zero: libc::c_ulong = 0;
+    let mut c: libc::c_ulong = 0;
+    // SAFETY: integer arguments alone, and the loop ends at the first
+    // capability number the kernel does not know.
+    while unsafe { prctl(libc::PR_CAPBSET_READ, c, zero) } >= 0 {
+        // SAFETY: as above.
+        if c != libc::c_ulong::from(CAP_SYS_ADMIN)
+            && unsafe { prctl(libc::PR_CAPBSET_DROP, c, zero) } < 0
+        {
+            let e = Errno::last();
+            complain(b"drop the bounding set to CAP_SYS_ADMIN", e.0);
+            return Err(e);
+        }
+        c = c.wrapping_add(1);
+    }
+    // SAFETY: integer arguments alone.
+    if unsafe {
+        prctl(
+            libc::PR_CAP_AMBIENT,
+            libc::PR_CAP_AMBIENT_CLEAR_ALL as libc::c_ulong,
+            zero,
+        )
+    } < 0
+        && sys::errno() != libc::EINVAL
+    {
+        let e = Errno::last();
+        complain(b"clear the ambient set", e.0);
+        return Err(e);
+    }
+    let h = CapHeader {
+        version: CAPABILITY_VERSION_3,
+        pid: 0,
+    };
+    let mut d = [CapData {
+        effective: 0,
+        permitted: 0,
+        inheritable: 0,
+    }; CAPABILITY_U32S_3];
+    if let Some(w) = d.get_mut((CAP_SYS_ADMIN >> 5) as usize) {
+        w.effective = 1u32 << (CAP_SYS_ADMIN & 31);
+        w.permitted = w.effective;
+    }
+    // SAFETY: h and d are live and laid out as capset reads them.
+    if unsafe {
+        sys::syscall(
+            libc::SYS_capset,
+            [(&raw const h) as c_long, d.as_ptr() as c_long, 0, 0, 0],
+        )
+    } < 0
+    {
+        let e = Errno::last();
+        complain(b"keep CAP_SYS_ADMIN alone", e.0);
+        return Err(e);
+    }
+    Ok(())
+}
+
 impl Zygote<'_> {
     /// own_mountns moves the zygote into a private mount namespace of its
     /// own, which every mntns fiber's namespace copies. fiberd asks with
@@ -601,15 +681,21 @@ impl Zygote<'_> {
         0
     }
 
-    /// cap_nested_userns as fz_serve runs it. The caller sets
-    /// deny_nested_userns.
+    /// cap_nested_userns as fz_serve runs it.
     pub fn cap_nested_userns(&mut self) -> Result<(), Errno> {
+        #[cfg(test)]
+        if let Some(e) = *tests::FAKE_NESTED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        {
+            return if e == 0 { Ok(()) } else { Err(Errno(e)) };
+        }
         cap_nested_userns()
     }
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     #![allow(
         clippy::indexing_slicing,
         clippy::arithmetic_side_effects,
@@ -620,6 +706,97 @@ mod tests {
     )]
     use super::*;
     use crate::zygote::{State, Tables};
+    use std::sync::Mutex;
+
+    /// What keep_only_sys_admin answers under test: 0 for Ok, else the
+    /// errno. None runs the real drop. Changed only under crate::serial().
+    pub(crate) static FAKE_CAPS: Mutex<Option<c_int>> = Mutex::new(Some(0));
+    /// The same for Zygote::cap_nested_userns.
+    pub(crate) static FAKE_NESTED: Mutex<Option<c_int>> = Mutex::new(None);
+
+    /// The thread's capability sets, as capget gives them.
+    fn capget() -> [CapData; CAPABILITY_U32S_3] {
+        let h = CapHeader {
+            version: CAPABILITY_VERSION_3,
+            pid: 0,
+        };
+        let mut d = [CapData {
+            effective: 0,
+            permitted: 0,
+            inheritable: 0,
+        }; CAPABILITY_U32S_3];
+        // SAFETY: h and d are live and laid out as capget writes them.
+        let r = unsafe {
+            sys::syscall(
+                libc::SYS_capget,
+                [(&raw const h) as c_long, d.as_mut_ptr() as c_long, 0, 0, 0],
+            )
+        };
+        assert_eq!(r, 0, "capget");
+        d
+    }
+
+    #[test]
+    fn narrow_to_sys_admin_leaves_that_alone() {
+        let _serial = crate::serial();
+        // Dropping the bounding set needs CAP_SETPCAP, so this runs in
+        // the dev container as root and is a no-op in CI.
+        if capget()[0].effective & (1 << 8) == 0 {
+            return;
+        }
+        // The child's exit code names the first set that is wrong.
+        let cases: &[(&str, fn() -> bool)] = &[
+            ("effective is CAP_SYS_ADMIN alone", || {
+                capget()[0].effective == 1 << CAP_SYS_ADMIN && capget()[1].effective == 0
+            }),
+            ("permitted is CAP_SYS_ADMIN alone", || {
+                capget()[0].permitted == 1 << CAP_SYS_ADMIN && capget()[1].permitted == 0
+            }),
+            ("inheritable is empty", || {
+                capget()[0].inheritable == 0 && capget()[1].inheritable == 0
+            }),
+            ("the bounding set is CAP_SYS_ADMIN alone", || {
+                (0..64u32).all(|c| {
+                    // SAFETY: integer arguments alone.
+                    let has = unsafe { prctl(libc::PR_CAPBSET_READ, c.into(), 0) };
+                    has < 0 || (has == 1) == (c == CAP_SYS_ADMIN)
+                })
+            }),
+        ];
+        // SAFETY: the child narrows its own sets, reads them and _exits.
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0, "fork");
+        if pid == 0 {
+            if narrow_to_sys_admin().is_err() {
+                // SAFETY: _exit ends the child.
+                unsafe { libc::_exit(100) };
+            }
+            for (i, (_, ok)) in cases.iter().enumerate() {
+                if !ok() {
+                    // SAFETY: _exit ends the child.
+                    unsafe { libc::_exit(i as c_int + 1) };
+                }
+            }
+            // SAFETY: _exit ends the child.
+            unsafe { libc::_exit(0) };
+        }
+        let mut status = 0;
+        // SAFETY: status is live for the call.
+        assert_eq!(
+            unsafe { libc::waitpid(pid, &mut status, 0) },
+            pid,
+            "waitpid"
+        );
+        assert!(
+            libc::WIFEXITED(status),
+            "the child died: status {status:#x}"
+        );
+        let code = libc::WEXITSTATUS(status);
+        assert_ne!(code, 100, "the drop was refused");
+        if code != 0 {
+            panic!("{}", cases[(code - 1) as usize].0);
+        }
+    }
 
     struct Rig {
         st: Box<State>,
@@ -778,7 +955,7 @@ mod tests {
                 "the zygote could not cover a HIDE path (/var/lib/fiberd/templates: Permission denied)",
             ),
             (
-                "a slot never filled names nothing, as the C's table did",
+                "a slot never filled names nothing",
                 F_HIDE,
                 Some(7),
                 libc::EPERM,

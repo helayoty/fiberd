@@ -22,7 +22,7 @@ sequenceDiagram
   A->>T: serve(on_fiber)
   T->>T: the rules, gc.freeze, PyOS_BeforeFork, release the GIL
   T->>C: fz_serve(3, trampoline)
-  C->>C: clone3 per CLONE, scrub, confine
+  C->>C: clone per CLONE, scrub, confine
   C->>T: trampoline, in the child
   T->>T: take the GIL, PyOS_AfterFork_Child, os.environ, reseed, hooks
   T->>A: on_fiber(Fiber)

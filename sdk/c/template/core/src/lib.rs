@@ -3,8 +3,9 @@
 //!
 //! Modules: record, line and procfiles parse. child and mounts are the
 //! child's path. fiber is the fiber-side API and gVisor. ctl is the
-//! control channel. prepare sets up the namespace before READY. zygote
-//! is the serving loop. sys is the one seam for system calls.
+//! control channel. prepare sets up the namespace before READY. seccomp
+//! is the fiber filter the zygote installs there. zygote is the serving
+//! loop. sys is the one seam for system calls.
 //!
 //! No std, no allocator and one lock, the fz_report_line mutex. The
 //! child never takes it before on_fiber. Tests and fuzz targets link std.
@@ -20,6 +21,7 @@ pub mod mounts;
 pub mod prepare;
 pub mod procfiles;
 pub mod record;
+pub mod seccomp;
 pub mod sys;
 pub mod zygote;
 
