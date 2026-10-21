@@ -47,10 +47,11 @@ Verification does not reject a token merely because `exp` is in the past. Lease 
 - `policy.isolation` is `UNTRUSTED` or `TRUSTED`, and unset means `UNTRUSTED`. An untrusted grant is admitted only by a home whose runtime isolates tenants from the host kernel (gVisor or Hyperlight). Any other home refuses it with `FailedPrecondition`.
 - `policy.endpoint_mode` is the endpoint mode, `DIRECT` or `HANDOFF`, and unset means `DIRECT`. A `DIRECT` fiber listens on its own endpoint. A `HANDOFF` fiber is reached over TLS through the home's [handoff](glossary.md#handoff) listener. A `HANDOFF` grant must be bound to a caller certificate, and an unbound one is refused with `Unauthenticated`. A home that does not hand off connections refuses the grant with `FailedPrecondition` at admission, as a needs-tier [miss](glossary.md#clone-misses).
 - `device_budget.bytes` and `device_budget.class` are the [device budget](glossary.md#device-budget) and the requested device class. The host enforces the bytes but does not compare the class with the [engine](glossary.md#engine).
+- `disk_budget_bytes` is the per-fiber workspace ceiling in bytes, for the [file calls](#files). Zero means the grant's fibers have no workspace. A home whose runtime gives fibers no workspace refuses a grant that sets it with `FailedPrecondition` at admission. No backend gives fibers a workspace yet, and Hyperlight never will.
 
 ## Fibers service
 
-The `Fibers` service has four RPCs.
+The `Fibers` service has seven RPCs.
 
 ### Clone
 
@@ -123,9 +124,21 @@ The stream does not advertise clone rate, desired replicas, CPU usage or autosca
 
 Snapshot batches are flattened into individual `Status` messages. There is no batch-complete marker or grant-deletion tombstone, and a transition from one grant to zero emits no record. Callers cannot use Watch alone as an authoritative set-reconciliation protocol.
 
+### Files
+
+Three RPCs move files into and out of a running fiber's workspace, which the fiber sees at `/workspace`. Paths are relative to it.
+
+- `Upload(stream UploadRequest) returns (FileInfo)` writes one file. The first message is the header, with the fiber ID, the path and the size. The size must be set, and zero is an empty file. Every later message is a data chunk of at most 1 MiB, and the chunks add up to the size.
+- `Download(DownloadRequest) returns (stream FileChunk)` reads one regular file from `offset`. The first chunk carries its `FileInfo`, and each chunk carries at most 1 MiB.
+- `ListFiles(ListFilesRequest) returns (ListFilesResponse)` lists one directory. An empty `dir` is the workspace itself.
+
+They are authorized like Park, so an unknown fiber and another caller's fiber both answer `NotFound`. A fiber whose grant has no disk budget answers `FailedPrecondition` with a `NoWorkspace` detail. A header whose size is over the disk budget answers `ResourceExhausted` with no `Miss`, before any data is read.
+
+fiberd checks these calls but does not serve them yet. A call that passes every check answers `Unimplemented`.
+
 ## Admission completeness
 
-The protobuf request is the complete clone-time authority. The gRPC interceptor rejects unknown protobuf fields, including unknown fields inside nested messages, with `InvalidArgument`. The JSON gateway uses strict protobuf JSON decoding and rejects unknown JSON fields as well.
+The protobuf request is the complete clone-time authority. The gRPC interceptors reject unknown protobuf fields, including unknown fields inside nested messages, with `InvalidArgument`. They check every message a call receives, the request of a unary call and each message of a stream. The JSON gateway uses strict protobuf JSON decoding and rejects unknown JSON fields as well.
 
 This rule prevents a caller from smuggling workload-shaping fields that the signed grant and admitted template did not cover.
 
@@ -177,6 +190,8 @@ The core returns transport-independent outcomes, and the gRPC layer maps them as
 - A malformed request becomes `InvalidArgument`.
 - An invalid grant, signature, issuer or audience becomes `Unauthenticated`.
 - An unknown fiber becomes `NotFound`.
+- A file call on a fiber whose grant has no workspace becomes `FailedPrecondition` with a `NoWorkspace` detail, so a client tells it apart from a tier gap.
+- A file larger than the disk budget becomes `ResourceExhausted` with no `Miss`, so a client never mistakes it for `SHED`.
 - A Clone runtime failure or missed deadline becomes `DEFERRED_FALLBACK`, whether or not the issuer is reachable. The grant's own task limit is the exception and becomes `SHED`.
 - Admission and template-preparation failures become a capacity miss chosen by whether the issuer is reachable, as below.
 - Park and Release runtime failures become `Internal`.
@@ -216,6 +231,6 @@ Requests and successful responses use protobuf JSON. Errors use `google.rpc.Stat
 - `Unavailable` becomes 503.
 - Other failures become 500.
 
-The HTTP status endpoint returns the current status snapshot. The streaming Watch RPC is available only over gRPC.
+The HTTP status endpoint returns the current status snapshot. The streaming Watch RPC and the [file calls](#files) are available only over gRPC.
 
 Both faces share one transport and one caller identity, described in [grant.md](design/grant.md).
