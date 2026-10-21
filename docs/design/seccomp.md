@@ -31,6 +31,7 @@ The program allows by default. A refusal is an errno and not a kill, because lib
 | netlink other than NETLINK_ROUTE and NETLINK_GENERIC | EPROTONOSUPPORT |
 | `personality` other than the query, PER_LINUX and PER_LINUX32, with or without ADDR_NO_RANDOMIZE | EPERM |
 | io_uring, `bpf`, `userfaultfd`, `perf_event_open`, the keyring calls, `memfd_secret`, `lsm_set_self_attr` | EPERM |
+| `file_setattr`, and `ioctl` with `FS_IOC_FSSETXATTR` or `FS_IOC_SETFLAGS`, which change a file's project quota | EPERM |
 | `ptrace`, `process_vm_readv` and `process_vm_writev`, `kcmp`, `pidfd_getfd` | EPERM |
 | the host's calls (modules, kexec, reboot, swap, `syslog`, clocks, host and domain names, quotas, `acct`, `fanotify_init`) | EPERM |
 | another architecture, or an x86_64 number with the x32 bit, which numbers these calls differently | the process is killed |
@@ -60,7 +61,7 @@ The child's install is one small filter and takes no node-wide lock, so births d
 
 ## Security notes and known gaps
 
-- The filter is a denylist. It narrows the kernel's unprivileged surface, a new call is allowed until it is named, and `ioctl` is not filtered.
+- The filter is a denylist. It narrows the kernel's unprivileged surface, and a new call is allowed until it is named. `ioctl` passes except for the two commands that change a file's project quota, so a proc fiber cannot leave its workspace disk budget. A proc fiber owns its files in the initial user namespace, where `fs/fileattr.c`'s `fileattr_set_prepare` lets an owner set `fsx_projid` and toggle `FS_XFLAG_PROJINHERIT`. `FS_IOC_FSSETXATTR` and its syscall twin `file_setattr` set the project id, and `FS_IOC_SETFLAGS` clears `PROJINHERIT` on a directory so new files land in project 0. A runc fiber is in a nested user namespace, where the same kernel check refuses the change with EINVAL, so it is already safe. Its program refuses these too, since it is the fiber program plus the mount family. gVisor and Hyperlight fibers never reach the host kernel's `fileattr` path.
 - On proc the mount calls are not filtered, since each child mounts its own `/proc` after the clone. A proc fiber has no capability to mount.
 - Capabilities belong to a thread. On runc, an engine thread the template starts before `fz_serve` keeps the container's set. No fiber inherits it, since every fiber forks from the serving thread.
 - The address check refuses the zygote's ordinary `clone3` calls, not code built to jump to the library's instruction. Such code is the template's own, behind the TRUSTED mark.

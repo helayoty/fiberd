@@ -100,6 +100,7 @@
 #include <sys/klog.h>
 #include <sys/personality.h>
 #include <sys/ptrace.h>
+#include <sys/ioctl.h>
 #include <sys/syscall.h>
 #include <sys/uio.h>
 #include <linux/netlink.h>
@@ -739,6 +740,18 @@ static void borrow_errno(const char *arg, char *out, size_t n) {
 #ifndef NETLINK_SOCK_DIAG
 #define NETLINK_SOCK_DIAG 4
 #endif
+/* The quota-escape routes the fiber filter refuses. The ioctl command
+ * numbers are the asm-generic _IOW encodings, the same on x86_64 and
+ * aarch64. file_setattr is FS_IOC_FSSETXATTR's syscall twin. */
+#ifndef FS_IOC_FSSETXATTR
+#define FS_IOC_FSSETXATTR 0x401c5820
+#endif
+#ifndef FS_IOC_SETFLAGS
+#define FS_IOC_SETFLAGS 0x40086602
+#endif
+#ifndef SYS_file_setattr
+#define SYS_file_setattr 469
+#endif
 
 static int probe_sock(int family, int type, int proto) {
     int s = socket(family, type | SOCK_CLOEXEC, proto);
@@ -799,6 +812,35 @@ static int p_sethostname(void) {
     if (gethostname(h, sizeof h - 1) < 0) return -1;
     return sethostname(h, strlen(h));
 }
+/* A temporary file under /tmp an ioctl probe can target. The filter
+ * refuses the command before the kernel reads the descriptor, so the
+ * file's own filesystem does not matter. */
+static int ioctl_on_tmp(unsigned long cmd, void *arg) {
+    char path[] = "/tmp/.ftq-XXXXXX";
+    int fd = mkstemp(path);
+    if (fd < 0) return -1;
+    int rc = ioctl(fd, cmd, arg);
+    int e = errno;
+    close(fd);
+    unlink(path);
+    errno = e;
+    return rc;
+}
+/* Change a file's project id, the proc fiber's route out of its disk
+ * quota. */
+static int p_fssetxattr(void) {
+    unsigned char fsx[28] = {0}; /* struct fsxattr */
+    return ioctl_on_tmp(FS_IOC_FSSETXATTR, fsx);
+}
+/* Clear the inode flags, which would drop FS_PROJINHERIT_FL. */
+static int p_setflags(void) {
+    long flags = 0;
+    return ioctl_on_tmp(FS_IOC_SETFLAGS, &flags);
+}
+/* The syscall twin of FS_IOC_FSSETXATTR, added in Linux 6.13. */
+static int p_file_setattr(void) {
+    return (int)syscall(SYS_file_setattr, 0, (void *)0, 0, 0, 0);
+}
 static void *probe_idle(void *a) { return a; }
 static int p_thread(void) {
     pthread_t t;
@@ -845,6 +887,7 @@ static const struct { const char *name; int (*fn)(void); } probes[] = {
     { "syslog", p_syslog }, { "sethostname", p_sethostname },
     { "thread", p_thread }, { "x32", p_x32 },
     { "mount", p_mount }, { "pivot-root", p_pivot_root }, { "chroot", p_chroot },
+    { "fssetxattr", p_fssetxattr }, { "setflags", p_setflags }, { "file-setattr", p_file_setattr },
 };
 
 /* probe runs the named probe in a child and writes its answer. */
