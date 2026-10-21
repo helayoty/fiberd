@@ -134,7 +134,7 @@ Three RPCs move files into and out of a running fiber's workspace, which the fib
 
 They are authorized like Park, so an unknown fiber and another caller's fiber both answer `NotFound`. A fiber whose grant has no disk budget answers `FailedPrecondition` with a `NoWorkspace` detail. A header whose size is over the disk budget answers `ResourceExhausted` with no `Miss`, before any data is read.
 
-fiberd checks these calls but does not serve them yet. A call that passes every check answers `Unimplemented`.
+Past those checks the home's runtime serves the call on the fiber's workspace. A path with `..`, an absolute path, a NUL, one over 4096 bytes or 64 components, a name that is not a regular file, a body that does not match the declared size, and a sha256 that does not match answer `InvalidArgument`. A missing file or directory answers `NotFound`. A file that does not fit what is left of the disk budget, or a 65537th entry, answers `ResourceExhausted` with no `Miss`. Nothing of a refused upload appears. A parked session's files are not reachable until it is resumed. The stub runtime moves no files and answers `Unimplemented`.
 
 ## Admission completeness
 
