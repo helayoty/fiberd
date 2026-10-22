@@ -10,12 +10,14 @@
 // these choices rest on):
 //
 //   - Warm: `runsc run` the template rootfs with the workload as init. The
-//     workload initialises, drops a ready marker on the bind-mounted run
-//     directory and blocks reading /proc/gvisor/checkpoint; the backend
-//     then takes the template image with `runsc checkpoint
-//     --leave-running`. That blocking read is gVisor's sync point: it is
-//     where every restored sandbox resumes, and it answers "restore"
-//     there (and "resume" in the original).
+//     workload initialises, opens /proc/gvisor/checkpoint, drops a ready
+//     marker on the bind-mounted run directory and blocks reading the
+//     file; the backend then takes the template image with `runsc
+//     checkpoint --leave-running`. That blocking read is gVisor's sync
+//     point: it is where every restored sandbox resumes, and it answers
+//     "restore" there (and "resume" in the original). The read answers
+//     for the first checkpoint after its open, which is why the open
+//     comes before the marker.
 //   - Clone: `runsc restore` the template image into a new sandbox whose
 //     spec carries a one-shot token. The workload claims it on the pool
 //     socket at /fiberd/channel and gets its fence, endpoint, payload,
@@ -910,14 +912,18 @@ func (b *Backend) Warm(ctx context.Context, sp backend.WarmSpec) (backend.Warm, 
 		return backend.Warm{}, err
 	}
 	w.pid = b.pidOf(ctx, w.cid)
-	// The workload drops the marker once its init is done and blocks in
-	// its read of /proc/gvisor/checkpoint; the template image is taken
-	// there, from outside, and the original keeps running.
+	// The workload opens /proc/gvisor/checkpoint once its init is done,
+	// drops the marker and blocks in its read of the file; the template
+	// image is taken here, from outside, and the original keeps running.
+	// The open registers for the next checkpoint, so the image may be
+	// taken the moment the marker shows. A workload that opened the file
+	// after the marker could be imaged in between, and every sandbox
+	// restored from that image would open the file after its restore and
+	// wait for a checkpoint that never comes, never claiming its token.
 	if err := waitFile(ctx, marker, false); err != nil {
 		_, _ = b.runsc(context.Background(), -1, "delete", "-force", w.cid)
 		return backend.Warm{}, fmt.Errorf("gvisor: template did not become ready: %w", err)
 	}
-	time.Sleep(20 * time.Millisecond) // let it reach the read after dropping the marker
 	if ctx.Err() != nil {
 		// Close ended the wait: nothing is written where the tmpfs was.
 		_, _ = b.runsc(context.Background(), -1, "delete", "-force", w.cid)
@@ -964,6 +970,12 @@ func (b *Backend) Warm(ctx context.Context, sp backend.WarmSpec) (backend.Warm, 
 // errClosed is Warm's answer once Close has begun.
 var errClosed = errors.New("gvisor: backend closed")
 
+// probeHung logs a footprint probe that did not serve by the cap, with
+// the time since its restore and what is known of the sandbox.
+func probeHung(err error, t0 time.Time, what string) {
+	log.Printf("gvisor: footprint probe did not serve: %v (%s after its restore, %s)", err, time.Since(t0).Round(time.Millisecond), what)
+}
+
 // probeFootprint restores the template image once into the given empty
 // cgroup exactly as a fiber would be, reads the cgroup (its shmem, the
 // guest memory, and its memory.current), and ends it. 0 when it cannot
@@ -997,13 +1009,18 @@ func (b *Backend) probeFootprint(ctx context.Context, w *warm, cgroupFD int) (sh
 	conn, err := b.claimOrServe(pctx, w, x)
 	switch {
 	case err != nil:
-		log.Printf("gvisor: footprint probe did not serve: %v", err)
+		// A sandbox still running at the cap neither claimed nor served:
+		// it hangs after its restore, which a slow restore does not look
+		// like. The line names the time, not the token.
+		probeHung(err, t0, "sandbox "+x.state())
 		return 0, 0
 	case conn == nil:
 		w.noPool = true
 	default:
 		if _, err := b.bind(pctx, x, conn, "clone", "probe", "/host/probe.sock", nil, "", 1); err != nil {
-			log.Printf("gvisor: footprint probe did not serve: %v", err)
+			// bind has killed it by now, so its state says nothing. That
+			// it claimed and then never served is what is known.
+			probeHung(err, t0, "claimed its token, then never served")
 			return 0, 0
 		}
 	}
@@ -1044,6 +1061,17 @@ func (b *Backend) claimOrServe(ctx context.Context, w *warm, x *box) (net.Conn, 
 			return nil, errors.New("sandbox exited before serving")
 		case <-time.After(5 * time.Millisecond):
 		}
+	}
+}
+
+// state says whether x still runs, for the log line of a sandbox that
+// went silent.
+func (x *box) state() string {
+	select {
+	case <-x.done:
+		return "exited"
+	default:
+		return "still running"
 	}
 }
 

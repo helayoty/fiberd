@@ -369,6 +369,33 @@ def test_listen_unix(sock_dir):
         assert s.family == socket.AF_UNIX and os.path.exists(ep)
 
 
+def ipv6_loopback():
+    """Whether this host can bind ::1, which a container without IPv6 cannot."""
+    try:
+        with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as s:
+            s.bind(("::1", 0))
+    except OSError:
+        return False
+    return True
+
+
+LISTEN_TCP = [
+    # the endpoint, the family and address the listener binds
+    ("ipv4", "tcp://127.0.0.1:0", socket.AF_INET, "127.0.0.1"),
+    ("ipv6", "tcp://[::1]:0", socket.AF_INET6, "::1"),
+]
+
+
+@table(LISTEN_TCP)
+def test_listen_tcp_binds_the_named_host(name, f0, f1, f2):
+    """fiberd advertises and relays on the endpoint's host, so the fiber listens there and not on every interface."""
+    if f1 == socket.AF_INET6 and not ipv6_loopback():
+        pytest.skip("no IPv6 loopback here")
+    f = ft.Fiber("g/1/1", f0, b"", "", {})
+    with f.listen() as s:
+        assert s.family == f1 and s.getsockname()[0] == f2
+
+
 def test_listen_handoff_refused():
     f = ft.Fiber("g/1/1", "handoff", b"", "", {"FIBERD_CHANNEL_FD": "4"})
     assert f.kind == "handoff"
@@ -482,11 +509,63 @@ class FakeGvisorExt(FakeExt):
 
 
 def gvisor_here(monkeypatch, tmp_path, answers):
-    """A fake sandbox: detect says gVisor, the checkpoint read answers from answers, the ready marker lands in tmp_path."""
+    """A fake sandbox: detect says gVisor, each checkpoint read answers from answers on a descriptor of no file, the ready marker lands in tmp_path."""
     monkeypatch.setattr(ft._gvisor, "detect", lambda *a, **k: True)
-    monkeypatch.setattr(ft._gvisor, "wait_checkpoint", lambda path=None: answers.pop(0))
+    monkeypatch.setattr(ft._gvisor, "open_checkpoint", lambda path=None: -1)
+    monkeypatch.setattr(ft._gvisor, "read_checkpoint", lambda fd: answers.pop(0))
     monkeypatch.setattr(ft._gvisor, "READY_MARKER", str(tmp_path / "warm.ready"))
     monkeypatch.setattr(ft, "_rebuild_environ", lambda env: None)
+
+
+def descriptors_on(path):
+    """How many of this process's descriptors are open on path, which Linux's /proc tells."""
+    fds = "/proc/self/fd"
+    n = 0
+    for name in os.listdir(fds):
+        try:
+            if os.readlink(os.path.join(fds, name)) == path:
+                n += 1
+        except OSError:
+            continue
+    return n
+
+
+REGISTERED = [
+    # what lets the backend take the next checkpoint, when the loop must already hold the file open
+    ("the ready marker lets it take the template image", "mark"),
+    ("an incarnation serving lets it take a park", "fiber"),
+]
+
+
+@pytest.mark.skipif(not os.path.isdir("/proc/self/fd"), reason="the witness is /proc/self/fd")
+@table(REGISTERED)
+def test_serve_on_gvisor_opens_the_checkpoint_file_before_it_lets_the_backend_checkpoint(tmp_path, monkeypatch, name, f0):
+    """The checkpoint file is open before the marker and before each incarnation, since a read answers only for checkpoints taken after its open."""
+    checkpoint = tmp_path / "checkpoint"
+    checkpoint.write_text("restore\n")
+    monkeypatch.setattr(ft._gvisor, "CHECKPOINT", str(checkpoint))
+    monkeypatch.setattr(ft._gvisor, "READY_MARKER", str(tmp_path / "warm.ready"))
+    monkeypatch.setattr(ft._gvisor, "detect", lambda *a, **k: True)
+    monkeypatch.setattr(ft, "_rebuild_environ", lambda env: None)
+    ext = FakeGvisorExt([("clone", "g/1/1", "/host/1-1.sock", b"", os.urandom(32), "", 1)])
+    monkeypatch.setattr(ft, "_ext", lambda: ext)
+    monkeypatch.setattr(ft, "_inited", True)
+    monkeypatch.setattr(ft, "PROC_SELF", one_thread_proc(tmp_path))
+    held = {}
+    real_mark = ft._gvisor.mark_ready
+
+    def mark(marker):
+        held["mark"] = descriptors_on(str(checkpoint))
+        real_mark(marker)
+
+    monkeypatch.setattr(ft._gvisor, "mark_ready", mark)
+
+    def on_fiber(f):
+        held["fiber"] = descriptors_on(str(checkpoint))
+        return 7
+
+    assert ft.serve(on_fiber) == 7
+    assert held[f0] == 1, f"the checkpoint file must be open when {name}"
 
 
 def test_init_on_gvisor_skips_the_library(tmp_path, monkeypatch):
