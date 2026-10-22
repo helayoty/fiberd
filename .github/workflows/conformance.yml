@@ -133,8 +133,26 @@ jobs:
           if-no-files-found: ignore
 
   overcommit:
-    name: 2x overcommit storm parks before any OOM kill
+    name: 2x overcommit storm parks before any OOM kill, and its baselines without fiberd
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - run: make overcommit
+      # One run measures three sides in one 384 MiB container: fiberd,
+      # then the same storm on plain processes, shared and separate. Only
+      # the fiberd side decides the exit status. The baselines' OOM kills
+      # are expected.
+      - name: storm, fiberd side then both baselines
+        shell: bash
+        run: mkdir -p bin && make overcommit 2>&1 | tee bin/overcommit.log
+      # Each side's "storm summary:" line, the record docs/benchmarks.md
+      # copies, on the run's summary page.
+      - name: summary lines
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo '### Overcommit storm, one line per side'
+            echo '```'
+            grep '^storm summary:' bin/overcommit.log || echo 'no summary lines (see the storm step)'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
