@@ -12,9 +12,11 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
+	"github.com/helayoty/fiberd/pkg/backend"
 	"github.com/helayoty/fiberd/pkg/core"
 	"github.com/helayoty/fiberd/pkg/runtime/host/wsfs"
 )
@@ -170,6 +172,82 @@ func TestWorkspaceLifecycle(t *testing.T) {
 			}
 			if _, err := r.Upload(ctx, h.ID, "a.txt", 1, 0o644, nil, strings.NewReader("x")); !errors.Is(err, core.ErrFiberUnknown) {
 				t.Fatalf("Upload after the end = %v, want ErrFiberUnknown", err)
+			}
+		})
+	}
+}
+
+// TestWorkspaceOwner checks that a backend that maps the grant's root
+// into a user namespace (runc) gets workspaces owned by that root, the
+// tree and every file fiberd writes into it, so the fiber, uid 0
+// inside, can write what it was given. A mapper that refuses the grant
+// at the birth leaves no workspace. The mapped root here is the test's
+// own uid, the one owner a chown without privilege may name. The
+// foreign uid is tests/integration/runc TestWorkspaceRoundTrip.
+func TestWorkspaceOwner(t *testing.T) {
+	cases := []struct {
+		name    string
+		mapper  bool
+		refuse  bool // the mapper refuses once the template is prepared
+		wantErr string
+	}{
+		{name: "no mapper keeps fiberd's ids"},
+		{name: "the mapped root owns the tree and the uploads", mapper: true},
+		{name: "a mapper that refuses at the birth leaves no workspace", mapper: true, refuse: true, wantErr: "workspace owner of grant g1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			uid, gid := os.Geteuid(), os.Getegid()
+			if tc.mapper && uid != 0 && uid != gid {
+				t.Skip("the mapped root's gid is its uid, which this user cannot chown to")
+			}
+			var be backend.Backend = newWorkspaceBackend(core.TierCheckpoint)
+			m := &idMapperMixin{uid: uint32(uid)}
+			if tc.mapper {
+				be = &struct {
+					workspaceCodecBackend
+					*idMapperMixin
+				}{newWorkspaceBackend(core.TierCheckpoint), m}
+			}
+			r := newTestRuntime(t, be, nil)
+			g := core.Grant{UID: "g1", TemplateDigest: "sha256:tmpl", FiberMax: 2, WBudgetBytes: 64 * mib, DiskBudgetBytes: 1 << 20}
+			ctx := context.Background()
+			if err := r.PrepareTemplate(ctx, g); err != nil {
+				t.Fatal(err)
+			}
+			if tc.refuse {
+				m.err = errors.New("fake: range revoked")
+			}
+			fence := core.Fence{GrantUID: g.UID, Epoch: 1, Seq: 1}
+			dir := r.workspaceDir(fence)
+			h, err := r.Clone(ctx, core.CloneSpec{Grant: g, Fence: fence, CallerCert: callerDER})
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("Clone = %v, want %q", err, tc.wantErr)
+				}
+				if exists(dir) {
+					t.Fatalf("%s remains after the refused birth", dir)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Clone: %v", err)
+			}
+			defer func() { _ = r.Release(ctx, h.ID, false) }()
+			uploadString(t, r, h.ID, "in/data.txt", "hello")
+			wantGID := gid
+			if tc.mapper {
+				wantGID = uid
+			}
+			for _, rel := range []string{"root", "root/in", "root/in/data.txt"} {
+				st, err := os.Lstat(filepath.Join(dir, rel))
+				if err != nil {
+					t.Fatal(err)
+				}
+				sys, _ := st.Sys().(*syscall.Stat_t)
+				if sys == nil || int(sys.Uid) != uid || int(sys.Gid) != wantGID {
+					t.Fatalf("%s is owned by %v, want %d:%d", rel, sys, uid, wantGID)
+				}
 			}
 		})
 	}

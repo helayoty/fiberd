@@ -1,6 +1,6 @@
 # Design: wsfs
 
-This doc explains the file layer of a [fiber](../glossary.md#fiber)'s workspace, the tree a caller uploads into and downloads from. It is for readers of `pkg/runtime/host/wsfs` and anyone auditing what [fiberd](../glossary.md#fiberd) does as root in a tree a fiber controls. Read [runtime-host.md](runtime-host.md) first. The host runtime opens one workspace per fiber of a grant with a disk budget, serves the file calls on it, captures it at park and unpacks it at resume, and the proc backend mounts its root at `/workspace` in the fiber.
+This doc explains the file layer of a [fiber](../glossary.md#fiber)'s workspace, the tree a caller uploads into and downloads from. It is for readers of `pkg/runtime/host/wsfs` and anyone auditing what [fiberd](../glossary.md#fiberd) does as root in a tree a fiber controls. Read [runtime-host.md](runtime-host.md) first. The host runtime opens one workspace per fiber of a grant with a disk budget, serves the file calls on it, captures it at park and unpacks it at resume, and the proc or runc backend mounts its root at `/workspace` in the fiber.
 
 ## Purpose
 
@@ -35,6 +35,6 @@ flowchart LR
 - The fiber's own writes never pass through this layer, so the budget counts only what fiberd writes.
 - Entry accounting on upload is best effort. The name is checked before the reservation and the fiber may add or remove it in between. The bytes are exact for what fiberd wrote, and what fiberd wrote is remembered by inode in memory, so a restart forgets it and replacing an older file then gives nothing back.
 - The read of exactly the declared size ends when the body does. A stream that keeps the connection open after the last byte holds the upload and its reservation until the transport's idle timeout, which is the RPC layer's to set.
-- Ownership of what fiberd writes is `Owner`, applied by descriptor to staged files, to directories made on the way, and to a name fiberd just made only after it is pinned and found to be of the type fiberd made. Which id a backend hands in is that backend's decision.
+- Ownership of what fiberd writes is `Owner`, applied by descriptor to staged files, to directories made on the way, and to a name fiberd just made only after it is pinned and found to be of the type fiberd made. The host sets it to the grant's mapped root on runc and leaves it unset on proc ([runtime-host.md](runtime-host.md)).
 - Directories made on the way to an upload that then fails stay behind, uncounted.
 - Directory modes come back from an archive with the owner's `rwx` added, so the rest of the archive can land inside.
