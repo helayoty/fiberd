@@ -55,7 +55,7 @@ func TestWorkersOf(t *testing.T) {
 // TestTally pins the kill accounting of the baseline's summary line.
 func TestTally(t *testing.T) {
 	growth := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
-	at := func(d time.Duration) time.Time { return growth.Add(d) }
+	at := growth.Add
 	var alive time.Time
 	cases := []struct {
 		name         string
