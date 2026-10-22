@@ -2,6 +2,8 @@
 // directory polled for *.jwt files. A new or changed file is GrantAdded
 // with its contents; a removed file is GrantRemoved with the UID read
 // (unverified: it is only used to stop admissions) from the last copy.
+// An empty file is skipped until its token is written, so emptying a
+// grant's file to rewrite it does not remove the grant.
 // The standalone home points it at -grants-dir; the Kubernetes home at
 // the Secret volume the issuer controller projects grants into.
 package grantdir
@@ -78,8 +80,18 @@ func scan(ctx context.Context, dir string, seen map[string]fileState, ch chan<- 
 		if st, ok := seen[name]; ok && st.mod.Equal(info.ModTime()) && st.size == info.Size() {
 			continue
 		}
+		// A writer creates or truncates the file before it writes the
+		// token, so an empty file is never a grant. It stays present,
+		// so a grant being rewritten is not removed. It is not seen
+		// either, so the poll that finds its bytes delivers them. A
+		// file whose size changed while it was read is retried the
+		// same way. A token only partly written can still be read. It
+		// fails Verify, and once its size changes it is sent whole.
+		if info.Size() == 0 {
+			continue
+		}
 		tok, err := os.ReadFile(path)
-		if err != nil {
+		if err != nil || int64(len(tok)) != info.Size() {
 			continue
 		}
 		uid, _ := grant.PeekUID(string(tok))
