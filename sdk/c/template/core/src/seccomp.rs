@@ -592,7 +592,10 @@ pub fn install(which: Program) -> Result<(), Refusal> {
             Program::Fiber => &PROG,
             Program::Runc => &PROG_RUNC,
         }
-        .gated(crate::child::gate_addr(), crate::child::move_mount_gate_addr());
+        .gated(
+            crate::child::gate_addr(),
+            crate::child::move_mount_gate_addr(),
+        );
         let prog = libc::sock_fprog {
             len: p.len,
             // The kernel copies the program and writes nothing through
@@ -1287,7 +1290,13 @@ pub(crate) mod tests {
         let cases: &[(&str, u64, u32, u32, u32)] = &[
             ("at its gate", MOVE_GATE, ALLOW, ALLOW, EPERM),
             ("one byte past its gate", MOVE_GATE + 1, EPERM, ALLOW, EPERM),
-            ("one byte before its gate", MOVE_GATE - 1, EPERM, ALLOW, EPERM),
+            (
+                "one byte before its gate",
+                MOVE_GATE - 1,
+                EPERM,
+                ALLOW,
+                EPERM,
+            ),
             (
                 "its gate's low word under another high word",
                 MOVE_GATE ^ (1 << 40),
@@ -1305,7 +1314,13 @@ pub(crate) mod tests {
             ("at clone3's gate", GATE, EPERM, ALLOW, EPERM),
             ("elsewhere in the library", ELSEWHERE, EPERM, ALLOW, EPERM),
             ("address zero", 0, EPERM, ALLOW, EPERM),
-            ("the unwritten compare's address", u64::MAX, EPERM, ALLOW, EPERM),
+            (
+                "the unwritten compare's address",
+                u64::MAX,
+                EPERM,
+                ALLOW,
+                EPERM,
+            ),
         ];
         let arches: &[(&str, &Arch)] = &[("x86_64", &X86_64), ("aarch64", &AARCH64)];
         let child = child_prog();
@@ -1356,7 +1371,11 @@ pub(crate) mod tests {
             assert_eq!(usize::from(p.len), *len, "{name}: length");
             assert_eq!(p.words().len(), *len, "{name}: live words");
             assert!(p.check(), "{name}");
-            assert_eq!(p.move_gate.is_some(), *has_move_gate, "{name}: a move_mount gate");
+            assert_eq!(
+                p.move_gate.is_some(),
+                *has_move_gate,
+                "{name}: a move_mount gate"
+            );
             // Each gate's two compares, low then high, hold NO_GATE until
             // gated writes the address, and gated writes each gate's own.
             let clone3 = p.gate.map(usize::from);
@@ -1371,7 +1390,11 @@ pub(crate) mod tests {
             assert_eq!(g.len, p.len, "{name}: gated keeps the length");
             assert!(g.check(), "{name}: gated");
             for (gate, [lo, hi], addr) in &gates {
-                assert_eq!(*hi, lo + 2, "{name}: the {gate} compares sit two words apart");
+                assert_eq!(
+                    *hi,
+                    lo + 2,
+                    "{name}: the {gate} compares sit two words apart"
+                );
                 for (what, i) in [("low", *lo), ("high", *hi)] {
                     let w = p.words[i];
                     assert_eq!(
@@ -1379,10 +1402,17 @@ pub(crate) mod tests {
                         JEQ_K,
                         "{name}: the {gate} gate's {what} compare's code"
                     );
-                    assert_eq!(w.k, NO_GATE, "{name}: the {gate} {what} compare before gated");
+                    assert_eq!(
+                        w.k, NO_GATE,
+                        "{name}: the {gate} {what} compare before gated"
+                    );
                 }
                 assert_eq!(g.words[*lo].k, *addr as u32, "{name}: the {gate} low word");
-                assert_eq!(g.words[*hi].k, (*addr >> 32) as u32, "{name}: the {gate} high word");
+                assert_eq!(
+                    g.words[*hi].k,
+                    (*addr >> 32) as u32,
+                    "{name}: the {gate} high word"
+                );
             }
             if let Some([lo, _]) = p.move_gate {
                 assert!(
@@ -1547,7 +1577,10 @@ pub(crate) mod tests {
             ("clone3", CLONE3, libc::SYS_clone3),
             ("move_mount", MOVE_MOUNT, libc::SYS_move_mount),
         ];
-        assert!(!NATIVE.mounts.contains(&MOVE_MOUNT), "move_mount is gated, not in the mount list");
+        assert!(
+            !NATIVE.mounts.contains(&MOVE_MOUNT),
+            "move_mount is gated, not in the mount list"
+        );
         for (name, got, want) in checked {
             assert_eq!(c_long::from(*got), *want, "{name}");
         }
@@ -1705,7 +1738,10 @@ pub(crate) mod tests {
             Program::Fiber => &PROG,
             Program::Runc => &PROG_RUNC,
         }
-        .gated(crate::child::gate_addr(), crate::child::move_mount_gate_addr());
+        .gated(
+            crate::child::gate_addr(),
+            crate::child::move_mount_gate_addr(),
+        );
         let prog = libc::sock_fprog {
             len: p.len,
             filter: p.words.as_ptr().cast_mut(),
