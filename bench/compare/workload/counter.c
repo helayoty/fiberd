@@ -121,25 +121,32 @@ static void serve_conn(int fd, unsigned long *counter) {
 }
 
 /* Listen on an endpoint as fiberd spells it: a unix socket path, or
- * tcp://host:port (bound on the wildcard of the family, as refzygote
- * does). Returns the listening fd or -1. */
+ * tcp://host:port. A TCP listener binds the host the endpoint names, as
+ * refzygote does, since fiberd advertises and relays on exactly that
+ * address. The host is an IP literal, an IPv6 one in brackets, or the
+ * call fails with EINVAL. Returns the listening fd or -1. */
 static int listen_endpoint(const char *ep) {
     if (strncmp(ep, "tcp://", 6) == 0) {
-        const char *colon = strrchr(ep + 6, ':');
+        const char *hp = ep + 6;
+        const char *colon = strrchr(hp, ':');
         if (!colon) { errno = EINVAL; return -1; }
-        int port = atoi(colon + 1), v6 = ep[6] == '[';
+        int port = atoi(colon + 1), v6 = hp[0] == '[';
+        const char *h = hp + v6, *end = colon;
+        if (v6 && (end == h || end[-1] != ']')) { errno = EINVAL; return -1; }
+        if (v6) end--;
+        char host[INET6_ADDRSTRLEN];
+        size_t hlen = (size_t)(end - h);
+        if (hlen == 0 || hlen >= sizeof host) { errno = EINVAL; return -1; }
+        memcpy(host, h, hlen);
+        host[hlen] = 0;
+        struct sockaddr_in6 a6 = { .sin6_family = AF_INET6, .sin6_port = htons((uint16_t)port) };
+        struct sockaddr_in a4 = { .sin_family = AF_INET, .sin_port = htons((uint16_t)port) };
+        if (inet_pton(v6 ? AF_INET6 : AF_INET, host, v6 ? (void *)&a6.sin6_addr : (void *)&a4.sin_addr) != 1) { errno = EINVAL; return -1; }
         int s = socket(v6 ? AF_INET6 : AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
         if (s < 0) return -1;
         int one = 1;
         setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
-        int rc;
-        if (v6) {
-            struct sockaddr_in6 a6 = { .sin6_family = AF_INET6, .sin6_port = htons((uint16_t)port), .sin6_addr = in6addr_any };
-            rc = bind(s, (struct sockaddr *)&a6, sizeof a6);
-        } else {
-            struct sockaddr_in a4 = { .sin_family = AF_INET, .sin_port = htons((uint16_t)port), .sin_addr.s_addr = htonl(INADDR_ANY) };
-            rc = bind(s, (struct sockaddr *)&a4, sizeof a4);
-        }
+        int rc = v6 ? bind(s, (struct sockaddr *)&a6, sizeof a6) : bind(s, (struct sockaddr *)&a4, sizeof a4);
         if (rc < 0 || listen(s, 64) < 0) { int e = errno; close(s); errno = e; return -1; }
         return s;
     }
@@ -243,11 +250,19 @@ static int on_fiber(const fz_incarnation_t *f) {
 
 /* ---- gVisor mode, as refzygote does it ---------------------------------- */
 
-/* Blocks until the next checkpoint of this sandbox completes. 1 when
- * running in a sandbox restored from it, 0 when resumed in place. */
-static int wait_checkpoint(void) {
+/* Registers for the next checkpoint of this sandbox. The read answers
+ * for the first checkpoint after the open, so the open comes before
+ * whatever lets the backend checkpoint, as in refzygote. */
+static int open_checkpoint(void) {
     int fd = open("/proc/gvisor/checkpoint", O_RDONLY);
     if (fd < 0) { perror("counter: /proc/gvisor/checkpoint"); exit(6); }
+    return fd;
+}
+
+/* Blocks until the checkpoint fd registered for completes, and closes
+ * fd. 1 when running in a sandbox restored from it, 0 when resumed in
+ * place. */
+static int read_checkpoint(int fd) {
     char buf[32]; ssize_t n;
     while ((n = read(fd, buf, sizeof buf - 1)) < 0 && errno == EINTR) {}
     close(fd);
@@ -259,12 +274,15 @@ static int wait_checkpoint(void) {
 static int gvisor_main(void) {
     struct sigaction sa = { .sa_handler = on_usr1 };
     sigaction(SIGUSR1, &sa, NULL);
+    int ck = open_checkpoint();
     int m = open("/host/warm.ready", O_CREAT | O_WRONLY, 0644);
     if (m < 0) { perror("counter: /host/warm.ready"); return 6; }
     close(m);
     unsigned long counter = 0;
     for (;;) {
-        if (!wait_checkpoint()) continue;
+        int restored = read_checkpoint(ck);
+        ck = open_checkpoint(); /* for the park that ends this incarnation */
+        if (!restored) continue;
         /* A sandbox restored from the image. Its identity and a fresh
          * seed come on fiberd's channel, see refzygote. */
         fz_incarnation_t id;

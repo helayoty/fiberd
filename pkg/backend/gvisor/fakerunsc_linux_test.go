@@ -85,6 +85,10 @@ type knobs struct {
 	// SlowRestore is how long a restore takes before the sandbox is up.
 	// The context ending cuts it short, as it kills a real runsc.
 	SlowRestore time.Duration
+	// EndsFirst holds a restore until its sandbox has ended, as one whose
+	// workload dies at once can before runsc returns. The pid file still
+	// names it, as runsc wrote it when the sandbox started.
+	EndsFirst bool
 	// SlowCheckpt is how long a checkpoint that ends the sandbox takes
 	// after it is gone, as a real one's image flush and cleanup do.
 	SlowCheckpt time.Duration
@@ -339,11 +343,21 @@ func (f *fakeRunsc) run(ctx context.Context, cgroupFD int, args []string, out io
 				}
 			}
 		}
-		if err := f.startSandbox(cid, flag("--bundle"), k, out); err != nil {
+		x, err := f.startSandbox(cid, flag("--bundle"), k, out)
+		if err != nil {
 			return err
 		}
+		if cmd == "restore" && k.EndsFirst {
+			select {
+			case <-x.done:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+		// The pid the sandbox started with, which runsc writes whether or
+		// not the sandbox has ended since.
 		if pf := flag("--pid-file"); pf != "" && !k.NoPidFile {
-			if err := os.WriteFile(pf, []byte(fmt.Sprintf("%d\n", f.pidOf(cid))), 0o644); err != nil {
+			if err := os.WriteFile(pf, []byte(fmt.Sprintf("%d\n", x.pid)), 0o644); err != nil {
 				return fail("pid file")
 			}
 		}
@@ -377,20 +391,27 @@ func (f *fakeRunsc) run(ctx context.Context, cgroupFD int, args []string, out io
 		_, _ = fmt.Fprintf(out, `{"id": %q, "pid": %d, "status": "running"}`+"\n", cid, pid)
 		return nil
 	case "wait":
+		// How the sandbox itself ended, running or not, as runsc keeps it
+		// until the delete.
 		f.mu.Lock()
 		x := f.boxes[cid]
+		if x == nil {
+			x = f.ended[cid]
+		}
 		f.mu.Unlock()
+		status := k.ExitStatus
 		if x != nil {
 			select {
 			case <-x.done:
 			case <-ctx.Done():
 				return ctx.Err()
 			}
+			status = x.status
 		}
 		if k.BadWaitJSON {
 			_, _ = fmt.Fprintln(out, "not json")
 		} else {
-			_, _ = fmt.Fprintf(out, `{"id": %q, "exitStatus": %d}`+"\n", cid, k.ExitStatus)
+			_, _ = fmt.Fprintf(out, `{"id": %q, "exitStatus": %d}`+"\n", cid, status)
 		}
 		return nil
 	case "kill":
@@ -415,17 +436,18 @@ func (f *fakeRunsc) run(ctx context.Context, cgroupFD int, args []string, out io
 }
 
 // startSandbox brings up the sandbox for the bundle, as `runsc run
-// --detach` returns with the sandbox up.
-func (f *fakeRunsc) startSandbox(cid, bundle string, k knobs, out io.Writer) error {
+// --detach` returns with the sandbox up. It returns the sandbox, which
+// may have ended by the time the caller looks.
+func (f *fakeRunsc) startSandbox(cid, bundle string, k knobs, out io.Writer) (*fakeSandbox, error) {
 	data, err := os.ReadFile(filepath.Join(bundle, "config.json"))
 	if err != nil {
 		_, _ = fmt.Fprintf(out, "fake runsc: bundle: %v\n", err)
-		return errExit
+		return nil, errExit
 	}
 	var s spec
 	if err := json.Unmarshal(data, &s); err != nil {
 		_, _ = fmt.Fprintf(out, "fake runsc: bundle: %v\n", err)
-		return errExit
+		return nil, errExit
 	}
 	host, channel := "", ""
 	for _, m := range s.Mounts {
@@ -449,7 +471,7 @@ func (f *fakeRunsc) startSandbox(cid, bundle string, k knobs, out io.Writer) err
 		if !k.NoMarker {
 			if err := os.WriteFile(filepath.Join(host, readyMarker), nil, 0o644); err != nil {
 				_, _ = fmt.Fprintf(out, "fake runsc: marker: %v\n", err)
-				return errExit
+				return nil, errExit
 			}
 		}
 	case x.token != "" && !k.NoToken:
@@ -458,7 +480,7 @@ func (f *fakeRunsc) startSandbox(cid, bundle string, k knobs, out io.Writer) err
 	case env["FIBERD_ENDPOINT"] != "" && !k.NoServe:
 		if err := f.serve(x, host, env["FIBERD_ENDPOINT"]); err != nil {
 			_, _ = fmt.Fprintf(out, "fake runsc: listen: %v\n", err)
-			return errExit
+			return nil, errExit
 		}
 	}
 	f.mu.Lock()
@@ -468,7 +490,7 @@ func (f *fakeRunsc) startSandbox(cid, bundle string, k knobs, out io.Writer) err
 		if x.ln != nil {
 			_ = x.ln.Close()
 		}
-		return errExit
+		return nil, errExit
 	}
 	// A pid of the fake's own, never reused, so the reaper's await can
 	// tell one sandbox from the next as a pidfd would.
@@ -482,7 +504,7 @@ func (f *fakeRunsc) startSandbox(cid, bundle string, k knobs, out io.Writer) err
 		}
 		go f.dialPool(x, host, sock, k)
 	}
-	return nil
+	return x, nil
 }
 
 // serve binds the sandbox's endpoint, ep as the sandbox names it under
