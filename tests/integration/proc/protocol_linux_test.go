@@ -102,11 +102,11 @@ func readLine(t *testing.T, uc *net.UnixConn, rd *bufio.Reader) string {
 	return strings.TrimSuffix(line, "\n")
 }
 
-// tcpEndpoint is a "tcp://host:0" endpoint of exactly n characters. The
-// host is padding, since refzygote binds the wildcard address.
+// tcpEndpoint is a tcp endpoint on 127.0.0.1 of exactly n characters.
+// The port is zeros, which read as 0, since refzygote binds the host.
 func tcpEndpoint(n int) string {
-	const head, tail = "tcp://", ":0"
-	return head + strings.Repeat("h", n-len(head)-len(tail)) + tail
+	const head = "tcp://127.0.0.1:"
+	return head + strings.Repeat("0", n-len(head))
 }
 
 // TestControlProtocolLines sends the zygote lines the backend never would
@@ -142,8 +142,9 @@ func TestControlProtocolLines(t *testing.T) {
 			want: "ERROR " + long[:127] + " malformed CLONE",
 		},
 		{
-			// A tcp endpoint binds the wildcard whatever its host says,
-			// so the length is all that is checked here.
+			// The template binds the host the endpoint names, so the host
+			// is a real literal and the port is padded with zeros, which
+			// still read as port 0.
 			name: "an endpoint of 1023 characters is born",
 			line: "CLONE ep1023 " + tcpEndpoint(1023) + " 2000 - -",
 			want: "CLONED ep1023 ",
