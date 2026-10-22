@@ -304,6 +304,13 @@ storm-grower-test: ## storm-grower's own C unit test (hack/storm/grower/grower_t
 	$(CC) $(ZYGOTE_CFLAGS) $(ZYGOTE_LDFLAGS) -Wall -Wextra -o $(BIN)/storm-grower-test hack/storm/grower/grower_test.c
 	$(BIN)/storm-grower-test
 
+## The fake CUDA driver the engine's CUDA path runs on in CI. Linux only.
+## A shared library takes -fPIC and -shared where the zygote takes -pie.
+
+fakecuda: ## build bin/fakecuda/libcuda.so.1 (sdk/c/template/fakecuda) with the zygote's hardening flags
+	@mkdir -p $(BIN)/fakecuda
+	$(CC) $(ZYGOTE_CFLAGS) -fPIC -fvisibility=hidden $(filter-out -pie,$(ZYGOTE_LDFLAGS)) -shared -Wl,-soname,libcuda.so.1 -Wall -Wextra -pthread -o $(BIN)/fakecuda/libcuda.so.1 sdk/c/template/fakecuda/fakecuda.c
+
 zygote-check: zygote-core ## check the core archive's undefined symbols against the allowlist and count its PAC instructions
 	$(CORE_DIR)/check.sh $(CORE_LIB)
 

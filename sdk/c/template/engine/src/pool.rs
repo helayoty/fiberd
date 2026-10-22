@@ -13,10 +13,21 @@ use std::ptr;
 
 use crate::proto::{self, Fnv};
 
-/// A sticky device error, named by one word. The engine exits on one,
-/// since a fault may have poisoned the pool for every fiber.
+/// A device error, named by one word.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Fault(pub &'static str);
+pub enum Fault {
+    /// The engine exits, since the fault may have poisoned the pool for
+    /// every fiber. A sticky driver error, a half-done move or a bug.
+    Fatal(&'static str),
+    /// The one request fails with `err device` and the engine serves on.
+    /// A driver error that leaves the context usable.
+    Soft(&'static str),
+}
+
+/// A range past the pool, which only a bug in Pool could ask for.
+const RANGE: Fault = Fault::Fatal("range");
+/// Slice sums that do not add up, a bug.
+const ACCOUNTING: Fault = Fault::Fatal("accounting");
 
 /// The bytes of one pool. The engine opens the device, sends ENGINE
 /// and GPU, then calls allocate once before READY. Offsets and lengths
@@ -39,7 +50,8 @@ pub trait Device {
     /// FNV-1a 64 over len bytes at off.
     fn hash(&mut self, off: u64, len: u64) -> Result<u64, Fault>;
     /// Moves len bytes from from to to, ranges that may overlap, so the
-    /// pool can close its gaps.
+    /// pool can close its gaps. Any failure is Fatal, since a half-done
+    /// move leaves another fiber's slice torn.
     fn copy(&mut self, from: u64, to: u64, len: u64) -> Result<(), Fault>;
 }
 
@@ -105,15 +117,15 @@ impl Sim {
     /// which only a bug in Pool could ask for.
     fn range(&mut self, off: u64, len: u64) -> Result<&mut [u8], Fault> {
         let (a, n) = span(off, len)?;
-        let end = a.checked_add(n).ok_or(Fault("range"))?;
-        self.mem.get_mut(a..end).ok_or(Fault("range"))
+        let end = a.checked_add(n).ok_or(RANGE)?;
+        self.mem.get_mut(a..end).ok_or(RANGE)
     }
 }
 
 /// off and len as usize.
 fn span(off: u64, len: u64) -> Result<(usize, usize), Fault> {
-    let a = usize::try_from(off).map_err(|_| Fault("range"))?;
-    let n = usize::try_from(len).map_err(|_| Fault("range"))?;
+    let a = usize::try_from(off).map_err(|_| RANGE)?;
+    let n = usize::try_from(len).map_err(|_| RANGE)?;
     Ok((a, n))
 }
 
@@ -158,7 +170,7 @@ impl Device for Sim {
         self.range(to, len)?;
         let (a, n) = span(from, len)?;
         let (b, _) = span(to, len)?;
-        let end = a.checked_add(n).ok_or(Fault("range"))?;
+        let end = a.checked_add(n).ok_or(RANGE)?;
         self.mem.copy_within(a..end, b);
         Ok(())
     }
@@ -240,7 +252,7 @@ impl Pool {
     /// reserve replaces the fence's slice with a zeroed one of bytes,
     /// rounded up to UNIT. 0 drops it, as release does. The check counts
     /// the old slice as freed, so a fiber can always shrink or keep its
-    /// size.
+    /// size. A Soft fault from the zeroing leaves the fence with no slice.
     pub fn reserve(&mut self, fence: &[u8], bytes: u64) -> Result<Reserved, Fault> {
         if bytes == 0 {
             self.release(fence);
@@ -250,7 +262,7 @@ impl Pool {
             return Ok(Reserved::Capacity);
         };
         let had = self.bytes(fence);
-        let rest = self.used.checked_sub(had).ok_or(Fault("accounting"))?;
+        let rest = self.used.checked_sub(had).ok_or(ACCOUNTING)?;
         if rest.checked_add(len).is_none_or(|t| t > self.cap) {
             return Ok(Reserved::Capacity);
         }
@@ -269,7 +281,7 @@ impl Pool {
                 len,
             },
         );
-        self.used = self.used.checked_add(len).ok_or(Fault("accounting"))?;
+        self.used = self.used.checked_add(len).ok_or(ACCOUNTING)?;
         Ok(Reserved::Done)
     }
 
@@ -309,7 +321,7 @@ impl Pool {
             if s.off.saturating_sub(at) >= len {
                 return Ok(at);
             }
-            at = s.off.checked_add(s.len).ok_or(Fault("accounting"))?;
+            at = s.off.checked_add(s.len).ok_or(ACCOUNTING)?;
         }
         if self.cap.saturating_sub(at) >= len {
             return Ok(at);
@@ -318,7 +330,7 @@ impl Pool {
         if self.cap.saturating_sub(at) >= len {
             return Ok(at);
         }
-        Err(Fault("accounting"))
+        Err(ACCOUNTING)
     }
 
     /// compact moves every slice down to close the gaps, in offset
@@ -331,7 +343,7 @@ impl Pool {
                 self.dev.copy(s.off, at, s.len)?;
                 s.off = at;
             }
-            at = at.checked_add(s.len).ok_or(Fault("accounting"))?;
+            at = at.checked_add(s.len).ok_or(ACCOUNTING)?;
         }
         Ok(at)
     }

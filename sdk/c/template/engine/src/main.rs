@@ -5,7 +5,8 @@
 //! so no fiber ever opens the device. It learns which fiber is asking
 //! from the kernel and from fiberd's LEAF lines, never from the request,
 //! and it reports every slice to fiberd on fd 3. The protocol is
-//! bin/gpu-poc/PROTOCOL.md. With `--sim-mb` the pool is host memory.
+//! bin/gpu-poc/PROTOCOL.md. With `--sim-mb` the pool is host memory,
+//! and without it the pool is GPU memory through libcuda (cuda.rs).
 //!
 //! One thread serves everything. A poll loop watches fd 3 and the
 //! listening socket, takes every pending fd 3 line first, then answers
@@ -15,6 +16,7 @@
 // ---- modules and bounds ----
 
 mod ctl;
+mod cuda;
 mod peer;
 mod pool;
 mod proto;
@@ -29,6 +31,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::ctl::{Control, Ctl, Recv};
+use crate::cuda::Cuda;
 use crate::peer::Map;
 use crate::pool::{Device, Fault, Pool, Reserved, Sim};
 use crate::proto::{LINE_MAX, Reply, Request};
@@ -50,26 +53,39 @@ fn die(why: &str) -> ! {
     std::process::exit(2)
 }
 
-/// fault ends the engine on a sticky device error, since the pool may
-/// be poisoned for every fiber. fiberd sets every slice to zero.
-fn fault(f: Fault) -> ! {
-    eprintln!("refengine: device fault: {}", f.0);
-    std::process::exit(1)
+/// failed turns a device error into the request's reply. A fatal one
+/// ends the engine, since the pool may be poisoned for every fiber, and
+/// fiberd sets every slice to zero. A soft one fails this request alone
+/// with `err device`.
+fn failed(f: Fault) -> Reply {
+    match f {
+        Fault::Fatal(word) => {
+            eprintln!("refengine: device fault: {word}");
+            std::process::exit(1)
+        }
+        Fault::Soft(word) => {
+            eprintln!("refengine: device error: {word}");
+            Reply::Err("device")
+        }
+    }
 }
 
 // ---- arguments ----
 
-/// The command line, `--grant <grant> --socket <path> [--sim-mb N]`.
+/// The command line, `--grant <grant> --socket <path> [--sim-mb N]
+/// [--pool-mb N]`. `--pool-mb` sizes a CUDA pool, so it goes without
+/// `--sim-mb`.
 struct Args {
     grant: String,
     socket: PathBuf,
     sim_mb: Option<u64>,
+    pool_mb: Option<u64>,
 }
 
 impl Args {
     /// parse reads each flag once, with its value as the next argument.
     fn parse(mut it: impl Iterator<Item = OsString>) -> Result<Args, String> {
-        let (mut grant, mut socket, mut sim_mb) = (None, None, None);
+        let (mut grant, mut socket, mut sim_mb, mut pool_mb) = (None, None, None, None);
         while let Some(flag) = it.next() {
             let flag = flag.to_string_lossy().into_owned();
             let value = it.next().ok_or_else(|| format!("{flag} needs a value"))?;
@@ -81,6 +97,11 @@ impl Args {
                     let mb = proto::dec_u64(text.as_bytes()).filter(|&mb| mb > 0);
                     let mb = mb.ok_or("--sim-mb needs a whole number of MiB, at least 1")?;
                     sim_mb.replace(mb).is_some()
+                }
+                "--pool-mb" => {
+                    let mb = proto::dec_u64(text.as_bytes()).filter(|&mb| mb > 0);
+                    let mb = mb.ok_or("--pool-mb needs a whole number of MiB, at least 1")?;
+                    pool_mb.replace(mb).is_some()
                 }
                 _ => return Err(format!("unknown flag {flag}")),
             };
@@ -96,6 +117,7 @@ impl Args {
             grant,
             socket: socket.ok_or("--socket is required")?,
             sim_mb,
+            pool_mb,
         })
     }
 }
@@ -138,17 +160,22 @@ fn main() {
 }
 
 /// open_device opens the device the arguments name, not yet allocated.
-/// `--sim-mb` is the simulated one. Without it the class is gpu and the
-/// first FIBERD_DEVICES entry is the device, which this build cannot
-/// drive yet (M6). It never falls back to another device.
+/// `--sim-mb` is the simulated one. Without it the class is gpu, the
+/// first FIBERD_DEVICES entry is the device, and libcuda drives it. It
+/// never falls back to another device.
 fn open_device(args: &Args) -> Result<Box<dyn Device>, String> {
     let first = first_device();
     let Some(mb) = args.sim_mb else {
-        return Err(match first {
-            Some(d) => format!("no CUDA support in this build for device {d}"),
-            None => String::from("FIBERD_DEVICES names no device and --sim-mb is not set"),
-        });
+        let Some(entry) = first else {
+            let none = "FIBERD_DEVICES names no device and --sim-mb is not set";
+            return Err(none.to_owned());
+        };
+        let cuda = Cuda::open(&entry, args.pool_mb)?;
+        return Ok(Box::new(cuda));
     };
+    if args.pool_mb.is_some() {
+        return Err("--pool-mb sizes a CUDA pool, not a --sim-mb one".to_owned());
+    }
     let cap = mb.checked_mul(1 << 20).ok_or("--sim-mb is too large")?;
     if let Some(d) = first {
         eprintln!("refengine: simulated pool, device {d} is not opened");
@@ -353,7 +380,13 @@ impl Engine {
                     Reply::Ok
                 }
                 Ok(Reserved::Capacity) => Reply::Err("capacity"),
-                Err(f) => fault(f),
+                Err(f) => {
+                    // A soft fault dropped the old slice, so fiberd
+                    // hears the fence is down to none.
+                    let reply = failed(f);
+                    self.report(fence);
+                    reply
+                }
             },
             Request::Release { fence } => {
                 self.pool.release(fence);
@@ -376,12 +409,12 @@ fn pollin(fd: i32) -> libc::pollfd {
 }
 
 /// hashed turns a fill or sum into its reply. No slice is `err none`,
-/// and a device fault ends the engine.
+/// and a device error is failed's.
 fn hashed(r: Result<Option<u64>, Fault>) -> Reply {
     match r {
         Ok(Some(h)) => Reply::Hash(h),
         Ok(None) => Reply::Err("none"),
-        Err(f) => fault(f),
+        Err(f) => failed(f),
     }
 }
 
