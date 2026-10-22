@@ -358,10 +358,10 @@ class Fiber:
     def listen(self) -> socket.socket:
         """A bound, listening socket for a unix or tcp endpoint, as fiberd spelled it."""
         if self.kind == "tcp":
-            v6, port = _fence.tcp_bind(self.endpoint)
+            v6, host, port = _fence.tcp_bind(self.endpoint)
             s = socket.socket(socket.AF_INET6 if v6 else socket.AF_INET, socket.SOCK_STREAM)
             s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            s.bind(("::" if v6 else "0.0.0.0", port))
+            s.bind((host, port))
         elif self.kind == "unix":
             path = _fence.unix_path(self.endpoint)
             try:

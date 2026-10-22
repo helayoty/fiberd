@@ -39,18 +39,27 @@ def test_endpoint_kind(name, f0, f1):
     assert _fence.endpoint_kind(f0) == f1
 
 
+NOT_HOSTPORT = "is not tcp://host:port"
+NO_LITERAL = "names no IP literal to bind"
+
 TCP = [
-    ("ipv4", "tcp://10.0.0.1:9000", (False, 9000)),
-    ("ipv6 bracketed", "tcp://[fd00::1]:9000", (True, 9000)),
-    ("no port", "tcp://10.0.0.1", None),
-    ("a port that is no number", "tcp://10.0.0.1:x", None),
+    # the endpoint, what tcp_bind returns, or the refusal it raises
+    ("ipv4", "tcp://10.0.0.1:9000", (False, "10.0.0.1", 9000), None),
+    ("ipv6 bracketed", "tcp://[fd00::1]:9000", (True, "fd00::1", 9000), None),
+    ("no port", "tcp://10.0.0.1", None, NOT_HOSTPORT),
+    ("a port that is no number", "tcp://10.0.0.1:x", None, NOT_HOSTPORT),
+    ("a hostname, which fiberd never writes", "tcp://fiber.example:9000", None, NO_LITERAL),
+    ("an ipv4 literal in brackets", "tcp://[10.0.0.1]:9000", None, NO_LITERAL),
+    ("an ipv6 literal without brackets, which fiberd's endpoint package refuses too", "tcp://fd00::1:9000", None, NO_LITERAL),
+    ("an empty host", "tcp://:9000", None, NO_LITERAL),
+    ("empty brackets", "tcp://[]:9000", None, NO_LITERAL),
 ]
 
 
 @table(TCP)
-def test_tcp_bind(name, f0, f1):
-    if f1 is None:
-        with pytest.raises(TemplateError, match="is not tcp://host:port"):
+def test_tcp_bind(name, f0, f1, f2):
+    if f2 is not None:
+        with pytest.raises(TemplateError, match=f2):
             _fence.tcp_bind(f0)
     else:
         assert _fence.tcp_bind(f0) == f1

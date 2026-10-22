@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 from dataclasses import dataclass
 
 from fiberd.template._errors import TemplateError
@@ -45,10 +46,24 @@ def unix_path(endpoint: str) -> str:
     return endpoint[len("unix://"):] if endpoint.startswith("unix://") else endpoint
 
 
-def tcp_bind(endpoint: str) -> tuple[bool, int]:
-    """Whether a tcp endpoint names an IPv6 host, and its port. The listener binds that family's wildcard."""
+def tcp_bind(endpoint: str) -> tuple[bool, str, int]:
+    """Whether a tcp endpoint names an IPv6 host, the host without brackets, and its port.
+
+    The listener binds that host, the one address fiberd advertises and
+    relays on, never a wildcard. fiberd writes an IP literal, an IPv6 one
+    in brackets, so anything else is refused.
+    """
     hostport = endpoint[len("tcp://"):]
     host, sep, port = hostport.rpartition(":")
     if not sep or not port.isdigit():
         raise TemplateError(f"endpoint {endpoint!r} is not tcp://host:port")
-    return host.startswith("["), int(port)
+    v6 = host.startswith("[") and host.endswith("]")
+    if v6:
+        host = host[1:-1]
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        ip = None
+    if ip is None or ip.version != (6 if v6 else 4):
+        raise TemplateError(f"endpoint {endpoint!r} names no IP literal to bind, want tcp://a.b.c.d:port or tcp://[v6]:port")
+    return v6, host, int(port)
