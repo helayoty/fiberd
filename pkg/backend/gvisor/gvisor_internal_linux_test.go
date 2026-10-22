@@ -839,11 +839,14 @@ func TestProbeFootprint(t *testing.T) {
 		wantBytes uint64
 		wantTotal uint64
 		wantLog   string
+		wantAlso  string // a second part of the same line
 	}{
 		{name: "measured serving in the leaf", wantBytes: 8192, wantTotal: 12288},
 		{name: "no probe cgroup", noCgroup: true},
 		{name: "restore fails", knobs: knobs{Fail: map[string]bool{"restore": true}}, noSandbox: true, wantLog: "footprint probe: gvisor: runsc restore"},
-		{name: "never serves", knobs: knobs{NoServe: true}, wantLog: "probe did not serve: context deadline exceeded"},
+		// The line says the sandbox outlived the cap without serving, so a
+		// template hung after its restore reads as that and not as slow.
+		{name: "never serves", knobs: knobs{NoServe: true}, wantLog: "probe did not serve: context deadline exceeded (", wantAlso: "after its restore, sandbox still running)"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -865,8 +868,10 @@ func TestProbeFootprint(t *testing.T) {
 			if w.Bytes != tc.wantBytes || w.TotalBytes != tc.wantTotal {
 				t.Fatalf("Warm measured %d/%d bytes, want %d/%d", w.Bytes, w.TotalBytes, tc.wantBytes, tc.wantTotal)
 			}
-			if tc.wantLog != "" && !strings.Contains(logs.String(), tc.wantLog) {
-				t.Fatalf("log = %q, want %q", logs.String(), tc.wantLog)
+			for _, want := range []string{tc.wantLog, tc.wantAlso} {
+				if want != "" && !strings.Contains(logs.String(), want) {
+					t.Fatalf("log = %q, want %q", logs.String(), want)
+				}
 			}
 			calls := f.calls()
 			tdir := filepath.Join(b.opt.StateDir, "templates", warmCID(t, b, "g"))
@@ -1712,7 +1717,7 @@ func TestSweep(t *testing.T) {
 				t.Fatal(err)
 			}
 			var out bytes.Buffer
-			if err := f.startSandbox("w-old-7", bundle, knobs{}, &out); err != nil || !f.alive("w-old-7") {
+			if _, err := f.startSandbox("w-old-7", bundle, knobs{}, &out); err != nil || !f.alive("w-old-7") {
 				t.Fatalf("the leftover sandbox did not start: %v %s", err, out.String())
 			}
 			// What the previous life left on disk: a fiber's bundle and a
@@ -1959,7 +1964,9 @@ func TestProbeDetectsLateBinding(t *testing.T) {
 // the ack and the endpoint. An unknown, repeated or missing claim is
 // closed, no token under the deadline kills the sandbox, and a bad or
 // missing ack kills what is the fiber by then. after is set once the
-// template is warm, so the probe saw a template that binds late.
+// template is warm, so the probe saw a template that binds late. A
+// sandbox that ends before its restore returns still reports its own
+// status.
 func TestPoolBind(t *testing.T) {
 	cases := []struct {
 		name        string
@@ -1967,6 +1974,7 @@ func TestPoolBind(t *testing.T) {
 		deadline    time.Duration
 		wantPoolErr string
 		wantExit    string // how the sandbox of a failed Pool ended
+		wantWait    bool   // its reaper asked `runsc wait`, having no pid
 		wantBindErr string
 		// A connection of the test's own, made once the sandbox holds its
 		// claim: it repeats the sandbox's token, or says nothing. Either
@@ -1975,6 +1983,10 @@ func TestPoolBind(t *testing.T) {
 	}{
 		{name: "token claimed, identity handed out"},
 		{name: "unknown token", after: knobs{WrongToken: true}, wantPoolErr: "exited before sending its token", wantExit: "exit:122"},
+		// The sandbox gives up before its restore returns. Its own status
+		// still comes back, from the pid runsc wrote or from `runsc wait`.
+		{name: "unknown token, ended before the restore returned", after: knobs{WrongToken: true, EndsFirst: true}, wantPoolErr: "exited before sending its token", wantExit: "exit:122"},
+		{name: "unknown token, ended before the restore returned, no pid file", after: knobs{WrongToken: true, EndsFirst: true, NoPidFile: true}, wantPoolErr: "exited before sending its token", wantExit: "exit:122", wantWait: true},
 		{name: "repeated token is closed", repeat: true},
 		{name: "a connection that sends no token is closed", silent: true},
 		{name: "no token before the deadline", after: knobs{NoToken: true}, deadline: 300 * time.Millisecond, wantPoolErr: "sent no token: context deadline exceeded", wantExit: "exit:0"},
@@ -2005,6 +2017,9 @@ func TestPoolBind(t *testing.T) {
 				// not know.
 				if e := waitExit(t, b); e != (backend.Exit{PooledID: pc, Status: tc.wantExit}) {
 					t.Fatalf("exit = %+v, want pooled %s with %s", e, pc, tc.wantExit)
+				}
+				if got := findCall(f.calls(), "wait "+pc) != ""; got != tc.wantWait {
+					t.Fatalf("a `runsc wait` ran for %s: %v, want %v", pc, got, tc.wantWait)
 				}
 				b.mu.Lock()
 				n := len(b.pooled)
