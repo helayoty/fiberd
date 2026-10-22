@@ -17,6 +17,7 @@ use core::ptr;
 
 use crate::abi::{Kept, RUNDIR_MAX};
 use crate::child::{EX_MNT_DROP, EX_MNT_HIDE, EX_MNT_PRIVATE, EX_MNT_PROC, EX_MNT_RO};
+use crate::procfiles::MountLine;
 use crate::sys;
 
 /// The failure bits of prepare_ns and mount_ns, which pick the reason a
@@ -35,6 +36,9 @@ pub const F_HIDE: c_int = 16;
 pub const F_RUNDIR: c_int = 32;
 /// Other fiberd homes' mounts dropped (prepare_ns alone).
 pub const F_FOREIGN: c_int = 64;
+/// Every cgroup mount made read-only, by file system type (prepare_ns
+/// alone).
+pub const F_CGROUP: c_int = 128;
 
 /// MNT_DETACH, which libc types as a C int.
 const MNT_DETACH: c_int = libc::MNT_DETACH;
@@ -77,6 +81,56 @@ pub unsafe fn ro_remount(path: *const c_char) -> c_int {
             ptr::null(),
         )
     }
+}
+
+/// Whether the mountinfo line m is a cgroup file system, "cgroup2" or
+/// the v1 "cgroup". The kernel writes the type right before the source,
+/// and the tokenizer ended each token with a NUL, so the type is the
+/// token that ends one byte before the source. A line with no source
+/// has no type to read and counts as no cgroup mount.
+pub fn cgroup_fs(buf: &[u8], m: &MountLine) -> bool {
+    if m.source.len == 0 {
+        return false;
+    }
+    let Some(end) = m.source.off.checked_sub(1) else {
+        return false;
+    };
+    if end <= m.point.off {
+        return false;
+    }
+    let mut start = end;
+    while let Some(&c) = start.checked_sub(1).and_then(|i| buf.get(i)) {
+        if c == 0 || c == b' ' {
+            break;
+        }
+        start = start.wrapping_sub(1);
+    }
+    let fstype = buf.get(start..end).unwrap_or(&[]);
+    fstype == b"cgroup2" || fstype == b"cgroup"
+}
+
+/// Makes the cgroup mount at path read-only in this namespace
+/// (ro_remount), so no fiber can write cgroup.procs and leave its leaf.
+/// A remount by path reaches whatever mount is on top at that path. When
+/// that is no cgroup file system, the cgroup mount is covered and left
+/// alone, since a fiber cannot reach it either: lifting the cover needs
+/// CAP_SYS_ADMIN, which every fiber drops, and nothing holds a
+/// descriptor into it. statfs says which file system the path shows.
+/// 0, or -1 with errno.
+///
+/// # Safety
+/// path is NUL-ended and live for the call.
+pub unsafe fn lock_cgroup_mount(path: *const c_char) -> c_int {
+    let mut st: libc::statfs = crate::child::zeroed();
+    // SAFETY: path by the contract above, st is a live struct statfs.
+    if unsafe { libc::statfs(path, &raw mut st) } < 0 {
+        return -1;
+    }
+    if st.f_type != libc::CGROUP2_SUPER_MAGIC && st.f_type != libc::CGROUP_SUPER_MAGIC {
+        return 0;
+    }
+    // SAFETY: by the contract above.
+    unsafe { ro_remount(path) }
 }
 
 /// What stat says about path. None when there is no such path or it
