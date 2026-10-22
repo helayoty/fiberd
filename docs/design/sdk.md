@@ -6,7 +6,7 @@ This doc explains the SDK under `sdk/`, the two edges other people's code touche
 
 A [template](../glossary.md#template) author writes code that runs inside a [fiber](../glossary.md#fiber), and a caller writes code that asks for one. `sdk/c/template` is the template side's C ABI, `libfiberzygote.h`, which `FZ_ABI_VERSION` names and every binding checks at build time. The library behind it is a static archive, built from Rust, that a binding links. `sdk/go/client` is the Go client. `sdk/python` binds the library as a CPython extension, `fiberd._zygote`, built against the limited API so one wheel serves every CPython from 3.14, and puts `fiberd.template` over it. The extension's C glue is compiled with the same hardening flags as the Makefile's `ZYGOTE_CFLAGS` and links the same archive refzygote does. `fiberd.client` is the Python client, the messages generated from `api/grant/v1/grant.proto` (`make python-proto`, checked for drift in CI), the seven stubs written by hand, and one wrapper mirroring the Go client in sync and `grpc.aio` form. It needs the `client` extra (grpcio and protobuf), so a template never pulls them, and it reads a miss off the status trailer with a wire walker of its own rather than grpcio-status.
 
-`sdk/typescript` is the Node.js client, `@fiberd/client`, over grpc-js. Its messages and stubs come from the same grant proto (`make typescript-proto`, checked for drift in CI), and it reads misses from the `google.rpc.Status` trailer. Calls return promises, Watch is an async iterator, and uint64 values stay `bigint`. Handoff trusts the Clone's certificate and checks its SPKI pin before returning the socket. [Its README](../../sdk/typescript/README.md) covers usage.
+`sdk/typescript` is the Node.js client, `@fiberd/client`, over grpc-js. Its messages and stubs come from the same grant proto (`make typescript-proto`, checked for drift in CI), and it reads misses from the `google.rpc.Status` trailer. Calls return promises, Watch and Download are async iterables, and uint64 values stay `bigint`. Handoff trusts the Clone's certificate and checks its SPKI pin before returning the socket. [Its README](../../sdk/typescript/README.md) covers usage.
 
 ## How it works
 
@@ -38,7 +38,7 @@ sequenceDiagram
 
 **Async.** `on_fiber` may be `async def`. It runs under `asyncio.run` in the fiber, so the loop is born after the fork. `serve_async(handler)` then runs `handler(reader, writer)` for each connection, over `asyncio.start_unix_server`, `start_server` or the handoff channel. `connections()` is the async `accept()`, and waits on the channel with `loop.add_reader`.
 
-**Uploads.** The Go and Python clients send an upload as a header, then chunks of at most 1 MiB. The message that completes the declared size waits until the source is read once more and found to end there. For an empty file the Go client opens no stream until then, and the Python client holds back the header. A source that is short or long cancels the call, so fiberd never places a file that does not match its source.
+**Uploads.** The Go, Python and TypeScript clients send an upload as a header, then chunks of at most 1 MiB. The message that completes the declared size waits until the source is read once more and found to end there. For an empty file the Go and TypeScript clients open no stream until then, and the Python client holds back the header. A source that is short or long cancels the call, so fiberd never places a file that does not match its source.
 
 ## Backends
 
