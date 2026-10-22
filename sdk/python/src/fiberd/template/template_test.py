@@ -369,6 +369,33 @@ def test_listen_unix(sock_dir):
         assert s.family == socket.AF_UNIX and os.path.exists(ep)
 
 
+def ipv6_loopback():
+    """Whether this host can bind ::1, which a container without IPv6 cannot."""
+    try:
+        with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as s:
+            s.bind(("::1", 0))
+    except OSError:
+        return False
+    return True
+
+
+LISTEN_TCP = [
+    # the endpoint, the family and address the listener binds
+    ("ipv4", "tcp://127.0.0.1:0", socket.AF_INET, "127.0.0.1"),
+    ("ipv6", "tcp://[::1]:0", socket.AF_INET6, "::1"),
+]
+
+
+@table(LISTEN_TCP)
+def test_listen_tcp_binds_the_named_host(name, f0, f1, f2):
+    """fiberd advertises and relays on the endpoint's host, so the fiber listens there and not on every interface."""
+    if f1 == socket.AF_INET6 and not ipv6_loopback():
+        pytest.skip("no IPv6 loopback here")
+    f = ft.Fiber("g/1/1", f0, b"", "", {})
+    with f.listen() as s:
+        assert s.family == f1 and s.getsockname()[0] == f2
+
+
 def test_listen_handoff_refused():
     f = ft.Fiber("g/1/1", "handoff", b"", "", {"FIBERD_CHANNEL_FD": "4"})
     assert f.kind == "handoff"

@@ -280,7 +280,7 @@ zygote-test: ## the core's Rust unit tests, clippy and rustfmt (the fuzz targets
 	cd $(CORE_DIR) && $(CARGO) test --locked && $(CARGO) clippy --locked --all-targets -- -D warnings && \
 	  $(CARGO) fmt --check && rustfmt --edition 2024 --check fuzz/fuzz_targets/*.rs
 
-zygote-c-test: zygote-core ## the reference zygote's own C unit test (the engine's fence parse, sdk/c/template/test), built as make zygote is but without TLS, then run
+zygote-c-test: zygote-core ## the reference zygote's own C unit test (the engine's fence parse and the tcp endpoint's bind, sdk/c/template/test), built as make zygote is but without TLS, then run
 	@mkdir -p $(BIN)
 	$(CC) $(ZYGOTE_CFLAGS) $(ZYGOTE_LDFLAGS) -Wall -Wextra -pthread -o $(BIN)/refzygote-test sdk/c/template/test/engine_test.c $(CORE_LIB)
 	$(BIN)/refzygote-test
