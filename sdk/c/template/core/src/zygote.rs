@@ -67,6 +67,10 @@ pub struct State {
     pub have_own_ns: bool,
     /// prepare_ns went through, so mntns fibers may be born.
     pub ns_prepared: bool,
+    /// A runc zygote (FIBERD_USERNS_NESTED=deny), set in serve before
+    /// READY. It prepares no namespace, so it takes ws without mntns and
+    /// gives such a child a copy of the container's mount namespace.
+    pub runc: bool,
     /// How many HIDE paths Tables.hide holds.
     pub nhide: usize,
     /// How many DROP paths Tables.drop holds.
@@ -87,6 +91,7 @@ impl State {
             paths_refused: None,
             have_own_ns: false,
             ns_prepared: false,
+            runc: false,
             nhide: 0,
             ndrop: 0,
             nkids: 0,
@@ -816,9 +821,11 @@ impl Zygote<'_> {
                 .send(ctl_fd);
             return;
         }
-        if cl.ws && !cl.mntns {
+        if cl.ws && !cl.mntns && !st.runc {
             // The tree goes into the child's own namespace. Without one
             // it would land in the zygote's, in front of every sibling.
+            // A proc child gets one with mntns. A runc child gets one
+            // with ws itself, below, since its zygote prepares none.
             Line::new()
                 .s(b"ERROR ")
                 .s(fence)
@@ -938,7 +945,11 @@ impl Zygote<'_> {
         if cl.pidns {
             want |= libc::CLONE_NEWPID as c_ulonglong;
         }
-        if cl.mntns {
+        // A runc child with a workspace is born in a copy of the
+        // container's mount namespace, so the mount is its own and no
+        // sibling sees it. The runc program lets CLONE_NEWNS through on
+        // clone and unshare, and clone3 passes its gate unread.
+        if cl.mntns || (cl.ws && st.runc) {
             want |= libc::CLONE_NEWNS as c_ulonglong;
         }
         // SAFETY: the serving thread, and the child goes on under
@@ -1033,11 +1044,13 @@ impl Zygote<'_> {
         // A runc zygote (FIBERD_USERNS_NESTED=deny, what fiberd sets when
         // the zygote keeps capabilities in a user namespace of its own)
         // serves no mntns fiber, so its fibers keep CAP_SYS_ADMIN alone
-        // and may not mount. The drop acts on this thread, the one every
-        // fiber is forked from. An engine thread started before fz_serve
-        // keeps the container's capabilities and no fiber inherits them.
-        // Fail closed, as cap_nested_userns.
+        // and may not mount, beyond the one move that puts a workspace
+        // in place. The drop acts on this thread, the one every fiber is
+        // forked from. An engine thread started before fz_serve keeps
+        // the container's capabilities and no fiber inherits them. Fail
+        // closed, as cap_nested_userns. handle_clone reads the flag.
         let runc = env_is(c"FIBERD_USERNS_NESTED", b"deny");
+        self.st.runc = runc;
         if runc && let Err(Errno(e)) = keep_only_sys_admin() {
             let (text, n) = errno_text(e);
             Line::new()
@@ -2216,6 +2229,9 @@ mod tests {
             ws: bool,
             refused: Option<Refused>,
             prepared: bool,
+            // A runc zygote, which prepares no namespace and takes ws
+            // without mntns.
+            runc: bool,
             npending: usize,
             want: &'static str,
         }
@@ -2242,6 +2258,7 @@ mod tests {
                 ws: false,
                 refused: None,
                 prepared: true,
+                runc: false,
                 npending: 0,
                 want: "ERROR s5 malformed CLONE",
             },
@@ -2252,6 +2269,7 @@ mod tests {
                 ws: false,
                 refused: None,
                 prepared: true,
+                runc: false,
                 npending: 0,
                 want: "ERROR ? malformed CLONE",
             },
@@ -2262,6 +2280,7 @@ mod tests {
                 ws: false,
                 refused: None,
                 prepared: true,
+                runc: false,
                 npending: 0,
                 want: "ERROR bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb fence too long (at most 127 characters)",
             },
@@ -2272,6 +2291,7 @@ mod tests {
                 ws: false,
                 refused: None,
                 prepared: true,
+                runc: false,
                 npending: 0,
                 want: "ERROR ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc fence too long (at most 127 characters)",
             },
@@ -2282,6 +2302,7 @@ mod tests {
                 ws: false,
                 refused: Some(Refused::Text(c"RUNDIR refused")),
                 prepared: true,
+                runc: false,
                 npending: 0,
                 want: "ERROR f unknown CLONE option foo",
             },
@@ -2292,6 +2313,7 @@ mod tests {
                 ws: false,
                 refused: None,
                 prepared: true,
+                runc: false,
                 npending: 0,
                 want: "ERROR ddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd fence too long (at most 127 characters)",
             },
@@ -2302,6 +2324,7 @@ mod tests {
                 ws: false,
                 refused: Some(Refused::Text(c"RUNDIR refused")),
                 prepared: true,
+                runc: false,
                 npending: 0,
                 want: "ERROR f refused: the mount namespace cannot hide what fiberd asked (RUNDIR refused)",
             },
@@ -2312,6 +2335,7 @@ mod tests {
                 ws: false,
                 refused: Some(Refused::OwnNs),
                 prepared: false,
+                runc: false,
                 npending: 0,
                 want: "ERROR f refused: the mount namespace cannot hide what fiberd asked (own ns why)",
             },
@@ -2322,6 +2346,18 @@ mod tests {
                 ws: false,
                 refused: None,
                 prepared: false,
+                runc: false,
+                npending: 0,
+                want: "ERROR f refused: no mount namespace was prepared before READY (fiberd sent PREPARE none)",
+            },
+            Case {
+                name: "mntns with ws on a runc zygote is unprepared too",
+                line: "CLONE f e 50 - - mntns,ws",
+                channel: true,
+                ws: true,
+                refused: None,
+                prepared: false,
+                runc: true,
                 npending: 0,
                 want: "ERROR f refused: no mount namespace was prepared before READY (fiberd sent PREPARE none)",
             },
@@ -2332,6 +2368,7 @@ mod tests {
                 ws: false,
                 refused: None,
                 prepared: true,
+                runc: false,
                 npending: 0,
                 want: "ERROR f CLONE without a channel",
             },
@@ -2342,18 +2379,42 @@ mod tests {
                 ws: false,
                 refused: None,
                 prepared: true,
+                runc: false,
                 npending: 0,
                 want: "ERROR f CLONE with ws but no workspace descriptor",
             },
             Case {
-                name: "ws without mntns",
+                name: "ws with the channel alone on a runc zygote",
+                line: "CLONE f e 50 - 00 ws",
+                channel: true,
+                ws: false,
+                refused: None,
+                prepared: false,
+                runc: true,
+                npending: 0,
+                want: "ERROR f CLONE with ws but no workspace descriptor",
+            },
+            Case {
+                name: "ws without mntns on a proc zygote",
                 line: "CLONE f e 50 - 00 ws",
                 channel: true,
                 ws: true,
                 refused: None,
                 prepared: true,
+                runc: false,
                 npending: 0,
                 want: "ERROR f CLONE with ws needs mntns",
+            },
+            Case {
+                name: "ws without mntns on a runc zygote reaches the session check",
+                line: "CLONE s7 e 50 - 6100 ws",
+                channel: true,
+                ws: true,
+                refused: None,
+                prepared: false,
+                runc: true,
+                npending: 0,
+                want: "ERROR s7 session holds a NUL byte",
             },
             Case {
                 name: "ws with mntns reaches the session check",
@@ -2362,6 +2423,7 @@ mod tests {
                 ws: true,
                 refused: None,
                 prepared: true,
+                runc: false,
                 npending: 0,
                 want: "ERROR s6 session holds a NUL byte",
             },
@@ -2372,6 +2434,7 @@ mod tests {
                 ws: false,
                 refused: None,
                 prepared: true,
+                runc: false,
                 npending: 0,
                 want: "ERROR s4 session holds a NUL byte",
             },
@@ -2382,6 +2445,18 @@ mod tests {
                 ws: false,
                 refused: None,
                 prepared: true,
+                runc: false,
+                npending: MAX_PENDING,
+                want: "ERROR f too many clones in flight",
+            },
+            Case {
+                name: "too many in flight on a runc zygote with ws",
+                line: "CLONE f e 50 - - pidns,ws",
+                channel: true,
+                ws: true,
+                refused: None,
+                prepared: false,
+                runc: true,
                 npending: MAX_PENDING,
                 want: "ERROR f too many clones in flight",
             },
@@ -2392,6 +2467,7 @@ mod tests {
                 ws: false,
                 refused: None,
                 prepared: true,
+                runc: false,
                 npending: 0,
                 want: "ERROR ep endpoint too long (at most 1023 characters)",
             },
@@ -2401,6 +2477,7 @@ mod tests {
             set_cstr(&mut rig.t.own_ns_why, b"own ns why");
             rig.st.paths_refused = tc.refused;
             rig.st.ns_prepared = tc.prepared;
+            rig.st.runc = tc.runc;
             rig.st.npending = tc.npending;
             let [ours, theirs] = pair();
             let [chan, chan_peer] = pair();
@@ -2498,6 +2575,112 @@ mod tests {
         }
         // SAFETY: null names no engine.
         unsafe { ctl::fz_set_engine(ptr::null()) };
+    }
+
+    #[test]
+    fn handle_clone_asks_birth_for_the_namespaces_the_line_and_zygote_say() {
+        let _serial = crate::serial();
+        // Each case reaches birth, which fails on a cgroup descriptor
+        // that is not open before any child exists, root or not, and
+        // the flags it was asked for are read back. A runc zygote adds
+        // CLONE_NEWNS for ws on its own, a proc zygote for mntns alone.
+        struct Case {
+            name: &'static str,
+            line: &'static str,
+            runc: bool,
+            ws: bool,
+            want: c_ulonglong,
+        }
+        let newns = libc::CLONE_NEWNS as c_ulonglong;
+        let newpid = libc::CLONE_NEWPID as c_ulonglong;
+        let cases = [
+            Case {
+                name: "the least",
+                line: "CLONE f e 50 - -",
+                runc: false,
+                ws: false,
+                want: 0,
+            },
+            Case {
+                name: "pidns",
+                line: "CLONE f e 50 - - pidns",
+                runc: false,
+                ws: false,
+                want: newpid,
+            },
+            Case {
+                name: "mntns on a proc zygote",
+                line: "CLONE f e 50 - - mntns",
+                runc: false,
+                ws: false,
+                want: newns,
+            },
+            Case {
+                name: "mntns with ws on a proc zygote",
+                line: "CLONE f e 50 - - pidns,mntns,ws",
+                runc: false,
+                ws: true,
+                want: newpid | newns,
+            },
+            Case {
+                name: "pidns alone on a runc zygote stays in the container's namespace",
+                line: "CLONE f e 50 - - pidns",
+                runc: true,
+                ws: false,
+                want: newpid,
+            },
+            Case {
+                name: "ws on a runc zygote gets a mount namespace",
+                line: "CLONE f e 50 - - ws",
+                runc: true,
+                ws: true,
+                want: newns,
+            },
+            Case {
+                name: "pidns with ws on a runc zygote gets both",
+                line: "CLONE f e 50 - - pidns,ws",
+                runc: true,
+                ws: true,
+                want: newpid | newns,
+            },
+        ];
+        for tc in cases {
+            let mut rig = Rig::new();
+            rig.st.ns_prepared = !tc.runc;
+            rig.st.runc = tc.runc;
+            let [ours, theirs] = pair();
+            let [tree, tree_peer] = pair();
+            rig.t.line[..tc.line.len()].copy_from_slice(tc.line.as_bytes());
+            rig.t.line[tc.line.len()] = 0;
+            // The cgroup descriptor is not open, so clone3 refuses before
+            // any child exists, and with CLONE_NEWNS an unprivileged
+            // zygote is refused the namespace first. Either way no child.
+            let passed = if tc.ws {
+                [1 << 20, tree, ours]
+            } else {
+                [1 << 20, ours, -1]
+            };
+            child::BIRTH_WANT.store(u64::MAX, std::sync::atomic::Ordering::Relaxed);
+            rig.z().handle_clone(ours, &passed, None);
+            let got = lines(theirs);
+            assert_eq!(got.len(), 1, "{}: {got:?}", tc.name);
+            assert!(
+                got[0].starts_with("ERROR f clone: "),
+                "{}: {}",
+                tc.name,
+                got[0]
+            );
+            assert_eq!(
+                child::BIRTH_WANT.load(std::sync::atomic::Ordering::Relaxed),
+                tc.want,
+                "{}: the flags birth was asked for",
+                tc.name
+            );
+            assert_eq!(rig.st.npending, 0, "{}: nothing forked", tc.name);
+            for fd in [ours, theirs, tree, tree_peer] {
+                close(fd);
+            }
+        }
     }
 
     #[test]

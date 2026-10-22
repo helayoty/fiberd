@@ -54,7 +54,8 @@ The state layout keeps what fibers must never read under one hidden directory.
                         once no warm instance or delta names them
   deltas/               parked deltas, also hidden from fibers
   workspaces/           running fibers' workspaces (-workspace-dir), mode
-                        0700, hidden from fibers, each mounted at /workspace
+                        0700 (0711 on runc, whose mapped root walks to its
+                        own), hidden from fibers, each mounted at /workspace
                         in its own fiber alone, swept at start
   run/                  fiber endpoints (unix sockets) and zygote logs, one
                         directory per grant, which fibers see

@@ -49,14 +49,74 @@ func (r *Runtime) newWorkspace(fence core.Fence, g core.Grant) (*workspace, erro
 		return nil, err
 	}
 	_ = os.RemoveAll(dir)
+	owner, err := r.workspaceOwner(g.UID)
+	if err != nil {
+		return nil, err
+	}
 	limits := wsfs.Limits{Bytes: int64(g.DiskBudgetBytes)}
 	budget := wsfs.NewCounter(limits)
-	ws, err := wsfs.Open(dir, wsfs.Options{Budget: budget, Limits: limits})
+	ws, err := wsfs.Open(dir, wsfs.Options{Budget: budget, Limits: limits, Owner: owner})
 	if err != nil {
 		_ = os.RemoveAll(dir)
 		return nil, fmt.Errorf("host: workspace of %s: %w", fence, err)
 	}
+	if owner != nil {
+		if err := searchableBy(owner, filepath.Dir(dir), dir); err != nil {
+			ws.Close()
+			_ = os.RemoveAll(dir)
+			return nil, fmt.Errorf("host: workspace of %s: %w", fence, err)
+		}
+	}
 	return &workspace{dir: dir, ws: ws, budget: budget}, nil
+}
+
+// workspaceOwner is who owns a workspace of grantUID and everything
+// fiberd writes into it. A backend that maps the grant's root into a
+// user namespace (runc) gets that root, so the fiber, uid 0 inside,
+// owns its tree and can write what it was given. Host root's files
+// would read as nobody there. Any other backend's fiber runs as
+// fiberd's uid, and nil keeps fiberd's ids.
+func (r *Runtime) workspaceOwner(grantUID string) (*wsfs.Owner, error) {
+	m, ok := r.be.(backend.IDMapper)
+	if !ok {
+		return nil, nil
+	}
+	uid, err := m.MappedRoot(grantUID)
+	if err != nil {
+		return nil, fmt.Errorf("host: workspace owner of grant %s: %w", grantUID, err)
+	}
+	return &wsfs.Owner{UID: int(uid), GID: int(uid)}, nil
+}
+
+// searchableBy lets the owner of a workspace, the grant's mapped root,
+// search down to its tree, the way the run directory is shared with it.
+// criu restores a runc fiber's workspace bind from inside the restored
+// user namespace, as that root, and opens the tree by its path. Each
+// level stays fiberd's, with the owner's group and search alone (0710),
+// so no other grant and no other user gets in, nothing can be listed,
+// and the staging directory beside the tree stays fiberd's alone.
+// WorkspaceDir itself lets anyone search it (workspaceDirMode).
+func searchableBy(owner *wsfs.Owner, dirs ...string) error {
+	for _, d := range dirs {
+		if err := os.Chown(d, -1, owner.GID); err != nil {
+			return err
+		}
+		if err := os.Chmod(d, 0o710); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// workspaceDirMode is WorkspaceDir's mode, fiberd's alone (0700), or
+// searchable by anyone and listed by nobody (0711) when the backend maps
+// each grant's root into a user namespace, whose root must walk to its
+// tree (searchableBy). The levels below are gated by each grant's group.
+func workspaceDirMode(be backend.Backend) os.FileMode {
+	if _, ok := be.(backend.IDMapper); ok {
+		return 0o711
+	}
+	return 0o700
 }
 
 // unpackWorkspace fills a fresh workspace for fence from the park

@@ -253,6 +253,11 @@ func New(cfg Config) (*Runtime, error) {
 			return nil, err
 		}
 	}
+	// A grant's mapped root walks through to its own workspace at a
+	// runc restore.
+	if err := os.Chmod(cfg.WorkspaceDir, workspaceDirMode(cfg.Backend)); err != nil {
+		return nil, err
+	}
 	// What this home believes about its host. The configuration's facts
 	// win, then the backend's, and what neither names is detected.
 	host := artifact.Platform{Arch: cfg.Platform.Arch, Kernel: cfg.Platform.Kernel, Libc: cfg.Platform.Libc}

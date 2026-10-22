@@ -84,6 +84,18 @@ type launcher struct {
 	// A grant on a template from the rootfs has no entry.
 	smu    sync.Mutex
 	staged map[string]string
+
+	// procRoot is where a dumped tree's processes are read for the files
+	// they hold through the container's mounts (foreignDump). "" is
+	// /proc, and a test lays out one of its own.
+	procRoot string
+	// inspect learns the mount id, inode and type of one map_files or fd
+	// entry under procRoot. Nil opens the entry (inspectEntry), and a
+	// test answers by path.
+	inspect func(path string) (entryInfo, error)
+	// devDir is where a restore reopens a device bind's node from
+	// (foreignInherit). "" is /dev.
+	devDir string
 }
 
 // fsLock is the grant's lock for its hold and root filesystem copy.
@@ -552,6 +564,14 @@ func (l *launcher) bundleConfig(spec backend.WarmSpec, argv []string, rootfs, cg
 			"uidMappings": idMap,
 			"gidMappings": idMap,
 			"cgroupsPath": cgPath,
+			// A fiber with a workspace moves it into its own copy of the
+			// container's namespace and cannot make that copy private,
+			// since the runc program refuses mount. Slave mounts send
+			// nothing, so the move reaches no sibling and not the
+			// container, even where the state directory is on a shared
+			// mount. runc's default is the same, pinned here so no host
+			// default can change it.
+			"rootfsPropagation": "rslave",
 			// The runc/Docker defaults, kept as the second line behind the
 			// user namespace. runc skips a path the rootfs or this kernel
 			// lacks.
@@ -625,6 +645,10 @@ func (l *launcher) ensureRootfs(spec backend.WarmSpec, rng IDRange) (string, err
 			return "", err
 		}
 	}
+	if err := makeWorkspaceMountpoint(dst); err != nil {
+		_ = os.RemoveAll(dst)
+		return "", err
+	}
 	data, err := json.Marshal(want)
 	if err != nil {
 		return "", err
@@ -653,6 +677,36 @@ func makeMountpoint(root, rel string, rng IDRange) error {
 		if err := os.Lchown(p, int(rng.Start), int(rng.Start)); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// makeWorkspaceMountpoint makes backend.WorkspaceMount in the copy at
+// root, the directory a fiber's child moves its workspace onto in its
+// own copy of the container's namespace, and a restore binds the
+// resuming fiber's workspace over. It is fiberd's own, root's in
+// production, an id outside the grant's range that reads as nobody
+// inside, and mode 0, so a fiber without a workspace can neither write
+// in it nor change its mode. A directory the rootfs already had there is
+// taken over the same way. A link or anything else at the name is
+// refused, never followed.
+func makeWorkspaceMountpoint(root string) error {
+	p := filepath.Join(root, strings.TrimPrefix(backend.WorkspaceMount, "/"))
+	if err := os.Mkdir(p, 0); err != nil && !errors.Is(err, fs.ErrExist) {
+		return fmt.Errorf("runc: workspace mount point %s: %w", p, err)
+	}
+	fi, err := os.Lstat(p)
+	if err != nil {
+		return fmt.Errorf("runc: workspace mount point %s: %w", p, err)
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("runc: workspace mount point %s is not a directory (%s)", p, fi.Mode().Type())
+	}
+	if err := os.Lchown(p, os.Geteuid(), os.Getegid()); err != nil {
+		return fmt.Errorf("runc: workspace mount point %s: %w", p, err)
+	}
+	if err := os.Chmod(p, 0); err != nil {
+		return fmt.Errorf("runc: workspace mount point %s: %w", p, err)
 	}
 	return nil
 }
@@ -963,8 +1017,11 @@ func shareImages(dir string, rng IDRange) error {
 // mount namespace, the run directory, the /sys bind, runc's device
 // binds and, for a grant on a registry template, the template bind,
 // which it also records beside the images in dir so the restore knows
-// to bind one.
-func (l *launcher) DumpExtra(spec backend.WarmSpec, dir string) ([]string, error) {
+// to bind one. A fiber with a workspace lives in a copy of the
+// container's namespace, so every file it still holds through the
+// container's own mounts is named too, and recorded for the restore
+// (foreignDump). The backend names the workspace mount itself.
+func (l *launcher) DumpExtra(spec backend.WarmSpec, dir string, d proc.Dumped) ([]string, error) {
 	extra := append([]string{"--external", "mnt[/host]:host", "--external", "mnt[/sys]:sys"}, netExtra...)
 	for _, d := range deviceBinds {
 		extra = append(extra, "--external", "mnt[/dev/"+d+"]:dev-"+d)
@@ -981,6 +1038,13 @@ func (l *launcher) DumpExtra(spec backend.WarmSpec, dir string) ([]string, error
 			return nil, err
 		}
 		extra = append(extra, "--external", "mnt["+backend.TemplateMount+"]:"+templateKey)
+	}
+	if d.Workspace {
+		files, err := l.foreignDump(d, dir)
+		if err != nil {
+			return nil, err
+		}
+		extra = append(extra, files...)
 	}
 	return extra, nil
 }
@@ -1011,15 +1075,17 @@ func (l *launcher) templateBind(spec backend.WarmSpec, dir string) ([]string, er
 
 // RestoreExtra gives the restored tree the grant's root filesystem copy
 // on this home, its run directory at /host, this home's /sys bind and
-// the host's device nodes.
+// the host's device nodes, and hands it the files its dump recorded as
+// held through the container's mounts, reopened on this home
+// (foreignInherit).
 // The tree maps the grant's id range, so it takes a hold on it, which
 // refuses a restore while another grant holds the slot and keeps the
 // range and the copy for as long as the tree runs (until RestoredGone).
 // The copy is made when this home has not warmed the grant.
-func (l *launcher) RestoreExtra(spec backend.WarmSpec, dir string) (extra []string, err error) {
+func (l *launcher) RestoreExtra(spec backend.WarmSpec, dir string) (extra []string, held []proc.Inherit, err error) {
 	rootfs, err := l.hold(spec, false)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer func() {
 		if err != nil {
@@ -1028,13 +1094,13 @@ func (l *launcher) RestoreExtra(spec backend.WarmSpec, dir string) (extra []stri
 	}()
 	rng := l.opt.Pool.Range(spec.GrantUID)
 	if err := prepareWorkDir(spec.WorkDir, rng); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := shareImages(dir, rng); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := l.sysMountPoint(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	extra = append([]string{"--root", rootfs, "--external", "mnt[host]:" + spec.WorkDir, "--external", "mnt[sys]:" + l.sysDir()}, emptyNet...)
 	for _, d := range deviceBinds {
@@ -1042,9 +1108,12 @@ func (l *launcher) RestoreExtra(spec backend.WarmSpec, dir string) (extra []stri
 	}
 	bind, err := l.templateBind(spec, dir)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return append(extra, bind...), nil
+	if held, err = l.foreignInherit(spec, dir, rootfs); err != nil {
+		return nil, nil, err
+	}
+	return append(extra, bind...), held, nil
 }
 
 var (

@@ -5,11 +5,12 @@
 //! have an argument checked, including the two ioctl commands that would
 //! move a file out of its project quota, and a foreign arch or an x32
 //! number kills the process. clone3 passes from one address alone, birth's own
-//! syscall instruction, and every child stacks a second filter that
-//! closes it. A runc zygote, whose fibers keep CAP_SYS_ADMIN and never
-//! get a mount namespace, takes a second program that also refuses the
-//! mount family. Both are built and checked at compile time, so a jump
-//! that lands outside the program is a build error.
+//! syscall instruction. A runc zygote, whose fibers keep CAP_SYS_ADMIN,
+//! takes a second program that also refuses the mount family, with
+//! move_mount gated the same way, from the one instruction that mounts
+//! a child's workspace. Every child stacks a second filter that closes
+//! both gates. Both programs are built and checked at compile time, so a
+//! jump that lands outside the program is a build error.
 #![deny(
     clippy::indexing_slicing,
     clippy::arithmetic_side_effects,
@@ -45,9 +46,10 @@ pub struct Arch {
     pub ioctl: u32,
     /// The calls refused outright with EPERM, sorted by number.
     pub plain: &'static [u32],
-    /// The mount family, sorted by number, refused by the runc program
-    /// alone. A proc fiber's mount_ns runs after the clone and needs
-    /// them.
+    /// The mount family but move_mount, sorted by number, refused by the
+    /// runc program alone. A proc fiber's mount_ns runs after the clone
+    /// and needs them. move_mount has a gate of its own in the runc
+    /// program, so it is not in this list.
     pub mounts: &'static [u32],
 }
 
@@ -119,7 +121,6 @@ pub const X86_64: Arch = Arch {
         303, // name_to_handle_at
         304, // open_by_handle_at
         428, // open_tree
-        429, // move_mount
         430, // fsopen
         431, // fsconfig
         432, // fsmount
@@ -187,7 +188,6 @@ pub const AARCH64: Arch = Arch {
         264, // name_to_handle_at
         265, // open_by_handle_at
         428, // open_tree
-        429, // move_mount
         430, // fsopen
         431, // fsconfig
         432, // fsmount
@@ -198,13 +198,15 @@ pub const AARCH64: Arch = Arch {
 };
 
 /// Which program. Fiber is the design's list. Runc adds the mount
-/// family, since a runc fiber keeps CAP_SYS_ADMIN and could mount.
+/// family, since a runc fiber keeps CAP_SYS_ADMIN and could mount, and
+/// gates move_mount, which mounts its workspace.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Program {
     /// The fiber filter, for a zygote whose fibers may take a mount
     /// namespace (proc).
     Fiber,
-    /// The fiber filter plus the mount family (runc).
+    /// The fiber filter plus the mount family, with move_mount gated
+    /// (runc).
     Runc,
 }
 
@@ -220,6 +222,9 @@ pub const NATIVE: Arch = AARCH64;
 
 /// __NR_clone3, the same on every arch.
 const CLONE3: u32 = 435;
+
+/// __NR_move_mount, the same on every arch.
+const MOVE_MOUNT: u32 = 429;
 
 /// __X32_SYSCALL_BIT. On x86_64 it selects the x32 table under the same
 /// audit arch, where the numbers above mean other calls.
@@ -297,9 +302,9 @@ const _: () = assert!(
     "ARGn_LO and IP_LO add 4 on a big-endian arch"
 );
 
-/// What the gate compares against until gated writes the address. No
+/// What a gate compares against until gated writes the address. No
 /// user instruction sits at !0, so the built program lets no clone3
-/// through.
+/// through, and no move_mount in the runc program.
 const NO_GATE: u32 = u32::MAX;
 
 /// The most words a program has.
@@ -312,9 +317,12 @@ pub struct Prog {
     pub words: [libc::sock_filter; PROG_MAX],
     /// How many words the program has.
     pub len: u16,
-    /// The two compares that hold the gate address, low word then
+    /// The two compares that hold clone3's gate address, low word then
     /// high, which gated writes.
     pub gate: [u16; 2],
+    /// The same for move_mount's gate, which the runc program alone
+    /// has.
+    pub move_gate: Option<[u16; 2]>,
 }
 
 /// A BPF statement, BPF_STMT in linux/filter.h.
@@ -372,17 +380,21 @@ impl Prog {
             words: [stmt(0, 0); PROG_MAX],
             len: 0,
             gate: [0, 0],
+            move_gate: None,
         };
-        let (chain, n) = match which {
-            Program::Fiber => merge(a.plain, &[]),
-            Program::Runc => merge(a.plain, a.mounts),
+        let runc = matches!(which, Program::Runc);
+        let (chain, n) = if runc {
+            merge(a.plain, a.mounts)
+        } else {
+            merge(a.plain, &[])
         };
         // Where the shared returns land, so every jump to one is
         // absolute. The sections, in order: the plain chain (n), the
-        // clone3 gate (5), clone and unshare (4), socket (11),
-        // personality (7) and ioctl (4).
+        // clone3 gate (5), the move_mount gate (5, runc alone), clone
+        // and unshare (4), socket (11), personality (7) and ioctl (4).
         let head = if a.x32 { 6 } else { 4 };
-        let allow = head + n + 5 + 4 + 11 + 7 + 4;
+        let move_gate = if runc { 5 } else { 0 };
+        let allow = head + n + 5 + move_gate + 4 + 11 + 7 + 4;
         let eperm = allow + 1;
         let enosys = allow + 2;
 
@@ -410,6 +422,20 @@ impl Prog {
         p.ld(IP_HI);
         p.gate[1] = p.len;
         p.jmp(JEQ_K, NO_GATE, allow, enosys);
+        // A runc fiber's workspace goes in by move_mount, which the rest
+        // of the mount family's refusal would cover. It passes from the
+        // child's one gate (child.rs), checked as clone3's is, and is
+        // EPERM from anywhere else like the rest of the family.
+        if runc {
+            p.jmp(JEQ_K, MOVE_MOUNT, p.next(), p.next() + 4);
+            p.ld(IP_LO);
+            let lo = p.len;
+            p.jmp(JEQ_K, NO_GATE, p.next(), eperm);
+            p.ld(IP_HI);
+            let hi = p.len;
+            p.jmp(JEQ_K, NO_GATE, allow, eperm);
+            p.move_gate = Some([lo, hi]);
+        }
         // clone and unshare. The kernel reads clone's low 32 bits alone,
         // and refuses unshare any high bit with EINVAL, so the low word
         // is the whole check.
@@ -490,12 +516,17 @@ impl Prog {
         self.words.get(..usize::from(self.len)).unwrap_or(&[])
     }
 
-    /// A copy with gate, the address seccomp reports for birth's clone3,
-    /// in the two compares.
-    pub fn gated(&self, gate: u64) -> Prog {
+    /// A copy with the addresses seccomp reports for birth's clone3 and
+    /// the child's move_mount in their compares. The fiber program has
+    /// no move_mount gate, so the second address goes unused there.
+    pub fn gated(&self, clone3: u64, move_mount: u64) -> Prog {
         let mut p = *self;
-        p.words[usize::from(self.gate[0])].k = gate as u32;
-        p.words[usize::from(self.gate[1])].k = (gate >> 32) as u32;
+        p.words[usize::from(self.gate[0])].k = clone3 as u32;
+        p.words[usize::from(self.gate[1])].k = (clone3 >> 32) as u32;
+        if let Some([lo, hi]) = self.move_gate {
+            p.words[usize::from(lo)].k = move_mount as u32;
+            p.words[usize::from(hi)].k = (move_mount >> 32) as u32;
+        }
         p
     }
 }
@@ -546,7 +577,7 @@ pub enum Refusal {
 }
 
 /// install puts the program on every thread of the process, under
-/// no_new_privs so no capability is needed, with the gate's address
+/// no_new_privs so no capability is needed, with both gates' addresses
 /// read here so ASLR is moot. Fibers inherit it at the clone. A refusal
 /// means the zygote must not serve.
 pub fn install(which: Program) -> Result<(), Refusal> {
@@ -561,7 +592,10 @@ pub fn install(which: Program) -> Result<(), Refusal> {
             Program::Fiber => &PROG,
             Program::Runc => &PROG_RUNC,
         }
-        .gated(crate::child::gate_addr());
+        .gated(
+            crate::child::gate_addr(),
+            crate::child::move_mount_gate_addr(),
+        );
         let prog = libc::sock_fprog {
             len: p.len,
             // The kernel copies the program and writes nothing through
@@ -576,16 +610,21 @@ pub fn install(which: Program) -> Result<(), Refusal> {
     }
 }
 
-/// Whether the real program is on this process, so a child stacks the
-/// clone3 refusal. The faked installs of the unit tests leave it clear,
-/// since their children have no no_new_privs to stack under.
+/// Whether the real program is on this process, so a child stacks
+/// CHILD. The faked installs of the unit tests leave it clear, since
+/// their children have no no_new_privs to stack under.
 pub static INSTALLED: AtomicBool = AtomicBool::new(false);
 
-/// The child's filter. clone3 is ENOSYS from any address, so a fiber
-/// cannot reach the gate, by a jump or by an exec that puts a syscall
-/// at its address. Every other call passes to the zygote's program
-/// beneath, and the strictest answer wins.
-pub static CHILD: [libc::sock_filter; 4] = [
+/// The child's filter, which closes both gates. clone3 is ENOSYS and
+/// move_mount EPERM from any address, so a fiber cannot reach a gate,
+/// by a jump or by an exec that puts a syscall at its address. Every
+/// child of both backends stacks it, with or without a workspace. A
+/// runc fiber without one shares the container's mount namespace, where
+/// an open gate would let it move /host or /sys under its siblings, and
+/// a proc fiber's mount_ns never calls move_mount, so the stricter
+/// filter costs it nothing. Every other call passes to the zygote's
+/// program beneath, and the strictest answer wins.
+pub static CHILD: [libc::sock_filter; 6] = [
     stmt(LD_W_ABS, NR_OFF),
     libc::sock_filter {
         code: JEQ_K as u16,
@@ -594,13 +633,19 @@ pub static CHILD: [libc::sock_filter; 4] = [
         k: CLONE3,
     },
     stmt(RET_K, ENOSYS),
+    libc::sock_filter {
+        code: JEQ_K as u16,
+        jt: 0,
+        jf: 1,
+        k: MOVE_MOUNT,
+    },
+    stmt(RET_K, EPERM),
     stmt(RET_K, ALLOW),
 ];
 
-/// refuse_clone3 stacks CHILD on the calling thread, a fresh child's
-/// only one, under the no_new_privs the zygote set. 0, or -1 with
-/// errno.
-pub fn refuse_clone3() -> c_long {
+/// close_gates stacks CHILD on the calling thread, a fresh child's only
+/// one, under the no_new_privs the zygote set. 0, or -1 with errno.
+pub fn close_gates() -> c_long {
     let prog = libc::sock_fprog {
         len: CHILD.len() as u16,
         filter: CHILD.as_ptr().cast_mut(),
@@ -676,6 +721,7 @@ pub(crate) mod tests {
         clippy::type_complexity
     )]
     use super::*;
+    use core::ffi::{c_char, c_uint};
     use core::ptr;
     use std::sync::Mutex;
 
@@ -685,8 +731,10 @@ pub(crate) mod tests {
     /// The length of the program the faked apply was given.
     pub(crate) static SEEN_LEN: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
 
-    /// A gate address with distinct words, as a text address has.
+    /// clone3's gate address with distinct words, as a text address has.
     const GATE: u64 = 0x0000_7f3a_1b2c_4d58;
+    /// move_mount's gate, a little further into the same text.
+    const MOVE_GATE: u64 = 0x0000_7f3a_1b2c_4e90;
     /// Some other address in the library, where the vectors run from.
     const ELSEWHERE: u64 = GATE + 0x1000;
 
@@ -1086,7 +1134,7 @@ pub(crate) mod tests {
             .iter()
             .flat_map(|a| programs.iter().map(move |w| (a, *w)))
         {
-            let p = Prog::build(a, which).gated(GATE);
+            let p = Prog::build(a, which).gated(GATE, MOVE_GATE);
             for tc in &cases {
                 let got = run(&p, a.audit, tc.nr.on(a), ELSEWHERE, tc.args);
                 assert_eq!(got, tc.want, "{arch_name} {which:?}: {}", tc.name);
@@ -1108,6 +1156,13 @@ pub(crate) mod tests {
                     "{arch_name} {which:?}: mount nr {nr}"
                 );
             }
+            // move_mount from anywhere but its gate is one of the family
+            // to the runc program, and passes the fiber program.
+            assert_eq!(
+                run(&p, a.audit, MOVE_MOUNT, ELSEWHERE, [u64::MAX; 6]),
+                mounts,
+                "{arch_name} {which:?}: move_mount from elsewhere"
+            );
             // The other arch's table is foreign, and i386's too.
             let other = if a.x32 { AARCH64.audit } else { X86_64.audit };
             assert_eq!(
@@ -1150,6 +1205,7 @@ pub(crate) mod tests {
                 ENOSYS,
                 ENOSYS,
             ),
+            ("at move_mount's gate", MOVE_GATE, ENOSYS, ENOSYS),
             ("elsewhere in the library", ELSEWHERE, ENOSYS, ENOSYS),
             ("address zero", 0, ENOSYS, ENOSYS),
             ("the unwritten compare's address", u64::MAX, ENOSYS, ENOSYS),
@@ -1158,7 +1214,7 @@ pub(crate) mod tests {
         let child = child_prog();
         for (arch_name, a) in arches {
             for which in [Program::Fiber, Program::Runc] {
-                let p = Prog::build(a, which).gated(GATE);
+                let p = Prog::build(a, which).gated(GATE, MOVE_GATE);
                 for (name, ip, want, _) in cases {
                     assert_eq!(
                         run(&p, a.audit, CLONE3, *ip, arg0(0)),
@@ -1227,39 +1283,158 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_programs_are_short_and_checked() {
-        let cases: &[(&str, &Arch, Program, usize)] = &[
-            ("x86_64 fiber", &X86_64, Program::Fiber, 88),
-            ("x86_64 runc", &X86_64, Program::Runc, 102),
-            ("aarch64 fiber", &AARCH64, Program::Fiber, 77),
-            ("aarch64 runc", &AARCH64, Program::Runc, 91),
+    fn move_mount_passes_the_runc_gate_alone() {
+        // Where move_mount is called from, and what the runc program,
+        // the fiber program and the child's filter answer. The
+        // arguments are not read, so they are all ones.
+        let cases: &[(&str, u64, u32, u32, u32)] = &[
+            ("at its gate", MOVE_GATE, ALLOW, ALLOW, EPERM),
+            ("one byte past its gate", MOVE_GATE + 1, EPERM, ALLOW, EPERM),
+            (
+                "one byte before its gate",
+                MOVE_GATE - 1,
+                EPERM,
+                ALLOW,
+                EPERM,
+            ),
+            (
+                "its gate's low word under another high word",
+                MOVE_GATE ^ (1 << 40),
+                EPERM,
+                ALLOW,
+                EPERM,
+            ),
+            (
+                "its gate's high word over another low word",
+                MOVE_GATE ^ (1 << 12),
+                EPERM,
+                ALLOW,
+                EPERM,
+            ),
+            ("at clone3's gate", GATE, EPERM, ALLOW, EPERM),
+            ("elsewhere in the library", ELSEWHERE, EPERM, ALLOW, EPERM),
+            ("address zero", 0, EPERM, ALLOW, EPERM),
+            (
+                "the unwritten compare's address",
+                u64::MAX,
+                EPERM,
+                ALLOW,
+                EPERM,
+            ),
         ];
-        for (name, arch, which, len) in cases {
+        let arches: &[(&str, &Arch)] = &[("x86_64", &X86_64), ("aarch64", &AARCH64)];
+        let child = child_prog();
+        for (arch_name, a) in arches {
+            let runc = Prog::build(a, Program::Runc).gated(GATE, MOVE_GATE);
+            let fiber = Prog::build(a, Program::Fiber).gated(GATE, MOVE_GATE);
+            for (name, ip, want_runc, want_fiber, want_child) in cases {
+                assert_eq!(
+                    run(&runc, a.audit, MOVE_MOUNT, *ip, [u64::MAX; 6]),
+                    *want_runc,
+                    "{arch_name} runc: move_mount {name}"
+                );
+                assert_eq!(
+                    run(&fiber, a.audit, MOVE_MOUNT, *ip, [u64::MAX; 6]),
+                    *want_fiber,
+                    "{arch_name} fiber: move_mount {name}"
+                );
+                assert_eq!(
+                    run(&child, a.audit, MOVE_MOUNT, *ip, [u64::MAX; 6]),
+                    *want_child,
+                    "{arch_name} child: move_mount {name}"
+                );
+            }
+            // Before gated, nothing in user space passes the runc
+            // program.
+            let built = Prog::build(a, Program::Runc);
+            for ip in [0, GATE, MOVE_GATE, ELSEWHERE] {
+                assert_eq!(
+                    run(&built, a.audit, MOVE_MOUNT, ip, [u64::MAX; 6]),
+                    EPERM,
+                    "{arch_name} runc: move_mount from {ip:#x} before gated"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_programs_are_short_and_checked() {
+        // Each program's length, and whether it has a move_mount gate.
+        let cases: &[(&str, &Arch, Program, usize, bool)] = &[
+            ("x86_64 fiber", &X86_64, Program::Fiber, 88, false),
+            ("x86_64 runc", &X86_64, Program::Runc, 106, true),
+            ("aarch64 fiber", &AARCH64, Program::Fiber, 77, false),
+            ("aarch64 runc", &AARCH64, Program::Runc, 95, true),
+        ];
+        for (name, arch, which, len, has_move_gate) in cases {
             let p = Prog::build(arch, *which);
             assert_eq!(usize::from(p.len), *len, "{name}: length");
             assert_eq!(p.words().len(), *len, "{name}: live words");
             assert!(p.check(), "{name}");
-            // The gate's two compares, low then high, hold NO_GATE until
-            // gated writes the address.
-            let [lo, hi] = p.gate.map(usize::from);
-            assert_eq!(hi, lo + 2, "{name}: the compares sit two words apart");
-            for (what, i) in [("low", lo), ("high", hi)] {
-                let w = p.words[i];
-                assert_eq!(
-                    u32::from(w.code),
-                    JEQ_K,
-                    "{name}: the {what} compare's code"
-                );
-                assert_eq!(w.k, NO_GATE, "{name}: the {what} compare before gated");
-            }
-            let g = p.gated(GATE);
+            assert_eq!(
+                p.move_gate.is_some(),
+                *has_move_gate,
+                "{name}: a move_mount gate"
+            );
+            // Each gate's two compares, low then high, hold NO_GATE until
+            // gated writes the address, and gated writes each gate's own.
+            let clone3 = p.gate.map(usize::from);
+            let gates: Vec<(&str, [usize; 2], u64)> = match p.move_gate {
+                Some(m) => vec![
+                    ("clone3", clone3, GATE),
+                    ("move_mount", m.map(usize::from), MOVE_GATE),
+                ],
+                None => vec![("clone3", clone3, GATE)],
+            };
+            let g = p.gated(GATE, MOVE_GATE);
             assert_eq!(g.len, p.len, "{name}: gated keeps the length");
-            assert_eq!(g.words[lo].k, GATE as u32, "{name}: the low word");
-            assert_eq!(g.words[hi].k, (GATE >> 32) as u32, "{name}: the high word");
             assert!(g.check(), "{name}: gated");
+            for (gate, [lo, hi], addr) in &gates {
+                assert_eq!(
+                    *hi,
+                    lo + 2,
+                    "{name}: the {gate} compares sit two words apart"
+                );
+                for (what, i) in [("low", *lo), ("high", *hi)] {
+                    let w = p.words[i];
+                    assert_eq!(
+                        u32::from(w.code),
+                        JEQ_K,
+                        "{name}: the {gate} gate's {what} compare's code"
+                    );
+                    assert_eq!(
+                        w.k, NO_GATE,
+                        "{name}: the {gate} {what} compare before gated"
+                    );
+                }
+                assert_eq!(g.words[*lo].k, *addr as u32, "{name}: the {gate} low word");
+                assert_eq!(
+                    g.words[*hi].k,
+                    (*addr >> 32) as u32,
+                    "{name}: the {gate} high word"
+                );
+            }
+            if let Some([lo, _]) = p.move_gate {
+                assert!(
+                    usize::from(lo) > clone3[1],
+                    "{name}: the move_mount gate comes after clone3's"
+                );
+            }
+            // gated touches the compares alone.
+            let changed = p
+                .words()
+                .iter()
+                .zip(g.words())
+                .enumerate()
+                .filter(|(_, (a, b))| a.k != b.k)
+                .map(|(i, _)| i)
+                .collect::<Vec<_>>();
+            let mut compares: Vec<usize> = gates.iter().flat_map(|(_, c, _)| *c).collect();
+            compares.sort_unstable();
+            assert_eq!(changed, compares, "{name}: the words gated changed");
         }
         let child = child_prog();
-        assert_eq!(child.len, 4, "the child's filter is four words");
+        assert_eq!(child.len, 6, "the child's filter is six words");
         assert!(child.check(), "the child's filter");
     }
 
@@ -1378,7 +1553,6 @@ pub(crate) mod tests {
             ("name_to_handle_at", libc::SYS_name_to_handle_at),
             ("open_by_handle_at", libc::SYS_open_by_handle_at),
             ("open_tree", libc::SYS_open_tree),
-            ("move_mount", libc::SYS_move_mount),
             ("fsopen", libc::SYS_fsopen),
             ("fsconfig", libc::SYS_fsconfig),
             ("fsmount", libc::SYS_fsmount),
@@ -1401,7 +1575,12 @@ pub(crate) mod tests {
             ("personality", NATIVE.personality, libc::SYS_personality),
             ("ioctl", NATIVE.ioctl, libc::SYS_ioctl),
             ("clone3", CLONE3, libc::SYS_clone3),
+            ("move_mount", MOVE_MOUNT, libc::SYS_move_mount),
         ];
+        assert!(
+            !NATIVE.mounts.contains(&MOVE_MOUNT),
+            "move_mount is gated, not in the mount list"
+        );
         for (name, got, want) in checked {
             assert_eq!(c_long::from(*got), *want, "{name}");
         }
@@ -1442,40 +1621,81 @@ pub(crate) mod tests {
         status
     }
 
+    /// How a live case makes its call.
+    enum Via {
+        /// libc's syscall, from an address no gate names.
+        Syscall,
+        /// clone3 through birth's gate, with no args and a zero size,
+        /// which the kernel refuses with EINVAL once the filter lets it
+        /// through. nr and args are unused.
+        Clone3Gate,
+        /// move_mount through the child's gate, args as the call takes
+        /// them. nr is unused.
+        MoveMountGate,
+    }
+
     /// A raw call made under the real filter in a forked child. Only
     /// system calls run there, and the child's exit code is the first
     /// case that did not answer as expected, or 0.
     struct Live {
         name: &'static str,
-        /// clone3 through birth's gate, with no args and a zero size,
-        /// which the kernel refuses with EINVAL once the filter lets it
-        /// through. nr and args are unused.
-        gate: bool,
+        via: Via,
         nr: c_long,
         args: [c_long; 5],
         want: c_int, // 0 for success, else the errno
+        /// The answer is the kernel's past may_mount, which tells the
+        /// filter's EPERM from the kernel's only where the child reaches
+        /// it. Skipped when setup says it does not.
+        kernel: bool,
     }
 
+    /// A move_mount with a flag the kernel does not know and no path it
+    /// reads, so nothing is mounted. EINVAL past may_mount, EPERM short
+    /// of it, since move_mount asks may_mount before it looks at a flag.
+    const MOVE_MOUNT_BAD_FLAG: [c_long; 5] = [-1, 0, -1, 0, u32::MAX as c_long];
+
+    /// What setup answers. The kernel cases run on REACHES alone.
+    const REACHES: c_int = 0;
+    const SHORT: c_int = 1;
+    /// The child's exit when it passed but skipped the kernel cases.
+    const SKIPPED: c_int = 99;
+
     /// Forks, runs setup then the cases in the child, and names the
-    /// case that failed. setup's answer 0 means the kernel refused a
-    /// program.
-    fn live(setup: fn() -> c_int, cases: &[Live]) {
+    /// case that failed. setup answers REACHES or SHORT, for may_mount,
+    /// or anything else when the kernel refused a program.
+    fn live(setup: impl Fn() -> c_int, cases: &[Live]) {
         // SAFETY: the child installs filters, makes raw calls and _exits.
         let pid = unsafe { libc::fork() };
         assert!(pid >= 0, "fork");
         if pid == 0 {
-            if setup() != 0 {
+            let reach = setup();
+            if reach != REACHES && reach != SHORT {
                 // SAFETY: _exit ends the child.
                 unsafe { libc::_exit(100) };
             }
+            let mut skipped = false;
             for (i, tc) in cases.iter().enumerate() {
+                if tc.kernel && reach == SHORT {
+                    skipped = true;
+                    continue;
+                }
                 // SAFETY: each call takes integers, a null pointer where
-                // one is read (clone3, io_uring_setup) fails before use.
+                // one is read (clone3, io_uring_setup) fails before use,
+                // and move_mount's bad flag fails before any path.
                 let r = unsafe {
-                    if tc.gate {
-                        crate::child::clone3(ptr::null_mut(), 0)
-                    } else {
-                        sys::syscall(tc.nr, tc.args)
+                    match tc.via {
+                        Via::Syscall => sys::syscall(tc.nr, tc.args),
+                        Via::Clone3Gate => crate::child::clone3(ptr::null_mut(), 0),
+                        Via::MoveMountGate => {
+                            let [from_dfd, from_path, to_dfd, to_path, flags] = tc.args;
+                            crate::child::move_mount(
+                                from_dfd as c_int,
+                                from_path as *const c_char,
+                                to_dfd as c_int,
+                                to_path as *const c_char,
+                                flags as c_uint,
+                            )
+                        }
                     }
                 };
                 let ok = if tc.want == 0 {
@@ -1489,7 +1709,7 @@ pub(crate) mod tests {
                 }
             }
             // SAFETY: _exit ends the child.
-            unsafe { libc::_exit(0) };
+            unsafe { libc::_exit(if skipped { SKIPPED } else { 0 }) };
         }
         let status = wait(pid);
         assert!(
@@ -1498,6 +1718,12 @@ pub(crate) mod tests {
         );
         let code = libc::WEXITSTATUS(status);
         assert_ne!(code, 100, "the kernel refused a program");
+        if code == SKIPPED {
+            eprintln!(
+                "move_mount stops at may_mount here, so the cases that reach the kernel past it were skipped"
+            );
+            return;
+        }
         if code != 0 {
             panic!(
                 "{}: not the answer expected",
@@ -1506,14 +1732,51 @@ pub(crate) mod tests {
         }
     }
 
-    /// The zygote's program with the real gate, as install puts it on.
-    fn install_zygote() -> c_int {
-        let p = PROG.gated(crate::child::gate_addr());
+    /// A zygote program with the real gates, as install puts it on.
+    fn install_program(which: Program) -> c_int {
+        let p = match which {
+            Program::Fiber => &PROG,
+            Program::Runc => &PROG_RUNC,
+        }
+        .gated(
+            crate::child::gate_addr(),
+            crate::child::move_mount_gate_addr(),
+        );
         let prog = libc::sock_fprog {
             len: p.len,
             filter: p.words.as_ptr().cast_mut(),
         };
         apply_real(&prog) as c_int
+    }
+
+    /// What the kernel answers MOVE_MOUNT_BAD_FLAG from libc's syscall,
+    /// with no filter on.
+    fn move_mount_errno() -> c_int {
+        // SAFETY: the bad flag fails before any argument is read.
+        let r = unsafe { sys::syscall(libc::SYS_move_mount, MOVE_MOUNT_BAD_FLAG) };
+        if r < 0 { sys::errno() } else { 0 }
+    }
+
+    /// Puts the child past may_mount, so a move_mount the filter lets
+    /// through answers the kernel's EINVAL and one it refuses the
+    /// filter's EPERM. Root in the initial namespace is there already.
+    /// Otherwise a user namespace of the child's own, owning a copy of
+    /// its mount namespace, gives it CAP_SYS_ADMIN over that copy, which
+    /// is what may_mount asks. REACHES when it got there, SHORT when a
+    /// host that refuses unprivileged user namespaces left both answers
+    /// EPERM.
+    fn reach_may_mount() -> c_int {
+        if move_mount_errno() == libc::EINVAL {
+            return REACHES;
+        }
+        // SAFETY: integer argument alone, in the forked child, the one
+        // thread of its process.
+        unsafe { libc::unshare(libc::CLONE_NEWUSER | libc::CLONE_NEWNS) };
+        if move_mount_errno() == libc::EINVAL {
+            REACHES
+        } else {
+            SHORT
+        }
     }
 
     #[test]
@@ -1522,63 +1785,72 @@ pub(crate) mod tests {
         let cases = [
             Live {
                 name: "getpid",
-                gate: false,
+                via: Via::Syscall,
+                kernel: false,
                 nr: libc::SYS_getpid,
                 args: [0; 5],
                 want: 0,
             },
             Live {
                 name: "io_uring_setup",
-                gate: false,
+                via: Via::Syscall,
+                kernel: false,
                 nr: libc::SYS_io_uring_setup,
                 args: [1, 0, 0, 0, 0],
                 want: libc::EPERM,
             },
             Live {
                 name: "kcmp",
-                gate: false,
+                via: Via::Syscall,
+                kernel: false,
                 nr: libc::SYS_kcmp,
                 args: [0; 5],
                 want: libc::EPERM,
             },
             Live {
                 name: "clone3 from libc's syscall",
-                gate: false,
+                via: Via::Syscall,
+                kernel: false,
                 nr: libc::SYS_clone3,
                 args: [0; 5],
                 want: libc::ENOSYS,
             },
             Live {
                 name: "clone3 from the gate reaches the kernel",
-                gate: true,
+                via: Via::Clone3Gate,
+                kernel: false,
                 nr: 0,
                 args: [0; 5],
                 want: libc::EINVAL,
             },
             Live {
                 name: "unshare(CLONE_NEWUSER)",
-                gate: false,
+                via: Via::Syscall,
+                kernel: false,
                 nr: libc::SYS_unshare,
                 args: [c_long::from(libc::CLONE_NEWUSER), 0, 0, 0, 0],
                 want: libc::EPERM,
             },
             Live {
                 name: "unshare(CLONE_FS)",
-                gate: false,
+                via: Via::Syscall,
+                kernel: false,
                 nr: libc::SYS_unshare,
                 args: [c_long::from(libc::CLONE_FS), 0, 0, 0, 0],
                 want: 0,
             },
             Live {
                 name: "socket(AF_ALG)",
-                gate: false,
+                via: Via::Syscall,
+                kernel: false,
                 nr: libc::SYS_socket,
                 args: [38, c_long::from(libc::SOCK_SEQPACKET), 0, 0, 0],
                 want: libc::EAFNOSUPPORT,
             },
             Live {
                 name: "socket(AF_NETLINK, NETLINK_SOCK_DIAG)",
-                gate: false,
+                via: Via::Syscall,
+                kernel: false,
                 nr: libc::SYS_socket,
                 args: [
                     c_long::from(libc::AF_NETLINK),
@@ -1591,7 +1863,8 @@ pub(crate) mod tests {
             },
             Live {
                 name: "socket(AF_NETLINK, NETLINK_ROUTE)",
-                gate: false,
+                via: Via::Syscall,
+                kernel: false,
                 nr: libc::SYS_socket,
                 args: [
                     c_long::from(libc::AF_NETLINK),
@@ -1604,7 +1877,8 @@ pub(crate) mod tests {
             },
             Live {
                 name: "socket(AF_UNIX)",
-                gate: false,
+                via: Via::Syscall,
+                kernel: false,
                 nr: libc::SYS_socket,
                 args: [
                     c_long::from(libc::AF_UNIX),
@@ -1617,14 +1891,16 @@ pub(crate) mod tests {
             },
             Live {
                 name: "personality query",
-                gate: false,
+                via: Via::Syscall,
+                kernel: false,
                 nr: libc::SYS_personality,
                 args: [0xFFFF_FFFF, 0, 0, 0, 0],
                 want: 0,
             },
             Live {
                 name: "personality(UNAME26)",
-                gate: false,
+                via: Via::Syscall,
+                kernel: false,
                 nr: libc::SYS_personality,
                 args: [0x0002_0000, 0, 0, 0, 0],
                 want: libc::EPERM,
@@ -1634,79 +1910,266 @@ pub(crate) mod tests {
             // kernel.
             Live {
                 name: "ioctl(FS_IOC_FSSETXATTR)",
-                gate: false,
+                via: Via::Syscall,
+                kernel: false,
                 nr: libc::SYS_ioctl,
                 args: [0, 0x401c_5820, 0, 0, 0],
                 want: libc::EPERM,
             },
             Live {
                 name: "ioctl(FS_IOC_SETFLAGS)",
-                gate: false,
+                via: Via::Syscall,
+                kernel: false,
                 nr: libc::SYS_ioctl,
                 args: [0, 0x4008_6602, 0, 0, 0],
                 want: libc::EPERM,
             },
             Live {
                 name: "file_setattr",
-                gate: false,
+                via: Via::Syscall,
+                kernel: false,
                 nr: 469,
                 args: [0, 0, 0, 0, 0],
                 want: libc::EPERM,
             },
         ];
-        live(install_zygote, &cases);
+        live(
+            || {
+                if install_program(Program::Fiber) == 0 {
+                    REACHES
+                } else {
+                    -1
+                }
+            },
+            &cases,
+        );
     }
 
     #[test]
-    fn the_childs_filter_closes_the_gate() {
+    fn the_childs_filter_closes_the_gates() {
         let _serial = crate::serial();
-        // The zygote's program, then the child's filter on top, as a
-        // fiber has them. clone3 is ENOSYS from the gate too, and the
-        // zygote's answers still stand.
+        // The fiber program, then the child's filter on top, as a proc
+        // fiber has them. clone3 is ENOSYS from the gate too, move_mount
+        // EPERM from its gate although the fiber program lets it
+        // through, and the zygote's answers still stand.
         fn setup() -> c_int {
-            if install_zygote() != 0 {
+            if install_program(Program::Fiber) != 0 {
                 return -1;
             }
-            refuse_clone3() as c_int
+            if close_gates() != 0 {
+                return -1;
+            }
+            REACHES
         }
         let cases = [
             Live {
+                name: "move_mount from the gate",
+                via: Via::MoveMountGate,
+                nr: 0,
+                args: MOVE_MOUNT_BAD_FLAG,
+                want: libc::EPERM,
+                kernel: false,
+            },
+            Live {
+                name: "move_mount from libc's syscall",
+                via: Via::Syscall,
+                nr: libc::SYS_move_mount,
+                args: MOVE_MOUNT_BAD_FLAG,
+                want: libc::EPERM,
+                kernel: false,
+            },
+            Live {
                 name: "clone3 from the gate",
-                gate: true,
+                via: Via::Clone3Gate,
+                kernel: false,
                 nr: 0,
                 args: [0; 5],
                 want: libc::ENOSYS,
             },
             Live {
                 name: "clone3 from libc's syscall",
-                gate: false,
+                via: Via::Syscall,
+                kernel: false,
                 nr: libc::SYS_clone3,
                 args: [0; 5],
                 want: libc::ENOSYS,
             },
             Live {
                 name: "getpid",
-                gate: false,
+                via: Via::Syscall,
+                kernel: false,
                 nr: libc::SYS_getpid,
                 args: [0; 5],
                 want: 0,
             },
             Live {
                 name: "unshare(CLONE_NEWUSER), the zygote's program beneath",
-                gate: false,
+                via: Via::Syscall,
+                kernel: false,
                 nr: libc::SYS_unshare,
                 args: [c_long::from(libc::CLONE_NEWUSER), 0, 0, 0, 0],
                 want: libc::EPERM,
             },
             Live {
                 name: "kcmp, the zygote's program beneath",
-                gate: false,
+                via: Via::Syscall,
+                kernel: false,
                 nr: libc::SYS_kcmp,
                 args: [0; 5],
                 want: libc::EPERM,
             },
         ];
         live(setup, &cases);
+    }
+
+    #[test]
+    fn move_mount_passes_the_runc_gate_alone_in_the_kernel() {
+        let _serial = crate::serial();
+        // Each program with the real gates, and the runc program with
+        // the child's filter on top, as a runc fiber has them. A
+        // move_mount the filter lets through answers the kernel's EINVAL
+        // for the bad flag, which tells it from the filter's EPERM only
+        // past may_mount (reach_may_mount), so those cases are skipped
+        // short of it. The EPERM cases hold either way.
+        struct Scenario {
+            name: &'static str,
+            program: Program,
+            child: bool,
+            cases: Vec<Live>,
+        }
+        let scenarios = [
+            Scenario {
+                name: "the fiber program lets move_mount through",
+                program: Program::Fiber,
+                child: false,
+                cases: vec![
+                    Live {
+                        name: "move_mount from libc's syscall reaches the kernel under the fiber program",
+                        via: Via::Syscall,
+                        nr: libc::SYS_move_mount,
+                        args: MOVE_MOUNT_BAD_FLAG,
+                        want: libc::EINVAL,
+                        kernel: true,
+                    },
+                    Live {
+                        name: "move_mount from the gate reaches the kernel under the fiber program",
+                        via: Via::MoveMountGate,
+                        nr: 0,
+                        args: MOVE_MOUNT_BAD_FLAG,
+                        want: libc::EINVAL,
+                        kernel: true,
+                    },
+                ],
+            },
+            Scenario {
+                name: "the runc program passes the gate alone",
+                program: Program::Runc,
+                child: false,
+                cases: vec![
+                    Live {
+                        name: "move_mount from libc's syscall is the runc program's EPERM",
+                        via: Via::Syscall,
+                        nr: libc::SYS_move_mount,
+                        args: MOVE_MOUNT_BAD_FLAG,
+                        want: libc::EPERM,
+                        kernel: false,
+                    },
+                    Live {
+                        name: "move_mount from the gate reaches the kernel under the runc program",
+                        via: Via::MoveMountGate,
+                        nr: 0,
+                        args: MOVE_MOUNT_BAD_FLAG,
+                        want: libc::EINVAL,
+                        kernel: true,
+                    },
+                    Live {
+                        name: "mount from libc's syscall under the runc program",
+                        via: Via::Syscall,
+                        nr: libc::SYS_mount,
+                        args: [0; 5],
+                        want: libc::EPERM,
+                        kernel: false,
+                    },
+                    Live {
+                        name: "open_tree from libc's syscall under the runc program",
+                        via: Via::Syscall,
+                        nr: libc::SYS_open_tree,
+                        args: [0; 5],
+                        want: libc::EPERM,
+                        kernel: false,
+                    },
+                    Live {
+                        name: "clone3 from its gate reaches the kernel under the runc program",
+                        via: Via::Clone3Gate,
+                        nr: 0,
+                        args: [0; 5],
+                        want: libc::EINVAL,
+                        kernel: false,
+                    },
+                    Live {
+                        name: "getpid under the runc program",
+                        via: Via::Syscall,
+                        nr: libc::SYS_getpid,
+                        args: [0; 5],
+                        want: 0,
+                        kernel: false,
+                    },
+                ],
+            },
+            Scenario {
+                name: "the child's filter closes the runc gate",
+                program: Program::Runc,
+                child: true,
+                cases: vec![
+                    Live {
+                        name: "move_mount from the gate under the child's filter",
+                        via: Via::MoveMountGate,
+                        nr: 0,
+                        args: MOVE_MOUNT_BAD_FLAG,
+                        want: libc::EPERM,
+                        kernel: false,
+                    },
+                    Live {
+                        name: "move_mount from libc's syscall under the child's filter",
+                        via: Via::Syscall,
+                        nr: libc::SYS_move_mount,
+                        args: MOVE_MOUNT_BAD_FLAG,
+                        want: libc::EPERM,
+                        kernel: false,
+                    },
+                    Live {
+                        name: "clone3 from its gate under the child's filter",
+                        via: Via::Clone3Gate,
+                        nr: 0,
+                        args: [0; 5],
+                        want: libc::ENOSYS,
+                        kernel: false,
+                    },
+                    Live {
+                        name: "getpid under the child's filter",
+                        via: Via::Syscall,
+                        nr: libc::SYS_getpid,
+                        args: [0; 5],
+                        want: 0,
+                        kernel: false,
+                    },
+                ],
+            },
+        ];
+        for sc in &scenarios {
+            eprintln!("{}", sc.name);
+            let setup = || {
+                let reach = reach_may_mount();
+                if install_program(sc.program) != 0 {
+                    return -1;
+                }
+                if sc.child && close_gates() != 0 {
+                    return -1;
+                }
+                reach
+            };
+            live(setup, &sc.cases);
+        }
     }
 
     #[cfg(target_arch = "x86_64")]
@@ -1717,7 +2180,7 @@ pub(crate) mod tests {
         let pid = unsafe { libc::fork() };
         assert!(pid >= 0, "fork");
         if pid == 0 {
-            if install_zygote() != 0 {
+            if install_program(Program::Fiber) != 0 {
                 // SAFETY: _exit ends the child.
                 unsafe { libc::_exit(100) };
             }

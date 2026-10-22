@@ -28,7 +28,7 @@ var (
 	template   = flag.String("template", "sha256:conform", "template digest for minted grants")
 	fiberWarm  = flag.Int("fiber-warm", 0, "fibers.warm for minted grants: above zero the home pools sandboxes and the Pool case checks a clone is served from them")
 	isolation  = flag.String("isolation", "UNTRUSTED", "isolation for minted grants: TRUSTED for a target on proc or runc")
-	workspaces = flag.Bool("workspaces", false, "the target's runtime gives fibers a workspace (proc): C12 uploads into one, parks, resumes and downloads")
+	workspaces = flag.Bool("workspaces", false, "the target's runtime gives fibers a workspace (proc, runc): C12 uploads into one, parks, resumes and downloads")
 	mint       = flag.String("mint", "insecure-json", "how to mint grants: jwt (sign with -issuer-key as -issuer) or insecure-json")
 	issuerKey  = flag.String("issuer-key", "", "private JWK for -mint=jwt (from grant-issuer keygen)")
 	issuerURL  = flag.String("issuer", "", "issuer URL for -mint=jwt: what the target verifies against")
