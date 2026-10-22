@@ -18,6 +18,9 @@ routes to preferred_home), on Shed it waits retry_after and tries again.
         c.park(f)
         c.release(f, discard=True)
 
+A fiber whose grant has a disk budget has a workspace, its /workspace.
+upload, download and list_files move files in and out of it.
+
 fiberd.client.aio.Client is the same over grpc.aio. The token is never
 stored, logged or shown by a repr, and nothing here reads the environment.
 """
@@ -33,13 +36,14 @@ import logging
 import os
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any, BinaryIO
 
 from google.protobuf import empty_pb2
 
 from fiberd.client import _calls
 from fiberd.client._api import grant_pb2
-from fiberd.client._calls import Status, Token
-from fiberd.client._errors import Deferred, Error, KeyMismatch, NotFound, NotHandoff, Shed, TierGap, classify
+from fiberd.client._calls import FileInfo, Status, Token
+from fiberd.client._errors import Deferred, Error, KeyMismatch, NotFound, NotHandoff, NoWorkspace, QuotaExceeded, Shed, TierGap, classify
 from fiberd.client._fiber import HANDOFF_SUFFIX, Fence, Fiber, Kind
 from fiberd.client._stubs import Stubs
 
@@ -47,13 +51,17 @@ __all__ = [
     "HANDOFF_SUFFIX",
     "Client",
     "Deferred",
+    "Download",
     "Error",
     "Fence",
     "Fiber",
+    "FileInfo",
     "KeyMismatch",
     "Kind",
     "NotFound",
     "NotHandoff",
+    "NoWorkspace",
+    "QuotaExceeded",
     "Shed",
     "Status",
     "TierGap",
@@ -71,6 +79,49 @@ def tls_credentials(cert: PathLike, key: PathLike, ca: PathLike) -> grpc.Channel
     return grpc.ssl_channel_credentials(
         root_certificates=Path(ca).read_bytes(), private_key=Path(key).read_bytes(), certificate_chain=Path(cert).read_bytes()
     )
+
+
+class Download:
+    """One file coming down from a fiber's workspace, an iterator of its bytes.
+
+    info is what the first message carried. b"".join(download) reads the
+    whole file. cancel(), or the end of a with block, stops it early. A
+    failure while reading raises the same typed errors as the call.
+    """
+
+    def __init__(self, call: Any, info: FileInfo, first: bytes) -> None:
+        # call is the grpc stream, a grpc.Call that iterates FileChunks.
+        self._call = call
+        self._first = first
+        self.info = info
+
+    def __repr__(self) -> str:
+        return f"Download(info={self.info!r})"
+
+    def __iter__(self) -> Download:
+        return self
+
+    def __next__(self) -> bytes:
+        if self._first:
+            data, self._first = self._first, b""
+            return data
+        while True:
+            try:
+                chunk = next(self._call)
+            except grpc.RpcError as e:
+                raise classify(e) from None
+            if chunk.data:
+                return chunk.data
+
+    def __enter__(self) -> Download:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.cancel()
+
+    def cancel(self) -> None:
+        """Stops the transfer. A call already done is left as it is."""
+        self._call.cancel()
 
 
 class Client:
@@ -150,3 +201,60 @@ class Client:
             raise classify(e) from None
         finally:
             call.cancel()
+
+    def upload(
+        self,
+        fiber: Fiber | str,
+        path: str,
+        data: bytes | BinaryIO,
+        *,
+        size: int | None = None,
+        mode: int = 0,
+        sha256: bytes | None = None,
+        timeout: float | None = None,
+    ) -> FileInfo:
+        """Writes data to path in the fiber's workspace, relative to its /workspace, and returns what landed.
+
+        data is bytes or a binary file read from where it stands. A file's
+        size comes from fstat or a seek to its end, and a stream with
+        neither needs size. A source that ends early or holds more than
+        size bytes raises ValueError, and fiberd keeps no file. mode zero
+        is 0644. sha256, when given, is checked before the file appears.
+        Raises NotFound, NoWorkspace or QuotaExceeded, or the grpc.RpcError
+        for anything else.
+        """
+        read, size = _calls.upload_source(data, size)
+        up = _calls.Upload(_calls.upload_header(fiber, path, size, mode, sha256))
+        try:
+            r = self._stubs.upload(up.requests(read), timeout=timeout)
+        except grpc.RpcError as e:
+            # A source that broke its size cancelled the call from the request iterator.
+            if up.error is not None:
+                raise up.error from None
+            raise classify(e) from None
+        return _calls.file_info_from(r)
+
+    def download(self, fiber: Fiber | str, path: str, *, offset: int = 0, timeout: float | None = None) -> Download:
+        """Starts reading path from the fiber's workspace at offset, and returns once its info arrived.
+
+        Raises NotFound for an unknown fiber or a missing file, NoWorkspace,
+        or the grpc.RpcError for anything else, from here rather than from
+        the first read.
+        """
+        call = self._stubs.download(grant_pb2.DownloadRequest(fiber_id=_calls.fiber_id(fiber), path=path, offset=offset), timeout=timeout)
+        try:
+            first = next(call)
+        except grpc.RpcError as e:
+            raise classify(e) from None
+        except StopIteration:
+            call.cancel()
+            raise Error(f"download of {path}: the stream ended before the file's info") from None
+        return Download(call, _calls.file_info_from(first.info), first.data)
+
+    def list_files(self, fiber: Fiber | str, dir: str = "", *, timeout: float | None = None) -> list[FileInfo]:
+        """The entries of dir in the fiber's workspace, not recursive. Empty dir is the workspace itself."""
+        try:
+            r = self._stubs.list_files(grant_pb2.ListFilesRequest(fiber_id=_calls.fiber_id(fiber), dir=dir), timeout=timeout)
+        except grpc.RpcError as e:
+            raise classify(e) from None
+        return [_calls.file_info_from(f) for f in r.files]

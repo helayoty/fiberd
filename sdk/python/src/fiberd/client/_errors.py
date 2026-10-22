@@ -1,14 +1,16 @@
 """The typed outcomes a caller branches on, and the classifier that reads them off a failed call.
 
 A miss travels as a google.rpc.Status in the grpc-status-details-bin
-trailer with the Miss as one of its Any details. The trailer is read with
-a small protobuf wire walker rather than grpcio-status, so the client
-needs only grpcio and protobuf.
+trailer with the Miss as one of its Any details. A file call on a fiber
+with no workspace carries a NoWorkspace detail the same way. The trailer
+is read with a small protobuf wire walker rather than grpcio-status, so
+the client needs only grpcio and protobuf.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterator
+from dataclasses import dataclass
 
 import grpc
 from google.protobuf.message import DecodeError
@@ -17,6 +19,7 @@ from fiberd.client._api import grant_pb2
 
 DETAILS_KEY = "grpc-status-details-bin"
 MISS_TYPE = "/fiberd.grant.v1.Miss"
+NO_WORKSPACE_TYPE = "/fiberd.grant.v1.NoWorkspace"
 
 
 class Error(Exception):
@@ -64,8 +67,24 @@ class TierGap(Error):
         self.reason = reason
 
 
+class NoWorkspace(Error):
+    """A file call on a fiber whose grant has no workspace, since its disk_budget_bytes is zero. Not a tier gap, the grant asked for none."""
+
+    def __init__(self, reason: str = "") -> None:
+        super().__init__(f"no workspace: {reason}")
+        self.reason = reason
+
+
+class QuotaExceeded(Error):
+    """The file does not fit the workspace's disk budget or its entry limit. Not a shed, so waiting does not help."""
+
+    def __init__(self, reason: str = "") -> None:
+        super().__init__(f"quota exceeded: {reason}")
+        self.reason = reason
+
+
 class NotFound(Error):
-    """A Park or Release of a fiber the home does not know, a prior epoch's fence or one already gone."""
+    """A call on a fiber the home does not know, a prior epoch's fence or one already gone, or a file its workspace does not hold."""
 
     def __init__(self, reason: str = "") -> None:
         super().__init__(f"not found: {reason}")
@@ -115,8 +134,8 @@ def fields(b: bytes) -> Iterator[tuple[int, bytes | int]]:
             raise ValueError(f"wire type {wire}")
 
 
-def miss_from_status(raw: bytes) -> grant_pb2.Miss | None:
-    """The Miss among a serialized google.rpc.Status's details, or None."""
+def details(raw: bytes) -> Iterator[tuple[bytes, bytes]]:
+    """The (type URL, value) of each Any detail of a serialized google.rpc.Status."""
     for number, value in fields(raw):
         if number != 3 or not isinstance(value, bytes):
             continue
@@ -126,22 +145,53 @@ def miss_from_status(raw: bytes) -> grant_pb2.Miss | None:
                 type_url = v
             elif n == 2 and isinstance(v, bytes):
                 payload = v
+        yield type_url, payload
+
+
+def miss_from_status(raw: bytes) -> grant_pb2.Miss | None:
+    """The Miss among a serialized google.rpc.Status's details, or None."""
+    for type_url, payload in details(raw):
         if type_url.endswith(MISS_TYPE.encode()):
             return grant_pb2.Miss.FromString(payload)
     return None
 
 
-def miss_from_call(call: object) -> grant_pb2.Miss | None:
-    """The Miss detail of a failed call (a grpc.Call or a grpc.aio.AioRpcError), when it carries one."""
+def no_workspace_in_status(raw: bytes) -> bool:
+    """Whether a serialized google.rpc.Status carries the NoWorkspace detail."""
+    return any(type_url.endswith(NO_WORKSPACE_TYPE.encode()) for type_url, _ in details(raw))
+
+
+@dataclass(frozen=True)
+class _Trailer:
+    """What classify reads off a failed call's grpc-status-details-bin trailer."""
+
+    miss: grant_pb2.Miss | None = None
+    no_workspace: bool = False
+    # False for a trailer that does not parse. A call without a trailer parses.
+    parsed: bool = True
+
+
+def _trailer(call: object) -> _Trailer:
+    """The trailer of a failed call (a grpc.Call or a grpc.aio.AioRpcError)."""
     trailing = getattr(call, "trailing_metadata", None)
     metadata = trailing() if callable(trailing) else None
     for key, value in metadata or ():
         if key == DETAILS_KEY and isinstance(value, bytes):
             try:
-                return miss_from_status(value)
+                miss = miss_from_status(value)
             except (ValueError, DecodeError):
-                return None
-    return None
+                return _Trailer(parsed=False)
+            # A Miss ahead of a detail that does not parse still counts.
+            try:
+                return _Trailer(miss, no_workspace_in_status(value))
+            except ValueError:
+                return _Trailer(miss, parsed=False)
+    return _Trailer()
+
+
+def miss_from_call(call: object) -> grant_pb2.Miss | None:
+    """The Miss detail of a failed call, when it carries one."""
+    return _trailer(call).miss
 
 
 def classify(err: grpc.RpcError) -> Exception:
@@ -150,7 +200,8 @@ def classify(err: grpc.RpcError) -> Exception:
     if not callable(getattr(err, "code", None)) or not callable(getattr(err, "details", None)):
         return err
     reason = err.details() or ""
-    miss = miss_from_call(err)
+    t = _trailer(err)
+    miss = t.miss
     if miss is not None:
         if miss.code == grant_pb2.SHED:
             return Shed(retry_after=float(miss.retry_after_s), issuer=miss.issuer, reason=reason)
@@ -158,7 +209,11 @@ def classify(err: grpc.RpcError) -> Exception:
             return Deferred(issuer=miss.issuer, preferred_home=miss.preferred_home, reason=reason)
     code = err.code()
     if code == grpc.StatusCode.FAILED_PRECONDITION:
-        return TierGap(reason)
+        return NoWorkspace(reason) if t.no_workspace else TierGap(reason)
+    # A shed is ResourceExhausted with a Miss, and without one it is the disk budget. A trailer that
+    # does not parse might have held a Miss, so that call stays what it was rather than read as a quota.
+    if code == grpc.StatusCode.RESOURCE_EXHAUSTED and miss is None and t.parsed:
+        return QuotaExceeded(reason)
     if code == grpc.StatusCode.NOT_FOUND:
         return NotFound(reason)
     return err
