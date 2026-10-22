@@ -101,6 +101,7 @@ The conformance suite in `tests/e2e/conform` checks these.
 - The loss of the [warm](glossary.md#warm) template.
 - [Scope](glossary.md#scope) loss.
 - A [session](glossary.md#session) that moves to a second home and back, when one is given.
+- A workspace's files across a park and resume, on a runtime that gives fibers one (proc and runc).
 
 ```bash
 make conform-proc

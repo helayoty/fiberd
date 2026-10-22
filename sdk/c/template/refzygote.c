@@ -863,6 +863,27 @@ static int p_mount(void) {
  * answers ENOENT and moves nothing. */
 static int p_pivot_root(void) { return (int)syscall(SYS_pivot_root, "/.probe-none", "/.probe-none"); }
 static int p_chroot(void) { return chroot("/"); }
+#ifndef SYS_move_mount
+#define SYS_move_mount 429
+#endif
+/* Take the workspace off /workspace. The kernel lets a runc fiber do it,
+ * since it holds CAP_SYS_ADMIN over its own mount namespace, so EPERM is
+ * the filter's. Where /workspace is no mount the kernel would say
+ * EINVAL. A pass costs the fiber its workspace, which the test reports. */
+static int p_umount_workspace(void) { return umount2("/workspace", MNT_DETACH); }
+/* Move the workspace onto a scratch directory under /tmp, which the
+ * kernel would allow for the same reason. A move that goes through is
+ * put back. */
+static int p_move_mount_workspace(void) {
+    char dir[] = "/tmp/.probe-XXXXXX";
+    if (!mkdtemp(dir)) return -1;
+    int rc = (int)syscall(SYS_move_mount, AT_FDCWD, "/workspace", AT_FDCWD, dir, 0);
+    int e = errno;
+    if (rc == 0) syscall(SYS_move_mount, AT_FDCWD, dir, AT_FDCWD, "/workspace", 0);
+    rmdir(dir);
+    errno = e;
+    return rc;
+}
 /* getpid through the x32 table, which a fiber has no use for. */
 static int p_x32(void) {
 #if defined(__x86_64__)
@@ -887,6 +908,7 @@ static const struct { const char *name; int (*fn)(void); } probes[] = {
     { "syslog", p_syslog }, { "sethostname", p_sethostname },
     { "thread", p_thread }, { "x32", p_x32 },
     { "mount", p_mount }, { "pivot-root", p_pivot_root }, { "chroot", p_chroot },
+    { "umount-workspace", p_umount_workspace }, { "move-mount-workspace", p_move_mount_workspace },
     { "fssetxattr", p_fssetxattr }, { "setflags", p_setflags }, { "file-setattr", p_file_setattr },
 };
 
@@ -1003,6 +1025,31 @@ static void scribble(const char *path, char *out, size_t n) {
     snprintf(out, n, "ok\n");
 }
 
+/* second_arg splits "<first> <rest>" into first, of size n, and returns
+ * rest, or NULL when there is no space or first does not fit. */
+static const char *second_arg(const char *args, char *first, size_t n) {
+    const char *sp = strchr(args, ' ');
+    if (!sp || (size_t)(sp - args) >= n) return NULL;
+    memcpy(first, args, (size_t)(sp - args)); first[sp - args] = 0;
+    return sp + 1;
+}
+
+/* rename_path and symlink_path let a fiber swap the workspace mount
+ * point of its grant's root filesystem for a link, as a sibling may. */
+static void rename_path(const char *args, char *out, size_t n) {
+    char from[256];
+    const char *to = second_arg(args, from, sizeof from);
+    if (!to) { snprintf(out, n, "err want <from> <to>\n"); return; }
+    if (rename(from, to) == 0) snprintf(out, n, "ok\n"); else errname(errno, out, n);
+}
+
+static void symlink_path(const char *args, char *out, size_t n) {
+    char target[256];
+    const char *at = second_arg(args, target, sizeof target);
+    if (!at) { snprintf(out, n, "err want <target> <link>\n"); return; }
+    if (symlink(target, at) == 0) snprintf(out, n, "ok\n"); else errname(errno, out, n);
+}
+
 static int serve_client(conn_t *c, const char *fence, unsigned long *counter) {
     char line[256];
     while (conn_line(c, line, sizeof line)) {
@@ -1046,6 +1093,8 @@ static int serve_client(conn_t *c, const char *fence, unsigned long *counter) {
         else if (strcmp(line, "held read") == 0) held_read(out, sizeof out);
         else if (strncmp(line, "scribble ", 9) == 0) scribble(line + 9, out, sizeof out);
         else if (strcmp(line, "scribbled") == 0) snprintf(out, sizeof out, "%lu\n", scribbled);
+        else if (strncmp(line, "rename ", 7) == 0) rename_path(line + 7, out, sizeof out);
+        else if (strncmp(line, "symlink ", 8) == 0) symlink_path(line + 8, out, sizeof out);
         else if (strncmp(line, "wopen ", 6) == 0) wopen_errno(line + 6, out, sizeof out);
         else if (strncmp(line, "stat ", 5) == 0) stat_kind(line + 5, out, sizeof out);
         else if (strncmp(line, "connect ", 8) == 0) connect_errno(line + 8, out, sizeof out);

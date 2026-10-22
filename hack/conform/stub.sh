@@ -62,7 +62,7 @@ ENGINE_HOOK=()
 # proc and runc fibers share the host kernel, so they serve trusted grants only.
 ISOLATION=UNTRUSTED
 if [ "$RUNTIME" = proc ] || [ "$RUNTIME" = runc ]; then ISOLATION=TRUSTED; fi
-# proc gives each fiber a workspace, which C12 moves files through.
+# proc and runc give each fiber a workspace, which C12 moves files through.
 WORKSPACES=()
 if [ "$RUNTIME" = proc ]; then
   WORKSPACES=(-workspaces)
@@ -77,6 +77,7 @@ elif [ "$RUNTIME" = gvisor ]; then
   TIER=${CONFORM_TIER:-FIBER_SNAPSHOT}
   RUNTIME_FLAGS=(-runtime gvisor -gvisor-rootfs "$GVISOR_ROOTFS" -template "default=${CONFORM_TEMPLATE:-/bin/refzygote --heap-mb 32 --gvisor}")
 elif [ "$RUNTIME" = runc ]; then
+  WORKSPACES=(-workspaces)
   TIER=${CONFORM_TIER:-FIBER_CHECKPOINT}
   RUNTIME_FLAGS=(-runtime runc -runc-rootfs "$GVISOR_ROOTFS" -template "default=${CONFORM_TEMPLATE:-/bin/refzygote --heap-mb 32 --device-mb 64}")
   ENGINE_HOOK=(-engine-kill-cmd "$0 engine-kill \$1")

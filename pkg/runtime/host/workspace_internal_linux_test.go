@@ -12,9 +12,11 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
+	"github.com/helayoty/fiberd/pkg/backend"
 	"github.com/helayoty/fiberd/pkg/core"
 	"github.com/helayoty/fiberd/pkg/runtime/host/wsfs"
 )
@@ -170,6 +172,117 @@ func TestWorkspaceLifecycle(t *testing.T) {
 			}
 			if _, err := r.Upload(ctx, h.ID, "a.txt", 1, 0o644, nil, strings.NewReader("x")); !errors.Is(err, core.ErrFiberUnknown) {
 				t.Fatalf("Upload after the end = %v, want ErrFiberUnknown", err)
+			}
+		})
+	}
+}
+
+// TestWorkspaceOwner checks that a backend that maps the grant's root
+// into a user namespace (runc) gets workspaces owned by that root, the
+// tree and every file fiberd writes into it, so the fiber, uid 0
+// inside, can write what it was given. That root can also search down
+// to its tree, since criu restores the workspace bind from inside the
+// restored user namespace: WorkspaceDir is 0711, the grant's and the
+// fiber's directories fiberd's with the mapped group and 0710, and the
+// staging directory fiberd's alone. Without a mapper every level stays
+// 0700. A mapper that refuses the grant at the birth leaves no
+// workspace. The mapped root here is the test's own uid, the one owner
+// a chown without privilege may name. The foreign uid is
+// tests/integration/runc TestWorkspaceRoundTrip.
+func TestWorkspaceOwner(t *testing.T) {
+	cases := []struct {
+		name    string
+		mapper  bool
+		refuse  bool // the mapper refuses once the template is prepared
+		wantErr string
+	}{
+		{name: "no mapper keeps fiberd's ids"},
+		{name: "the mapped root owns the tree and the uploads", mapper: true},
+		// The leaf's cgroup.procs is handed over before the workspace is
+		// made, so the refusal comes from there, and nothing is left.
+		{name: "a mapper that refuses at the birth leaves no workspace", mapper: true, refuse: true, wantErr: "range revoked"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			uid, gid := os.Geteuid(), os.Getegid()
+			if tc.mapper && uid != 0 && uid != gid {
+				t.Skip("the mapped root's gid is its uid, which this user cannot chown to")
+			}
+			var be backend.Backend = newWorkspaceBackend(core.TierCheckpoint)
+			m := &idMapperMixin{uid: uint32(uid)}
+			if tc.mapper {
+				be = &struct {
+					workspaceCodecBackend
+					*idMapperMixin
+				}{newWorkspaceBackend(core.TierCheckpoint), m}
+			}
+			// A mapper hands the grant's and the leaf's cgroup.procs to the
+			// mapped root, so the fake tree carries them.
+			r := newTestRuntime(t, be, func(c *Config) { delegatedUnder(c.CgroupRoot, "g1", "g1/f-1-1") })
+			g := core.Grant{UID: "g1", TemplateDigest: "sha256:tmpl", FiberMax: 2, WBudgetBytes: 64 * mib, DiskBudgetBytes: 1 << 20}
+			ctx := context.Background()
+			if err := r.PrepareTemplate(ctx, g); err != nil {
+				t.Fatal(err)
+			}
+			if tc.refuse {
+				m.err = errors.New("fake: range revoked")
+			}
+			fence := core.Fence{GrantUID: g.UID, Epoch: 1, Seq: 1}
+			dir := r.workspaceDir(fence)
+			h, err := r.Clone(ctx, core.CloneSpec{Grant: g, Fence: fence, CallerCert: callerDER})
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("Clone = %v, want %q", err, tc.wantErr)
+				}
+				if exists(dir) {
+					t.Fatalf("%s remains after the refused birth", dir)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Clone: %v", err)
+			}
+			defer func() { _ = r.Release(ctx, h.ID, false) }()
+			uploadString(t, r, h.ID, "in/data.txt", "hello")
+			wantGID := gid
+			if tc.mapper {
+				wantGID = uid
+			}
+			// The levels the mapped root walks down at a runc restore.
+			levels := []struct {
+				path string
+				mode os.FileMode
+				gid  int
+			}{
+				{r.cfg.WorkspaceDir, 0o700, -1},
+				{filepath.Dir(dir), 0o700, -1},
+				{dir, 0o700, -1},
+				{filepath.Join(dir, ".stage"), 0o700, gid},
+			}
+			if tc.mapper {
+				levels[0].mode = 0o711
+				levels[1].mode, levels[1].gid = 0o710, uid
+				levels[2].mode, levels[2].gid = 0o710, uid
+			}
+			for _, l := range levels {
+				st, err := os.Stat(l.path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				sys, _ := st.Sys().(*syscall.Stat_t)
+				if st.Mode().Perm() != l.mode || sys == nil || int(sys.Uid) != uid || (l.gid >= 0 && int(sys.Gid) != l.gid) {
+					t.Fatalf("%s is %v owned by %v, want mode %v, uid %d, gid %d", l.path, st.Mode().Perm(), sys, l.mode, uid, l.gid)
+				}
+			}
+			for _, rel := range []string{"root", "root/in", "root/in/data.txt"} {
+				st, err := os.Lstat(filepath.Join(dir, rel))
+				if err != nil {
+					t.Fatal(err)
+				}
+				sys, _ := st.Sys().(*syscall.Stat_t)
+				if sys == nil || int(sys.Uid) != uid || int(sys.Gid) != wantGID {
+					t.Fatalf("%s is owned by %v, want %d:%d", rel, sys, uid, wantGID)
+				}
 			}
 		})
 	}

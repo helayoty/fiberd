@@ -20,6 +20,7 @@ import (
 	"go.uber.org/goleak"
 
 	"github.com/helayoty/fiberd/pkg/backend"
+	"github.com/helayoty/fiberd/pkg/backend/proc"
 )
 
 // TestMain fails the package when a test leaves a goroutine behind.
@@ -187,6 +188,7 @@ type ociConfig struct {
 		UIDMappings []map[string]uint32 `json:"uidMappings"`
 		GIDMappings []map[string]uint32 `json:"gidMappings"`
 		CgroupsPath string              `json:"cgroupsPath"`
+		Propagation string              `json:"rootfsPropagation"`
 		Readonly    []string            `json:"readonlyPaths"`
 		Masked      []string            `json:"maskedPaths"`
 	} `json:"linux"`
@@ -272,6 +274,11 @@ func TestBundleConfig(t *testing.T) {
 				}
 				if cfg.Linux.CgroupsPath != "" {
 					t.Errorf("cgroupsPath = %q, want none", cfg.Linux.CgroupsPath)
+				}
+				// A workspace moved in one fiber's copy of the namespace
+				// must reach no sibling, whatever the host's default.
+				if cfg.Linux.Propagation != "rslave" {
+					t.Errorf("rootfsPropagation = %q, want rslave", cfg.Linux.Propagation)
 				}
 				if cfg.Root.Path != l.rootfs(spec) || cfg.Root.Readonly {
 					t.Errorf("root = %+v, want the writable copy at %s", cfg.Root, l.rootfs(spec))
@@ -679,16 +686,22 @@ func TestDumpExtra(t *testing.T) {
 		base = append(base, "--external", "mnt[/dev/"+d+"]:dev-"+d)
 	}
 	cases := []struct {
-		name     string
-		template backend.Template
-		want     []string
-		record   bool
-		wantErr  string
+		name      string
+		template  backend.Template
+		want      []string
+		record    bool
+		workspace bool // the dumped tree is a fiber with a workspace
+		wantErr   string
 	}{
 		{name: "a template from the rootfs", want: base},
 		{name: "a registry template names its bind", template: backend.Template{Dir: "/cache/x", Argv: []string{"/cache/x/zygote"}},
 			want: append(append([]string{}, base...), "--external", "mnt["+backend.TemplateMount+"]:template"), record: true},
 		{name: "a record that cannot be written", template: backend.Template{Dir: "/cache/x", Argv: []string{"/cache/x/zygote"}}, wantErr: "not a directory"},
+		// A fiber with a workspace lives in a copy of the container's
+		// namespace, so the files it holds through the container's mounts
+		// are named too, the zygote's text here (mount 200, inode 19).
+		{name: "a fiber with a workspace names its foreign files", workspace: true,
+			want: append(append([]string{}, base...), "--external", "file[c8:13]")},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -697,7 +710,13 @@ func TestDumpExtra(t *testing.T) {
 				dir = filepath.Join(t.TempDir(), "file", "images")
 				stateFile(t, filepath.Dir(dir))
 			}
-			got, err := (&launcher{}).DumpExtra(backend.WarmSpec{GrantUID: "g1", Template: tc.template}, dir)
+			l, d := &launcher{}, proc.Dumped{PID: 7, Zygote: 3}
+			if tc.workspace {
+				f := newFakeProc(t)
+				f.mapping(fiberPID, 0x400000, 0x47e000, "r-xp", "/zyg", reg(mntRootfs, 19))
+				l, d = f.launcher(), proc.Dumped{PID: fiberPID, Zygote: zygotePID, Workspace: true}
+			}
+			got, err := l.DumpExtra(backend.WarmSpec{GrantUID: "g1", Template: tc.template}, dir, d)
 			if tc.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 					t.Fatalf("DumpExtra = %v, want %q", err, tc.wantErr)
@@ -713,6 +732,9 @@ func TestDumpExtra(t *testing.T) {
 			}
 			if tc.record && !strings.Contains(string(b), backend.TemplateMount) {
 				t.Fatalf("record = %s, want the mount point", b)
+			}
+			if fb, err := os.ReadFile(filepath.Join(dir, foreignFile)); (err == nil) != tc.workspace || (tc.workspace && !strings.Contains(string(fb), `"/zyg"`)) {
+				t.Fatalf("record %s: %q %v, want one naming /zyg only for a fiber with a workspace", foreignFile, fb, err)
 			}
 		})
 	}
@@ -1115,7 +1137,10 @@ func TestRestoreExtraRefusals(t *testing.T) {
 			l := identityLauncher(t)
 			spec := warmSpec(t, "g1")
 			tc.setup(t, l, &spec)
-			_, err := l.RestoreExtra(spec, t.TempDir())
+			_, held, err := l.RestoreExtra(spec, t.TempDir())
+			if held != nil {
+				t.Fatalf("the failed RestoreExtra handed out %v", held)
+			}
 			if err == nil || (tc.wantErr != "" && !strings.Contains(err.Error(), tc.wantErr)) || (tc.wantIs != nil && !errors.Is(err, tc.wantIs)) {
 				t.Fatalf("RestoreExtra = %v, want %q %v", err, tc.wantErr, tc.wantIs)
 			}
@@ -1206,6 +1231,66 @@ func TestShareImages(t *testing.T) {
 			err := shareImages(dir, testPool.Range("g1"))
 			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 				t.Fatalf("shareImages = %v, want an error containing %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestWorkspaceMountpoint checks that every root filesystem copy holds
+// /workspace as fiberd's own directory with mode 0, so a fiber without a
+// workspace can neither write in it nor change its mode, that one the
+// rootfs already had is taken over, and that a link or a file at the
+// name is refused without touching what a link points at.
+func TestWorkspaceMountpoint(t *testing.T) {
+	cases := []struct {
+		name    string
+		setup   func(t *testing.T, root, outside string)
+		wantErr string
+	}{
+		{name: "made when absent", setup: func(*testing.T, string, string) {}},
+		{name: "a directory the rootfs had is taken over", setup: func(t *testing.T, root, _ string) {
+			if err := os.Mkdir(filepath.Join(root, "workspace"), 0o777); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "a link is refused, never followed", wantErr: "not a directory", setup: func(t *testing.T, root, outside string) {
+			if err := os.Symlink(outside, filepath.Join(root, "workspace")); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "a file is refused", wantErr: "not a directory", setup: func(t *testing.T, root, _ string) {
+			if err := os.WriteFile(filepath.Join(root, "workspace"), nil, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root, outside := t.TempDir(), t.TempDir()
+			if err := os.Chmod(outside, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			tc.setup(t, root, outside)
+			err := makeWorkspaceMountpoint(root)
+			if st, serr := os.Stat(outside); serr != nil || st.Mode().Perm() != 0o755 {
+				t.Fatalf("what a link pointed at changed: %v %v", st, serr)
+			}
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("makeWorkspaceMountpoint = %v, want %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("makeWorkspaceMountpoint: %v", err)
+			}
+			fi, err := os.Lstat(filepath.Join(root, "workspace"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			st, _ := fi.Sys().(*syscall.Stat_t)
+			if !fi.IsDir() || fi.Mode().Perm() != 0 || st == nil || int(st.Uid) != os.Geteuid() {
+				t.Fatalf("/workspace = %v uid %v, want a mode 0 directory of uid %d", fi.Mode(), st, os.Geteuid())
 			}
 		})
 	}
