@@ -324,7 +324,7 @@ func TestDownload(t *testing.T) {
 		{name: "a first chunk without info fails Download", chunks: []*grantv1.FileChunk{data("ab")},
 			wantErr: func(err error) bool { return err != nil }},
 		{name: "an error after the first chunk comes from Read", buf: 4,
-			chunks:      []*grantv1.FileChunk{{Info: info, Data: []byte("ab")}}, serverErr: homeError(core.Internal, "disk gone"), want: "ab",
+			chunks: []*grantv1.FileChunk{{Info: info, Data: []byte("ab")}}, serverErr: homeError(core.Internal, "disk gone"), want: "ab",
 			wantReadErr: func(err error) bool { return status.Code(err) == codes.Internal }},
 	}
 	for _, tc := range cases {
