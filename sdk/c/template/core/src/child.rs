@@ -877,7 +877,13 @@ pub unsafe fn scrub_and_run(c: &Child<'_>) -> ! {
 pub fn mount_workspace(fd: c_int) -> c_int {
     // SAFETY: integer arguments and static strings alone.
     let rc = unsafe {
-        move_mount(fd, c"".as_ptr(), libc::AT_FDCWD, WORKSPACE.as_ptr(), MOVE_MOUNT_F_EMPTY_PATH)
+        move_mount(
+            fd,
+            c"".as_ptr(),
+            libc::AT_FDCWD,
+            WORKSPACE.as_ptr(),
+            MOVE_MOUNT_F_EMPTY_PATH,
+        )
     };
     if rc < 0 { -1 } else { 0 }
 }

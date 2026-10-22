@@ -2664,7 +2664,12 @@ mod tests {
             rig.z().handle_clone(ours, &passed, None);
             let got = lines(theirs);
             assert_eq!(got.len(), 1, "{}: {got:?}", tc.name);
-            assert!(got[0].starts_with("ERROR f clone: "), "{}: {}", tc.name, got[0]);
+            assert!(
+                got[0].starts_with("ERROR f clone: "),
+                "{}: {}",
+                tc.name,
+                got[0]
+            );
             assert_eq!(
                 child::BIRTH_WANT.load(std::sync::atomic::Ordering::Relaxed),
                 tc.want,
