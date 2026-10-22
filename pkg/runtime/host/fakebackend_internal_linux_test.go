@@ -62,6 +62,8 @@ type fakeBackend struct {
 	nextPID  int
 	// warmCalls counts Warm calls, idempotent prepares included.
 	warmCalls int
+	// resumeCalls counts Resume calls, refused ones included.
+	resumeCalls int
 	// events is the order of unwarms and pool discards, for tests that
 	// check what goes first.
 	events []string
@@ -313,6 +315,7 @@ func (b *fakeBackend) Resume(_ context.Context, spec backend.ResumeSpec) (backen
 	enter(spec.CgroupFD)
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	b.resumeCalls++
 	if b.resumeErr != nil {
 		return backend.Fiber{}, b.resumeErr
 	}

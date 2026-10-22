@@ -370,13 +370,9 @@ func TestWorkspaceResumeRefused(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), tc.errText) {
 				t.Fatalf("resume = %v, want %q", err, tc.errText)
 			}
-			restores := 0
+			// Resume calls, since a refused restore records no fiber.
 			be.mu.Lock()
-			for _, fb := range be.fibers {
-				if fb.resume != nil {
-					restores++
-				}
-			}
+			restores := be.resumeCalls
 			be.mu.Unlock()
 			if restores != tc.wantRestores {
 				t.Fatalf("the backend restored %d times, want %d", restores, tc.wantRestores)
