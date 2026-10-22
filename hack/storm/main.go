@@ -9,6 +9,12 @@
 // memory.current and PSI, the ledger status stream, and the container's
 // own OOM counter. Exit status is non-zero if the container recorded an
 // OOM kill, if no fiber was parked, or if fiberd stopped reporting.
+//
+// -plain runs the same storm without fiberd, as the baseline (plain.go).
+// Its exit status is 0 whenever it measured, kills or not.
+//
+// Each side ends with one "storm summary:" line, the record
+// docs/benchmarks.md copies.
 package main
 
 import (
@@ -41,8 +47,10 @@ type opts struct {
 	target, nodeID, issuerKey, issuerURL, cgRoot, rootEvents string
 	tlsCA, tlsCert, tlsKey                                   string
 	isolation, tenant                                        string
+	layout, grower                                           string
+	plain                                                    bool
 	fibers                                                   int
-	ceiling, step                                            uint64
+	ceiling, step, heapMB                                    uint64
 	overcommit                                               float64
 	round, timeout, deadline                                 time.Duration
 }
@@ -67,7 +75,14 @@ func main() {
 	flag.StringVar(&o.tlsCert, "tls-cert", "", "PEM client certificate presented to the home")
 	flag.StringVar(&o.tlsKey, "tls-key", "", "PEM private key of -tls-cert")
 	flag.StringVar(&o.isolation, "isolation", "UNTRUSTED", "the grant's isolation, UNTRUSTED or TRUSTED")
+	flag.BoolVar(&o.plain, "plain", false, "the baseline: the same storm on plain processes, without fiberd (-fibers of them)")
+	flag.StringVar(&o.layout, "layout", "shared", "-plain: shared (forked from one parent that touched the heap) or separate (each process its own heap)")
+	flag.StringVar(&o.grower, "grower", "", "-plain: the storm-grower binary (default: beside this one)")
+	flag.Uint64Var(&o.heapMB, "heap-mb", 64, "-plain: the template's heap in MiB, as refzygote --heap-mb")
 	flag.Parse()
+	if o.plain {
+		os.Exit(runPlain(o))
+	}
 	os.Exit(run(o))
 }
 
@@ -101,7 +116,7 @@ func run(o opts) int {
 	if err != nil {
 		return fatal("-isolation: %v", err)
 	}
-	perFiber := uint64(float64(o.ceiling) * o.overcommit / float64(o.fibers))
+	perFiber := perInstance(o.ceiling, o.overcommit, o.fibers)
 	g := core.Grant{
 		UID: fmt.Sprintf("storm-%d", time.Now().Unix()), Audience: o.nodeID, TemplateDigest: "sha256:storm", Tenant: o.tenant,
 		FiberMax: o.fibers, WBudgetBytes: perFiber + 8<<20, LeaseExpiry: time.Now().Add(time.Hour),
@@ -178,7 +193,7 @@ func run(o opts) int {
 	fmt.Printf("storm: %d fibers running; dirtying %dMiB per round per fiber\n", len(fs), o.step>>20)
 
 	start := time.Now()
-	var firstPark time.Time
+	var firstPark, firstKill time.Time
 	var firstParkPSI float64
 	var maxCurrent uint64
 	fmt.Printf("%8s %10s %8s %8s %8s %10s\n", "t", "grant.cur", "psi", "running", "parked", "demand")
@@ -189,11 +204,15 @@ func run(o opts) int {
 		var wg sync.WaitGroup
 		allDone := true
 		for _, f := range fs {
-			if f.gone || f.dirtied >= perFiber {
+			if f.gone {
+				continue
+			}
+			next, ok := nextStep(f.dirtied, perFiber, o.step)
+			if !ok {
 				continue
 			}
 			allDone = false
-			f.dirtied += o.step
+			f.dirtied = next
 			wg.Add(1)
 			go func(f *fib) {
 				defer wg.Done()
@@ -231,6 +250,9 @@ func run(o opts) int {
 			firstPark = time.Now()
 			firstParkPSI = psi.SomeAvg10
 		}
+		if firstKill.IsZero() && rise(oomKills(o.rootEvents), oomBefore) > 0 {
+			firstKill = time.Now()
+		}
 		if roundsOver(allDone, running, seen, !firstPark.IsZero()) {
 			break
 		}
@@ -239,6 +261,9 @@ func run(o opts) int {
 	time.Sleep(2 * time.Second) // let the ladder settle
 	running, parked, ok := status()
 	oomAfter := oomKills(o.rootEvents)
+	if firstKill.IsZero() && rise(oomAfter, oomBefore) > 0 {
+		firstKill = time.Now()
+	}
 	fmt.Println()
 	fmt.Printf("storm: max grant memory.current = %d MiB (ceiling %d MiB); container OOM kills before=%d after=%d\n",
 		maxCurrent>>20, o.ceiling>>20, oomBefore, oomAfter)
@@ -246,6 +271,9 @@ func run(o opts) int {
 		fmt.Printf("storm: first park observed at t=%s with PSI some avg10 = %.1f%%\n", firstPark.Sub(start).Round(100*time.Millisecond), firstParkPSI)
 	}
 	fmt.Printf("storm: final ledger: running=%d parked=%d\n", running, parked)
+	fmt.Println(summary{side: "fiberd", layout: "fibers", n: o.fibers, demand: uint64(float64(o.ceiling) * o.overcommit),
+		oomKills: rise(oomAfter, oomBefore), survivors: int(running + parked), parked: int(parked),
+		firstPark: since(firstPark, start), firstKill: since(firstKill, start)})
 	rc := 0
 	if oomAfter > oomBefore {
 		fmt.Println("storm: FAIL container recorded an OOM kill: the ladder lost the race")

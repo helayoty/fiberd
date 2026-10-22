@@ -85,18 +85,32 @@ jobs:
         run: sudo tail -n 50 bin/knative-state/*.log || true
 
   conform-slurm:
-    name: example - Slurm integration in Docker (allocation, C1-C10, overcommit storm)
+    name: example - Slurm integration in Docker (allocation, C1-C10, overcommit storm and its baselines without fiberd)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-      - run: make conform-slurm
+      # The storm's baselines without fiberd run after it, in jobs of the
+      # same size. Only the fiberd side decides the exit status.
+      - shell: bash
+        run: mkdir -p bin && make conform-slurm 2>&1 | tee bin/conform-slurm.log
+      # Each storm side's "storm summary:" line on the run's summary page.
+      - name: storm summary lines
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo '### Slurm storm, one line per side'
+            echo '```'
+            grep '^storm summary:' bin/conform-slurm.log || echo 'no summary lines (see the conform-slurm step)'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: cluster state on failure
         if: failure()
         run: |
-          docker exec fiberd-slurm sh -c 'squeue; sinfo; tail -50 /var/log/slurm/slurmd.log; tail -50 /var/log/fiberd-conform.out; tail -50 /var/log/fiberd-storm.out' || true
+          docker exec fiberd-slurm sh -c 'squeue; sinfo; tail -50 /var/log/slurm/slurmd.log; tail -50 /var/log/fiberd-conform.out; tail -50 /var/log/fiberd-storm.out; tail -50 /var/log/storm-plain-*.out' || true
 
   example-substrate:
     name: example - Agent Substrate in kind (actors are fibers, suspended and resumed through Substrate)
