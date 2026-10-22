@@ -107,7 +107,7 @@ func (f *fakeProc) appendTo(rel, line string) {
 	if err != nil {
 		f.t.Fatal(err)
 	}
-	defer fh.Close()
+	defer func() { _ = fh.Close() }()
 	if _, err := fh.WriteString(line); err != nil {
 		f.t.Fatal(err)
 	}

@@ -88,7 +88,7 @@ func inspectEntry(p string) (entryInfo, error) {
 	if err != nil {
 		return entryInfo{}, err
 	}
-	defer unix.Close(fd)
+	defer func() { _ = unix.Close(fd) }()
 	b, err := os.ReadFile(fmt.Sprintf("/proc/self/fdinfo/%d", fd))
 	if err != nil {
 		return entryInfo{}, err
@@ -291,7 +291,8 @@ func (l *launcher) foreignOf(pid int, table map[int]string, files map[string]*fo
 			if err != nil {
 				return fmt.Errorf("runc: foreign files of %d: %s/%s: %w", pid, kind, e.Name(), err)
 			}
-			access, app := "r", false
+			var access string
+			app := false
 			if kind == "map_files" {
 				access = maps.access(e.Name())
 			} else {
@@ -713,7 +714,7 @@ func openUnder(base, rel string, e foreignEntry) (*os.File, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", base, err)
 	}
-	defer unix.Close(bfd)
+	defer func() { _ = unix.Close(bfd) }()
 	if rel == "" {
 		rel = "."
 	}
@@ -734,7 +735,7 @@ func openUnder(base, rel string, e foreignEntry) (*os.File, error) {
 			return nil, fmt.Errorf("%s under %s: %w", rel, base, err)
 		}
 	}
-	defer unix.Close(pfd)
+	defer func() { _ = unix.Close(pfd) }()
 	return reopen(pfd, e)
 }
 
@@ -746,12 +747,12 @@ func openDevice(devDir, name string, e foreignEntry) (*os.File, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", devDir, err)
 	}
-	defer unix.Close(dfd)
+	defer func() { _ = unix.Close(dfd) }()
 	pfd, err := unix.Openat(dfd, name, unix.O_PATH|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, fmt.Errorf("%s in %s: %w", name, devDir, err)
 	}
-	defer unix.Close(pfd)
+	defer func() { _ = unix.Close(pfd) }()
 	return reopen(pfd, e)
 }
 
