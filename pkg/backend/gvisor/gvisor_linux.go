@@ -970,6 +970,12 @@ func (b *Backend) Warm(ctx context.Context, sp backend.WarmSpec) (backend.Warm, 
 // errClosed is Warm's answer once Close has begun.
 var errClosed = errors.New("gvisor: backend closed")
 
+// probeHung logs a footprint probe that did not serve by the cap, with
+// the time since its restore and what is known of the sandbox.
+func probeHung(err error, t0 time.Time, what string) {
+	log.Printf("gvisor: footprint probe did not serve: %v (%s after its restore, %s)", err, time.Since(t0).Round(time.Millisecond), what)
+}
+
 // probeFootprint restores the template image once into the given empty
 // cgroup exactly as a fiber would be, reads the cgroup (its shmem, the
 // guest memory, and its memory.current), and ends it. 0 when it cannot
@@ -1006,13 +1012,15 @@ func (b *Backend) probeFootprint(ctx context.Context, w *warm, cgroupFD int) (sh
 		// A sandbox still running at the cap neither claimed nor served:
 		// it hangs after its restore, which a slow restore does not look
 		// like. The line names the time, not the token.
-		log.Printf("gvisor: footprint probe did not serve: %v (%s after its restore, sandbox %s)", err, time.Since(t0).Round(time.Millisecond), x.state())
+		probeHung(err, t0, "sandbox "+x.state())
 		return 0, 0
 	case conn == nil:
 		w.noPool = true
 	default:
 		if _, err := b.bind(pctx, x, conn, "clone", "probe", "/host/probe.sock", nil, "", 1); err != nil {
-			log.Printf("gvisor: footprint probe did not serve: %v", err)
+			// bind has killed it by now, so its state says nothing. That
+			// it claimed and then never served is what is known.
+			probeHung(err, t0, "claimed its token, then never served")
 			return 0, 0
 		}
 	}

@@ -845,8 +845,10 @@ func TestProbeFootprint(t *testing.T) {
 		{name: "no probe cgroup", noCgroup: true},
 		{name: "restore fails", knobs: knobs{Fail: map[string]bool{"restore": true}}, noSandbox: true, wantLog: "footprint probe: gvisor: runsc restore"},
 		// The line says the sandbox outlived the cap without serving, so a
-		// template hung after its restore reads as that and not as slow.
-		{name: "never serves", knobs: knobs{NoServe: true}, wantLog: "probe did not serve: context deadline exceeded (", wantAlso: "after its restore, sandbox still running)"},
+		// template hung after its restore reads as that and not as slow,
+		// whether it hung before its claim or after it.
+		{name: "claims, never serves", knobs: knobs{NoServe: true}, wantLog: "probe did not serve: context deadline exceeded (", wantAlso: "after its restore, claimed its token, then never served)"},
+		{name: "never claims, never serves", knobs: knobs{NoToken: true, NoServe: true}, wantLog: "footprint probe did not serve: context deadline exceeded (", wantAlso: "after its restore, sandbox still running)"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
