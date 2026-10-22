@@ -131,9 +131,15 @@ func TestWorkspaceLifecycle(t *testing.T) {
 				if spec.Workspace != root {
 					t.Fatalf("backend got workspace %q, want %s", spec.Workspace, root)
 				}
+				// root is the fiber's tree, 0755 as wsfs makes it. What keeps
+				// other users out is its 0700 parent, the fiber's own
+				// workspace directory.
 				st, err := os.Stat(root)
-				if err != nil || !st.IsDir() || st.Mode().Perm() != 0o700 {
-					t.Fatalf("root %s: %v %v, want a 0700 directory", root, st, err)
+				if err != nil || !st.IsDir() || st.Mode().Perm() != 0o755 {
+					t.Fatalf("root %s: %v %v, want a 0755 directory", root, st, err)
+				}
+				if pst, err := os.Stat(filepath.Dir(root)); err != nil || pst.Mode().Perm() != 0o700 {
+					t.Fatalf("workspace %s: %v %v, want a 0700 directory", filepath.Dir(root), pst, err)
 				}
 				if ents, _ := os.ReadDir(root); len(ents) != 0 {
 					t.Fatalf("a fresh workspace holds %d entries, want none", len(ents))

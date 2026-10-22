@@ -228,9 +228,10 @@ func TestNewPlatform(t *testing.T) {
 			if r.cfg.PrivateDir != "" && !strings.HasPrefix(r.cfg.PrivateDir, cwd) {
 				t.Fatalf("PrivateDir %q was not made absolute under %s", r.cfg.PrivateDir, cwd)
 			}
-			// The cache is hidden with the keys and the deltas: a proc
-			// fiber could rewrite a cached template otherwise.
-			want := []string{DefaultFiberHide[0], r.cfg.DeltaDir}
+			// The cache is hidden with the keys, the deltas and the
+			// workspaces: a proc fiber could rewrite a cached template or
+			// read a sibling's workspace otherwise.
+			want := []string{DefaultFiberHide[0], r.cfg.DeltaDir, r.cfg.WorkspaceDir}
 			if r.cfg.PrivateDir != "" {
 				want = append(want, r.cfg.PrivateDir)
 			}
