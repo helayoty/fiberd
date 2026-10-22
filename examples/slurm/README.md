@@ -21,7 +21,7 @@ Run it from the repository root. It needs Docker and Go.
 make conform-slurm
 ```
 
-The latest result is in [benchmarks](../../docs/benchmarks.md).
+After the storm, it runs the same storm without fiberd, in jobs of the same size. That baseline only measures, so its OOM kills are expected. The latest result is in [benchmarks](../../docs/benchmarks.md).
 
 ## Design
 
