@@ -276,6 +276,13 @@ zygote: zygote-core ## build bin/refzygote, the reference zygote, with TLS for h
 zygote-core: ## build the zygote library, $(CORE_LIB), from its Rust crate
 	cd $(CORE_DIR) && $(CARGO) build --release --locked
 
+ENGINE_DIR := sdk/c/template/engine
+.PHONY: engine
+engine: ## build bin/refengine, the reference device engine fiberd starts beside a grant's zygote, from its Rust crate
+	@mkdir -p $(BIN)
+	cd $(ENGINE_DIR) && $(CARGO) build --release --locked
+	cp $(ENGINE_DIR)/target/release/refengine $(BIN)/refengine
+
 zygote-test: ## the core's Rust unit tests, clippy and rustfmt (the fuzz targets too, with the core's stable rustfmt, since the fuzz crate's nightly has none)
 	cd $(CORE_DIR) && $(CARGO) test --locked && $(CARGO) clippy --locked --all-targets -- -D warnings && \
 	  $(CARGO) fmt --check && rustfmt --edition 2024 --check fuzz/fuzz_targets/*.rs

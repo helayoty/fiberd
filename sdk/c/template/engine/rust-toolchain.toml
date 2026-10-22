@@ -1,0 +1,6 @@
+# The exact stable the core builds with. The dev image installs this
+# version (docker/dev/Dockerfile), rustup elsewhere installs it on the
+# first cargo call. Bump it by PR.
+[toolchain]
+channel = "1.99.0"
+components = ["clippy", "rustfmt"]
