@@ -513,7 +513,7 @@ REGISTERED = [
 @pytest.mark.skipif(not os.path.isdir("/proc/self/fd"), reason="the witness is /proc/self/fd")
 @table(REGISTERED)
 def test_serve_on_gvisor_opens_the_checkpoint_file_before_it_lets_the_backend_checkpoint(tmp_path, monkeypatch, name, f0):
-    """The read answers for the first checkpoint after the open and for no earlier one. So the file is open before the marker, and open again before an incarnation runs, since its endpoint closing is what lets the backend take the park. A copy restored from an image taken before the open would wait for a second checkpoint that never comes. The checkpoint file is a plain file here, which answers "restore" to every read."""
+    """The checkpoint file is open before the marker and before each incarnation, since a read answers only for checkpoints taken after its open."""
     checkpoint = tmp_path / "checkpoint"
     checkpoint.write_text("restore\n")
     monkeypatch.setattr(ft._gvisor, "CHECKPOINT", str(checkpoint))
