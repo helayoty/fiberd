@@ -1,9 +1,10 @@
 from google.protobuf import empty_pb2 as _empty_pb2
 from google.protobuf import timestamp_pb2 as _timestamp_pb2
+from google.protobuf.internal import containers as _containers
 from google.protobuf.internal import enum_type_wrapper as _enum_type_wrapper
 from google.protobuf import descriptor as _descriptor
 from google.protobuf import message as _message
-from typing import ClassVar as _ClassVar, Mapping as _Mapping, Optional as _Optional, Union as _Union
+from typing import ClassVar as _ClassVar, Iterable as _Iterable, Mapping as _Mapping, Optional as _Optional, Union as _Union
 
 ATTACH: CloneKind
 BEST_EFFORT: Durability
@@ -26,9 +27,10 @@ TRUSTED: Isolation
 UNTRUSTED: Isolation
 
 class CapacityGrant(_message.Message):
-    __slots__ = ["audience", "device_budget", "fibers", "grant_uid", "issuer", "lease_expiry", "min_tier", "policy", "template_digest", "tenant", "w_budget_bytes"]
+    __slots__ = ["audience", "device_budget", "disk_budget_bytes", "fibers", "grant_uid", "issuer", "lease_expiry", "min_tier", "policy", "template_digest", "tenant", "w_budget_bytes"]
     AUDIENCE_FIELD_NUMBER: _ClassVar[int]
     DEVICE_BUDGET_FIELD_NUMBER: _ClassVar[int]
+    DISK_BUDGET_BYTES_FIELD_NUMBER: _ClassVar[int]
     FIBERS_FIELD_NUMBER: _ClassVar[int]
     GRANT_UID_FIELD_NUMBER: _ClassVar[int]
     ISSUER_FIELD_NUMBER: _ClassVar[int]
@@ -40,6 +42,7 @@ class CapacityGrant(_message.Message):
     W_BUDGET_BYTES_FIELD_NUMBER: _ClassVar[int]
     audience: str
     device_budget: DeviceBudget
+    disk_budget_bytes: int
     fibers: FiberLimits
     grant_uid: str
     issuer: str
@@ -49,7 +52,7 @@ class CapacityGrant(_message.Message):
     template_digest: str
     tenant: str
     w_budget_bytes: int
-    def __init__(self, grant_uid: _Optional[str] = ..., issuer: _Optional[str] = ..., audience: _Optional[str] = ..., template_digest: _Optional[str] = ..., tenant: _Optional[str] = ..., fibers: _Optional[_Union[FiberLimits, _Mapping]] = ..., w_budget_bytes: _Optional[int] = ..., min_tier: _Optional[_Union[Tier, str]] = ..., lease_expiry: _Optional[_Union[_timestamp_pb2.Timestamp, _Mapping]] = ..., policy: _Optional[_Union[Policy, _Mapping]] = ..., device_budget: _Optional[_Union[DeviceBudget, _Mapping]] = ...) -> None: ...
+    def __init__(self, grant_uid: _Optional[str] = ..., issuer: _Optional[str] = ..., audience: _Optional[str] = ..., template_digest: _Optional[str] = ..., tenant: _Optional[str] = ..., fibers: _Optional[_Union[FiberLimits, _Mapping]] = ..., w_budget_bytes: _Optional[int] = ..., min_tier: _Optional[_Union[Tier, str]] = ..., lease_expiry: _Optional[_Union[_timestamp_pb2.Timestamp, _Mapping]] = ..., policy: _Optional[_Union[Policy, _Mapping]] = ..., device_budget: _Optional[_Union[DeviceBudget, _Mapping]] = ..., disk_budget_bytes: _Optional[int] = ...) -> None: ...
 
 class CloneRequest(_message.Message):
     __slots__ = ["deadline", "grant_jwt", "payload", "session"]
@@ -88,6 +91,16 @@ class DeviceBudget(_message.Message):
     bytes: int
     def __init__(self, bytes: _Optional[int] = ..., **kwargs) -> None: ...
 
+class DownloadRequest(_message.Message):
+    __slots__ = ["fiber_id", "offset", "path"]
+    FIBER_ID_FIELD_NUMBER: _ClassVar[int]
+    OFFSET_FIELD_NUMBER: _ClassVar[int]
+    PATH_FIELD_NUMBER: _ClassVar[int]
+    fiber_id: str
+    offset: int
+    path: str
+    def __init__(self, fiber_id: _Optional[str] = ..., path: _Optional[str] = ..., offset: _Optional[int] = ...) -> None: ...
+
 class Fence(_message.Message):
     __slots__ = ["epoch", "grant_uid", "seq"]
     EPOCH_FIELD_NUMBER: _ClassVar[int]
@@ -106,6 +119,42 @@ class FiberLimits(_message.Message):
     warm: int
     def __init__(self, max: _Optional[int] = ..., warm: _Optional[int] = ...) -> None: ...
 
+class FileChunk(_message.Message):
+    __slots__ = ["data", "info"]
+    DATA_FIELD_NUMBER: _ClassVar[int]
+    INFO_FIELD_NUMBER: _ClassVar[int]
+    data: bytes
+    info: FileInfo
+    def __init__(self, info: _Optional[_Union[FileInfo, _Mapping]] = ..., data: _Optional[bytes] = ...) -> None: ...
+
+class FileInfo(_message.Message):
+    __slots__ = ["directory", "mode", "path", "sha256", "size"]
+    DIRECTORY_FIELD_NUMBER: _ClassVar[int]
+    MODE_FIELD_NUMBER: _ClassVar[int]
+    PATH_FIELD_NUMBER: _ClassVar[int]
+    SHA256_FIELD_NUMBER: _ClassVar[int]
+    SIZE_FIELD_NUMBER: _ClassVar[int]
+    directory: bool
+    mode: int
+    path: str
+    sha256: bytes
+    size: int
+    def __init__(self, path: _Optional[str] = ..., size: _Optional[int] = ..., mode: _Optional[int] = ..., directory: bool = ..., sha256: _Optional[bytes] = ...) -> None: ...
+
+class ListFilesRequest(_message.Message):
+    __slots__ = ["dir", "fiber_id"]
+    DIR_FIELD_NUMBER: _ClassVar[int]
+    FIBER_ID_FIELD_NUMBER: _ClassVar[int]
+    dir: str
+    fiber_id: str
+    def __init__(self, fiber_id: _Optional[str] = ..., dir: _Optional[str] = ...) -> None: ...
+
+class ListFilesResponse(_message.Message):
+    __slots__ = ["files"]
+    FILES_FIELD_NUMBER: _ClassVar[int]
+    files: _containers.RepeatedCompositeFieldContainer[FileInfo]
+    def __init__(self, files: _Optional[_Iterable[_Union[FileInfo, _Mapping]]] = ...) -> None: ...
+
 class Miss(_message.Message):
     __slots__ = ["code", "issuer", "preferred_home", "retry_after_s"]
     CODE_FIELD_NUMBER: _ClassVar[int]
@@ -117,6 +166,10 @@ class Miss(_message.Message):
     preferred_home: str
     retry_after_s: int
     def __init__(self, code: _Optional[_Union[MissCode, str]] = ..., retry_after_s: _Optional[int] = ..., issuer: _Optional[str] = ..., preferred_home: _Optional[str] = ...) -> None: ...
+
+class NoWorkspace(_message.Message):
+    __slots__ = []
+    def __init__(self) -> None: ...
 
 class ParkRequest(_message.Message):
     __slots__ = ["fiber_id", "sync"]
@@ -167,6 +220,28 @@ class Status(_message.Message):
     running: int
     w_used_bytes: int
     def __init__(self, grant_uid: _Optional[str] = ..., running: _Optional[int] = ..., parked: _Optional[int] = ..., w_used_bytes: _Optional[int] = ..., latest: _Optional[_Union[Fence, _Mapping]] = ..., pooled: _Optional[int] = ...) -> None: ...
+
+class UploadHeader(_message.Message):
+    __slots__ = ["fiber_id", "mode", "path", "sha256", "size"]
+    FIBER_ID_FIELD_NUMBER: _ClassVar[int]
+    MODE_FIELD_NUMBER: _ClassVar[int]
+    PATH_FIELD_NUMBER: _ClassVar[int]
+    SHA256_FIELD_NUMBER: _ClassVar[int]
+    SIZE_FIELD_NUMBER: _ClassVar[int]
+    fiber_id: str
+    mode: int
+    path: str
+    sha256: bytes
+    size: int
+    def __init__(self, fiber_id: _Optional[str] = ..., path: _Optional[str] = ..., size: _Optional[int] = ..., mode: _Optional[int] = ..., sha256: _Optional[bytes] = ...) -> None: ...
+
+class UploadRequest(_message.Message):
+    __slots__ = ["data", "header"]
+    DATA_FIELD_NUMBER: _ClassVar[int]
+    HEADER_FIELD_NUMBER: _ClassVar[int]
+    data: bytes
+    header: UploadHeader
+    def __init__(self, header: _Optional[_Union[UploadHeader, _Mapping]] = ..., data: _Optional[bytes] = ...) -> None: ...
 
 class Tier(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     __slots__ = []

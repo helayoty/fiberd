@@ -2,9 +2,13 @@ package rpc_test
 
 import (
 	"context"
+	"errors"
+	"io"
 	"strings"
 	"testing"
+	"time"
 
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/encoding/protowire"
@@ -13,7 +17,10 @@ import (
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/descriptorpb"
 	"google.golang.org/protobuf/types/dynamicpb"
+	"google.golang.org/protobuf/types/known/emptypb"
 
+	grantv1 "github.com/helayoty/fiberd/api/grant/v1"
+	"github.com/helayoty/fiberd/pkg/core"
 	"github.com/helayoty/fiberd/pkg/rpc"
 )
 
@@ -176,6 +183,131 @@ func TestAdmissionInterceptor(t *testing.T) {
 			}
 			if tc.wantHandled && resp != tc.req {
 				t.Fatalf("response = %v, want the handler's", resp)
+			}
+		})
+	}
+}
+
+// recvStream hands out its messages in order, then io.EOF or err.
+type recvStream struct {
+	grpc.ServerStream // only RecvMsg is used
+	msgs              []proto.Message
+	err               error
+}
+
+func (s *recvStream) RecvMsg(m any) error {
+	if len(s.msgs) == 0 {
+		if s.err != nil {
+			return s.err
+		}
+		return io.EOF
+	}
+	next := s.msgs[0]
+	s.msgs = s.msgs[1:]
+	if pm, ok := m.(proto.Message); ok {
+		proto.Merge(pm, next)
+	}
+	return nil
+}
+
+// The stream interceptor checks every message the handler receives, not
+// only the first, and passes the stream's own errors through.
+func TestAdmissionStreamInterceptor(t *testing.T) {
+	md := nodeDescriptor(t)
+	clean := func() proto.Message { return dynamicpb.NewMessage(md) }
+	dirty := func() proto.Message {
+		m := dynamicpb.NewMessage(md)
+		m.SetUnknown(protowire.AppendVarint(protowire.AppendTag(nil, 99, protowire.VarintType), 1))
+		return m
+	}
+	errBroken := errors.New("transport is closing")
+	cases := []struct {
+		name     string
+		msgs     []proto.Message
+		err      error // what the stream answers after its messages
+		raw      bool  // the handler receives into a value that is not a message
+		want     codes.Code
+		wantErr  error // when set, the handler's error is this one, unchanged
+		wantRead int
+	}{
+		{name: "every clean message reaches the handler, then EOF", msgs: []proto.Message{clean(), clean(), clean()},
+			wantErr: io.EOF, wantRead: 3},
+		{name: "an unknown field on the first message is InvalidArgument", msgs: []proto.Message{dirty(), clean()},
+			want: codes.InvalidArgument},
+		{name: "an unknown field on a later message is InvalidArgument", msgs: []proto.Message{clean(), clean(), dirty()},
+			want: codes.InvalidArgument, wantRead: 2},
+		{name: "the stream's own error passes through", msgs: []proto.Message{clean()}, err: errBroken,
+			wantErr: errBroken, wantRead: 1},
+		{name: "a value that is not a message is not checked", msgs: []proto.Message{dirty()}, raw: true,
+			wantErr: io.EOF, wantRead: 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			read := 0
+			handler := func(_ any, ss grpc.ServerStream) error {
+				for {
+					var err error
+					if tc.raw {
+						var s string
+						err = ss.RecvMsg(&s)
+					} else {
+						err = ss.RecvMsg(dynamicpb.NewMessage(md))
+					}
+					if err != nil {
+						return err
+					}
+					read++
+				}
+			}
+			err := rpc.AdmissionStreamInterceptor()(nil, &recvStream{msgs: tc.msgs, err: tc.err}, nil, handler)
+			if tc.wantErr != nil {
+				if !errors.Is(err, tc.wantErr) {
+					t.Fatalf("interceptor = %v, want %v", err, tc.wantErr)
+				}
+			} else if status.Code(err) != tc.want {
+				t.Fatalf("interceptor = %v, want %v", err, tc.want)
+			}
+			if read != tc.wantRead {
+				t.Fatalf("the handler received %d messages, want %d", read, tc.wantRead)
+			}
+		})
+	}
+}
+
+// smuggle adds field 99 to m, as a caller shaping a workload would.
+func smuggle[M proto.Message](m M) M {
+	b := protowire.AppendTag(nil, 99, protowire.BytesType)
+	m.ProtoReflect().SetUnknown(protowire.AppendBytes(b, []byte("evil")))
+	return m
+}
+
+// A Watch request is checked like any other. It used to skip the check,
+// since only unary calls had an admission interceptor.
+func TestWatchAdmission(t *testing.T) {
+	h := newHarness(t, core.TierCheckpoint)
+	if _, err := h.client.Clone(context.Background(), &grantv1.CloneRequest{
+		GrantJwt: jsonGrant(t, core.Grant{UID: "g1", Audience: "node-a", Tenant: "acme"}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name string
+		req  *emptypb.Empty
+		want codes.Code
+	}{
+		{name: "a clean watch streams status", req: &emptypb.Empty{}, want: codes.OK},
+		{name: "a watch with an unknown field is InvalidArgument", req: smuggle(&emptypb.Empty{}), want: codes.InvalidArgument},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			s, err := h.client.Watch(ctx, tc.req)
+			if err == nil {
+				_, err = s.Recv()
+			}
+			if status.Code(err) != tc.want {
+				t.Fatalf("watch = %v, want %v", err, tc.want)
 			}
 		})
 	}

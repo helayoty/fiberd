@@ -647,6 +647,17 @@ type isolatorMixin struct{ isolates bool }
 
 func (m isolatorMixin) IsolatesTenants() bool { return m.isolates }
 
+type workspaceMixin struct{ holds bool }
+
+func (m workspaceMixin) HoldsWorkspaces() bool { return m.holds }
+
+// workspaceBackend is a fork backend that answers whether it gives
+// fibers a workspace.
+type workspaceBackend struct {
+	*fakeBackend
+	workspaceMixin
+}
+
 // handoffMixin says the backend's fibers take a channel. The fake it
 // wraps must make them (channels), so a test composing it sets that.
 type handoffMixin struct{ handoff bool }

@@ -28,6 +28,7 @@ func sample(now time.Time) core.Grant {
 		Policy:           core.Policy{Durability: core.Sync, PSISomeAvg10Park: 20, Isolation: core.Trusted, EndpointMode: core.EndpointHandoff},
 		CallerThumbprint: "x5t-of-the-caller",
 		DeviceBudget:     core.DeviceBudget{Bytes: 1 << 30, Class: "gpu"},
+		DiskBudgetBytes:  64 << 20,
 	}
 }
 

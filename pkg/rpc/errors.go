@@ -5,6 +5,7 @@ import (
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/protoadapt"
 
 	grantv1 "github.com/helayoty/fiberd/api/grant/v1"
 	"github.com/helayoty/fiberd/pkg/core"
@@ -18,6 +19,8 @@ import (
 //	core.Invalid          -> InvalidArgument
 //	core.Unauthenticated  -> Unauthenticated
 //	core.NotFound         -> NotFound
+//	core.NoWorkspace      -> FailedPrecondition + NoWorkspace
+//	core.OverBudget       -> ResourceExhausted, no Miss
 //	core.Internal         -> Internal
 func (s *Server) ToError(code core.StatusCode, err error) error {
 	msg := ""
@@ -28,7 +31,7 @@ func (s *Server) ToError(code core.StatusCode, err error) error {
 	case core.OK:
 		return nil
 	case core.Shed:
-		return withMiss(codes.ResourceExhausted, msg, &grantv1.Miss{
+		return withDetail(codes.ResourceExhausted, msg, &grantv1.Miss{
 			Code:        grantv1.MissCode_SHED,
 			RetryAfterS: uint32(s.retryAfter().Seconds()),
 			Issuer:      s.Issuer,
@@ -39,7 +42,7 @@ func (s *Server) ToError(code core.StatusCode, err error) error {
 		if errors.As(err, &rm) {
 			miss.PreferredHome = rm.PreferredHome
 		}
-		return withMiss(codes.Unavailable, msg, miss)
+		return withDetail(codes.Unavailable, msg, miss)
 	case core.NeedsTier:
 		return status.Error(codes.FailedPrecondition, msg)
 	case core.Invalid:
@@ -48,17 +51,21 @@ func (s *Server) ToError(code core.StatusCode, err error) error {
 		return status.Error(codes.Unauthenticated, msg)
 	case core.NotFound:
 		return status.Error(codes.NotFound, msg)
+	case core.NoWorkspace:
+		return withDetail(codes.FailedPrecondition, msg, &grantv1.NoWorkspace{})
+	case core.OverBudget:
+		return status.Error(codes.ResourceExhausted, msg)
 	default:
 		return status.Error(codes.Internal, msg)
 	}
 }
 
-func withMiss(c codes.Code, msg string, miss *grantv1.Miss) error {
-	st, err := status.New(c, msg).WithDetails(miss)
+func withDetail(c codes.Code, msg string, detail protoadapt.MessageV1) error {
+	st, err := status.New(c, msg).WithDetails(detail)
 	if err != nil {
 		// Cannot happen for a registered message type; fail loudly rather
 		// than return a bare code that violates the protocol.
-		panic("rpc: attach Miss detail: " + err.Error())
+		panic("rpc: attach detail: " + err.Error())
 	}
 	return st.Err()
 }
@@ -76,6 +83,21 @@ func MissFromError(err error) (*grantv1.Miss, bool) {
 		}
 	}
 	return nil, false
+}
+
+// IsNoWorkspace reports whether err is the refusal of a file call on a
+// fiber whose grant has no workspace.
+func IsNoWorkspace(err error) bool {
+	st, ok := status.FromError(err)
+	if !ok || st.Code() != codes.FailedPrecondition {
+		return false
+	}
+	for _, d := range st.Details() {
+		if _, ok := d.(*grantv1.NoWorkspace); ok {
+			return true
+		}
+	}
+	return false
 }
 
 // IsMiss reports whether err is one of the two miss outcomes.

@@ -134,6 +134,10 @@ type Grant struct {
 	LeaseExpiry  time.Time // zero = no expiry
 	Policy       Policy
 	DeviceBudget DeviceBudget
+	// DiskBudgetBytes is the per-fiber workspace ceiling. Zero means the
+	// grant's fibers get no workspace and every file call on them is
+	// refused.
+	DiskBudgetBytes uint64
 	// CallerThumbprint is the x5t#S256 of the one client certificate the
 	// grant may be presented over.
 	CallerThumbprint string

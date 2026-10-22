@@ -27,6 +27,31 @@ func AdmissionInterceptor() grpc.UnaryServerInterceptor {
 	}
 }
 
+// AdmissionStreamInterceptor is AdmissionInterceptor for streaming calls.
+// It checks every message the client sends, not only the first, so a
+// later Upload chunk cannot carry an undefined field either.
+func AdmissionStreamInterceptor() grpc.StreamServerInterceptor {
+	return func(srv any, ss grpc.ServerStream, _ *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+		return handler(srv, admittedStream{ss})
+	}
+}
+
+// admittedStream refuses each received message that carries an unknown
+// field.
+type admittedStream struct{ grpc.ServerStream }
+
+func (s admittedStream) RecvMsg(m any) error {
+	if err := s.ServerStream.RecvMsg(m); err != nil {
+		return err
+	}
+	if pm, ok := m.(proto.Message); ok {
+		if err := RejectUnknown(pm.ProtoReflect()); err != nil {
+			return status.Error(codes.InvalidArgument, err.Error())
+		}
+	}
+	return nil
+}
+
 // RejectUnknown walks the message and every nested message and fails on
 // the first unknown field found.
 func RejectUnknown(m protoreflect.Message) error {

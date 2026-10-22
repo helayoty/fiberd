@@ -94,6 +94,11 @@ func TestSurface(t *testing.T) {
 				t.Fatal("IsolatesTenants = false")
 			}
 		}},
+		{name: "fibers have no workspace, so a grant with a disk budget is refused", check: func(t *testing.T) {
+			if _, ok := any(be).(backend.WorkspaceHolder); ok {
+				t.Fatal("hyperlight implements backend.WorkspaceHolder, but its guest has no file system")
+			}
+		}},
 		{name: "the deadlines", check: func(t *testing.T) {
 			if c, r := be.DefaultDeadlines(""); c != 500*time.Millisecond || r != 2*time.Second {
 				t.Fatalf("DefaultDeadlines = %s, %s", c, r)

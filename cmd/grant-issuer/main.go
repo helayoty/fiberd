@@ -140,6 +140,7 @@ func mint(args []string, stdout, stderr io.Writer) error {
 	psiShed := fs.Float64("psi-shed", 0, "PSI memory some avg10 (%) at which the home sheds new clones")
 	psiPark := fs.Float64("psi-park", 0, "PSI memory some avg10 (%) at which the home parks sessions")
 	devBudget := fs.String("device-budget", "0", "per-fiber slice of the engine's device state, bytes with optional Ki/Mi/Gi suffix (0 = no device)")
+	diskBudget := fs.String("disk-budget", "0", "per-fiber workspace ceiling, bytes with optional Ki/Mi/Gi suffix (0 = no workspace)")
 	devClass := fs.String("device-class", "", "device class the budget is for (gpu, sim; empty = any)")
 	bindCert := fs.String("bind-cert", "", "PEM client certificate the grant is bound to (cnf x5t#S256). Homes serving mutual TLS require it")
 	isolation := fs.String("isolation", "UNTRUSTED", "UNTRUSTED (only gvisor or hyperlight homes serve it) or TRUSTED (any home, including proc and runc)")
@@ -175,6 +176,10 @@ func mint(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("-device-budget: %w", err)
 	}
+	disk, err := parseBytes(*diskBudget)
+	if err != nil {
+		return fmt.Errorf("-disk-budget: %w", err)
+	}
 	var d core.Durability
 	switch strings.ToLower(*durability) {
 	case "best-effort", "best_effort", "besteffort":
@@ -193,9 +198,10 @@ func mint(args []string, stdout, stderr io.Writer) error {
 	g := core.Grant{
 		UID: *uid, Audience: *aud, TemplateDigest: *template, Tenant: *tenant,
 		FiberMax: int(*maxF), FiberWarm: int(*warm), WBudgetBytes: w, MinTier: tier,
-		LeaseExpiry:  now.Add(*ttl).Truncate(time.Second),
-		Policy:       core.Policy{Durability: d, PSISomeAvg10Shed: *psiShed, PSISomeAvg10Park: *psiPark, Isolation: iso, EndpointMode: mode},
-		DeviceBudget: core.DeviceBudget{Bytes: dev, Class: *devClass},
+		LeaseExpiry:     now.Add(*ttl).Truncate(time.Second),
+		Policy:          core.Policy{Durability: d, PSISomeAvg10Shed: *psiShed, PSISomeAvg10Park: *psiPark, Isolation: iso, EndpointMode: mode},
+		DeviceBudget:    core.DeviceBudget{Bytes: dev, Class: *devClass},
+		DiskBudgetBytes: disk,
 	}
 	if *bindCert != "" {
 		if g.CallerThumbprint, err = tlsconf.ThumbprintFile(*bindCert); err != nil {

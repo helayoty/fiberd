@@ -49,7 +49,7 @@ The verifier does not enforce `exp`. Lease expiry is a capacity miss the [core](
 - All three TLS files are set, `-tls-cert`, `-tls-key` and `-client-ca`.
 - `-insecure-plaintext` is set, and no TLS file is.
 
-The certificate's thumbprint is the caller on every call. Park and Release answer `NotFound` for a fiber whose grant is bound to another caller, the same as for a fiber that does not exist. Watch and the gateway's status report only the caller's grants.
+The certificate's thumbprint is the caller on every call. Park, Release and the [file calls](../protocol.md#files) answer `NotFound` for a fiber whose grant is bound to another caller, the same as for a fiber that does not exist. Watch and the gateway's status report only the caller's grants.
 
 **Admission completeness.** The RPC server refuses unknown fields at any depth before the core sees a Clone, so a caller cannot shape the workload the [template](../glossary.md#template) fixed ([protocol.md](../protocol.md#admission-completeness)).
 

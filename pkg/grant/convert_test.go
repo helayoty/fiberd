@@ -29,6 +29,7 @@ func TestProtoRoundTrip(t *testing.T) {
 		{name: "zero grant has no lease and no device budget", g: core.Grant{UID: "g"}},
 		{name: "a device class without bytes still travels",
 			g: core.Grant{UID: "g", DeviceBudget: core.DeviceBudget{Class: "gpu"}}, wantDev: true},
+		{name: "a disk budget travels", g: core.Grant{UID: "g", DiskBudgetBytes: 4096}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

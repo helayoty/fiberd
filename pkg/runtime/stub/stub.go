@@ -52,6 +52,10 @@ func (r *Runtime) Tier() core.Tier { return r.tier }
 // fiber can reach the host and untrusted grants are admitted.
 func (r *Runtime) IsolatesTenants() bool { return true }
 
+// HoldsWorkspaces implements core.WorkspaceHolder. The stub models the
+// contract, so grants with a disk budget are admitted.
+func (r *Runtime) HoldsWorkspaces() bool { return true }
+
 func (r *Runtime) PrepareTemplate(_ context.Context, g core.Grant) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()

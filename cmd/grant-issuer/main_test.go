@@ -224,13 +224,14 @@ func TestMint(t *testing.T) {
 		{name: "every flag lands in the grant",
 			args: []string{"-uid", "g-7", "-template", "sha256:abc", "-max", "8", "-warm", "2", "-w-budget", "64Mi",
 				"-min-tier", "FIBER_CHECKPOINT", "-ttl", "1h", "-durability", "sync", "-psi-shed", "40", "-psi-park", "20",
-				"-device-budget", "1Gi", "-device-class", "gpu", "-bind-cert", certFile, "-isolation", "TRUSTED", "-endpoint-mode", "HANDOFF"},
+				"-device-budget", "1Gi", "-device-class", "gpu", "-disk-budget", "256Mi", "-bind-cert", certFile, "-isolation", "TRUSTED", "-endpoint-mode", "HANDOFF"},
 			check: func(t *testing.T, g core.Grant) {
 				want := core.Grant{UID: "g-7", Issuer: "https://issuer.test", Audience: "node-a", TemplateDigest: "sha256:abc",
 					FiberMax: 8, FiberWarm: 2, WBudgetBytes: 64 << 20, MinTier: core.TierCheckpoint, LeaseExpiry: g.LeaseExpiry,
 					Policy: core.Policy{Durability: core.Sync, PSISomeAvg10Shed: 40, PSISomeAvg10Park: 20,
 						Isolation: core.Trusted, EndpointMode: core.EndpointHandoff},
 					DeviceBudget:     core.DeviceBudget{Bytes: 1 << 30, Class: "gpu"},
+					DiskBudgetBytes:  256 << 20,
 					CallerThumbprint: tlsconf.Thumbprint(caller.Cert)}
 				if g != want {
 					t.Fatalf("grant\n got %+v\nwant %+v", g, want)
@@ -254,6 +255,7 @@ func TestMint(t *testing.T) {
 		{name: "an unknown endpoint mode fails", args: []string{"-endpoint-mode", "TUNNEL"}, wantStderr: "-endpoint-mode"},
 		{name: "a bad w budget fails", args: []string{"-w-budget", "lots"}, wantStderr: "-w-budget"},
 		{name: "a bad device budget fails", args: []string{"-device-budget", "1Ti"}, wantStderr: "-device-budget"},
+		{name: "a bad disk budget fails", args: []string{"-disk-budget", "big"}, wantStderr: "-disk-budget"},
 		{name: "an unknown durability fails", args: []string{"-durability", "eventually"}, wantStderr: `-durability: "eventually"`},
 		{name: "a bind cert that is not a certificate fails", args: []string{"-bind-cert", keyPEM}, wantStderr: "-bind-cert"},
 		{name: "a uid no home accepts fails", args: []string{"-uid", "G_1"}, wantStderr: "DNS-1123"},

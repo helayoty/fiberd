@@ -13,6 +13,8 @@ import {
   type ClientOptions,
   type ClientReadableStream,
   type ClientUnaryCall,
+  type ClientWritableStream,
+  type handleClientStreamingCall,
   type handleServerStreamingCall,
   type handleUnaryCall,
   makeGenericClientConstructor,
@@ -213,7 +215,18 @@ export interface CapacityGrant {
     | Policy
     | undefined;
   /** Absent or zero bytes: the grant needs no device. */
-  deviceBudget: DeviceBudget | undefined;
+  deviceBudget:
+    | DeviceBudget
+    | undefined;
+  /**
+   * Per-fiber workspace ceiling in bytes. Each fiber gets a private
+   * workspace at /workspace that Upload, Download and ListFiles reach.
+   * Zero means no workspace, and every file call on the grant's fibers
+   * fails with FailedPrecondition and a NoWorkspace detail. A home whose
+   * runtime offers no workspace refuses a grant that sets it, with
+   * FailedPrecondition.
+   */
+  diskBudgetBytes: bigint;
 }
 
 /**
@@ -307,6 +320,88 @@ export interface Status {
    * fibers.max and not in running.
    */
   pooled: number;
+}
+
+/**
+ * NoWorkspace is attached as a detail to the FailedPrecondition a file
+ * call gets when its fiber's grant has no workspace (disk_budget_bytes is
+ * zero). It tells that refusal apart from a tier gap.
+ */
+export interface NoWorkspace {
+}
+
+/**
+ * UploadHeader opens an Upload. It is the stream's first message and the
+ * only header.
+ */
+export interface UploadHeader {
+  fiberId: string;
+  /** The file's path, relative to the fiber's /workspace. */
+  path: string;
+  /**
+   * The file's size in bytes, declared up front so the budget is
+   * reserved before any byte lands. The data chunks add up to it
+   * exactly. It must be set, and zero is an empty file.
+   */
+  size?:
+    | bigint
+    | undefined;
+  /** The file's permission bits. Zero means 0644. */
+  mode: number;
+  /** Optional SHA-256 of the content, checked before the file appears. */
+  sha256: Buffer;
+}
+
+/**
+ * UploadRequest is one message of an Upload stream. The first carries
+ * the header and every later one a data chunk of at most 1 MiB.
+ */
+export interface UploadRequest {
+  header?: UploadHeader | undefined;
+  data?: Buffer | undefined;
+}
+
+export interface DownloadRequest {
+  fiberId: string;
+  /** The file's path, relative to the fiber's /workspace. */
+  path: string;
+  /** Where to start reading, in bytes. */
+  offset: bigint;
+}
+
+/** FileInfo describes one entry of a workspace. */
+export interface FileInfo {
+  /** Relative to the fiber's /workspace. */
+  path: string;
+  size: bigint;
+  /** The permission bits. */
+  mode: number;
+  directory: boolean;
+  /** SHA-256 of the content. Set in Upload's reply only. */
+  sha256: Buffer;
+}
+
+/**
+ * FileChunk is one message of a Download stream. The first carries info
+ * and every chunk carries at most 1 MiB of data.
+ */
+export interface FileChunk {
+  info: FileInfo | undefined;
+  data: Buffer;
+}
+
+export interface ListFilesRequest {
+  fiberId: string;
+  /**
+   * The directory to list, relative to the fiber's /workspace. Empty is
+   * the workspace itself.
+   */
+  dir: string;
+}
+
+export interface ListFilesResponse {
+  /** The directory's entries, not recursive. */
+  files: FileInfo[];
 }
 
 function createBasePolicy(): Policy {
@@ -594,6 +689,7 @@ function createBaseCapacityGrant(): CapacityGrant {
     leaseExpiry: undefined,
     policy: undefined,
     deviceBudget: undefined,
+    diskBudgetBytes: 0n,
   };
 }
 
@@ -634,6 +730,12 @@ export const CapacityGrant: MessageFns<CapacityGrant> = {
     }
     if (message.deviceBudget !== undefined) {
       DeviceBudget.encode(message.deviceBudget, writer.uint32(82).fork()).join();
+    }
+    if (message.diskBudgetBytes !== 0n) {
+      if (BigInt.asUintN(64, message.diskBudgetBytes) !== message.diskBudgetBytes) {
+        throw new globalThis.Error("value provided for field message.diskBudgetBytes of type uint64 too large");
+      }
+      writer.uint32(96).uint64(message.diskBudgetBytes);
     }
     return writer;
   },
@@ -739,6 +841,14 @@ export const CapacityGrant: MessageFns<CapacityGrant> = {
             message.deviceBudget = DeviceBudget.decode(reader, reader.uint32());
             continue;
           }
+          case 12: {
+            if (tag !== 96) {
+              break;
+            }
+
+            message.diskBudgetBytes = reader.uint64() as bigint;
+            continue;
+          }
         }
         if ((tag & 7) === 4 || tag === 0) {
           break;
@@ -777,6 +887,9 @@ export const CapacityGrant: MessageFns<CapacityGrant> = {
     message.deviceBudget = (object.deviceBudget !== undefined && object.deviceBudget !== null)
       ? DeviceBudget.fromPartial(object.deviceBudget)
       : undefined;
+    message.diskBudgetBytes = (object.diskBudgetBytes !== undefined && object.diskBudgetBytes !== null)
+      ? BigInt(object.diskBudgetBytes)
+      : 0n;
     return message;
   },
 };
@@ -1441,6 +1554,601 @@ export const Status: MessageFns<Status> = {
   },
 };
 
+function createBaseNoWorkspace(): NoWorkspace {
+  return {};
+}
+
+export const NoWorkspace: MessageFns<NoWorkspace> = {
+  encode(_: NoWorkspace, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): NoWorkspace {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const previousRecursionDepth = (reader as any).__tsProtoDecodeDepth ?? 0;
+    if (previousRecursionDepth >= 100) {
+      throw new globalThis.Error("protobuf decode recursion limit exceeded");
+    }
+    (reader as any).__tsProtoDecodeDepth = previousRecursionDepth + 1;
+    try {
+      const end = length === undefined ? reader.len : reader.pos + length;
+      const message = createBaseNoWorkspace();
+      while (reader.pos < end) {
+        const tag = reader.uint32();
+        switch (tag >>> 3) {
+        }
+        if ((tag & 7) === 4 || tag === 0) {
+          break;
+        }
+        reader.skip(tag & 7);
+      }
+      return message;
+    } finally {
+      (reader as any).__tsProtoDecodeDepth = previousRecursionDepth;
+    }
+  },
+
+  create<I extends Exact<DeepPartial<NoWorkspace>, I>>(base?: I): NoWorkspace {
+    return NoWorkspace.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<NoWorkspace>, I>>(_: I): NoWorkspace {
+    const message = createBaseNoWorkspace();
+    return message;
+  },
+};
+
+function createBaseUploadHeader(): UploadHeader {
+  return { fiberId: "", path: "", size: undefined, mode: 0, sha256: Buffer.alloc(0) };
+}
+
+export const UploadHeader: MessageFns<UploadHeader> = {
+  encode(message: UploadHeader, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.fiberId !== "") {
+      writer.uint32(10).string(message.fiberId);
+    }
+    if (message.path !== "") {
+      writer.uint32(18).string(message.path);
+    }
+    if (message.size !== undefined) {
+      if (BigInt.asUintN(64, message.size) !== message.size) {
+        throw new globalThis.Error("value provided for field message.size of type uint64 too large");
+      }
+      writer.uint32(24).uint64(message.size);
+    }
+    if (message.mode !== 0) {
+      writer.uint32(32).uint32(message.mode);
+    }
+    if (message.sha256.length !== 0) {
+      writer.uint32(42).bytes(message.sha256);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): UploadHeader {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const previousRecursionDepth = (reader as any).__tsProtoDecodeDepth ?? 0;
+    if (previousRecursionDepth >= 100) {
+      throw new globalThis.Error("protobuf decode recursion limit exceeded");
+    }
+    (reader as any).__tsProtoDecodeDepth = previousRecursionDepth + 1;
+    try {
+      const end = length === undefined ? reader.len : reader.pos + length;
+      const message = createBaseUploadHeader();
+      while (reader.pos < end) {
+        const tag = reader.uint32();
+        switch (tag >>> 3) {
+          case 1: {
+            if (tag !== 10) {
+              break;
+            }
+
+            message.fiberId = reader.string();
+            continue;
+          }
+          case 2: {
+            if (tag !== 18) {
+              break;
+            }
+
+            message.path = reader.string();
+            continue;
+          }
+          case 3: {
+            if (tag !== 24) {
+              break;
+            }
+
+            message.size = reader.uint64() as bigint;
+            continue;
+          }
+          case 4: {
+            if (tag !== 32) {
+              break;
+            }
+
+            message.mode = reader.uint32();
+            continue;
+          }
+          case 5: {
+            if (tag !== 42) {
+              break;
+            }
+
+            message.sha256 = Buffer.from(reader.bytes());
+            continue;
+          }
+        }
+        if ((tag & 7) === 4 || tag === 0) {
+          break;
+        }
+        reader.skip(tag & 7);
+      }
+      return message;
+    } finally {
+      (reader as any).__tsProtoDecodeDepth = previousRecursionDepth;
+    }
+  },
+
+  create<I extends Exact<DeepPartial<UploadHeader>, I>>(base?: I): UploadHeader {
+    return UploadHeader.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<UploadHeader>, I>>(object: I): UploadHeader {
+    const message = createBaseUploadHeader();
+    message.fiberId = object.fiberId ?? "";
+    message.path = object.path ?? "";
+    message.size = (object.size !== undefined && object.size !== null) ? BigInt(object.size) : undefined;
+    message.mode = object.mode ?? 0;
+    message.sha256 = object.sha256 ?? Buffer.alloc(0);
+    return message;
+  },
+};
+
+function createBaseUploadRequest(): UploadRequest {
+  return { header: undefined, data: undefined };
+}
+
+export const UploadRequest: MessageFns<UploadRequest> = {
+  encode(message: UploadRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.header !== undefined) {
+      UploadHeader.encode(message.header, writer.uint32(10).fork()).join();
+    }
+    if (message.data !== undefined) {
+      writer.uint32(18).bytes(message.data);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): UploadRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const previousRecursionDepth = (reader as any).__tsProtoDecodeDepth ?? 0;
+    if (previousRecursionDepth >= 100) {
+      throw new globalThis.Error("protobuf decode recursion limit exceeded");
+    }
+    (reader as any).__tsProtoDecodeDepth = previousRecursionDepth + 1;
+    try {
+      const end = length === undefined ? reader.len : reader.pos + length;
+      const message = createBaseUploadRequest();
+      while (reader.pos < end) {
+        const tag = reader.uint32();
+        switch (tag >>> 3) {
+          case 1: {
+            if (tag !== 10) {
+              break;
+            }
+
+            message.header = UploadHeader.decode(reader, reader.uint32());
+            continue;
+          }
+          case 2: {
+            if (tag !== 18) {
+              break;
+            }
+
+            message.data = Buffer.from(reader.bytes());
+            continue;
+          }
+        }
+        if ((tag & 7) === 4 || tag === 0) {
+          break;
+        }
+        reader.skip(tag & 7);
+      }
+      return message;
+    } finally {
+      (reader as any).__tsProtoDecodeDepth = previousRecursionDepth;
+    }
+  },
+
+  create<I extends Exact<DeepPartial<UploadRequest>, I>>(base?: I): UploadRequest {
+    return UploadRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<UploadRequest>, I>>(object: I): UploadRequest {
+    const message = createBaseUploadRequest();
+    message.header = (object.header !== undefined && object.header !== null)
+      ? UploadHeader.fromPartial(object.header)
+      : undefined;
+    message.data = object.data ?? undefined;
+    return message;
+  },
+};
+
+function createBaseDownloadRequest(): DownloadRequest {
+  return { fiberId: "", path: "", offset: 0n };
+}
+
+export const DownloadRequest: MessageFns<DownloadRequest> = {
+  encode(message: DownloadRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.fiberId !== "") {
+      writer.uint32(10).string(message.fiberId);
+    }
+    if (message.path !== "") {
+      writer.uint32(18).string(message.path);
+    }
+    if (message.offset !== 0n) {
+      if (BigInt.asUintN(64, message.offset) !== message.offset) {
+        throw new globalThis.Error("value provided for field message.offset of type uint64 too large");
+      }
+      writer.uint32(24).uint64(message.offset);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): DownloadRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const previousRecursionDepth = (reader as any).__tsProtoDecodeDepth ?? 0;
+    if (previousRecursionDepth >= 100) {
+      throw new globalThis.Error("protobuf decode recursion limit exceeded");
+    }
+    (reader as any).__tsProtoDecodeDepth = previousRecursionDepth + 1;
+    try {
+      const end = length === undefined ? reader.len : reader.pos + length;
+      const message = createBaseDownloadRequest();
+      while (reader.pos < end) {
+        const tag = reader.uint32();
+        switch (tag >>> 3) {
+          case 1: {
+            if (tag !== 10) {
+              break;
+            }
+
+            message.fiberId = reader.string();
+            continue;
+          }
+          case 2: {
+            if (tag !== 18) {
+              break;
+            }
+
+            message.path = reader.string();
+            continue;
+          }
+          case 3: {
+            if (tag !== 24) {
+              break;
+            }
+
+            message.offset = reader.uint64() as bigint;
+            continue;
+          }
+        }
+        if ((tag & 7) === 4 || tag === 0) {
+          break;
+        }
+        reader.skip(tag & 7);
+      }
+      return message;
+    } finally {
+      (reader as any).__tsProtoDecodeDepth = previousRecursionDepth;
+    }
+  },
+
+  create<I extends Exact<DeepPartial<DownloadRequest>, I>>(base?: I): DownloadRequest {
+    return DownloadRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<DownloadRequest>, I>>(object: I): DownloadRequest {
+    const message = createBaseDownloadRequest();
+    message.fiberId = object.fiberId ?? "";
+    message.path = object.path ?? "";
+    message.offset = (object.offset !== undefined && object.offset !== null) ? BigInt(object.offset) : 0n;
+    return message;
+  },
+};
+
+function createBaseFileInfo(): FileInfo {
+  return { path: "", size: 0n, mode: 0, directory: false, sha256: Buffer.alloc(0) };
+}
+
+export const FileInfo: MessageFns<FileInfo> = {
+  encode(message: FileInfo, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.path !== "") {
+      writer.uint32(10).string(message.path);
+    }
+    if (message.size !== 0n) {
+      if (BigInt.asUintN(64, message.size) !== message.size) {
+        throw new globalThis.Error("value provided for field message.size of type uint64 too large");
+      }
+      writer.uint32(16).uint64(message.size);
+    }
+    if (message.mode !== 0) {
+      writer.uint32(24).uint32(message.mode);
+    }
+    if (message.directory !== false) {
+      writer.uint32(32).bool(message.directory);
+    }
+    if (message.sha256.length !== 0) {
+      writer.uint32(42).bytes(message.sha256);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): FileInfo {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const previousRecursionDepth = (reader as any).__tsProtoDecodeDepth ?? 0;
+    if (previousRecursionDepth >= 100) {
+      throw new globalThis.Error("protobuf decode recursion limit exceeded");
+    }
+    (reader as any).__tsProtoDecodeDepth = previousRecursionDepth + 1;
+    try {
+      const end = length === undefined ? reader.len : reader.pos + length;
+      const message = createBaseFileInfo();
+      while (reader.pos < end) {
+        const tag = reader.uint32();
+        switch (tag >>> 3) {
+          case 1: {
+            if (tag !== 10) {
+              break;
+            }
+
+            message.path = reader.string();
+            continue;
+          }
+          case 2: {
+            if (tag !== 16) {
+              break;
+            }
+
+            message.size = reader.uint64() as bigint;
+            continue;
+          }
+          case 3: {
+            if (tag !== 24) {
+              break;
+            }
+
+            message.mode = reader.uint32();
+            continue;
+          }
+          case 4: {
+            if (tag !== 32) {
+              break;
+            }
+
+            message.directory = reader.bool();
+            continue;
+          }
+          case 5: {
+            if (tag !== 42) {
+              break;
+            }
+
+            message.sha256 = Buffer.from(reader.bytes());
+            continue;
+          }
+        }
+        if ((tag & 7) === 4 || tag === 0) {
+          break;
+        }
+        reader.skip(tag & 7);
+      }
+      return message;
+    } finally {
+      (reader as any).__tsProtoDecodeDepth = previousRecursionDepth;
+    }
+  },
+
+  create<I extends Exact<DeepPartial<FileInfo>, I>>(base?: I): FileInfo {
+    return FileInfo.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<FileInfo>, I>>(object: I): FileInfo {
+    const message = createBaseFileInfo();
+    message.path = object.path ?? "";
+    message.size = (object.size !== undefined && object.size !== null) ? BigInt(object.size) : 0n;
+    message.mode = object.mode ?? 0;
+    message.directory = object.directory ?? false;
+    message.sha256 = object.sha256 ?? Buffer.alloc(0);
+    return message;
+  },
+};
+
+function createBaseFileChunk(): FileChunk {
+  return { info: undefined, data: Buffer.alloc(0) };
+}
+
+export const FileChunk: MessageFns<FileChunk> = {
+  encode(message: FileChunk, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.info !== undefined) {
+      FileInfo.encode(message.info, writer.uint32(10).fork()).join();
+    }
+    if (message.data.length !== 0) {
+      writer.uint32(18).bytes(message.data);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): FileChunk {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const previousRecursionDepth = (reader as any).__tsProtoDecodeDepth ?? 0;
+    if (previousRecursionDepth >= 100) {
+      throw new globalThis.Error("protobuf decode recursion limit exceeded");
+    }
+    (reader as any).__tsProtoDecodeDepth = previousRecursionDepth + 1;
+    try {
+      const end = length === undefined ? reader.len : reader.pos + length;
+      const message = createBaseFileChunk();
+      while (reader.pos < end) {
+        const tag = reader.uint32();
+        switch (tag >>> 3) {
+          case 1: {
+            if (tag !== 10) {
+              break;
+            }
+
+            message.info = FileInfo.decode(reader, reader.uint32());
+            continue;
+          }
+          case 2: {
+            if (tag !== 18) {
+              break;
+            }
+
+            message.data = Buffer.from(reader.bytes());
+            continue;
+          }
+        }
+        if ((tag & 7) === 4 || tag === 0) {
+          break;
+        }
+        reader.skip(tag & 7);
+      }
+      return message;
+    } finally {
+      (reader as any).__tsProtoDecodeDepth = previousRecursionDepth;
+    }
+  },
+
+  create<I extends Exact<DeepPartial<FileChunk>, I>>(base?: I): FileChunk {
+    return FileChunk.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<FileChunk>, I>>(object: I): FileChunk {
+    const message = createBaseFileChunk();
+    message.info = (object.info !== undefined && object.info !== null) ? FileInfo.fromPartial(object.info) : undefined;
+    message.data = object.data ?? Buffer.alloc(0);
+    return message;
+  },
+};
+
+function createBaseListFilesRequest(): ListFilesRequest {
+  return { fiberId: "", dir: "" };
+}
+
+export const ListFilesRequest: MessageFns<ListFilesRequest> = {
+  encode(message: ListFilesRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.fiberId !== "") {
+      writer.uint32(10).string(message.fiberId);
+    }
+    if (message.dir !== "") {
+      writer.uint32(18).string(message.dir);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ListFilesRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const previousRecursionDepth = (reader as any).__tsProtoDecodeDepth ?? 0;
+    if (previousRecursionDepth >= 100) {
+      throw new globalThis.Error("protobuf decode recursion limit exceeded");
+    }
+    (reader as any).__tsProtoDecodeDepth = previousRecursionDepth + 1;
+    try {
+      const end = length === undefined ? reader.len : reader.pos + length;
+      const message = createBaseListFilesRequest();
+      while (reader.pos < end) {
+        const tag = reader.uint32();
+        switch (tag >>> 3) {
+          case 1: {
+            if (tag !== 10) {
+              break;
+            }
+
+            message.fiberId = reader.string();
+            continue;
+          }
+          case 2: {
+            if (tag !== 18) {
+              break;
+            }
+
+            message.dir = reader.string();
+            continue;
+          }
+        }
+        if ((tag & 7) === 4 || tag === 0) {
+          break;
+        }
+        reader.skip(tag & 7);
+      }
+      return message;
+    } finally {
+      (reader as any).__tsProtoDecodeDepth = previousRecursionDepth;
+    }
+  },
+
+  create<I extends Exact<DeepPartial<ListFilesRequest>, I>>(base?: I): ListFilesRequest {
+    return ListFilesRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ListFilesRequest>, I>>(object: I): ListFilesRequest {
+    const message = createBaseListFilesRequest();
+    message.fiberId = object.fiberId ?? "";
+    message.dir = object.dir ?? "";
+    return message;
+  },
+};
+
+function createBaseListFilesResponse(): ListFilesResponse {
+  return { files: [] };
+}
+
+export const ListFilesResponse: MessageFns<ListFilesResponse> = {
+  encode(message: ListFilesResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    for (const v of message.files) {
+      FileInfo.encode(v!, writer.uint32(10).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ListFilesResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const previousRecursionDepth = (reader as any).__tsProtoDecodeDepth ?? 0;
+    if (previousRecursionDepth >= 100) {
+      throw new globalThis.Error("protobuf decode recursion limit exceeded");
+    }
+    (reader as any).__tsProtoDecodeDepth = previousRecursionDepth + 1;
+    try {
+      const end = length === undefined ? reader.len : reader.pos + length;
+      const message = createBaseListFilesResponse();
+      while (reader.pos < end) {
+        const tag = reader.uint32();
+        switch (tag >>> 3) {
+          case 1: {
+            if (tag !== 10) {
+              break;
+            }
+
+            message.files.push(FileInfo.decode(reader, reader.uint32()));
+            continue;
+          }
+        }
+        if ((tag & 7) === 4 || tag === 0) {
+          break;
+        }
+        reader.skip(tag & 7);
+      }
+      return message;
+    } finally {
+      (reader as any).__tsProtoDecodeDepth = previousRecursionDepth;
+    }
+  },
+
+  create<I extends Exact<DeepPartial<ListFilesResponse>, I>>(base?: I): ListFilesResponse {
+    return ListFilesResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ListFilesResponse>, I>>(object: I): ListFilesResponse {
+    const message = createBaseListFilesResponse();
+    message.files = object.files?.map((e) => FileInfo.fromPartial(e)) || [];
+    return message;
+  },
+};
+
 export type FibersService = typeof FibersService;
 export const FibersService = {
   /**
@@ -1486,6 +2194,43 @@ export const FibersService = {
     responseSerialize: (value: Status): Buffer => Buffer.from(Status.encode(value).finish()),
     responseDeserialize: (value: Buffer): Status => Status.decode(value),
   },
+  /**
+   * Upload writes one file into a running fiber's workspace. The first
+   * message is the header. Each file call is authorized like Park, so
+   * another caller's fiber answers NotFound.
+   */
+  upload: {
+    path: "/fiberd.grant.v1.Fibers/Upload" as const,
+    requestStream: true as const,
+    responseStream: false as const,
+    requestSerialize: (value: UploadRequest): Buffer => Buffer.from(UploadRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer): UploadRequest => UploadRequest.decode(value),
+    responseSerialize: (value: FileInfo): Buffer => Buffer.from(FileInfo.encode(value).finish()),
+    responseDeserialize: (value: Buffer): FileInfo => FileInfo.decode(value),
+  },
+  /**
+   * Download reads one regular file from a running fiber's workspace.
+   * The first chunk carries its FileInfo.
+   */
+  download: {
+    path: "/fiberd.grant.v1.Fibers/Download" as const,
+    requestStream: false as const,
+    responseStream: true as const,
+    requestSerialize: (value: DownloadRequest): Buffer => Buffer.from(DownloadRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer): DownloadRequest => DownloadRequest.decode(value),
+    responseSerialize: (value: FileChunk): Buffer => Buffer.from(FileChunk.encode(value).finish()),
+    responseDeserialize: (value: Buffer): FileChunk => FileChunk.decode(value),
+  },
+  /** ListFiles lists one directory of a running fiber's workspace. */
+  listFiles: {
+    path: "/fiberd.grant.v1.Fibers/ListFiles" as const,
+    requestStream: false as const,
+    responseStream: false as const,
+    requestSerialize: (value: ListFilesRequest): Buffer => Buffer.from(ListFilesRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer): ListFilesRequest => ListFilesRequest.decode(value),
+    responseSerialize: (value: ListFilesResponse): Buffer => Buffer.from(ListFilesResponse.encode(value).finish()),
+    responseDeserialize: (value: Buffer): ListFilesResponse => ListFilesResponse.decode(value),
+  },
 } as const;
 
 export interface FibersServer extends UntypedServiceImplementation {
@@ -1500,6 +2245,19 @@ export interface FibersServer extends UntypedServiceImplementation {
   park: handleUnaryCall<ParkRequest, Empty>;
   release: handleUnaryCall<ReleaseRequest, Empty>;
   watch: handleServerStreamingCall<Empty, Status>;
+  /**
+   * Upload writes one file into a running fiber's workspace. The first
+   * message is the header. Each file call is authorized like Park, so
+   * another caller's fiber answers NotFound.
+   */
+  upload: handleClientStreamingCall<UploadRequest, FileInfo>;
+  /**
+   * Download reads one regular file from a running fiber's workspace.
+   * The first chunk carries its FileInfo.
+   */
+  download: handleServerStreamingCall<DownloadRequest, FileChunk>;
+  /** ListFiles lists one directory of a running fiber's workspace. */
+  listFiles: handleUnaryCall<ListFilesRequest, ListFilesResponse>;
 }
 
 export interface FibersClient extends Client {
@@ -1551,6 +2309,51 @@ export interface FibersClient extends Client {
   ): ClientUnaryCall;
   watch(request: Empty, options?: Partial<CallOptions>): ClientReadableStream<Status>;
   watch(request: Empty, metadata?: Metadata, options?: Partial<CallOptions>): ClientReadableStream<Status>;
+  /**
+   * Upload writes one file into a running fiber's workspace. The first
+   * message is the header. Each file call is authorized like Park, so
+   * another caller's fiber answers NotFound.
+   */
+  upload(callback: (error: ServiceError | null, response: FileInfo) => void): ClientWritableStream<UploadRequest>;
+  upload(
+    metadata: Metadata,
+    callback: (error: ServiceError | null, response: FileInfo) => void,
+  ): ClientWritableStream<UploadRequest>;
+  upload(
+    options: Partial<CallOptions>,
+    callback: (error: ServiceError | null, response: FileInfo) => void,
+  ): ClientWritableStream<UploadRequest>;
+  upload(
+    metadata: Metadata,
+    options: Partial<CallOptions>,
+    callback: (error: ServiceError | null, response: FileInfo) => void,
+  ): ClientWritableStream<UploadRequest>;
+  /**
+   * Download reads one regular file from a running fiber's workspace.
+   * The first chunk carries its FileInfo.
+   */
+  download(request: DownloadRequest, options?: Partial<CallOptions>): ClientReadableStream<FileChunk>;
+  download(
+    request: DownloadRequest,
+    metadata?: Metadata,
+    options?: Partial<CallOptions>,
+  ): ClientReadableStream<FileChunk>;
+  /** ListFiles lists one directory of a running fiber's workspace. */
+  listFiles(
+    request: ListFilesRequest,
+    callback: (error: ServiceError | null, response: ListFilesResponse) => void,
+  ): ClientUnaryCall;
+  listFiles(
+    request: ListFilesRequest,
+    metadata: Metadata,
+    callback: (error: ServiceError | null, response: ListFilesResponse) => void,
+  ): ClientUnaryCall;
+  listFiles(
+    request: ListFilesRequest,
+    metadata: Metadata,
+    options: Partial<CallOptions>,
+    callback: (error: ServiceError | null, response: ListFilesResponse) => void,
+  ): ClientUnaryCall;
 }
 
 export const FibersClient = makeGenericClientConstructor(FibersService, "fiberd.grant.v1.Fibers") as unknown as {

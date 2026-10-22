@@ -41,6 +41,16 @@ export class TierGap extends FiberdError {
   }
 }
 
+/**
+ * A file call on a fiber whose grant has no workspace, since its
+ * disk_budget_bytes is zero. Not a tier gap, the grant asked for none.
+ */
+export class NoWorkspace extends FiberdError {
+  constructor(public readonly reason: string, options?: ErrorOptions) {
+    super(`no workspace: ${reason}`, options);
+  }
+}
+
 export class NotFound extends FiberdError {
   constructor(public readonly reason: string, options?: ErrorOptions) {
     super(`not found: ${reason}`, options);
@@ -60,6 +70,7 @@ function isServiceError(error: unknown): error is ServiceError {
 export function classify(error: unknown): unknown {
   if (!isServiceError(error)) return error;
   let miss: Miss | undefined;
+  let noWorkspace = false;
   const raw = error.metadata.get("grpc-status-details-bin")[0];
   if (Buffer.isBuffer(raw)) {
     try {
@@ -73,6 +84,7 @@ export function classify(error: unknown): unknown {
           validateWire(detail.value);
           miss = Miss.decode(detail.value);
         }
+        noWorkspace = envelope.details.some((d) => d.typeUrl.endsWith("/fiberd.grant.v1.NoWorkspace"));
       }
     } catch (cause) {
       if (!(cause instanceof Error)) throw cause;
@@ -86,7 +98,9 @@ export function classify(error: unknown): unknown {
   if (miss?.code === MissCode.DEFERRED_FALLBACK) {
     return new Deferred(miss.issuer, miss.preferredHome, error.details, options);
   }
-  if (error.code === status.FAILED_PRECONDITION) return new TierGap(error.details, options);
+  if (error.code === status.FAILED_PRECONDITION) {
+    return noWorkspace ? new NoWorkspace(error.details, options) : new TierGap(error.details, options);
+  }
   if (error.code === status.NOT_FOUND) return new NotFound(error.details, options);
   return error;
 }

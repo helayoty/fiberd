@@ -33,6 +33,13 @@ var (
 	// hand connections to fibers (no -handoff-listen, or a backend that
 	// cannot). It is a FailedPrecondition, like a tier gap.
 	ErrNeedsHandoff = errors.New("fiberd: handoff grant needs a home that hands connections to fibers")
+	// ErrNeedsWorkspace means the grant sets a disk budget and this home's
+	// runtime gives fibers no workspace. It is a FailedPrecondition, like
+	// a tier gap.
+	ErrNeedsWorkspace = errors.New("fiberd: grant with a disk budget needs a runtime that gives fibers a workspace")
+	// ErrNoWorkspace means a file call named a fiber whose grant has no
+	// disk budget, so the fiber has no workspace.
+	ErrNoWorkspace = errors.New("fiberd: the fiber's grant has no workspace (disk_budget_bytes is zero)")
 	// ErrDeltaQuota means parking the fiber would take the grant's parked
 	// deltas past its quota on this home. The fiber keeps running, and the
 	// caller backs off (SHED) or releases something.

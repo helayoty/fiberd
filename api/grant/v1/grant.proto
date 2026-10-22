@@ -131,6 +131,13 @@ message CapacityGrant {
   Policy policy = 9;
   // Absent or zero bytes: the grant needs no device.
   DeviceBudget device_budget = 10;
+  // Per-fiber workspace ceiling in bytes. Each fiber gets a private
+  // workspace at /workspace that Upload, Download and ListFiles reach.
+  // Zero means no workspace, and every file call on the grant's fibers
+  // fails with FailedPrecondition and a NoWorkspace detail. A home whose
+  // runtime offers no workspace refuses a grant that sets it, with
+  // FailedPrecondition.
+  uint64 disk_budget_bytes = 12;
 }
 
 // Fence identifies one run of a fiber: (grant, fiberd epoch, seq).
@@ -224,6 +231,75 @@ message Status {
   uint32 pooled = 6;
 }
 
+// NoWorkspace is attached as a detail to the FailedPrecondition a file
+// call gets when its fiber's grant has no workspace (disk_budget_bytes is
+// zero). It tells that refusal apart from a tier gap.
+message NoWorkspace {}
+
+// UploadHeader opens an Upload. It is the stream's first message and the
+// only header.
+message UploadHeader {
+  string fiber_id = 1;
+  // The file's path, relative to the fiber's /workspace.
+  string path = 2;
+  // The file's size in bytes, declared up front so the budget is
+  // reserved before any byte lands. The data chunks add up to it
+  // exactly. It must be set, and zero is an empty file.
+  optional uint64 size = 3;
+  // The file's permission bits. Zero means 0644.
+  uint32 mode = 4;
+  // Optional SHA-256 of the content, checked before the file appears.
+  bytes sha256 = 5;
+}
+
+// UploadRequest is one message of an Upload stream. The first carries
+// the header and every later one a data chunk of at most 1 MiB.
+message UploadRequest {
+  oneof part {
+    UploadHeader header = 1;
+    bytes data = 2;
+  }
+}
+
+message DownloadRequest {
+  string fiber_id = 1;
+  // The file's path, relative to the fiber's /workspace.
+  string path = 2;
+  // Where to start reading, in bytes.
+  uint64 offset = 3;
+}
+
+// FileInfo describes one entry of a workspace.
+message FileInfo {
+  // Relative to the fiber's /workspace.
+  string path = 1;
+  uint64 size = 2;
+  // The permission bits.
+  uint32 mode = 3;
+  bool directory = 4;
+  // SHA-256 of the content. Set in Upload's reply only.
+  bytes sha256 = 5;
+}
+
+// FileChunk is one message of a Download stream. The first carries info
+// and every chunk carries at most 1 MiB of data.
+message FileChunk {
+  FileInfo info = 1;
+  bytes data = 2;
+}
+
+message ListFilesRequest {
+  string fiber_id = 1;
+  // The directory to list, relative to the fiber's /workspace. Empty is
+  // the workspace itself.
+  string dir = 2;
+}
+
+message ListFilesResponse {
+  // The directory's entries, not recursive.
+  repeated FileInfo files = 1;
+}
+
 service Fibers {
   // Clone resolves a session to attach, resume or create. Every miss
   // carries a Miss detail: ResourceExhausted for SHED, Unavailable for
@@ -234,4 +310,13 @@ service Fibers {
   rpc Park(ParkRequest) returns (google.protobuf.Empty);
   rpc Release(ReleaseRequest) returns (google.protobuf.Empty);
   rpc Watch(google.protobuf.Empty) returns (stream Status);
+  // Upload writes one file into a running fiber's workspace. The first
+  // message is the header. Each file call is authorized like Park, so
+  // another caller's fiber answers NotFound.
+  rpc Upload(stream UploadRequest) returns (FileInfo);
+  // Download reads one regular file from a running fiber's workspace.
+  // The first chunk carries its FileInfo.
+  rpc Download(DownloadRequest) returns (stream FileChunk);
+  // ListFiles lists one directory of a running fiber's workspace.
+  rpc ListFiles(ListFilesRequest) returns (ListFilesResponse);
 }

@@ -128,7 +128,8 @@ func TestMissCarriesDetail(t *testing.T) {
 
 // Every core outcome maps to one gRPC code. Only the two capacity misses
 // carry a Miss detail, and a deferred remote miss names the home the
-// caller should prefer.
+// caller should prefer. A missing workspace carries a NoWorkspace detail,
+// so it is not mistaken for a tier gap.
 func TestEveryOutcomeMaps(t *testing.T) {
 	s := &rpc.Server{Issuer: "iss"}
 	cases := []struct {
@@ -140,6 +141,7 @@ func TestEveryOutcomeMaps(t *testing.T) {
 		wantMissCode grantv1.MissCode
 		wantHome     string
 		wantRetry    uint32
+		wantNoWS     bool
 	}{
 		{name: "OK is no error", code: core.OK, wantCode: codes.OK},
 		{name: "SHED is ResourceExhausted with a miss and the default retry", code: core.Shed, wantCode: codes.ResourceExhausted,
@@ -154,6 +156,9 @@ func TestEveryOutcomeMaps(t *testing.T) {
 		{name: "Unauthenticated is Unauthenticated", code: core.Unauthenticated, wantCode: codes.Unauthenticated},
 		{name: "NotFound is NotFound", code: core.NotFound, wantCode: codes.NotFound},
 		{name: "Internal is Internal", code: core.Internal, wantCode: codes.Internal},
+		{name: "NoWorkspace is FailedPrecondition with a NoWorkspace detail", code: core.NoWorkspace,
+			wantCode: codes.FailedPrecondition, wantNoWS: true},
+		{name: "OverBudget is ResourceExhausted without a miss", code: core.OverBudget, wantCode: codes.ResourceExhausted},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -175,6 +180,9 @@ func TestEveryOutcomeMaps(t *testing.T) {
 			}
 			if rpc.IsMiss(err) != tc.wantMiss {
 				t.Fatalf("IsMiss = %v, want %v", rpc.IsMiss(err), tc.wantMiss)
+			}
+			if rpc.IsNoWorkspace(err) != tc.wantNoWS {
+				t.Fatalf("IsNoWorkspace = %v, want %v", rpc.IsNoWorkspace(err), tc.wantNoWS)
 			}
 		})
 	}

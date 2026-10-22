@@ -350,6 +350,13 @@ func (r *Runtime) IsolatesTenants() bool {
 	return ok && iso.IsolatesTenants()
 }
 
+// HoldsWorkspaces implements core.WorkspaceHolder with the backend's
+// answer.
+func (r *Runtime) HoldsWorkspaces() bool {
+	wh, ok := r.be.(backend.WorkspaceHolder)
+	return ok && wh.HoldsWorkspaces()
+}
+
 // OffersDevice implements core.DeviceCapable: the grant's warm instance
 // is an engine that has reported a device (the class is not checked
 // beyond that; one engine, one device class).

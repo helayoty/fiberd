@@ -262,12 +262,15 @@ func TestBackendFacts(t *testing.T) {
 		devicePressure  float64
 		handsOff        bool
 		handoffRouterOn bool
+		workspaces      bool
 	}{
 		{name: "a fork backend", be: newFakeBackend(core.TierWarm)},
 		{name: "a sandbox backend with a device", be: sb, isolates: true, create: 3 * time.Second, resume: 9 * time.Second,
 			offersDevice: true, devicePressure: 25, handsOff: true, handoffRouterOn: true},
 		{name: "a sandbox whose engine reports no capacity", be: noDevice, isolates: true, handsOff: true, handoffRouterOn: true},
 		{name: "a handoff backend without a router", be: newSandboxBackend(core.TierSnapshot), isolates: true},
+		{name: "a backend with workspaces", be: workspaceBackend{newFakeBackend(core.TierWarm), workspaceMixin{true}}, workspaces: true},
+		{name: "a backend that says it has no workspaces", be: workspaceBackend{newFakeBackend(core.TierWarm), workspaceMixin{false}}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -288,6 +291,9 @@ func TestBackendFacts(t *testing.T) {
 			p, err := r.DevicePressure().Pressure("g1")
 			if err != nil || p != tc.devicePressure {
 				t.Fatalf("DevicePressure = %v %v, want %v", p, err, tc.devicePressure)
+			}
+			if got := r.HoldsWorkspaces(); got != tc.workspaces {
+				t.Fatalf("HoldsWorkspaces = %v, want %v", got, tc.workspaces)
 			}
 			if got := r.HandsOff(); got != tc.handsOff {
 				t.Fatalf("HandsOff = %v, want %v", got, tc.handsOff)

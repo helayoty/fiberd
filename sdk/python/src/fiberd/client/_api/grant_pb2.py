@@ -15,7 +15,7 @@ from google.protobuf import empty_pb2 as google_dot_protobuf_dot_empty__pb2
 from google.protobuf import timestamp_pb2 as google_dot_protobuf_dot_timestamp__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0bgrant.proto\x12\x0f\x66iberd.grant.v1\x1a\x1bgoogle/protobuf/empty.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\x84\x02\n\x06Policy\x12/\n\ndurability\x18\x01 \x01(\x0e\x32\x1b.fiberd.grant.v1.Durability\x12\x15\n\rsession_class\x18\x02 \x01(\t\x12\x13\n\x0b\x61udit_class\x18\x03 \x01(\t\x12\x1b\n\x13psi_some_avg10_shed\x18\x04 \x01(\x02\x12\x1b\n\x13psi_some_avg10_park\x18\x05 \x01(\x02\x12-\n\tisolation\x18\x06 \x01(\x0e\x32\x1a.fiberd.grant.v1.Isolation\x12\x34\n\rendpoint_mode\x18\x07 \x01(\x0e\x32\x1d.fiberd.grant.v1.EndpointMode\"(\n\x0b\x46iberLimits\x12\x0b\n\x03max\x18\x01 \x01(\r\x12\x0c\n\x04warm\x18\x02 \x01(\r\",\n\x0c\x44\x65viceBudget\x12\r\n\x05\x62ytes\x18\x01 \x01(\x04\x12\r\n\x05\x63lass\x18\x02 \x01(\t\"\xed\x02\n\rCapacityGrant\x12\x11\n\tgrant_uid\x18\x01 \x01(\t\x12\x0e\n\x06issuer\x18\x02 \x01(\t\x12\x10\n\x08\x61udience\x18\x03 \x01(\t\x12\x17\n\x0ftemplate_digest\x18\x04 \x01(\t\x12\x0e\n\x06tenant\x18\x0b \x01(\t\x12,\n\x06\x66ibers\x18\x05 \x01(\x0b\x32\x1c.fiberd.grant.v1.FiberLimits\x12\x16\n\x0ew_budget_bytes\x18\x06 \x01(\x04\x12\'\n\x08min_tier\x18\x07 \x01(\x0e\x32\x15.fiberd.grant.v1.Tier\x12\x30\n\x0clease_expiry\x18\x08 \x01(\x0b\x32\x1a.google.protobuf.Timestamp\x12\'\n\x06policy\x18\t \x01(\x0b\x32\x17.fiberd.grant.v1.Policy\x12\x34\n\rdevice_budget\x18\n \x01(\x0b\x32\x1d.fiberd.grant.v1.DeviceBudget\"6\n\x05\x46\x65nce\x12\x11\n\tgrant_uid\x18\x01 \x01(\t\x12\r\n\x05\x65poch\x18\x02 \x01(\x04\x12\x0b\n\x03seq\x18\x03 \x01(\x04\"q\n\x0c\x43loneRequest\x12\x11\n\tgrant_jwt\x18\x01 \x01(\t\x12\x0f\n\x07session\x18\x02 \x01(\t\x12,\n\x08\x64\x65\x61\x64line\x18\x03 \x01(\x0b\x32\x1a.google.protobuf.Timestamp\x12\x0f\n\x07payload\x18\x04 \x01(\x0c\"\xc9\x01\n\rCloneResponse\x12\x10\n\x08\x66iber_id\x18\x01 \x01(\t\x12\x10\n\x08\x65ndpoint\x18\x02 \x01(\t\x12%\n\x05\x66\x65nce\x18\x03 \x01(\x0b\x32\x16.fiberd.grant.v1.Fence\x12(\n\x04kind\x18\x04 \x01(\x0e\x32\x1a.fiberd.grant.v1.CloneKind\x12\x13\n\x0brouting_key\x18\x05 \x01(\t\x12\x19\n\x11server_key_sha256\x18\x06 \x01(\t\x12\x13\n\x0bserver_cert\x18\x07 \x01(\x0c\"n\n\x04Miss\x12\'\n\x04\x63ode\x18\x01 \x01(\x0e\x32\x19.fiberd.grant.v1.MissCode\x12\x15\n\rretry_after_s\x18\x02 \x01(\r\x12\x0e\n\x06issuer\x18\x03 \x01(\t\x12\x16\n\x0epreferred_home\x18\x04 \x01(\t\"-\n\x0bParkRequest\x12\x10\n\x08\x66iber_id\x18\x01 \x01(\t\x12\x0c\n\x04sync\x18\x02 \x01(\x08\"3\n\x0eReleaseRequest\x12\x10\n\x08\x66iber_id\x18\x01 \x01(\t\x12\x0f\n\x07\x64iscard\x18\x02 \x01(\x08\"\x8a\x01\n\x06Status\x12\x11\n\tgrant_uid\x18\x01 \x01(\t\x12\x0f\n\x07running\x18\x02 \x01(\r\x12\x0e\n\x06parked\x18\x03 \x01(\r\x12\x14\n\x0cw_used_bytes\x18\x04 \x01(\x04\x12&\n\x06latest\x18\x05 \x01(\x0b\x32\x16.fiberd.grant.v1.Fence\x12\x0e\n\x06pooled\x18\x06 \x01(\r*g\n\x04Tier\x12\x14\n\x10TIER_UNSPECIFIED\x10\x00\x12\x0f\n\x0b\x46IBER_BASIC\x10\x01\x12\x0e\n\nFIBER_WARM\x10\x02\x12\x14\n\x10\x46IBER_CHECKPOINT\x10\x03\x12\x12\n\x0e\x46IBER_SNAPSHOT\x10\x04*C\n\nDurability\x12\x1a\n\x16\x44URABILITY_UNSPECIFIED\x10\x00\x12\x0f\n\x0b\x42\x45ST_EFFORT\x10\x01\x12\x08\n\x04SYNC\x10\x02*B\n\tIsolation\x12\x19\n\x15ISOLATION_UNSPECIFIED\x10\x00\x12\r\n\tUNTRUSTED\x10\x01\x12\x0b\n\x07TRUSTED\x10\x02*\'\n\x0c\x45ndpointMode\x12\n\n\x06\x44IRECT\x10\x00\x12\x0b\n\x07HANDOFF\x10\x01*/\n\tCloneKind\x12\n\n\x06\x43REATE\x10\x00\x12\n\n\x06\x41TTACH\x10\x01\x12\n\n\x06RESUME\x10\x02*+\n\x08MissCode\x12\x08\n\x04SHED\x10\x00\x12\x15\n\x11\x44\x45\x46\x45RRED_FALLBACK\x10\x01\x32\x8e\x02\n\x06\x46ibers\x12\x46\n\x05\x43lone\x12\x1d.fiberd.grant.v1.CloneRequest\x1a\x1e.fiberd.grant.v1.CloneResponse\x12<\n\x04Park\x12\x1c.fiberd.grant.v1.ParkRequest\x1a\x16.google.protobuf.Empty\x12\x42\n\x07Release\x12\x1f.fiberd.grant.v1.ReleaseRequest\x1a\x16.google.protobuf.Empty\x12:\n\x05Watch\x12\x16.google.protobuf.Empty\x1a\x17.fiberd.grant.v1.Status0\x01\x42\x31Z/github.com/helayoty/fiberd/api/grant/v1;grantv1b\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0bgrant.proto\x12\x0f\x66iberd.grant.v1\x1a\x1bgoogle/protobuf/empty.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\x84\x02\n\x06Policy\x12/\n\ndurability\x18\x01 \x01(\x0e\x32\x1b.fiberd.grant.v1.Durability\x12\x15\n\rsession_class\x18\x02 \x01(\t\x12\x13\n\x0b\x61udit_class\x18\x03 \x01(\t\x12\x1b\n\x13psi_some_avg10_shed\x18\x04 \x01(\x02\x12\x1b\n\x13psi_some_avg10_park\x18\x05 \x01(\x02\x12-\n\tisolation\x18\x06 \x01(\x0e\x32\x1a.fiberd.grant.v1.Isolation\x12\x34\n\rendpoint_mode\x18\x07 \x01(\x0e\x32\x1d.fiberd.grant.v1.EndpointMode\"(\n\x0b\x46iberLimits\x12\x0b\n\x03max\x18\x01 \x01(\r\x12\x0c\n\x04warm\x18\x02 \x01(\r\",\n\x0c\x44\x65viceBudget\x12\r\n\x05\x62ytes\x18\x01 \x01(\x04\x12\r\n\x05\x63lass\x18\x02 \x01(\t\"\x88\x03\n\rCapacityGrant\x12\x11\n\tgrant_uid\x18\x01 \x01(\t\x12\x0e\n\x06issuer\x18\x02 \x01(\t\x12\x10\n\x08\x61udience\x18\x03 \x01(\t\x12\x17\n\x0ftemplate_digest\x18\x04 \x01(\t\x12\x0e\n\x06tenant\x18\x0b \x01(\t\x12,\n\x06\x66ibers\x18\x05 \x01(\x0b\x32\x1c.fiberd.grant.v1.FiberLimits\x12\x16\n\x0ew_budget_bytes\x18\x06 \x01(\x04\x12\'\n\x08min_tier\x18\x07 \x01(\x0e\x32\x15.fiberd.grant.v1.Tier\x12\x30\n\x0clease_expiry\x18\x08 \x01(\x0b\x32\x1a.google.protobuf.Timestamp\x12\'\n\x06policy\x18\t \x01(\x0b\x32\x17.fiberd.grant.v1.Policy\x12\x34\n\rdevice_budget\x18\n \x01(\x0b\x32\x1d.fiberd.grant.v1.DeviceBudget\x12\x19\n\x11\x64isk_budget_bytes\x18\x0c \x01(\x04\"6\n\x05\x46\x65nce\x12\x11\n\tgrant_uid\x18\x01 \x01(\t\x12\r\n\x05\x65poch\x18\x02 \x01(\x04\x12\x0b\n\x03seq\x18\x03 \x01(\x04\"q\n\x0c\x43loneRequest\x12\x11\n\tgrant_jwt\x18\x01 \x01(\t\x12\x0f\n\x07session\x18\x02 \x01(\t\x12,\n\x08\x64\x65\x61\x64line\x18\x03 \x01(\x0b\x32\x1a.google.protobuf.Timestamp\x12\x0f\n\x07payload\x18\x04 \x01(\x0c\"\xc9\x01\n\rCloneResponse\x12\x10\n\x08\x66iber_id\x18\x01 \x01(\t\x12\x10\n\x08\x65ndpoint\x18\x02 \x01(\t\x12%\n\x05\x66\x65nce\x18\x03 \x01(\x0b\x32\x16.fiberd.grant.v1.Fence\x12(\n\x04kind\x18\x04 \x01(\x0e\x32\x1a.fiberd.grant.v1.CloneKind\x12\x13\n\x0brouting_key\x18\x05 \x01(\t\x12\x19\n\x11server_key_sha256\x18\x06 \x01(\t\x12\x13\n\x0bserver_cert\x18\x07 \x01(\x0c\"n\n\x04Miss\x12\'\n\x04\x63ode\x18\x01 \x01(\x0e\x32\x19.fiberd.grant.v1.MissCode\x12\x15\n\rretry_after_s\x18\x02 \x01(\r\x12\x0e\n\x06issuer\x18\x03 \x01(\t\x12\x16\n\x0epreferred_home\x18\x04 \x01(\t\"-\n\x0bParkRequest\x12\x10\n\x08\x66iber_id\x18\x01 \x01(\t\x12\x0c\n\x04sync\x18\x02 \x01(\x08\"3\n\x0eReleaseRequest\x12\x10\n\x08\x66iber_id\x18\x01 \x01(\t\x12\x0f\n\x07\x64iscard\x18\x02 \x01(\x08\"\x8a\x01\n\x06Status\x12\x11\n\tgrant_uid\x18\x01 \x01(\t\x12\x0f\n\x07running\x18\x02 \x01(\r\x12\x0e\n\x06parked\x18\x03 \x01(\r\x12\x14\n\x0cw_used_bytes\x18\x04 \x01(\x04\x12&\n\x06latest\x18\x05 \x01(\x0b\x32\x16.fiberd.grant.v1.Fence\x12\x0e\n\x06pooled\x18\x06 \x01(\r\"\r\n\x0bNoWorkspace\"h\n\x0cUploadHeader\x12\x10\n\x08\x66iber_id\x18\x01 \x01(\t\x12\x0c\n\x04path\x18\x02 \x01(\t\x12\x11\n\x04size\x18\x03 \x01(\x04H\x00\x88\x01\x01\x12\x0c\n\x04mode\x18\x04 \x01(\r\x12\x0e\n\x06sha256\x18\x05 \x01(\x0c\x42\x07\n\x05_size\"X\n\rUploadRequest\x12/\n\x06header\x18\x01 \x01(\x0b\x32\x1d.fiberd.grant.v1.UploadHeaderH\x00\x12\x0e\n\x04\x64\x61ta\x18\x02 \x01(\x0cH\x00\x42\x06\n\x04part\"A\n\x0f\x44ownloadRequest\x12\x10\n\x08\x66iber_id\x18\x01 \x01(\t\x12\x0c\n\x04path\x18\x02 \x01(\t\x12\x0e\n\x06offset\x18\x03 \x01(\x04\"W\n\x08\x46ileInfo\x12\x0c\n\x04path\x18\x01 \x01(\t\x12\x0c\n\x04size\x18\x02 \x01(\x04\x12\x0c\n\x04mode\x18\x03 \x01(\r\x12\x11\n\tdirectory\x18\x04 \x01(\x08\x12\x0e\n\x06sha256\x18\x05 \x01(\x0c\"B\n\tFileChunk\x12\'\n\x04info\x18\x01 \x01(\x0b\x32\x19.fiberd.grant.v1.FileInfo\x12\x0c\n\x04\x64\x61ta\x18\x02 \x01(\x0c\"1\n\x10ListFilesRequest\x12\x10\n\x08\x66iber_id\x18\x01 \x01(\t\x12\x0b\n\x03\x64ir\x18\x02 \x01(\t\"=\n\x11ListFilesResponse\x12(\n\x05\x66iles\x18\x01 \x03(\x0b\x32\x19.fiberd.grant.v1.FileInfo*g\n\x04Tier\x12\x14\n\x10TIER_UNSPECIFIED\x10\x00\x12\x0f\n\x0b\x46IBER_BASIC\x10\x01\x12\x0e\n\nFIBER_WARM\x10\x02\x12\x14\n\x10\x46IBER_CHECKPOINT\x10\x03\x12\x12\n\x0e\x46IBER_SNAPSHOT\x10\x04*C\n\nDurability\x12\x1a\n\x16\x44URABILITY_UNSPECIFIED\x10\x00\x12\x0f\n\x0b\x42\x45ST_EFFORT\x10\x01\x12\x08\n\x04SYNC\x10\x02*B\n\tIsolation\x12\x19\n\x15ISOLATION_UNSPECIFIED\x10\x00\x12\r\n\tUNTRUSTED\x10\x01\x12\x0b\n\x07TRUSTED\x10\x02*\'\n\x0c\x45ndpointMode\x12\n\n\x06\x44IRECT\x10\x00\x12\x0b\n\x07HANDOFF\x10\x01*/\n\tCloneKind\x12\n\n\x06\x43REATE\x10\x00\x12\n\n\x06\x41TTACH\x10\x01\x12\n\n\x06RESUME\x10\x02*+\n\x08MissCode\x12\x08\n\x04SHED\x10\x00\x12\x15\n\x11\x44\x45\x46\x45RRED_FALLBACK\x10\x01\x32\xf5\x03\n\x06\x46ibers\x12\x46\n\x05\x43lone\x12\x1d.fiberd.grant.v1.CloneRequest\x1a\x1e.fiberd.grant.v1.CloneResponse\x12<\n\x04Park\x12\x1c.fiberd.grant.v1.ParkRequest\x1a\x16.google.protobuf.Empty\x12\x42\n\x07Release\x12\x1f.fiberd.grant.v1.ReleaseRequest\x1a\x16.google.protobuf.Empty\x12:\n\x05Watch\x12\x16.google.protobuf.Empty\x1a\x17.fiberd.grant.v1.Status0\x01\x12\x45\n\x06Upload\x12\x1e.fiberd.grant.v1.UploadRequest\x1a\x19.fiberd.grant.v1.FileInfo(\x01\x12J\n\x08\x44ownload\x12 .fiberd.grant.v1.DownloadRequest\x1a\x1a.fiberd.grant.v1.FileChunk0\x01\x12R\n\tListFiles\x12!.fiberd.grant.v1.ListFilesRequest\x1a\".fiberd.grant.v1.ListFilesResponseB1Z/github.com/helayoty/fiberd/api/grant/v1;grantv1b\x06proto3')
 
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, globals())
 _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'grant_pb2', globals())
@@ -23,18 +23,18 @@ if _descriptor._USE_C_DESCRIPTORS == False:
 
   DESCRIPTOR._options = None
   DESCRIPTOR._serialized_options = b'Z/github.com/helayoty/fiberd/api/grant/v1;grantv1'
-  _TIER._serialized_start=1541
-  _TIER._serialized_end=1644
-  _DURABILITY._serialized_start=1646
-  _DURABILITY._serialized_end=1713
-  _ISOLATION._serialized_start=1715
-  _ISOLATION._serialized_end=1781
-  _ENDPOINTMODE._serialized_start=1783
-  _ENDPOINTMODE._serialized_end=1822
-  _CLONEKIND._serialized_start=1824
-  _CLONEKIND._serialized_end=1871
-  _MISSCODE._serialized_start=1873
-  _MISSCODE._serialized_end=1916
+  _TIER._serialized_start=2117
+  _TIER._serialized_end=2220
+  _DURABILITY._serialized_start=2222
+  _DURABILITY._serialized_end=2289
+  _ISOLATION._serialized_start=2291
+  _ISOLATION._serialized_end=2357
+  _ENDPOINTMODE._serialized_start=2359
+  _ENDPOINTMODE._serialized_end=2398
+  _CLONEKIND._serialized_start=2400
+  _CLONEKIND._serialized_end=2447
+  _MISSCODE._serialized_start=2449
+  _MISSCODE._serialized_end=2492
   _POLICY._serialized_start=95
   _POLICY._serialized_end=355
   _FIBERLIMITS._serialized_start=357
@@ -42,21 +42,37 @@ if _descriptor._USE_C_DESCRIPTORS == False:
   _DEVICEBUDGET._serialized_start=399
   _DEVICEBUDGET._serialized_end=443
   _CAPACITYGRANT._serialized_start=446
-  _CAPACITYGRANT._serialized_end=811
-  _FENCE._serialized_start=813
-  _FENCE._serialized_end=867
-  _CLONEREQUEST._serialized_start=869
-  _CLONEREQUEST._serialized_end=982
-  _CLONERESPONSE._serialized_start=985
-  _CLONERESPONSE._serialized_end=1186
-  _MISS._serialized_start=1188
-  _MISS._serialized_end=1298
-  _PARKREQUEST._serialized_start=1300
-  _PARKREQUEST._serialized_end=1345
-  _RELEASEREQUEST._serialized_start=1347
-  _RELEASEREQUEST._serialized_end=1398
-  _STATUS._serialized_start=1401
-  _STATUS._serialized_end=1539
-  _FIBERS._serialized_start=1919
-  _FIBERS._serialized_end=2189
+  _CAPACITYGRANT._serialized_end=838
+  _FENCE._serialized_start=840
+  _FENCE._serialized_end=894
+  _CLONEREQUEST._serialized_start=896
+  _CLONEREQUEST._serialized_end=1009
+  _CLONERESPONSE._serialized_start=1012
+  _CLONERESPONSE._serialized_end=1213
+  _MISS._serialized_start=1215
+  _MISS._serialized_end=1325
+  _PARKREQUEST._serialized_start=1327
+  _PARKREQUEST._serialized_end=1372
+  _RELEASEREQUEST._serialized_start=1374
+  _RELEASEREQUEST._serialized_end=1425
+  _STATUS._serialized_start=1428
+  _STATUS._serialized_end=1566
+  _NOWORKSPACE._serialized_start=1568
+  _NOWORKSPACE._serialized_end=1581
+  _UPLOADHEADER._serialized_start=1583
+  _UPLOADHEADER._serialized_end=1687
+  _UPLOADREQUEST._serialized_start=1689
+  _UPLOADREQUEST._serialized_end=1777
+  _DOWNLOADREQUEST._serialized_start=1779
+  _DOWNLOADREQUEST._serialized_end=1844
+  _FILEINFO._serialized_start=1846
+  _FILEINFO._serialized_end=1933
+  _FILECHUNK._serialized_start=1935
+  _FILECHUNK._serialized_end=2001
+  _LISTFILESREQUEST._serialized_start=2003
+  _LISTFILESREQUEST._serialized_end=2052
+  _LISTFILESRESPONSE._serialized_start=2054
+  _LISTFILESRESPONSE._serialized_end=2115
+  _FIBERS._serialized_start=2495
+  _FIBERS._serialized_end=2996
 # @@protoc_insertion_point(module_scope)

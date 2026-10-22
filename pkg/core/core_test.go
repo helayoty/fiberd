@@ -44,6 +44,8 @@ type fakeRuntime struct {
 	parkRef bool
 	shared  bool // fibers share the host kernel, so not an isolating runtime
 	routes  bool // routes connections to fibers (core.HandoffRouter)
+	// workspaces gives fibers a workspace (core.WorkspaceHolder).
+	workspaces bool
 	// noRef makes Park return neither a ref nor an error.
 	noRef bool
 	// releaseFail is what Release answers.
@@ -53,6 +55,8 @@ type fakeRuntime struct {
 }
 
 func (f fakeRuntime) HandsOff() bool { return f.routes }
+
+func (f fakeRuntime) HoldsWorkspaces() bool { return f.workspaces }
 
 func (f fakeRuntime) HandoffRoute(fiberID string) (string, string, []byte, bool) {
 	return "rk-" + fiberID, "pin", []byte("cert"), f.routes
@@ -133,6 +137,10 @@ func TestCloneOutcomes(t *testing.T) {
 	routes := func(t *testing.T, a *core.Core) {
 		a.Runtime = fakeRuntime{tier: core.TierCheckpoint, exits: make(chan core.FiberExit, 8), routes: true}
 	}
+	disk := core.Grant{UID: "gd", Tenant: "acme", Audience: "node-a", DiskBudgetBytes: 1 << 20}
+	workspaces := func(t *testing.T, a *core.Core) {
+		a.Runtime = fakeRuntime{tier: core.TierCheckpoint, exits: make(chan core.FiberExit, 8), workspaces: true}
+	}
 	removed := func(t *testing.T, a *core.Core) {
 		r, err := core.OpenRevoked(filepath.Join(t.TempDir(), "revoked.json"), time.Hour, time.Now())
 		if err != nil {
@@ -164,6 +172,14 @@ func TestCloneOutcomes(t *testing.T) {
 			setup: routes, token: "gu", want: core.Unauthenticated, wantErr: core.ErrHandoffUnbound},
 		{name: "handoff grant on a home that does not hand off is needs-tier", health: "up", tier: core.TierCheckpoint, grants: []core.Grant{handoff},
 			token: "gh", caller: "router-x5t", want: core.NeedsTier, wantErr: core.ErrNeedsHandoff},
+		{name: "a disk budget on a runtime without workspaces is needs-tier", health: "up", tier: core.TierCheckpoint, grants: []core.Grant{disk},
+			token: "gd", want: core.NeedsTier, wantErr: core.ErrNeedsWorkspace},
+		{name: "a disk budget on a runtime without workspaces is needs-tier with the issuer down", health: "down", tier: core.TierCheckpoint, grants: []core.Grant{disk},
+			token: "gd", want: core.NeedsTier, wantErr: core.ErrNeedsWorkspace},
+		{name: "a disk budget on a runtime with workspaces creates", health: "up", tier: core.TierCheckpoint, grants: []core.Grant{disk},
+			setup: workspaces, token: "gd", want: core.OK, running: 1},
+		{name: "no disk budget needs no workspaces", health: "up", tier: core.TierCheckpoint, grants: []core.Grant{g1},
+			token: "g1", want: core.OK, running: 1},
 		{name: "direct fiber has no route", health: "up", tier: core.TierCheckpoint, grants: []core.Grant{bound},
 			token: "gb", caller: "router-x5t", want: core.OK, running: 1},
 		{name: "bound grant from its caller creates", health: "up", tier: core.TierCheckpoint, grants: []core.Grant{bound},

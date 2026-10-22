@@ -126,6 +126,10 @@ func TestGateway(t *testing.T) {
 				}
 			}},
 		{name: "a GET of an RPC is 405", method: "GET", path: "/v1/clone", wantStatus: http.StatusMethodNotAllowed},
+		// The file calls are streams, so like Watch they are gRPC only.
+		{name: "upload is not on the gateway", method: "POST", path: "/v1/upload", body: fiber(""), wantStatus: http.StatusNotFound},
+		{name: "download is not on the gateway", method: "POST", path: "/v1/download", body: fiber(""), wantStatus: http.StatusNotFound},
+		{name: "listing files is not on the gateway", method: "POST", path: "/v1/listfiles", body: fiber(""), wantStatus: http.StatusNotFound},
 	}
 	for _, st := range steps {
 		t.Run(st.name, func(t *testing.T) {
@@ -148,8 +152,8 @@ func TestGateway(t *testing.T) {
 			if got := rec.Header().Get("Retry-After"); got != st.wantRetry {
 				t.Fatalf("Retry-After = %q, want %q", got, st.wantRetry)
 			}
-			if rec.Code == http.StatusMethodNotAllowed {
-				return
+			if rec.Code == http.StatusMethodNotAllowed || st.wantStatus == http.StatusNotFound && st.wantCode == codes.OK {
+				return // the mux's own answer, not a status
 			}
 			if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
 				t.Fatalf("Content-Type = %q, want application/json", ct)
