@@ -23,7 +23,7 @@ Run it from the repository root. It needs Docker, kubectl, Go and jq, and takes 
 make example-substrate
 ```
 
-The latest result is in [benchmarks](../../docs/benchmarks.md).
+The latest result is in [benchmarks](../../docs/benchmarks.md#run-e-substrate-shaped-worker-lifecycle).
 
 ## Design
 
