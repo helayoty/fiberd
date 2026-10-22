@@ -5,6 +5,8 @@ itself once warm, and every fiber is a sandbox restored from that image.
 A restore is told apart from the original by the Sentry's checkpoint
 file, whose blocking read answers "restore" in a restored copy, and the
 copy then takes its identity on fiberd's channel (fz_gvisor_identity).
+The file answers for the first checkpoint after its open, so it is open
+before anything that lets the backend checkpoint (open_checkpoint).
 The pieces that read a path are given it, so the unit tests hand in a
 fake tree and start nothing.
 """
@@ -43,17 +45,28 @@ def mark_ready(marker: str = READY_MARKER) -> None:
         pass
 
 
-def wait_checkpoint(path: str = CHECKPOINT) -> str:
-    """Blocks until the next checkpoint of this sandbox completes.
+def open_checkpoint(path: str = CHECKPOINT) -> int:
+    """Registers for the next checkpoint of this sandbox. The descriptor is read with read_checkpoint.
 
-    Opening registers interest in the next checkpoint, the read answers
-    once it is done, and the file must be reopened to wait again. The
-    answer is "restore" in a sandbox restored from the image, "resume" in
-    the original (or a fiber checkpointed with sync) and "error" when the
-    checkpoint failed. A signal interrupts the read, and the handler runs
-    before it is retried.
+    The open fixes which checkpoint the read answers for: the first one
+    taken after it, and no earlier one. So the file is opened before
+    whatever lets the backend take a checkpoint, the ready marker or an
+    endpoint closing for a park. A copy restored from an image taken
+    before its open would open the file after the restore and wait for a
+    second checkpoint that never comes, and never claim its token.
     """
-    fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC)
+    return os.open(path, os.O_RDONLY | os.O_CLOEXEC)
+
+
+def read_checkpoint(fd: int) -> str:
+    """Blocks until the checkpoint fd registered for completes, and closes fd.
+
+    The answer is "restore" in a sandbox restored from the image, "resume"
+    in the original (or a fiber checkpointed with sync) and "error" when
+    the checkpoint failed. A signal interrupts the read, and the handler
+    runs before it is retried. The descriptor answers the same thing ever
+    after, so it is closed here and the next wait opens the file again.
+    """
     try:
         answer = os.read(fd, 32)
     finally:

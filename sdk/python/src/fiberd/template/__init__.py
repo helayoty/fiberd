@@ -260,11 +260,22 @@ def _serve_gvisor(on_fiber: Callable[[Fiber], int]) -> int:
     signal.signal(signal.SIGUSR1, stop)
     signal.signal(signal.SIGTERM, stop)
     _flush()
+    # The checkpoint file answers for the first checkpoint after its
+    # open, and the marker lets the backend take one. So the open comes
+    # first. Opened after the marker, in a copy restored from an image
+    # taken in between, the read would wait for a second checkpoint that
+    # never comes, and the copy would never claim its token.
+    checkpoint = _gvisor.open_checkpoint(_gvisor.CHECKPOINT)
     _gvisor.mark_ready(_gvisor.READY_MARKER)
     print("fiberd.template: warm, waiting for the template checkpoint", file=sys.stderr)
     _flush()
     while True:
-        if _gvisor.wait_checkpoint() != "restore":
+        answer = _gvisor.read_checkpoint(checkpoint)
+        # The next checkpoint is a park, which the backend takes once the
+        # incarnation has closed its endpoint. Registered for before the
+        # incarnation can serve, for the same reason.
+        checkpoint = _gvisor.open_checkpoint(_gvisor.CHECKPOINT)
+        if answer != "restore":
             # The original, or a fiber checkpointed in place. Nothing to
             # serve. The backend ends it, or the template stands by.
             continue

@@ -1521,12 +1521,22 @@ static int on_fiber(const fz_incarnation_t *f) {
 
 /* ---- gVisor mode ------------------------------------------------------ */
 
-/* Blocks until the next checkpoint of this sandbox completes. Returns 1
- * in a sandbox restored from that image, 0 in the original (or on a
- * failed checkpoint). Each wait needs a fresh open. */
-static int wait_checkpoint(void) {
+/* Registers for the next checkpoint of this sandbox and returns the
+ * descriptor to read it on. The read answers for the first checkpoint
+ * after the open and for no earlier one, so the file is opened before
+ * whatever lets the backend checkpoint: the ready marker, or the
+ * endpoint closing for a park. A copy restored from an image taken
+ * before its open would wait for a checkpoint that never comes. */
+static int open_checkpoint(void) {
     int fd = open("/proc/gvisor/checkpoint", O_RDONLY);
     if (fd < 0) { perror("refzygote: /proc/gvisor/checkpoint"); exit(6); }
+    return fd;
+}
+
+/* Blocks until the checkpoint fd registered for completes, and closes
+ * fd. Returns 1 in a sandbox restored from that image, 0 in the
+ * original (or on a failed checkpoint). */
+static int read_checkpoint(int fd) {
     char buf[32]; ssize_t n;
     while ((n = read(fd, buf, sizeof buf - 1)) < 0 && errno == EINTR) {}
     close(fd);
@@ -1574,17 +1584,23 @@ static int gvisor_serve_once(const char *fence, const char *ep, const unsigned c
 
 static int gvisor_main(void) {
     park_arm();
-    /* Init is done. The backend checkpoints from outside while this
-     * process blocks in wait_checkpoint(), gVisor's documented sync point,
-     * where every restored sandbox resumes. Nothing else tells an original
+    /* Init is done. The checkpoint file comes first, then the marker
+     * that lets the backend checkpoint from outside while this process
+     * blocks in read_checkpoint(), gVisor's documented sync point, where
+     * every restored sandbox resumes. Nothing else tells an original
      * from a copy, since a copy even sees the filesystem as it was. */
+    int ck = open_checkpoint();
     int m = open("/host/warm.ready", O_CREAT | O_WRONLY, 0644);
     if (m < 0) { perror("refzygote: /host/warm.ready"); return 6; }
     close(m);
     fprintf(stderr, "refzygote: warm, waiting for the template checkpoint\n");
     static unsigned long counter;
     for (;;) {
-        if (!wait_checkpoint()) {
+        int restored = read_checkpoint(ck);
+        /* The next checkpoint is a park, taken once the incarnation has
+         * closed its endpoint. Registered for before it can serve. */
+        ck = open_checkpoint();
+        if (!restored) {
             /* The original goes on in place, with nothing to serve. */
             fprintf(stderr, "refzygote: checkpointed, resumed in place\n");
             continue;

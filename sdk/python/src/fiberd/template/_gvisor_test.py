@@ -48,14 +48,20 @@ CHECKPOINT = [
 
 
 @table(CHECKPOINT)
-def test_wait_checkpoint(tmp_path, name, f0, f1):
-    (tmp_path / "checkpoint").write_bytes(f0)
-    assert _gvisor.wait_checkpoint(str(tmp_path / "checkpoint")) == f1
+def test_read_checkpoint(tmp_path, name, f0, f1):
+    """The answer lands after the open, as a checkpoint's does, and the read closes the descriptor."""
+    path = tmp_path / "checkpoint"
+    path.write_bytes(b"")
+    fd = _gvisor.open_checkpoint(str(path))
+    path.write_bytes(f0)
+    assert _gvisor.read_checkpoint(fd) == f1
+    with pytest.raises(OSError):
+        os.fstat(fd)
 
 
-def test_wait_checkpoint_without_the_file(tmp_path):
+def test_open_checkpoint_without_the_file(tmp_path):
     with pytest.raises(FileNotFoundError):
-        _gvisor.wait_checkpoint(str(tmp_path / "missing"))
+        _gvisor.open_checkpoint(str(tmp_path / "missing"))
 
 
 def test_mark_ready(tmp_path):
