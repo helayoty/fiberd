@@ -15,6 +15,7 @@ A suggested order is fiberd, home, grant, core, audit, runtime-host, backends, z
 | [artifact.md](artifact.md) | [Template](../glossary.md#template) artifacts, signing, sealing, moving [deltas](../glossary.md#delta) between homes, and [parity](../glossary.md#parity) | `pkg/artifact`, `pkg/runtime/host` |
 | [runtime-host.md](runtime-host.md) | [Warm](../glossary.md#warm) templates, per-fiber [cgroups](../glossary.md#cgroup), [W](../glossary.md#w-working-set) enforcement and what a fiber can see | `pkg/runtime/host` |
 | [networking.md](networking.md) | Endpoint forms, ports and address families for each [backend](../glossary.md#backend) | `pkg/runtime/host` |
+| [file-transfer.md](file-transfer.md) | Moving files into and out of a fiber's workspace, and carrying it across a park | `pkg/rpc`, `pkg/runtime/host`, `pkg/backend/proc`, `pkg/backend/runc` |
 | [wsfs.md](wsfs.md) | The file layer of a fiber's workspace, hardened against a tree the fiber controls | `pkg/runtime/host/wsfs` |
 | [resources.md](resources.md) | The cgroup hierarchy, the memory formula and sizing | `pkg/runtime/host`, `pkg/sys/cgroup` |
 | [backends.md](backends.md) | The backend interface and how proc, runc, gVisor and Hyperlight make a fiber | `pkg/backend`, `pkg/backend/proc`, `pkg/backend/runc`, `pkg/backend/gvisor`, `pkg/backend/hyperlight` |
