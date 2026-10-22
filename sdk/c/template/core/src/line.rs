@@ -42,20 +42,20 @@ impl Span {
 /// or its end. A run of separators counts as one, a token is never
 /// empty, and the separator after a token becomes a NUL, as strtok_r
 /// leaves it. The line is handed to each call, so the caller keeps it.
-pub(crate) struct Tokens {
+pub struct Tokens {
     pos: usize,
     end: usize,
     sep: u8,
 }
 
 impl Tokens {
-    /// Over all of line.
-    pub(crate) fn new(line: &[u8], sep: u8) -> Self {
+    /// Over all of line, up to its first NUL.
+    pub fn new(line: &[u8], sep: u8) -> Self {
         Tokens::within(0, sys::nul_at(line), sep)
     }
 
     /// Over line[from..to], such as a token already cut out of the line.
-    pub(crate) fn within(from: usize, to: usize, sep: u8) -> Self {
+    pub fn within(from: usize, to: usize, sep: u8) -> Self {
         Tokens {
             pos: from,
             end: to,
@@ -63,7 +63,10 @@ impl Tokens {
         }
     }
 
-    pub(crate) fn next(&mut self, line: &mut [u8]) -> Option<Span> {
+    /// The next token's span, or None at the end. The separator after
+    /// it becomes a NUL in line, which must be the line the tokens are
+    /// over.
+    pub fn next(&mut self, line: &mut [u8]) -> Option<Span> {
         while self.pos < self.end && line.get(self.pos) == Some(&self.sep) {
             self.pos = self.pos.wrapping_add(1);
         }
@@ -86,7 +89,7 @@ impl Tokens {
 }
 
 /// isspace in the POSIX locale, what strtol skips.
-pub(crate) fn is_space(c: u8) -> bool {
+pub fn is_space(c: u8) -> bool {
     matches!(c, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r')
 }
 

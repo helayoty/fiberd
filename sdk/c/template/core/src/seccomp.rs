@@ -9,8 +9,10 @@
 //! takes a second program that also refuses the mount family, with
 //! move_mount gated the same way, from the one instruction that mounts
 //! a child's workspace. Every child stacks a second filter that closes
-//! both gates. Both programs are built and checked at compile time, so a
-//! jump that lands outside the program is a build error.
+//! both gates. The GPU engine takes a third program, the runc list with
+//! exec refused and no gate (docs/proposals/gpu.md). Every program is
+//! built and checked at compile time, so a jump that lands outside the
+//! program is a build error.
 #![deny(
     clippy::indexing_slicing,
     clippy::arithmetic_side_effects,
@@ -51,6 +53,10 @@ pub struct Arch {
     /// and needs them. move_mount has a gate of its own in the runc
     /// program, so it is not in this list.
     pub mounts: &'static [u32],
+    /// What the engine program refuses on top of the runc list, sorted
+    /// by number. execve and execveat, since the engine never runs
+    /// another image, and move_mount, which the engine has no gate for.
+    pub engine: &'static [u32],
 }
 
 /// x86_64, AUDIT_ARCH_X86_64 is EM_X86_64 with the 64-bit and
@@ -128,6 +134,11 @@ pub const X86_64: Arch = Arch {
         442, // mount_setattr
         467, // open_tree_attr
     ],
+    engine: &[
+        59,  // execve
+        322, // execveat
+        429, // move_mount
+    ],
 };
 
 /// aarch64, AUDIT_ARCH_AARCH64 is EM_AARCH64 with the same two bits.
@@ -195,11 +206,17 @@ pub const AARCH64: Arch = Arch {
         442, // mount_setattr
         467, // open_tree_attr
     ],
+    engine: &[
+        221, // execve
+        281, // execveat
+        429, // move_mount
+    ],
 };
 
 /// Which program. Fiber is the design's list. Runc adds the mount
 /// family, since a runc fiber keeps CAP_SYS_ADMIN and could mount, and
-/// gates move_mount, which mounts its workspace.
+/// gates move_mount, which mounts its workspace. Engine is the runc
+/// list with no gate at all, for the GPU engine (docs/proposals/gpu.md).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Program {
     /// The fiber filter, for a zygote whose fibers may take a mount
@@ -208,10 +225,18 @@ pub enum Program {
     /// The fiber filter plus the mount family, with move_mount gated
     /// (runc).
     Runc,
+    /// The runc list with execve, execveat and move_mount refused and
+    /// no clone3 gate, so clone3 is ENOSYS from any address and libc
+    /// falls back to clone. The engine, a host process that drives the
+    /// GPU for fibers, installs it on every thread after the driver is
+    /// up and before its first accept. perf_event_open stays refused,
+    /// and recvmsg passes, since the engine takes descriptors from
+    /// fiberd that way.
+    Engine,
 }
 
-/// The longest equality chain, both lists of x86_64.
-const CHAIN_MAX: usize = 64;
+/// Bounds the longest equality chain, the engine's 64 on x86_64.
+const CHAIN_MAX: usize = 72;
 
 /// This arch's numbers.
 #[cfg(target_arch = "x86_64")]
@@ -318,8 +343,8 @@ pub struct Prog {
     /// How many words the program has.
     pub len: u16,
     /// The two compares that hold clone3's gate address, low word then
-    /// high, which gated writes.
-    pub gate: [u16; 2],
+    /// high, which gated writes. The engine program has no gate.
+    pub gate: Option<[u16; 2]>,
     /// The same for move_mount's gate, which the runc program alone
     /// has.
     pub move_gate: Option<[u16; 2]>,
@@ -379,22 +404,28 @@ impl Prog {
         let mut p = Prog {
             words: [stmt(0, 0); PROG_MAX],
             len: 0,
-            gate: [0, 0],
+            gate: None,
             move_gate: None,
         };
         let runc = matches!(which, Program::Runc);
-        let (chain, n) = if runc {
-            merge(a.plain, a.mounts)
-        } else {
-            merge(a.plain, &[])
+        let engine = matches!(which, Program::Engine);
+        let (chain, n) = match which {
+            Program::Fiber => merge(a.plain, &[]),
+            Program::Runc => merge(a.plain, a.mounts),
+            Program::Engine => {
+                let (both, n) = merge(a.plain, a.mounts);
+                merge(both.split_at(n).0, a.engine)
+            }
         };
         // Where the shared returns land, so every jump to one is
         // absolute. The sections, in order: the plain chain (n), the
-        // clone3 gate (5), the move_mount gate (5, runc alone), clone
-        // and unshare (4), socket (11), personality (7) and ioctl (4).
+        // clone3 gate (5, or 1 for the engine's plain refusal), the
+        // move_mount gate (5, runc alone), clone and unshare (4), socket
+        // (11), personality (7) and ioctl (4).
         let head = if a.x32 { 6 } else { 4 };
+        let clone3_gate = if engine { 1 } else { 5 };
         let move_gate = if runc { 5 } else { 0 };
-        let allow = head + n + 5 + move_gate + 4 + 11 + 7 + 4;
+        let allow = head + n + clone3_gate + move_gate + 4 + 11 + 7 + 4;
         let eperm = allow + 1;
         let enosys = allow + 2;
 
@@ -415,13 +446,20 @@ impl Prog {
         // passes from birth's gate alone (child.rs), whose 64-bit address
         // gated writes into the two compares. From anywhere else it is
         // ENOSYS, as an old kernel answers, so libc falls back to clone.
-        p.jmp(JEQ_K, CLONE3, p.next(), p.next() + 4);
-        p.ld(IP_LO);
-        p.gate[0] = p.len;
-        p.jmp(JEQ_K, NO_GATE, p.next(), enosys);
-        p.ld(IP_HI);
-        p.gate[1] = p.len;
-        p.jmp(JEQ_K, NO_GATE, allow, enosys);
+        // The engine never births, so its program has no gate and
+        // answers ENOSYS from any address.
+        if engine {
+            p.jmp(JEQ_K, CLONE3, enosys, p.next());
+        } else {
+            p.jmp(JEQ_K, CLONE3, p.next(), p.next() + 4);
+            p.ld(IP_LO);
+            let lo = p.len;
+            p.jmp(JEQ_K, NO_GATE, p.next(), enosys);
+            p.ld(IP_HI);
+            let hi = p.len;
+            p.jmp(JEQ_K, NO_GATE, allow, enosys);
+            p.gate = Some([lo, hi]);
+        }
         // A runc fiber's workspace goes in by move_mount, which the rest
         // of the mount family's refusal would cover. It passes from the
         // child's one gate (child.rs), checked as clone3's is, and is
@@ -518,11 +556,14 @@ impl Prog {
 
     /// A copy with the addresses seccomp reports for birth's clone3 and
     /// the child's move_mount in their compares. The fiber program has
-    /// no move_mount gate, so the second address goes unused there.
+    /// no move_mount gate, so the second address goes unused there, and
+    /// the engine program has neither, so it comes back as it is.
     pub fn gated(&self, clone3: u64, move_mount: u64) -> Prog {
         let mut p = *self;
-        p.words[usize::from(self.gate[0])].k = clone3 as u32;
-        p.words[usize::from(self.gate[1])].k = (clone3 >> 32) as u32;
+        if let Some([lo, hi]) = self.gate {
+            p.words[usize::from(lo)].k = clone3 as u32;
+            p.words[usize::from(hi)].k = (clone3 >> 32) as u32;
+        }
         if let Some([lo, hi]) = self.move_gate {
             p.words[usize::from(lo)].k = move_mount as u32;
             p.words[usize::from(hi)].k = (move_mount >> 32) as u32;
@@ -561,6 +602,8 @@ const fn merge(a: &[u32], b: &[u32]) -> ([u32; CHAIN_MAX], usize) {
 static PROG: Prog = Prog::build(&NATIVE, Program::Fiber);
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 static PROG_RUNC: Prog = Prog::build(&NATIVE, Program::Runc);
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+static PROG_ENGINE: Prog = Prog::build(&NATIVE, Program::Engine);
 
 const _: () = {
     assert!(size_of::<libc::sock_filter>() == 8);
@@ -576,10 +619,12 @@ pub enum Refusal {
     Thread(c_int),
 }
 
-/// install puts the program on every thread of the process, under
-/// no_new_privs so no capability is needed, with both gates' addresses
-/// read here so ASLR is moot. Fibers inherit it at the clone. A refusal
-/// means the zygote must not serve.
+/// install puts the program on every thread of the process (TSYNC),
+/// under no_new_privs so no capability is needed, with both gates'
+/// addresses read here so ASLR is moot. Fibers inherit it at the clone.
+/// A refusal means the zygote must not serve. The engine program has no
+/// gate, so it goes on as built, and the engine calls this once its
+/// driver threads are up, since TSYNC covers them too.
 pub fn install(which: Program) -> Result<(), Refusal> {
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     {
@@ -589,13 +634,16 @@ pub fn install(which: Program) -> Result<(), Refusal> {
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     {
         let p = match which {
-            Program::Fiber => &PROG,
-            Program::Runc => &PROG_RUNC,
-        }
-        .gated(
-            crate::child::gate_addr(),
-            crate::child::move_mount_gate_addr(),
-        );
+            Program::Fiber => PROG.gated(
+                crate::child::gate_addr(),
+                crate::child::move_mount_gate_addr(),
+            ),
+            Program::Runc => PROG_RUNC.gated(
+                crate::child::gate_addr(),
+                crate::child::move_mount_gate_addr(),
+            ),
+            Program::Engine => PROG_ENGINE,
+        };
         let prog = libc::sock_fprog {
             len: p.len,
             // The kernel copies the program and writes nothing through
@@ -1129,7 +1177,7 @@ pub(crate) mod tests {
             ),
         ];
         let arches: &[(&str, &Arch)] = &[("x86_64", &X86_64), ("aarch64", &AARCH64)];
-        let programs = [Program::Fiber, Program::Runc];
+        let programs = [Program::Fiber, Program::Runc, Program::Engine];
         for ((arch_name, a), which) in arches
             .iter()
             .flat_map(|a| programs.iter().map(move |w| (a, *w)))
@@ -1147,8 +1195,12 @@ pub(crate) mod tests {
                     "{arch_name} {which:?}: nr {nr}"
                 );
             }
-            // The mount family, which only the runc program refuses.
-            let mounts = if which == Program::Runc { EPERM } else { ALLOW };
+            // The mount family, which the fiber program alone allows.
+            let mounts = if which == Program::Fiber {
+                ALLOW
+            } else {
+                EPERM
+            };
             for &nr in a.mounts {
                 assert_eq!(
                     run(&p, a.audit, nr, ELSEWHERE, [u64::MAX; 6]),
@@ -1363,8 +1415,10 @@ pub(crate) mod tests {
         let cases: &[(&str, &Arch, Program, usize, bool)] = &[
             ("x86_64 fiber", &X86_64, Program::Fiber, 88, false),
             ("x86_64 runc", &X86_64, Program::Runc, 106, true),
+            ("x86_64 engine", &X86_64, Program::Engine, 100, false),
             ("aarch64 fiber", &AARCH64, Program::Fiber, 77, false),
             ("aarch64 runc", &AARCH64, Program::Runc, 95, true),
+            ("aarch64 engine", &AARCH64, Program::Engine, 89, false),
         ];
         for (name, arch, which, len, has_move_gate) in cases {
             let p = Prog::build(arch, *which);
@@ -1378,14 +1432,19 @@ pub(crate) mod tests {
             );
             // Each gate's two compares, low then high, hold NO_GATE until
             // gated writes the address, and gated writes each gate's own.
-            let clone3 = p.gate.map(usize::from);
-            let gates: Vec<(&str, [usize; 2], u64)> = match p.move_gate {
-                Some(m) => vec![
-                    ("clone3", clone3, GATE),
-                    ("move_mount", m.map(usize::from), MOVE_GATE),
-                ],
-                None => vec![("clone3", clone3, GATE)],
-            };
+            // The engine program has no gate, so gated changes nothing.
+            assert_eq!(
+                p.gate.is_none(),
+                *which == Program::Engine,
+                "{name}: a clone3 gate"
+            );
+            let mut gates: Vec<(&str, [usize; 2], u64)> = Vec::new();
+            if let Some(c) = p.gate {
+                gates.push(("clone3", c.map(usize::from), GATE));
+            }
+            if let Some(m) = p.move_gate {
+                gates.push(("move_mount", m.map(usize::from), MOVE_GATE));
+            }
             let g = p.gated(GATE, MOVE_GATE);
             assert_eq!(g.len, p.len, "{name}: gated keeps the length");
             assert!(g.check(), "{name}: gated");
@@ -1414,11 +1473,8 @@ pub(crate) mod tests {
                     "{name}: the {gate} high word"
                 );
             }
-            if let Some([lo, _]) = p.move_gate {
-                assert!(
-                    usize::from(lo) > clone3[1],
-                    "{name}: the move_mount gate comes after clone3's"
-                );
+            if let (Some([_, hi]), Some([lo, _])) = (p.gate, p.move_gate) {
+                assert!(lo > hi, "{name}: the move_mount gate comes after clone3's");
             }
             // gated touches the compares alone.
             let changed = p
@@ -1737,6 +1793,7 @@ pub(crate) mod tests {
         let p = match which {
             Program::Fiber => &PROG,
             Program::Runc => &PROG_RUNC,
+            Program::Engine => &PROG_ENGINE,
         }
         .gated(
             crate::child::gate_addr(),
