@@ -63,9 +63,11 @@ func background(t *testing.T, logPath, name string, args ...string) {
 	})
 }
 
+// waitFor polls ok for up to 30 s. A cold fiberd on a busy runner takes
+// seconds to come up.
 func waitFor(t *testing.T, ok func() bool) {
 	t.Helper()
-	for range 100 {
+	for range 300 {
 		if ok() {
 			return
 		}
@@ -85,6 +87,13 @@ func TestCounterParkResume(t *testing.T) {
 	if cgroot == "" {
 		t.Skip("FIBERD_CGROUP_ROOT is unset: run in the dev container (make integration-tests)")
 	}
+	// A subtree of its own, as a real home has. At start fiberd prunes
+	// the stale grant cgroups under its root, and the shared root holds
+	// every earlier suite's leftovers, which would keep it busy for many
+	// seconds. fiberd makes the directory and enables what the parent
+	// delegates.
+	cgroot = filepath.Join(cgroot, "counter-park-"+strconv.Itoa(os.Getpid()))
+	t.Cleanup(func() { _ = os.Remove(cgroot) })
 	bin := t.TempDir()
 	mustRun(t, filepath.Join(repoRoot, "sdk", "c", "template", "core"), "cargo", "build", "--release", "--locked")
 	counter := filepath.Join(bin, "counter")
