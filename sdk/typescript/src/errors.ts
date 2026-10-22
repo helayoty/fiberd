@@ -51,6 +51,26 @@ export class NoWorkspace extends FiberdError {
   }
 }
 
+/**
+ * The file does not fit the workspace's disk budget or its entry limit.
+ * Not a shed, so retrying the same upload fails again.
+ */
+export class QuotaExceeded extends FiberdError {
+  constructor(public readonly reason: string, options?: ErrorOptions) {
+    super(`quota exceeded: ${reason}`, options);
+  }
+}
+
+/**
+ * An upload's source does not hold the size it declared. The client
+ * found it and cancelled the call, so fiberd never placed the file.
+ */
+export class SizeMismatch extends FiberdError {
+  constructor(public readonly path: string, public readonly size: bigint, public readonly reason: string, options?: ErrorOptions) {
+    super(`size mismatch: ${reason}`, options);
+  }
+}
+
 export class NotFound extends FiberdError {
   constructor(public readonly reason: string, options?: ErrorOptions) {
     super(`not found: ${reason}`, options);
@@ -71,8 +91,12 @@ export function classify(error: unknown): unknown {
   if (!isServiceError(error)) return error;
   let miss: Miss | undefined;
   let noWorkspace = false;
+  // Whether the call surely carries no Miss. A trailer that does not parse,
+  // or that names another code, might have held one.
+  let missKnown = true;
   const raw = error.metadata.get("grpc-status-details-bin")[0];
   if (Buffer.isBuffer(raw)) {
+    missKnown = false;
     try {
       // ts-proto accepts an early zero tag and can overlook a truncated nested
       // message. Check the Status and its Any boundaries before classifying it.
@@ -85,6 +109,7 @@ export function classify(error: unknown): unknown {
           miss = Miss.decode(detail.value);
         }
         noWorkspace = envelope.details.some((d) => d.typeUrl.endsWith("/fiberd.grant.v1.NoWorkspace"));
+        missKnown = true;
       }
     } catch (cause) {
       if (!(cause instanceof Error)) throw cause;
@@ -100,6 +125,12 @@ export function classify(error: unknown): unknown {
   }
   if (error.code === status.FAILED_PRECONDITION) {
     return noWorkspace ? new NoWorkspace(error.details, options) : new TierGap(error.details, options);
+  }
+  // A shed is ResourceExhausted with a Miss, and without one it is the disk
+  // budget. A call whose Miss is not known stays the raw error rather than
+  // read as a quota.
+  if (error.code === status.RESOURCE_EXHAUSTED && !miss && missKnown) {
+    return new QuotaExceeded(error.details, options);
   }
   if (error.code === status.NOT_FOUND) return new NotFound(error.details, options);
   return error;

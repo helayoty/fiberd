@@ -1,6 +1,6 @@
 # fiberd for TypeScript
 
-The TypeScript client for callers of fiberd, with Clone, Park, Release and Watch and the same typed misses as the Go and Python clients. It has no file calls, so it cannot move files into or out of a fiber's workspace. `@fiberd/client` runs on Node.js, not in a browser, and has no template binding.
+The TypeScript client for callers of fiberd, with Clone, Park, Release and Watch and the same typed misses as the Go and Python clients. Upload, Download and ListFiles move files into and out of a fiber's workspace. `@fiberd/client` runs on Node.js, not in a browser, and has no template binding.
 
 ## Install
 
@@ -57,11 +57,41 @@ try {
 
 `Client.dial(target)` is the plaintext form for a home started with `-insecure-plaintext`. TLS options take PEM buffers, not paths. `await fiber.dial()` connects to a direct Unix or TCP endpoint. A [handoff](../../docs/glossary.md#handoff) fiber uses `await fiber.dialHandoff({ cert, key })`, with the same caller certificate as the control API. It trusts the Clone's certificate and checks its key pin before returning the TLS socket. Attach an `error` listener immediately after awaiting either dial method. Later I/O errors belong to the socket, not the dialing promise. The caller closes the socket.
 
-`TierGap`, `NotFound` and `NoWorkspace` are the other typed RPC outcomes. `NoWorkspace` is a file call on a fiber whose grant has no workspace. Other failures remain gRPC errors. The token may be a string or a sync/async function returning one, and is never retained or logged. The client does not retry automatically.
+`TierGap`, `NotFound`, `NoWorkspace` and `QuotaExceeded` are the other typed RPC outcomes. `NoWorkspace` is a file call on a fiber whose grant has no workspace, and `QuotaExceeded` a file over its disk budget or entry limit. Other failures remain gRPC errors. The token may be a string or a sync/async function returning one, and is never retained or logged. The client does not retry automatically.
 
 Omit `session` for an anonymous fiber. Park waits for durability by default (`sync: true`). Release keeps parked state unless `discard: true`. Both accept a fiber or its ID. `client.watch()` is an async iterator of per-grant status. Breaking the loop cancels the RPC. Fence epochs/sequences and status `wUsedBytes` are `bigint`, so convert them to strings for JSON.
 
-Calls accept `timeoutMs` and `signal: AbortSignal`. Cancellation rejects with `signal.reason`, including while waiting for a token. It does not stop the token provider's own work. Clone's separate `deadlineMs` budgets runtime work. Zero or omission means unbounded for both durations. The RPC timeout starts after token resolution. For Watch it bounds the whole stream, even while statuses arrive, and expires with `DEADLINE_EXCEEDED`. Omit it for a long-lived watch and use a signal to stop. Socket dialing uses the timeout and signal for connection establishment only.
+Calls accept `timeoutMs` and `signal: AbortSignal`. Cancellation rejects with `signal.reason`, including while waiting for a token. It does not stop the token provider's own work. Clone's separate `deadlineMs` budgets runtime work. Zero or omission means unbounded for both durations. The RPC timeout starts after token resolution. For Watch, Upload and Download it bounds the whole stream, even while data flows, and expires with `DEADLINE_EXCEEDED`. Omit it for a long-lived watch or a large file and use a signal to stop. Socket dialing uses the timeout and signal for connection establishment only.
+
+## Files
+
+A grant with a disk budget gives each fiber a workspace, mounted at `/workspace` inside it. Paths are relative to it, under the rules of the [file calls](../../docs/protocol.md#files). The example uses `client` and `clone` from the one above, before the client is closed.
+
+```typescript
+import { createReadStream, statSync } from "node:fs";
+import { NoWorkspace, QuotaExceeded } from "@fiberd/client";
+
+const fiber = await clone("conv-7");
+try {
+  await client.upload(fiber, "in/task.json", Buffer.from('{"task":1}'));
+  const size = statSync("model.bin").size;
+  await client.upload(fiber, "in/model.bin", createReadStream("model.bin"), { size, mode: 0o600 });
+
+  const download = await client.download(fiber, "out/result.txt");
+  console.log(download.info.size);
+  for await (const chunk of download) process.stdout.write(chunk);
+
+  for (const entry of await client.listFiles(fiber, "out")) {
+    console.log(entry.path, entry.directory ? "dir" : entry.size);
+  }
+} catch (error) {
+  if (error instanceof NoWorkspace) console.error("The grant has no disk budget");
+  else if (error instanceof QuotaExceeded) console.error("The file does not fit:", error.reason);
+  else throw error;
+}
+```
+
+`upload` takes a `Uint8Array`, whose size is its length, or an `AsyncIterable<Uint8Array>` such as a Node.js stream, which needs `size`. It resolves to the file's `FileInfo`, with its SHA-256. Pass `sha256` and fiberd checks the content before the file appears. A source that is short or long rejects with `SizeMismatch`, and fiberd never places the file. `download` resolves once the file's info arrived, so `NotFound` and `NoWorkspace` reject from the call itself. Iterate it to its end or call `cancel()`, and breaking the loop cancels it too. Its `offset` option starts the read later in the file. File sizes are `bigint`. `QuotaExceeded` is not a `Shed`, so retrying the same upload fails again.
 
 ## Build and test
 
