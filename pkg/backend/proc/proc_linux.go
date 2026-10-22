@@ -1330,17 +1330,20 @@ func (b *Backend) WarmDevice(warmID string) (used, capacity uint64, ok bool) {
 }
 
 // EvictDevice implements backend.DeviceReporter: EVICT <fence> to the
-// engine, which drops the slice and reports it gone.
+// engine, which drops the slice and reports it gone. The engine is found
+// by the fence's grant, not through the fiber's entry, since the host
+// evicts after the fiber's exit, when finish has forgotten it. A grant
+// with no zygote has no engine left, and so no slice to drop.
 func (b *Backend) EvictDevice(fiberID string) error {
-	b.mu.Lock()
-	f, ok := b.fibers[fiberID]
-	var z *zygote
-	if ok {
-		z = b.zygotes[f.warmID]
+	fence, err := core.ParseFence(fiberID)
+	if err != nil {
+		return fmt.Errorf("proc: no engine for %q: %w", fiberID, err)
 	}
+	b.mu.Lock()
+	z := b.zygotes[fence.GrantUID]
 	b.mu.Unlock()
 	if z == nil {
-		return fmt.Errorf("proc: no engine for %q", fiberID)
+		return nil
 	}
 	if _, err := z.ctl.Write([]byte("EVICT " + fiberID + "\n")); err != nil {
 		return fmt.Errorf("proc: send EVICT: %w", err)
@@ -1430,7 +1433,8 @@ func (b *Backend) exited(z *zygote, zpid int, status string) {
 	}
 }
 
-// finish forgets a fiber and reports its end.
+// finish forgets a fiber, and its device slice with it, and reports its
+// end. The engine still holds the slice until the host's EVICT.
 func (b *Backend) finish(f *fiber, status string) {
 	b.mu.Lock()
 	if b.fibers[f.id] != f {
@@ -1441,7 +1445,13 @@ func (b *Backend) finish(f *fiber, status string) {
 	if f.zpid != 0 {
 		delete(b.byPID, pidKey{f.warmID, f.zpid})
 	}
+	z := b.zygotes[f.warmID]
 	b.mu.Unlock()
+	if z != nil {
+		z.dmu.Lock()
+		delete(z.dev, f.id)
+		z.dmu.Unlock()
+	}
 	b.exits <- backend.Exit{FiberID: f.id, Status: status}
 }
 

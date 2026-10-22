@@ -59,7 +59,7 @@ CONFORM_DIR ?= $(BIN)
 endif
 
 .PHONY: all build test integration-tests vet lint proto proto-lint proto-check clean \
-        bench zygote zygote-core zygote-test zygote-check fuzz fuzz-core conform-stub conform-signed conform-logs conform-proc conform-proc-python conform-gvisor conform-gvisor-python conform-runc conform-runc-python conform-hyperlight-fake conform-hyperlight \
+        bench zygote zygote-core zygote-test zygote-c-test zygote-check fuzz fuzz-core conform-stub conform-signed conform-logs conform-proc conform-proc-python conform-gvisor conform-gvisor-python conform-runc conform-runc-python conform-hyperlight-fake conform-hyperlight \
         python-build python-test python-dist python-proto python-proto-check \
         typescript-build typescript-skipped typescript-test typescript-proto typescript-proto-check \
         hyperlight-helper linux-hyperlight-check linux-hyperlight-test overcommit kind-up kind-down kind-image conform-kind slurm-up slurm-down conform-slurm example-knative example-knative-kvm example-kata example-substrate \
@@ -271,6 +271,11 @@ zygote-core: ## build the zygote library, $(CORE_LIB), from its Rust crate
 zygote-test: ## the core's Rust unit tests, clippy and rustfmt (the fuzz targets too, with the core's stable rustfmt, since the fuzz crate's nightly has none)
 	cd $(CORE_DIR) && $(CARGO) test --locked && $(CARGO) clippy --locked --all-targets -- -D warnings && \
 	  $(CARGO) fmt --check && rustfmt --edition 2024 --check fuzz/fuzz_targets/*.rs
+
+zygote-c-test: zygote-core ## the reference zygote's own C unit test (the engine's fence parse, sdk/c/template/test), built as make zygote is but without TLS, then run
+	@mkdir -p $(BIN)
+	$(CC) $(ZYGOTE_CFLAGS) $(ZYGOTE_LDFLAGS) -Wall -Wextra -pthread -o $(BIN)/refzygote-test sdk/c/template/test/engine_test.c $(CORE_LIB)
+	$(BIN)/refzygote-test
 
 zygote-check: zygote-core ## check the core archive's undefined symbols against the allowlist and count its PAC instructions
 	$(CORE_DIR)/check.sh $(CORE_LIB)

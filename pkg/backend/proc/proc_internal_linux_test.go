@@ -600,22 +600,19 @@ func TestDeviceReports(t *testing.T) {
 			if _, _, ok := b.WarmDevice("nobody"); ok {
 				t.Fatal("WarmDevice of an unknown instance reported something")
 			}
-			if _, ok := b.FiberDevice("g/9-9"); ok {
+			if _, ok := b.FiberDevice("g/9/9"); ok {
 				t.Fatal("FiberDevice of an unknown fiber reported something")
-			}
-			if err := b.EvictDevice("g/9-9"); err == nil || !strings.Contains(err.Error(), "no engine") {
-				t.Fatalf("EvictDevice of an unknown fiber = %v", err)
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			if _, err := b.Clone(ctx, w.ID, backend.FiberSpec{Generation: 1, Fence: "g/1-1", Endpoint: filepath.Join(workDir, "ep.sock"), CgroupFD: -1, Deadline: time.Second}); err != nil {
+			if _, err := b.Clone(ctx, w.ID, backend.FiberSpec{Generation: 1, Fence: "g/1/1", Endpoint: filepath.Join(workDir, "ep.sock"), CgroupFD: -1, Deadline: time.Second}); err != nil {
 				t.Fatalf("Clone: %v", err)
 			}
 			if !tc.engine {
 				if _, _, ok := b.WarmDevice(w.ID); ok {
 					t.Fatal("WarmDevice reported without an engine")
 				}
-				if _, ok := b.FiberDevice("g/1-1"); ok {
+				if _, ok := b.FiberDevice("g/1/1"); ok {
 					t.Fatal("FiberDevice reported without an engine")
 				}
 				return
@@ -625,17 +622,77 @@ func TestDeviceReports(t *testing.T) {
 				return ok && used == 100 && capacity == 1000
 			})
 			waitFor(t, "the fiber's slice", func() bool {
-				n, ok := b.FiberDevice("g/1-1")
+				n, ok := b.FiberDevice("g/1/1")
 				return ok && n == 42
 			})
-			if err := b.EvictDevice("g/1-1"); err != nil {
+			if err := b.EvictDevice("g/1/1"); err != nil {
 				t.Fatalf("EvictDevice: %v", err)
 			}
-			zy.waitRecv(t, "EVICT g/1-1")
+			zy.waitRecv(t, "EVICT g/1/1")
 			waitFor(t, "the slice to go", func() bool {
-				n, ok := b.FiberDevice("g/1-1")
+				n, ok := b.FiberDevice("g/1/1")
 				return ok && n == 0
 			})
+		})
+	}
+}
+
+// TestEvictAfterExit checks that the engine is found by the fence's grant,
+// so the host's EVICT after a fiber's exit still reaches it, and that the
+// exit forgets the fiber's slice. On main EvictDevice looked the engine up
+// through the fiber's entry, which finish had deleted, and failed with
+// "no engine". The DEVICE entry outlived the fiber too.
+func TestEvictAfterExit(t *testing.T) {
+	cases := []struct {
+		name    string
+		fence   string // what is evicted after the fiber g/1/1 exits
+		errText string // "" = no error
+		sent    bool   // EVICT reaches the engine
+	}{
+		{name: "the exited fiber's slice", fence: "g/1/1", sent: true},
+		{name: "a grant with no engine has no slice to drop", fence: "other/1/1"},
+		{name: "an id that is no fence", fence: "g-1-1", errText: "no engine"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFakes(t)
+			b := f.open(t, Options{})
+			w, zy, workDir := f.warm(t, b, "devexit", impossiblePID(t))
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if _, err := b.Clone(ctx, w.ID, backend.FiberSpec{Generation: 1, Fence: "g/1/1", Endpoint: filepath.Join(workDir, "ep.sock"), CgroupFD: -1, Deadline: time.Second}); err != nil {
+				t.Fatalf("Clone: %v", err)
+			}
+			if e := waitExit(t, b); e.FiberID != "g/1/1" {
+				t.Fatalf("exit = %+v, want g/1/1", e)
+			}
+			b.mu.Lock()
+			z := b.zygotes[w.ID]
+			b.mu.Unlock()
+			z.dmu.Lock()
+			_, kept := z.dev["g/1/1"]
+			z.dmu.Unlock()
+			if kept {
+				t.Fatal("the exited fiber's DEVICE entry was kept")
+			}
+			err := b.EvictDevice(tc.fence)
+			switch {
+			case tc.errText == "" && err != nil:
+				t.Fatalf("EvictDevice(%q): %v", tc.fence, err)
+			case tc.errText != "" && (err == nil || !strings.Contains(err.Error(), tc.errText)):
+				t.Fatalf("EvictDevice(%q) = %v, want an error mentioning %q", tc.fence, err, tc.errText)
+			}
+			if tc.sent {
+				zy.waitRecv(t, "EVICT "+tc.fence)
+				return
+			}
+			// What was sent arrives within microseconds, as noExit reasons.
+			time.Sleep(50 * time.Millisecond)
+			for _, l := range zy.lines() {
+				if strings.HasPrefix(l, "EVICT") {
+					t.Fatalf("the engine got %q", l)
+				}
+			}
 		})
 	}
 }
@@ -650,8 +707,8 @@ func TestEvictWithoutAChannel(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			c := pairConn(t)
 			_ = c.Close()
-			b := &Backend{zygotes: map[string]*zygote{"g": {id: "g", ctl: c}}, fibers: map[string]*fiber{"f": {id: "f", warmID: "g"}}}
-			if err := b.EvictDevice("f"); err == nil || !strings.Contains(err.Error(), "send EVICT") {
+			b := &Backend{zygotes: map[string]*zygote{"g": {id: "g", ctl: c}}, fibers: map[string]*fiber{}}
+			if err := b.EvictDevice("g/1/1"); err == nil || !strings.Contains(err.Error(), "send EVICT") {
 				t.Fatalf("EvictDevice = %v, want a send error", err)
 			}
 		})
