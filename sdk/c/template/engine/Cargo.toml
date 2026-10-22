@@ -1,0 +1,30 @@
+[package]
+name = "refengine"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.99"
+license = "Apache-2.0"
+description = "refengine, the reference device engine fiberd starts beside a grant's zygote"
+publish = false
+
+[[bin]]
+name = "refengine"
+path = "src/main.rs"
+
+# The core for its line tokenizer and its seccomp builder, and libc at
+# the core's version for the system calls. Nothing else from outside.
+[dependencies]
+fiberzygote-core = { path = "../core", features = ["std"] }
+libc = { version = "0.2.191", default-features = false }
+
+[profile.release]
+opt-level = 2
+panic = "abort"
+codegen-units = 1
+debug = false
+# A wrapped sum is a bug here as much as in debug.
+overflow-checks = true
+
+[profile.dev]
+panic = "abort"
+overflow-checks = true
