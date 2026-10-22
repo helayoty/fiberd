@@ -1,6 +1,6 @@
 # fiberd for TypeScript
 
-The TypeScript client for callers of fiberd, with the same calls and typed misses as the Go and Python clients. `@fiberd/client` runs on Node.js, not in a browser, and has no template binding.
+The TypeScript client for callers of fiberd, with Clone, Park, Release and Watch and the same typed misses as the Go and Python clients. It has no file calls, so it cannot move files into or out of a fiber's workspace. `@fiberd/client` runs on Node.js, not in a browser, and has no template binding.
 
 ## Install
 
