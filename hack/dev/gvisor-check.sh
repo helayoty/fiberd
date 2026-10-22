@@ -166,15 +166,17 @@ else
 fi
 $RUNSC delete -force selfck >/dev/null 2>&1 || true
 
-# 5. The backend's own mechanism: the workload drops a marker, opens
-#    /proc/gvisor/checkpoint and blocks reading it; the checkpoint is taken
-#    from outside with --leave-running; the read answers "resume" in the
-#    original and "restore" in a sandbox restored from the image with a
-#    different env, which the restored copy then reads from spec_environ.
+# 5. The backend's own mechanism: the workload opens
+#    /proc/gvisor/checkpoint, drops a marker and blocks reading the file;
+#    the checkpoint is taken from outside with --leave-running; the read
+#    answers "resume" in the original and "restore" in a sandbox restored
+#    from the image with a different env, which the restored copy then
+#    reads from spec_environ. The open comes before the marker because the
+#    read answers for the first checkpoint after the open only.
 # After "restore" the spec environment can still read as the checkpoint's
 # for a moment (seen on GitHub's x86 runners); the workload polls for the
 # new fence the way the backend's workload does.
-SCRIPT2='touch /host/ext-ready; exec 3</proc/gvisor/checkpoint; r=$(cat <&3); echo "$r" > /host/ext-$$-$r; if [ "$r" = restore ]; then i=0; while [ $i -lt 300 ]; do if tr "\0" "\n" < /proc/gvisor/spec_environ | grep -q "^FIBERD_FENCE=g/7/3"; then break; fi; sleep 0.01; i=$((i+1)); done; tr "\0" "\n" < /proc/gvisor/spec_environ > /host/ext-env; fi; sleep 30'
+SCRIPT2='exec 3</proc/gvisor/checkpoint; touch /host/ext-ready; r=$(cat <&3); echo "$r" > /host/ext-$$-$r; if [ "$r" = restore ]; then i=0; while [ $i -lt 300 ]; do if tr "\0" "\n" < /proc/gvisor/spec_environ | grep -q "^FIBERD_FENCE=g/7/3"; then break; fi; sleep 0.01; i=$((i+1)); done; tr "\0" "\n" < /proc/gvisor/spec_environ > /host/ext-env; fi; sleep 30'
 B=$(bundle ext "$SCRIPT2")
 rm -f "$HOSTDIR"/ext-*
 $RUNSC run --detach --bundle "$B" ext >"$W/ext.out" 2>&1 || bad "ext sandbox: $(cat "$W/ext.out")"

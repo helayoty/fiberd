@@ -243,11 +243,19 @@ static int on_fiber(const fz_incarnation_t *f) {
 
 /* ---- gVisor mode, as refzygote does it ---------------------------------- */
 
-/* Blocks until the next checkpoint of this sandbox completes. 1 when
- * running in a sandbox restored from it, 0 when resumed in place. */
-static int wait_checkpoint(void) {
+/* Registers for the next checkpoint of this sandbox. The read answers
+ * for the first checkpoint after the open, so the open comes before
+ * whatever lets the backend checkpoint, as in refzygote. */
+static int open_checkpoint(void) {
     int fd = open("/proc/gvisor/checkpoint", O_RDONLY);
     if (fd < 0) { perror("counter: /proc/gvisor/checkpoint"); exit(6); }
+    return fd;
+}
+
+/* Blocks until the checkpoint fd registered for completes, and closes
+ * fd. 1 when running in a sandbox restored from it, 0 when resumed in
+ * place. */
+static int read_checkpoint(int fd) {
     char buf[32]; ssize_t n;
     while ((n = read(fd, buf, sizeof buf - 1)) < 0 && errno == EINTR) {}
     close(fd);
@@ -259,12 +267,15 @@ static int wait_checkpoint(void) {
 static int gvisor_main(void) {
     struct sigaction sa = { .sa_handler = on_usr1 };
     sigaction(SIGUSR1, &sa, NULL);
+    int ck = open_checkpoint();
     int m = open("/host/warm.ready", O_CREAT | O_WRONLY, 0644);
     if (m < 0) { perror("counter: /host/warm.ready"); return 6; }
     close(m);
     unsigned long counter = 0;
     for (;;) {
-        if (!wait_checkpoint()) continue;
+        int restored = read_checkpoint(ck);
+        ck = open_checkpoint(); /* for the park that ends this incarnation */
+        if (!restored) continue;
         /* A sandbox restored from the image. Its identity and a fresh
          * seed come on fiberd's channel, see refzygote. */
         fz_incarnation_t id;

@@ -482,11 +482,63 @@ class FakeGvisorExt(FakeExt):
 
 
 def gvisor_here(monkeypatch, tmp_path, answers):
-    """A fake sandbox: detect says gVisor, the checkpoint read answers from answers, the ready marker lands in tmp_path."""
+    """A fake sandbox: detect says gVisor, each checkpoint read answers from answers on a descriptor of no file, the ready marker lands in tmp_path."""
     monkeypatch.setattr(ft._gvisor, "detect", lambda *a, **k: True)
-    monkeypatch.setattr(ft._gvisor, "wait_checkpoint", lambda path=None: answers.pop(0))
+    monkeypatch.setattr(ft._gvisor, "open_checkpoint", lambda path=None: -1)
+    monkeypatch.setattr(ft._gvisor, "read_checkpoint", lambda fd: answers.pop(0))
     monkeypatch.setattr(ft._gvisor, "READY_MARKER", str(tmp_path / "warm.ready"))
     monkeypatch.setattr(ft, "_rebuild_environ", lambda env: None)
+
+
+def descriptors_on(path):
+    """How many of this process's descriptors are open on path, which Linux's /proc tells."""
+    fds = "/proc/self/fd"
+    n = 0
+    for name in os.listdir(fds):
+        try:
+            if os.readlink(os.path.join(fds, name)) == path:
+                n += 1
+        except OSError:
+            continue
+    return n
+
+
+REGISTERED = [
+    # what lets the backend take the next checkpoint, when the loop must already hold the file open
+    ("the ready marker lets it take the template image", "mark"),
+    ("an incarnation serving lets it take a park", "fiber"),
+]
+
+
+@pytest.mark.skipif(not os.path.isdir("/proc/self/fd"), reason="the witness is /proc/self/fd")
+@table(REGISTERED)
+def test_serve_on_gvisor_opens_the_checkpoint_file_before_it_lets_the_backend_checkpoint(tmp_path, monkeypatch, name, f0):
+    """The read answers for the first checkpoint after the open and for no earlier one. So the file is open before the marker, and open again before an incarnation runs, since its endpoint closing is what lets the backend take the park. A copy restored from an image taken before the open would wait for a second checkpoint that never comes. The checkpoint file is a plain file here, which answers "restore" to every read."""
+    checkpoint = tmp_path / "checkpoint"
+    checkpoint.write_text("restore\n")
+    monkeypatch.setattr(ft._gvisor, "CHECKPOINT", str(checkpoint))
+    monkeypatch.setattr(ft._gvisor, "READY_MARKER", str(tmp_path / "warm.ready"))
+    monkeypatch.setattr(ft._gvisor, "detect", lambda *a, **k: True)
+    monkeypatch.setattr(ft, "_rebuild_environ", lambda env: None)
+    ext = FakeGvisorExt([("clone", "g/1/1", "/host/1-1.sock", b"", os.urandom(32), "", 1)])
+    monkeypatch.setattr(ft, "_ext", lambda: ext)
+    monkeypatch.setattr(ft, "_inited", True)
+    monkeypatch.setattr(ft, "PROC_SELF", one_thread_proc(tmp_path))
+    held = {}
+    real_mark = ft._gvisor.mark_ready
+
+    def mark(marker):
+        held["mark"] = descriptors_on(str(checkpoint))
+        real_mark(marker)
+
+    monkeypatch.setattr(ft._gvisor, "mark_ready", mark)
+
+    def on_fiber(f):
+        held["fiber"] = descriptors_on(str(checkpoint))
+        return 7
+
+    assert ft.serve(on_fiber) == 7
+    assert held[f0] == 1, f"the checkpoint file must be open when {name}"
 
 
 def test_init_on_gvisor_skips_the_library(tmp_path, monkeypatch):
