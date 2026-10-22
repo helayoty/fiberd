@@ -1,0 +1,169 @@
+# The Cloud Hypervisor spikes (hack/cloudhv/spike, docs/proposals/gpu-poc.md
+# Part 2), on demand only. GitHub's ubuntu-24.04 runners are x86_64 and
+# expose /dev/kvm, opened here as bench-compare.yml does. S1 to S4 run in one
+# job on one runner. S5 runs as two jobs, so a snapshot taken on one runner
+# is restored on another. The two runners may share a CPU model, and the
+# log says which models met. Results go to the log and the step summary.
+name: cloudhv-spike
+
+on:
+  workflow_dispatch:
+    inputs:
+      spikes:
+        description: "Which of S1 to S4 to run (S5 always runs)"
+        type: choice
+        options: [all, s1, s2, s3, s4, none]
+        default: all
+      mem_mb:
+        description: "Guest RAM per VM, in MiB"
+        type: string
+        default: "128"
+      s1_count:
+        description: "Clones alive at once in S1"
+        type: string
+        default: "64"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cloudhv-spike
+  cancel-in-progress: false
+
+env:
+  SPIKE_DIR: /var/tmp/cloudhv-spike
+  SPIKE_MEM_MB: ${{ inputs.mem_mb }}
+  S1_COUNT: ${{ inputs.s1_count }}
+
+jobs:
+  spikes:
+    name: S1 to S4 (${{ inputs.spikes }})
+    if: inputs.spikes != 'none'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: runner facts
+        run: |
+          {
+            echo "## Runner"
+            echo '```'
+            echo "cores: $(nproc)"
+            grep -m1 "model name" /proc/cpuinfo
+            free -h | head -2
+            echo "kernel: $(uname -r)"
+            ls -l /dev/kvm 2>/dev/null || echo "kvm: absent"
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: enable KVM for this runner
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+      - name: install the build tools for the guest
+        run: sudo apt-get update -q && sudo apt-get install -y -q build-essential cpio
+      - name: setup (download, verify, build the guest)
+        run: bash hack/cloudhv/spike/setup.sh
+      - name: S1 copy-on-write restore
+        if: ${{ !cancelled() && (inputs.spikes == 'all' || inputs.spikes == 's1') }}
+        run: |
+          rc=0
+          sudo env "SPIKE_DIR=$SPIKE_DIR" "SPIKE_MEM_MB=$SPIKE_MEM_MB" "S1_COUNT=$S1_COUNT" \
+            bash hack/cloudhv/spike/s1-cow.sh 2>&1 | tee "$RUNNER_TEMP/S1.txt" || rc=$?
+          { echo "## S1"; echo '```'; tail -n 40 "$RUNNER_TEMP/S1.txt"; echo '```'; } >>"$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+      - name: S2 peer cgroup
+        if: ${{ !cancelled() && (inputs.spikes == 'all' || inputs.spikes == 's2') }}
+        run: |
+          rc=0
+          sudo env "SPIKE_DIR=$SPIKE_DIR" "SPIKE_MEM_MB=$SPIKE_MEM_MB" "S1_COUNT=$S1_COUNT" \
+            bash hack/cloudhv/spike/s2-peer.sh 2>&1 | tee "$RUNNER_TEMP/S2.txt" || rc=$?
+          { echo "## S2"; echo '```'; tail -n 40 "$RUNNER_TEMP/S2.txt"; echo '```'; } >>"$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+      - name: S3 vsock across a snapshot
+        if: ${{ !cancelled() && (inputs.spikes == 'all' || inputs.spikes == 's3') }}
+        run: |
+          rc=0
+          sudo env "SPIKE_DIR=$SPIKE_DIR" "SPIKE_MEM_MB=$SPIKE_MEM_MB" "S1_COUNT=$S1_COUNT" \
+            bash hack/cloudhv/spike/s3-vsock-snapshot.sh 2>&1 | tee "$RUNNER_TEMP/S3.txt" || rc=$?
+          { echo "## S3"; echo '```'; tail -n 40 "$RUNNER_TEMP/S3.txt"; echo '```'; } >>"$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+      - name: S4 time to served
+        if: ${{ !cancelled() && (inputs.spikes == 'all' || inputs.spikes == 's4') }}
+        run: |
+          rc=0
+          sudo env "SPIKE_DIR=$SPIKE_DIR" "SPIKE_MEM_MB=$SPIKE_MEM_MB" "S1_COUNT=$S1_COUNT" \
+            bash hack/cloudhv/spike/s4-served.sh 2>&1 | tee "$RUNNER_TEMP/S4.txt" || rc=$?
+          { echo "## S4"; echo '```'; tail -n 40 "$RUNNER_TEMP/S4.txt"; echo '```'; } >>"$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+      - name: make the logs readable for the upload (the spikes ran as root)
+        if: always()
+        run: sudo chmod -R a+rX "$SPIKE_DIR" 2>/dev/null || true
+      - name: keep the logs and raw numbers
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cloudhv-spike-${{ github.run_id }}
+          path: |
+            /var/tmp/cloudhv-spike/s*/**/*.txt
+            /var/tmp/cloudhv-spike/s*/**/*.log
+            /var/tmp/cloudhv-spike/s*/**/ch.out
+          if-no-files-found: warn
+
+  s5-snapshot:
+    name: S5 snapshot
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: enable KVM for this runner
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+      - name: install the build tools for the guest
+        run: sudo apt-get update -q && sudo apt-get install -y -q build-essential cpio
+      - name: setup (download, verify, build the guest)
+        run: bash hack/cloudhv/spike/setup.sh
+      - name: snapshot and pack
+        run: |
+          sudo env "SPIKE_DIR=$SPIKE_DIR" bash hack/cloudhv/spike/s5-cpu.sh snapshot "$RUNNER_TEMP/s5.tar.gz"
+          sudo chmod a+r "$RUNNER_TEMP/s5.tar.gz"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cloudhv-spike-s5-${{ github.run_id }}
+          path: ${{ runner.temp }}/s5.tar.gz
+          if-no-files-found: error
+
+  s5-restore:
+    name: S5 restore on another runner
+    needs: s5-snapshot
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: enable KVM for this runner
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+      - name: install the build tools for the guest
+        run: sudo apt-get update -q && sudo apt-get install -y -q build-essential cpio
+      - name: setup (download, verify, build the guest)
+        run: bash hack/cloudhv/spike/setup.sh
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: cloudhv-spike-s5-${{ github.run_id }}
+          path: ${{ runner.temp }}/s5
+      - name: restore and compare
+        run: |
+          sudo env "SPIKE_DIR=$SPIKE_DIR" bash hack/cloudhv/spike/s5-cpu.sh restore "$RUNNER_TEMP/s5/s5.tar.gz" | tee "$RUNNER_TEMP/s5.txt"
+          {
+            echo "## S5"
+            echo '```'
+            cat "$RUNNER_TEMP/s5.txt"
+            echo '```'
+          } >>"$GITHUB_STEP_SUMMARY"
