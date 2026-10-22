@@ -162,6 +162,57 @@ func TestScanTokenSize(t *testing.T) {
 	}
 }
 
+// TestScanEmptyFile checks that an empty file is never a grant. A writer
+// creates or truncates a file before it writes the token, and a scan in
+// between must not deliver an empty token or remove the grant.
+func TestScanEmptyFile(t *testing.T) {
+	// The rewrite differs in size, because a coarse clock can give both
+	// writes the same modification time.
+	tokA := mint(t, "uid-a")
+	tokB := tokA + "\n"
+	added := func(tok string) []home.GrantEvent {
+		return []home.GrantEvent{{Kind: home.GrantAdded, Token: []byte(tok)}}
+	}
+	type step struct {
+		body string // a.jwt holds this when the scan runs
+		want []home.GrantEvent
+	}
+	cases := []struct {
+		name  string
+		steps []step
+	}{
+		{name: "a new file is delivered once its token is written",
+			steps: []step{{body: ""}, {body: tokA, want: added(tokA)}}},
+		{name: "a grant emptied for a rewrite is not removed",
+			steps: []step{{body: tokA, want: added(tokA)}, {body: ""}, {body: tokB, want: added(tokB)}}},
+		{name: "a file left empty is never a grant",
+			steps: []step{{body: ""}, {body: ""}}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			seen := map[string]fileState{}
+			for i, st := range c.steps {
+				if err := os.WriteFile(filepath.Join(dir, "a.jwt"), []byte(st.body), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				ch := make(chan home.GrantEvent, 16)
+				scan(context.Background(), dir, seen, ch)
+				close(ch)
+				var got []home.GrantEvent
+				for ev := range ch {
+					got = append(got, ev)
+				}
+				if !slices.EqualFunc(got, st.want, func(a, b home.GrantEvent) bool {
+					return a.Kind == b.Kind && a.UID == b.UID && bytes.Equal(a.Token, b.Token)
+				}) {
+					t.Fatalf("scan %d: events %+v, want %+v", i, got, st.want)
+				}
+			}
+		})
+	}
+}
+
 // TestScanStopsWithContext checks that a scan blocked on a full lane
 // returns once the context ends, for additions and removals alike.
 func TestScanStopsWithContext(t *testing.T) {
