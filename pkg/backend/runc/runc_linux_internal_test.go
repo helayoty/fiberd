@@ -226,15 +226,17 @@ func templateMountOf(t *testing.T, cfg ociConfig) string {
 // TestBundleConfig checks the spec runc runs the zygote from: its
 // namespaces, mappings, mounts, read-only and masked paths, the process
 // as root in its namespace logging under /host, and the template bind
-// when the grant has a staged copy. What Command makes around it (the
+// when the grant has a staged copy, and the device channel in the
+// environment when the grant has devices. What Command makes around it (the
 // rootfs copy, the run directory, the log's owner) is tests/integration/runc
 // TestCommandPreparesTheBundle.
 func TestBundleConfig(t *testing.T) {
 	cases := []struct {
-		name   string
-		cgPath string
-		staged string
-		check  func(t *testing.T, l *launcher, spec backend.WarmSpec, cfg ociConfig)
+		name    string
+		cgPath  string
+		staged  string
+		devices []string
+		check   func(t *testing.T, l *launcher, spec backend.WarmSpec, cfg ociConfig)
 	}{
 		{name: "namespaces, mappings, mounts, read-only and masked paths",
 			check: func(t *testing.T, l *launcher, spec backend.WarmSpec, cfg ociConfig) {
@@ -323,11 +325,20 @@ func TestBundleConfig(t *testing.T) {
 					t.Errorf("mounts = %v, want the staged copy bound as the fifth", cfg.Mounts)
 				}
 			}},
+		// On main the runc zygote never got the device channel, so an
+		// engine under runc had no device to open.
+		{name: "the device channel reaches the zygote's environment", devices: []string{"/dev/nvidia0", "/dev/nvidia1"},
+			check: func(t *testing.T, _ *launcher, _ backend.WarmSpec, cfg ociConfig) {
+				if want := []string{"PATH=/usr/bin:/bin", nestedUsernsEnv, rebindEnv, "FIBERD_DEVICES=/dev/nvidia0,/dev/nvidia1"}; !reflect.DeepEqual(cfg.Process.Env, want) {
+					t.Errorf("env = %v, want %v", cfg.Process.Env, want)
+				}
+			}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			l, _ := newLauncher(t, nil)
 			spec := warmSpec(t, "g1")
+			spec.Devices = tc.devices
 			cfg := l.bundleConfig(spec, []string{"/bin/zygote", "-x"}, l.rootfs(spec), tc.cgPath, tc.staged, testPool.Range("g1"))
 			tc.check(t, l, spec, configOf(t, cfg))
 		})
