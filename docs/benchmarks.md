@@ -2,7 +2,7 @@
 
 This page is the canonical source for fiberd performance measurements. It separates benchmark results from conformance and acceptance tests, and it records enough context to explain what each number measures.
 
-The head-to-head comparison below and the incarnation record A/B after it are the latest runs. The runs after them are historical results that were not rerun. Results from different runs should not be combined because the harness, concurrency, backend, and environment change the outcome.
+The head-to-head comparison below and the incarnation record A/B after it are the latest runs. The runs after them are historical results that were not rerun. Run D, Run E and the overcommit acceptance are the exceptions. They were measured again, together with their baselines without fiberd. Results from different runs should not be combined because the harness, concurrency, backend, and environment change the outcome.
 
 ![One uncached activation, with nested measurement spans: runtime call to ready sits inside the activator's Clone RPC, which sits inside the client's HTTP request and response. Verification and ledger work precede activation; audit and commit precede the Clone result; workload connection and execution follow.](./images/benchmark-methodology.svg)
 
@@ -217,74 +217,59 @@ A separate GitHub-hosted `ubuntu-24.04` KVM run reported 39 ms for CREATE and 13
 
 ## Run D: Slurm acceptance
 
-This is an integration duration and pressure observation rather than a backend microbenchmark.
+This is a pressure observation rather than a backend microbenchmark. The storm runs once with fiberd, then once per baseline without fiberd, each in a job of the same size.
 
-**Environment**
-
-- Docker Desktop on an Apple Silicon Mac.
-- The repository's one-node Slurm-in-Docker environment.
-
-**Command**
+- **Run.** [examples 39740368235](https://github.com/helayoty/fiberd/actions/runs/39740368235/job/119695857341), 2026-10-22, commit ba6c1a1, merged as 3eec46d. GitHub ubuntu-24.04 runner, image 20261012.601, kernel 6.17.0-1022-azure, amd64. The runner's CPU and memory were not recorded.
+- **Environment.** The repository's one-node Slurm-in-Docker image, with cgroup v2, swap closed for jobs, and criu 4.2.1.
+- **Method.** One job per side, each `--mem=384M --cpus-per-task=8`, one after another on the same node. The proc backend and refzygote with a 64 MiB heap, under a 160 MiB grant ceiling. Eight instances grow by 2 MiB every 250 ms toward 320 MiB in all. One run.
 
 ```bash
 make conform-slurm
 ```
 
-The recorded run completed conformance cases C1 to C10 in 13 seconds. During the overcommit phase, the first park occurred at 13 seconds with memory PSI near 50 percent, and the job reported no OOM kill.
+| Side | OOM kills | Instances alive, of 8 | Parked | First park | First kill | Killed before growth | Parent killed | Job state |
+| --- | ---: | ---: | ---: | --- | --- | ---: | --- | --- |
+| fiberd | 0 | 8 | 8 | 5.5 s | none | 0 | n/a | cancelled by the script |
+| Without fiberd, shared | 1 | 8 | 0 | none | 5 s | 0 | yes | OUT_OF_MEMORY |
+| Without fiberd, separate | 5 | 3 | 0 | none | before growth | 3 | n/a | OUT_OF_MEMORY |
 
-After the fiberd storm job, the script runs the storm's two baselines without fiberd from [Overcommit acceptance](#overcommit-acceptance). Each layout is its own `sbatch` job with the storm job's allocation (`--mem=384M --cpus-per-task=8`). Its plain processes run in a child cgroup of the job step. Each job prints its `storm summary:` line with `job_state` and `job_state_from` appended. The state comes from `sacct` when the cluster has accounting storage, and from `scontrol` otherwise. The baselines only measure, and the run passes or fails on the fiberd job alone. The CI conform-slurm job copies the summary lines to its run's summary page. The recorded run predates the baselines, and no baseline result is recorded yet.
+The fiberd job passed C1 to C10 and the storm. The first park occurred at 5.5 seconds with memory PSI near 20 percent, and the job reported no OOM kill. The grant peaked at 175 MiB against its 160 MiB ceiling.
+
+Without fiberd, the shared layout's one OOM kill took the parent, the process that holds the template's heap. All 8 instances lived. Each had already copied the pages it dirtied, so the parent held the only copy of the originals. In the separate layout, 3 instances died before growth began, since eight 64 MiB heaps do not fit in 384 MiB. Growth killed 2 more.
+
+The job state came from `scontrol`, since the cluster has no accounting storage. The baselines only measure, and the run passes or fails on the fiberd job alone.
 
 The script and checks are in [`examples/slurm/conform.sh`](../examples/slurm/conform.sh).
 
 ## Run E: Substrate-shaped worker lifecycle
 
-This run exercised two in-process workers and copied checkpoint files between
-them without an object store.
+Two in-process workers move an actor between them, copying checkpoint files with no object store. In the same run, the same counter starts as a plain process on the other worker's side, without fiberd.
 
-**Environment**
-
-- The repository's Linux development container on the Apple Silicon
-  development machine used for Run A.
-- The exact host model, Docker version, kernel version and date were not
-  recorded with the result.
-
-**Command**
-
-```bash
-make integration-tests
-```
-
-| Operation | Historical result |
-| --- | ---: |
-| Run the golden actor, including template warm | 183 ms |
-| Checkpoint and export | 175 ms |
-| Import, claim, resume, and readiness probe on the other worker | 414 ms |
-| Files copied | 8.6 MB, comprising an 8 MB parent and a 0.5 MB delta after rounding |
-
-The measured path is implemented by
-[`TestActorLifecycleAcrossWorkers`](../examples/substrate/tests/lifecycle_linux_test.go).
-It demonstrates the example's mapping to fiberd and does not include object
-storage or a Substrate control plane.
-
-The test now also measures a baseline without fiberd. After the golden export
-on worker A, it starts bench/compare's counter as a plain process with an 8 MiB
-heap on worker B's side. It times that start to the first 200 on `/readyz`,
-polled every 50 ms as the example polls a restored actor. Then it reads
-`/count`, which must be 0, because a new process starts empty. This time is a
-lower bound, since every real platform adds to a process start. It also leaves
-out rebuilding the lost state. The fiberd timing in the table is measured as
-before.
-
-Every move logs one `move:` line. It records the side, backend, actor, source
-and target worker, time to ready, the count, and whether the state was kept or
-lost. Go shows these lines only in verbose mode.
+- **Run.** 2026-10-22, commit 3eec46d, one run.
+- **Environment.** Apple M3 Mac (Mac15,3) with 16 GiB of memory. Docker Desktop 4.57.0 running the repository's Linux development container, whose CPU and memory limits were not recorded. Linux 6.12.54-linuxkit on arm64, glibc 2.43, gVisor release-20260817.0.
+- **Method.** Readiness is the first 200 on `/readyz`, polled every 50 ms with a 2 s timeout, on both sides. The plain process is bench/compare's counter with `--plain --heap-mb 8`. It does the same init as the template, an 8 MiB heap touched page by page and the same CPU work.
 
 ```bash
 make linux-shell
 cd examples/substrate && go test -tags integration -v -run TestActorLifecycleAcrossWorkers ./tests/
 ```
 
-No baseline result is recorded yet.
+| Operation | gVisor | proc |
+| --- | ---: | ---: |
+| Run the golden actor on A, including the template warm | 522 ms | 68 ms |
+| Checkpoint and export on A | 79 ms | 100 ms |
+| x1 on B from the golden snapshot, count 0, including B's first template warm | 461 ms | 115 ms |
+| x1 back to A from its own snapshot, count 3 | 114 ms | 84 ms |
+| y1 on B from the golden snapshot, count 0 | 101 ms | 53 ms |
+| A plain process on B, without fiberd, count 0 | 52 ms | 53 ms |
+| Files copied for the golden snapshot | 9.0 MB | 8.7 MB |
+
+Each restore row times the import, the claim, the resume and readiness. Only the x1 move back to A carries state. The plain process starts empty. Its time is a lower bound that leaves out rebuilding the lost state, and it is close to one 50 ms poll.
+
+The measured path is implemented by
+[`TestActorLifecycleAcrossWorkers`](../examples/substrate/tests/lifecycle_linux_test.go).
+It demonstrates the example's mapping to fiberd and does not include object
+storage or a Substrate control plane. Each move logs one `move:` line, shown with `-v`.
 
 ## Run F: end-to-end Clone over gRPC
 
@@ -346,7 +331,19 @@ The stage columns are each stage's own p50, so they do not add up to the round t
 
 The baselines grow by the same step each round, toward the same total demand. Their processes run in one child cgroup under the same container limit, and nothing parks them. So only the kernel's OOM killer acts. The baselines only measure. Their OOM kills are expected, and the fiberd phase alone decides the exit status. `make overcommit-baseline` runs the two baselines alone.
 
-Every phase ends with one `storm summary:` line. It records the side and layout, the instance count, the total demand, the OOM kills, the survivors, the parked count, the first park and first kill from the start of growth, and the kills before growth began. It also says whether the shared layout's parent was killed, since that kill shows in no worker, and names the kernel. The CI overcommit job copies these lines to its run's summary page. No baseline result is recorded yet.
+Every phase ends with one `storm summary:` line, which the CI overcommit job copies to its run's summary page.
+
+- **Run.** [conformance 39740368225](https://github.com/helayoty/fiberd/actions/runs/39740368225/job/119695857510), 2026-10-22, commit ba6c1a1, merged as 3eec46d. GitHub ubuntu-24.04 runner, image 20261012.601, kernel 6.17.0-1022-azure, amd64. The runner's CPU and memory were not recorded. One run.
+
+| Side | OOM kills | Instances alive, of 8 | Parked | First park | First kill | Killed before growth | Parent killed |
+| --- | ---: | ---: | ---: | --- | --- | ---: | --- |
+| fiberd | 0 | 8 | 8 | 8 s | none | 0 | n/a |
+| Without fiberd, shared | 1 | 8 | 0 | none | 12.5 s | 0 | yes |
+| Without fiberd, separate | 5 | 3 | 0 | none | before growth | 4 | n/a |
+
+With fiberd, the first park came at 8 seconds with memory PSI near 45 percent. The grant peaked at 179 MiB against its 160 MiB ceiling, and the container's OOM counter did not move.
+
+Without fiberd, the shared layout's one OOM kill took the parent, the process that holds the template's heap. All 8 instances lived. Each had already copied the pages it dirtied, so the parent held the only copy of the originals. In the separate layout, 4 instances died before growth began, since eight 64 MiB heaps do not fit in 384 MiB. Growth killed 1 more. The run before it, on commit d37e9e9, gave the same counts.
 
 The parameters and checks are in [`hack/test/overcommit.sh`](../hack/test/overcommit.sh).
 
