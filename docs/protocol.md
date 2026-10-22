@@ -47,7 +47,7 @@ Verification does not reject a token merely because `exp` is in the past. Lease 
 - `policy.isolation` is `UNTRUSTED` or `TRUSTED`, and unset means `UNTRUSTED`. An untrusted grant is admitted only by a home whose runtime isolates tenants from the host kernel (gVisor or Hyperlight). Any other home refuses it with `FailedPrecondition`.
 - `policy.endpoint_mode` is the endpoint mode, `DIRECT` or `HANDOFF`, and unset means `DIRECT`. A `DIRECT` fiber listens on its own endpoint. A `HANDOFF` fiber is reached over TLS through the home's [handoff](glossary.md#handoff) listener. A `HANDOFF` grant must be bound to a caller certificate, and an unbound one is refused with `Unauthenticated`. A home that does not hand off connections refuses the grant with `FailedPrecondition` at admission, as a needs-tier [miss](glossary.md#clone-misses).
 - `device_budget.bytes` and `device_budget.class` are the [device budget](glossary.md#device-budget) and the requested device class. The host enforces the bytes but does not compare the class with the [engine](glossary.md#engine).
-- `disk_budget_bytes` is the per-fiber workspace ceiling in bytes, for the [file calls](#files). Zero means the grant's fibers have no workspace. A home whose runtime gives fibers no workspace refuses a grant that sets it with `FailedPrecondition` at admission. No backend gives fibers a workspace yet, and Hyperlight never will.
+- `disk_budget_bytes` is the per-fiber workspace ceiling in bytes, for the [file calls](#files). Zero means the grant's fibers have no workspace. A home whose runtime gives fibers no workspace refuses a grant that sets it with `FailedPrecondition` at admission. Only proc gives fibers a workspace so far, and Hyperlight never will.
 
 ## Fibers service
 
