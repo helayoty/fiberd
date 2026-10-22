@@ -10,7 +10,8 @@ PKGS    := ./...
 # activation comparison benchmark (bench/compare) is one more.
 EXAMPLES := examples/kubernetes examples/slurm examples/knative examples/kata examples/substrate bench/compare
 
-# Hardening for every build of the zygote and refzygote. The flags are
+# Hardening for every build of the zygote, refzygote and the storm's
+# baseline workload (storm-grower). The flags are
 # defined here once. The Dockerfiles, hack/gvisor/rootfs.sh and the Go
 # tests that build refzygote mirror these lines, each saying so. The
 # library itself is Rust, and its archive takes rustc's hardening
@@ -59,10 +60,10 @@ CONFORM_DIR ?= $(BIN)
 endif
 
 .PHONY: all build test integration-tests vet lint proto proto-lint proto-check clean \
-        bench zygote zygote-core zygote-test zygote-c-test zygote-check fuzz fuzz-core conform-stub conform-signed conform-logs conform-proc conform-proc-python conform-gvisor conform-gvisor-python conform-runc conform-runc-python conform-hyperlight-fake conform-hyperlight \
+        bench zygote zygote-core zygote-test zygote-c-test zygote-check storm-grower storm-grower-test fuzz fuzz-core conform-stub conform-signed conform-logs conform-proc conform-proc-python conform-gvisor conform-gvisor-python conform-runc conform-runc-python conform-hyperlight-fake conform-hyperlight \
         python-build python-test python-dist python-proto python-proto-check \
         typescript-build typescript-skipped typescript-test typescript-proto typescript-proto-check \
-        hyperlight-helper linux-hyperlight-check linux-hyperlight-test overcommit kind-up kind-down kind-image conform-kind slurm-up slurm-down conform-slurm example-knative example-knative-kvm example-kata example-substrate \
+        hyperlight-helper linux-hyperlight-check linux-hyperlight-test overcommit overcommit-baseline kind-up kind-down kind-image conform-kind slurm-up slurm-down conform-slurm example-knative example-knative-kvm example-kata example-substrate \
         registry-start mobility linux-shell linux-check linux-gvisor-check linux-test linux-lint bench-e2e \
         compare-phase0 compare-phase1 compare-phase2 compare-phase3 compare-phase4 compare-down
 
@@ -170,7 +171,7 @@ slurm-up: ## build fiberd:slurm and start the one-node cluster container
 slurm-down: ## remove the Slurm container
 	examples/slurm/conform.sh down
 
-conform-slurm: ## C1-C10 + the overcommit storm against allocations in Slurm-in-Docker (needs docker, go)
+conform-slurm: ## C1-C10, the overcommit storm, and its baseline without fiberd in allocations of the same size, in Slurm-in-Docker (needs docker, go)
 	examples/slurm/conform.sh run
 
 ## The Knative example (examples/knative, its own module): scale-from-zero
@@ -197,9 +198,16 @@ example-knative-kvm: ## the same over the real Hyperlight helper (needs /dev/kvm
 	FIBERD_DEV_DOCKER_ARGS="--device /dev/kvm" hack/dev/run.sh env \
 	  CONFORM_HL_HELPER=/src/bin/hyperlight-helper CONFORM_HL_GUEST=/src/bin/hyperlight-guest examples/knative/run.sh
 
-overcommit: ## 2x overcommit storm under a 384 MiB container cap: park must fire before any OOM kill
-	hack/dev/run.sh sh -c 'go build -o bin/ ./cmd/grant-issuer ./hack/storm && go build -tags fiberd_testhooks -o bin/fiberd-testhooks ./cmd/fiberd && make -s zygote'
+# The storm's three phases share one 384 MiB container. The fiberd side
+# passes or fails the run. The two baselines without fiberd (hack/storm
+# -plain) only measure, and their OOM kills are expected.
+overcommit: ## 2x overcommit storm under a 384 MiB container cap: park must fire before any OOM kill. Then the same storm without fiberd (shared and separate), measured only
+	hack/dev/run.sh sh -c 'go build -o bin/ ./cmd/grant-issuer ./hack/storm && go build -tags fiberd_testhooks -o bin/fiberd-testhooks ./cmd/fiberd && make -s zygote storm-grower'
 	FIBERD_DEV_DOCKER_ARGS="--memory=384m --memory-swap=384m" hack/dev/run.sh env STORM_PREBUILT=1 hack/test/overcommit.sh
+
+overcommit-baseline: ## only the storm's baselines without fiberd, plain processes under the same 384 MiB cap (shared and separate), measured only
+	hack/dev/run.sh sh -c 'go build -o bin/ ./hack/storm && make -s storm-grower'
+	FIBERD_DEV_DOCKER_ARGS="--memory=384m --memory-swap=384m" hack/dev/run.sh env STORM_PREBUILT=1 STORM_PHASES="shared separate" hack/test/overcommit.sh
 
 ## OCI artifacts (zygote templates, parked deltas) through a local registry
 
@@ -276,6 +284,18 @@ zygote-c-test: zygote-core ## the reference zygote's own C unit test (the engine
 	@mkdir -p $(BIN)
 	$(CC) $(ZYGOTE_CFLAGS) $(ZYGOTE_LDFLAGS) -Wall -Wextra -pthread -o $(BIN)/refzygote-test sdk/c/template/test/engine_test.c $(CORE_LIB)
 	$(BIN)/refzygote-test
+
+## The storm's baseline workload (hack/storm/grower), plain processes
+## that grow as the storm's fibers do. Linux only.
+
+storm-grower: ## build bin/storm-grower with the zygote's hardening flags
+	@mkdir -p $(BIN)
+	$(CC) $(ZYGOTE_CFLAGS) $(ZYGOTE_LDFLAGS) -Wall -Wextra -o $(BIN)/storm-grower hack/storm/grower/grower.c
+
+storm-grower-test: ## storm-grower's own C unit test (hack/storm/grower/grower_test.c), built as make storm-grower is, then run
+	@mkdir -p $(BIN)
+	$(CC) $(ZYGOTE_CFLAGS) $(ZYGOTE_LDFLAGS) -Wall -Wextra -o $(BIN)/storm-grower-test hack/storm/grower/grower_test.c
+	$(BIN)/storm-grower-test
 
 zygote-check: zygote-core ## check the core archive's undefined symbols against the allowlist and count its PAC instructions
 	$(CORE_DIR)/check.sh $(CORE_LIB)
