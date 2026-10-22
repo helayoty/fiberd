@@ -39,7 +39,10 @@
 // fiber's workspace, a detached copy of its root directory
 // (open_tree), which the child mounts at backend.WorkspaceMount in its
 // own namespace before anything else and the zygote closes once the
-// child is forked. A child that cannot get every confinement it asked for
+// child is forked. A plain fiber's namespace is a copy of the prepared
+// one (mntns). A launcher's fiber sends ws without mntns, and its zygote
+// gives the child a copy of the container's namespace at the birth.
+// A child that cannot get every confinement it asked for
 // ends before it runs, and the zygote sends ERROR. A zygote that could not
 // prepare its namespace sends ERROR ? with the reason instead of READY and
 // ends, and Warm fails with that reason. Every fiber of a plain proc grant
@@ -188,12 +191,57 @@ type Launcher interface {
 	Endpoint(spec backend.WarmSpec, hostPath string) string
 	// DumpExtra and RestoreExtra are criu arguments for a tree that
 	// lives inside the launcher's namespaces. Both are given the image
-	// directory. DumpExtra may record there what its restore will need
-	// to know. RestoreExtra may have to make what the restore needs on
-	// this home first (a root filesystem for a grant it never warmed,
-	// images the restored tree's own identity may read).
-	DumpExtra(spec backend.WarmSpec, dir string) ([]string, error)
-	RestoreExtra(spec backend.WarmSpec, dir string) ([]string, error)
+	// directory. DumpExtra is told which tree is dumped and may record
+	// beside the images what its restore will need to know. RestoreExtra
+	// may have to make what the restore needs on this home first (a root
+	// filesystem for a grant it never warmed, images the restored tree's
+	// own identity may read), and may hand the tree files of this home
+	// in place of ones its images name. The backend numbers those and
+	// closes them once criu has them.
+	DumpExtra(spec backend.WarmSpec, dir string, d Dumped) ([]string, error)
+	RestoreExtra(spec backend.WarmSpec, dir string) ([]string, []Inherit, error)
+}
+
+// Dumped is the tree a launcher's DumpExtra names criu arguments for.
+type Dumped struct {
+	// PID is the tree's root as the host sees it.
+	PID int
+	// Zygote is the warm instance's process as the host sees it, the
+	// container's init. It is PID itself when the zygote is dumped.
+	Zygote int
+	// Workspace says the tree is a fiber with a mount namespace of its
+	// own, a copy of the zygote's, that holds its workspace at
+	// backend.WorkspaceMount.
+	Workspace bool
+}
+
+// Inherit is a file criu hands the restored tree in place of the one
+// its images name by Key, as --inherit-fd fd[N]:<Key>.
+type Inherit struct {
+	Key  string
+	File *os.File
+}
+
+// inheritArgs numbers in from criu's descriptor 3 on, the order
+// criu.RestoreWith passes files in, and returns the arguments and the
+// files.
+func inheritArgs(in []Inherit) ([]string, []*os.File) {
+	var args []string
+	var files []*os.File
+	for i, f := range in {
+		args = append(args, "--inherit-fd", fmt.Sprintf("fd[%d]:%s", 3+i, f.Key))
+		files = append(files, f.File)
+	}
+	return args, files
+}
+
+// closeInherits closes what a launcher handed a restore.
+func closeInherits(in []Inherit) {
+	for _, f := range in {
+		if f.File != nil {
+			_ = f.File.Close()
+		}
+	}
 }
 
 var ErrZygote = errors.New("proc: zygote error")
@@ -691,9 +739,11 @@ func (b *Backend) Handoff() bool { return true }
 
 // HoldsWorkspaces implements backend.WorkspaceHolder. A plain fork
 // backend's fibers have a mount namespace of their own to hold the
-// workspace in. A launcher's live in its container's namespace, which
-// is the launcher's own stage (#33).
-func (b *Backend) HoldsWorkspaces() bool { return b.opt.Launcher == nil }
+// workspace in, a copy of the zygote's prepared one. A launcher's fiber
+// with a workspace gets one too, a copy of its container's, which the
+// zygote makes at the birth. Its dump names every file the fiber still
+// holds through the container's mounts, which the launcher lists.
+func (b *Backend) HoldsWorkspaces() bool { return true }
 
 // workspaceMountPoint makes backend.WorkspaceMount on the host, the
 // directory every fiber's workspace is mounted over, once. It is mode 0
@@ -1128,7 +1178,7 @@ func (b *Backend) CheckpointWarm(ctx context.Context, warmID, dir string) error 
 		extra = []string{"--external", "unix[" + ino + "]"}
 	}
 	if b.opt.Launcher != nil {
-		more, err := b.opt.Launcher.DumpExtra(z.spec, dir)
+		more, err := b.opt.Launcher.DumpExtra(z.spec, dir, Dumped{PID: z.pid, Zygote: z.pid})
 		if err != nil {
 			return err
 		}
@@ -1442,14 +1492,16 @@ func (b *Backend) Clone(ctx context.Context, warmID string, spec backend.FiberSp
 	}
 	// The workspace rides as a detached tree between the cgroup's
 	// descriptor and the channel. The child mounts it in its own
-	// namespace, so only a fiber with one holds one.
+	// namespace, so only a fiber with one holds one. A launcher's fiber
+	// asks for ws without mntns, and its zygote gives the child a copy of
+	// the container's namespace for it, where the launcher made the
+	// mount point in the root filesystem copy.
 	wsFD := -1
 	if spec.Workspace != "" {
-		if !b.HoldsWorkspaces() {
-			return backend.Fiber{}, fmt.Errorf("%s: %s: this backend gives fibers no workspace", b.Name(), spec.Fence)
-		}
-		if err := b.opt.mountPoint(); err != nil {
-			return backend.Fiber{}, err
+		if b.opt.Launcher == nil {
+			if err := b.opt.mountPoint(); err != nil {
+				return backend.Fiber{}, err
+			}
 		}
 		var err error
 		if wsFD, err = b.opt.openTree(spec.Workspace); err != nil {
@@ -1579,7 +1631,7 @@ func (b *Backend) Park(ctx context.Context, fiberID string, spec backend.ParkSpe
 		return fmt.Errorf("proc: fiber %q: its zygote is gone, cannot name its container's mounts", fiberID)
 	case b.opt.Launcher != nil:
 		var err error
-		if extra, err = b.opt.Launcher.DumpExtra(z.spec, spec.Dir); err != nil {
+		if extra, err = b.opt.Launcher.DumpExtra(z.spec, spec.Dir, Dumped{PID: pid, Zygote: z.pid, Workspace: f.workspace}); err != nil {
 			return err
 		}
 	case b.opt.Launcher == nil:
@@ -1587,9 +1639,9 @@ func (b *Backend) Park(ctx context.Context, fiberID string, spec backend.ParkSpe
 		if extra, err = mountExtra(pid, f.runDir, spec.Dir); err != nil {
 			return fmt.Errorf("proc: mounts of %s: %w", fiberID, err)
 		}
-		if f.workspace {
-			extra = append(extra, "--external", "mnt["+backend.WorkspaceMount+"]:"+workspaceKey)
-		}
+	}
+	if f.workspace {
+		extra = append(extra, "--external", "mnt["+backend.WorkspaceMount+"]:"+workspaceKey)
 	}
 	if f.handoff {
 		// The channel's peer is the host's end, outside the dumped tree.
@@ -1779,26 +1831,26 @@ func awaitRecord(ctx context.Context, fd int, want byte, fields ...string) error
 	}
 }
 
-// handoffInherit returns the criu arguments and files that restore a
-// handoff checkpoint in dir with ch as its new channel. Every other
-// checkpoint takes neither, and ch must then be nil.
-func handoffInherit(dir string, ch *os.File) ([]string, []*os.File, error) {
+// handoffInherit returns what restores a handoff checkpoint in dir with
+// ch as its new channel. Every other checkpoint takes nothing, and ch
+// must then be nil.
+func handoffInherit(dir string, ch *os.File) ([]Inherit, error) {
 	b, err := os.ReadFile(filepath.Join(dir, handoffFile))
 	switch {
 	case errors.Is(err, os.ErrNotExist) && ch == nil:
-		return nil, nil, nil
+		return nil, nil
 	case errors.Is(err, os.ErrNotExist):
-		return nil, nil, fmt.Errorf("proc: checkpoint %s has no handoff channel to replace", dir)
+		return nil, fmt.Errorf("proc: checkpoint %s has no handoff channel to replace", dir)
 	case err != nil:
-		return nil, nil, err
+		return nil, err
 	case ch == nil:
-		return nil, nil, fmt.Errorf("proc: checkpoint %s serves handoff and needs a channel", dir)
+		return nil, fmt.Errorf("proc: checkpoint %s serves handoff and needs a channel", dir)
 	}
 	var rec handoffRecord
 	if err := json.Unmarshal(b, &rec); err != nil || rec.Inode == "" {
-		return nil, nil, fmt.Errorf("proc: %s in %s: malformed", handoffFile, dir)
+		return nil, fmt.Errorf("proc: %s in %s: malformed", handoffFile, dir)
 	}
-	return []string{"--inherit-fd", "fd[3]:socket:[" + rec.Inode + "]"}, []*os.File{ch}, nil
+	return []Inherit{{Key: "socket:[" + rec.Inode + "]", File: ch}}, nil
 }
 
 // sendResumed writes inc on the channel of the restored tree pid, by
@@ -1888,14 +1940,15 @@ func (b *Backend) Resume(ctx context.Context, spec backend.ResumeSpec) (backend.
 		defer cancel()
 	}
 	var extra []string
+	// held are the files a launcher hands the restored tree, numbered
+	// after a handoff channel's and closed once criu has them.
+	var held []Inherit
+	defer func() { closeInherits(held) }()
 	runDir := ""
 	// gone tells the launcher the tree it prepared for never came up, or
 	// has exited.
 	gone := func() {}
 	var wspec backend.WarmSpec
-	if spec.Workspace != "" && !b.HoldsWorkspaces() {
-		return backend.Fiber{}, fmt.Errorf("%s: %s: this backend gives fibers no workspace", b.Name(), spec.Fence)
-	}
 	if b.opt.Launcher != nil {
 		// The tree was dumped inside a container of this grant; it is
 		// restored with that container's root and mounts.
@@ -1905,10 +1958,15 @@ func (b *Backend) Resume(ctx context.Context, spec backend.ResumeSpec) (backend.
 		}
 		var err error
 		wspec = backend.WarmSpec{GrantUID: spec.WarmID, WorkDir: workDir}
-		if extra, err = b.opt.Launcher.RestoreExtra(wspec, spec.Dir); err != nil {
+		if extra, held, err = b.opt.Launcher.RestoreExtra(wspec, spec.Dir); err != nil {
 			return backend.Fiber{}, err
 		}
 		gone = func() { b.opt.Launcher.RestoredGone(wspec) }
+		if spec.Workspace != "" {
+			// The fiber's own namespace held its workspace under the
+			// fixed key, which criu maps to the resuming fiber's root.
+			extra = append(extra, "--external", "mnt["+workspaceKey+"]:"+filepath.Clean(spec.Workspace))
+		}
 	} else {
 		var err error
 		if extra, err = criu.RestoreMounts(spec.Dir, b.opt.RootBind); err != nil {
@@ -1986,12 +2044,15 @@ func (b *Backend) Resume(ctx context.Context, spec backend.ResumeSpec) (backend.
 			_ = hostEnd.Close()
 		}
 	}
-	inherit, files, err := handoffInherit(spec.Dir, fiberEnd)
+	channel, err := handoffInherit(spec.Dir, fiberEnd)
 	if err != nil {
 		closeHost()
 		gone()
 		return backend.Fiber{}, err
 	}
+	// The handoff channel is criu's descriptor 3 when there is one, and
+	// the launcher's files follow it.
+	inherit, files := inheritArgs(append(channel, held...))
 	res, err := b.criu.RestoreWith(rctx, spec.Dir, spec.CgroupFD, append(extra, inherit...), files)
 	if err != nil {
 		closeHost()
