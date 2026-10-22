@@ -18,7 +18,7 @@ use core::ptr;
 
 use crate::child::{CAPABILITY_U32S_3, CAPABILITY_VERSION_3, CapData, CapHeader, prctl};
 use crate::ctl::{self, Line, STRERROR_MAX};
-use crate::mounts::{self, F_DROP, F_FOREIGN, F_HIDE, F_RO, F_RUNDIR};
+use crate::mounts::{self, F_CGROUP, F_DROP, F_FOREIGN, F_HIDE, F_RO, F_RUNDIR};
 use crate::procfiles::{self, MountLine, RootId, Unread, stream_mounts};
 use crate::sys::{self, Errno};
 use crate::zygote::{Refused, Zygote, c_str, env_set, set_cstr};
@@ -158,6 +158,33 @@ pub fn lock_sys() -> c_int {
     // Covered, as runc and Docker mask it.
     // SAFETY: a static NUL-ended path.
     if unsafe { mounts::cover_empty(c"/sys/firmware".as_ptr()) } < 0 {
+        rc = -1;
+    }
+    rc
+}
+
+/// lock_cgroups makes every cgroup and cgroup2 mount read-only in the
+/// zygote's namespace, wherever it is mounted, by file system type
+/// (mounts::cgroup_fs). lock_sys matches paths under /sys, so a cgroup
+/// mount anywhere else would stay writable, and a euid-0 fiber could
+/// write cgroup.procs and leave its leaf, out from under its budget and
+/// the device program. Once per grant, like lock_sys, since the
+/// namespace is private and no mount arrives after this. Every mount is
+/// tried, and -1 when any was missed or the table could not be read.
+pub fn lock_cgroups() -> c_int {
+    let mut rc = 0;
+    if each_mount(|buf, m| {
+        if mounts::cgroup_fs(buf, m) {
+            let point = buf.as_ptr().wrapping_add(m.point.off).cast();
+            // SAFETY: the mount point is NUL-ended in buf, which is live.
+            if unsafe { mounts::lock_cgroup_mount(point) } < 0 {
+                rc = -1;
+            }
+        }
+        false
+    })
+    .is_err()
+    {
         rc = -1;
     }
     rc
@@ -616,6 +643,11 @@ impl Zygote<'_> {
         if failed & F_RO != 0 {
             return Refused::Text(c"the zygote could not make /sys read-only in its namespace");
         }
+        if failed & F_CGROUP != 0 {
+            return Refused::Text(
+                c"the zygote could not make a cgroup mount read-only in its namespace",
+            );
+        }
         if failed & F_DROP != 0 {
             return Refused::Text(c"the zygote could not unmount a DROP path");
         }
@@ -693,6 +725,9 @@ impl Zygote<'_> {
         }
         if lock_sys() < 0 {
             failed |= F_RO;
+        }
+        if lock_cgroups() < 0 {
+            failed |= F_CGROUP;
         }
         if mounts::drop_paths_now(self.t.drop.get(..self.st.ndrop).unwrap_or(&[])) < 0 {
             failed |= F_DROP;
