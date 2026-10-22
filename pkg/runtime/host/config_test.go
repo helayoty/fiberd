@@ -77,6 +77,22 @@ func TestConfigDerivations(t *testing.T) {
 			cfg:   Config{TemplateCache: "/var/lib/fiberd/templates/", RunDir: "/var/lib/fiberd/templates"},
 			grant: sized, grantPids: 5 * fiberPidsMax, quota: 4 * 4 * 32 << 20, ceiling: 160 << 20,
 			wantErr: "inside TemplateCache"},
+		// Workspaces are fibers' trees, each seen by its own fiber alone
+		// through its mount, so the directory holding them all is hidden
+		// like the deltas, after them and before the private dir.
+		{name: "the workspace dir is hidden without being listed, once, after the delta dir",
+			cfg: Config{DeltaDir: "/var/lib/fiberd/deltas", WorkspaceDir: "/var/lib/fiberd/workspaces/", PrivateDir: "/var/lib/fiberd/private", RunDir: "/run/fiberd",
+				FiberHide: []string{"/var/lib/fiberd/workspaces", "/srv/grants"}},
+			grant: sized, grantPids: 5 * fiberPidsMax, quota: 4 * 4 * 32 << 20, ceiling: 160 << 20,
+			hide: []string{token, "/var/lib/fiberd/deltas", "/var/lib/fiberd/workspaces", "/var/lib/fiberd/private", "/srv/grants"}},
+		{name: "a workspace dir holding the run dir is an error",
+			cfg:   Config{WorkspaceDir: "/var/lib/fiberd/workspaces", RunDir: "/var/lib/fiberd/workspaces/run"},
+			grant: sized, grantPids: 5 * fiberPidsMax, quota: 4 * 4 * 32 << 20, ceiling: 160 << 20,
+			wantErr: "inside WorkspaceDir /var/lib/fiberd/workspaces"},
+		{name: "a workspace dir that is the run dir is an error",
+			cfg:   Config{WorkspaceDir: "/var/lib/fiberd/workspaces/", RunDir: "/var/lib/fiberd/workspaces"},
+			grant: sized, grantPids: 5 * fiberPidsMax, quota: 4 * 4 * 32 << 20, ceiling: 160 << 20,
+			wantErr: "inside WorkspaceDir"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -126,7 +126,16 @@ type FiberSpec struct {
 	// host passes over its channel instead of Endpoint. nil for every
 	// other fiber. Only a Handoffer is given one.
 	Identity *Identity
+	// Workspace is the fiber's workspace root on the host, a directory
+	// fiberd owns and the fiber will own every name under, which the
+	// backend mounts at WorkspaceMount in the fiber. "" gives the fiber
+	// no workspace. Only a WorkspaceHolder is given one.
+	Workspace string
 }
+
+// WorkspaceMount is where a fiber sees its workspace, fixed for every
+// fiber and every backend that holds workspaces.
+const WorkspaceMount = "/workspace"
 
 // Fiber is a running fiber.
 type Fiber struct {
@@ -166,6 +175,16 @@ type ParkSpec struct {
 	// that fiber says it has stopped. nil for every other fiber, which
 	// says so on a pair of its own that the backend borrows an end of.
 	Channel *os.File
+	// Capture, when set, runs after the checkpoint while the fiber is
+	// stopped, before it is ended or runs on, so what it records matches
+	// the images exactly. The host captures the fiber's workspace with
+	// it. A Capture that fails fails the park, and the fiber runs on as
+	// after any other failed park.
+	Capture func() error
+	// CgroupFD is an open fd of the fiber's leaf, which a backend that
+	// stops the tree for a Capture continues or ends process by
+	// process. -1 when the host has none.
+	CgroupFD int
 }
 
 // ResumeSpec brings a checkpoint back as a new fiber.
@@ -193,6 +212,11 @@ type ResumeSpec struct {
 	// Fence, Generation and Session, on its channel, and waits for the
 	// fiber's ack, which says it has taken the record and serves again.
 	Handoff bool
+	// Workspace is the resumed fiber's workspace root on the host,
+	// filled from the park's capture, which the backend mounts at
+	// WorkspaceMount where the parked fiber had its own. "" when the
+	// parked fiber had none.
+	Workspace string
 }
 
 // EndpointSchemer is implemented by backends that can serve fibers on
@@ -291,9 +315,11 @@ type Isolator interface {
 }
 
 // WorkspaceHolder is implemented by backends that give each fiber a
-// private workspace at /workspace. Only these serve a grant with a disk
-// budget. A backend that does not implement it has none. Hyperlight
-// never will, since its guest has no file system.
+// private workspace at WorkspaceMount (FiberSpec.Workspace), capture it
+// at park under ParkSpec.Capture and mount it again at resume
+// (ResumeSpec.Workspace). Only these serve a grant with a disk budget. A
+// backend that does not implement it has none. Hyperlight never will,
+// since its guest has no file system.
 type WorkspaceHolder interface {
 	HoldsWorkspaces() bool
 }

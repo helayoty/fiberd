@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"go.uber.org/goleak"
+	"golang.org/x/sys/unix"
 
 	"github.com/helayoty/fiberd/pkg/backend"
 	"github.com/helayoty/fiberd/pkg/sys/criu"
@@ -585,19 +586,29 @@ type fakes struct {
 	// borrowed is every descriptor borrow handed the backend, so a test
 	// can check each was let go.
 	borrowed []int
-	// signals is every pid the backend signalled, and reply is what the
-	// fiber does at the signal, run in the backend's call.
+	// signals is every pid the backend signalled, sigs the signal each
+	// got, and reply is what the fiber does at the park's signal, run in
+	// the backend's call.
 	signals   []int
+	sigs      []syscall.Signal
 	reply     func(pid int)
 	signalErr error
+	// trees is every workspace root the backend asked a detached copy
+	// of, and mountPoints how often it made the mount point.
+	trees       []string
+	mountPoints int
 }
 
-// signal is Options.Signal: it records the park's signal and plays the
-// fiber's reply to it.
-func (f *fakes) signal(pid int, _ syscall.Signal) error {
+// signal is Options.Signal: it records the signal and, for the park's
+// SIGUSR1, plays the fiber's reply to it.
+func (f *fakes) signal(pid int, sig syscall.Signal) error {
 	f.mu.Lock()
 	f.signals = append(f.signals, pid)
+	f.sigs = append(f.sigs, sig)
 	reply, err := f.reply, f.signalErr
+	if sig != syscall.SIGUSR1 {
+		reply = nil
+	}
 	f.mu.Unlock()
 	if err != nil {
 		return err
@@ -613,6 +624,47 @@ func (f *fakes) signalled() []int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]int(nil), f.signals...)
+}
+
+// signalsSent is every signal the backend sent so far, as "pid:name".
+func (f *fakes) signalsSent() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	names := map[syscall.Signal]string{syscall.SIGUSR1: "USR1", syscall.SIGKILL: "KILL", syscall.SIGCONT: "CONT"}
+	var out []string
+	for i, pid := range f.signals {
+		name, ok := names[f.sigs[i]]
+		if !ok {
+			name = strconv.Itoa(int(f.sigs[i]))
+		}
+		out = append(out, strconv.Itoa(pid)+":"+name)
+	}
+	return out
+}
+
+// openTree is Options.openTree: it records the root and opens it as a
+// path, standing in for the detached copy open_tree would make.
+func (f *fakes) openTree(dir string) (int, error) {
+	f.mu.Lock()
+	f.trees = append(f.trees, dir)
+	f.mu.Unlock()
+	return unix.Open(dir, unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+}
+
+// mountPoint is Options.mountPoint: it counts.
+func (f *fakes) mountPoint() error {
+	f.mu.Lock()
+	f.mountPoints++
+	f.mu.Unlock()
+	return nil
+}
+
+// treesOpened is every workspace root the backend asked a copy of, and
+// how often the mount point was made.
+func (f *fakes) treesOpened() ([]string, int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.trees...), f.mountPoints
 }
 
 // say writes one message on fd, as the fiber writes its word on its
@@ -807,6 +859,7 @@ func queued(fd int) bool {
 func (f *fakes) open(t *testing.T, o Options) *Backend {
 	t.Helper()
 	o.spawn, o.procRoot, o.Commander, o.Borrow, o.Signal = f.spawn.spawn, f.proc, f.criu, f.borrow, f.signal
+	o.openTree, o.mountPoint = f.openTree, f.mountPoint
 	if o.RootBind == "" {
 		o.RootBind = filepath.Join(t.TempDir(), "root")
 	}

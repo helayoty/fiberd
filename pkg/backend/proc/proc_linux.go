@@ -12,7 +12,7 @@
 //	host   -> zygote HIDE <dir> | DROP <path> | RUNDIR <parent> <own>   (any number)
 //	host   -> zygote PREPARE mntns|none                                 (ends the setup)
 //	zygote -> host   READY
-//	host   -> zygote CLONE <fence> <endpoint> <deadline_ms> <payload-hex|-> <session-hex|-> [opt,opt...]   + SCM_RIGHTS cgroup fd, channel
+//	host   -> zygote CLONE <fence> <endpoint> <deadline_ms> <payload-hex|-> <session-hex|-> [opt,opt...]   + SCM_RIGHTS cgroup fd, workspace tree, channel
 //	zygote -> host   CLONED <fence> <pid>  |  ERROR <fence> <text>
 //	zygote -> host   EXITED <pid> exit:<n>|signal:<name>
 //
@@ -31,11 +31,15 @@
 // its zygote is started without the variable and sent PREPARE none and
 // nothing else.
 // The session is hex so a name may hold any character, and "-" for an
-// anonymous fiber. CLONE options are any of pidns, mntns and nocaps,
+// anonymous fiber. CLONE options are any of pidns, mntns, nocaps and ws,
 // comma-separated. With none the field is empty and the line ends in a
 // space. The last descriptor on the line is the fiber's channel, which
 // the host queued the fiber's incarnation record on before the line
-// (backend.Incarnation). A child that cannot get every confinement it asked for
+// (backend.Incarnation). With ws the descriptor before it is the
+// fiber's workspace, a detached copy of its root directory
+// (open_tree), which the child mounts at backend.WorkspaceMount in its
+// own namespace before anything else and the zygote closes once the
+// child is forked. A child that cannot get every confinement it asked for
 // ends before it runs, and the zygote sends ERROR. A zygote that could not
 // prepare its namespace sends ERROR ? with the reason instead of READY and
 // ends, and Warm fails with that reason. Every fiber of a plain proc grant
@@ -115,6 +119,14 @@ type Options struct {
 	// procRoot is where the host reads /proc. "" is /proc, and a test
 	// points it at a directory of its own.
 	procRoot string
+	// openTree makes the detached copy of a workspace root that the
+	// CLONE line carries (openWorkspace). Nil is open_tree(2), which
+	// needs CAP_SYS_ADMIN, and a test sets one that opens the directory
+	// plainly.
+	openTree func(dir string) (int, error)
+	// mountPoint makes backend.WorkspaceMount on the host
+	// (workspaceMountPoint). Nil is the real thing, which needs root.
+	mountPoint func() error
 }
 
 // process is a started zygote command, what the backend needs of an
@@ -518,8 +530,9 @@ type zygote struct {
 // the fiber from it when CLONED arrives (see cloned), so what the fiber
 // needs beyond the zygote's line is here.
 type pending struct {
-	ch      chan cloneResult // buffered 1, written once by whoever takes the entry
-	handoff bool
+	ch        chan cloneResult // buffered 1, written once by whoever takes the entry
+	handoff   bool
+	workspace bool
 }
 
 type cloneResult struct {
@@ -555,7 +568,19 @@ type fiber struct {
 	// grant's. It is "" for a launcher's fiber or a restore without the
 	// record.
 	runDir string
+	// workspace says the fiber's mount namespace holds its workspace at
+	// backend.WorkspaceMount, which every park names external and every
+	// resume binds the resuming fiber's root to.
+	workspace bool
 }
+
+// workspaceKey names the workspace mount to criu, at dump
+// (--external mnt[/workspace]:ws) and at restore (--external
+// mnt[ws]:<root>). The bind is always named and never left to criu's
+// autodetection, which would record the host path it came from, and on
+// a home whose workspace directory is a tmpfs would write the
+// workspace's bytes into the memory images.
+const workspaceKey = "ws"
 
 // channelFD is where libfiberzygote keeps a fiber's channel
 // (FZ_CHANNEL_FD). Every fiber reads its records off it. A handoff
@@ -625,6 +650,12 @@ func NewBackend(o Options) *Backend {
 	if o.Signal == nil {
 		o.Signal = syscall.Kill
 	}
+	if o.openTree == nil {
+		o.openTree = openWorkspace
+	}
+	if o.mountPoint == nil {
+		o.mountPoint = workspaceMountPoint
+	}
 	b := &Backend{opt: o, criu: criu.Options{Bin: o.CRIU, Wrap: o.CRIUWrap, Commander: o.Commander}, tier: core.TierWarm, defaultRoot: defaultRoot,
 		zygotes: map[string]*zygote{}, fibers: map[string]*fiber{}, byPID: map[pidKey]*fiber{},
 		exits: make(chan backend.Exit, 1024)}
@@ -657,6 +688,67 @@ func (b *Backend) EndpointSchemes() []string { return []string{"unix", "tcp"} }
 // Handoff implements backend.Handoffer. libfiberzygote keeps a handoff
 // fiber's channel at a fixed descriptor, and criu treats it as external.
 func (b *Backend) Handoff() bool { return true }
+
+// HoldsWorkspaces implements backend.WorkspaceHolder. A plain fork
+// backend's fibers have a mount namespace of their own to hold the
+// workspace in. A launcher's live in its container's namespace, which
+// is the launcher's own stage (#33).
+func (b *Backend) HoldsWorkspaces() bool { return b.opt.Launcher == nil }
+
+// workspaceMountPoint makes backend.WorkspaceMount on the host, the
+// directory every fiber's workspace is mounted over, once. It is mode 0
+// and root's, so a fiber without a workspace, which runs as fiberd's uid
+// with no capability, cannot write in it. A directory already there is
+// kept when it is root's and no link, and set to mode 0.
+func workspaceMountPoint() error {
+	mountPointMu.Lock()
+	defer mountPointMu.Unlock()
+	if mountPointMade {
+		return nil
+	}
+	dir := backend.WorkspaceMount
+	if err := os.Mkdir(dir, 0); err != nil && !errors.Is(err, fs.ErrExist) {
+		return fmt.Errorf("proc: workspace mount point %s: %w", dir, err)
+	}
+	fi, err := os.Lstat(dir)
+	if err != nil {
+		return fmt.Errorf("proc: workspace mount point %s: %w", dir, err)
+	}
+	st, _ := fi.Sys().(*syscall.Stat_t)
+	switch {
+	case fi.Mode()&fs.ModeSymlink != 0:
+		return fmt.Errorf("proc: workspace mount point %s is a link", dir)
+	case !fi.IsDir():
+		return fmt.Errorf("proc: workspace mount point %s is not a directory", dir)
+	case st != nil && st.Uid != 0:
+		return fmt.Errorf("proc: workspace mount point %s is owned by uid %d, not root", dir, st.Uid)
+	}
+	if fi.Mode().Perm() != 0 {
+		if err := os.Chmod(dir, 0); err != nil {
+			return fmt.Errorf("proc: workspace mount point %s: %w", dir, err)
+		}
+	}
+	mountPointMade = true
+	return nil
+}
+
+var (
+	mountPointMu   sync.Mutex
+	mountPointMade bool
+)
+
+// openWorkspace makes a detached copy of the workspace root at dir, a
+// bind in a mount namespace of its own that the CLONE line carries and
+// the child moves to backend.WorkspaceMount. Every component above the
+// root is fiberd's, so the path is safe to resolve. The copy is not
+// recursive, since nothing is mounted under a workspace.
+func openWorkspace(dir string) (int, error) {
+	fd, err := unix.OpenTree(unix.AT_FDCWD, dir, unix.OPEN_TREE_CLONE|unix.OPEN_TREE_CLOEXEC)
+	if err != nil {
+		return -1, fmt.Errorf("proc: open_tree %s: %w", dir, err)
+	}
+	return fd, nil
+}
 
 // clonePair makes the channel of a fiber forked from z. Without a
 // launcher the fibers share the host's network namespace and any pair
@@ -1048,7 +1140,7 @@ func (b *Backend) CheckpointWarm(ctx context.Context, warmID, dir string) error 
 		}
 		extra = append(extra, mounts...)
 	}
-	return b.criu.DumpWith(ctx, z.pid, dir, true, extra)
+	return b.criu.DumpWith(ctx, z.pid, dir, criu.LeaveRunning, extra)
 }
 
 // mountExtra is the criu dump arguments for the mount namespace of pid,
@@ -1232,7 +1324,7 @@ func (b *Backend) cloned(z *zygote, fence string, res cloneResult) {
 	if !ok {
 		return // Clone gave up, and the zygote kills the child at its deadline
 	}
-	f := &fiber{id: fence, pid: res.pid, zpid: res.pid, warmID: z.id, handoff: p.handoff}
+	f := &fiber{id: fence, pid: res.pid, zpid: res.pid, warmID: z.id, handoff: p.handoff, workspace: p.workspace}
 	if b.opt.Launcher != nil {
 		f.pid = 0
 	}
@@ -1348,6 +1440,27 @@ func (b *Backend) Clone(ctx context.Context, warmID string, spec backend.FiberSp
 	if b.opt.Launcher == nil {
 		opts = append(opts, "mntns", "nocaps")
 	}
+	// The workspace rides as a detached tree between the cgroup's
+	// descriptor and the channel. The child mounts it in its own
+	// namespace, so only a fiber with one holds one.
+	wsFD := -1
+	if spec.Workspace != "" {
+		if !b.HoldsWorkspaces() {
+			return backend.Fiber{}, fmt.Errorf("%s: %s: this backend gives fibers no workspace", b.Name(), spec.Fence)
+		}
+		if err := b.opt.mountPoint(); err != nil {
+			return backend.Fiber{}, err
+		}
+		var err error
+		if wsFD, err = b.opt.openTree(spec.Workspace); err != nil {
+			return backend.Fiber{}, fmt.Errorf("%s: %s: %w", b.Name(), spec.Fence, err)
+		}
+		// The zygote holds its own copy until the child is forked, and
+		// the child its own until it is mounted. This one is sent and
+		// let go.
+		defer func() { _ = syscall.Close(wsFD) }()
+		opts = append(opts, "ws")
+	}
 	opt := strings.Join(opts, ",")
 	endpoint := b.fiberEndpoint(z, spec.Endpoint)
 	// The fiber's record waits on its channel for it to be born. A fork
@@ -1364,14 +1477,17 @@ func (b *Backend) Clone(ctx context.Context, warmID string, spec backend.FiberSp
 	msg := fmt.Sprintf("CLONE %s %s %d %s %s %s\n", spec.Fence, endpoint, deadline, payload, session, opt)
 	reply := make(chan cloneResult, 1)
 	z.pmu.Lock()
-	z.pend[spec.Fence] = &pending{ch: reply, handoff: spec.Identity != nil}
+	z.pend[spec.Fence] = &pending{ch: reply, handoff: spec.Identity != nil, workspace: wsFD >= 0}
 	z.pmu.Unlock()
 	abandon := func() { b.abandon(z, spec.Fence, reply) }
 	// The channel is the last descriptor, after the cgroup's when the
-	// host has one.
+	// host has one and the workspace tree when the fiber has one.
 	var fds []int
 	if spec.CgroupFD >= 0 {
 		fds = append(fds, spec.CgroupFD)
+	}
+	if wsFD >= 0 {
+		fds = append(fds, wsFD)
 	}
 	fds = append(fds, fiberEnd)
 	if _, _, err := z.ctl.WriteMsgUnix([]byte(msg), syscall.UnixRights(fds...), nil); err != nil {
@@ -1430,6 +1546,10 @@ func (b *Backend) abandon(z *zygote, fence string, reply chan cloneResult) {
 // Park asks the fiber to stop serving and dumps its tree with criu once
 // it has said so. With Sync the tree keeps running (--leave-running),
 // serving nothing, and the host ends it once the images are durable.
+// With a Capture the tree is left stopped instead (--leave-stopped),
+// the capture runs against it, and only then is it ended, or continued
+// for a sync park or a failed capture. A fiber with a workspace has its
+// bind named external, by the fixed key, at every dump.
 func (b *Backend) Park(ctx context.Context, fiberID string, spec backend.ParkSpec) error {
 	if b.tier < core.TierCheckpoint {
 		return fmt.Errorf("proc: park needs %s (criu unavailable)", core.TierCheckpoint)
@@ -1467,6 +1587,9 @@ func (b *Backend) Park(ctx context.Context, fiberID string, spec backend.ParkSpe
 		if extra, err = mountExtra(pid, f.runDir, spec.Dir); err != nil {
 			return fmt.Errorf("proc: mounts of %s: %w", fiberID, err)
 		}
+		if f.workspace {
+			extra = append(extra, "--external", "mnt["+backend.WorkspaceMount+"]:"+workspaceKey)
+		}
 	}
 	if f.handoff {
 		// The channel's peer is the host's end, outside the dumped tree.
@@ -1489,12 +1612,33 @@ func (b *Backend) Park(ctx context.Context, fiberID string, spec backend.ParkSpe
 	if err := b.quiesce(ctx, pid, round, spec); err != nil {
 		return fmt.Errorf("%s: park %s: %w", b.Name(), fiberID, err)
 	}
-	err := b.criu.DumpWith(ctx, pid, spec.Dir, spec.Sync, extra)
+	after := criu.Kill
+	switch {
+	case spec.Capture != nil:
+		after = criu.LeaveStopped
+	case spec.Sync:
+		after = criu.LeaveRunning
+	}
+	err := b.criu.DumpWith(ctx, pid, spec.Dir, after, extra)
 	// A host connection the fiber closed at the signal is gone from the
 	// kernel moments later.
 	for end := time.Now().Add(parkQuiesce); b.opt.Launcher != nil && hostSocket(err) && time.Now().Before(end); {
 		time.Sleep(20 * time.Millisecond)
-		err = b.criu.DumpWith(ctx, pid, spec.Dir, spec.Sync, extra)
+		err = b.criu.DumpWith(ctx, pid, spec.Dir, after, extra)
+	}
+	if err == nil && spec.Capture != nil {
+		// Every task is stopped, so what the capture records is what the
+		// images hold, to the byte. The tree then goes the way the dump
+		// would have taken it, or runs on when the capture failed.
+		switch err = spec.Capture(); {
+		case err != nil:
+			err = fmt.Errorf("%s: park %s: capture: %w", b.Name(), fiberID, err)
+			b.signalTree(pid, spec.CgroupFD, syscall.SIGCONT)
+		case spec.Sync:
+			b.signalTree(pid, spec.CgroupFD, syscall.SIGCONT)
+		default:
+			b.signalTree(pid, spec.CgroupFD, syscall.SIGKILL)
+		}
 	}
 	if err != nil {
 		// The fiber waits for its resume's record. It is told the park
@@ -1505,6 +1649,28 @@ func (b *Backend) Park(ctx context.Context, fiberID string, spec backend.ParkSpe
 		return fmt.Errorf("%s: park %s: a client from outside the container is still connected: %w", b.Name(), fiberID, err)
 	}
 	return err
+}
+
+// signalTree sends sig to every process of the fiber's leaf, read from
+// its cgroup when the park names one, else to pid alone. criu's
+// --leave-stopped stops every task of the tree, and SIGCONT to the root
+// alone would leave its children stopped.
+func (b *Backend) signalTree(pid, cgroupFD int, sig syscall.Signal) {
+	if cgroupFD >= 0 {
+		if procs, err := readAt(cgroupFD, "cgroup.procs"); err == nil {
+			sent := false
+			for _, p := range strings.Fields(string(procs)) {
+				if n, err := strconv.Atoi(p); err == nil && n > 0 {
+					_ = b.opt.Signal(n, sig)
+					sent = true
+				}
+			}
+			if sent {
+				return
+			}
+		}
+	}
+	_ = b.opt.Signal(pid, sig)
 }
 
 // quiesce tells the fiber pid the park's round, signals it and waits,
@@ -1727,6 +1893,9 @@ func (b *Backend) Resume(ctx context.Context, spec backend.ResumeSpec) (backend.
 	// has exited.
 	gone := func() {}
 	var wspec backend.WarmSpec
+	if spec.Workspace != "" && !b.HoldsWorkspaces() {
+		return backend.Fiber{}, fmt.Errorf("%s: %s: this backend gives fibers no workspace", b.Name(), spec.Fence)
+	}
 	if b.opt.Launcher != nil {
 		// The tree was dumped inside a container of this grant; it is
 		// restored with that container's root and mounts.
@@ -1757,6 +1926,19 @@ func (b *Backend) Resume(ctx context.Context, spec backend.ResumeSpec) (backend.
 				return backend.Fiber{}, err
 			}
 			extra = append(extra, more...)
+		}
+		if spec.Workspace != "" {
+			// The parked fiber's bind, named by the fixed key, lands on
+			// the resuming fiber's root. A dump that named the bind and
+			// a resume without one, or the other way round, are refused
+			// by criu, which maps every external mount by name.
+			if extra == nil {
+				return backend.Fiber{}, fmt.Errorf("proc: checkpoint %s has no mount namespace to hold a workspace", spec.Dir)
+			}
+			if err := b.opt.mountPoint(); err != nil {
+				return backend.Fiber{}, err
+			}
+			extra = append(extra, "--external", "mnt["+workspaceKey+"]:"+filepath.Clean(spec.Workspace))
 		}
 	}
 	// The resume's record: the new fence, the next generation, the
@@ -1844,7 +2026,7 @@ func (b *Backend) Resume(ctx context.Context, spec backend.ResumeSpec) (backend.
 		gone()
 		return backend.Fiber{}, fmt.Errorf("%s: %s: %w", b.Name(), spec.Fence, ack)
 	}
-	f := &fiber{id: spec.Fence, pid: res.PID, restored: res, warmID: spec.WarmID, handoff: spec.Handoff, runDir: runDir}
+	f := &fiber{id: spec.Fence, pid: res.PID, restored: res, warmID: spec.WarmID, handoff: spec.Handoff, runDir: runDir, workspace: spec.Workspace != ""}
 	b.mu.Lock()
 	b.fibers[f.id] = f
 	b.mu.Unlock()
@@ -1942,4 +2124,5 @@ var (
 	_ backend.SelfCheckpointer = (*Backend)(nil)
 	_ backend.DeltaCodec       = (*Backend)(nil)
 	_ backend.DeviceReporter   = (*Backend)(nil)
+	_ backend.WorkspaceHolder  = (*Backend)(nil)
 )

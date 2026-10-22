@@ -113,7 +113,7 @@ func TestCriuCheckAndDump(t *testing.T) {
 			}
 			var err error
 			if tc.dump {
-				err = o.DumpWith(ctx, 7, dir, true, []string{"--external", "unix[4242]"})
+				err = o.DumpWith(ctx, 7, dir, criu.LeaveRunning, []string{"--external", "unix[4242]"})
 			} else {
 				err = o.Available(ctx)
 			}

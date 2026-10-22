@@ -761,6 +761,65 @@ func (c *capture) file(dfd int, n, p string, hdr *tar.Header) error {
 	return nil
 }
 
+// Size walks the tree and reports its apparent bytes and entries, as
+// Capture would count them, without reading a file. A file with several
+// names counts once. FIFOs, sockets and devices count as entries and no
+// bytes. The walk is bounded by the entry ceiling, so a hostile tree
+// cannot keep fiberd walking.
+func (w *Workspace) Size() (bytes, entries int64, err error) {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	seen := map[inode]bool{}
+	ceiling := w.opts.Limits.entries()
+	var walk func(dfd int, rel string) error
+	walk = func(dfd int, rel string) error {
+		names, err := readNames(dfd)
+		if err != nil {
+			return err
+		}
+		for _, n := range names {
+			var st unix.Stat_t
+			if err := unix.Fstatat(dfd, n, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+				if errors.Is(err, unix.ENOENT) {
+					continue
+				}
+				return fmt.Errorf("stat %s: %w", path.Join(rel, n), err)
+			}
+			if entries >= ceiling {
+				return fmt.Errorf("%w: over %d", ErrEntries, ceiling)
+			}
+			entries++
+			switch st.Mode & unix.S_IFMT {
+			case unix.S_IFDIR:
+				sub, err := openBeneath(dfd, n, unix.O_RDONLY|unix.O_DIRECTORY)
+				if err != nil {
+					if errors.Is(err, fs.ErrNotExist) {
+						continue
+					}
+					return err
+				}
+				err = walk(sub, path.Join(rel, n))
+				_ = unix.Close(sub)
+				if err != nil {
+					return err
+				}
+			case unix.S_IFREG:
+				key := inode{st.Dev, st.Ino}
+				if st.Nlink > 1 && seen[key] {
+					continue
+				}
+				seen[key] = st.Nlink > 1
+				bytes += st.Size
+			}
+		}
+		return nil
+	}
+	if err := walk(w.root, ""); err != nil {
+		return 0, 0, err
+	}
+	return bytes, entries, nil
+}
+
 // readLink reads the target of the link n under dfd. A target longer
 // than MaxPathBytes is refused.
 func readLink(dfd int, n string) (string, error) {

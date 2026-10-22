@@ -205,7 +205,7 @@ func TestDumpWith(t *testing.T) {
 	cases := []struct {
 		name         string
 		pid          int
-		leaveRunning bool
+		after        criu.After
 		extra        []string
 		out          string
 		err          error
@@ -218,9 +218,12 @@ func TestDumpWith(t *testing.T) {
 		wantIs       error
 	}{
 		{name: "the common arguments", pid: 1234},
-		{name: "leave running and extra arguments", pid: 7, leaveRunning: true,
+		{name: "leave running and extra arguments", pid: 7, after: criu.LeaveRunning,
 			extra:    []string{"--external", "unix[4242]"},
 			wantTail: []string{"--leave-running", "--external", "unix[4242]"}},
+		{name: "leave stopped", pid: 7, after: criu.LeaveStopped,
+			extra:    []string{"--external", "mnt[/workspace]:ws"},
+			wantTail: []string{"--leave-stopped", "--external", "mnt[/workspace]:ws"}},
 		{name: "failure carries the output and the last eight log lines", pid: 7, log: 10,
 			out: "Error: dump failed\n", err: errors.New("exit status 1"),
 			wantErr: []string{"criu dump pid 7: exit status 1: Error: dump failed", "\n  l03\n", "\n  l10"}, wantNotErr: []string{"l02"}},
@@ -249,7 +252,7 @@ func TestDumpWith(t *testing.T) {
 			if tc.cancelled {
 				cancel()
 			}
-			err := criu.Options{Commander: fake}.DumpWith(ctx, tc.pid, dir, tc.leaveRunning, tc.extra)
+			err := criu.Options{Commander: fake}.DumpWith(ctx, tc.pid, dir, tc.after, tc.extra)
 			if tc.wantIs != nil && !errors.Is(err, tc.wantIs) {
 				t.Fatalf("DumpWith = %v, want %v", err, tc.wantIs)
 			}

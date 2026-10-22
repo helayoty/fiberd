@@ -911,6 +911,98 @@ static void probe(const char *name, char *out, size_t n) {
 
 static unsigned long long reply_delay;
 
+/* ---- the workspace, for the file-transfer tests ----------------------- */
+
+/* write_line writes text and a newline to path, made or truncated. */
+static void write_line(const char *args, char *out, size_t n) {
+    char path[256];
+    const char *sp = strchr(args, ' ');
+    if (!sp || (size_t)(sp - args) >= sizeof path) { snprintf(out, n, "err want <path> <text>\n"); return; }
+    memcpy(path, args, (size_t)(sp - args)); path[sp - args] = 0;
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    if (fd < 0) { errname(errno, out, n); return; }
+    size_t len = strlen(sp + 1);
+    int ok = write(fd, sp + 1, len) == (ssize_t)len && write(fd, "\n", 1) == 1;
+    int saved = errno;
+    close(fd);
+    if (ok) snprintf(out, n, "ok\n"); else errname(saved, out, n);
+}
+
+/* held_fd is a file the fiber keeps open across a park, so a resume
+ * must find it where the dump saw it. */
+static int held_fd = -1;
+
+static void hold_open(const char *path, char *out, size_t n) {
+    if (held_fd >= 0) close(held_fd);
+    held_fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+    if (held_fd < 0) errname(errno, out, n); else snprintf(out, n, "ok\n");
+}
+
+/* held_write appends text and a newline at the held file's offset. */
+static void held_write(const char *text, char *out, size_t n) {
+    if (held_fd < 0) { snprintf(out, n, "err nothing held\n"); return; }
+    size_t len = strlen(text);
+    if (write(held_fd, text, len) != (ssize_t)len || write(held_fd, "\n", 1) != 1) errname(errno, out, n);
+    else snprintf(out, n, "ok\n");
+}
+
+/* held_read writes the held file's first line from its start. */
+static void held_read(char *out, size_t n) {
+    if (held_fd < 0) { snprintf(out, n, "err nothing held\n"); return; }
+    char buf[200];
+    ssize_t got = pread(held_fd, buf, sizeof buf - 1, 0);
+    if (got < 0) { errname(errno, out, n); return; }
+    buf[got] = 0;
+    buf[strcspn(buf, "\n")] = 0;
+    snprintf(out, n, "%s\n", got == 0 ? "-" : buf);
+}
+
+/* scribble appends one numbered line after another to a file from a
+ * thread of its own, so a park races a write in flight. scribbled is
+ * how many lines went in, which the file must hold exactly after a
+ * resume: a capture that ran with the fiber running would hold more. */
+static pthread_t scribbler;
+static int scribbling;
+static volatile unsigned long scribbled;
+static int scribble_fd = -1;
+
+static void *scribble_thread(void *arg) {
+    (void)arg;
+    while (__atomic_load_n(&scribbling, __ATOMIC_ACQUIRE)) {
+        char line[32];
+        int len = snprintf(line, sizeof line, "%lu\n", scribbled + 1);
+        if (write(scribble_fd, line, (size_t)len) != len) break;
+        scribbled++;
+        usleep(200);
+    }
+    return NULL;
+}
+
+static void scribble(const char *path, char *out, size_t n) {
+    if (strcmp(path, "stop") == 0) {
+        if (!scribbling) { snprintf(out, n, "ok %lu\n", scribbled); return; }
+        __atomic_store_n(&scribbling, 0, __ATOMIC_RELEASE);
+        pthread_join(scribbler, NULL);
+        close(scribble_fd);
+        scribble_fd = -1;
+        snprintf(out, n, "ok %lu\n", scribbled);
+        return;
+    }
+    if (scribbling) { snprintf(out, n, "err already scribbling\n"); return; }
+    scribble_fd = open(path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+    if (scribble_fd < 0) { errname(errno, out, n); return; }
+    scribbled = 0;
+    __atomic_store_n(&scribbling, 1, __ATOMIC_RELEASE);
+    if (pthread_create(&scribbler, NULL, scribble_thread, NULL) != 0) {
+        scribbling = 0;
+        close(scribble_fd);
+        scribble_fd = -1;
+        errname(errno, out, n);
+        return;
+    }
+    snprintf(out, n, "ok\n");
+}
+
 static int serve_client(conn_t *c, const char *fence, unsigned long *counter) {
     char line[256];
     while (conn_line(c, line, sizeof line)) {
@@ -948,6 +1040,12 @@ static int serve_client(conn_t *c, const char *fence, unsigned long *counter) {
         }
         else if (strncmp(line, "status ", 7) == 0) status_field(line + 7, out, sizeof out);
         else if (strncmp(line, "read ", 5) == 0) first_line(line + 5, out, sizeof out);
+        else if (strncmp(line, "write ", 6) == 0) write_line(line + 6, out, sizeof out);
+        else if (strncmp(line, "hold ", 5) == 0) hold_open(line + 5, out, sizeof out);
+        else if (strncmp(line, "held write ", 11) == 0) held_write(line + 11, out, sizeof out);
+        else if (strcmp(line, "held read") == 0) held_read(out, sizeof out);
+        else if (strncmp(line, "scribble ", 9) == 0) scribble(line + 9, out, sizeof out);
+        else if (strcmp(line, "scribbled") == 0) snprintf(out, sizeof out, "%lu\n", scribbled);
         else if (strncmp(line, "wopen ", 6) == 0) wopen_errno(line + 6, out, sizeof out);
         else if (strncmp(line, "stat ", 5) == 0) stat_kind(line + 5, out, sizeof out);
         else if (strncmp(line, "connect ", 8) == 0) connect_errno(line + 8, out, sizeof out);

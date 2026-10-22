@@ -79,6 +79,10 @@ type Driver struct {
 	// SealCheck reports template memory the shared registry holds in the
 	// clear, after C11 moved a session. Nil skips that check.
 	SealCheck func(ctx context.Context) error
+	// Workspaces says the target's runtime gives fibers a workspace, so
+	// a grant with a disk budget is admitted and the file calls serve.
+	// False skips C12.
+	Workspaces bool
 	// WBudget is the w_budget_bytes C6 minds (default 1 MiB). A template
 	// with a runtime dirties more at birth (a CPython fiber about 2 MiB,
 	// from reference counts on the pages it touches), so its
@@ -122,6 +126,7 @@ func Run(t *testing.T, d Driver) {
 	t.Run("C9_EngineLoss", func(t *testing.T) { c.c9(t) })
 	t.Run("C10_ScopeRevocation", func(t *testing.T) { c.c10(t) })
 	t.Run("C11_SessionMobility", func(t *testing.T) { c.c11(t) })
+	t.Run("C12_Workspace", func(t *testing.T) { c.c12(t) })
 	if d.FiberWarm > 0 {
 		t.Run("Pool", func(t *testing.T) { c.pool(t) })
 	}

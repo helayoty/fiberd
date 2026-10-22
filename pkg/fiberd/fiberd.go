@@ -140,6 +140,7 @@ type Runtime struct {
 	Parity       string            // -parity
 	GrantCeiling uint64            // -grant-ceiling
 	FiberHide    []string          // -fiber-hide
+	WorkspaceDir string            // -workspace-dir
 	Gvisor       Gvisor
 	Runc         Runc
 	Hyperlight   Hyperlight
@@ -225,8 +226,9 @@ func (c *Config) Bind(fs *flag.FlagSet) {
 		func(v string) error { return host.ParseTemplateFlag(c.Runtime.Templates, v) })
 	fs.StringVar(&c.Runtime.Parity, "parity", "strict", "proc: how closely artifact images and other homes' deltas must match this host: strict, off, or kernel=exact|series|off,libc=exact|off (arch always)")
 	fs.Uint64Var(&c.Runtime.GrantCeiling, "grant-ceiling", 0, "proc: fixed block ceiling per grant in bytes (memory.high); 0 = fibers.max * w_budget + zygote + 25%")
-	fs.Func("fiber-hide", "proc: directory fibers must not see, besides the service-account token, <state>/private, <state>/deltas and -grants-dir (repeatable)",
+	fs.Func("fiber-hide", "proc: directory fibers must not see, besides the service-account token, <state>/private, <state>/deltas, -workspace-dir and -grants-dir (repeatable)",
 		func(v string) error { c.Runtime.FiberHide = append(c.Runtime.FiberHide, v); return nil })
+	fs.StringVar(&c.Runtime.WorkspaceDir, "workspace-dir", "", "proc: directory holding the workspace of every fiber whose grant has a disk budget, fiberd's alone and hidden from fibers, each mounted at /workspace in its own fiber (default <state>/workspaces). One holding <state>/run refuses to start")
 	fs.StringVar(&c.Runtime.Gvisor.Rootfs, "gvisor-rootfs", "", "gvisor: rootfs directory every sandbox runs in; -template commands are paths inside it")
 	fs.BoolVar(&c.Runtime.Gvisor.TemplatesOnDisk, "gvisor-templates-on-disk", false, "gvisor: keep template images under <state>/gvisor/templates on disk. By default fiberd mounts a tmpfs there, so a warm template's memory never reaches a disk, at the cost of about one template image of RAM per warm grant")
 	fs.StringVar(&c.Runtime.Runc.Rootfs, "runc-rootfs", "", "runc: rootfs directory the zygote container runs in; -template commands are paths inside it")
@@ -539,7 +541,7 @@ func RunContext(ctx context.Context, c *Config, newHome HomeFactory) error {
 			return err
 		}
 		pc := host.Config{Backend: be, Templates: c.Runtime.Templates, CgroupRoot: h.CgroupRoot(), RunDir: filepath.Join(c.Node.StateDir, "run"),
-			DeltaDir: filepath.Join(c.Node.StateDir, "deltas"), Endpoints: eps,
+			DeltaDir: filepath.Join(c.Node.StateDir, "deltas"), WorkspaceDir: c.WorkspaceDir(), Endpoints: eps,
 			Registry: c.Registry.Templates, TemplateCache: filepath.Join(c.Node.StateDir, "templates"),
 			DeltaRegistry: c.Registry.Deltas, HomeID: c.Node.ID, Parity: parity,
 			FiberHide: c.Runtime.FiberHide, PrivateDir: c.PrivateDir()}

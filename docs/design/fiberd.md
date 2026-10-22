@@ -53,6 +53,9 @@ The state layout keeps what fibers must never read under one hidden directory.
     <digest>/images/    author images opened for a warm, mode 0700, pruned
                         once no warm instance or delta names them
   deltas/               parked deltas, also hidden from fibers
+  workspaces/           running fibers' workspaces (-workspace-dir), mode
+                        0700, hidden from fibers, each mounted at /workspace
+                        in its own fiber alone, swept at start
   run/                  fiber endpoints (unix sockets) and zygote logs, one
                         directory per grant, which fibers see
   runc/, gvisor/        backend state, with each grant's staged template copy

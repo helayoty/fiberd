@@ -43,7 +43,7 @@ fn check_clone(line: Vec<u8>) {
             "a byte changed"
         );
     }
-    assert!((0..=4).contains(&r.rc), "refusal {}", r.rc);
+    assert!((0..=5).contains(&r.rc), "refusal {}", r.rc);
     // SAFETY: each pointer is null or a token NUL-ended in line.
     let fence = unsafe { cbytes(r.out.fence) };
     let endpoint = unsafe { cbytes(r.out.endpoint) };
@@ -63,6 +63,12 @@ fn check_clone(line: Vec<u8>) {
         1 => assert_eq!(r.out.deadline_ms, 0),
         2 => {
             assert!(fence.len() >= FENCE_MAX);
+            assert_eq!(r.out.deadline_ms, 0);
+        }
+        // An unknown option is refused once the fence fits, before the
+        // deadline is read.
+        5 => {
+            assert!(!fence.is_empty() && fence.len() < FENCE_MAX);
             assert_eq!(r.out.deadline_ms, 0);
         }
         _ => {

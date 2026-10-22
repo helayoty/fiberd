@@ -86,7 +86,7 @@ static unsigned parse_generation(const char *s) {
 /* ---- the CLONE line, from handle_clone at main 1617-1678 ---- */
 
 struct confine {
-    int pidns, mntns, nocaps;
+    int pidns, mntns, nocaps, ws;
 };
 
 /* The session named on the CLONE line, decoded, for the fiber's record. */
@@ -107,11 +107,12 @@ enum {
     C_CLONE_FENCE_LONG,   /* "ERROR %.*s fence too long (at most 127 characters)" */
     C_CLONE_SESSION_LONG, /* "ERROR %s session too long (at most 1023 bytes)" */
     C_CLONE_SESSION_NUL,  /* "ERROR %s session holds a NUL byte" */
+    C_CLONE_UNKNOWN_OPT,  /* "ERROR %s unknown CLONE option <opt>", once the fence fits */
 };
 
 struct c_clone {
     int reason;      /* one of C_CLONE_* */
-    int pidns, mntns, nocaps;
+    int pidns, mntns, nocaps, ws;
     int deadline_ms; /* atoi with the default 50, set once the fence fits, else 0 */
     struct c_field fence, endpoint, deadline, payload, session_hex;
     size_t slen;     /* the decoded session's bytes in session, the NUL check's view */
@@ -141,14 +142,18 @@ static void parse_clone(char *line, struct c_clone *out) {
     char *opts = strtok_r(NULL, " ", &save);
     struct confine cf = {0};
     char *osave = NULL;
+    int unknown = 0;
     for (char *o = opts ? strtok_r(opts, ",", &osave) : NULL; o; o = strtok_r(NULL, ",", &osave)) {
         if (strcmp(o, "pidns") == 0) cf.pidns = 1;
         else if (strcmp(o, "mntns") == 0) cf.mntns = 1;
         else if (strcmp(o, "nocaps") == 0) cf.nocaps = 1;
+        else if (strcmp(o, "ws") == 0) cf.ws = 1;
+        else unknown = 1;
     }
     out->pidns = cf.pidns;
     out->mntns = cf.mntns;
     out->nocaps = cf.nocaps;
+    out->ws = cf.ws;
     out->fence = field_of(start, fence);
     out->endpoint = field_of(start, endpoint);
     out->deadline = field_of(start, dl);
@@ -160,6 +165,10 @@ static void parse_clone(char *line, struct c_clone *out) {
     }
     if (strlen(fence) >= FENCE_MAX) {
         out->reason = C_CLONE_FENCE_LONG;
+        return;
+    }
+    if (unknown) {
+        out->reason = C_CLONE_UNKNOWN_OPT;
         return;
     }
     int deadline_ms = atoi(dl);

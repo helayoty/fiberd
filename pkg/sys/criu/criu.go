@@ -133,13 +133,30 @@ func parseVersion(out []byte) ([2]int, bool) {
 	return [2]int{}, false
 }
 
-// DumpWith checkpoints the tree rooted at pid into dir. With leaveRunning
-// the tree keeps running after the dump (the caller kills it once the
-// images are durable). Otherwise criu kills it as the dump completes.
-// extra holds more criu arguments, for example "--external",
-// "unix[<inode>]" to allow a socket whose peer lives outside the dumped
-// tree (the zygote's control channel at build time).
-func (o Options) DumpWith(ctx context.Context, pid int, dir string, leaveRunning bool, extra []string) error {
+// After says what becomes of the dumped tree once the images are
+// written.
+type After int
+
+const (
+	// Kill ends the tree as the dump completes.
+	Kill After = iota
+	// LeaveRunning lets the tree run on, and the caller ends it once the
+	// images are durable.
+	LeaveRunning
+	// LeaveStopped leaves every task of the tree stopped, so nothing it
+	// could write between the dump and what the caller records next is
+	// missed. The caller continues or kills it. A tree with a pid
+	// namespace of its own is continued task by task, since SIGCONT to
+	// its root reaches that process alone.
+	LeaveStopped
+)
+
+// DumpWith checkpoints the tree rooted at pid into dir, and after says
+// what becomes of the tree once the images are written. extra holds
+// more criu arguments, for example "--external", "unix[<inode>]" to
+// allow a socket whose peer lives outside the dumped tree (the zygote's
+// control channel at build time).
+func (o Options) DumpWith(ctx context.Context, pid int, dir string, after After, extra []string) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
@@ -147,8 +164,11 @@ func (o Options) DumpWith(ctx context.Context, pid int, dir string, leaveRunning
 		"-t", strconv.Itoa(pid), "-D", dir,
 		"--ext-unix-sk", "--manage-cgroups=ignore",
 		"-v2", "--log-file", "dump.log"}
-	if leaveRunning {
+	switch after {
+	case LeaveRunning:
 		args = append(args, "--leave-running")
+	case LeaveStopped:
+		args = append(args, "--leave-stopped")
 	}
 	args = append(args, extra...)
 	out, err := o.commander().Output(ctx, args)

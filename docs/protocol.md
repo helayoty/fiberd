@@ -47,7 +47,7 @@ Verification does not reject a token merely because `exp` is in the past. Lease 
 - `policy.isolation` is `UNTRUSTED` or `TRUSTED`, and unset means `UNTRUSTED`. An untrusted grant is admitted only by a home whose runtime isolates tenants from the host kernel (gVisor or Hyperlight). Any other home refuses it with `FailedPrecondition`.
 - `policy.endpoint_mode` is the endpoint mode, `DIRECT` or `HANDOFF`, and unset means `DIRECT`. A `DIRECT` fiber listens on its own endpoint. A `HANDOFF` fiber is reached over TLS through the home's [handoff](glossary.md#handoff) listener. A `HANDOFF` grant must be bound to a caller certificate, and an unbound one is refused with `Unauthenticated`. A home that does not hand off connections refuses the grant with `FailedPrecondition` at admission, as a needs-tier [miss](glossary.md#clone-misses).
 - `device_budget.bytes` and `device_budget.class` are the [device budget](glossary.md#device-budget) and the requested device class. The host enforces the bytes but does not compare the class with the [engine](glossary.md#engine).
-- `disk_budget_bytes` is the per-fiber workspace ceiling in bytes, for the [file calls](#files). Zero means the grant's fibers have no workspace. A home whose runtime gives fibers no workspace refuses a grant that sets it with `FailedPrecondition` at admission. No backend gives fibers a workspace yet, and Hyperlight never will.
+- `disk_budget_bytes` is the per-fiber workspace ceiling in bytes, for the [file calls](#files). Zero means the grant's fibers have no workspace. A home whose runtime gives fibers no workspace refuses a grant that sets it with `FailedPrecondition` at admission. Only proc gives fibers a workspace so far, and Hyperlight never will.
 
 ## Fibers service
 
@@ -134,7 +134,7 @@ Three RPCs move files into and out of a running fiber's workspace, which the fib
 
 They are authorized like Park, so an unknown fiber and another caller's fiber both answer `NotFound`. A fiber whose grant has no disk budget answers `FailedPrecondition` with a `NoWorkspace` detail. A header whose size is over the disk budget answers `ResourceExhausted` with no `Miss`, before any data is read.
 
-fiberd checks these calls but does not serve them yet. A call that passes every check answers `Unimplemented`.
+Past those checks the home's runtime serves the call on the fiber's workspace. A path with `..`, an absolute path, a NUL, one over 4096 bytes or 64 components, a name that is not a regular file, a body that does not match the declared size, and a sha256 that does not match answer `InvalidArgument`. A missing file or directory answers `NotFound`. A file that does not fit what is left of the disk budget, or a 65537th entry, answers `ResourceExhausted` with no `Miss`. Nothing of a refused upload appears. A parked session's files are not reachable until it is resumed. The stub runtime moves no files and answers `Unimplemented`.
 
 ## Admission completeness
 

@@ -123,6 +123,7 @@ pub fn rs_clone(line: &mut [u8]) -> RsClone {
         pidns: -1,
         mntns: -1,
         nocaps: -1,
+        ws: -1,
         session_len: usize::MAX,
     };
     // SAFETY: line is NUL-ended and ours, session has its length, out is

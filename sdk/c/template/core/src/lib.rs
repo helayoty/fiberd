@@ -41,11 +41,11 @@ pub(crate) fn serial() -> std::sync::MutexGuard<'static, ()> {
 
 /// The ABI the core is written for. The header's own number is read by
 /// build.rs, and the two must agree.
-pub const ABI_VERSION: u32 = 10;
+pub const ABI_VERSION: u32 = 11;
 
 const _: () = assert!(
     parse_decimal(env!("FZ_HEADER_ABI_VERSION")) == ABI_VERSION,
-    "libfiberzygote.h moved FZ_ABI_VERSION, the core is written for 10"
+    "libfiberzygote.h moved FZ_ABI_VERSION, the core is written for 11"
 );
 
 /// A non-negative decimal, as a const for the assert above.

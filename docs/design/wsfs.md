@@ -1,6 +1,6 @@
 # Design: wsfs
 
-This doc explains the file layer of a [fiber](../glossary.md#fiber)'s workspace, the tree a caller uploads into and downloads from. It is for readers of `pkg/runtime/host/wsfs` and anyone auditing what [fiberd](../glossary.md#fiberd) does as root in a tree a fiber controls. Read [runtime-host.md](runtime-host.md) first. Nothing in fiberd uses the package yet, and nothing mounts a workspace.
+This doc explains the file layer of a [fiber](../glossary.md#fiber)'s workspace, the tree a caller uploads into and downloads from. It is for readers of `pkg/runtime/host/wsfs` and anyone auditing what [fiberd](../glossary.md#fiberd) does as root in a tree a fiber controls. Read [runtime-host.md](runtime-host.md) first. The host runtime opens one workspace per fiber of a grant with a disk budget, serves the file calls on it, captures it at park and unpacks it at resume, and the proc backend mounts its root at `/workspace` in the fiber.
 
 ## Purpose
 

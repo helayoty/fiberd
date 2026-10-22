@@ -127,3 +127,28 @@ func TestEnsurePrivate(t *testing.T) {
 		})
 	}
 }
+
+// TestWorkspaceDir pins where workspaces live: -workspace-dir, else
+// workspaces/ under the state directory beside deltas/.
+func TestWorkspaceDir(t *testing.T) {
+	cases := []struct {
+		name  string
+		state string
+		flag  string
+		want  string
+	}{
+		{name: "the default sits beside the deltas", state: "/var/lib/fiberd", want: "/var/lib/fiberd/workspaces"},
+		{name: "another state directory", state: "/srv/fz", want: "/srv/fz/workspaces"},
+		{name: "the flag wins", state: "/var/lib/fiberd", flag: "/mnt/ws", want: "/mnt/ws"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var c Config
+			c.Node.StateDir = tc.state
+			c.Runtime.WorkspaceDir = tc.flag
+			if got := c.WorkspaceDir(); got != tc.want {
+				t.Fatalf("WorkspaceDir = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

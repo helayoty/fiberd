@@ -62,7 +62,10 @@ ENGINE_HOOK=()
 # proc and runc fibers share the host kernel, so they serve trusted grants only.
 ISOLATION=UNTRUSTED
 if [ "$RUNTIME" = proc ] || [ "$RUNTIME" = runc ]; then ISOLATION=TRUSTED; fi
+# proc gives each fiber a workspace, which C12 moves files through.
+WORKSPACES=()
 if [ "$RUNTIME" = proc ]; then
+  WORKSPACES=(-workspaces)
   TIER=${CONFORM_TIER:-FIBER_CHECKPOINT}   # what proc offers when criu check passes
   RUNTIME_FLAGS=(-runtime proc -template "default=${CONFORM_TEMPLATE:-$PWD/bin/refzygote --heap-mb 32 --device-mb 64}")
   if [ "$MOBILITY" = 1 ]; then
@@ -242,7 +245,7 @@ case "${1:-}" in
     start
     bin/grant-conform -test.v -target "$ADDR" -target-tier "$TIER" -node-id "$NODE" -isolation "$ISOLATION" -fiber-warm "$WARM" -w-budget "$W_BUDGET" "${mint[@]}" \
       -restart-cmd "$0 restart" -cp-health-cmd "$0 issuer-reachable \$1" -audit-file "$STATE/private/audit.jsonl" \
-      -scope-cmd "$0 scope-lost" ${ENGINE_HOOK[@]+"${ENGINE_HOOK[@]}"} ${MOB_FLAGS[@]+"${MOB_FLAGS[@]}"} "${@:2}"
+      -scope-cmd "$0 scope-lost" ${ENGINE_HOOK[@]+"${ENGINE_HOOK[@]}"} ${MOB_FLAGS[@]+"${MOB_FLAGS[@]}"} ${WORKSPACES[@]+"${WORKSPACES[@]}"} "${@:2}"
     if [ "$MOBILITY" = 1 ]; then
       grep -h 'published parent checkpoint\|claimed\|pulled parent' "$LOG" "$PEER_STATE.log" | sed 's/^/mobility: /' || true
     fi

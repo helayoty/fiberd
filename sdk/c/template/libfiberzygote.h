@@ -70,19 +70,27 @@
  *                     anonymous, at most 1023 bytes decoded with no NUL,
  *                     and the fiber finds it as FIBERD_SESSION. The
  *                     fiber's cgroup directory fd, when fiberd has one,
- *                     and then the fiber's channel ride in SCM_RIGHTS on
- *                     the same message. opts is a comma list of "pidns",
- *                     "mntns" and "nocaps". A child that cannot get what
+ *                     then with "ws" the fiber's workspace tree, and
+ *                     last the fiber's channel ride in SCM_RIGHTS on the
+ *                     same message. opts is a comma list of "pidns",
+ *                     "mntns", "nocaps" and "ws". ws needs mntns. The
+ *                     tree is a detached mount (open_tree with
+ *                     OPEN_TREE_CLONE) that the child moves to /workspace
+ *                     in its own namespace before anything else, and the
+ *                     zygote closes its copy once the child is forked. An
+ *                     option the library does not know is refused with
+ *                     ERROR, never skipped. A child that cannot get what
  *                     it asked for ends before it runs and the CLONE is
  *                     answered with ERROR, as is a CLONE without a
- *                     channel.
+ *                     channel, or with ws and no tree.
  *   zygote -> fiberd  CLONED <fence> <pid>
  *   zygote -> fiberd  ERROR <fence> <reason>
  *                     A child that ended before ready gets "died before
- *                     ready: exit:<code>". Codes 110-126 are the
+ *                     ready: exit:<code>". Codes 110-127 are the
  *                     library's own (confinement, the child's filter,
  *                     descriptors, the incarnation record, the cgroup
- *                     leaf), and the reason then says which.
+ *                     leaf, the workspace mount), and the reason then
+ *                     says which.
  *   zygote -> fiberd  EXITED <pid> exit:<code>|signal:<num>
  *
  * On every fiber's channel the first message, queued by fiberd before
@@ -131,7 +139,7 @@
 
 /* The ABI this header describes, which every binding checks at build
  * time. */
-#define FZ_ABI_VERSION 10
+#define FZ_ABI_VERSION 11
 
 #include <stddef.h>
 

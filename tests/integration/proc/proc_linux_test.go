@@ -58,6 +58,9 @@ func newHost(c host.Config) (core.Runtime, error) {
 	if c.TemplateCache == "" {
 		c.TemplateCache = filepath.Join(suiteDir, "templates")
 	}
+	if c.WorkspaceDir == "" {
+		c.WorkspaceDir = filepath.Join(suiteDir, "workspaces")
+	}
 	c.FiberHide = append(c.FiberHide, hiddenDir)
 	if c.Handoff == nil {
 		// Routes handoff fibers without listening. Tests hand them

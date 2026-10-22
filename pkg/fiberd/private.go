@@ -15,6 +15,15 @@ import (
 // where fibers and CRIU need them.
 func (c *Config) PrivateDir() string { return filepath.Join(c.Node.StateDir, "private") }
 
+// WorkspaceDir is where fibers' workspaces live, -workspace-dir or
+// <state>/workspaces.
+func (c *Config) WorkspaceDir() string {
+	if c.Runtime.WorkspaceDir != "" {
+		return c.Runtime.WorkspaceDir
+	}
+	return filepath.Join(c.Node.StateDir, "workspaces")
+}
+
 // ensurePrivate creates PrivateDir, or checks the one that is there.
 // -state is visible to fibers, so what sits at this name is checked
 // before anything is written through it. A symlink a fiber planted there
