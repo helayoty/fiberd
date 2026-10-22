@@ -8,9 +8,24 @@ import {
   type ServiceError,
 } from "@grpc/grpc-js";
 import { createSecureContext } from "node:tls";
-import { FibersClient, type CloneResponse, type Fence as WireFence } from "./generated/grant/v1/grant.js";
+import {
+  FibersClient,
+  type CloneResponse,
+  type Fence as WireFence,
+  type ListFilesResponse,
+} from "./generated/grant/v1/grant.js";
 import { classify } from "./errors.js";
 import { type CallerIdentity, Fence, Fiber } from "./fiber.js";
+import {
+  byteCount,
+  type Download,
+  type FileInfo,
+  fileInfoFrom,
+  openDownload,
+  Source,
+  upload,
+  uploadSize,
+} from "./files.js";
 import { type OperationOptions, validateDuration } from "./options.js";
 
 export type Token = string | (() => string | Promise<string>);
@@ -36,6 +51,20 @@ export interface ParkOptions extends CallOptions {
 
 export interface ReleaseOptions extends CallOptions {
   discard?: boolean;
+}
+
+export interface UploadOptions extends CallOptions {
+  /** The bytes to declare. A Uint8Array's size is its length, and an AsyncIterable needs it. */
+  size?: number | bigint;
+  /** The file's permission bits. Zero or omission means 0644. */
+  mode?: number;
+  /** fiberd checks the content against this SHA-256 before the file appears. */
+  sha256?: Uint8Array;
+}
+
+export interface DownloadOptions extends CallOptions {
+  /** Where to start reading, in bytes. */
+  offset?: number | bigint;
 }
 
 export interface Status {
@@ -145,6 +174,62 @@ export class Client {
       options.signal?.removeEventListener("abort", aborted);
       stream.cancel();
     }
+  }
+
+  /**
+   * Writes data to path in the fiber's workspace, relative to its
+   * /workspace, and resolves to what landed. data is a Uint8Array or an
+   * AsyncIterable of them, such as a Node.js stream, which needs size.
+   * The data goes in chunks of at most 1 MiB, and the file appears only
+   * once every byte arrived.
+   *
+   * A source that is short or long rejects with SizeMismatch, and fiberd
+   * never places the file. Other rejections are NotFound, NoWorkspace,
+   * QuotaExceeded, the source's own error, or the gRPC error for anything
+   * else. timeoutMs bounds the call.
+   */
+  async upload(
+    fiber: Fiber | string,
+    path: string,
+    data: Uint8Array | AsyncIterable<Uint8Array>,
+    options: UploadOptions = {},
+  ): Promise<FileInfo> {
+    const size = uploadSize(path, data, options.size);
+    const rpcOptions = rpcOptionsFor(options);
+    const header = {
+      fiberId: typeof fiber === "string" ? fiber : fiber.id,
+      path,
+      size,
+      mode: (options.mode ?? 0) & 0o777,
+      sha256: Buffer.from(options.sha256 ?? []),
+    };
+    return upload(this.api, header, new Source(data), options.metadata ?? new Metadata(), rpcOptions, options.signal);
+  }
+
+  /**
+   * Starts reading path from the fiber's workspace at offset, and resolves
+   * once its info arrived. So NotFound, for an unknown fiber or a missing
+   * file, and NoWorkspace reject here rather than on the first read.
+   * timeoutMs bounds the whole transfer.
+   */
+  async download(fiber: Fiber | string, path: string, options: DownloadOptions = {}): Promise<Download> {
+    const offset = byteCount(options.offset ?? 0, "offset");
+    const rpcOptions = rpcOptionsFor(options);
+    const stream = this.api.download({
+      fiberId: typeof fiber === "string" ? fiber : fiber.id,
+      path,
+      offset,
+    }, options.metadata ?? new Metadata(), rpcOptions);
+    return openDownload(stream, path, options.signal);
+  }
+
+  /** The entries of dir in the fiber's workspace, not recursive. An empty dir is the workspace itself. */
+  async listFiles(fiber: Fiber | string, dir = "", options: CallOptions = {}): Promise<FileInfo[]> {
+    const response = await unary<ListFilesResponse>((rpcOptions, done) => this.api.listFiles({
+      fiberId: typeof fiber === "string" ? fiber : fiber.id,
+      dir,
+    }, options.metadata ?? new Metadata(), rpcOptions, done), options);
+    return response.files.map(fileInfoFrom);
   }
 }
 
