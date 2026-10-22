@@ -10,7 +10,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -53,14 +56,54 @@ func background(t *testing.T, logPath, name string, args ...string) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
+		// SIGTERM first, so fiberd takes down what it mounted under its
+		// state, a bind of / among them. SIGKILL only if it hangs.
+		_ = cmd.Process.Signal(syscall.SIGTERM)
+		done := make(chan struct{})
+		go func() { _ = cmd.Wait(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			_ = cmd.Process.Kill()
+			<-done
+		}
 		if t.Failed() {
 			b, _ := os.ReadFile(logPath)
 			t.Logf("%s:\n%s", filepath.Base(logPath), b)
 		}
 		_ = logf.Close()
 	})
+}
+
+// removeState removes a fiberd state directory, but never through a
+// mount. fiberd binds / at <state>/private/root, and os.RemoveAll walks
+// into mounts, so it would delete the host's files through that bind.
+// What is still mounted under dir is detached first, deepest first. If
+// anything stays mounted, dir is left in place.
+func removeState(t *testing.T, dir string) {
+	t.Helper()
+	mounted := func() []string {
+		b, err := os.ReadFile("/proc/self/mountinfo")
+		if err != nil {
+			return []string{dir} // unknown, so treat it as mounted
+		}
+		var under []string
+		for _, l := range strings.Split(string(b), "\n") {
+			if f := strings.Fields(l); len(f) > 4 && (f[4] == dir || strings.HasPrefix(f[4], dir+"/")) {
+				under = append(under, f[4])
+			}
+		}
+		sort.Slice(under, func(i, j int) bool { return len(under[i]) > len(under[j]) })
+		return under
+	}
+	for _, p := range mounted() {
+		_ = syscall.Unmount(p, syscall.MNT_DETACH)
+	}
+	if left := mounted(); len(left) > 0 {
+		t.Logf("leaving %s in place, still mounted: %v", dir, left)
+		return
+	}
+	_ = os.RemoveAll(dir)
 }
 
 // waitFor polls ok for up to 30 s. A cold fiberd on a busy runner takes
@@ -101,13 +144,13 @@ func TestCounterParkResume(t *testing.T) {
 		"sdk/c/template/core/target/release/libfiberzygote_core.a")...)
 	mustRun(t, repoRoot, "go", "build", "-o", bin, "./cmd/fiberd", "./cmd/grant-issuer")
 
-	// Not t.TempDir: fiberd mounts under its state, and a mount left
-	// behind would fail the cleanup. Removal is best effort.
+	// Not t.TempDir: fiberd mounts under its state, so the removal must
+	// go through removeState.
 	state, err := os.MkdirTemp("", "counter-park")
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.RemoveAll(state) })
+	t.Cleanup(func() { removeState(t, state) })
 	key := filepath.Join(state, "issuer-key.json")
 	mustRun(t, repoRoot, filepath.Join(bin, "grant-issuer"), "keygen", "-alg", "EdDSA", "-out", key)
 	const issuerAddr, homeAddr, node = "127.0.0.1:18798", "127.0.0.1:18598", "counter-park"
