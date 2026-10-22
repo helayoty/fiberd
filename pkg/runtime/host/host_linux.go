@@ -1192,6 +1192,9 @@ func (r *Runtime) finish(f *fiber, reason, detail string) {
 	if f.channel != nil {
 		_ = f.channel.Close()
 	}
+	// The device slice goes with the fiber, however it ended. A park
+	// evicted once before its dump, and this catches a slice taken since.
+	r.evictDevice(f)
 	// The workspace goes with the fiber. A park captured it into the
 	// delta before the fiber ended, and an anonymous fiber's is nobody's
 	// to resume.
@@ -1209,6 +1212,18 @@ func (r *Runtime) finish(f *fiber, reason, detail string) {
 	close(f.done)
 	if !released {
 		r.exits <- core.FiberExit{FiberID: f.id, Reason: reason, Detail: detail}
+	}
+}
+
+// evictDevice asks the engine to drop the fiber's device slice. Only a
+// fiber with a device budget can hold one.
+func (r *Runtime) evictDevice(f *fiber) {
+	dr, ok := r.be.(backend.DeviceReporter)
+	if !ok || f.devMax == 0 {
+		return
+	}
+	if err := dr.EvictDevice(f.id); err != nil {
+		log.Printf("host: evict device slice of %s: %v", f.id, err)
 	}
 }
 
@@ -1609,11 +1624,7 @@ func (r *Runtime) Park(ctx context.Context, fiberID string, sync bool) (string, 
 	}
 	// Devices are renegotiated on resume: the engine drops the slice
 	// before the CPU side is checkpointed (the continuity contract).
-	if dr, ok := r.be.(backend.DeviceReporter); ok && f.devMax > 0 {
-		if err := dr.EvictDevice(f.id); err != nil {
-			log.Printf("host: evict device slice of %s: %v", f.id, err)
-		}
-	}
+	r.evictDevice(f)
 	// giveBack undoes a park whose fiber still runs, keeping the failed
 	// images and dump log aside for diagnosis.
 	giveBack := func(err error) (string, error) {

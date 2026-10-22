@@ -279,7 +279,8 @@ func TestPark(t *testing.T) {
 			return sb
 		}, grant: core.Grant{UID: "g1", TemplateDigest: "sha256:tmpl", WBudgetBytes: 64 * mib, DeviceBudget: core.DeviceBudget{Bytes: 100}},
 			check: func(t *testing.T, f *parkFixture, ref string) {
-				if got := f.be.(*sandboxBackend).evictedIDs(); strings.Join(got, ",") != "g1/1/1" {
+				// Once before the dump and once as the fiber ends.
+				if got := f.be.(*sandboxBackend).evictedIDs(); strings.Join(got, ",") != "g1/1/1,g1/1/1" {
 					t.Fatalf("evicted %v", got)
 				}
 				if !f.r.HasDelta(ref) {
