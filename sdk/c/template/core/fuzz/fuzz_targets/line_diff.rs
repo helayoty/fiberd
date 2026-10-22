@@ -31,6 +31,7 @@ struct CClone {
     pidns: c_int,
     mntns: c_int,
     nocaps: c_int,
+    ws: c_int,
     deadline_ms: c_int,
     fence: CField,
     endpoint: CField,
@@ -119,8 +120,8 @@ fn diff_clone(line: Vec<u8>) {
     }
     assert_eq!(c.deadline_ms, r.out.deadline_ms, "deadline_ms");
     assert_eq!(
-        (c.pidns, c.mntns, c.nocaps),
-        (r.out.pidns, r.out.mntns, r.out.nocaps),
+        (c.pidns, c.mntns, c.nocaps, c.ws),
+        (r.out.pidns, r.out.mntns, r.out.nocaps, r.out.ws),
         "options"
     );
     assert_eq!(c.slen, r.out.session_len, "session length");
