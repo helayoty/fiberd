@@ -16,9 +16,11 @@
     clippy::panic
 )]
 
-use core::ffi::{CStr, c_char, c_int, c_long, c_ulong, c_ulonglong, c_void};
+use core::ffi::{CStr, c_char, c_int, c_long, c_uint, c_ulong, c_ulonglong, c_void};
 use core::mem::{offset_of, size_of};
 use core::ptr;
+#[cfg(test)]
+use core::sync::atomic::AtomicU64;
 use core::sync::atomic::Ordering;
 
 use crate::abi::{FZ_CHANNEL_FD, FZ_CHANNEL_PEER_FD, OnFiber, RECORD_MAX, RecordStore};
@@ -86,7 +88,7 @@ pub const EX_FDS: c_int = 120;
 pub const EX_IDENTITY: c_int = 121;
 /// The child could not join its cgroup leaf after the legacy clone.
 pub const EX_CGROUP: c_int = 125;
-/// The child could not stack its clone3 filter.
+/// The child could not stack its filter, the one that closes the gates.
 pub const EX_FILTER: c_int = 126;
 /// The child could not mount its workspace at /workspace.
 pub const EX_WORKSPACE: c_int = 127;
@@ -95,7 +97,7 @@ pub const EX_WORKSPACE: c_int = 127;
 pub const WORKSPACE: &CStr = c"/workspace";
 /// MOVE_MOUNT_F_EMPTY_PATH from linux/mount.h: the source is the
 /// descriptor itself.
-const MOVE_MOUNT_F_EMPTY_PATH: c_long = 0x4;
+const MOVE_MOUNT_F_EMPTY_PATH: c_uint = 0x4;
 
 /// CLONE_INTO_CGROUP from linux/sched.h of 5.7. libc's is an int, which
 /// cannot hold it.
@@ -136,12 +138,62 @@ core::arch::global_asm!(
     "ret",
     ".size fz_clone3_gate, .-fz_clone3_gate",
 );
+// The child's move_mount gate, the one syscall instruction the runc
+// program lets move_mount through, which mounts the workspace
+// (mount_workspace). fz_move_mount_gate_ret is the word after it, as
+// above. move_mount takes five arguments. On aarch64 they are x0 to x4
+// for a call and a syscall alike. On x86_64 the fourth rides in rcx for
+// a call and r10 for a syscall, so it moves over first.
+#[cfg(target_arch = "aarch64")]
+core::arch::global_asm!(
+    ".section .text.fz_move_mount_gate,\"ax\",%progbits",
+    ".balign 4",
+    ".globl fz_move_mount_gate",
+    ".hidden fz_move_mount_gate",
+    ".type fz_move_mount_gate,%function",
+    "fz_move_mount_gate:",
+    "mov x8, #429",
+    "svc #0",
+    ".globl fz_move_mount_gate_ret",
+    ".hidden fz_move_mount_gate_ret",
+    "fz_move_mount_gate_ret:",
+    "ret",
+    ".size fz_move_mount_gate, .-fz_move_mount_gate",
+);
+#[cfg(target_arch = "x86_64")]
+core::arch::global_asm!(
+    ".section .text.fz_move_mount_gate,\"ax\",@progbits",
+    ".balign 16",
+    ".globl fz_move_mount_gate",
+    ".hidden fz_move_mount_gate",
+    ".type fz_move_mount_gate,@function",
+    "fz_move_mount_gate:",
+    "mov eax, 429",
+    "mov r10, rcx",
+    "syscall",
+    ".globl fz_move_mount_gate_ret",
+    ".hidden fz_move_mount_gate_ret",
+    "fz_move_mount_gate_ret:",
+    "ret",
+    ".size fz_move_mount_gate, .-fz_move_mount_gate",
+);
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 unsafe extern "C" {
     /// clone3(args, size), the raw answer: a pid, 0, or -errno.
     #[cfg(not(feature = "fuzzshim"))]
     fn fz_clone3_gate(args: *mut libc::clone_args, size: usize) -> c_long;
     static fz_clone3_gate_ret: u8;
+    /// move_mount(from_dfd, from_path, to_dfd, to_path, flags), the raw
+    /// answer: 0 or -errno.
+    #[cfg(not(feature = "fuzzshim"))]
+    fn fz_move_mount_gate(
+        from_dfd: c_int,
+        from_path: *const c_char,
+        to_dfd: c_int,
+        to_path: *const c_char,
+        flags: c_uint,
+    ) -> c_long;
+    static fz_move_mount_gate_ret: u8;
 }
 
 /// The address seccomp reports for a clone3 from the gate, read at run
@@ -149,6 +201,13 @@ unsafe extern "C" {
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 pub fn gate_addr() -> u64 {
     (&raw const fz_clone3_gate_ret) as u64
+}
+
+/// The address seccomp reports for a move_mount from its gate, read at
+/// run time as gate_addr is.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+pub fn move_mount_gate_addr() -> u64 {
+    (&raw const fz_move_mount_gate_ret) as u64
 }
 
 /// clone3 through the gate, as libc's syscall answers: a pid, 0 in the
@@ -182,6 +241,52 @@ pub(crate) unsafe fn clone3(args: *mut libc::clone_args, size: usize) -> c_long 
     }
 }
 
+/// move_mount through its gate, as libc's syscall answers: 0, or -1
+/// with errno. Under the fuzzshim it is the hook's call, so a target
+/// never mounts.
+///
+/// # Safety
+/// The paths are NUL-ended and live for the call, or go unread because
+/// flags holds one the kernel refuses first.
+pub(crate) unsafe fn move_mount(
+    from_dfd: c_int,
+    from_path: *const c_char,
+    to_dfd: c_int,
+    to_path: *const c_char,
+    flags: c_uint,
+) -> c_long {
+    #[cfg(all(
+        not(feature = "fuzzshim"),
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    {
+        // SAFETY: by the contract above.
+        let raw = unsafe { fz_move_mount_gate(from_dfd, from_path, to_dfd, to_path, flags) };
+        if (-4095..0).contains(&raw) {
+            sys::set_errno(raw.wrapping_neg() as c_int);
+            return -1;
+        }
+        raw
+    }
+    #[cfg(not(all(
+        not(feature = "fuzzshim"),
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )))]
+    // SAFETY: by the contract above.
+    unsafe {
+        sys::syscall(
+            libc::SYS_move_mount,
+            [
+                c_long::from(from_dfd),
+                from_path as c_long,
+                c_long::from(to_dfd),
+                to_path as c_long,
+                c_long::from(flags),
+            ],
+        )
+    }
+}
+
 /// birth forks the fiber straight into its leaf cgroup. With pidns the
 /// child is the init of its own pid namespace, so a checkpoint of it
 /// restores without colliding with a live pid. A namespace the kernel
@@ -202,6 +307,8 @@ pub(crate) unsafe fn clone3(args: *mut libc::clone_args, size: usize) -> c_long 
 /// The caller is the zygote's serving thread, and the child keeps to the
 /// rule at the top of this module.
 pub unsafe fn birth(cgroup_fd: c_int, want: c_ulonglong) -> libc::pid_t {
+    #[cfg(test)]
+    BIRTH_WANT.store(want, Ordering::Relaxed);
     let mut args: libc::clone_args = zeroed();
     args.exit_signal = libc::SIGCHLD as c_ulonglong;
     args.flags = want;
@@ -255,6 +362,11 @@ pub unsafe fn birth(cgroup_fd: c_int, want: c_ulonglong) -> libc::pid_t {
     }
     pid as libc::pid_t
 }
+
+/// The flags of the last birth, which the tests of handle_clone read,
+/// since the clone itself is refused there before a child exists.
+#[cfg(test)]
+pub(crate) static BIRTH_WANT: AtomicU64 = AtomicU64::new(0);
 
 /// An all-zero value of a plain repr(C) struct.
 pub(crate) fn zeroed<T: Copy>() -> T {
@@ -571,10 +683,27 @@ unsafe fn child_say(fence: *const c_char, what: &CStr, why: *const c_char) {
 /// The caller is the child of birth, c is a live Child whose pointers
 /// name the zygote's statics, and the whole process is this path's.
 pub unsafe fn scrub_and_run(c: &Child<'_>) -> ! {
-    // The clone3 refusal first, so no instruction of the fiber's runs
-    // with the zygote's gate open. It needs the no_new_privs the real
+    // The workspace goes in first, while the descriptor is open, the
+    // capability the move needs is held and the move_mount gate is
+    // still open. A proc child's namespace is a copy of the zygote's
+    // private one. A runc child's is a copy of the container's, whose
+    // mounts runc made slaves. The mount propagates nowhere either way.
+    // The descriptor is closed with everything else below.
+    if c.ws_fd >= 0 && mount_workspace(c.ws_fd) < 0 {
+        // SAFETY: fence by the contract above, the reason is static.
+        unsafe {
+            child_say(
+                c.fence,
+                c"workspace",
+                c"move_mount to /workspace failed".as_ptr(),
+            );
+            libc::_exit(EX_WORKSPACE)
+        }
+    }
+    // Then the filter that closes both gates, so no instruction of the
+    // fiber's runs with either open. It needs the no_new_privs the real
     // install set, which is what INSTALLED says.
-    if seccomp::INSTALLED.load(Ordering::Relaxed) && seccomp::refuse_clone3() != 0 {
+    if seccomp::INSTALLED.load(Ordering::Relaxed) && seccomp::close_gates() != 0 {
         // SAFETY: _exit ends the child and never returns.
         unsafe { libc::_exit(EX_FILTER) }
     }
@@ -597,21 +726,6 @@ pub unsafe fn scrub_and_run(c: &Child<'_>) -> ! {
         libc::close(c.ready_r);
         if c.sigchld_fd >= 0 {
             libc::close(c.sigchld_fd);
-        }
-    }
-    // The workspace goes in first, while the descriptor is still open
-    // and the capabilities it needs are held. The child's namespace is
-    // a copy of the zygote's private one, so the mount propagates
-    // nowhere. The descriptor is closed with everything else below.
-    if c.ws_fd >= 0 && mount_workspace(c.ws_fd) < 0 {
-        // SAFETY: fence by the contract above, the reason is static.
-        unsafe {
-            child_say(
-                c.fence,
-                c"workspace",
-                c"move_mount to /workspace failed".as_ptr(),
-            );
-            libc::_exit(EX_WORKSPACE)
         }
     }
     let mut channel = c.channel;
@@ -756,21 +870,14 @@ pub unsafe fn scrub_and_run(c: &Child<'_>) -> ! {
 }
 
 /// mount_workspace moves the detached tree at fd to WORKSPACE in the
-/// calling namespace, as move_mount(2) with MOVE_MOUNT_F_EMPTY_PATH does.
-/// The raw syscall, which glibc wraps only from 2.36. Returns 0 or -1.
+/// calling namespace, as move_mount(2) with MOVE_MOUNT_F_EMPTY_PATH does,
+/// through the gate above, the one address the runc program lets
+/// move_mount pass from. A proc child goes through it too, since its
+/// program lets move_mount pass from anywhere. Returns 0 or -1.
 pub fn mount_workspace(fd: c_int) -> c_int {
     // SAFETY: integer arguments and static strings alone.
     let rc = unsafe {
-        sys::syscall(
-            libc::SYS_move_mount,
-            [
-                c_long::from(fd),
-                c"".as_ptr() as c_long,
-                c_long::from(libc::AT_FDCWD),
-                WORKSPACE.as_ptr() as c_long,
-                MOVE_MOUNT_F_EMPTY_PATH,
-            ],
-        )
+        move_mount(fd, c"".as_ptr(), libc::AT_FDCWD, WORKSPACE.as_ptr(), MOVE_MOUNT_F_EMPTY_PATH)
     };
     if rc < 0 { -1 } else { 0 }
 }

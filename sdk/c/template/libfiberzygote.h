@@ -37,9 +37,10 @@
  *                        fz_serve sets user.max_user_namespaces to 0 in
  *                        the zygote's user namespace, keeps CAP_SYS_ADMIN
  *                        alone on the serving thread, and installs the
- *                        fiber filter with the mount family refused too.
- *                        It does not serve in the initial user namespace
- *                        or when any step is refused.
+ *                        fiber filter with the mount family refused too,
+ *                        move_mount passing from the workspace move
+ *                        alone. It does not serve in the initial user
+ *                        namespace or when any step is refused.
  *
  * Wire protocol on the control descriptor, one line per message. fiberd
  * speaks first, and its setup lines, ended by PREPARE, come before READY.
@@ -73,16 +74,19 @@
  *                     then with "ws" the fiber's workspace tree, and
  *                     last the fiber's channel ride in SCM_RIGHTS on the
  *                     same message. opts is a comma list of "pidns",
- *                     "mntns", "nocaps" and "ws". ws needs mntns. The
- *                     tree is a detached mount (open_tree with
- *                     OPEN_TREE_CLONE) that the child moves to /workspace
- *                     in its own namespace before anything else, and the
- *                     zygote closes its copy once the child is forked. An
- *                     option the library does not know is refused with
- *                     ERROR, never skipped. A child that cannot get what
- *                     it asked for ends before it runs and the CLONE is
- *                     answered with ERROR, as is a CLONE without a
- *                     channel, or with ws and no tree.
+ *                     "mntns", "nocaps" and "ws". The tree is a detached
+ *                     mount (open_tree with OPEN_TREE_CLONE) that the
+ *                     child moves to /workspace in its own namespace
+ *                     before anything else, and the zygote closes its
+ *                     copy once the child is forked. On a proc zygote ws
+ *                     needs mntns. A runc zygote prepares no namespace,
+ *                     so it takes ws without mntns and gives the child
+ *                     its own copy of the container's mount namespace
+ *                     instead. An option the library does not know is
+ *                     refused with ERROR, never skipped. A child that
+ *                     cannot get what it asked for ends before it runs
+ *                     and the CLONE is answered with ERROR, as is a
+ *                     CLONE without a channel, or with ws and no tree.
  *   zygote -> fiberd  CLONED <fence> <pid>
  *   zygote -> fiberd  ERROR <fence> <reason>
  *                     A child that ended before ready gets "died before
