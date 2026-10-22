@@ -223,6 +223,7 @@ func (z *fakeZygote) waitRecv(t *testing.T, want string) []string {
 //	die       ends on CLONE without answering
 //	device    DEVICE lines for the warm instance and each fiber, dropped
 //	          again on EVICT
+//	devexit   device, but each fiber exits right after its DEVICE line
 //	notready  greets with something other than READY
 //	silent    never says READY
 //	quit      ends before READY
@@ -253,7 +254,7 @@ func (z *fakeZygote) serve() {
 		say("READY\n")
 	}
 	switch z.script {
-	case "device":
+	case "device", "devexit":
 		// A short DEVICE line carries nothing and is ignored.
 		say("DEVICE - 100 1000\nDEVICE short\n")
 	case "refuse":
@@ -278,7 +279,7 @@ func (z *fakeZygote) serve() {
 		switch fields[0] {
 		case "CLONE":
 		case "EVICT":
-			if z.script == "device" && len(fields) >= 2 {
+			if (z.script == "device" || z.script == "devexit") && len(fields) >= 2 {
 				say("DEVICE " + fields[1] + " 0 0\n")
 			}
 			continue
@@ -321,6 +322,8 @@ func (z *fakeZygote) serve() {
 			return
 		case "device":
 			say(cloned + "DEVICE " + fence + " 42 0\n")
+		case "devexit":
+			say(cloned + "DEVICE " + fence + " 42 0\n" + exited)
 		default:
 			return
 		}

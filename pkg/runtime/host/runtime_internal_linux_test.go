@@ -1132,6 +1132,88 @@ func TestEnforceW(t *testing.T) {
 	}
 }
 
+// TestFinishEvictsDevice checks that a fiber with a device budget has its
+// slice evicted however it ends, so the engine never keeps a dead fiber's
+// slice. A park evicts twice, once before its dump and once as the fiber
+// ends. On main only the park evicted, once, so every other row saw none.
+func TestFinishEvictsDevice(t *testing.T) {
+	withDevice := core.Grant{UID: "g1", TemplateDigest: "sha256:tmpl", WBudgetBytes: 64 * mib, DeviceBudget: core.DeviceBudget{Bytes: 50}}
+	noDevice := core.Grant{UID: "g1", TemplateDigest: "sha256:tmpl", WBudgetBytes: 64 * mib}
+	cases := []struct {
+		name  string
+		grant core.Grant
+		end   func(t *testing.T, r *Runtime, sb *sandboxBackend, id string)
+		want  []string
+	}{
+		{name: "the fiber exits on its own", grant: withDevice, want: []string{"g1/1/1"},
+			end: func(t *testing.T, r *Runtime, sb *sandboxBackend, id string) {
+				sb.die(id, "exit:0")
+				waitExit(t, r)
+			}},
+		{name: "the fiber is killed from outside", grant: withDevice, want: []string{"g1/1/1"},
+			end: func(t *testing.T, r *Runtime, sb *sandboxBackend, id string) {
+				sb.die(id, "signal:SIGKILL")
+				waitExit(t, r)
+			}},
+		{name: "the host kills it over its device budget", grant: withDevice, want: []string{"g1/1/1"},
+			end: func(t *testing.T, r *Runtime, sb *sandboxBackend, id string) {
+				sb.setDevice(id, 80)
+				if e := waitExit(t, r); e.Reason != "oom" {
+					t.Fatalf("exit = %+v, want oom", e)
+				}
+			}},
+		{name: "a release", grant: withDevice, want: []string{"g1/1/1"},
+			end: func(t *testing.T, r *Runtime, _ *sandboxBackend, id string) {
+				if err := r.Release(context.Background(), id, false); err != nil {
+					t.Fatalf("Release: %v", err)
+				}
+			}},
+		{name: "a release that discards", grant: withDevice, want: []string{"g1/1/1"},
+			end: func(t *testing.T, r *Runtime, _ *sandboxBackend, id string) {
+				if err := r.Release(context.Background(), id, true); err != nil {
+					t.Fatalf("Release: %v", err)
+				}
+			}},
+		{name: "a park", grant: withDevice, want: []string{"g1/1/1", "g1/1/1"},
+			end: func(t *testing.T, r *Runtime, _ *sandboxBackend, id string) {
+				if _, err := r.Park(context.Background(), id, false); err != nil {
+					t.Fatalf("Park: %v", err)
+				}
+			}},
+		{name: "the warm instance ends", grant: withDevice, want: []string{"g1/1/1"},
+			end: func(t *testing.T, r *Runtime, sb *sandboxBackend, _ string) {
+				sb.warmGone("g1")
+				waitExit(t, r)
+			}},
+		{name: "no device budget, nothing to evict", grant: noDevice,
+			end: func(t *testing.T, r *Runtime, sb *sandboxBackend, id string) {
+				sb.die(id, "exit:0")
+				waitExit(t, r)
+			}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sb := newSandboxBackend(core.TierSnapshot)
+			r := newTestRuntime(t, sb, nil)
+			ctx := context.Background()
+			if err := r.PrepareTemplate(ctx, tc.grant); err != nil {
+				t.Fatal(err)
+			}
+			h, err := r.Clone(ctx, core.CloneSpec{Grant: tc.grant, Fence: core.Fence{GrantUID: "g1", Epoch: 1, Seq: 1}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := sb.evictedIDs(); len(got) != 0 {
+				t.Fatalf("evicted %v while the fiber runs", got)
+			}
+			tc.end(t, r, sb, h.ID)
+			if got := sb.evictedIDs(); strings.Join(got, ",") != strings.Join(tc.want, ",") {
+				t.Fatalf("evicted %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestWBytes checks where a fiber's working set is read from, by backend
 // kind, over a leaf charged a known amount. A live task's count is
 // tests/integration/host TestWBytesOfLiveTask.
