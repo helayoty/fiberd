@@ -522,9 +522,10 @@ func firstOK(url string, within time.Duration) (time.Time, error) {
 			if resp.StatusCode == http.StatusOK {
 				return time.Now(), nil
 			}
+			err = fmt.Errorf("status %d", resp.StatusCode)
 		}
 		if time.Now().After(deadline) {
-			return time.Time{}, fmt.Errorf("%s did not answer 200 within %s (last error %v)", url, within, err)
+			return time.Time{}, fmt.Errorf("%s did not answer 200 within %s: %w", url, within, err)
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
