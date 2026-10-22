@@ -273,7 +273,7 @@ func run(o opts) int {
 	fmt.Printf("storm: final ledger: running=%d parked=%d\n", running, parked)
 	fmt.Println(summary{side: "fiberd", layout: "fibers", n: o.fibers, demand: uint64(float64(o.ceiling) * o.overcommit),
 		oomKills: rise(oomAfter, oomBefore), survivors: int(running + parked), parked: int(parked),
-		firstPark: since(firstPark, start), firstKill: since(firstKill, start)})
+		firstPark: since(firstPark, start), firstKill: since(firstKill, start), parentKilled: "n/a", kernel: kernelRelease(osReleasePath)})
 	rc := 0
 	if oomAfter > oomBefore {
 		fmt.Println("storm: FAIL container recorded an OOM kill: the ladder lost the race")
