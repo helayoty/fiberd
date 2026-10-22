@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -127,6 +128,29 @@ var procZygote = sync.OnceValues(func() (string, error) {
 	return bin, nil
 })
 
+// plainCounter builds bench/compare's counter for the Move baseline,
+// once, with refzygote's flags above. Its --plain mode is a plain process
+// serving the same /readyz and /count as refzygote --http, after the same
+// init: the heap touched page by page and the same CPU burn. It links the
+// zygote library, which procZygote builds, though --plain never calls it.
+var plainCounter = sync.OnceValues(func() (string, error) {
+	if _, err := procZygote(); err != nil {
+		return "", err
+	}
+	bin := filepath.Join(work, "counter")
+	args := []string{"-O2", "-pthread"}
+	if runtime.GOARCH == "arm64" {
+		args = append(args, "-mbranch-protection=none")
+	}
+	build := exec.Command("gcc", append(args, "-o", bin, "../../../bench/compare/workload/counter.c",
+		"../../../sdk/c/template/core/target/release/libfiberzygote_core.a")...)
+	build.Stderr = os.Stderr
+	if err := build.Run(); err != nil {
+		return "", fmt.Errorf("gcc: %w", err)
+	}
+	return bin, nil
+})
+
 // backends are the cases the lifecycle runs on: the image's, then proc.
 func backends() []backendCase {
 	return []backendCase{
@@ -161,6 +185,7 @@ func (bc backendCase) templateOf(t *testing.T) string {
 
 // worker is one Substrate worker Pod's worth of fiberd.
 type worker struct {
+	name    string
 	svc     *herder.Service
 	home    *subhome.Home
 	ingress *httptest.Server
@@ -243,7 +268,7 @@ func newWorker(t *testing.T, name string, bc backendCase, cgRoot, base string) *
 	svc := herder.New(herder.Config{Client: c, Grants: h, Router: ing, Paths: paths,
 		Host: host.Config{DeltaRegistry: hc.DeltaRegistry, DeltaKeys: hc.DeltaKeys, HomeID: name}})
 	go svc.Run(ctx)
-	return &worker{svc: svc, home: h, ingress: isrv2, paths: paths}
+	return &worker{name: name, svc: svc, home: h, ingress: isrv2, paths: paths}
 }
 
 // through sends a request the way the router would: with the actor header.
@@ -349,6 +374,46 @@ func lifecycleAcrossWorkers(t *testing.T, bc backendCase, cgRoot string) {
 	}
 	snapshots := map[string]snapshot{"golden": {on: a, files: resp.GetSnapshotFiles()}} // by actor uid
 
+	// The Move baseline, without fiberd: the same counter started as a
+	// plain process on B's side, timed from its start to the first 200 on
+	// /readyz, polled as the herder polls. It starts empty, so its count
+	// is 0 whatever the actor had counted. Every real platform adds to a
+	// process start, so this is a lower bound, and it leaves out
+	// rebuilding the lost state. The fiberd side is each restore below.
+	t.Run("a plain counter started on B's side, without fiberd, starts empty", func(t *testing.T) {
+		bin, err := plainCounter()
+		if err != nil {
+			t.Skipf("cannot build bench/compare's counter: %v", err)
+		}
+		l, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		port := l.Addr().(*net.TCPAddr).Port
+		_ = l.Close()
+		cmd := exec.Command(bin, "--plain", "--heap-mb", "8", "--port", strconv.Itoa(port))
+		cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
+		t0 := time.Now()
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+		})
+		base := fmt.Sprintf("http://127.0.0.1:%d", port)
+		ready, err := firstOK(base+"/readyz", 30*time.Second)
+		if err != nil {
+			t.Fatalf("plain counter: %v", err)
+		}
+		took := ready.Sub(t0)
+		st, count := get(t, base+"/count")
+		if st != 200 || count != "0" {
+			t.Fatalf("plain counter count = %d %q, want 200 0: a new process starts empty", st, count)
+		}
+		t.Log(moveLine("plain", bc.name, "-", "-", b.name, took, count, false))
+	})
+
 	// Each step is atelet moving an actor. It restores the actor on a
 	// worker from a downloaded snapshot, drives its count through the
 	// ingress, then removes it by checkpoint, whose snapshot a later step
@@ -397,7 +462,18 @@ func lifecycleAcrossWorkers(t *testing.T, bc backendCase, cgRoot string) {
 			if _, err := tc.to.svc.RestoreWorkload(ctx, restore); err != nil {
 				t.Fatalf("restore %s: %v", tc.uid, err)
 			}
-			t.Logf("RestoreWorkload (import, claim, resume, readyz): %s", time.Since(t0).Round(time.Millisecond))
+			took := time.Since(t0)
+			t.Logf("RestoreWorkload (import, claim, resume, readyz): %s", took.Round(time.Millisecond))
+			// The count the actor parked with, read before it counts on.
+			total, err := strconv.Atoi(tc.count)
+			if err != nil {
+				t.Fatal(err)
+			}
+			parkedWith := strconv.Itoa(total - tc.incr)
+			if st, body := tc.to.through(t, "GET", actor, "/count"); st != 200 || body != parkedWith {
+				t.Fatalf("%s count right after the restore = %d %q, want %s", tc.uid, st, body, parkedWith)
+			}
+			t.Log(moveLine("fiberd", bc.name, tc.uid, tc.from, tc.to.name, took, parkedWith, true))
 			for i := 0; i < tc.incr; i++ {
 				if st, _ := tc.to.through(t, "POST", actor, "/incr"); st != 200 {
 					t.Fatalf("incr %d: %d", i, st)
@@ -431,4 +507,38 @@ func lifecycleAcrossWorkers(t *testing.T, bc backendCase, cgRoot string) {
 			t.FailNow()
 		}
 	}
+}
+
+// firstOK polls url until it answers 200, every 50 ms with a 2 s request
+// timeout as the herder's readiness probe does, and returns when.
+func firstOK(url string, within time.Duration) (time.Time, error) {
+	c := &http.Client{Timeout: 2 * time.Second}
+	deadline := time.Now().Add(within)
+	for {
+		resp, err := c.Get(url)
+		if err == nil {
+			_, _ = io.Copy(io.Discard, resp.Body)
+			_ = resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				return time.Now(), nil
+			}
+			err = fmt.Errorf("status %d", resp.StatusCode)
+		}
+		if time.Now().After(deadline) {
+			return time.Time{}, fmt.Errorf("%s did not answer 200 within %s: %w", url, within, err)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// get is one plain GET, its status and trimmed body.
+func get(t *testing.T, url string) (int, string) {
+	t.Helper()
+	resp, err := http.Get(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	b, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, strings.TrimSpace(string(b))
 }

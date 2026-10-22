@@ -232,6 +232,8 @@ make conform-slurm
 
 The recorded run completed conformance cases C1 to C10 in 13 seconds. During the overcommit phase, the first park occurred at 13 seconds with memory PSI near 50 percent, and the job reported no OOM kill.
 
+After the fiberd storm job, the script runs the storm's two baselines without fiberd from [Overcommit acceptance](#overcommit-acceptance). Each layout is its own `sbatch` job with the storm job's allocation (`--mem=384M --cpus-per-task=8`). Its plain processes run in a child cgroup of the job step. Each job prints its `storm summary:` line with `job_state` and `job_state_from` appended. The state comes from `sacct` when the cluster has accounting storage, and from `scontrol` otherwise. The baselines only measure, and the run passes or fails on the fiberd job alone. The CI conform-slurm job copies the summary lines to its run's summary page. The recorded run predates the baselines, and no baseline result is recorded yet.
+
 The script and checks are in [`examples/slurm/conform.sh`](../examples/slurm/conform.sh).
 
 ## Run E: Substrate-shaped worker lifecycle
@@ -263,6 +265,26 @@ The measured path is implemented by
 [`TestActorLifecycleAcrossWorkers`](../examples/substrate/tests/lifecycle_linux_test.go).
 It demonstrates the example's mapping to fiberd and does not include object
 storage or a Substrate control plane.
+
+The test now also measures a baseline without fiberd. After the golden export
+on worker A, it starts bench/compare's counter as a plain process with an 8 MiB
+heap on worker B's side. It times that start to the first 200 on `/readyz`,
+polled every 50 ms as the example polls a restored actor. Then it reads
+`/count`, which must be 0, because a new process starts empty. This time is a
+lower bound, since every real platform adds to a process start. It also leaves
+out rebuilding the lost state. The fiberd timing in the table is measured as
+before.
+
+Every move logs one `move:` line. It records the side, backend, actor, source
+and target worker, time to ready, the count, and whether the state was kept or
+lost. Go shows these lines only in verbose mode.
+
+```bash
+make linux-shell
+cd examples/substrate && go test -tags integration -v -run TestActorLifecycleAcrossWorkers ./tests/
+```
+
+No baseline result is recorded yet.
 
 ## Run F: end-to-end Clone over gRPC
 
@@ -316,9 +338,17 @@ The stage columns are each stage's own p50, so they do not add up to the round t
 
 ## Overcommit acceptance
 
-`make overcommit` is a pass or fail resource test rather than a latency benchmark. It runs a proc home inside a container with a 384 MiB memory and swap limit, sets the grant ceiling to 160 MiB, and drives eight fibers toward twice that grant ceiling.
+`make overcommit` is a pass or fail resource test rather than a latency benchmark. It runs three phases, one after another, in one container with a 384 MiB memory and swap limit.
 
-The test passes only when the pressure ladder reclaims fibers while fiberd remains alive and the container's OOM counter stays unchanged. Its parameters and checks are in [`hack/test/overcommit.sh`](../hack/test/overcommit.sh).
+- **fiberd.** A proc home sets the grant ceiling to 160 MiB and drives eight fibers toward twice that grant ceiling. It passes only when the pressure ladder reclaims fibers while fiberd remains alive and the container's OOM counter stays unchanged.
+- **shared**, the headline baseline without fiberd. One parent touches a 64 MiB heap and forks eight processes that share it copy-on-write, as fibers share their zygote's.
+- **separate**, a note. Eight processes start on their own, each touching its own 64 MiB heap.
+
+The baselines grow by the same step each round, toward the same total demand. Their processes run in one child cgroup under the same container limit, and nothing parks them. So only the kernel's OOM killer acts. The baselines only measure. Their OOM kills are expected, and the fiberd phase alone decides the exit status. `make overcommit-baseline` runs the two baselines alone.
+
+Every phase ends with one `storm summary:` line. It records the side and layout, the instance count, the total demand, the OOM kills, the survivors, the parked count, the first park and first kill from the start of growth, and the kills before growth began. The CI overcommit job copies these lines to its run's summary page. No baseline result is recorded yet.
+
+The parameters and checks are in [`hack/test/overcommit.sh`](../hack/test/overcommit.sh).
 
 ## Reproducing backend measurements
 

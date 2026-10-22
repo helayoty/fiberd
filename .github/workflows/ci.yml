@@ -84,6 +84,9 @@ jobs:
       # The reference zygote's C unit test of the engine's fence parse, built as make zygote is.
       - if: runner.os == 'Linux'
         run: make zygote-c-test
+      # The storm baseline's C workload, its unit test, built as make storm-grower is.
+      - if: runner.os == 'Linux'
+        run: make storm-grower-test
 
   typescript:
     name: "TypeScript client (${{ matrix.os }}, Node.js ${{ matrix.node }}): types, tests, tarball and proto drift"

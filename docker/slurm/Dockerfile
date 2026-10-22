@@ -1,8 +1,8 @@
 # A one-node Slurm cluster with fiberd inside. It holds Debian's slurm-wlm,
 # munge, criu, fiberd-slurm, and fiberd's reference issuer, zygote,
-# conformance and storm binaries. It builds from fiberd's dev image
-# (docker/dev), which has the toolchain and criu 4.2.1. The runtime layer
-# is bookworm-slim.
+# conformance and storm binaries, and the storm baseline's storm-grower.
+# It builds from fiberd's dev image (docker/dev), which has the toolchain
+# and criu 4.2.1. The runtime layer is bookworm-slim.
 #
 #   docker build -t fiberd:slurm -f docker/slurm/Dockerfile .   (from the repo root)
 #
@@ -19,7 +19,9 @@ COPY . .
 # with TLS (-DFZ_TLS) so it can serve handoff grants, with ZYGOTE_CFLAGS and
 # ZYGOTE_LDFLAGS from the Makefile, and links the zygote library's
 # archive, which the dev image's cargo builds. On aarch64 it is built without PAC
-# branch protection (see docker/dev/Dockerfile).
+# branch protection (see docker/dev/Dockerfile). storm-grower, the plain
+# processes of the storm's baseline, takes the same flags and needs no
+# library.
 # fiberd is built with the fiberd_testhooks tag, since the conformance run
 # drives the test-only admin controls (-admin-unsafe). The release image
 # (docker/fiberd) is built without it.
@@ -38,12 +40,16 @@ RUN set -eu; mkdir -p /out; \
     gcc $sr -D_FORTIFY_SOURCE=3 -O2 -fstack-protector-strong -fstack-clash-protection -fPIE -Wformat=2 -Werror=format-security \
       -pie -Wl,-z,relro,-z,now -Wall -Wextra -pthread $flags -DFZ_TLS -o /out/refzygote \
       sdk/c/template/refzygote.c sdk/c/template/core/target/release/libfiberzygote_core.a -lssl -lcrypto; \
-    need=$(objdump -T /out/refzygote | grep -o "GLIBC_2\.[0-9]*" | sort -t. -k2 -n | tail -1); \
-    [ "${need#GLIBC_2.}" -le 36 ] || { echo "refzygote needs $need, newer than the bookworm runtime" >&2; exit 1; }
+    gcc $sr -D_FORTIFY_SOURCE=3 -O2 -fstack-protector-strong -fstack-clash-protection -fPIE -Wformat=2 -Werror=format-security \
+      -pie -Wl,-z,relro,-z,now -Wall -Wextra $flags -o /out/storm-grower hack/storm/grower/grower.c; \
+    for b in refzygote storm-grower; do \
+      need=$(objdump -T "/out/$b" | grep -o "GLIBC_2\.[0-9]*" | sort -t. -k2 -n | tail -1); \
+      [ "${need#GLIBC_2.}" -le 36 ] || { echo "$b needs $need, newer than the bookworm runtime" >&2; exit 1; }; \
+    done
 
 FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587
 LABEL org.opencontainers.image.source="https://github.com/helayoty/fiberd" \
-      org.opencontainers.image.description="fiberd's Slurm example: a one-node Slurm cluster with fiberd-slurm, the reference issuer and zygote, criu, and the conformance and storm binaries" \
+      org.opencontainers.image.description="fiberd's Slurm example: a one-node Slurm cluster with fiberd-slurm, the reference issuer and zygote, criu, and the conformance, storm and storm-grower binaries" \
       org.opencontainers.image.licenses="Apache-2.0"
 ARG DEBIAN_FRONTEND=noninteractive
 # Runtime packages only. Besides Slurm and munge, the libraries serve criu
