@@ -404,8 +404,11 @@ type DeviceReporter interface {
 	// WarmDevice is the engine's total use and capacity; ok is false when
 	// the warm instance reported no device at all.
 	WarmDevice(warmID string) (used, capacity uint64, ok bool)
-	// EvictDevice asks the engine to drop the fiber's slice: what a park
-	// does before the CPU checkpoint (devices are renegotiated on resume).
+	// EvictDevice asks the engine to drop the fiber's slice. A park does
+	// it before the CPU checkpoint (devices are renegotiated on resume),
+	// and every end of the fiber does it again, after the backend has
+	// reported the exit. So the engine is found by the fence's grant, not
+	// through a fiber the backend may have forgotten.
 	EvictDevice(fiberID string) error
 }
 

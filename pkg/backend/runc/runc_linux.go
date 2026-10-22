@@ -537,6 +537,12 @@ func (l *launcher) bundleConfig(spec backend.WarmSpec, argv []string, rootfs, cg
 		mounts = append(mounts, map[string]any{"destination": backend.TemplateMount, "type": "bind", "source": staged, "options": backend.TemplateMountOptions})
 	}
 	idMap := []map[string]uint32{{"containerID": 0, "hostID": rng.Start, "size": rng.Count}}
+	env := []string{"PATH=/usr/bin:/bin", nestedUsernsEnv, rebindEnv}
+	if len(spec.Devices) > 0 {
+		// The device channel, as proc passes it: the one grant-specific
+		// thing an engine needs at warm-up.
+		env = append(env, "FIBERD_DEVICES="+strings.Join(spec.Devices, ","))
+	}
 	return map[string]any{
 		"ociVersion": "1.0.2",
 		"process": map[string]any{
@@ -544,7 +550,7 @@ func (l *launcher) bundleConfig(spec backend.WarmSpec, argv []string, rootfs, cg
 			"user":     map[string]int{"uid": 0, "gid": 0},
 			"cwd":      "/host", // criu's parasite scratch lands on the bind mount, not the rootfs
 			"args":     append(append([]string{}, argv...), "--log", "/host/zygote.log"),
-			"env":      []string{"PATH=/usr/bin:/bin", nestedUsernsEnv, rebindEnv},
+			"env":      env,
 			"capabilities": map[string][]string{
 				"bounding":    containerCaps,
 				"effective":   containerCaps,

@@ -81,6 +81,9 @@ jobs:
       # crate installs its pinned toolchain on the first cargo call.
       - if: runner.os == 'Linux'
         run: make zygote-test
+      # The reference zygote's C unit test of the engine's fence parse, built as make zygote is.
+      - if: runner.os == 'Linux'
+        run: make zygote-c-test
 
   typescript:
     name: "TypeScript client (${{ matrix.os }}, Node.js ${{ matrix.node }}): types, tests, tarball and proto drift"

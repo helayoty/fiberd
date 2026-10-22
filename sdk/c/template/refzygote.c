@@ -36,6 +36,12 @@
  *   probe <name>    -> "ok", the errno's name, or the signal that ended
  *                      it ("SIGSYS"), for one call the fiber filter
  *                      refuses or lets through (see probes[] below)
+ *   reserve <bytes> -> the engine's reply to a slice under this fiber's
+ *                      own fence ("ok", "err capacity", ...)
+ *   devfree         -> the engine's reply to releasing that slice
+ *   engine <line>   -> the engine's one-line reply to <line> sent as it
+ *                      is, so a test can make a fiber name a sibling's
+ *                      fence and see "err fence"
  *
  * A handoff fiber (its record carries an identity) serves the same
  * protocol inside TLS 1.3 on the connections fz_accept() hands it, and
@@ -61,7 +67,10 @@
  * --device-mb N makes the zygote an engine with a simulated device of N
  * MiB, the GPU model in miniature. Fibers hold slices over FIBERD_ENGINE
  * ("reserve <bytes>", "devfree"), the engine reports them in DEVICE
- * lines and drops one on EVICT.
+ * lines and drops one on EVICT. The engine names each caller's fence
+ * from its socket peer's cgroup leaf and refuses a line naming any
+ * other fence with "err fence", so no fiber can charge or free a
+ * sibling's slice.
  *
  * Build: (cd core && cargo build --release --locked)
  *        gcc -O2 -pthread -o refzygote refzygote.c core/target/release/libfiberzygote_core.a
@@ -78,6 +87,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <poll.h>
 #include <pthread.h>
 #include <signal.h>
@@ -245,8 +255,183 @@ static void on_control(const char *line) {
     }
 }
 
+/* ---- who is asking: the caller's fence from its cgroup -------------
+ *
+ * The engine never trusts the fence a line carries. It names the
+ * caller's fence itself from the socket peer's cgroup. fiberd puts
+ * every fiber in <grant_dir>/f-<epoch>-<seq> (leafName in
+ * pkg/runtime/host) and the zygote in <grant_dir>/zygote, so a peer in
+ * a leaf of our own grant's directory is a fiber of this grant and the
+ * leaf's name is its fence. A line naming any other fence gets
+ * "err fence". This check is the engine's, template code, and needs no
+ * library call.
+ *
+ * The parse is split from the system calls so it can be unit tested
+ * (sdk/c/template/test/engine_test.c) and fuzzed. Every parse takes n
+ * bytes that may hold NULs and never reads past n. */
+
+static char grant_dir[256]; /* the grant's cgroup directory, parent of the zygote's */
+
+/* cgroup_unified finds the cgroup v2 line of a /proc/<pid>/cgroup file,
+ * "0::<path>", and gives its path without the newline. Exactly one such
+ * line, newline-terminated. The lines of a hybrid v1 hierarchy
+ * ("1:name=systemd:/...") may come before or after it and are skipped.
+ * A NUL anywhere refuses the file, since the kernel writes none. 0, or
+ * -1 for no such line, two of them, or an unterminated line. */
+static int cgroup_unified(const char *buf, size_t n, const char **path, size_t *len) {
+    if (n && memchr(buf, 0, n)) return -1;
+    int found = 0;
+    size_t i = 0;
+    while (i < n) {
+        const char *nl = memchr(buf + i, '\n', n - i);
+        if (!nl) return -1;
+        size_t ln = (size_t)(nl - (buf + i));
+        if (ln >= 3 && memcmp(buf + i, "0::", 3) == 0) {
+            if (found) return -1;
+            found = 1;
+            *path = buf + i + 3;
+            *len = ln - 3;
+        }
+        i += ln + 1;
+    }
+    return found ? 0 : -1;
+}
+
+/* dec_u64 parses s[0..n) as a decimal u64: digits only, no sign, no
+ * leading zero, no overflow. "0" is refused with the leading zeros,
+ * since fiberd mints epochs and sequence numbers from 1. */
+static int dec_u64(const char *s, size_t n, unsigned long long *v) {
+    if (n == 0 || n > 20 || s[0] == '0') return -1;
+    unsigned long long x = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (s[i] < '0' || s[i] > '9') return -1;
+        unsigned d = (unsigned)(s[i] - '0');
+        if (x > (ULLONG_MAX - d) / 10) return -1;
+        x = x * 10 + d;
+    }
+    *v = x;
+    return 0;
+}
+
+/* leaf_name parses "f-<epoch>-<seq>", the name fiberd gives a fiber's
+ * cgroup, with nothing before or after. */
+static int leaf_name(const char *s, size_t n, unsigned long long *epoch, unsigned long long *seq) {
+    if (n < 2 || s[0] != 'f' || s[1] != '-') return -1;
+    s += 2; n -= 2;
+    const char *dash = memchr(s, '-', n);
+    if (!dash) return -1;
+    size_t el = (size_t)(dash - s);
+    if (dec_u64(s, el, epoch) < 0) return -1;
+    return dec_u64(dash + 1, n - el - 1, seq);
+}
+
+/* grant_dir_of reads the engine's own /proc/self/cgroup into dir. The
+ * zygote runs in <grant_dir>/zygote, so the grant's directory is the
+ * parent of the unified path. A path whose parent is empty or "/" or
+ * whose last component is empty is refused, since no grant lives there.
+ * 0, or -1. */
+static int grant_dir_of(const char *buf, size_t n, char *dir, size_t dn) {
+    const char *p; size_t len;
+    if (cgroup_unified(buf, n, &p, &len) < 0) return -1;
+    if (len == 0 || p[0] != '/') return -1;
+    const char *end = p + len;
+    while (end > p && end[-1] != '/') end--;
+    /* end sits just past the last '/'. */
+    if (end == p + len) return -1;        /* no last component */
+    size_t parent = (size_t)(end - p) - 1;
+    if (parent == 0) return -1;           /* the parent is "/" */
+    if (parent >= dn) return -1;
+    memcpy(dir, p, parent);
+    dir[parent] = 0;
+    return 0;
+}
+
+/* leaf_fence turns a peer's /proc/<pid>/cgroup into the peer's fence.
+ * The peer must sit in <grant_dir>/f-<epoch>-<seq>: one component under
+ * the grant's directory, matched whole (so "/r/g1" never matches
+ * "/r/g10/f-1-1"), with nothing after the sequence number, not
+ * " (deleted)" and not a sub-cgroup. The fence is <grant>/<epoch>/<seq>
+ * with grant the last component of grant_dir, which is how core.Fence
+ * prints and so the fiber id fiberd uses in EVICT and DEVICE lines. 0,
+ * or -1, also when the fence does not fit fn. */
+static int leaf_fence(const char *buf, size_t n, const char *gdir, char *fence, size_t fn) {
+    if (fn) fence[0] = 0;
+    const char *p; size_t len;
+    if (cgroup_unified(buf, n, &p, &len) < 0) return -1;
+    size_t gl = strlen(gdir);
+    if (gl == 0 || len < gl + 2 || memcmp(p, gdir, gl) != 0 || p[gl] != '/') return -1;
+    const char *leaf = p + gl + 1;
+    size_t ll = len - gl - 1;
+    if (memchr(leaf, '/', ll)) return -1;
+    unsigned long long epoch, seq;
+    if (leaf_name(leaf, ll, &epoch, &seq) < 0) return -1;
+    const char *g = strrchr(gdir, '/');
+    g = g ? g + 1 : gdir;
+    if (!*g) return -1;
+    int m = snprintf(fence, fn, "%s/%llu/%llu", g, epoch, seq);
+    if (m < 0 || (size_t)m >= fn) { if (fn) fence[0] = 0; return -1; }
+    return 0;
+}
+
+/* read_small reads path whole into buf and returns its length, or -1
+ * when it cannot be read or does not fit. A file that fills buf is
+ * refused too, since its end was never seen. */
+static ssize_t read_small(const char *path, char *buf, size_t n) {
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return -1;
+    size_t got = 0;
+    for (;;) {
+        if (got == n) { close(fd); return -1; }
+        ssize_t r = read(fd, buf + got, n - got);
+        if (r < 0) { if (errno == EINTR) continue; close(fd); return -1; }
+        if (r == 0) break;
+        got += (size_t)r;
+    }
+    close(fd);
+    return (ssize_t)got;
+}
+
+#ifndef SO_PEERPIDFD
+#define SO_PEERPIDFD 77
+#endif
+#ifndef SYS_pidfd_open
+#define SYS_pidfd_open 434
+#endif
+
+/* peer_fence names the fence of the fiber on conn from that fiber's
+ * cgroup. The pid comes from SO_PEERCRED and is pinned by a pidfd from
+ * SO_PEERPIDFD (Linux 6.5), so a pid reused after the peer's exit
+ * cannot pass. A kernel without it gets pidfd_open(pid), which is
+ * narrower, since the pid may already be another process's by the time
+ * it is opened. Without that too the pid alone has to do. A peer not
+ * visible in our pid namespace shows as pid 0 and is refused. After the
+ * read the pidfd is polled: POLLIN means the peer has exited, so the
+ * file may have been another process's, and the peer is refused. The
+ * poll needs no kill permission, unlike pidfd_send_signal. 0, or -1. */
+static int peer_fence(int conn, char *fence, size_t fn) {
+    if (fn) fence[0] = 0;
+    struct ucred cr; socklen_t cl = sizeof cr;
+    if (getsockopt(conn, SOL_SOCKET, SO_PEERCRED, &cr, &cl) < 0 || cr.pid <= 0) return -1;
+    int pidfd = -1; socklen_t pl = sizeof pidfd;
+    if (getsockopt(conn, SOL_SOCKET, SO_PEERPIDFD, &pidfd, &pl) < 0) pidfd = (int)syscall(SYS_pidfd_open, cr.pid, 0);
+    char path[64];
+    snprintf(path, sizeof path, "/proc/%d/cgroup", (int)cr.pid);
+    char buf[4096];
+    ssize_t n = read_small(path, buf, sizeof buf);
+    int rc = n < 0 ? -1 : leaf_fence(buf, (size_t)n, grant_dir, fence, fn);
+    if (pidfd >= 0) {
+        struct pollfd pf = { .fd = pidfd, .events = POLLIN };
+        if (poll(&pf, 1, 0) != 0) rc = -1;
+        close(pidfd);
+    }
+    if (rc < 0 && fn) fence[0] = 0;
+    return rc;
+}
+
 /* One request per connection, "reserve <fence> <bytes>", "release
- * <fence>" or "stat", and a one-line reply. */
+ * <fence>" or "stat", and a one-line reply. The peer check runs first
+ * for every line, and reserve and release must name the peer's own
+ * fence. Anything else about the fence is "err fence". */
 static void *engine_thread(void *arg) {
     (void)arg;
     int s = engine_fd;
@@ -263,10 +448,12 @@ static void *engine_thread(void *arg) {
         char line[256]; ssize_t n = read(c, line, sizeof line - 1);
         if (n <= 0) { close(c); continue; }
         line[n] = 0; line[strcspn(line, "\r\n")] = 0;
-        char out[128]; char fence[128]; unsigned long long bytes;
+        char out[128]; char fence[128]; char peer[128]; unsigned long long bytes;
+        int known = peer_fence(c, peer, sizeof peer) == 0;
         pthread_mutex_lock(&dev_mu);
-        if (sscanf(line, "reserve %127s %llu", fence, &bytes) == 2) snprintf(out, sizeof out, "%s\n", dev_set(fence, bytes));
-        else if (sscanf(line, "release %127s", fence) == 1) snprintf(out, sizeof out, "%s\n", dev_set(fence, 0));
+        if (!known) snprintf(out, sizeof out, "err fence\n");
+        else if (sscanf(line, "reserve %127s %llu", fence, &bytes) == 2) snprintf(out, sizeof out, "%s\n", strcmp(fence, peer) == 0 ? dev_set(fence, bytes) : "err fence");
+        else if (sscanf(line, "release %127s", fence) == 1) snprintf(out, sizeof out, "%s\n", strcmp(fence, peer) == 0 ? dev_set(fence, 0) : "err fence");
         else if (strcmp(line, "stat") == 0) snprintf(out, sizeof out, "%llu %llu\n", dev_used, dev_cap);
         else snprintf(out, sizeof out, "err unknown\n");
         pthread_mutex_unlock(&dev_mu);
@@ -281,6 +468,19 @@ static void engine_start(size_t mb) {
     char cwd[192];
     if (!getcwd(cwd, sizeof cwd)) { perror("refzygote: getcwd"); exit(2); }
     snprintf(engine_path, sizeof engine_path, "%s/engine.sock", cwd);
+    /* The grant's cgroup directory, read once. fiberd starts the zygote
+     * in <grant_dir>/zygote (proc through a cgroup fd, runc through
+     * cgroupsPath with no cgroup namespace, so both see the same paths).
+     * Outside fiberd there is no grant, as in zygotectl's build and
+     * smoke runs, where the zygote sits in whatever cgroup the shell
+     * has. The engine then starts with no grant directory and refuses
+     * every caller, since no fiber is ever forked there. */
+    char cg[4096];
+    ssize_t n = read_small("/proc/self/cgroup", cg, sizeof cg);
+    if (n < 0 || grant_dir_of(cg, (size_t)n, grant_dir, sizeof grant_dir) < 0) {
+        grant_dir[0] = 0;
+        fprintf(stderr, "refzygote: engine: no grant cgroup above our own in /proc/self/cgroup, every device request will be refused\n");
+    }
     /* Bound before fz_serve remounts the run directory. A bind racing
      * that remount lands where no fiber can reach it. */
     engine_fd = listen_endpoint(engine_path);
@@ -309,26 +509,37 @@ static unsigned cur_generation;
 /* The fence the engine should file the slice under. */
 static const char *current_fence(void) { return cur_fence[0] ? cur_fence : "?"; }
 
-/* device_reserve asks the engine for a slice (0 releases it) and returns
- * the engine's reply. */
-static const char *device_reserve(unsigned long long bytes, char *reply, size_t n) {
+/* engine_send sends one line to the engine on a fresh connection and
+ * returns the engine's one-line reply, in reply, or an "err ..." of its
+ * own when the engine cannot be reached. */
+static const char *engine_send(const char *req, char *reply, size_t n) {
     const char *eng = getenv("FIBERD_ENGINE");
     if (!eng) return "err no engine";
     if (strncmp(eng, "unix://", 7) == 0) eng += 7;
+    char buf[256];
+    int m = snprintf(buf, sizeof buf, "%s\n", req);
+    if (m < 0 || (size_t)m >= sizeof buf) return "err line too long";
     int s = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
     if (s < 0) return "err socket";
     struct sockaddr_un a = { .sun_family = AF_UNIX };
     snprintf(a.sun_path, sizeof a.sun_path, "%s", eng);
     if (connect(s, (struct sockaddr *)&a, sizeof a) < 0) { close(s); return "err engine unreachable"; }
-    const char *fence = current_fence();
-    char req[256];
-    int m = bytes ? snprintf(req, sizeof req, "reserve %s %llu\n", fence, bytes) : snprintf(req, sizeof req, "release %s\n", fence);
-    (void)!write(s, req, (size_t)m);
+    (void)!write(s, buf, (size_t)m);
     ssize_t r = read(s, reply, n - 1);
     close(s);
     if (r <= 0) return "err no reply";
     reply[r] = 0; reply[strcspn(reply, "\r\n")] = 0;
     return reply;
+}
+
+/* device_reserve asks the engine for a slice (0 releases it) under this
+ * fiber's own fence and returns the engine's reply. */
+static const char *device_reserve(unsigned long long bytes, char *reply, size_t n) {
+    const char *fence = current_fence();
+    char req[256];
+    if (bytes) snprintf(req, sizeof req, "reserve %s %llu", fence, bytes);
+    else snprintf(req, sizeof req, "release %s", fence);
+    return engine_send(req, reply, n);
 }
 
 /* first_line writes path's first line (or "-") and a newline to out. */
@@ -704,10 +915,8 @@ static void set_incarnation(const fz_incarnation_t *inc) {
 }
 
 /* borrow_errno tries pidfd_open plus pidfd_getfd of fd in pid, to show
- * whether a fiber can reach another's channel the way fiberd does. */
-#ifndef SYS_pidfd_open
-#define SYS_pidfd_open 434
-#endif
+ * whether a fiber can reach another's channel the way fiberd does.
+ * SYS_pidfd_open is defined with the engine's peer check above. */
 #ifndef SYS_pidfd_getfd
 #define SYS_pidfd_getfd 438
 #endif
@@ -1106,6 +1315,7 @@ static int serve_client(conn_t *c, const char *fence, unsigned long *counter) {
         else if (strncmp(line, "probe ", 6) == 0) probe(line + 6, out, sizeof out);
         else if (strncmp(line, "reserve ", 8) == 0) { char rp[128]; snprintf(out, sizeof out, "%s\n", device_reserve(strtoull(line + 8, NULL, 10), rp, sizeof rp)); }
         else if (strcmp(line, "devfree") == 0) { char rp[128]; snprintf(out, sizeof out, "%s\n", device_reserve(0, rp, sizeof rp)); }
+        else if (strncmp(line, "engine ", 7) == 0) { char rp[128]; snprintf(out, sizeof out, "%s\n", engine_send(line + 7, rp, sizeof rp)); }
         else snprintf(out, sizeof out, "err unknown command\n");
         if (conn_write(c, out, strlen(out)) < 0) break;
         /* "reply_delay_ms": a pause between the reply and the next read,

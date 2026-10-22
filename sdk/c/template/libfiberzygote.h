@@ -134,7 +134,8 @@
  *   zygote -> fiberd  DEVICE <fence> <bytes> 0        one fiber's slice
  *   zygote -> fiberd  DEVICE - <used> <capacity>      the whole engine
  *
- * It receives this one before a fiber is parked.
+ * It receives this one before a fiber is parked, and again whenever a
+ * fiber with a device budget ends.
  *
  *   fiberd -> zygote  EVICT <fence>                   drop that slice
  */
