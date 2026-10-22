@@ -999,12 +999,15 @@ type fakeLauncher struct {
 	commandErr, channelErr, pidErr, restoreExtraErr, restoredErr error
 	ownPair                                                      bool // Channel moves the conversation onto a pair of its own
 	endpointRoot                                                 string
-	pid                                                          int // what PID reports as the container's init
+	pid                                                          int      // what PID reports as the container's init
+	inherit                                                      []string // the keys RestoreExtra hands a file for
 
-	mu       sync.Mutex
-	calls    []string
-	own      *os.File // the host's end of the launcher's own pair
-	ownChild *os.File // the zygote's, closed here once it has started
+	mu        sync.Mutex
+	calls     []string
+	own       *os.File   // the host's end of the launcher's own pair
+	ownChild  *os.File   // the zygote's, closed here once it has started
+	inherited []*os.File // what RestoreExtra handed out, in order
+	writers   []*os.File // their pipes' write ends, never closed by the backend
 }
 
 func (l *fakeLauncher) record(s string) {
@@ -1083,15 +1086,54 @@ func (l *fakeLauncher) Release(backend.WarmSpec)      { l.record("release") }
 func (l *fakeLauncher) Endpoint(_ backend.WarmSpec, p string) string {
 	return filepath.Join(l.endpointRoot, filepath.Base(p))
 }
-func (l *fakeLauncher) DumpExtra(backend.WarmSpec, string) ([]string, error) {
-	return []string{"--dump-extra"}, nil
+
+// DumpExtra says what it was told in its arguments: the zygote itself
+// (--dump-extra-root) and a fiber with a workspace
+// (--dump-extra-workspace).
+func (l *fakeLauncher) DumpExtra(_ backend.WarmSpec, _ string, d Dumped) ([]string, error) {
+	extra := []string{"--dump-extra"}
+	if d.PID == d.Zygote {
+		extra = append(extra, "--dump-extra-root")
+	}
+	if d.Workspace {
+		extra = append(extra, "--dump-extra-workspace")
+	}
+	return extra, nil
 }
-func (l *fakeLauncher) RestoreExtra(_ backend.WarmSpec, dir string) ([]string, error) {
+
+// RestoreExtra hands the restore one file per key in inherit, each the
+// read end of a pipe whose write end the test keeps.
+func (l *fakeLauncher) RestoreExtra(_ backend.WarmSpec, dir string) ([]string, []Inherit, error) {
 	l.record("restoreExtra:" + dir)
 	if l.restoreExtraErr != nil {
-		return nil, l.restoreExtraErr
+		return nil, nil, l.restoreExtraErr
 	}
-	return []string{"--restore-extra"}, nil
+	var held []Inherit
+	for _, key := range l.inherit {
+		r, w, err := os.Pipe()
+		if err != nil {
+			return nil, nil, err
+		}
+		l.mu.Lock()
+		l.inherited = append(l.inherited, r)
+		l.writers = append(l.writers, w)
+		l.mu.Unlock()
+		held = append(held, Inherit{Key: key, File: r})
+	}
+	return []string{"--restore-extra"}, held, nil
+}
+
+// handedOver reports, for each file RestoreExtra handed out, whether the
+// backend closed it.
+func (l *fakeLauncher) handedOver() []bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	closed := make([]bool, len(l.inherited))
+	for i, r := range l.inherited {
+		_, err := r.Stat()
+		closed[i] = errors.Is(err, os.ErrClosed)
+	}
+	return closed
 }
 
 // nopLauncher is a launcher that does nothing, for tests of the backend's
@@ -1109,9 +1151,11 @@ func (nopLauncher) Channel(_ context.Context, _ backend.WarmSpec, _ *exec.Cmd, b
 func (nopLauncher) Socketpair(_ backend.WarmSpec, _ int, typ int) ([2]int, error) {
 	return syscall.Socketpair(syscall.AF_UNIX, typ|syscall.SOCK_CLOEXEC, 0)
 }
-func (nopLauncher) Restored(backend.WarmSpec, int) error                    { return nil }
-func (nopLauncher) RestoredGone(backend.WarmSpec)                           {}
-func (nopLauncher) Release(backend.WarmSpec)                                {}
-func (nopLauncher) Endpoint(_ backend.WarmSpec, p string) string            { return p }
-func (nopLauncher) DumpExtra(backend.WarmSpec, string) ([]string, error)    { return nil, nil }
-func (nopLauncher) RestoreExtra(backend.WarmSpec, string) ([]string, error) { return nil, nil }
+func (nopLauncher) Restored(backend.WarmSpec, int) error                         { return nil }
+func (nopLauncher) RestoredGone(backend.WarmSpec)                                {}
+func (nopLauncher) Release(backend.WarmSpec)                                     {}
+func (nopLauncher) Endpoint(_ backend.WarmSpec, p string) string                 { return p }
+func (nopLauncher) DumpExtra(backend.WarmSpec, string, Dumped) ([]string, error) { return nil, nil }
+func (nopLauncher) RestoreExtra(backend.WarmSpec, string) ([]string, []Inherit, error) {
+	return nil, nil, nil
+}

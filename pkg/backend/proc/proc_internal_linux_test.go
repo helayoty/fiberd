@@ -54,6 +54,11 @@ func TestBackendFacts(t *testing.T) {
 			if !b.Handoff() {
 				t.Fatal("Handoff() = false, want true")
 			}
+			// A launcher's fibers hold workspaces too, in their own copy
+			// of the container's namespace.
+			if !b.HoldsWorkspaces() {
+				t.Fatal("HoldsWorkspaces() = false, want true")
+			}
 			if got := strings.Join(b.EndpointSchemes(), ","); got != "unix,tcp" {
 				t.Fatalf("EndpointSchemes = %s, want unix,tcp", got)
 			}
@@ -344,8 +349,13 @@ func TestCloneLine(t *testing.T) {
 			wantLine: "EP 1000 - - mntns,nocaps,ws", wantFDs: 2},
 		{name: "cgroup, workspace tree and channel", spec: backend.FiberSpec{Generation: 1, Deadline: time.Second, OwnPIDNS: true}, cgroup: true, workspace: true,
 			wantLine: "EP 1000 - - pidns,mntns,nocaps,ws", wantFDs: 3},
-		{name: "launcher gives no workspace", spec: backend.FiberSpec{Generation: 1, Deadline: time.Second}, workspace: true, launcher: &fakeLauncher{endpointRoot: "/run/inside"},
-			wantErr: "gives fibers no workspace"},
+		// A launcher's fiber asks for ws without mntns. Its zygote gives
+		// the child a copy of the container's namespace, and the launcher
+		// made the mount point in its root filesystem, not on the host.
+		{name: "a launcher's fiber asks for ws without mntns", spec: backend.FiberSpec{Generation: 1, Deadline: time.Second, OwnPIDNS: true}, workspace: true, launcher: &fakeLauncher{endpointRoot: "/run/inside"},
+			wantLine: "/run/inside/ep.sock 1000 - - pidns,ws", wantFDs: 2},
+		{name: "a launcher's fiber with a cgroup and a workspace", spec: backend.FiberSpec{Generation: 1, Deadline: time.Second, OwnPIDNS: true}, cgroup: true, workspace: true, launcher: &fakeLauncher{endpointRoot: "/run/inside"},
+			wantLine: "/run/inside/ep.sock 1000 - - pidns,ws", wantFDs: 3},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -379,8 +389,12 @@ func TestCloneLine(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			fb, err := b.Clone(ctx, w.ID, spec)
-			if trees, points := f.treesOpened(); tc.workspace && tc.wantErr == "" && (len(trees) != 1 || trees[0] != spec.Workspace || points != 1) {
-				t.Fatalf("trees opened %v, mount point made %d times, want the root %s once and the mount point once", trees, points, spec.Workspace)
+			wantPoints := 1
+			if tc.launcher != nil {
+				wantPoints = 0 // the launcher's root filesystem holds the mount point
+			}
+			if trees, points := f.treesOpened(); tc.workspace && tc.wantErr == "" && (len(trees) != 1 || trees[0] != spec.Workspace || points != wantPoints) {
+				t.Fatalf("trees opened %v, mount point made %d times, want the root %s once and the mount point %d times", trees, points, spec.Workspace, wantPoints)
 			} else if (!tc.workspace || tc.wantErr != "") && (len(trees) != 0 || points != 0) {
 				t.Fatalf("trees opened %v, mount point made %d times, want none", trees, points)
 			}
@@ -779,6 +793,11 @@ func TestCheckpointWarm(t *testing.T) {
 			if strings.Contains(dump, "--dump-extra") != (tc.launcher != nil) {
 				t.Fatalf("criu dump %q: launcher arguments present = %v", dump, tc.launcher != nil)
 			}
+			// The launcher is told the tree is the zygote itself, with no
+			// workspace.
+			if strings.Contains(dump, "--dump-extra-root") != (tc.launcher != nil) || strings.Contains(dump, "--dump-extra-workspace") {
+				t.Fatalf("criu dump %q: want the launcher told it dumps the zygote, with no workspace", dump)
+			}
 		})
 	}
 }
@@ -950,6 +969,13 @@ func TestPark(t *testing.T) {
 		// key, never left to criu to find.
 		{name: "a workspace is named external at every dump", fiber: true, pair: true, workspace: true,
 			wantArgs: []string{"--external mnt[/workspace]:ws"}, wantDumps: 1},
+		// A launcher's fiber with a workspace has the same name, and the
+		// launcher is told, so it names the files the fiber holds through
+		// its container's mounts.
+		{name: "a launcher's fiber with a workspace is named, and the launcher told", fiber: true, pair: true, launcher: true, zygote: true, workspace: true,
+			wantArgs: []string{"--dump-extra-workspace", "--external mnt[/workspace]:ws"}, wantDumps: 1},
+		{name: "a launcher's capture runs while the tree is stopped", fiber: true, pair: true, launcher: true, zygote: true, workspace: true, capture: "ok",
+			wantArgs: []string{"--leave-stopped", "--dump-extra-workspace", "--external mnt[/workspace]:ws"}, wantDumps: 1, wantSignals: []string{"PID:USR1", "PID:KILL"}},
 		// With a capture the tree is left stopped. The capture sees one
 		// dump and no signal but the park's, and only then is the tree
 		// ended, as criu would have ended it.
@@ -1235,13 +1261,14 @@ func TestHandoffInherit(t *testing.T) {
 				}
 				defer func() { _ = ch.Close() }()
 			}
-			args, files, err := handoffInherit(dir, ch)
+			in, err := handoffInherit(dir, ch)
 			if tc.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-					t.Fatalf("handoffInherit = %v %v %v, want %q", args, files, err, tc.wantErr)
+					t.Fatalf("handoffInherit = %v %v, want %q", in, err, tc.wantErr)
 				}
 				return
 			}
+			args, files := inheritArgs(in)
 			if err != nil || strings.Join(args, " ") != tc.want {
 				t.Fatalf("handoffInherit = %v %v, want %q", args, err, tc.want)
 			}
@@ -1251,6 +1278,54 @@ func TestHandoffInherit(t *testing.T) {
 			}
 			if len(files) != wantFiles || (wantFiles == 1 && files[0] != ch) {
 				t.Fatalf("files = %v, want the channel only when given", files)
+			}
+		})
+	}
+}
+
+// TestInheritArgs checks that a handoff channel is criu's descriptor 3
+// and a launcher's files follow it in the order it gave them, each
+// under its own key.
+func TestInheritArgs(t *testing.T) {
+	cases := []struct {
+		name      string
+		handoff   bool
+		launcher  []string // the keys the launcher hands a file for
+		wantArgs  string
+		wantFiles int
+	}{
+		{name: "nothing to inherit"},
+		{name: "a handoff channel alone", handoff: true, wantArgs: "--inherit-fd fd[3]:socket:[42]", wantFiles: 1},
+		{name: "a launcher's files alone start at 3", launcher: []string{"file[110:13]", "file[2a:7]"},
+			wantArgs: "--inherit-fd fd[3]:file[110:13] --inherit-fd fd[4]:file[2a:7]", wantFiles: 2},
+		{name: "a launcher's files follow the channel", handoff: true, launcher: []string{"file[110:13]", "file[2a:7]"},
+			wantArgs: "--inherit-fd fd[3]:socket:[42] --inherit-fd fd[4]:file[110:13] --inherit-fd fd[5]:file[2a:7]", wantFiles: 3},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var in []Inherit
+			var want []*os.File
+			open := func() *os.File {
+				f, err := os.Open(os.DevNull)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = f.Close() })
+				want = append(want, f)
+				return f
+			}
+			if tc.handoff {
+				in = append(in, Inherit{Key: "socket:[42]", File: open()})
+			}
+			for _, k := range tc.launcher {
+				in = append(in, Inherit{Key: k, File: open()})
+			}
+			args, files := inheritArgs(in)
+			if got := strings.Join(args, " "); got != tc.wantArgs {
+				t.Fatalf("args = %q, want %q", got, tc.wantArgs)
+			}
+			if len(files) != tc.wantFiles || !slices.Equal(files, want) {
+				t.Fatalf("files = %v, want %v in order", files, want)
 			}
 		})
 	}
@@ -1356,7 +1431,19 @@ func TestResume(t *testing.T) {
 		{name: "a workspace is bound by its key", workspace: true, root: true, setup: func(t *testing.T, dir, _ string) { writeMounts(t, dir) },
 			wantArgs: []string{"--root ROOT", "--external mnt[ws]:WS"}, wantExit: "exit:0"},
 		{name: "a workspace needs a mount namespace in the checkpoint", workspace: true, wantText: "no mount namespace to hold a workspace"},
-		{name: "launcher gives no workspace", launcher: &fakeLauncher{}, workspace: true, wantText: "gives fibers no workspace", wantCalls: ""},
+		// A launcher's fiber had a namespace of its own, so its bind is
+		// mapped by the same key, with no mount point made on the host.
+		{name: "launcher binds the workspace by its key", launcher: &fakeLauncher{endpointRoot: "/host"}, workspace: true,
+			wantArgs: []string{"--restore-extra", "--external mnt[ws]:WS"}, wantExit: "exit:0",
+			wantCalls: "restoreExtra:DIR,restored:PID,restoredGone", wantEndpoint: "/host/ep.sock"},
+		// The files a launcher hands the tree become criu's descriptors
+		// from 3 on, and the backend closes its copies once criu has them,
+		// on a failed restore too.
+		{name: "launcher files are inherited in order and let go", launcher: &fakeLauncher{endpointRoot: "/host", inherit: []string{"file[110:13]", "file[2a:7]"}},
+			wantArgs: []string{"--inherit-fd fd[3]:file[110:13]", "--inherit-fd fd[4]:file[2a:7]", "files=2"}, wantExit: "exit:0",
+			wantCalls: "restoreExtra:DIR,restored:PID,restoredGone", wantEndpoint: "/host/ep.sock"},
+		{name: "launcher files are let go when the restore fails", launcher: &fakeLauncher{inherit: []string{"file[110:13]"}}, criu: criuKnobs{restore: "no"},
+			wantText: "criu restore failed", wantCalls: "restoreExtra:DIR,restoredGone"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1445,8 +1532,20 @@ func TestResume(t *testing.T) {
 			} else if err != nil {
 				t.Fatalf("Resume: %v", err)
 			}
-			if _, points := f.treesOpened(); points != map[bool]int{true: 1, false: 0}[tc.workspace && err == nil] {
-				t.Fatalf("the mount point was made %d times, want it once for a resume with a workspace", points)
+			if _, points := f.treesOpened(); points != map[bool]int{true: 1, false: 0}[tc.workspace && err == nil && tc.launcher == nil] {
+				t.Fatalf("the mount point was made %d times, want it once for a plain resume with a workspace", points)
+			}
+			if tc.launcher != nil {
+				t.Cleanup(func() {
+					for _, w := range tc.launcher.writers {
+						_ = w.Close()
+					}
+				})
+				for i, closed := range tc.launcher.handedOver() {
+					if !closed {
+						t.Fatalf("the backend kept file %d the launcher handed the restore", i)
+					}
+				}
 			}
 			if err == nil {
 				if fb.ID != "g/2-1" || fb.PID != f.criu.restorePID || channelOf(t, fb) != spec.Handoff {
