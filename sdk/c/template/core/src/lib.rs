@@ -8,8 +8,9 @@
 //! loop. sys is the one seam for system calls.
 //!
 //! No std, no allocator and one lock, the fz_report_line mutex. The
-//! child never takes it before on_fiber. Tests and fuzz targets link std.
-#![cfg_attr(not(any(test, fuzzing)), no_std)]
+//! child never takes it before on_fiber. Tests and fuzz targets link std,
+//! and so does refengine, which builds the rlib with the `std` feature.
+#![cfg_attr(not(any(test, fuzzing, feature = "std")), no_std)]
 #![deny(unsafe_op_in_unsafe_fn, missing_docs)]
 
 pub mod abi;
@@ -64,7 +65,7 @@ const fn parse_decimal(s: &str) -> u32 {
 /// The prebuilt core is compiled with unwinding and keeps a reference to
 /// the personality routine in its debug frames. With panic=abort it is
 /// never called, so an empty symbol satisfies the link on stable.
-#[cfg(not(any(test, fuzzing)))]
+#[cfg(not(any(test, fuzzing, feature = "std")))]
 #[unsafe(no_mangle)]
 pub extern "C" fn rust_eh_personality() {}
 
@@ -72,7 +73,7 @@ pub extern "C" fn rust_eh_personality() {}
 /// fiber that is "died before ready: signal:6", in the zygote it ends the
 /// template loudly. Nothing is formatted, since formatting could run
 /// under a lock the child does not own.
-#[cfg(not(any(test, fuzzing)))]
+#[cfg(not(any(test, fuzzing, feature = "std")))]
 #[panic_handler]
 fn on_panic(info: &core::panic::PanicInfo<'_>) -> ! {
     let mut line = [0u8; 512];

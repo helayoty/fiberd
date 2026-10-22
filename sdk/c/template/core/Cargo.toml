@@ -29,6 +29,11 @@ fuzzshim = []
 # testhooks exports fz_rs_wait_bounded for the fixtures under
 # tests/integration/proc/testdata. Only reap_linux_test.go turns it on.
 testhooks = []
+# std links std into the crate, for refengine (sdk/c/template/engine),
+# a std binary that reuses the line tokenizer and the seccomp builder.
+# The panic handler and the personality stub are left out, as under
+# test and fuzzing. The staticlib every template links never sets it.
+std = []
 
 # cargo-fuzz builds the library with --cfg fuzzing (fuzz/), which leaves
 # the panic handler to the harness.
