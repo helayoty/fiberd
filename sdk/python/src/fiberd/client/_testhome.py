@@ -1,16 +1,19 @@
 """A home in this process for the client's unit tests, with the certificates and fibers they need. Not shipped (see setup.py).
 
-Home serves the four methods over grpc.server with a ledger of a few
+Home serves the seven methods over grpc.server with a ledger of a few
 lines, answers the two misses and the tier gap the way pkg/rpc does, and
-keeps the last CloneRequest so a test can see what went on the wire. No
-process starts. The certificates come from cryptography, the fibers are
-threads with a socket each.
+keeps the last CloneRequest so a test can see what went on the wire. The
+file calls work on an in-memory workspace per fiber, under one disk
+budget, and keep what every upload sent. No process starts. The
+certificates come from cryptography, the fibers are threads with a socket
+each.
 """
 
 from __future__ import annotations
 
 import collections
 import datetime
+import hashlib
 import ipaddress
 import os
 import socket
@@ -31,6 +34,7 @@ from google.protobuf import empty_pb2
 
 from fiberd.client import _der
 from fiberd.client._api import grant_pb2
+from fiberd.client._calls import CHUNK
 from fiberd.client._errors import DETAILS_KEY
 from fiberd.client._stubs import SERVICE
 
@@ -58,6 +62,11 @@ def rich_status(code: int, message: str, miss: grant_pb2.Miss) -> bytes:
     return vi(1, code) + ld(2, message.encode()) + ld(3, detail)
 
 
+def no_workspace_status(code: int, message: str) -> bytes:
+    """A serialized google.rpc.Status carrying the NoWorkspace detail. The message is empty, so the Any has its type URL alone, as Go marshals it."""
+    return vi(1, code) + ld(2, message.encode()) + ld(3, ld(1, b"type.googleapis.com/fiberd.grant.v1.NoWorkspace"))
+
+
 class _RichStatus(collections.namedtuple("_RichStatus", ("code", "details", "trailing_metadata")), grpc.Status):
     """What abort_with_status takes, as grpcio-status would build it."""
 
@@ -69,6 +78,16 @@ class _Line:
     seq: int
     endpoint: str
     parked: bool = False
+
+
+@dataclass
+class Received:
+    """What one Upload sent, its header and the size of each data chunk, whether a file came of it and whether the handler returned."""
+
+    header: grant_pb2.UploadHeader | None = None
+    chunks: list[int] = field(default_factory=list)
+    done: bool = False
+    ended: threading.Event = field(default_factory=threading.Event)
 
 
 @dataclass
@@ -89,9 +108,21 @@ class Home:
     server_cert: bytes = b""
     endpoint: str = "unix:///run/fiberd/g1.sock"
     status_interval: float = 0.02
+    # disk_budget is the grant's disk_budget_bytes, each fiber's workspace ceiling. Zero means no workspace.
+    disk_budget: int = 64 << 20
+    # download_chunk is the most data one Download message carries.
+    download_chunk: int = CHUNK
+    # download_fail, a code and a message, ends a Download with that status before its chunk number download_fail_after.
+    download_fail: tuple[grpc.StatusCode, str] | None = None
+    download_fail_after: int = 1
+    # download_gate, when set, holds every Download chunk after the first until the event is set.
+    download_gate: threading.Event | None = None
     last_clone: grant_pb2.CloneRequest | None = None
     seq: int = 0
     lines: dict[str, _Line] = field(default_factory=dict)
+    # workspaces maps a fiber to its files, each path to its content and mode.
+    workspaces: dict[str, dict[str, tuple[bytes, int]]] = field(default_factory=dict)
+    uploads: list[Received] = field(default_factory=list)
     lock: threading.Lock = field(default_factory=threading.Lock)
 
     def _miss(self, context: grpc.ServicerContext, message: str) -> None:
@@ -173,14 +204,114 @@ class Home:
             yield st
             time.sleep(self.status_interval)
 
+    def put(self, fiber_id: str, path: str, data: bytes, mode: int = 0o644) -> None:
+        """Places a file in a fiber's workspace, as the fiber itself would write it."""
+        with self.lock:
+            self.workspaces.setdefault(fiber_id, {})[path] = (data, mode)
+
+    def _workspace(self, fiber_id: str, context: grpc.ServicerContext) -> dict[str, tuple[bytes, int]]:
+        """The running fiber's workspace. An unknown fiber is NotFound and a grant without a budget is NoWorkspace, as pkg/rpc answers."""
+        with self.lock:
+            self._running(fiber_id, context)
+            if self.disk_budget == 0:
+                message = f"grant has no workspace: fiber {fiber_id}"
+                code = grpc.StatusCode.FAILED_PRECONDITION
+                trailer = no_workspace_status(code.value[0], message)
+                context.abort_with_status(_RichStatus(code, message, ((DETAILS_KEY, trailer),)))
+            return self.workspaces.setdefault(fiber_id, {})
+
+    def upload(self, requests, context: grpc.ServicerContext) -> grant_pb2.FileInfo:
+        rec = Received()
+        self.uploads.append(rec)
+        try:
+            return self._upload(rec, requests, context)
+        finally:
+            rec.ended.set()
+
+    def _upload(self, rec: Received, requests, context: grpc.ServicerContext) -> grant_pb2.FileInfo:
+        # A call the client cancelled ends its request stream early or raises. Either way no file lands.
+        it = iter(requests)
+        first = next(it, None)
+        if first is None or not first.HasField("header"):
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, "an upload starts with its header")
+        h = rec.header = first.header
+        if not h.path or not h.HasField("size"):
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, "the upload header names no path or declares no size")
+        ws = self._workspace(h.fiber_id, context)
+        with self.lock:
+            used = sum(len(data) for path, (data, _) in ws.items() if path != h.path)
+        if used + h.size > self.disk_budget:
+            # pkg/rpc's OverBudget is ResourceExhausted with no Miss.
+            context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, f"the file is larger than the grant's disk budget: {h.size} bytes")
+        body = bytearray()
+        for m in it:
+            if m.HasField("header") or len(m.data) > CHUNK:
+                context.abort(grpc.StatusCode.INVALID_ARGUMENT, "a second header or a chunk over 1 MiB")
+            rec.chunks.append(len(m.data))
+            body += m.data
+            if len(body) > h.size:
+                context.abort(grpc.StatusCode.INVALID_ARGUMENT, "the upload sent more bytes than its header declared")
+        if len(body) != h.size:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, "the upload ended before the size its header declared")
+        digest = hashlib.sha256(body).digest()
+        if h.sha256 and h.sha256 != digest:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, "sha256 mismatch")
+        mode = h.mode & 0o777 or 0o644
+        with self.lock:
+            ws[h.path] = (bytes(body), mode)
+        rec.done = True
+        return grant_pb2.FileInfo(path=h.path, size=h.size, mode=mode, sha256=digest)
+
+    def download(self, req: grant_pb2.DownloadRequest, context: grpc.ServicerContext):
+        ws = self._workspace(req.fiber_id, context)
+        with self.lock:
+            found = ws.get(req.path)
+        if found is None:
+            context.abort(grpc.StatusCode.NOT_FOUND, f"file {req.path} does not exist")
+        data, mode = found
+        info = grant_pb2.FileInfo(path=req.path, size=len(data), mode=mode)
+        body, n = data[req.offset:], self.download_chunk
+        pieces = [body[i:i + n] for i in range(0, len(body), n)] or [b""]
+        for i, piece in enumerate(pieces):
+            if i > 0 and self.download_gate is not None:
+                self.download_gate.wait(10)
+            if self.download_fail is not None and i == self.download_fail_after:
+                context.abort(*self.download_fail)
+            yield grant_pb2.FileChunk(info=info, data=piece) if i == 0 else grant_pb2.FileChunk(data=piece)
+
+    def list_files(self, req: grant_pb2.ListFilesRequest, context: grpc.ServicerContext) -> grant_pb2.ListFilesResponse:
+        ws = self._workspace(req.fiber_id, context)
+        prefix = req.dir.strip("/") + "/" if req.dir.strip("/") else ""
+        with self.lock:
+            entries = sorted(ws.items())
+        if prefix and not any(path.startswith(prefix) for path, _ in entries):
+            context.abort(grpc.StatusCode.NOT_FOUND, f"directory {req.dir} does not exist")
+        out, dirs = [], set()
+        for path, (data, mode) in entries:
+            if not path.startswith(prefix):
+                continue
+            head, sep, _ = path[len(prefix):].partition("/")
+            if not sep:
+                out.append(grant_pb2.FileInfo(path=path, size=len(data), mode=mode))
+            elif head not in dirs:
+                dirs.add(head)
+                out.append(grant_pb2.FileInfo(path=prefix + head, mode=0o755, directory=True))
+        return grant_pb2.ListFilesResponse(files=out)
+
     def handler(self) -> grpc.GenericRpcHandler:
         unary, stream = grpc.unary_unary_rpc_method_handler, grpc.unary_stream_rpc_method_handler
+        upstream = grpc.stream_unary_rpc_method_handler
         empty = empty_pb2.Empty.SerializeToString
         return grpc.method_handlers_generic_handler(SERVICE, {
             "Clone": unary(self.clone, request_deserializer=grant_pb2.CloneRequest.FromString, response_serializer=grant_pb2.CloneResponse.SerializeToString),
             "Park": unary(self.park, request_deserializer=grant_pb2.ParkRequest.FromString, response_serializer=empty),
             "Release": unary(self.release, request_deserializer=grant_pb2.ReleaseRequest.FromString, response_serializer=empty),
             "Watch": stream(self.watch, request_deserializer=empty_pb2.Empty.FromString, response_serializer=grant_pb2.Status.SerializeToString),
+            "Upload": upstream(self.upload, request_deserializer=grant_pb2.UploadRequest.FromString, response_serializer=grant_pb2.FileInfo.SerializeToString),
+            "Download": stream(self.download, request_deserializer=grant_pb2.DownloadRequest.FromString,
+                               response_serializer=grant_pb2.FileChunk.SerializeToString),
+            "ListFiles": unary(self.list_files, request_deserializer=grant_pb2.ListFilesRequest.FromString,
+                               response_serializer=grant_pb2.ListFilesResponse.SerializeToString),
         })
 
     def serve(self, target: str = "127.0.0.1:0", creds: grpc.ServerCredentials | None = None) -> tuple[grpc.Server, str]:

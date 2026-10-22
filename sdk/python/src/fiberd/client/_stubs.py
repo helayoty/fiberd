@@ -1,4 +1,4 @@
-"""The four methods of the Fibers service over a channel, sync or grpc.aio.
+"""The seven methods of the Fibers service over a channel, sync or grpc.aio.
 
 Written by hand rather than generated, since the generated grant_pb2_grpc
 would import the messages by their proto path and need a rewrite step.
@@ -40,4 +40,19 @@ class Stubs:
             f"/{SERVICE}/Watch",
             request_serializer=empty_pb2.Empty.SerializeToString,
             response_deserializer=grant_pb2.Status.FromString,
+        )
+        self.upload = channel.stream_unary(
+            f"/{SERVICE}/Upload",
+            request_serializer=grant_pb2.UploadRequest.SerializeToString,
+            response_deserializer=grant_pb2.FileInfo.FromString,
+        )
+        self.download = channel.unary_stream(
+            f"/{SERVICE}/Download",
+            request_serializer=grant_pb2.DownloadRequest.SerializeToString,
+            response_deserializer=grant_pb2.FileChunk.FromString,
+        )
+        self.list_files = channel.unary_unary(
+            f"/{SERVICE}/ListFiles",
+            request_serializer=grant_pb2.ListFilesRequest.SerializeToString,
+            response_deserializer=grant_pb2.ListFilesResponse.FromString,
         )

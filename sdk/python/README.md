@@ -71,7 +71,22 @@ with Client.dial_tls("home:7443", cert="me.pem", key="me-key.pem", ca="ca.pem") 
     c.release(f, discard=True)         # end it, and drop its parked delta
 ```
 
-`Client.dial(addr)` is the plaintext form for a home started with `-insecure-plaintext`. A [handoff](../../docs/glossary.md#handoff) fiber is reached with `f.dial_handoff(cert, key)`, which sends its routing key as the server name, admits only the fiber's certificate from the Clone in the handshake and checks its key pin after it. `TierGap` and `NotFound` are the other typed outcomes, and any other failure is the `grpc.RpcError` as raised. `c.watch()` yields one status per grant as the home publishes it. `fiberd.client.aio.Client` has the same methods as coroutines, with `watch` as an async iterator. The token is accepted as a string or a callable that returns one, and it is never stored, logged or shown by a repr.
+`Client.dial(addr)` is the plaintext form for a home started with `-insecure-plaintext`. A [handoff](../../docs/glossary.md#handoff) fiber is reached with `f.dial_handoff(cert, key)`, which sends its routing key as the server name, admits only the fiber's certificate from the Clone in the handshake and checks its key pin after it. `TierGap`, `NotFound`, `NoWorkspace` and `QuotaExceeded` are the other typed outcomes, and any other failure is the `grpc.RpcError` as raised. `c.watch()` yields one status per grant as the home publishes it. `fiberd.client.aio.Client` has the same methods as coroutines, with `watch` and `download` as async iterators. The token is accepted as a string or a callable that returns one, and it is never stored, logged or shown by a repr.
+
+A fiber whose grant has a `disk_budget_bytes` has a workspace, mounted at `/workspace` inside it. The [file calls](../../docs/protocol.md#files) move files in and out of a running fiber's workspace.
+
+```python
+with open("dataset.csv", "rb") as src:
+    c.upload(f, "in/dataset.csv", src)                # sized by fstat, sent in chunks of at most 1 MiB
+c.upload(f, "config.json", b'{"k":1}', mode=0o600)    # a FileInfo, with path, size, mode and sha256
+with c.download(f, "out/result.bin") as d:           # NotFound or NoWorkspace raise here, not on the first read
+    print(d.info.size)
+    result = b"".join(d)
+for entry in c.list_files(f, "out"):                  # one directory, not recursive
+    print(entry.path, entry.size, entry.directory)
+```
+
+`upload` takes bytes or a binary file. A stream that can neither fstat nor seek needs `size=`. A source that ends early or holds more than its size raises `ValueError`, and fiberd keeps no file. A grant without a workspace raises `NoWorkspace`, and a file over the disk budget raises `QuotaExceeded`, which is not a shed. The aio client's `upload` also takes an async iterable of bytes with `size=`.
 
 ## Build and test
 

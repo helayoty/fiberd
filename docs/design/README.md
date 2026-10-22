@@ -38,7 +38,7 @@ These have no design doc of their own.
 | Piece | What it is |
 | --- | --- |
 | `api/grant/v1` | The wire contract, described in [protocol.md](../protocol.md) |
-| `sdk/go/client` | A client for [Clone](../glossary.md#clone), [Park](../glossary.md#park), [Release](../glossary.md#release) and Watch that turns misses into typed errors |
+| `sdk/go/client` | A client for [Clone](../glossary.md#clone), [Park](../glossary.md#park), [Release](../glossary.md#release) and Watch that turns misses into typed errors, and for the file calls on a fiber's workspace |
 | `pkg/endpoint` | How a fiber's address is written, chosen and dialled |
 | `pkg/tlsconf/tlsconftest` | Throwaway certificates for tests that need mutual TLS |
 | `pkg/runtime/stub` | An in-memory runtime for tests and the conformance suite |

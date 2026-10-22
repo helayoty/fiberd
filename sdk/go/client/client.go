@@ -6,6 +6,11 @@
 // (create the thing the slow way, or route to the home that holds the
 // session's state), on SHED it waits retry_after and tries again.
 // Nothing here knows which home it talks to.
+//
+// Upload, Download and ListFiles move files into and out of a running
+// fiber's workspace. A grant without a disk budget has no workspace, and
+// its file calls fail with *NoWorkspace. A file over the budget fails
+// with *QuotaExceeded.
 package client
 
 import (
@@ -115,6 +120,18 @@ type TierGap struct{ Reason string }
 
 func (e *TierGap) Error() string { return "tier gap: " + e.Reason }
 
+// NoWorkspace: a file call reached a fiber whose grant has no workspace,
+// since its disk_budget_bytes is zero. Not a miss and not a tier gap.
+type NoWorkspace struct{ Reason string }
+
+func (e *NoWorkspace) Error() string { return "no workspace: " + e.Reason }
+
+// QuotaExceeded: the file does not fit the workspace's disk budget or
+// its entry limit. Not a shed, so retrying the same upload fails again.
+type QuotaExceeded struct{ Reason string }
+
+func (e *QuotaExceeded) Error() string { return "quota exceeded: " + e.Reason }
+
 // Client talks to one home.
 type Client struct {
 	conn *grpc.ClientConn
@@ -213,8 +230,9 @@ func (c *Client) Watch(ctx context.Context, fn func(Status)) error {
 	}
 }
 
-// NotFound reports a Park or Release of a fiber the home does not know:
-// a prior epoch's fence, or one already gone.
+// NotFound reports a Park, Release or file call on a fiber the home does
+// not know, such as a prior epoch's fence or one already gone. For a file
+// call it also reports a missing file.
 func NotFound(err error) bool { return status.Code(err) == codes.NotFound }
 
 // classify turns the protocol's errors into the typed ones.
@@ -222,7 +240,8 @@ func classify(err error) error {
 	if err == nil {
 		return nil
 	}
-	if miss, ok := rpc.MissFromError(err); ok {
+	miss, isMiss := rpc.MissFromError(err)
+	if isMiss {
 		switch miss.GetCode() {
 		case grantv1.MissCode_SHED:
 			return &Shed{RetryAfter: time.Duration(miss.GetRetryAfterS()) * time.Second, Issuer: miss.GetIssuer(), Reason: status.Convert(err).Message()}
@@ -230,8 +249,19 @@ func classify(err error) error {
 			return &Deferred{Issuer: miss.GetIssuer(), PreferredHome: miss.GetPreferredHome(), Reason: status.Convert(err).Message()}
 		}
 	}
-	if status.Code(err) == codes.FailedPrecondition {
+	switch status.Code(err) {
+	case codes.FailedPrecondition:
+		// The NoWorkspace detail tells the zero-budget refusal apart from
+		// a tier gap, which carries none.
+		if rpc.IsNoWorkspace(err) {
+			return &NoWorkspace{Reason: status.Convert(err).Message()}
+		}
 		return &TierGap{Reason: status.Convert(err).Message()}
+	case codes.ResourceExhausted:
+		// A shed carries a Miss. Over the disk budget does not.
+		if !isMiss {
+			return &QuotaExceeded{Reason: status.Convert(err).Message()}
+		}
 	}
 	return err
 }

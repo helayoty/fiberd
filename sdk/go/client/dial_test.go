@@ -195,6 +195,10 @@ func TestText(t *testing.T) {
 		{name: "deferred names where the session lives", got: (&client.Deferred{Reason: "too large", PreferredHome: "home-b"}).Error(),
 			want: "deferred: too large (session lives on home-b)"},
 		{name: "a tier gap says why", got: (&client.TierGap{Reason: "needs CHECKPOINT"}).Error(), want: "tier gap: needs CHECKPOINT"},
+		{name: "no workspace says why", got: (&client.NoWorkspace{Reason: "fiber f has no workspace"}).Error(),
+			want: "no workspace: fiber f has no workspace"},
+		{name: "quota exceeded says why", got: (&client.QuotaExceeded{Reason: "the file is larger than the grant's disk budget"}).Error(),
+			want: "quota exceeded: the file is larger than the grant's disk budget"},
 		{name: "a fence is grant, epoch and seq", got: client.Fence{GrantUID: "g1", Epoch: 3, Seq: 7}.String(), want: "g1/3/7"},
 	}
 	for _, tc := range cases {

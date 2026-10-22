@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib
+import io
 import logging
+import os
 import sys
 import tempfile
+import threading
 import time
 
 import grpc
@@ -13,7 +17,7 @@ import pytest
 
 import fiberd.client
 from fiberd._testtable import table
-from fiberd.client import Client, Deferred, Fence, Kind, NotFound, Shed, TierGap
+from fiberd.client import Client, Deferred, Fence, FileInfo, Kind, NotFound, NoWorkspace, QuotaExceeded, Shed, TierGap
 from fiberd.client import _testhome as th
 
 TOKEN = "eyJhbGciOiJFUzI1NiJ9.secret-grant-token.signature"
@@ -259,11 +263,272 @@ def test_no_environment_fallback(monkeypatch, home):
         assert e.value.code() == grpc.StatusCode.UNAUTHENTICATED
 
 
+MiB = 1 << 20
+
+
+class _Stream:
+    """A binary stream with read alone, no fileno and no seek, as a pipe reads."""
+
+    def __init__(self, data: bytes) -> None:
+        self._b = io.BytesIO(data)
+
+    def read(self, n: int = -1) -> bytes:
+        return self._b.read(n)
+
+
+def _file(dir, data: bytes, skip: int = 0):
+    """A regular file holding data, open for reading at skip."""
+    path = dir / "source.bin"
+    path.write_bytes(data)
+    f = open(path, "rb")
+    f.seek(skip)
+    return f
+
+
+def _no_file_landed(home, fiber_id: str, path: str) -> None:
+    """Every upload the home saw has ended without a file, and the workspace holds none at path."""
+    for u in home.uploads:
+        assert u.ended.wait(10) and not u.done
+        assert u.header is None or sum(u.chunks) < u.header.size or u.header.size == 0
+    assert path not in home.workspaces.get(fiber_id, {})
+
+
+UPLOAD = [
+    # the file's size, the data chunks fiberd must see
+    ("an empty file is the header alone, its size set to zero", 0, []),
+    ("one byte is one chunk", 1, [1]),
+    ("exactly 1 MiB is one full chunk", MiB, [MiB]),
+    ("1 MiB and a byte is a full chunk and one byte", MiB + 1, [MiB, 1]),
+]
+
+
+@table(UPLOAD)
+def test_upload_chunks(home, client, name, f0, f1):
+    f = client.clone(TOKEN)
+    data = os.urandom(f0)
+    digest = hashlib.sha256(data).digest()
+    info = client.upload(f, "d/data.bin", data, mode=0o600, sha256=digest)
+    rec = home.uploads[-1]
+    assert rec.chunks == f1, name
+    assert rec.header.HasField("size") and rec.header.size == f0, name
+    assert (rec.header.fiber_id, rec.header.path, rec.header.mode, rec.header.sha256) == (f.id, "d/data.bin", 0o600, digest), name
+    assert info == FileInfo("d/data.bin", f0, 0o600, False, digest), name
+    assert home.workspaces[f.id]["d/data.bin"] == (data, 0o600), name
+
+
+def test_upload_defaults(home, client):
+    """No mode is zero on the wire, which fiberd reads as 0644, and no sha256 is empty."""
+    f = client.clone(TOKEN)
+    info = client.upload(f.id, "a.txt", b"hello")
+    h = home.uploads[-1].header
+    assert (h.mode, h.sha256, h.size) == (0, b"", 5)
+    assert (info.path, info.size, info.mode, info.directory) == ("a.txt", 5, 0o644, False)
+
+
+SOURCES = [
+    # the source made from the data in a directory, the size passed given the data, the error wanted
+    ("a regular file, sized by fstat", lambda d, tmp: _file(tmp, d), None, None),
+    ("a regular file is read from where it stands", lambda d, tmp: _file(tmp, b"skip" + d, skip=4), None, None),
+    ("a BytesIO has no fileno and is sized by seeking", lambda d, tmp: io.BytesIO(d), None, None),
+    ("a stream with neither and its size", lambda d, tmp: _Stream(d), len, None),
+    ("a stream with neither needs size", lambda d, tmp: _Stream(d), None, ValueError),
+    ("bytes with another size", lambda d, tmp: d, lambda d: len(d) + 1, ValueError),
+    ("a negative size", lambda d, tmp: _Stream(d), lambda d: -1, ValueError),
+]
+
+
+@table(SOURCES)
+def test_upload_sources(home, client, tmp_path, name, f0, f1, f2):
+    f = client.clone(TOKEN)
+    data = os.urandom(MiB + 3)
+    src = f0(data, tmp_path)
+    try:
+        size = f1(data) if f1 else None
+        if f2 is not None:
+            with pytest.raises(f2):
+                client.upload(f, "in.bin", src, size=size)
+            assert home.uploads == [], name
+            return
+        info = client.upload(f, "in.bin", src, size=size)
+    finally:
+        getattr(src, "close", lambda: None)()
+    assert info.size == len(data), name
+    assert home.uploads[-1].chunks == [MiB, 3], name
+    assert home.workspaces[f.id]["in.bin"][0] == data, name
+
+
+BROKEN = [
+    # the source, the size declared, what the error says
+    ("a stream a byte short", lambda: _Stream(b"x" * 9), 10, "ended 1 bytes short"),
+    ("a stream short after a full chunk", lambda: _Stream(b"x" * MiB), MiB + 5, "ended 5 bytes short"),
+    ("a stream that ends at once", lambda: _Stream(b""), 3, "ended 3 bytes short"),
+    ("a stream a byte long", lambda: _Stream(b"x" * 11), 10, "holds more than its size, 10 bytes"),
+    ("a stream long after a full chunk", lambda: _Stream(b"x" * (MiB + 1)), MiB, "holds more than its size"),
+    ("an empty file that is not empty", lambda: _Stream(b"x"), 0, "holds more than its size, 0 bytes"),
+]
+
+
+@table(BROKEN)
+def test_upload_source_breaks_its_size(home, client, name, f0, f1, f2):
+    """The source fails locally with ValueError, and fiberd never sees a finished upload."""
+    f = client.clone(TOKEN)
+    with pytest.raises(ValueError, match=f2):
+        client.upload(f, "x.bin", f0(), size=f1)
+    _no_file_landed(home, f.id, "x.bin")
+
+
+def test_upload_source_read_error(home, client):
+    """A source whose read fails raises that error, and no file lands."""
+
+    class Failing(_Stream):
+        def read(self, n: int = -1) -> bytes:
+            raise OSError("disk went away")
+
+    f = client.clone(TOKEN)
+    with pytest.raises(OSError, match="disk went away"):
+        client.upload(f, "x.bin", Failing(b""), size=4)
+    _no_file_landed(home, f.id, "x.bin")
+
+
+DOWNLOAD = [
+    # the file's size, the home's chunk size, the offset, the chunk sizes wanted
+    ("an empty file is its info alone", 0, MiB, 0, []),
+    ("a small file is one chunk", 5, MiB, 0, [5]),
+    ("a file over many chunks reassembles", 25, 10, 0, [10, 10, 5]),
+    ("1 MiB and a byte in full chunks", MiB + 1, MiB, 0, [MiB, 1]),
+    ("an offset skips the start, and info still names the whole file", 25, 10, 7, [10, 8]),
+    ("an offset at the end is no data", 25, 10, 25, []),
+]
+
+
+@table(DOWNLOAD)
+def test_download(home, client, name, f0, f1, f2, f3):
+    f = client.clone(TOKEN)
+    data = os.urandom(f0)
+    home.put(f.id, "out/r.bin", data, 0o640)
+    home.download_chunk = f1
+    with client.download(f, "out/r.bin", offset=f2) as d:
+        assert d.info == FileInfo("out/r.bin", f0, 0o640), name
+        chunks = list(d)
+    assert [len(c) for c in chunks] == f3, name
+    assert b"".join(chunks) == data[f2:], name
+    assert b"".join(client.download(f.id, "out/r.bin", offset=f2)) == data[f2:], name
+
+
+def test_upload_then_download(home, client):
+    f = client.clone(TOKEN)
+    data = os.urandom(2 * MiB + 7)
+    client.upload(f, "round/trip.bin", io.BytesIO(data))
+    assert b"".join(client.download(f, "round/trip.bin")) == data
+
+
+FILE_CALLS = {
+    "upload": lambda c, fid: c.upload(fid, "a.txt", b"hello"),
+    "download": lambda c, fid: c.download(fid, "a.txt"),
+    "download a missing file": lambda c, fid: c.download(fid, "missing.txt"),
+    "list_files": lambda c, fid: c.list_files(fid),
+}
+
+FILE_ERRORS = [
+    # the call, the home's state, whether the fiber is unknown, the exception wanted, what it says
+    ("an upload to an unknown fiber is NotFound", "upload", {}, True, NotFound, "not found: fiber g1/1/99 unknown"),
+    ("a download from an unknown fiber is NotFound", "download", {}, True, NotFound, "not found: fiber g1/1/99 unknown"),
+    ("listing an unknown fiber is NotFound", "list_files", {}, True, NotFound, "not found: fiber g1/1/99 unknown"),
+    ("an upload with no disk budget is NoWorkspace, not a tier gap", "upload", dict(disk_budget=0), False, NoWorkspace, "no workspace: grant has no workspace"),
+    ("a download with no disk budget is NoWorkspace", "download", dict(disk_budget=0), False, NoWorkspace, "no workspace: grant has no workspace"),
+    ("listing with no disk budget is NoWorkspace", "list_files", dict(disk_budget=0), False, NoWorkspace, "no workspace: grant has no workspace"),
+    ("an upload over the budget is QuotaExceeded, not Shed", "upload", dict(disk_budget=4), False, QuotaExceeded,
+     "quota exceeded: the file is larger than the grant's disk budget: 5 bytes"),
+    ("a missing file is NotFound from download itself", "download a missing file", {}, False, NotFound, "not found: file missing.txt does not exist"),
+    ("a failure before the first chunk raises from download itself", "download", dict(download_fail=(grpc.StatusCode.NOT_FOUND, "gone"), download_fail_after=0),
+     False, NotFound, "not found: gone"),
+]
+
+
+@table(FILE_ERRORS)
+def test_file_errors(home, client, name, f0, f1, f2, f3, f4):
+    f = client.clone(TOKEN)
+    home.put(f.id, "a.txt", b"hello")
+    for k, v in f1.items():
+        setattr(home, k, v)
+    with pytest.raises(f3) as e:
+        FILE_CALLS[f0](client, "g1/1/99" if f2 else f.id)
+    assert str(e.value).startswith(f4), name
+
+
+MID_STREAM = [
+    # the status the home ends the stream with after the first chunk, the exception wanted
+    ("a fiber gone mid-stream is NotFound", (grpc.StatusCode.NOT_FOUND, "fiber went away"), NotFound),
+    ("anything else is the raw grpc.RpcError", (grpc.StatusCode.ABORTED, "park cancelled the transfer"), grpc.RpcError),
+]
+
+
+@table(MID_STREAM)
+def test_download_fails_mid_stream(home, client, name, f0, f1):
+    f = client.clone(TOKEN)
+    data = os.urandom(30)
+    home.put(f.id, "big", data)
+    home.download_chunk = 10
+    home.download_fail, home.download_fail_after = f0, 1
+    d = client.download(f, "big")
+    assert next(d) == data[:10], name
+    with pytest.raises(f1) as e:
+        next(d)
+    if f1 is grpc.RpcError:
+        assert e.value.code() == f0[0], name
+    else:
+        assert f0[1] in str(e.value), name
+
+
+def test_download_cancel(home, client):
+    """Leaving a download's with block early cancels it. The home holds the second chunk back until then."""
+    f = client.clone(TOKEN)
+    home.put(f.id, "big", os.urandom(30))
+    home.download_chunk = 10
+    home.download_gate = threading.Event()
+    try:
+        with client.download(f, "big") as d:
+            assert len(next(d)) == 10
+        with pytest.raises(grpc.RpcError) as e:
+            next(d)
+        assert e.value.code() == grpc.StatusCode.CANCELLED
+    finally:
+        home.download_gate.set()
+
+
+LIST = [
+    # the directory listed, the entries wanted or the exception wanted
+    ("the workspace itself, files and directories", "", [FileInfo("a.txt", 2, 0o600), FileInfo("d", 0, 0o755, True)]),
+    ("a directory, not recursive", "d", [FileInfo("d/b.bin", 3, 0o644), FileInfo("d/e", 0, 0o755, True)]),
+    ("a directory deeper down", "d/e", [FileInfo("d/e/c", 0, 0o644)]),
+    ("a directory that is not there is NotFound", "nope", NotFound),
+]
+
+
+@table(LIST)
+def test_list_files(home, client, name, f0, f1):
+    f = client.clone(TOKEN)
+    home.put(f.id, "a.txt", b"hi", 0o600)
+    home.put(f.id, "d/b.bin", b"xyz")
+    home.put(f.id, "d/e/c", b"")
+    if isinstance(f1, type):
+        with pytest.raises(f1):
+            client.list_files(f, f0)
+        return
+    assert client.list_files(f, f0) == f1, name
+
+
+def test_list_files_empty(home, client):
+    assert client.list_files(client.clone(TOKEN)) == []
+
+
 TEXT = [
     ("shed says why and when to retry", Shed(retry_after=2, reason="grant g is at pids.max"), "shed: grant g is at pids.max, retry after 2s"),
     ("deferred says why", Deferred(reason="grant full"), "deferred: grant full"),
     ("deferred names where the session lives", Deferred(reason="too large", preferred_home="home-b"), "deferred: too large (session lives on home-b)"),
     ("a tier gap says why", TierGap("needs CHECKPOINT"), "tier gap: needs CHECKPOINT"),
+    ("no workspace says why", NoWorkspace("fiber g/1/1"), "no workspace: fiber g/1/1"),
+    ("a quota says why", QuotaExceeded("over the disk budget"), "quota exceeded: over the disk budget"),
     ("a fence is grant, epoch and seq", Fence("g1", 3, 7), "g1/3/7"),
 ]
 
