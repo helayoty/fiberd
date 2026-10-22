@@ -10,7 +10,11 @@
 #   4. run grant-conform C1-C10 from the host against the published port,
 #      every hook reaching into the allocation through docker exec;
 #   5. run the 2x overcommit storm inside a second allocation with a 384
-#      MiB job memory limit: a park must fire before any OOM kill.
+#      MiB job memory limit: a park must fire before any OOM kill;
+#   6. run the same storm without fiberd, as a job of the same size per
+#      layout (storm -plain, shared then separate). It only measures.
+#      Its OOM kills are expected, and the run passes or fails on step 5
+#      alone.
 #
 #   examples/slurm/conform.sh run          (everything; needs docker and go)
 #   examples/slurm/conform.sh up|down      (just the container)
@@ -158,15 +162,63 @@ storm() {
   wait_for 90 "fiberd in storm job $id" dexec curl -sf --unix-socket "/var/lib/fiberd/job-$id/private/admin.sock" http://x/healthz
   # The job's cgroup carries Slurm's memory limit; its OOM counter is the
   # one the storm must leave untouched.
+  local rc=0
   dexec sh -c "pid=\$(pgrep -f '^fiberd-slurm -state /var/lib/fiberd/job-$id' | head -1); own=/sys/fs/cgroup\$(grep -m1 '^0::' /proc/\$pid/cgroup | cut -d: -f3); own=\${own%/fiberd};
     job=\$(echo \$own | sed 's#\(/job_[0-9]*\).*#\1#');
     echo \"job cgroup \$job memory.max=\$(cat \$job/memory.max)\";
     exec storm -target 127.0.0.1:8485 -node-id $NODE -issuer-key $KEY -issuer $ISSUER_URL -isolation TRUSTED \
       -cgroup-root \$own/grants -container-events \$job/memory.events \
-      -fibers 8 -ceiling 167772160 -overcommit 2 -step 2097152 -round 250ms"
+      -fibers 8 -ceiling 167772160 -overcommit 2 -step 2097152 -round 250ms" || rc=$?
   echo "--- storm job:"
   dexec scontrol show job "$id" | grep -E "JobState|ExitCode"
   dexec scancel "$id"
+  # The baseline's jobs need the storm job's CPUs. A job slow to leave
+  # only delays them, so it does not fail the run.
+  wait_for 120 "storm job gone" sh -c "! docker exec $NAME squeue -h -j $id 2>/dev/null | grep -q ." || true
+  baseline shared
+  baseline separate
+  return "$rc"
+}
+
+# baseline runs the storm without fiberd as a job of its own, with the
+# storm job's allocation (--mem=384M --cpus-per-task=8): 8 plain
+# processes in a child cgroup of the job step, with the same heap and the
+# same growth, and nothing to park. The job cgroup's OOM counter is the
+# storm's -container-events, as on the fiberd side. It prints the storm's
+# summary line with the job's state appended. It only measures, so it
+# never fails the run.
+baseline() {
+  local layout=$1 id state from line out=/var/log/storm-plain-$1.out
+  echo "--- storm without fiberd, $layout layout:"
+  if ! id=$(dexec sbatch --parsable --ntasks=1 --cpus-per-task=8 --mem=384M --job-name="storm-plain-$layout" -o "$out" \
+      --wrap "own=/sys/fs/cgroup\$(grep -m1 '^0::' /proc/self/cgroup | cut -d: -f3);
+        job=\$(echo \$own | sed 's#\(/job_[0-9]*\).*#\1#');
+        echo \"job cgroup \$job memory.max=\$(cat \$job/memory.max)\";
+        exec storm -plain -layout $layout -heap-mb 64 -cgroup-root own -container-events \$job/memory.events \
+          -fibers 8 -ceiling 167772160 -overcommit 2 -step 2097152 -round 250ms"); then
+    echo "the $layout baseline was not submitted"
+    return 0
+  fi
+  if ! wait_for 300 "baseline job $id done" sh -c "! docker exec $NAME squeue -h -j $id 2>/dev/null | grep -q ."; then
+    dexec scancel "$id" || true
+  fi
+  # The job's output, but its summary line only once, below, with the
+  # job's state.
+  dexec grep -v '^storm summary:' "$out" || true
+  # Accounting storage is optional in this cluster. Without it sacct has
+  # nothing, and slurmctld still holds the finished job's state.
+  from=sacct
+  state=$(dexec sacct -n -X -P -j "$id" -o State 2>/dev/null | head -1 | cut -d' ' -f1 || true)
+  if [ -z "$state" ]; then
+    from=scontrol
+    state=$(dexec scontrol show job "$id" 2>/dev/null | grep -o 'JobState=[A-Z_]*' | cut -d= -f2 || true)
+  fi
+  line=$(dexec grep '^storm summary:' "$out" 2>/dev/null || true)
+  if [ -z "$line" ]; then
+    echo "the $layout baseline left no summary line (job $id, state ${state:-unknown})"
+    return 0
+  fi
+  echo "$line job_state=${state:-unknown} job_state_from=$from"
 }
 
 case "${1:-}" in
