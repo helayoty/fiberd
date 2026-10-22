@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -118,16 +120,19 @@ func TestSummaryLine(t *testing.T) {
 	}{
 		{name: "the fiberd side",
 			s: summary{side: "fiberd", layout: "fibers", n: 8, demand: 320 << 20, survivors: 8, parked: 3,
-				firstPark: moment{at: 4200 * time.Millisecond, seen: true}},
-			want: "storm summary: side=fiberd layout=fibers n=8 demand=320MiB oom_kills=0 survivors=8 parked=3 first_park=4.2s first_kill=none killed_before_growth=0"},
-		{name: "the shared baseline",
-			s: summary{side: "plain", layout: "shared", n: 8, demand: 320 << 20, oomKills: 5, survivors: 3,
-				firstKill: moment{at: 3100 * time.Millisecond, seen: true}},
-			want: "storm summary: side=plain layout=shared n=8 demand=320MiB oom_kills=5 survivors=3 parked=0 first_park=none first_kill=3.1s killed_before_growth=0"},
+				firstPark: moment{at: 4200 * time.Millisecond, seen: true}, parentKilled: "n/a", kernel: "6.17.0-1010-azure"},
+			want: "storm summary: side=fiberd layout=fibers n=8 demand=320MiB oom_kills=0 survivors=8 parked=3 first_park=4.2s first_kill=none killed_before_growth=0 parent_killed=n/a kernel=6.17.0-1010-azure"},
+		{name: "the shared baseline, its one kill the parent",
+			s: summary{side: "plain", layout: "shared", n: 8, demand: 320 << 20, oomKills: 1, survivors: 8,
+				firstKill: moment{at: 13400 * time.Millisecond, seen: true}, parentKilled: "yes", kernel: "6.17.0-1010-azure"},
+			want: "storm summary: side=plain layout=shared n=8 demand=320MiB oom_kills=1 survivors=8 parked=0 first_park=none first_kill=13.4s killed_before_growth=0 parent_killed=yes kernel=6.17.0-1010-azure"},
 		{name: "the separate baseline, killed before growth",
 			s: summary{side: "plain", layout: "separate", n: 8, demand: 320 << 20, oomKills: 4, survivors: 4,
-				firstKill: moment{seen: true, early: true}, killedBeforeGrowth: 3},
-			want: "storm summary: side=plain layout=separate n=8 demand=320MiB oom_kills=4 survivors=4 parked=0 first_park=none first_kill=before-growth killed_before_growth=3"},
+				firstKill: moment{seen: true, early: true}, killedBeforeGrowth: 3, parentKilled: "n/a", kernel: "6.17.0-1010-azure"},
+			want: "storm summary: side=plain layout=separate n=8 demand=320MiB oom_kills=4 survivors=4 parked=0 first_park=none first_kill=before-growth killed_before_growth=3 parent_killed=n/a kernel=6.17.0-1010-azure"},
+		{name: "unset parent and kernel still print a value",
+			s:    summary{side: "plain", layout: "shared", n: 8, demand: 320 << 20, survivors: 8},
+			want: "storm summary: side=plain layout=shared n=8 demand=320MiB oom_kills=0 survivors=8 parked=0 first_park=none first_kill=none killed_before_growth=0 parent_killed=n/a kernel=unknown"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -137,3 +142,33 @@ func TestSummaryLine(t *testing.T) {
 		})
 	}
 }
+
+func TestKernelRelease(t *testing.T) {
+	cases := []struct {
+		name    string
+		content *string // nil: no file
+		want    string
+	}{
+		{name: "a release with its newline", content: ptr("6.17.0-1010-azure\n"), want: "6.17.0-1010-azure"},
+		{name: "linuxkit", content: ptr("6.12.54-linuxkit\n"), want: "6.12.54-linuxkit"},
+		{name: "spaces become underscores, so the line stays key=value", content: ptr("6.1 custom build\n"), want: "6.1_custom_build"},
+		{name: "an empty file", content: ptr(""), want: "unknown"},
+		{name: "only whitespace", content: ptr(" \n"), want: "unknown"},
+		{name: "no file, as on macOS", want: "unknown"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "osrelease")
+			if tc.content != nil {
+				if err := os.WriteFile(path, []byte(*tc.content), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got := kernelRelease(path); got != tc.want {
+				t.Fatalf("kernelRelease = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func ptr(s string) *string { return &s }
