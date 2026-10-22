@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/helayoty/fiberd/pkg/sys/cgroup"
@@ -68,9 +69,10 @@ func (l layout) workersOf() int {
 
 // tally is the kill accounting of one baseline run.
 type tally struct {
-	growth   time.Time   // growth began (zero: it never did)
-	deaths   []time.Time // when each worker's answer pipe ended, zero while alive
-	firstOOM time.Time   // the round the OOM counter was first seen above where it started
+	growth     time.Time   // growth began (zero: it never did)
+	deaths     []time.Time // when each worker's answer pipe ended, zero while alive
+	firstOOM   time.Time   // the round the OOM counter was first seen above where it started
+	parentDied time.Time   // when the shared layout's parent was killed, zero if it was not
 }
 
 func (t tally) survivors() int {
@@ -95,12 +97,13 @@ func (t tally) killedBeforeGrowth() int {
 	return n
 }
 
-// firstKill is the earliest of a worker's death and the OOM counter's
-// first rise. A worker's pipe ends the moment it dies. The counter also
-// sees a kill that is not a worker, the shared layout's parent.
+// firstKill is the earliest of a worker's death, the shared parent's
+// and the OOM counter's first rise. A worker's pipe ends the moment it
+// dies, and storm sees its own child, the parent, end at once. The
+// counter is read once a round.
 func (t tally) firstKill() time.Time {
 	first := t.firstOOM
-	for _, d := range t.deaths {
+	for _, d := range append([]time.Time{t.parentDied}, t.deaths...) {
 		if !d.IsZero() && (first.IsZero() || d.Before(first)) {
 			first = d
 		}
@@ -178,6 +181,55 @@ func (w *worker) dirty(n uint64, to time.Duration) {
 			return
 		}
 	}
+}
+
+// growerProc is one storm-grower process, watched from its start. In
+// the shared layout it is the parent, which holds the template's heap as
+// a zygote does. Its death shows in no worker's pipe, so storm watches
+// it directly.
+type growerProc struct {
+	cmd     *exec.Cmd
+	stdin   io.WriteCloser
+	exited  chan struct{}
+	at      time.Time // set before exited closes
+	sigkill bool      // it ended on SIGKILL, which is how the OOM killer ends a process
+}
+
+func watchGrower(cmd *exec.Cmd, stdin io.WriteCloser) *growerProc {
+	p := &growerProc{cmd: cmd, stdin: stdin, exited: make(chan struct{})}
+	go func() {
+		_ = cmd.Wait()
+		p.at = time.Now()
+		if st, ok := cmd.ProcessState.Sys().(syscall.WaitStatus); ok {
+			p.sigkill = st.Signaled() && st.Signal() == syscall.SIGKILL
+		}
+		close(p.exited)
+	}()
+	return p
+}
+
+func (p *growerProc) ended() bool {
+	select {
+	case <-p.exited:
+		return true
+	default:
+		return false
+	}
+}
+
+// parentOutcome is the summary's parent_killed. Only the shared layout
+// has a parent. During the run nothing but a kill ends it, since it
+// leaves only once its workers have, so any other end is said as is.
+func parentOutcome(layout string, ended, sigkill bool) string {
+	switch {
+	case layout != "shared":
+		return "n/a"
+	case !ended:
+		return "no"
+	case sigkill:
+		return "yes"
+	}
+	return "exited"
 }
 
 // growerPath is storm-grower beside this binary, as make storm-grower
@@ -301,24 +353,23 @@ func runPlain(o opts) int {
 		lay.name, o.fibers, o.heapMB, uint64(float64(o.ceiling)*o.overcommit)>>20, o.overcommit, o.ceiling>>20, share>>20, cg.Path)
 
 	var ws []*worker
-	var cmds []*exec.Cmd
-	var stdins []io.WriteCloser
+	var procs []*growerProc
 	defer func() {
 		for _, w := range ws {
 			if w.cmd != nil {
 				_ = w.cmd.Close()
 			}
 		}
-		for _, s := range stdins {
-			_ = s.Close()
+		for _, p := range procs {
+			_ = p.stdin.Close()
 		}
 		if cg.Kill() != nil { // a kernel before 5.14 has no cgroup.kill
-			for _, c := range cmds {
-				_ = c.Process.Kill()
+			for _, p := range procs {
+				_ = p.cmd.Process.Kill()
 			}
 		}
-		for _, c := range cmds {
-			_ = c.Wait()
+		for _, p := range procs {
+			<-p.exited
 		}
 		removeCgroup(cg)
 	}()
@@ -333,8 +384,7 @@ func runPlain(o opts) int {
 			return fatal("start %s: %v", o.grower, err)
 		}
 		ws = append(ws, group...)
-		cmds = append(cmds, cmd)
-		stdins = append(stdins, stdin)
+		procs = append(procs, watchGrower(cmd, stdin))
 	}
 	// Every worker touches its heap (separate) or the parent touches the
 	// one heap (shared) before the first step. One that dies here is
@@ -405,12 +455,19 @@ func runPlain(o opts) int {
 			t.deaths = append(t.deaths, time.Time{})
 		}
 	}
+	parent := procs[0]
+	ended := parent.ended()
+	parentKilled := parentOutcome(lay.name, ended, ended && parent.sigkill)
+	if parentKilled == "yes" {
+		t.parentDied = parent.at
+	}
 	fmt.Println()
 	fmt.Printf("storm: plain max cgroup memory.current = %d MiB; OOM kills before=%d after=%d\n", maxCurrent>>20, oomBefore, oomAfter)
-	fmt.Printf("storm: plain survivors=%d of %d, killed before growth=%d, first kill at %s\n",
-		t.survivors(), len(ws), t.killedBeforeGrowth(), since(t.firstKill(), t.growth))
+	fmt.Printf("storm: plain survivors=%d of %d, killed before growth=%d, parent killed=%s, first kill at %s\n",
+		t.survivors(), len(ws), t.killedBeforeGrowth(), parentKilled, since(t.firstKill(), t.growth))
 	fmt.Println(summary{side: "plain", layout: lay.name, n: len(ws), demand: uint64(float64(o.ceiling) * o.overcommit), oomKills: rise(oomAfter, oomBefore),
-		survivors: t.survivors(), firstKill: since(t.firstKill(), t.growth), killedBeforeGrowth: t.killedBeforeGrowth()})
+		survivors: t.survivors(), firstKill: since(t.firstKill(), t.growth), killedBeforeGrowth: t.killedBeforeGrowth(),
+		parentKilled: parentKilled, kernel: kernelRelease(osReleasePath)})
 	// The baseline measures. It never fails on kills, which are expected.
 	return 0
 }
