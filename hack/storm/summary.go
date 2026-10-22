@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"os"
+	"strings"
 	"time"
 )
 
@@ -76,9 +78,32 @@ type summary struct {
 	firstPark          moment
 	firstKill          moment
 	killedBeforeGrowth int
+	parentKilled       string // the shared layout's parent: yes, no or exited. n/a elsewhere
+	kernel             string
 }
 
 func (s summary) String() string {
-	return fmt.Sprintf("storm summary: side=%s layout=%s n=%d demand=%dMiB oom_kills=%d survivors=%d parked=%d first_park=%s first_kill=%s killed_before_growth=%d",
-		s.side, s.layout, s.n, s.demand>>20, s.oomKills, s.survivors, s.parked, s.firstPark, s.firstKill, s.killedBeforeGrowth)
+	return fmt.Sprintf("storm summary: side=%s layout=%s n=%d demand=%dMiB oom_kills=%d survivors=%d parked=%d first_park=%s first_kill=%s killed_before_growth=%d parent_killed=%s kernel=%s",
+		s.side, s.layout, s.n, s.demand>>20, s.oomKills, s.survivors, s.parked, s.firstPark, s.firstKill, s.killedBeforeGrowth,
+		orElse(s.parentKilled, "n/a"), orElse(s.kernel, "unknown"))
+}
+
+func orElse(v, d string) string {
+	if v == "" {
+		return d
+	}
+	return v
+}
+
+// osReleasePath is where Linux names its kernel release.
+const osReleasePath = "/proc/sys/kernel/osrelease"
+
+// kernelRelease is the kernel the storm ran on, for the record. One
+// word, so the summary line stays key=value. "unknown" when unreadable.
+func kernelRelease(path string) string {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "unknown"
+	}
+	return orElse(strings.Join(strings.Fields(string(b)), "_"), "unknown")
 }

@@ -82,6 +82,14 @@ func TestTally(t *testing.T) {
 		{name: "a kill exactly at growth counts as during growth",
 			t:         tally{growth: growth, deaths: []time.Time{growth}},
 			firstKill: "0s"},
+		// The CI run of PR 46: one OOM kill, every worker alive. The parent
+		// died first, and storm sees that before the next round's counter.
+		{name: "the shared parent killed, no worker",
+			t:         tally{growth: growth, deaths: []time.Time{alive, alive}, parentDied: at(13400 * time.Millisecond), firstOOM: at(13600 * time.Millisecond)},
+			survivors: 2, firstKill: "13.4s"},
+		{name: "a worker before the parent",
+			t:         tally{growth: growth, deaths: []time.Time{at(5 * time.Second), alive}, parentDied: at(6 * time.Second)},
+			survivors: 1, firstKill: "5s"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -93,6 +101,30 @@ func TestTally(t *testing.T) {
 			}
 			if got := since(tc.t.firstKill(), tc.t.growth).String(); got != tc.firstKill {
 				t.Errorf("first kill = %q, want %q", got, tc.firstKill)
+			}
+		})
+	}
+}
+
+// TestParentOutcome pins parent_killed, which says whether the shared
+// layout's one OOM kill took the parent rather than a worker.
+func TestParentOutcome(t *testing.T) {
+	cases := []struct {
+		name           string
+		layout         string
+		ended, sigkill bool
+		want           string
+	}{
+		{name: "shared, the parent alive", layout: "shared", want: "no"},
+		{name: "shared, the parent killed", layout: "shared", ended: true, sigkill: true, want: "yes"},
+		{name: "shared, the parent ended some other way", layout: "shared", ended: true, want: "exited"},
+		{name: "separate has no parent", layout: "separate", want: "n/a"},
+		{name: "separate has no parent, even when its first process died", layout: "separate", ended: true, sigkill: true, want: "n/a"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := parentOutcome(tc.layout, tc.ended, tc.sigkill); got != tc.want {
+				t.Fatalf("parentOutcome(%q, %v, %v) = %q, want %q", tc.layout, tc.ended, tc.sigkill, got, tc.want)
 			}
 		})
 	}

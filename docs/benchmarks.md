@@ -346,7 +346,7 @@ The stage columns are each stage's own p50, so they do not add up to the round t
 
 The baselines grow by the same step each round, toward the same total demand. Their processes run in one child cgroup under the same container limit, and nothing parks them. So only the kernel's OOM killer acts. The baselines only measure. Their OOM kills are expected, and the fiberd phase alone decides the exit status. `make overcommit-baseline` runs the two baselines alone.
 
-Every phase ends with one `storm summary:` line. It records the side and layout, the instance count, the total demand, the OOM kills, the survivors, the parked count, the first park and first kill from the start of growth, and the kills before growth began. The CI overcommit job copies these lines to its run's summary page. No baseline result is recorded yet.
+Every phase ends with one `storm summary:` line. It records the side and layout, the instance count, the total demand, the OOM kills, the survivors, the parked count, the first park and first kill from the start of growth, and the kills before growth began. It also says whether the shared layout's parent was killed, since that kill shows in no worker, and names the kernel. The CI overcommit job copies these lines to its run's summary page. No baseline result is recorded yet.
 
 The parameters and checks are in [`hack/test/overcommit.sh`](../hack/test/overcommit.sh).
 
