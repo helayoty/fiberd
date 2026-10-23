@@ -7,12 +7,20 @@ package main
 import (
 	"bufio"
 	"errors"
+	"io"
 	"os"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
 )
+
+// engineConn is a connection to the engine. A vsock fd is an *os.File,
+// since net.FileConn does not know AF_VSOCK.
+type engineConn interface {
+	io.ReadWriteCloser
+	SetDeadline(t time.Time) error
+}
 
 // maxEngineLine is refzygote's bound on a request line, its newline
 // included.

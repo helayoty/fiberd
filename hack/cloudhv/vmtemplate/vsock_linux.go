@@ -15,7 +15,7 @@ import (
 // which names its guest side of the host's ports in FIBERD_FAKE_VSOCK,
 // that is the unix socket <name>_<port>, which the fake forwards as a
 // real VMM forwards AF_VSOCK. In a VM it is AF_VSOCK to the host, CID 2.
-func dialEngine() (net.Conn, error) {
+func dialEngine() (engineConn, error) {
 	port, err := hostPort()
 	if err != nil {
 		return nil, err
@@ -31,11 +31,10 @@ func dialEngine() (net.Conn, error) {
 		_ = unix.Close(fd)
 		return nil, fmt.Errorf("vsock connect 2:%d: %w", port, err)
 	}
-	f := os.NewFile(uintptr(fd), "vsock")
-	defer func() { _ = f.Close() }()
-	c, err := net.FileConn(f)
-	if err != nil {
-		return nil, fmt.Errorf("vsock conn: %w", err)
+	// Non-blocking, the fd joins Go's poller, so deadlines work on it.
+	if err := unix.SetNonblock(fd, true); err != nil {
+		_ = unix.Close(fd)
+		return nil, fmt.Errorf("vsock nonblock: %w", err)
 	}
-	return c, nil
+	return os.NewFile(uintptr(fd), "vsock"), nil
 }
