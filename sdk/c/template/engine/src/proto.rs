@@ -143,7 +143,8 @@ pub enum Reply {
     Hash(u64),
     /// `<used> <capacity>`, for stat.
     Stat(u64, u64),
-    /// `err <reason>`, one of fence, capacity, none, proto and device.
+    /// `err <reason>`, one of fence, capacity, none, proto, device and
+    /// held.
     Err(&'static str),
 }
 

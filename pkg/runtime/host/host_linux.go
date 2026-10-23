@@ -17,6 +17,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/helayoty/fiberd/pkg/artifact"
 	"github.com/helayoty/fiberd/pkg/backend"
 	"github.com/helayoty/fiberd/pkg/core"
@@ -1292,6 +1294,7 @@ func (r *Runtime) finish(f *fiber, reason, detail string) {
 	}
 	delete(r.fibers, f.id)
 	released := f.released
+	parked := f.parked
 	f.exit = &core.FiberExit{FiberID: f.id, Reason: reason, Detail: detail}
 	ep := f.endpoint
 	r.mu.Unlock()
@@ -1310,9 +1313,10 @@ func (r *Runtime) finish(f *fiber, reason, detail string) {
 		_ = f.channel.Close()
 	}
 	// The device slice goes with the fiber, however it ended, and then
-	// its leaf's mapping. A park evicted once before its dump, and this
-	// catches a slice taken since.
-	if f.devMax > 0 {
+	// its leaf's mapping. A park owns its slice from HOLD until the slice
+	// is saved and evicted or the park has failed, so this skips a fiber
+	// a park is holding and lets the park (or its unpark) drop the slice.
+	if f.devMax > 0 && !parked {
 		r.endDevice(f.grantUID, f.id)
 	}
 	// The workspace goes with the fiber. A park captured it into the
@@ -1323,9 +1327,6 @@ func (r *Runtime) finish(f *fiber, reason, detail string) {
 	_ = removeSoon(f.cg)
 	// A parked fiber keeps its port: the restored listener needs the same
 	// one. Every other end frees it.
-	r.mu.Lock()
-	parked := f.parked
-	r.mu.Unlock()
 	if !parked {
 		r.freePort(f.port, f.id)
 	}
@@ -1461,7 +1462,20 @@ func leafName(f core.Fence) string { return fmt.Sprintf("f-%d-%d", f.Epoch, f.Se
 // restores a parked delta.
 func (r *Runtime) Clone(ctx context.Context, spec core.CloneSpec) (core.FiberHandle, error) {
 	if spec.Source == core.SourceDelta {
-		return r.resume(ctx, spec)
+		h, err := r.resume(ctx, spec)
+		if err != nil && !errors.Is(err, core.ErrPressure) {
+			// A claimed delta whose resume failed, a GPU pool too small
+			// among the reasons, goes back to the registry so another home
+			// that fits can take it. A delta still published there, or an
+			// anonymous one, is left as it is (ReturnDelta decides). Not
+			// on ErrPressure: the core answers that with Shed, the caller
+			// retries here, and the session stays this home's alone
+			// instead of being claimable elsewhere while it resumes here.
+			if rerr := r.ReturnDelta(context.WithoutCancel(ctx), spec.Grant, spec.Session, spec.Ref); rerr != nil {
+				log.Printf("host: resume of %s/%s failed and it could not be returned to the registry: %v", spec.Grant.UID, spec.Session, rerr)
+			}
+		}
+		return h, err
 	}
 	r.mu.Lock()
 	z, ok := r.warms[spec.Grant.UID]
@@ -1697,6 +1711,34 @@ func (r *Runtime) deltaDir(f core.Fence) string {
 	return filepath.Join(r.cfg.DeltaDir, f.GrantUID, fmt.Sprintf("%d-%d", f.Epoch, f.Seq))
 }
 
+// saveSlice opens a fresh staging file fiberd owns and has the engine
+// write fence's held slice into it (SAVE), then makes it durable. The
+// file is O_EXCL, close-on-exec and 0600, so no fiber shares it, and it
+// is written from offset 0 (no O_APPEND, as the engine uses pwrite). It
+// is left at path for the caller to move into the delta on a good dump,
+// and returns the bytes and hash the engine reported and the SAVE time.
+func (r *Runtime) saveSlice(ctx context.Context, e *engine, fence, path string, timeout time.Duration) (uint64, string, time.Duration, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return 0, "", 0, err
+	}
+	_ = os.Remove(path)
+	fd, err := unix.Open(path, unix.O_RDWR|unix.O_CREAT|unix.O_EXCL|unix.O_CLOEXEC, 0o600)
+	if err != nil {
+		return 0, "", 0, fmt.Errorf("host: device staging file: %w", err)
+	}
+	sf := os.NewFile(uintptr(fd), path)
+	defer func() { _ = sf.Close() }()
+	t0 := time.Now()
+	n, hash, err := e.save(ctx, fence, int(sf.Fd()), timeout)
+	if err != nil {
+		return 0, "", 0, err
+	}
+	if err := fsync(sf); err != nil {
+		return 0, "", 0, err
+	}
+	return n, hash, time.Since(t0), nil
+}
+
 // Park checkpoints the fiber into its delta directory and ends its running
 // incarnation. sync: the fiber keeps running until the delta, its manifest
 // and every file under the directory are durable (fsync), then it is
@@ -1726,43 +1768,93 @@ func (r *Runtime) Park(ctx context.Context, fiberID string, sync bool) (string, 
 	}
 	dir := r.deltaDir(fence)
 	_ = os.RemoveAll(dir)
+	stage := dir + ".slice" // a staging file beside the delta, on its filesystem
+	_ = os.Remove(stage)    // whatever a crashed park left
 	w, _ := r.wBytes(f)
+	// One per-grant wait bounds the dump, the engine exchanges, and the
+	// wait on the fiber's exit. A handoff fiber answers on the channel
+	// the host holds.
+	_, deadline := core.GrantDeadlines(r, f.grantUID)
+	// The slice is held before the dump, so no reserve slips in, and
+	// before the quota is checked, so its bytes count. An engine that is
+	// down holds no slice to save, so the park goes on without one. The
+	// slice stays on the device, held, until the dump is durable.
+	var e *engine
+	if f.devMax > 0 {
+		e = r.engineOf(f.grantUID)
+	}
+	held, sliceBytes := false, uint64(0)
+	if e != nil {
+		switch err := e.hold(ctx, f.id, deadline); {
+		case err == nil:
+			held, sliceBytes = true, e.slice(f.id)
+		case errors.Is(err, errEngineDown):
+			e = nil // its slices went with it: nothing to save
+		default:
+			// The HOLD may have reached the engine late, after the wait
+			// gave up on it, and then the live fiber would see err held on
+			// every request. UNHOLD of an unheld fence is harmless.
+			e.unhold(f.id)
+			r.unpark(f)
+			return "", fmt.Errorf("host: park %s: hold its device slice: %w", fiberID, err)
+		}
+	}
+	// undo lifts a hold and drops the staging file when a park fails
+	// before its dump, so the fiber keeps running with its slice.
+	undo := func() {
+		if held {
+			e.unhold(f.id)
+			held = false
+		}
+		_ = os.Remove(stage)
+	}
 	// Checked before the dump. An async park ends the fiber, so a delta
 	// refused afterwards would take the session with it. W plus the
-	// workspace's apparent size is roughly what the delta will weigh.
+	// workspace's apparent size and the slice is roughly what the delta
+	// will weigh.
 	if f.quota > 0 {
 		var wsBytes uint64
 		if f.ws != nil {
 			b, _, err := f.ws.size()
 			if err != nil {
+				undo()
 				r.unpark(f)
 				return "", fmt.Errorf("host: park %s: size its workspace: %w", fiberID, err)
 			}
 			wsBytes = b
 		}
-		if used := treeBytes(filepath.Join(r.cfg.DeltaDir, f.grantUID)); used+w+wsBytes > f.quota {
+		if used := treeBytes(filepath.Join(r.cfg.DeltaDir, f.grantUID)); used+w+wsBytes+sliceBytes > f.quota {
+			undo()
 			r.unpark(f)
 			return "", fmt.Errorf("%w: grant %s holds %d bytes, parking %s adds about %d, quota %d",
-				core.ErrDeltaQuota, f.grantUID, used, fiberID, w+wsBytes, f.quota)
+				core.ErrDeltaQuota, f.grantUID, used, fiberID, w+wsBytes+sliceBytes, f.quota)
 		}
 	}
-	// Devices are renegotiated on resume: the engine drops the leaf's
-	// mapping and then the slice before the CPU side is checkpointed
-	// (the continuity contract).
-	r.evictDevice(f)
+	// The held slice is saved into the staging file before the CPU
+	// checkpoint (the continuity contract): the fiber's device state is
+	// captured while it is still whole.
+	var saveTime time.Duration
+	savedSlice := false
+	if held && sliceBytes != 0 {
+		n, _, dur, err := r.saveSlice(ctx, e, f.id, stage, deadline)
+		if err != nil {
+			undo()
+			r.unpark(f)
+			return "", fmt.Errorf("host: park %s: save its device slice: %w", fiberID, err)
+		}
+		sliceBytes, saveTime, savedSlice = n, dur, true
+	}
 	// giveBack undoes a park whose fiber still runs, keeping the failed
-	// images and dump log aside for diagnosis.
+	// images and dump log aside for diagnosis, lifting any hold and
+	// dropping the staging file.
 	giveBack := func(err error) (string, error) {
+		undo()
 		r.unpark(f)
 		_ = os.RemoveAll(dir + ".failed")
 		_ = os.Rename(dir, dir+".failed")
 		return "", err
 	}
-	// The fiber is asked to stop serving and dumped once it has. The
-	// wait is bounded by the grant's resume deadline, the one per-grant
-	// number for a wait on a fiber, and a handoff fiber answers on the
-	// channel the host holds.
-	_, deadline := core.GrantDeadlines(r, f.grantUID)
+	// The fiber is asked to stop serving and dumped once it has.
 	pspec := backend.ParkSpec{Dir: dir, Sync: sync, Deadline: deadline, Channel: channel, CgroupFD: -1}
 	if f.ws != nil {
 		// The workspace is captured while the fiber is stopped, so the
@@ -1779,10 +1871,33 @@ func (r *Runtime) Park(ctx context.Context, fiberID string, sync bool) (string, 
 	if err := r.be.Park(ctx, f.id, pspec); err != nil {
 		return giveBack(err)
 	}
+	// The dump is in place. Move the saved slice beside it as device.slice,
+	// so it rides the delta's seal, quota and durability.
+	if savedSlice {
+		if err := os.Rename(stage, filepath.Join(dir, deviceSlice)); err != nil {
+			return giveBack(fmt.Errorf("host: park %s: place its device slice: %w", fiberID, err))
+		}
+	}
+	// dropDevice ends the fiber's device state once the delta is kept:
+	// UNLEAF before EVICT, so a racing request finds no mapping, and EVICT
+	// lifts the hold. It runs held or not, so a LEAF the engine was down
+	// for is forgotten here too, else a restart replays it and a request
+	// in the dying leaf could reserve a slice nothing would evict.
+	dropDevice := func() {
+		if f.devMax > 0 {
+			r.endDevice(f.grantUID, f.id)
+			held = false
+		}
+	}
 	// A sync park's fiber runs until the delta is durable, so a failure
-	// gives it back. An async park's fiber is gone, so the ref goes back
-	// with any error, and the ledger parks the session rather than count a
-	// dead fiber.
+	// gives it back, with its slice and mapping, and its device state goes
+	// only once the delta is durable (below). An async park's fiber is
+	// gone, so its device state goes now, and the ref goes back with any
+	// error, and the ledger parks the session rather than count a dead
+	// fiber.
+	if !sync {
+		dropDevice()
+	}
 	m := manifest{Fence: f.id, GrantUID: f.grantUID, Birth: f.birth, Endpoint: ep, Handoff: f.handoff, Backend: r.be.Name(),
 		Generation: f.generation, WUsed: w, ParkedAt: time.Now().UTC().Format(time.RFC3339Nano)}
 	if f.relay != nil {
@@ -1816,6 +1931,9 @@ func (r *Runtime) Park(ctx context.Context, fiberID string, sync bool) (string, 
 			log.Printf("host: delta for %s failed, keeping the full image: %v", fiberID, err)
 		}
 	}
+	if savedSlice {
+		log.Printf("host: parked device slice of %s: delta=%d slice=%d bytes, saved in %s", fiberID, m.WBytes, sliceBytes, saveTime)
+	}
 	err = writeJSON(filepath.Join(dir, "manifest.json"), m)
 	parentsDone()
 	if err != nil {
@@ -1826,10 +1944,13 @@ func (r *Runtime) Park(ctx context.Context, fiberID string, sync bool) (string, 
 		return dir, err
 	}
 	if sync {
-		// Everything is written. Make it durable, then end the fiber.
+		// Everything is written. Make it durable, then drop the device
+		// state and end the fiber. Until here a failure gave the fiber back
+		// with its slice and mapping, so none of its requests saw err fence.
 		if err := syncDir(dir); err != nil {
 			return giveBack(err)
 		}
+		dropDevice()
 		_ = r.be.Kill(f.id)
 		_ = f.cg.Kill()
 	}
@@ -1851,20 +1972,27 @@ func (r *Runtime) Park(ctx context.Context, fiberID string, sync bool) (string, 
 
 // unpark takes back a park that failed: the fiber runs again, its exit
 // no longer ours. One that died meanwhile had its exit withheld by finish
-// under the park's flag, so it is reported now rather than lost.
+// under the park's flag, so it is reported now rather than lost. The
+// failure site has already lifted any hold (UNHOLD) and dropped the
+// staging file, so the fiber keeps its slice.
 func (r *Runtime) unpark(f *fiber) {
 	r.mu.Lock()
 	f.released, f.parked = false, false
 	exit := f.exit
 	r.mu.Unlock()
-	// A fiber that runs on gets its leaf mapped again, which the park
-	// dropped before its dump. One that died meanwhile ended unmapped.
 	if exit == nil {
+		// The fiber runs on: map its leaf again, so a repeated LEAF is in
+		// place, and it keeps its slice.
 		r.releafDevice(f)
+		return
 	}
-	if exit != nil {
-		r.exits <- *exit
+	// The fiber died during the park. finish skipped its slice while the
+	// park held it, so drop the slice and its mapping now, then report
+	// the death.
+	if f.devMax > 0 {
+		r.endDevice(f.grantUID, f.id)
 	}
+	r.exits <- *exit
 }
 
 // resume restores a parked delta into a fresh leaf under the new fence.
@@ -2052,9 +2180,14 @@ func (r *Runtime) resume(ctx context.Context, spec core.CloneSpec) (core.FiberHa
 		_ = rmdir(leaf)
 		return core.FiberHandle{}, err
 	}
-	// The engine learns the leaf's fence before the restored fiber runs.
-	// It reserves again, since its park dropped its slice.
-	if err := r.deviceLeaf(spec.Grant, spec.Fence.String(), leaf); err != nil {
+	// The device slice, when the delta carries one, is restored under the
+	// new fence before the LEAF, so the fiber never runs without its
+	// slice. RESTORE reserves under the fence with no mapping yet; a
+	// failure keeps no slice, so the new fence is evicted. The engine's
+	// pool may be smaller than the slice: that ERROR fails the resume,
+	// and the session is not lost, since Clone returns the delta to the
+	// registry (ReturnDelta).
+	unwind := func() {
 		ws.remove()
 		if rl != nil {
 			rl.Close()
@@ -2062,6 +2195,41 @@ func (r *Runtime) resume(ctx context.Context, spec core.CloneSpec) (core.FiberHa
 		r.freeSocket(sock, spec.Fence.String())
 		r.freePort(port, spec.Fence.String())
 		_ = rmdir(leaf)
+	}
+	if _, err := os.Stat(filepath.Join(dir, deviceSlice)); err == nil {
+		e := r.engineOf(spec.Grant.UID)
+		if !r.wantsEngine(spec.Grant) || e == nil {
+			// The compatibility gate refuses this before the claim; a
+			// direct resume here fails by name.
+			unwind()
+			return core.FiberHandle{}, fmt.Errorf("host: delta %s carries a device slice, but grant %s has no device engine here", dir, spec.Grant.UID)
+		}
+		_, rdl := core.GrantDeadlines(r, spec.Grant.UID)
+		if spec.Deadline > 0 {
+			rdl = spec.Deadline
+		}
+		sfd, err := unix.Open(filepath.Join(dir, deviceSlice), unix.O_RDONLY|unix.O_CLOEXEC, 0)
+		if err != nil {
+			unwind()
+			return core.FiberHandle{}, fmt.Errorf("host: delta %s: open its device slice: %w", dir, err)
+		}
+		sf := os.NewFile(uintptr(sfd), deviceSlice)
+		t0 := time.Now()
+		n, err := e.restore(ctx, spec.Fence.String(), int(sf.Fd()), rdl)
+		_ = sf.Close()
+		if err != nil {
+			r.endDevice(spec.Grant.UID, spec.Fence.String()) // keep no slice under the new fence
+			unwind()
+			return core.FiberHandle{}, fmt.Errorf("host: resume %s: restore its device slice: %w", dir, err)
+		}
+		log.Printf("host: restored device slice of %s: %d bytes in %s", spec.Fence, n, time.Since(t0))
+	}
+	// The engine learns the leaf's fence before the restored fiber runs.
+	// The slice is already reserved under the fence by the RESTORE above,
+	// or the fiber has none: LEAF only maps the leaf to the fence.
+	if err := r.deviceLeaf(spec.Grant, spec.Fence.String(), leaf); err != nil {
+		r.endDevice(spec.Grant.UID, spec.Fence.String()) // drop a slice the RESTORE reserved
+		unwind()
 		return core.FiberHandle{}, err
 	}
 	// The resumed fiber is the next generation of the parked one's

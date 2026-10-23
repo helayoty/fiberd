@@ -136,7 +136,8 @@ Three more lines on fd 3, all from fiberd. fiberd sends descriptors to the engin
 | --- | --- | --- |
 | `HOLD <fence>` | `HELD <fence>` | The engine finishes any request in flight for that fence and answers new ones `err held`. The slice can no longer change |
 | `SAVE <fence>`, one descriptor attached | `SAVED <fence> <bytes> <hash>` or `ERROR <fence> <reason>` | The engine copies the slice to the host and writes it to the descriptor. fiberd opened the file, so the engine needs no write access to the park directory. The slice stays on the device while it is held |
-| `RESTORE <fence>`, one descriptor attached | `RESTORED <fence> <bytes>` or `ERROR <fence> <reason>` | The engine checks the header, reserves a slice under the resume's new fence, copies the bytes in and reports it |
+| `UNHOLD <fence>` | none | Lifts the hold and keeps the slice, so a fiber whose park failed runs on with it |
+| `RESTORE <fence>`, one descriptor attached | `RESTORED <fence> <bytes>` or `ERROR <fence> <reason>` | The engine checks the header, reserves a slice under the resume's new fence, copies the bytes in and reports it. A fence that is held, mapped or already has a slice is refused as `busy` |
 
 ### Park and resume order
 
@@ -153,13 +154,13 @@ sequenceDiagram
   E-->>H: SAVED bytes hash
   H->>K: be.Park, the CPU checkpoint
   H->>H: move the staging file into the park directory as device.slice
-  H->>E: EVICT fence, then UNLEAF
+  H->>E: UNLEAF fence, then EVICT
   Note over H: publish. The quota counts the slice
 ```
 
 - The quota check (`host_linux.go:1585-1600`) adds the slice's bytes.
 - The fiber's exit path evicts every slice (`host_linux.go:1197`). It skips a held fence, so the slice survives until the file is in place.
-- If `SAVE` or `be.Park` fails, the park fails as a failed CRIU dump does today. fiberd drops the staging file and releases the hold, and the fiber keeps running with its slice. The release line is settled in M5.
+- If `SAVE` or `be.Park` fails, the park fails as a failed CRIU dump does today. fiberd drops the staging file and sends `UNHOLD`, and the fiber keeps running with its slice.
 
 **At resume** the order is `RESTORE` under the new fence, then `LEAF`, then `be.Resume`. The fiber never runs without its slice. If the resume fails, fiberd evicts the new fence.
 

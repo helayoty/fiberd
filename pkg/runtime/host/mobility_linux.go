@@ -84,6 +84,9 @@ func (r *Runtime) PublishDelta(ctx context.Context, deltaRef string, g core.Gran
 		artifact.AnnotationGeneration: strconv.Itoa(m.Generation),
 	}
 	r.host.Annotate(ann) // what a claiming home must be able to restore
+	if e := r.engineOf(grantUID); e != nil {
+		e.facts().annotate(ann) // the engine its slice needs, checked before a claim
+	}
 	if _, local := r.cfg.Command(m.Template); local {
 		delete(ann, artifact.AnnotationTemplates) // a -template executable is not in the cache
 	}
@@ -178,6 +181,10 @@ func (r *Runtime) FindDelta(ctx context.Context, g core.Grant, session string) (
 			}
 		}
 	}
+	// The device gate, before the claim deletes the tag.
+	if err := r.checkEngine(g, session, rd, loc.Annotations); err != nil {
+		return rd, true, err
+	}
 	return rd, true, nil
 }
 
@@ -250,6 +257,32 @@ func (r *Runtime) ClaimDelta(ctx context.Context, g core.Grant, session string, 
 	}
 	log.Printf("host: claimed %s/%s from %s (%d bytes) -> %s", grantUID, session, rd.Home, rd.WBytes, dst)
 	return dst, nil
+}
+
+// ReturnDelta puts a delta whose resume failed back in the registry, so
+// the session can resume on a home that fits. A claim deleted the tag
+// and its publish record, and the copy at deltaRef is then the only one.
+// It is published as a park here publishes, so this home keeps it parked
+// until another home claims it (Owned). A delta with a publish record is
+// in the registry already, or was claimed elsewhere since, and stays as
+// it is. The push does not inherit the resume's deadline, which is often
+// what failed.
+func (r *Runtime) ReturnDelta(ctx context.Context, g core.Grant, session, deltaRef string) error {
+	if session == "" || r.cfg.checkDeltaRegistry() != nil {
+		return nil
+	}
+	switch _, err := os.Stat(filepath.Join(deltaRef, remoteFile)); {
+	case err == nil:
+		return nil
+	case !errors.Is(err, os.ErrNotExist):
+		return err
+	}
+	remote, err := r.PublishDelta(context.WithoutCancel(ctx), deltaRef, g, session)
+	if err != nil {
+		return fmt.Errorf("host: return %s/%s to the registry: %w", g.UID, session, err)
+	}
+	log.Printf("host: returned %s/%s to the registry as %s after a failed resume", g.UID, session, remote)
+	return nil
 }
 
 // DiscardDelta implements core.DeltaDiscarder. It removes a delta nothing

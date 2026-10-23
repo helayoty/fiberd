@@ -56,6 +56,17 @@ const (
 	AnnotationTemplates = "io.fiberd.templates"
 )
 
+// Annotations for the device engine a parked fiber's slice was saved by,
+// on a delta of a grant with an engine.
+const (
+	AnnotationEngineClass   = "io.fiberd.engine_class"
+	AnnotationEngineLayout  = "io.fiberd.engine_layout"
+	AnnotationEngineVersion = "io.fiberd.engine_version"
+	AnnotationGPUName       = "io.fiberd.gpu_name"
+	AnnotationGPUCC         = "io.fiberd.gpu_cc"
+	AnnotationGPUDriver     = "io.fiberd.gpu_driver"
+)
+
 // Annotate adds the platform to a manifest annotation map.
 func (p Platform) Annotate(m map[string]string) {
 	m[AnnotationArch] = p.Arch

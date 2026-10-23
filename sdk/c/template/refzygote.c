@@ -42,6 +42,19 @@
  *   engine <line>   -> the engine's one-line reply to <line> sent as it
  *                      is, so a test can make a fiber name a sibling's
  *                      fence and see "err fence"
+ *   gpufill <seed> <bytes> -> "ok <hash>" once a reserve of bytes under
+ *                      this fiber's fence and the engine's fill from
+ *                      seed succeed. The hash is kept in memory, so it
+ *                      survives a park
+ *   gpucheck        -> "ok" when the engine's sum under the current fence
+ *                      matches the kept hash, else "mismatch <kept>
+ *                      <now>", or "err none" before any fill
+ *   gpuopen <path>  -> "ok" or the errno's name of open(O_RDWR), for a GPU
+ *                      node such as /dev/nvidiactl. No ioctl is ever sent.
+ *
+ * The device probes pass an engine error ("err fence", "err capacity",
+ * an unreachable engine) through as the reply. A malformed gpufill or
+ * gpuopen gets "err proto".
  *
  * A handoff fiber (its record carries an identity) serves the same
  * protocol inside TLS 1.3 on the connections fz_accept() hands it, and
@@ -62,11 +75,15 @@
  * --http serves HTTP/1.1 instead of the line protocol, over the same
  * state. GET /readyz -> "ok", GET / or /count -> the counter, POST / or
  * /incr -> the counter after one increment, GET /fence -> the fence,
- * POST /dirty?bytes=N -> "ok N".
+ * POST /dirty?bytes=N -> "ok N". POST /gpu/fill?seed=S&bytes=N,
+ * GET /gpu/check and GET /gpu/open?path=P answer as gpufill, gpucheck
+ * and gpuopen do. The status is 200 for an answer, a mismatch included,
+ * 502 for an engine error, 409 for a check before any fill and 400 for a
+ * query that is not exactly the one named.
  *
  * fiberd names the grant's device engine, when it has one, in
  * FIBERD_ENGINE_PATH. The library hands it to each fiber as
- * FIBERD_ENGINE, which "reserve" and "devfree" talk to.
+ * FIBERD_ENGINE, which "reserve", "devfree" and the gpu probes talk to.
  *
  * Build: (cd core && cargo build --release --locked)
  *        gcc -O2 -pthread -o refzygote refzygote.c core/target/release/libfiberzygote_core.a
@@ -287,6 +304,8 @@ static void errname(int e, char *out, size_t n) {
     case ENOSYS: snprintf(out, n, "ENOSYS\n"); break;
     case EAFNOSUPPORT: snprintf(out, n, "EAFNOSUPPORT\n"); break;
     case EPROTONOSUPPORT: snprintf(out, n, "EPROTONOSUPPORT\n"); break;
+    case ENXIO: snprintf(out, n, "ENXIO\n"); break;
+    case ENODEV: snprintf(out, n, "ENODEV\n"); break;
     default: snprintf(out, n, "errno %d\n", e); break;
     }
 }
@@ -974,6 +993,115 @@ static void symlink_path(const char *args, char *out, size_t n) {
     if (symlink(target, at) == 0) snprintf(out, n, "ok\n"); else errname(errno, out, n);
 }
 
+/* ---- the GPU probes ---------------------------------------------------- */
+
+/* The hash the engine returned for this fiber's last fill, 16 hex digits,
+ * or empty. It lives in the fiber's memory, so a park and resume carry
+ * it, and gpu_check compares it with what the slice holds now. */
+static char gpu_hash[17];
+
+/* dec_u64 reads all of s's len bytes as a decimal u64, as the engine
+ * does. 0 on success, -1 when s is empty, holds any other byte or
+ * overflows. */
+static int dec_u64(const char *s, size_t len, unsigned long long *v) {
+    if (len == 0) return -1;
+    unsigned long long x = 0;
+    for (size_t i = 0; i < len; i++) {
+        if (s[i] < '0' || s[i] > '9') return -1;
+        unsigned d = (unsigned)(s[i] - '0');
+        if (x > (ULLONG_MAX - d) / 10) return -1;
+        x = x * 10 + d;
+    }
+    *v = x;
+    return 0;
+}
+
+/* engine_hash copies the hash out of an engine reply "ok <hash>" into
+ * hash, of 17 bytes. -1, with hash untouched, for any other reply. */
+static int engine_hash(const char *reply, char *hash) {
+    if (strncmp(reply, "ok ", 3) != 0 || strlen(reply + 3) != 16) return -1;
+    for (int i = 3; i < 19; i++)
+        if (!((reply[i] >= '0' && reply[i] <= '9') || (reply[i] >= 'a' && reply[i] <= 'f'))) return -1;
+    memcpy(hash, reply + 3, 17);
+    return 0;
+}
+
+/* gpu_fill and gpu_check write their answer to out and return the HTTP
+ * status that goes with it. 200 is an answer, a mismatch included. 502
+ * is an engine error, passed through as it came. 409 is the fiber's own
+ * "err none", a check with no fill before it. */
+
+/* gpu_fill reserves bytes (not 0) under this fiber's fence, as "reserve"
+ * does, has the engine fill the slice from seed and keeps the hash it
+ * returns. */
+static int gpu_fill(unsigned long long seed, unsigned long long bytes, char *out, size_t n) {
+    char rp[128], req[256];
+    gpu_hash[0] = 0; /* the reserve replaces the slice the old hash was of */
+    const char *r = device_reserve(bytes, rp, sizeof rp);
+    if (strcmp(r, "ok") != 0) { snprintf(out, n, "%s\n", r); return 502; }
+    snprintf(req, sizeof req, "fill %s %llu", current_fence(), seed);
+    r = engine_send(req, rp, sizeof rp);
+    if (engine_hash(r, gpu_hash) < 0) { snprintf(out, n, "%s\n", r); return 502; }
+    snprintf(out, n, "ok %s\n", gpu_hash);
+    return 200;
+}
+
+/* gpu_check asks the engine for the slice's hash under the current
+ * fence, the new one after a resume, and compares it with the kept one. */
+static int gpu_check(char *out, size_t n) {
+    if (!gpu_hash[0]) { snprintf(out, n, "err none\n"); return 409; }
+    char rp[128], req[256], now[17];
+    snprintf(req, sizeof req, "sum %s", current_fence());
+    const char *r = engine_send(req, rp, sizeof rp);
+    if (engine_hash(r, now) < 0) { snprintf(out, n, "%s\n", r); return 502; }
+    if (strcmp(now, gpu_hash) == 0) snprintf(out, n, "ok\n");
+    else snprintf(out, n, "mismatch %s %s\n", gpu_hash, now);
+    return 200;
+}
+
+/* gpufill_line parses the line's "<seed> <bytes>" strictly, two decimal
+ * u64s and bytes not 0, then fills. */
+static void gpufill_line(const char *args, char *out, size_t n) {
+    char s[24];
+    unsigned long long seed = 0, bytes = 0;
+    const char *b = second_arg(args, s, sizeof s);
+    if (!b || dec_u64(s, strlen(s), &seed) < 0 || dec_u64(b, strlen(b), &bytes) < 0 || bytes == 0) {
+        snprintf(out, n, "err proto\n");
+        return;
+    }
+    (void)gpu_fill(seed, bytes, out, n);
+}
+
+/* gpu_query parses a fill's query, "seed=S&bytes=N" in either order,
+ * each key once and no other, bytes not 0. 0 on success, else -1. */
+static int gpu_query(const char *query, unsigned long long *seed, unsigned long long *bytes) {
+    int have = 0;
+    while (*query) {
+        const char *amp = strchr(query, '&');
+        size_t len = amp ? (size_t)(amp - query) : strlen(query);
+        unsigned long long *v;
+        int bit;
+        if (len > 5 && strncmp(query, "seed=", 5) == 0) { v = seed; bit = 1; query += 5; len -= 5; }
+        else if (len > 6 && strncmp(query, "bytes=", 6) == 0) { v = bytes; bit = 2; query += 6; len -= 6; }
+        else return -1;
+        if ((have & bit) || dec_u64(query, len, v) < 0) return -1;
+        have |= bit;
+        query += len;
+        if (!*query) break;
+        if (!*++query) return -1; /* a trailing '&' */
+    }
+    return have == 3 && *bytes ? 0 : -1;
+}
+
+/* gpuopen_errno is wopen's twin for a GPU node such as /dev/nvidiactl.
+ * It opens read-write, as a CUDA runtime does, and writes "ok" or the
+ * errno's name. It never sends an ioctl, so nothing reaches a driver. */
+static void gpuopen_errno(const char *path, char *out, size_t n) {
+    int fd = open(path, O_RDWR | O_CLOEXEC | O_NOCTTY);
+    if (fd >= 0) { close(fd); snprintf(out, n, "ok\n"); return; }
+    errname(errno, out, n);
+}
+
 static int serve_client(conn_t *c, const char *fence, unsigned long *counter) {
     char line[256];
     while (conn_line(c, line, sizeof line)) {
@@ -1031,6 +1159,12 @@ static int serve_client(conn_t *c, const char *fence, unsigned long *counter) {
         else if (strncmp(line, "reserve ", 8) == 0) { char rp[128]; snprintf(out, sizeof out, "%s\n", device_reserve(strtoull(line + 8, NULL, 10), rp, sizeof rp)); }
         else if (strcmp(line, "devfree") == 0) { char rp[128]; snprintf(out, sizeof out, "%s\n", device_reserve(0, rp, sizeof rp)); }
         else if (strncmp(line, "engine ", 7) == 0) { char rp[128]; snprintf(out, sizeof out, "%s\n", engine_send(line + 7, rp, sizeof rp)); }
+        else if (strncmp(line, "gpufill ", 8) == 0) gpufill_line(line + 8, out, sizeof out);
+        else if (strcmp(line, "gpucheck") == 0) (void)gpu_check(out, sizeof out);
+        else if (strncmp(line, "gpuopen ", 8) == 0) {
+            if (line[8]) gpuopen_errno(line + 8, out, sizeof out);
+            else snprintf(out, sizeof out, "err proto\n");
+        }
         else snprintf(out, sizeof out, "err unknown command\n");
         if (conn_write(c, out, strlen(out)) < 0) break;
         /* "reply_delay_ms": a pause between the reply and the next read,
@@ -1050,6 +1184,11 @@ static void http_reply(conn_t *c, int status, const char *reason, const char *bo
                      status, reason, strlen(body));
     if (conn_write(c, head, (size_t)n) < 0) return;
     (void)conn_write(c, body, strlen(body));
+}
+
+/* gpu_reply sends a GPU probe's answer with the status it returned. */
+static void gpu_reply(conn_t *c, int status, const char *body) {
+    http_reply(c, status, status == 200 ? "OK" : status == 409 ? "Conflict" : "Bad Gateway", body);
 }
 
 static int serve_http(conn_t *c, const char *fence, unsigned long *counter) {
@@ -1081,6 +1220,20 @@ static int serve_http(conn_t *c, const char *fence, unsigned long *counter) {
         const char *b = strstr(query, "bytes=");
         size_t got = dirty(b ? (size_t)strtoull(b + 6, NULL, 10) : 0);
         snprintf(body, sizeof body, "ok %zu\n", got); http_reply(c, 200, "OK", body); return 0;
+    }
+    if (strcmp(method, "POST") == 0 && strcmp(target, "/gpu/fill") == 0) {
+        unsigned long long seed = 0, bytes = 0;
+        if (gpu_query(query, &seed, &bytes) < 0) { http_reply(c, 400, "Bad Request", "err proto\n"); return 0; }
+        gpu_reply(c, gpu_fill(seed, bytes, body, sizeof body), body); return 0;
+    }
+    if (strcmp(method, "GET") == 0 && strcmp(target, "/gpu/check") == 0) {
+        if (query[0]) { http_reply(c, 400, "Bad Request", "err proto\n"); return 0; }
+        gpu_reply(c, gpu_check(body, sizeof body), body); return 0;
+    }
+    if (strcmp(method, "GET") == 0 && strcmp(target, "/gpu/open") == 0) {
+        /* One key and the path as it is, with no percent-decoding. */
+        if (strncmp(query, "path=", 5) != 0 || !query[5] || strchr(query, '&')) { http_reply(c, 400, "Bad Request", "err proto\n"); return 0; }
+        gpuopen_errno(query + 5, body, sizeof body); http_reply(c, 200, "OK", body); return 0;
     }
     http_reply(c, 404, "Not Found", "not found\n");
     return 0;

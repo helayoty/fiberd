@@ -25,6 +25,11 @@ var (
 	// does not offer. Like a tier gap it is a FailedPrecondition, never a
 	// silent CPU-only fiber.
 	ErrNeedsDevice = errors.New("fiberd: grant needs a device class this home does not offer")
+	// ErrDeviceMismatch means the session's parked device slice was saved
+	// by an engine of another class or layout than the grant's engine
+	// here, or the grant has no engine here. The session stays in the
+	// registry, and like a tier gap it is a FailedPrecondition.
+	ErrDeviceMismatch = errors.New("fiberd: parked device state needs an engine of another class or layout; not moving it")
 	// ErrNeedsIsolation means the grant is untrusted and this home's
 	// runtime does not sandbox fibers from the host kernel. It is a
 	// FailedPrecondition, like a tier gap.

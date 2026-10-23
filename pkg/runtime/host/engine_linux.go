@@ -90,14 +90,37 @@ type engine struct {
 	class    string
 	layout   string
 	capacity uint64
-	used     uint64            // from DEVICE - lines, 0 while down
-	slices   map[string]uint64 // fence -> slice bytes, from DEVICE lines
+	// gpu, cc and driver are the device the engine last declared on its
+	// GPU line. They are only logged and published, never compared, so a
+	// restart or a move may change them.
+	gpu    string
+	cc     string
+	driver string
+	used   uint64            // from DEVICE - lines, 0 while down
+	slices map[string]uint64 // fence -> slice bytes, from DEVICE lines
 	// leaves maps each fence that has a LEAF to its cgroup path as the
 	// engine names it. A restart sends them all again.
 	leaves map[string]string
 	// cgRoot is the cgroup mount as fiberd sees it, so a leaf's path
 	// less cgRoot is the path the engine reads in /proc/<pid>/cgroup.
 	cgRoot string
+	// emu serializes one reply-bearing exchange (HOLD, SAVE, RESTORE) at a
+	// time, so a single caller owns reply. reply, set under mu while an
+	// exchange waits, names the fence and verb it waits for and takes the
+	// line that answers it, or "" when the engine goes down first. DEVICE
+	// lines are still applied while it is set.
+	emu   sync.Mutex
+	reply *engineReply
+}
+
+// engineReply is what one exchange waits for: the reply verb (HELD, SAVED
+// or RESTORED) for its fence, or an ERROR for that fence. Any other reply
+// line is a stray from an earlier exchange or a fire-and-forget line, and
+// is logged, never handed to the waiter.
+type engineReply struct {
+	fence string
+	verb  string
+	ch    chan string
 }
 
 // engineResult is what a start in the background hands back.
@@ -307,18 +330,11 @@ func (r *Runtime) endDevice(grantUID, fence string) {
 	}
 }
 
-// evictDevice drops the device slice of a fiber about to be parked, and
-// its mapping first. Only a fiber with a device budget can hold one. A
-// park that fails maps the fiber again (releafDevice).
-func (r *Runtime) evictDevice(f *fiber) {
-	if f.devMax == 0 {
-		return
-	}
-	r.endDevice(f.grantUID, f.id)
-}
-
 // releafDevice maps a fiber's leaf again after its park failed, since
-// the fiber runs on. An engine that is down gets it with the replay of
+// the fiber runs on. A park that fails before its dump keeps the slice,
+// the hold and the mapping, so the repeated LEAF is a safe no-op there;
+// it still guards the fiber's slice against a mapping dropped by any
+// other racing path. An engine that is down gets it with the replay of
 // its restart.
 func (r *Runtime) releafDevice(f *fiber) {
 	if f.devMax == 0 {
@@ -453,6 +469,12 @@ func (e *engine) down(conn *net.UnixConn, proc *os.Process) {
 		e.conn, e.proc, e.up = nil, nil, false
 		e.used = 0
 		clear(e.slices)
+		// Wake an exchange waiting on this connection: its reply is never
+		// coming. "" is the engine-down sentinel.
+		if e.reply != nil {
+			e.reply.ch <- ""
+			e.reply = nil
+		}
 	}
 	e.mu.Unlock()
 	_ = conn.Close()
@@ -539,6 +561,168 @@ func (e *engine) write(line string) error {
 		return errEngineDown
 	}
 	return nil
+}
+
+// writeFd sends one line, with fd as its single SCM_RIGHTS descriptor
+// when fd is not negative. Like write, a line that cannot be written
+// closes fd 3, so serve ends and run starts the engine again, and the
+// caller sees it down. The caller does not hold wmu: writeFd takes it,
+// so a SAVE or RESTORE line orders with LEAF and the rest.
+func (e *engine) writeFd(line string, fd int) error {
+	if len(line)+1 > engineLineMax || strings.ContainsAny(line, "\n\x00") {
+		return fmt.Errorf("host: line to the engine too long or not one line: %q", line)
+	}
+	e.wmu.Lock()
+	defer e.wmu.Unlock()
+	e.mu.Lock()
+	conn, up := e.conn, e.up
+	e.mu.Unlock()
+	if !up || conn == nil {
+		return errEngineDown
+	}
+	var oob []byte
+	if fd >= 0 {
+		oob = unix.UnixRights(fd)
+	}
+	_ = conn.SetWriteDeadline(time.Now().Add(engineWriteTimeout))
+	if _, _, err := conn.WriteMsgUnix([]byte(line+"\n"), oob, nil); err != nil {
+		log.Printf("host: device engine of %s: line %q not taken (%v); ending it", e.grantUID, line, err)
+		_ = conn.Close()
+		return errEngineDown
+	}
+	return nil
+}
+
+// exchange sends "<verb> <fence>", with an optional descriptor, and waits
+// for the one reply that answers it: want (HELD, SAVED or RESTORED) or an
+// ERROR, both naming fence. The reader skips the DEVICE lines it keeps
+// applying and logs any other reply, so a late reply to an exchange that
+// timed out, or an ERROR for another fence's line, never reaches this
+// one. One exchange runs at a time. It ends on the reply, on the engine's
+// death, when timeout passes, or when ctx does.
+func (e *engine) exchange(ctx context.Context, verb, want, fence string, fd int, timeout time.Duration) (string, error) {
+	e.emu.Lock()
+	defer e.emu.Unlock()
+	line := verb + " " + fence
+	rp := &engineReply{fence: fence, verb: want, ch: make(chan string, 1)}
+	e.mu.Lock()
+	if !e.up || e.conn == nil {
+		e.mu.Unlock()
+		return "", errEngineDown
+	}
+	e.reply = rp
+	e.mu.Unlock()
+	defer func() {
+		e.mu.Lock()
+		if e.reply == rp {
+			e.reply = nil
+		}
+		e.mu.Unlock()
+	}()
+	if err := e.writeFd(line, fd); err != nil {
+		return "", err
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case r := <-rp.ch:
+		if r == "" {
+			return "", errEngineDown
+		}
+		return r, nil
+	case <-timer.C:
+		return "", fmt.Errorf("host: device engine of %s: no reply to %q within %s", e.grantUID, line, timeout)
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
+}
+
+// hold asks the engine to hold fence's slice (HOLD), so no reserve slips
+// in before a dump. It blocks later requests for the fence until an
+// UNHOLD or an EVICT.
+func (e *engine) hold(ctx context.Context, fence string, timeout time.Duration) error {
+	if err := token(fence); err != nil {
+		return err
+	}
+	line, err := e.exchange(ctx, "HOLD", "HELD", fence, -1, timeout)
+	if err != nil {
+		return err
+	}
+	f := strings.Fields(line)
+	switch {
+	case len(f) == 2 && f[0] == "HELD" && f[1] == fence:
+		return nil
+	case f[0] == "ERROR":
+		return fmt.Errorf("host: HOLD %s: %s", fence, engineReason(f))
+	default:
+		return fmt.Errorf("host: HOLD %s: engine said %q", fence, line)
+	}
+}
+
+// save asks the engine to write fence's held slice into fd (SAVE), and
+// returns the bytes and hash it reports. The slice stays on the device,
+// still held.
+func (e *engine) save(ctx context.Context, fence string, fd int, timeout time.Duration) (uint64, string, error) {
+	line, err := e.exchange(ctx, "SAVE", "SAVED", fence, fd, timeout)
+	if err != nil {
+		return 0, "", err
+	}
+	f := strings.Fields(line)
+	switch {
+	case len(f) == 4 && f[0] == "SAVED" && f[1] == fence:
+		n, err := strconv.ParseUint(f[2], 10, 64)
+		if err != nil {
+			return 0, "", fmt.Errorf("host: SAVE %s: bad bytes %q", fence, f[2])
+		}
+		return n, f[3], nil
+	case f[0] == "ERROR":
+		return 0, "", fmt.Errorf("host: SAVE %s: %s", fence, engineReason(f))
+	default:
+		return 0, "", fmt.Errorf("host: SAVE %s: engine said %q", fence, line)
+	}
+}
+
+// unhold lifts a hold and keeps the slice (UNHOLD), so a fiber whose park
+// failed keeps running with it. There is no reply.
+func (e *engine) unhold(fence string) {
+	if err := e.send("UNHOLD " + fence); err != nil && !errors.Is(err, errEngineDown) {
+		log.Printf("host: UNHOLD %s: %v", fence, err)
+	}
+}
+
+// restore asks the engine to reserve fence's slice from fd under the new
+// fence (RESTORE), with no LEAF yet, and returns the bytes it read. On
+// any failure the engine keeps no slice.
+func (e *engine) restore(ctx context.Context, fence string, fd int, timeout time.Duration) (uint64, error) {
+	if err := token(fence); err != nil {
+		return 0, err
+	}
+	line, err := e.exchange(ctx, "RESTORE", "RESTORED", fence, fd, timeout)
+	if err != nil {
+		return 0, err
+	}
+	f := strings.Fields(line)
+	switch {
+	case len(f) == 3 && f[0] == "RESTORED" && f[1] == fence:
+		n, err := strconv.ParseUint(f[2], 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("host: RESTORE %s: bad bytes %q", fence, f[2])
+		}
+		return n, nil
+	case f[0] == "ERROR":
+		return 0, fmt.Errorf("host: RESTORE %s: %s", fence, engineReason(f))
+	default:
+		return 0, fmt.Errorf("host: RESTORE %s: engine said %q", fence, line)
+	}
+}
+
+// engineReason is the reason token of an ERROR line, "ERROR" when it
+// carries none.
+func engineReason(f []string) string {
+	if len(f) >= 3 {
+		return strings.Join(f[2:], " ")
+	}
+	return "ERROR"
 }
 
 // leaf maps leaf to fence in the engine (LEAF) and keeps the mapping, so
@@ -711,6 +895,7 @@ func (e *engine) launch() (*net.UnixConn, *os.Process, error) {
 	defer e.wmu.Unlock()
 	e.mu.Lock()
 	e.class, e.layout, e.capacity = d.class, d.layout, d.capacity
+	e.gpu, e.cc, e.driver = d.gpu, d.cc, d.driver
 	e.cgRoot = root
 	e.up, e.used = true, 0
 	clear(e.slices)
@@ -1078,9 +1263,46 @@ func (e *engine) apply(line string) {
 				e.slices[f[1]] = n
 			}
 		}
-	case len(f) >= 2 && f[0] == "ERROR":
-		log.Printf("host: device engine of %s: %s", e.grantUID, line)
+	case len(f) >= 2 && isReply(f[0]):
+		e.deliver(line)
 	default:
 		log.Printf("host: device engine of %s: unknown line %q", e.grantUID, line)
 	}
+}
+
+// isReply reports whether a line is the answer to a HOLD, SAVE or
+// RESTORE: one an exchange waits for.
+func isReply(word string) bool {
+	switch word {
+	case "HELD", "SAVED", "RESTORED", "ERROR":
+		return true
+	}
+	return false
+}
+
+// deliver hands a reply line to the exchange waiting for it, when the line
+// names that exchange's fence and is its reply verb or an ERROR. Any other
+// reply is logged: an ERROR for a fire-and-forget line that failed (an
+// EVICT, say), or a late reply to an exchange that timed out. fiberd
+// sends no fire-and-forget line for a fence while an exchange for it is
+// pending, so an ERROR for the fence answers the exchange, unless it
+// refuses a LEAF of the fence written just before (a replay, or the LEAF
+// again after a failed park). The engine acks no LEAF, so that one cannot
+// be told apart. It fails the exchange early, its UNHOLD or EVICT undoes
+// the engine's answer, and the real reply is logged here as a stray.
+func (e *engine) deliver(line string) {
+	f := strings.Fields(line)
+	e.mu.Lock()
+	rp := e.reply
+	if rp != nil && f[1] == rp.fence && (f[0] == rp.verb || f[0] == "ERROR") {
+		e.reply = nil
+	} else {
+		rp = nil
+	}
+	e.mu.Unlock()
+	if rp != nil {
+		rp.ch <- line
+		return
+	}
+	log.Printf("host: device engine of %s: %s", e.grantUID, line)
 }
