@@ -61,6 +61,10 @@ type WarmSpec struct {
 	// its engine (device paths or ids), for the warm instance's
 	// environment; nil when the grant has none.
 	Devices []string
+	// EnginePath is the host path of the grant's device engine socket,
+	// which the warm instance gets as FIBERD_ENGINE_PATH and hands every
+	// fiber as FIBERD_ENGINE. "" when the grant has no engine.
+	EnginePath string
 	// ProbeCgroupFD is an open fd of an empty cgroup a backend may use
 	// to measure what one fiber of this template costs (Warm.Bytes), by
 	// starting one there and reading the cgroup; the host removes it
@@ -389,27 +393,6 @@ type WMeter interface {
 // for W and for budget enforcement instead of the leaf's counters.
 type WReporter interface {
 	FiberW(fiberID string) (uint64, bool)
-}
-
-// DeviceReporter is implemented by backends whose warm instance is an
-// engine that owns device state (a KV cache, VRAM) and reports each
-// fiber's slice of it: on the zygote channel, `DEVICE <fence> <bytes> 0`
-// per fiber and `DEVICE - <used> <capacity>` for the whole engine. The
-// host prices, enforces and reclaims on those reports, since the kernel
-// has no pressure class for devices.
-type DeviceReporter interface {
-	// FiberDevice is the engine's slice for the fiber; ok is false when
-	// the engine has said nothing about it.
-	FiberDevice(fiberID string) (used uint64, ok bool)
-	// WarmDevice is the engine's total use and capacity; ok is false when
-	// the warm instance reported no device at all.
-	WarmDevice(warmID string) (used, capacity uint64, ok bool)
-	// EvictDevice asks the engine to drop the fiber's slice. A park does
-	// it before the CPU checkpoint (devices are renegotiated on resume),
-	// and every end of the fiber does it again, after the backend has
-	// reported the exit. So the engine is found by the fence's grant, not
-	// through a fiber the backend may have forgotten.
-	EvictDevice(fiberID string) error
 }
 
 // SelfCheckpointer is implemented by backends that can checkpoint a

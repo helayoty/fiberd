@@ -113,7 +113,31 @@ type Config struct {
 	// and would pass the owner checks on its files, so it is always
 	// hidden from them, like DeltaDir. Empty when fiberd has none.
 	PrivateDir string
+	// Engine is the device engine's command line, "path [args...]".
+	// fiberd starts one engine for each grant with a device budget, with
+	// --grant and --socket put after the path, and the grant is admitted
+	// once it is READY. Empty starts none, and a grant with a device
+	// budget is then refused.
+	Engine []string
+	// EngineUID is the uid and gid every engine runs as. It must not be
+	// 0 and must be no fiber's uid (DefaultEngineUID when 0).
+	EngineUID uint32
+	// EngineMemoryMax is memory.max of each engine's leaf, <grant>/engine
+	// (DefaultEngineMemoryMax when 0).
+	EngineMemoryMax uint64
 }
+
+// DefaultEngineUID is the engine's uid when Config names none. It is one
+// below the default -userns-pool (runcbackend.DefaultPool), so no runc
+// grant's range holds it, and above the ranges hosts hand out by
+// convention (useradd stops at 600100000). proc fibers run as fiberd's
+// own uid.
+const DefaultEngineUID = 1<<30 - 1
+
+// DefaultEngineMemoryMax is memory.max of an engine's leaf when Config
+// names none. A simulated engine holds its whole pool in host memory, so
+// it must fit here.
+const DefaultEngineMemoryMax = 1 << 30
 
 // checkDeltaRegistry is what every use of the delta registry needs.
 func (c Config) checkDeltaRegistry() error {

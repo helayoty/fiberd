@@ -27,6 +27,8 @@ type parkFixture struct {
 	g     core.Grant
 	h     core.FiberHandle
 	fence core.Fence
+	// engine is the grant's fake device engine, nil without one.
+	engine *fakeEngine
 }
 
 func (f *parkFixture) fake() *fakeBackend {
@@ -37,7 +39,23 @@ func (b *fakeBackend) base() *fakeBackend { return b }
 
 func newParkFixture(t *testing.T, be backend.Backend, g core.Grant, mod func(*Config)) *parkFixture {
 	t.Helper()
-	r := newTestRuntime(t, be, mod)
+	return startParkFixture(t, newTestRuntime(t, be, mod), be, g)
+}
+
+// newEngineParkFixture is newParkFixture on a home with a device engine,
+// a fake one the grant has from before its warm.
+func newEngineParkFixture(t *testing.T, be backend.Backend, g core.Grant) *parkFixture {
+	t.Helper()
+	r := newTestRuntime(t, be, func(c *Config) { c.Engine = []string{"/bin/true"} })
+	fe := injectEngine(t, r, g.UID, "sim", 1000, 0)
+	f := startParkFixture(t, r, be, g)
+	f.engine = fe
+	return f
+}
+
+// startParkFixture prepares g on r and clones its first fiber.
+func startParkFixture(t *testing.T, r *Runtime, be backend.Backend, g core.Grant) *parkFixture {
+	t.Helper()
 	ctx := context.Background()
 	if err := r.PrepareTemplate(ctx, g); err != nil {
 		t.Fatalf("PrepareTemplate: %v", err)
@@ -83,6 +101,8 @@ func TestPark(t *testing.T) {
 		be    func() backend.Backend
 		grant core.Grant
 		mod   func(*Config)
+		// engine gives the grant a fake device engine.
+		engine bool
 		// before runs with the fiber running, before the park.
 		before func(t *testing.T, f *parkFixture)
 		sync   bool
@@ -273,15 +293,26 @@ func TestPark(t *testing.T) {
 					t.Fatal("the park did not happen")
 				}
 			}},
-		{name: "a device slice is evicted before the checkpoint, even when the engine complains", be: func() backend.Backend {
-			sb := newSandboxBackend(core.TierSnapshot)
-			sb.evictErr = errors.New("fake: engine busy")
-			return sb
-		}, grant: core.Grant{UID: "g1", TemplateDigest: "sha256:tmpl", WBudgetBytes: 64 * mib, DeviceBudget: core.DeviceBudget{Bytes: 100}},
+		{name: "a device slice is evicted before the checkpoint", be: func() backend.Backend { return newSandboxBackend(core.TierSnapshot) },
+			grant: core.Grant{UID: "g1", TemplateDigest: "sha256:tmpl", WBudgetBytes: 64 * mib, DeviceBudget: core.DeviceBudget{Bytes: 100}}, engine: true,
 			check: func(t *testing.T, f *parkFixture, ref string) {
-				// Once before the dump and once as the fiber ends.
-				if got := f.be.(*sandboxBackend).evictedIDs(); strings.Join(got, ",") != "g1/1/1,g1/1/1" {
-					t.Fatalf("evicted %v", got)
+				// Mapped at birth, unmapped and evicted before the dump, and
+				// evicted once more as the fiber ends.
+				want := "LEAF g1/1/1 /g1/f-1-1,UNLEAF g1/1/1,EVICT g1/1/1,EVICT g1/1/1"
+				if got := f.engine.lines(100 * time.Millisecond); strings.Join(got, ",") != want {
+					t.Fatalf("the engine got %q, want %s", got, want)
+				}
+				if !f.r.HasDelta(ref) {
+					t.Fatal("the park did not happen")
+				}
+			}},
+		{name: "an engine that is down does not hold up the park", be: func() backend.Backend { return newSandboxBackend(core.TierSnapshot) },
+			grant: core.Grant{UID: "g1", TemplateDigest: "sha256:tmpl", WBudgetBytes: 64 * mib, DeviceBudget: core.DeviceBudget{Bytes: 100}}, engine: true,
+			before: func(t *testing.T, f *parkFixture) { f.engine.setDown() },
+			check: func(t *testing.T, f *parkFixture, ref string) {
+				// The EVICT and UNLEAF fail, and the park goes on.
+				if got := f.engine.lines(100 * time.Millisecond); strings.Join(got, ",") != "LEAF g1/1/1 /g1/f-1-1" {
+					t.Fatalf("the engine got %q, want only the birth's LEAF", got)
 				}
 				if !f.r.HasDelta(ref) {
 					t.Fatal("the park did not happen")
@@ -318,7 +349,12 @@ func TestPark(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			f := newParkFixture(t, tc.be(), tc.grant, tc.mod)
+			var f *parkFixture
+			if tc.engine {
+				f = newEngineParkFixture(t, tc.be(), tc.grant)
+			} else {
+				f = newParkFixture(t, tc.be(), tc.grant, tc.mod)
+			}
 			if tc.before != nil {
 				tc.before(t, f)
 			}

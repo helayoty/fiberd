@@ -278,7 +278,7 @@ func TestAdmitRefreshKeepsDevices(t *testing.T) {
 		prepErr       error
 		devicesErr    error
 		device        core.DeviceBudget
-		offers        map[string]bool // the refresh's, the first delivery offers every class
+		offer         string // the class the refresh's engine declares, the first delivery's declares gpu
 		want          core.StatusCode
 		wantErr       error
 		wantAttached  []string // the channels the runtime was handed, in order
@@ -289,7 +289,7 @@ func TestAdmitRefreshKeepsDevices(t *testing.T) {
 			want: core.OK, wantAttached: []string{"c1", "c2"}, wantReleased: []string{"c1"}, wantAfterDrop: []string{"c1", "c2"}},
 		{name: "a refresh whose template fails to warm keeps the old channel", prepErr: errors.New("pull: manifest unknown"),
 			want: core.DeferredFallback, wantErr: core.ErrNotReady, wantAttached: []string{"c1", "c2", "c1"}, wantReleased: []string{"c2"}, wantAfterDrop: []string{"c2", "c1"}},
-		{name: "a refresh whose device class is no longer offered keeps the old channel", device: gpu, offers: map[string]bool{"sim": true},
+		{name: "a refresh whose device class is no longer offered keeps the old channel", device: gpu, offer: "sim",
 			want: core.NeedsTier, wantErr: core.ErrNeedsDevice, wantAttached: []string{"c1", "c2", "c1"}, wantReleased: []string{"c2"}, wantAfterDrop: []string{"c2", "c1"}},
 		{name: "a refresh whose channel cannot be provisioned keeps the old channel", devicesErr: errors.New("claim pending"),
 			want: core.DeferredFallback, wantErr: core.ErrNotReady, wantAttached: []string{"c1"}, wantAfterDrop: []string{"c1"}},
@@ -300,7 +300,7 @@ func TestAdmitRefreshKeepsDevices(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			g := core.Grant{UID: "g1", Tenant: "acme", Audience: "node-a", DeviceBudget: tc.device}
 			a := newCore(t, "up", core.TierCheckpoint)
-			rt := &admitRuntime{fakeRuntime: fakeRuntime{tier: core.TierCheckpoint}, offers: map[string]bool{"gpu": true, "sim": true}}
+			rt := &admitRuntime{fakeRuntime: fakeRuntime{tier: core.TierCheckpoint}, offer: "gpu"}
 			if tc.plain {
 				a.Runtime = plainPrepRuntime{fakeRuntime: fakeRuntime{tier: core.TierCheckpoint}, rt: rt}
 			} else {
@@ -321,8 +321,8 @@ func TestAdmitRefreshKeepsDevices(t *testing.T) {
 				t.Fatalf("first admit = %d %v, want OK", code, err)
 			}
 			rt.prepErr, devicesErr = tc.prepErr, tc.devicesErr
-			if tc.offers != nil {
-				rt.offers = tc.offers
+			if tc.offer != "" {
+				rt.offer = tc.offer
 			}
 			code, err := a.Admit(context.Background(), g)
 			if code != tc.want || !errors.Is(err, tc.wantErr) {
@@ -427,17 +427,22 @@ func TestCloneUnderAdmittedGrant(t *testing.T) {
 	}
 }
 
-// admitRuntime warms templates with prepErr, offers the device classes in
-// offers, and records the device channels it is given.
+// admitRuntime warms templates with prepErr, declares an engine of class
+// offer ("" for none), and records the device channels it is given.
 type admitRuntime struct {
 	fakeRuntime
 	prepErr  error
-	offers   map[string]bool
+	offer    string
 	attached []core.DeviceChannel
 }
 
 func (r *admitRuntime) PrepareTemplate(context.Context, core.Grant) error { return r.prepErr }
-func (r *admitRuntime) OffersDevice(_, class string) bool                 { return r.offers[class] }
+func (r *admitRuntime) DeviceOffer(string) (string, uint64) {
+	if r.offer == "" {
+		return "", 0
+	}
+	return r.offer, 1 << 30
+}
 func (r *admitRuntime) AttachDevices(_ string, fc core.DeviceChannel) {
 	r.attached = append(r.attached, fc)
 }
@@ -454,7 +459,7 @@ func TestAdmitOutcomes(t *testing.T) {
 		plain        bool // the runtime takes no device channel and offers no device
 		devicesErr   error
 		prepErr      error
-		offers       map[string]bool
+		offer        string
 		device       core.DeviceBudget
 		admits       int // how many times the grant is delivered, 0 means once
 		want         core.StatusCode
@@ -476,9 +481,9 @@ func TestAdmitOutcomes(t *testing.T) {
 			want: core.DeferredFallback, wantErr: core.ErrNotReady, provisioned: 1, released: 1, attached: 1},
 		{name: "a re-delivery releases the device channel it replaces", admits: 2,
 			want: core.OK, wantAdmitted: true, provisioned: 2, released: 1, attached: 2},
-		{name: "a device class the template offers is admitted", device: gpu, offers: map[string]bool{"gpu": true},
+		{name: "a device class the template offers is admitted", device: gpu, offer: "gpu",
 			want: core.OK, wantAdmitted: true, provisioned: 1, attached: 1},
-		{name: "a device class the template does not offer is needs-tier, and the device channel is released", device: gpu, offers: map[string]bool{"sim": true},
+		{name: "a device class the template does not offer is needs-tier, and the device channel is released", device: gpu, offer: "sim",
 			want: core.NeedsTier, wantErr: core.ErrNeedsDevice, provisioned: 1, released: 1, attached: 1},
 		{name: "a device budget on a runtime with no device is needs-tier, and the device channel is released", plain: true, device: gpu,
 			want: core.NeedsTier, wantErr: core.ErrNeedsDevice, provisioned: 1, released: 1},
@@ -491,7 +496,7 @@ func TestAdmitOutcomes(t *testing.T) {
 			}
 			g := core.Grant{UID: "g1", Tenant: "acme", Audience: "node-a", DeviceBudget: tc.device}
 			a := newCore(t, health, core.TierCheckpoint)
-			rt := &admitRuntime{fakeRuntime: fakeRuntime{tier: core.TierCheckpoint}, prepErr: tc.prepErr, offers: tc.offers}
+			rt := &admitRuntime{fakeRuntime: fakeRuntime{tier: core.TierCheckpoint}, prepErr: tc.prepErr, offer: tc.offer}
 			if tc.plain {
 				a.Runtime = fakeRuntime{tier: core.TierCheckpoint}
 			} else {

@@ -514,6 +514,9 @@ func (c *client) c8(t *testing.T) {
 	if err != nil && status.Code(err) != codes.Unavailable {
 		t.Fatalf("over-device-budget clone: %v", err)
 	}
+	if err != nil {
+		t.Logf("over-device-budget clone: %v (the home's log says why)", err)
+	}
 	if _, err := c.waitStatus(ctx, g.UID, func(st *grantv1.Status) bool { return st.GetRunning() == 0 }); err != nil {
 		t.Fatalf("slot never freed after over-budget device slice: %v", err)
 	}

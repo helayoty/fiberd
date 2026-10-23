@@ -7,55 +7,96 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"strings"
+	"os/exec"
+	"path/filepath"
 	"testing"
 	"time"
 
 	runcbackend "github.com/helayoty/fiberd/pkg/backend/runc"
 	"github.com/helayoty/fiberd/pkg/core"
 	"github.com/helayoty/fiberd/pkg/runtime/host"
+	"github.com/helayoty/fiberd/tests/internal/testenv"
 )
 
-// TestDeviceOnRunc runs the reference engine as a runc container's init.
-// The grant's device channel reaches the zygote's environment, which on
-// main it never did. A fiber reserves under its own fence, which the
-// engine names from the fiber's cgroup leaf as seen inside the
-// container, and the slice is gone once the fiber is released.
+// refEngine is the reference engine on the host, FIBERD_REFENGINE or the
+// checkout's bin/refengine. The test skips without it.
+func refEngine(t *testing.T) string {
+	t.Helper()
+	path := os.Getenv("FIBERD_REFENGINE")
+	if path == "" {
+		path = filepath.Join(testenv.RepoRoot(), "bin", "refengine")
+	}
+	if _, err := exec.LookPath(path); err != nil {
+		t.Skipf("no reference engine at %s (build it, or set FIBERD_REFENGINE): %v", path, err)
+	}
+	return path
+}
+
+// environOf is the environment of pid, one entry per element.
+func environOf(t *testing.T, pid int) [][]byte {
+	t.Helper()
+	env, err := os.ReadFile(fmt.Sprintf("/proc/%d/environ", pid))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return bytes.Split(env, []byte{0})
+}
+
+// hasEnv reports whether env holds kv exactly.
+func hasEnv(env [][]byte, kv string) bool {
+	for _, e := range env {
+		if string(e) == kv {
+			return true
+		}
+	}
+	return false
+}
+
+// TestDeviceOnRunc runs the reference engine beside a runc container's
+// zygote. fiberd starts the engine on the host, and the zygote learns
+// only its socket. The grant's device channel reaches the engine's
+// environment and not the zygote's. A fiber reserves under its own fence,
+// which the engine names from the fiber's cgroup leaf, and the slice is
+// gone once the fiber is released.
 func TestDeviceOnRunc(t *testing.T) {
+	engine := refEngine(t)
 	g := core.Grant{UID: "rdev", TemplateDigest: "sha256:ref", FiberMax: 4, WBudgetBytes: 64 << 20,
 		DeviceBudget: core.DeviceBudget{Bytes: 4 << 20, Class: "sim"}}
 	hm := newHome(t, func(_ *runcbackend.Options, hc *host.Config) {
-		hc.Templates = map[string]string{"default": "/bin/refzygote --heap-mb 32 --device-mb 8"}
+		hc.Templates = map[string]string{"default": "/bin/refzygote --heap-mb 32"}
+		hc.Engine = []string{engine, "--sim-mb", "8"}
 	})
 	hm.rt.(core.DeviceAware).AttachDevices(g.UID, core.DeviceChannel{Kind: "static", Devices: []string{"/dev/sim0", "/dev/sim1"}})
 	ctx := context.Background()
 	if err := hm.rt.PrepareTemplate(ctx, g); err != nil {
 		t.Fatalf("prepare: %v", err)
 	}
-	dc := hm.rt.(core.DeviceCapable)
-	deadline := time.Now().Add(5 * time.Second)
-	for !dc.OffersDevice(g.UID, "sim") && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
+	// The grant is warm once the engine said READY, so its offer is in.
+	if class, capacity := hm.rt.(core.DeviceCapable).DeviceOffer(g.UID); class != "sim" || capacity == 0 {
+		t.Fatalf("DeviceOffer = %q %d, want class sim with some capacity", class, capacity)
 	}
-	if !dc.OffersDevice(g.UID, "sim") {
-		t.Fatal("the engine never reported its device")
-	}
+	const devices = "FIBERD_DEVICES=/dev/sim0,/dev/sim1"
 	cases := []struct {
 		name  string
 		check func(t *testing.T)
 	}{
-		{name: "the device channel is in the zygote's environment", check: func(t *testing.T) {
-			env, err := os.ReadFile(fmt.Sprintf("/proc/%d/environ", hm.zygotePID(t, g.UID)))
-			if err != nil {
-				t.Fatal(err)
+		{name: "the device channel is in the engine's environment and not the zygote's", check: func(t *testing.T) {
+			pids := readPIDs(t, filepath.Join(hm.cgRoot, g.UID, "engine", "cgroup.procs"))
+			if len(pids) == 0 {
+				t.Fatalf("no engine in %s", g.UID)
 			}
-			want := []byte("FIBERD_DEVICES=/dev/sim0,/dev/sim1")
-			for _, kv := range bytes.Split(env, []byte{0}) {
-				if bytes.Equal(kv, want) {
-					return
-				}
+			if env := environOf(t, pids[0]); !hasEnv(env, devices) {
+				t.Fatalf("the engine's environment %q lacks %s", bytes.Join(env, []byte(" ")), devices)
 			}
-			t.Fatalf("the zygote's environment %q lacks %s", strings.ReplaceAll(string(env), "\x00", " "), want)
+			if env := environOf(t, hm.zygotePID(t, g.UID)); hasEnv(env, devices) {
+				t.Fatalf("the zygote's environment holds %s", devices)
+			}
+		}},
+		{name: "the zygote learns the engine's socket as the container sees it", check: func(t *testing.T) {
+			const want = "FIBERD_ENGINE_PATH=/host/engine/engine.sock"
+			if env := environOf(t, hm.zygotePID(t, g.UID)); !hasEnv(env, want) {
+				t.Fatalf("the zygote's environment %q lacks %s", bytes.Join(env, []byte(" ")), want)
+			}
 		}},
 		{name: "a fiber reserves under its own fence, and its release frees the slice", check: func(t *testing.T) {
 			h := clone(t, hm, g, 1)

@@ -324,6 +324,16 @@ type templateRecord struct {
 	MountPoint string `json:"mountpoint"`
 }
 
+// engineFile, in a checkpoint of a fiber whose grant has a device
+// engine, records the engine directory's read-only bind at engineMount.
+// The dump names that mount engineKey, an external mount, and the
+// restore binds the resuming grant's engine directory there.
+const (
+	engineFile  = "fiberd-engine.json"
+	engineKey   = "engine"
+	engineMount = "/host/engine"
+)
+
 func (l *launcher) runc(ctx context.Context, args ...string) (string, error) {
 	run := l.run
 	if run == nil {
@@ -536,12 +546,23 @@ func (l *launcher) bundleConfig(spec backend.WarmSpec, argv []string, rootfs, cg
 	if staged != "" {
 		mounts = append(mounts, map[string]any{"destination": backend.TemplateMount, "type": "bind", "source": staged, "options": backend.TemplateMountOptions})
 	}
+	if spec.EnginePath != "" {
+		// The engine's directory, read-only over itself inside /host, so
+		// the grant's mapped root, which may write /host, can neither
+		// rename it nor put another socket in its place.
+		mounts = append(mounts, map[string]any{"destination": engineMount, "type": "bind", "source": filepath.Dir(spec.EnginePath),
+			"options": []string{"rbind", "ro", "nosuid", "nodev", "noexec"}})
+	}
 	idMap := []map[string]uint32{{"containerID": 0, "hostID": rng.Start, "size": rng.Count}}
 	env := []string{"PATH=/usr/bin:/bin", nestedUsernsEnv, rebindEnv}
 	if len(spec.Devices) > 0 {
 		// The device channel, as proc passes it: the one grant-specific
 		// thing an engine needs at warm-up.
 		env = append(env, "FIBERD_DEVICES="+strings.Join(spec.Devices, ","))
+	}
+	if spec.EnginePath != "" {
+		// The engine's socket as the container sees it, under /host.
+		env = append(env, "FIBERD_ENGINE_PATH="+l.Endpoint(spec, spec.EnginePath))
 	}
 	return map[string]any{
 		"ociVersion": "1.0.2",
@@ -1045,6 +1066,19 @@ func (l *launcher) DumpExtra(spec backend.WarmSpec, dir string, d proc.Dumped) (
 		}
 		extra = append(extra, "--external", "mnt["+backend.TemplateMount+"]:"+templateKey)
 	}
+	if spec.EnginePath != "" {
+		rec, err := json.Marshal(templateRecord{MountPoint: engineMount})
+		if err != nil {
+			return nil, err
+		}
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return nil, err
+		}
+		if err := os.WriteFile(filepath.Join(dir, engineFile), rec, 0o600); err != nil {
+			return nil, err
+		}
+		extra = append(extra, "--external", "mnt["+engineMount+"]:"+engineKey)
+	}
 	if d.Workspace {
 		files, err := l.foreignDump(d, dir)
 		if err != nil {
@@ -1077,6 +1111,30 @@ func (l *launcher) templateBind(spec backend.WarmSpec, dir string) ([]string, er
 		return nil, fmt.Errorf("runc: checkpoint was taken with a registry template at %s, which warm instance %q does not have here", backend.TemplateMount, spec.GrantUID)
 	}
 	return []string{"--external", "mnt[" + templateKey + "]:" + staged}, nil
+}
+
+// engineBind is the restore's argument that binds the resuming grant's
+// engine directory, <WorkDir>/engine, where the checkpoint in dir
+// recorded one, nil when it recorded none.
+func engineBind(spec backend.WarmSpec, dir string) ([]string, error) {
+	b, err := os.ReadFile(filepath.Join(dir, engineFile))
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var rec templateRecord
+	if err := json.Unmarshal(b, &rec); err != nil || rec.MountPoint != engineMount {
+		return nil, fmt.Errorf("runc: %s in %s: malformed", engineFile, dir)
+	}
+	// The resume's spec names only the run directory, under which the
+	// grant's engine made its directory before the resume.
+	host := filepath.Join(spec.WorkDir, "engine")
+	if st, err := os.Lstat(host); err != nil || !st.IsDir() {
+		return nil, fmt.Errorf("runc: checkpoint was taken with a device engine's directory at %s, which grant %q has none of here", engineMount, spec.GrantUID)
+	}
+	return []string{"--external", "mnt[" + engineKey + "]:" + host}, nil
 }
 
 // RestoreExtra gives the restored tree the grant's root filesystem copy
@@ -1116,6 +1174,11 @@ func (l *launcher) RestoreExtra(spec backend.WarmSpec, dir string) (extra []stri
 	if err != nil {
 		return nil, nil, err
 	}
+	ebind, err := engineBind(spec, dir)
+	if err != nil {
+		return nil, nil, err
+	}
+	bind = append(bind, ebind...)
 	if held, err = l.foreignInherit(spec, dir, rootfs); err != nil {
 		return nil, nil, err
 	}

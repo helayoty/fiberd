@@ -39,6 +39,8 @@ pub const F_FOREIGN: c_int = 64;
 /// Every cgroup mount made read-only, by file system type (prepare_ns
 /// alone).
 pub const F_CGROUP: c_int = 128;
+/// The engine's directory made read-only (prepare_ns alone).
+pub const F_ENGINE: c_int = 256;
 
 /// MNT_DETACH, which libc types as a C int.
 const MNT_DETACH: c_int = libc::MNT_DETACH;
@@ -334,6 +336,32 @@ pub unsafe fn narrow_rundir(parent: *const c_char, own: *const c_char) -> c_int 
     // SAFETY: fd is the descriptor opened above.
     unsafe { libc::close(fd) };
     rc
+}
+
+/// Makes the engine's directory a read-only mount point in this
+/// namespace, and so in every fiber's. A fiber is euid 0 and could
+/// otherwise rename, unlink or replace the engine's socket. A rename
+/// of a mount point is EBUSY, and lifting it needs CAP_SYS_ADMIN, which
+/// every fiber drops. The bind shares the directory, so a socket the
+/// engine binds later from the host's namespace shows through, and
+/// connect asks the inode's permission, not the mount's, so a fiber
+/// still connects. The directory must exist and be one, so a missing
+/// one fails closed. Under runc it is a read-only bind already, and a
+/// bind over one is allowed. Runs once, from prepare_ns. 0, or -1 with
+/// errno.
+///
+/// # Safety
+/// path is NUL-ended and live for the call.
+pub unsafe fn lock_engine_dir(path: *const c_char) -> c_int {
+    // SAFETY: by the contract above.
+    let fd = unsafe { sys::open(path, libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC) };
+    if fd < 0 {
+        return -1;
+    }
+    // SAFETY: fd is the descriptor opened above.
+    unsafe { libc::close(fd) };
+    // SAFETY: by the contract above.
+    unsafe { bind_ro(path) }
 }
 
 /// under reports whether path lies inside dir (not dir itself).

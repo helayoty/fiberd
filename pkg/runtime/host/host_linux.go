@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -110,6 +111,15 @@ type Runtime struct {
 
 	devicesMu      sync.Mutex
 	deviceChannels map[string]core.DeviceChannel // grant uid -> what the home provisioned
+
+	// engines holds each grant's device engine, from its first warm to
+	// DropTemplate. It outlives a warm instance that dies, since its
+	// fibers' slices are its own (engine_linux.go).
+	// engineDirs names the grants whose engine directory this fiberd
+	// made, which stays until DropTemplate or Close. enginesMu guards it.
+	enginesMu  sync.Mutex
+	engines    map[string]*engine
+	engineDirs map[string]bool
 }
 
 // AttachDevices implements core.DeviceAware: the grant's devices reach
@@ -231,6 +241,18 @@ func New(cfg Config) (*Runtime, error) {
 		}
 		*p = abs
 	}
+	if len(cfg.Engine) > 0 {
+		// The engine starts in its own directory, so its path is made
+		// absolute here, as the others are above.
+		bin, err := exec.LookPath(cfg.Engine[0])
+		if err != nil {
+			return nil, fmt.Errorf("host: device engine: %w", err)
+		}
+		if bin, err = filepath.Abs(bin); err != nil {
+			return nil, err
+		}
+		cfg.Engine = append([]string{bin}, cfg.Engine[1:]...)
+	}
 	tier := cfg.Backend.Tier()
 	if tier == core.TierUnspecified {
 		return nil, noTier(cfg.Backend)
@@ -324,8 +346,7 @@ func New(cfg Config) (*Runtime, error) {
 	r.pokePrune()
 	_, overhead := cfg.Backend.(backend.Overheader)
 	_, reports := cfg.Backend.(backend.WReporter)
-	_, devices := cfg.Backend.(backend.DeviceReporter)
-	if overhead || reports || devices {
+	if overhead || reports || len(cfg.Engine) > 0 {
 		go r.enforceW()
 	}
 	return r, nil
@@ -373,37 +394,6 @@ func (r *Runtime) HoldsWorkspaces() bool {
 	return ok && wh.HoldsWorkspaces()
 }
 
-// OffersDevice implements core.DeviceCapable: the grant's warm instance
-// is an engine that has reported a device (the class is not checked
-// beyond that; one engine, one device class).
-func (r *Runtime) OffersDevice(grantUID, _ string) bool {
-	dr, ok := r.be.(backend.DeviceReporter)
-	if !ok {
-		return false
-	}
-	_, capacity, ok := dr.WarmDevice(grantUID)
-	return ok && capacity > 0
-}
-
-// DevicePressure is the ladder's second input: the engine's occupancy in
-// percent of its capacity, for grants whose template is an engine; 0 for
-// the rest. Combine with the PSI source through core.MaxPressure.
-func (r *Runtime) DevicePressure() core.PressureSource { return devicePressure{r} }
-
-type devicePressure struct{ r *Runtime }
-
-func (d devicePressure) Pressure(grantUID string) (float64, error) {
-	dr, ok := d.r.be.(backend.DeviceReporter)
-	if !ok {
-		return 0, nil
-	}
-	used, capacity, ok := dr.WarmDevice(grantUID)
-	if !ok || capacity == 0 {
-		return 0, nil
-	}
-	return 100 * float64(used) / float64(capacity), nil
-}
-
 // enforceW is the executioner for backends whose fibers carry a fixed
 // footprint, or report W themselves because they are not processes in a
 // leaf. Their leaves get memory.max = budget + footprint + slack for the
@@ -427,18 +417,17 @@ func (r *Runtime) enforceW() {
 			}
 		}
 		r.mu.Unlock()
-		dr, _ := r.be.(backend.DeviceReporter)
 		_, overhead := r.be.(backend.Overheader)
 		_, reports := r.be.(backend.WReporter)
 		for _, f := range fs {
 			why := ""
-			if overhead || reports || dr == nil {
+			if overhead || reports {
 				if w, err := r.wBytes(f); err == nil && f.budget > 0 && w > f.budget {
 					why = fmt.Sprintf("W=%d over budget %d", w, f.budget)
 				}
 			}
-			if why == "" && dr != nil && f.devMax > 0 {
-				if d, ok := dr.FiberDevice(f.id); ok && d > f.devMax {
+			if why == "" && f.devMax > 0 {
+				if d := r.fiberDevice(f); d > f.devMax {
 					why = fmt.Sprintf("device %d over budget %d", d, f.devMax)
 				}
 			}
@@ -870,8 +859,38 @@ func (r *Runtime) PrepareTemplate(ctx context.Context, g core.Grant) error {
 	defer func() { _ = removeSoon(pcg) }()
 
 	workDir := filepath.Join(r.cfg.RunDir, g.UID)
-	w, err := r.be.Warm(ctx, backend.WarmSpec{GrantUID: g.UID, Template: tpl, CgroupFD: int(zfd.Fd()), WorkDir: workDir, ProbeCgroupFD: probeFD,
-		Devices: r.devicesOf(g.UID).Devices, Hide: r.hide})
+	wspec := backend.WarmSpec{GrantUID: g.UID, Template: tpl, CgroupFD: int(zfd.Fd()), WorkDir: workDir, ProbeCgroupFD: probeFD,
+		Devices: r.devicesOf(g.UID).Devices, Hide: r.hide}
+	// The device engine starts beside the warm instance, and the grant is
+	// warm once both are READY. The device channel is then the engine's
+	// alone, and the zygote learns only the engine's socket.
+	var engineDone chan engineResult
+	if r.wantsEngine(g) {
+		// The zygote binds the engine's directory over itself as it
+		// prepares, so the directory is there before it starts.
+		if err := r.ensureEngineDir(g.UID); err != nil {
+			return err
+		}
+		engineDone = make(chan engineResult, 1)
+		go func() {
+			e, started, err := r.ensureEngine(ctx, g, gcg)
+			engineDone <- engineResult{e: e, started: started, err: err}
+		}()
+		wspec.Devices, wspec.EnginePath = nil, r.enginePath(g.UID)
+	}
+	w, err := r.be.Warm(ctx, wspec)
+	var eng *engine
+	if engineDone != nil {
+		res := <-engineDone
+		switch {
+		case res.err != nil && err == nil:
+			r.be.Unwarm(w.ID)
+			return res.err
+		case res.err == nil && err != nil && res.started:
+			r.dropEngine(res.e)
+		}
+		eng = res.e
+	}
 	if err != nil {
 		return err
 	}
@@ -951,7 +970,13 @@ func (r *Runtime) PrepareTemplate(ctx context.Context, g core.Grant) error {
 	}
 	gc := g
 	gc.WBudgetBytes = r.leafMax(g) // each fiber's leaf is this large
-	if c := ceiling(gc, zbytes); c > 0 {
+	tbytes := zbytes
+	if eng != nil {
+		// The engine's leaf is under the grant's, so the ceiling holds it.
+		eb, _ := eng.cg.MemoryCurrent()
+		tbytes += eb
+	}
+	if c := ceiling(gc, tbytes); c > 0 {
 		if err := gcg.SetCeiling(c, c+gc.WBudgetBytes); err != nil {
 			log.Printf("host: ceiling on grant %s: %v", g.UID, err)
 		}
@@ -1152,11 +1177,14 @@ func (r *Runtime) DropTemplate(grantUID string) {
 	}
 	r.mu.Unlock()
 	r.forgetIdentity(grantUID)
+	r.stopEngine(grantUID)
 	if z == nil {
+		r.dropEngineDir(grantUID)
 		return
 	}
 	r.discard(ps)
 	r.be.Unwarm(z.id)
+	r.dropEngineDir(grantUID)
 	for _, d := range []cgroup.Dir{z.zcg, z.cg} {
 		if err := d.SetMemoryMin(0); err != nil {
 			log.Printf("host: unprotect template of %s: %v", grantUID, err)
@@ -1192,9 +1220,12 @@ func (r *Runtime) finish(f *fiber, reason, detail string) {
 	if f.channel != nil {
 		_ = f.channel.Close()
 	}
-	// The device slice goes with the fiber, however it ended. A park
-	// evicted once before its dump, and this catches a slice taken since.
-	r.evictDevice(f)
+	// The device slice goes with the fiber, however it ended, and then
+	// its leaf's mapping. A park evicted once before its dump, and this
+	// catches a slice taken since.
+	if f.devMax > 0 {
+		r.endDevice(f.grantUID, f.id)
+	}
 	// The workspace goes with the fiber. A park captured it into the
 	// delta before the fiber ended, and an anonymous fiber's is nobody's
 	// to resume.
@@ -1212,18 +1243,6 @@ func (r *Runtime) finish(f *fiber, reason, detail string) {
 	close(f.done)
 	if !released {
 		r.exits <- core.FiberExit{FiberID: f.id, Reason: reason, Detail: detail}
-	}
-}
-
-// evictDevice asks the engine to drop the fiber's device slice. Only a
-// fiber with a device budget can hold one.
-func (r *Runtime) evictDevice(f *fiber) {
-	dr, ok := r.be.(backend.DeviceReporter)
-	if !ok || f.devMax == 0 {
-		return
-	}
-	if err := dr.EvictDevice(f.id); err != nil {
-		log.Printf("host: evict device slice of %s: %v", f.id, err)
 	}
 }
 
@@ -1472,6 +1491,17 @@ func (r *Runtime) start(ctx context.Context, z *warm, spec core.CloneSpec, p *po
 			return core.FiberHandle{}, err
 		}
 	}
+	// The engine learns the leaf's fence before the fiber can run.
+	if err := r.deviceLeaf(spec.Grant, spec.Fence.String(), leaf); err != nil {
+		ws.remove()
+		if rl != nil {
+			rl.Close()
+		}
+		r.freeSocket(sock, spec.Fence.String())
+		r.freePort(port, spec.Fence.String())
+		giveUp()
+		return core.FiberHandle{}, err
+	}
 	// A fiber born from the warm instance, forked or restored from its
 	// image, starts its lineage at generation 1.
 	f := &fiber{id: spec.Fence.String(), grantUID: spec.Grant.UID, cg: leaf, endpoint: url, port: port, sock: sock, birth: spec.Fence.String(),
@@ -1517,6 +1547,11 @@ func (r *Runtime) start(ctx context.Context, z *warm, spec core.CloneSpec, p *po
 			removeDead(leaf)
 		} else {
 			_ = rmdir(leaf)
+		}
+		if f.devMax > 0 {
+			// The fiber may have run, so its slice goes with its LEAF,
+			// once nothing in the leaf can take another between the two.
+			r.endDevice(f.grantUID, f.id)
 		}
 		return core.FiberHandle{}, err
 	}
@@ -1622,8 +1657,9 @@ func (r *Runtime) Park(ctx context.Context, fiberID string, sync bool) (string, 
 				core.ErrDeltaQuota, f.grantUID, used, fiberID, w+wsBytes, f.quota)
 		}
 	}
-	// Devices are renegotiated on resume: the engine drops the slice
-	// before the CPU side is checkpointed (the continuity contract).
+	// Devices are renegotiated on resume: the engine drops the leaf's
+	// mapping and then the slice before the CPU side is checkpointed
+	// (the continuity contract).
 	r.evictDevice(f)
 	// giveBack undoes a park whose fiber still runs, keeping the failed
 	// images and dump log aside for diagnosis.
@@ -1732,6 +1768,11 @@ func (r *Runtime) unpark(f *fiber) {
 	f.released, f.parked = false, false
 	exit := f.exit
 	r.mu.Unlock()
+	// A fiber that runs on gets its leaf mapped again, which the park
+	// dropped before its dump. One that died meanwhile ended unmapped.
+	if exit == nil {
+		r.releafDevice(f)
+	}
 	if exit != nil {
 		r.exits <- *exit
 	}
@@ -1766,6 +1807,16 @@ func (r *Runtime) resume(ctx context.Context, spec core.CloneSpec) (core.FiberHa
 	gcg, err := r.grantCgroup(spec.Grant)
 	if err != nil {
 		return core.FiberHandle{}, err
+	}
+	if r.wantsEngine(spec.Grant) {
+		// A resume needs no warm instance, but its fiber needs the
+		// grant's engine.
+		if err := r.ensureEngineDir(spec.Grant.UID); err != nil {
+			return core.FiberHandle{}, err
+		}
+		if _, _, err := r.ensureEngine(ctx, spec.Grant, gcg); err != nil {
+			return core.FiberHandle{}, err
+		}
 	}
 	leaf, err := r.fiberLeaf(gcg, spec.Grant, spec.Fence)
 	if err != nil {
@@ -1912,6 +1963,18 @@ func (r *Runtime) resume(ctx context.Context, spec core.CloneSpec) (core.FiberHa
 		_ = rmdir(leaf)
 		return core.FiberHandle{}, err
 	}
+	// The engine learns the leaf's fence before the restored fiber runs.
+	// It reserves again, since its park dropped its slice.
+	if err := r.deviceLeaf(spec.Grant, spec.Fence.String(), leaf); err != nil {
+		ws.remove()
+		if rl != nil {
+			rl.Close()
+		}
+		r.freeSocket(sock, spec.Fence.String())
+		r.freePort(port, spec.Fence.String())
+		_ = rmdir(leaf)
+		return core.FiberHandle{}, err
+	}
 	// The resumed fiber is the next generation of the parked one's
 	// lineage, whichever home parked it. The backend tells it so on its
 	// channel, and a handoff fiber gets a fresh channel from the backend
@@ -1940,6 +2003,11 @@ func (r *Runtime) resume(ctx context.Context, spec core.CloneSpec) (core.FiberHa
 		r.freeSocket(sock, f.id)
 		r.freePort(port, f.id)
 		_ = leaf.Kill()
+		if f.devMax > 0 {
+			// The restored fiber may have run, so its slice goes with
+			// its LEAF, once nothing in the leaf can take another.
+			r.endDevice(f.grantUID, f.id)
+		}
 		_ = rmdir(leaf)
 		// Nothing serves on the socket a failed restore may have bound.
 		if sock != "" {
@@ -2248,11 +2316,7 @@ func (r *Runtime) Stats(_ context.Context, fiberID string) (core.FiberStats, err
 	if err != nil {
 		return core.FiberStats{}, err
 	}
-	st := core.FiberStats{WUsedBytes: w}
-	if dr, ok := r.be.(backend.DeviceReporter); ok {
-		st.DeviceUsedBytes, _ = dr.FiberDevice(f.id)
-	}
-	return st, nil
+	return core.FiberStats{WUsedBytes: w, DeviceUsedBytes: r.fiberDevice(f)}, nil
 }
 
 func (r *Runtime) Exits() <-chan core.FiberExit { return r.exits }
@@ -2272,6 +2336,24 @@ func (r *Runtime) Close() {
 	r.mu.Unlock()
 	r.discard(ps)
 	r.be.Close()
+	r.enginesMu.Lock()
+	es := make([]*engine, 0, len(r.engines))
+	for _, e := range r.engines {
+		es = append(es, e)
+	}
+	r.enginesMu.Unlock()
+	for _, e := range es {
+		r.dropEngine(e)
+	}
+	r.enginesMu.Lock()
+	dirs := make([]string, 0, len(r.engineDirs))
+	for uid := range r.engineDirs {
+		dirs = append(dirs, uid)
+	}
+	r.enginesMu.Unlock()
+	for _, uid := range dirs {
+		r.dropEngineDir(uid)
+	}
 	r.mu.Lock()
 	var relays []*relay
 	for _, f := range r.fibers {

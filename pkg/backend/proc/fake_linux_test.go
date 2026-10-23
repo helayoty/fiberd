@@ -213,7 +213,7 @@ func (z *fakeZygote) waitRecv(t *testing.T, want string) []string {
 //	early     CLONED and EXITED in one write, as fz_serve does when a fiber
 //	          reports ready and exits within one poll iteration
 //	late      CLONED, then EXITED in a write of its own
-//	overdue   nothing until the gate is closed, then early
+//	overdue   nothing until the gate is closed, then early, then ends
 //	never     CLONED and no EXITED
 //	error     ERROR <fence> deadline exceeded before ready
 //	refuse    ERROR ? for every path line, then ERROR <fence> refused
@@ -221,9 +221,6 @@ func (z *fakeZygote) waitRecv(t *testing.T, want string) []string {
 //	short     CLONED <fence>, no pid at all
 //	noise     lines the reader must tolerate, then CLONED
 //	die       ends on CLONE without answering
-//	device    DEVICE lines for the warm instance and each fiber, dropped
-//	          again on EVICT
-//	devexit   device, but each fiber exits right after its DEVICE line
 //	notready  greets with something other than READY
 //	silent    never says READY
 //	quit      ends before READY
@@ -253,11 +250,7 @@ func (z *fakeZygote) serve() {
 	default:
 		say("READY\n")
 	}
-	switch z.script {
-	case "device", "devexit":
-		// A short DEVICE line carries nothing and is ignored.
-		say("DEVICE - 100 1000\nDEVICE short\n")
-	case "refuse":
+	if z.script == "refuse" {
 		for _, line := range setup {
 			say("ERROR ? " + strings.Fields(line)[0] + " refused: by the script\n")
 		}
@@ -278,11 +271,6 @@ func (z *fakeZygote) serve() {
 		}
 		switch fields[0] {
 		case "CLONE":
-		case "EVICT":
-			if (z.script == "device" || z.script == "devexit") && len(fields) >= 2 {
-				say("DEVICE " + fields[1] + " 0 0\n")
-			}
-			continue
 		default: // HIDE, DROP, RUNDIR, PREPARE
 			if z.script == "refuse" {
 				say("ERROR ? " + fields[0] + " refused: by the script\n")
@@ -303,7 +291,8 @@ func (z *fakeZygote) serve() {
 			say(exited)
 		case "overdue":
 			<-z.gate
-			say(cloned + exited + "DEVICE - 1 1\n")
+			say(cloned + exited)
+			return
 		case "never":
 			say(cloned)
 		case "error":
@@ -320,10 +309,6 @@ func (z *fakeZygote) serve() {
 			say("CLONED\nEXITED 5\nEXITED\nFUTURE " + fence + "\n\n" + cloned)
 		case "die":
 			return
-		case "device":
-			say(cloned + "DEVICE " + fence + " 42 0\n")
-		case "devexit":
-			say(cloned + "DEVICE " + fence + " 42 0\n" + exited)
 		default:
 			return
 		}

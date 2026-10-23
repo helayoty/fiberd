@@ -62,15 +62,15 @@ func TestExitRightAfterCloneIsReported(t *testing.T) {
 					t.Fatalf("exit = %+v, want %+v", got, want)
 				}
 			} else {
-				// The overdue zygote answers now, then reports a device
-				// line, which the reader handles after the lines before
-				// it. Nothing was registered for the late CLONED, so the
-				// EXITED after it finds no fiber and reports nothing.
+				// The overdue zygote answers now and ends, which the
+				// reader sees after the lines before it. Nothing was
+				// registered for the late CLONED, so the EXITED after it
+				// finds no fiber and reports nothing before the zygote's
+				// own end.
 				close(zy.gate)
-				waitFor(t, "the device line after the late answer", func() bool {
-					_, _, ok := b.WarmDevice(w.ID)
-					return ok
-				})
+				if got := waitExit(t, b); got != (backend.Exit{WarmID: w.ID, Status: "zygote exited"}) {
+					t.Fatalf("exit = %+v, want the zygote's end alone", got)
+				}
 				if n := len(b.exits); n != 0 {
 					t.Fatalf("%d exits reported for a fiber the caller never got", n)
 				}

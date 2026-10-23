@@ -79,6 +79,23 @@ func needCheckpoint(t *testing.T, be *procbackend.Backend) {
 	}
 }
 
+// readPIDs reads a cgroup.procs file.
+func readPIDs(t *testing.T, path string) []int {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	var pids []int
+	for _, f := range strings.Fields(string(data)) {
+		var p int
+		if _, err := fmt.Sscan(f, &p); err == nil {
+			pids = append(pids, p)
+		}
+	}
+	return pids
+}
+
 // TestWarmInCgroup checks that the zygote is born in the cgroup the host
 // hands over, and in the host's own without one.
 func TestWarmInCgroup(t *testing.T) {

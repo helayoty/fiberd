@@ -1,7 +1,7 @@
 # The grant the conformance suite runs against: the reference zygote as
-# the template (with a simulated device for C8/C9), the test-only admin
-# controls on for the hooks, and a NodePort so grant-conform on the host
-# reaches fiberd at localhost:30084 across container restarts.
+# the template, the test-only admin controls on for the hooks, and a
+# NodePort so grant-conform on the host reaches fiberd at localhost:30084
+# across container restarts.
 apiVersion: fiberd.io/v1alpha1
 kind: CapacityGrant
 metadata:
@@ -20,7 +20,7 @@ spec:
     unsafeAdmin: true
     args:
       - -template
-      - default=/usr/local/bin/refzygote --heap-mb 16 --device-mb 64
+      - default=/usr/local/bin/refzygote --heap-mb 16
       - -stale-ttl
       - 30s
     resources:

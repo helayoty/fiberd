@@ -16,9 +16,10 @@
 use core::ffi::{c_char, c_int, c_long};
 use core::ptr;
 
+use crate::abi::ENGINE_MAX;
 use crate::child::{CAPABILITY_U32S_3, CAPABILITY_VERSION_3, CapData, CapHeader, prctl};
 use crate::ctl::{self, Line, STRERROR_MAX};
-use crate::mounts::{self, F_CGROUP, F_DROP, F_FOREIGN, F_HIDE, F_RO, F_RUNDIR};
+use crate::mounts::{self, F_CGROUP, F_DROP, F_ENGINE, F_FOREIGN, F_HIDE, F_RO, F_RUNDIR};
 use crate::procfiles::{self, MountLine, RootId, Unread, stream_mounts};
 use crate::sys::{self, Errno};
 use crate::zygote::{Refused, Zygote, c_str, env_set, set_cstr};
@@ -188,6 +189,57 @@ pub fn lock_cgroups() -> c_int {
         rc = -1;
     }
     rc
+}
+
+/// The directory the engine's endpoint lives in, NUL-ended in buf, and
+/// its length. The endpoint is cut at its last slash, so nothing is
+/// allocated. None for a relative endpoint, one right under /, or one
+/// that ends in a slash.
+fn engine_dir(endpoint: &[u8], buf: &mut [u8; ENGINE_MAX]) -> Option<usize> {
+    if endpoint.first() != Some(&b'/') {
+        return None;
+    }
+    let cut = endpoint.iter().rposition(|&c| c == b'/')?;
+    if cut == 0 || cut == endpoint.len().wrapping_sub(1) {
+        return None;
+    }
+    let n = sys::append(buf, 0, endpoint.get(..cut)?);
+    *buf.get_mut(n)? = 0;
+    Some(n)
+}
+
+/// Makes the engine's directory read-only in the zygote's namespace
+/// (mounts::lock_engine_dir), when fz_set_engine named an endpoint.
+/// The directory is the endpoint cut at its last slash (engine_dir).
+/// It must not be the run directory or its parent, and its path must
+/// hold no symlink, so realpath must give it back unchanged. A fiber is
+/// euid 0, and where a symlink sat it could put a directory of its own,
+/// so the path bound here must be the one fibers are handed. 0 with no
+/// endpoint or with the directory bound, or -1.
+fn lock_engine_dir(rundir_parent: &[u8], rundir_own: &[u8]) -> c_int {
+    let endpoint = ctl::engine_endpoint();
+    let endpoint = c_str(&endpoint);
+    if endpoint.is_empty() {
+        return 0;
+    }
+    let mut dir = [0u8; ENGINE_MAX];
+    let Some(n) = engine_dir(endpoint, &mut dir) else {
+        return -1;
+    };
+    let path = dir.get(..n).unwrap_or(&[]);
+    if path == c_str(rundir_parent) || path == c_str(rundir_own) {
+        return -1;
+    }
+    let mut real = [0u8; PATH_MAX];
+    // SAFETY: dir is NUL-ended, and real has PATH_MAX bytes.
+    if unsafe { libc::realpath(dir.as_ptr().cast(), real.as_mut_ptr().cast()) }.is_null() {
+        return -1;
+    }
+    if c_str(&real) != path {
+        return -1;
+    }
+    // SAFETY: dir is NUL-ended in its buffer.
+    unsafe { mounts::lock_engine_dir(dir.as_ptr().cast()) }
 }
 
 /// Calls f with each line of /proc/self/mountinfo until f returns true,
@@ -657,6 +709,11 @@ impl Zygote<'_> {
         if failed & F_RUNDIR != 0 {
             return Refused::Text(c"the zygote could not narrow the run directory");
         }
+        if failed & F_ENGINE != 0 {
+            return Refused::Text(
+                c"the zygote could not make the engine's directory read-only in its namespace",
+            );
+        }
         let path: &[u8] = hide_i
             .and_then(|i| self.t.hide.get(i))
             .map_or(b"?", |p| c_str(p));
@@ -746,6 +803,9 @@ impl Zygote<'_> {
             if rc < 0 {
                 failed |= F_RUNDIR;
             }
+        }
+        if lock_engine_dir(&self.t.rundir_parent, &self.t.rundir_own) < 0 {
+            failed |= F_ENGINE;
         }
         // /proc/self/exe is resolved, so each HIDE path is too. With a
         // symlink in it the executable would not be bound back under the

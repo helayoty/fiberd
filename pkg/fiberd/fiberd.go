@@ -15,11 +15,13 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -141,9 +143,18 @@ type Runtime struct {
 	GrantCeiling uint64            // -grant-ceiling
 	FiberHide    []string          // -fiber-hide
 	WorkspaceDir string            // -workspace-dir
+	Engine       Engine
 	Gvisor       Gvisor
 	Runc         Runc
 	Hyperlight   Hyperlight
+}
+
+// Engine is the device engine fiberd starts for each grant with a
+// device budget. The host runtime's backends share it.
+type Engine struct {
+	Command   string // -engine
+	UID       uint   // -engine-uid
+	MemoryMax uint64 // -engine-memory-max
 }
 
 // Gvisor, Runc and Hyperlight are what only that backend needs. The
@@ -231,6 +242,9 @@ func (c *Config) Bind(fs *flag.FlagSet) {
 	fs.StringVar(&c.Runtime.WorkspaceDir, "workspace-dir", "", "proc: directory holding the workspace of every fiber whose grant has a disk budget, fiberd's alone and hidden from fibers, each mounted at /workspace in its own fiber (default <state>/workspaces). One holding <state>/run refuses to start")
 	fs.StringVar(&c.Runtime.Gvisor.Rootfs, "gvisor-rootfs", "", "gvisor: rootfs directory every sandbox runs in; -template commands are paths inside it")
 	fs.BoolVar(&c.Runtime.Gvisor.TemplatesOnDisk, "gvisor-templates-on-disk", false, "gvisor: keep template images under <state>/gvisor/templates on disk. By default fiberd mounts a tmpfs there, so a warm template's memory never reaches a disk, at the cost of about one template image of RAM per warm grant")
+	fs.StringVar(&c.Runtime.Engine.Command, "engine", "", "proc, runc: device engine command line, \"path [args]\", which fiberd starts for each grant with a device budget, with --grant and --socket added, as its own uid in <grant>/engine, and admits the grant once it is READY. Empty refuses grants with a device budget")
+	fs.UintVar(&c.Runtime.Engine.UID, "engine-uid", host.DefaultEngineUID, "proc, runc: uid and gid every device engine runs as. Not 0, and no fiber's (the default sits just below the default -userns-pool)")
+	fs.Uint64Var(&c.Runtime.Engine.MemoryMax, "engine-memory-max", host.DefaultEngineMemoryMax, "proc, runc: memory.max in bytes of each device engine's cgroup leaf, which a simulated engine's pool must fit")
 	fs.StringVar(&c.Runtime.Runc.Rootfs, "runc-rootfs", "", "runc: rootfs directory the zygote container runs in; -template commands are paths inside it")
 	fs.StringVar(&c.Runtime.Runc.UsernsPool, "userns-pool", runcbackend.DefaultPool, "runc: START:SLOTS host id pool that grants' user namespaces take 65536-id slots from, picked by a hash of the grant uid. A pool overlapping /etc/subuid or /etc/subgid is refused")
 	fs.StringVar(&c.Runtime.Hyperlight.Helper, "hyperlight-helper", "", "hyperlight: helper executable speaking hack/hyperlight/PROTOCOL.md (the Rust helper, or fakehelper)")
@@ -271,6 +285,16 @@ func (c *Config) parseDevices(v string) error {
 // an error and the caller should exit.
 func (c *Config) NarrowCaps() error {
 	keep, measured := caps.ForRuntime(c.Runtime.Name)
+	if measured && c.Runtime.Engine.Command != "" {
+		// The engine's directory goes to its uid (Chown), and its
+		// process drops to that uid and gid (SetUID, SetGID).
+		keep = append([]int(nil), keep...)
+		for _, n := range []int{caps.Chown, caps.SetUID, caps.SetGID} {
+			if !slices.Contains(keep, n) {
+				keep = append(keep, n)
+			}
+		}
+	}
 	if c.Node.AllCaps || !measured || len(capsExtra(keep)) == 0 {
 		return nil
 	}
@@ -545,6 +569,13 @@ func RunContext(ctx context.Context, c *Config, newHome HomeFactory) error {
 			Registry: c.Registry.Templates, TemplateCache: filepath.Join(c.Node.StateDir, "templates"),
 			DeltaRegistry: c.Registry.Deltas, HomeID: c.Node.ID, Parity: parity,
 			FiberHide: c.Runtime.FiberHide, PrivateDir: c.PrivateDir()}
+		if c.Runtime.Engine.Command != "" {
+			if c.Runtime.Engine.UID == 0 || c.Runtime.Engine.UID > math.MaxUint32-1 {
+				return fmt.Errorf("-engine-uid %d: want a uid above 0 and below %d", c.Runtime.Engine.UID, uint64(math.MaxUint32))
+			}
+			pc.Engine = strings.Fields(c.Runtime.Engine.Command)
+			pc.EngineUID, pc.EngineMemoryMax = uint32(c.Runtime.Engine.UID), c.Runtime.Engine.MemoryMax
+		}
 		if pc.DeltaKeys, err = c.LoadDeltaKeys(); err != nil {
 			return err
 		}

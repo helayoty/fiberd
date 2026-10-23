@@ -645,16 +645,22 @@ func (a *Core) Admit(ctx context.Context, g Grant) (StatusCode, error) {
 		}
 	}
 	if err := a.Runtime.PrepareTemplate(ctx, g); err != nil {
+		// The caller sees a capacity miss. The reason is here alone.
+		log.Printf("admit: grant %s: warm the template: %v", g.UID, err)
 		refuse()
 		return a.missCode(ErrNotReady), fmt.Errorf("%w: %w", ErrNotReady, err)
 	}
 	if g.DeviceBudget.Bytes > 0 {
-		// The template is warm, so the runtime now knows whether its
-		// engine holds a device of the class the grant budgets for.
-		dc, ok := a.Runtime.(DeviceCapable)
-		if !ok || !dc.OffersDevice(g.UID, g.DeviceBudget.Class) {
+		// The template is warm and the engine READY, so the runtime now
+		// knows the class and capacity the engine declared.
+		var class string
+		var capacity uint64
+		if dc, ok := a.Runtime.(DeviceCapable); ok {
+			class, capacity = dc.DeviceOffer(g.UID)
+		}
+		if err := DeviceFits(g.DeviceBudget.Class, class, capacity); err != nil {
 			refuse()
-			return NeedsTier, fmt.Errorf("%w: class %q", ErrNeedsDevice, g.DeviceBudget.Class)
+			return NeedsTier, err
 		}
 	}
 	if a.Devices != nil {
