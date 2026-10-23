@@ -448,7 +448,7 @@ func TestWriteBundle(t *testing.T) {
 			if tc.dir != nil {
 				dir = tc.dir(t)
 			}
-			err := b.writeBundle(dir, []string{"/bin/refzygote", "--gvisor"}, tc.env, "/run/g", "/state/channel/w-g-1", tc.images, tc.template)
+			err := b.writeBundle(dir, []string{"/bin/refzygote", "--gvisor"}, tc.env, "/run/g", "/state/channel/w-g-1", tc.images, tc.template, "")
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("writeBundle = %v, want error %v", err, tc.wantErr)
 			}
@@ -1715,7 +1715,7 @@ func TestSweep(t *testing.T) {
 			// A sandbox of a previous life, started outside any backend.
 			old := &Backend{opt: Options{Rootfs: "/rootfs"}}
 			bundle := filepath.Join(t.TempDir(), "bundle")
-			if err := old.writeBundle(bundle, []string{"/bin/refzygote"}, []string{"FIBERD_FENCE=none"}, t.TempDir(), t.TempDir(), "", ""); err != nil {
+			if err := old.writeBundle(bundle, []string{"/bin/refzygote"}, []string{"FIBERD_FENCE=none"}, t.TempDir(), t.TempDir(), "", "", ""); err != nil {
 				t.Fatal(err)
 			}
 			var out bytes.Buffer
