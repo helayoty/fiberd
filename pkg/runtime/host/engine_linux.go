@@ -101,6 +101,9 @@ type engine struct {
 	// leaves maps each fence that has a LEAF to its cgroup path as the
 	// engine names it. A restart sends them all again.
 	leaves map[string]string
+	// relays are the cgroups sent RELAY, whose peers speak for their
+	// fibers. A restart sends them all again (rerelay).
+	relays map[string]bool
 	// cgRoot is the cgroup mount as fiberd sees it, so a leaf's path
 	// less cgRoot is the path the engine reads in /proc/<pid>/cgroup.
 	cgRoot string
@@ -902,11 +905,16 @@ func (e *engine) launch() (*net.UnixConn, *os.Process, error) {
 	leaves := make(map[string]string, len(e.leaves))
 	maps.Copy(leaves, e.leaves)
 	e.mu.Unlock()
+	replayed := true
 	for fence, path := range leaves {
 		if err := e.write("LEAF " + fence + " " + path); err != nil {
 			log.Printf("host: LEAF %s again after the engine's restart: %v", fence, err)
+			replayed = false
 			break
 		}
+	}
+	if replayed {
+		e.rerelay() // a failed line closed fd 3, and the next restart sends both again
 	}
 	log.Printf("host: device engine of %s is %s on %s cc %s driver %s", e.grantUID, d.class, d.gpu, d.cc, d.driver)
 	return conn, proc, nil

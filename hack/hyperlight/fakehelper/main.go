@@ -3,8 +3,8 @@
 // backend, the host runtime and the conformance suite can run in the
 // Linux dev container. The Rust helper replaces it where KVM exists.
 //
-//	fakehelper --guest <path> [--init-ms N]      (fd 3 is the control socket)
-//	fakehelper --version                         (the facts READY carries)
+//	fakehelper --guest <path> [--init-ms N] [--engine <sock>]  (fd 3 is the control socket)
+//	fakehelper --version                                       (the facts READY carries)
 package main
 
 import (
@@ -20,6 +20,7 @@ import (
 func main() {
 	guest := flag.String("guest", "", "guest binary (checked for existence only)")
 	initMS := flag.Int("init-ms", 20, "pretend init time")
+	engine := flag.String("engine", "", "the grant's device engine socket, which fibers reach through the helper")
 	version := flag.Bool("version", false, "print the snapshot facts and exit")
 	flag.Parse()
 	if *version {
@@ -36,7 +37,7 @@ func main() {
 		os.Exit(2)
 	}
 	time.Sleep(time.Duration(*initMS) * time.Millisecond)
-	if err := helper.Serve(ctl, os.Stderr); err != nil {
+	if err := helper.Serve(ctl, os.Stderr, *engine); err != nil {
 		fmt.Fprintf(os.Stderr, "fakehelper: %v\n", err)
 	}
 }

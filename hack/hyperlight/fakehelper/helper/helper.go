@@ -3,7 +3,9 @@
 // fakehelper binary runs it as a process, and the backend's unit tests
 // run it as a goroutine, so everything it starts ends when Serve returns.
 // It logs every command as the Rust helper does, the seed and the
-// payload by size alone.
+// payload by size alone. A sandbox reaches the grant's device engine only
+// through its engine method, which puts the sandbox's own fence in every
+// line, as the Rust helper's Engine host function does.
 package helper
 
 import (
@@ -31,8 +33,9 @@ const SeedBytes = 32
 
 // Helper is one run of the protocol over a control connection.
 type Helper struct {
-	out chan string
-	log io.Writer
+	out    chan string
+	log    io.Writer
+	engine string // the grant's engine socket, "" when it has none
 
 	mu      sync.Mutex
 	boxes   map[string]*sandbox
@@ -63,6 +66,10 @@ type sandbox struct {
 	generation int
 	rng        *rand.ChaCha8
 	keptSeed   string
+
+	// gpuHash is the hash of the slice the last gpufill filled, "" before
+	// one. A park carries it, as guest memory carries the guest's.
+	gpuHash string
 }
 
 // birth is what CLONE and RESUME carry for the sandbox.
@@ -126,14 +133,17 @@ type state struct {
 	// honours as a resumed process honours its payload. The seed itself
 	// is never written.
 	KeepSeed bool `json:"keep_seed,omitempty"`
+	// GPUHash is the sandbox's kept slice hash.
+	GPUHash string `json:"gpu_hash,omitempty"`
 }
 
 // Serve says READY on ctl and answers commands until ctl's read side
 // ends, logging each one on log (the helper's stderr, which fiberd
-// points at the grant's zygote.log). Every sandbox, endpoint and
-// goroutine is gone when it returns.
-func Serve(ctl net.Conn, log io.Writer) error {
-	h := &Helper{out: make(chan string, 256), log: log, boxes: map[string]*sandbox{}, stop: make(chan struct{})}
+// points at the grant's zygote.log). engine is the grant's engine
+// socket, "" when it has none. Every sandbox, endpoint and goroutine is
+// gone when it returns.
+func Serve(ctl net.Conn, log io.Writer, engine string) error {
+	h := &Helper{out: make(chan string, 256), log: log, engine: engine, boxes: map[string]*sandbox{}, stop: make(chan struct{})}
 	wrote := make(chan struct{})
 	go func() {
 		defer close(wrote)
@@ -256,7 +266,7 @@ func (h *Helper) clone(fence, endpoint, payloadHex string, st *state, born birth
 	}
 	b.ln = ln
 	if st != nil {
-		b.counter, b.dirtied = st.Counter, st.Dirtied
+		b.counter, b.dirtied, b.gpuHash = st.Counter, st.Dirtied, st.GPUHash
 	}
 	h.mu.Lock()
 	if h.stopped {
@@ -359,6 +369,14 @@ func (b *sandbox) client(c net.Conn) {
 			reply = "-"
 		case line == "rss":
 			reply = strconv.FormatUint(b.w(), 10)
+		case strings.HasPrefix(line, "gpufill "):
+			reply = b.gpuFill(strings.TrimPrefix(line, "gpufill "))
+		case line == "gpucheck":
+			reply = b.gpuCheck()
+		case strings.HasPrefix(line, "gpuopen "):
+			// A guest has no file system and no device, so every path is
+			// missing. Nothing is opened.
+			reply = "ENOENT"
 		case line == "quit":
 			return
 		default:
@@ -368,6 +386,147 @@ func (b *sandbox) client(c net.Conn) {
 			return
 		}
 	}
+}
+
+// engineLineMax is the longest line to or from the engine, its newline
+// counted.
+const engineLineMax = 256
+
+// engineTimeout bounds one engine request, so a stuck engine cannot hold
+// the sandbox.
+const engineTimeout = 10 * time.Second
+
+// gpuFill is "gpufill <seed> <bytes>". It reserves the bytes under the
+// sandbox's fence, fills them from the seed and keeps the hash, as the
+// guest's GpuFill does. The reply is the fill's, "ok <hash>", or the
+// first reply that was not ok.
+func (b *sandbox) gpuFill(args string) string {
+	f := strings.Split(args, " ")
+	if len(f) != 2 {
+		return "err usage: gpufill <seed> <bytes>"
+	}
+	seed, err1 := strconv.ParseUint(f[0], 10, 64)
+	n, err2 := strconv.ParseUint(f[1], 10, 64)
+	if err1 != nil || err2 != nil {
+		return "err usage: gpufill <seed> <bytes>"
+	}
+	// A failed fill may have zeroed the slice, so the old hash goes first.
+	b.setGPUHash("")
+	if r := b.engine("reserve " + strconv.FormatUint(n, 10)); r != "ok" {
+		return r
+	}
+	r := b.engine("fill " + strconv.FormatUint(seed, 10))
+	if hash, ok := strings.CutPrefix(r, "ok "); ok {
+		b.setGPUHash(hash)
+	}
+	return r
+}
+
+// gpuCheck is "gpucheck". It answers "ok" when the slice's hash now is
+// the kept one, "mismatch <kept> <now>" when not, "err none" before any
+// fill, or the engine's own error.
+func (b *sandbox) gpuCheck() string {
+	b.mu.Lock()
+	kept := b.gpuHash
+	b.mu.Unlock()
+	if kept == "" {
+		return "err none"
+	}
+	r := b.engine("sum")
+	now, ok := strings.CutPrefix(r, "ok ")
+	switch {
+	case !ok:
+		return r
+	case now == kept:
+		return "ok"
+	default:
+		return "mismatch " + kept + " " + now
+	}
+}
+
+func (b *sandbox) setGPUHash(hash string) {
+	b.mu.Lock()
+	b.gpuHash = hash
+	b.mu.Unlock()
+}
+
+// engine sends one request to the grant's engine and returns its reply,
+// or an "err" of the helper's own. It is the sandbox's one way to the
+// engine, and the request names the sandbox's fence alone (engineLine).
+func (b *sandbox) engine(line string) string {
+	req, ok := engineLine(b.fence, line)
+	if !ok {
+		return "err proto"
+	}
+	if b.h.engine == "" {
+		return "err no engine"
+	}
+	c, err := net.DialTimeout("unix", b.h.engine, engineTimeout)
+	if err != nil {
+		return "err engine unreachable"
+	}
+	defer func() { _ = c.Close() }()
+	_ = c.SetDeadline(time.Now().Add(engineTimeout))
+	if _, err := io.WriteString(c, req+"\n"); err != nil {
+		return "err engine unreachable"
+	}
+	// A reply cut short still counts. An empty one does not.
+	reply, _ := bufio.NewReader(io.LimitReader(c, engineLineMax)).ReadString('\n')
+	if reply = strings.TrimRight(reply, "\r\n"); reply == "" {
+		return "err no reply"
+	}
+	return reply
+}
+
+// engineLine is the engine request for a sandbox's line, with the fence
+// put in by the helper. The line is "reserve <n>", "fill <n>", "release"
+// or "sum", one space apart, with n decimal digits. Nothing it can hold
+// is a fence, a second line or another token, so the request names this
+// sandbox alone. Anything else is not ok.
+func engineLine(fence, line string) (string, bool) {
+	if !validFence(fence) {
+		return "", false
+	}
+	f := strings.Split(line, " ")
+	var req string
+	switch {
+	case len(f) == 2 && (f[0] == "reserve" || f[0] == "fill") && isDecimal(f[1]):
+		req = f[0] + " " + fence + " " + f[1]
+	case len(f) == 1 && (f[0] == "release" || f[0] == "sum"):
+		req = f[0] + " " + fence
+	default:
+		return "", false
+	}
+	return req, len(req) < engineLineMax
+}
+
+// validFence reports whether f is a fence as the engine takes one.
+// Printable ASCII with no space, and not the "-" its DEVICE lines use for
+// the pool.
+func validFence(f string) bool {
+	if f == "" || f == "-" {
+		return false
+	}
+	for i := 0; i < len(f); i++ {
+		if f[i] < 0x21 || f[i] > 0x7e {
+			return false
+		}
+	}
+	return true
+}
+
+// isDecimal reports whether s is one to twenty decimal digits, a u64's
+// longest.
+func isDecimal(s string) bool {
+	if s == "" || len(s) > 20 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // stopServing closes the endpoint. Clients already connected keep their
@@ -417,7 +576,7 @@ func (h *Helper) park(fence, dir string, sync bool) {
 	// Stop serving before the state is written.
 	b.stopServing()
 	b.mu.Lock()
-	st := state{Counter: b.counter, Dirtied: b.dirtied, KeepSeed: b.keptSeed != ""}
+	st := state{Counter: b.counter, Dirtied: b.dirtied, KeepSeed: b.keptSeed != "", GPUHash: b.gpuHash}
 	b.mu.Unlock()
 	data, _ := json.Marshal(st)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
