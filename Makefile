@@ -63,7 +63,7 @@ endif
         bench zygote zygote-core zygote-test zygote-c-test zygote-check storm-grower storm-grower-test fuzz fuzz-core conform-stub conform-signed conform-logs conform-proc conform-proc-python conform-gvisor conform-gvisor-python conform-runc conform-runc-python conform-hyperlight-fake conform-hyperlight \
         python-build python-test python-dist python-proto python-proto-check \
         typescript-build typescript-skipped typescript-test typescript-proto typescript-proto-check \
-        hyperlight-helper linux-hyperlight-check linux-hyperlight-test overcommit overcommit-baseline kind-up kind-down kind-image conform-kind slurm-up slurm-down conform-slurm example-knative example-knative-kvm example-kata example-substrate \
+        hyperlight-helper linux-hyperlight-check linux-hyperlight-test overcommit overcommit-baseline kind-up kind-down kind-image conform-kind slurm-up slurm-down conform-slurm example-knative example-knative-kvm example-kata example-kata-gpu example-substrate \
         registry-start mobility linux-shell linux-check linux-gvisor-check linux-test linux-lint bench-e2e \
         compare-phase0 compare-phase1 compare-phase2 compare-phase3 compare-phase4 compare-down
 
@@ -202,6 +202,9 @@ example-knative: ## the activator over a Hyperlight home with the fake helper (n
 
 example-kata: ## install the shim into the kind node and run Pods whose containers are fibers (needs docker, kind, kubectl, go)
 	examples/kata/kind/run.sh run
+
+example-kata-gpu: ## the GPU PoC's Kata row on VM A: Pods whose fibers use a host home's GPU engine, park and resume their slice (KATA_GPU_SIM=1 without a GPU)
+	examples/kata/kind/run.sh gpu
 
 ## The Agent Substrate example (examples/substrate, its own module): a
 ## Substrate sandbox class whose actors are fibers, run under Substrate's
