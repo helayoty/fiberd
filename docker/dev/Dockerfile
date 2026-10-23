@@ -42,11 +42,12 @@ ARG DEBIAN_FRONTEND=noninteractive
 # libclang-rt-14-dev holds libFuzzer's runtime for `make fuzz`. criu 4.2
 # generates its image code through protoc (protobuf-compiler) with the
 # protobuf-c plugin. The last line is what the PAC-free CPython below
-# links (zlib1g-dev and uuid-dev are already in the base).
+# links (zlib1g-dev and uuid-dev are already in the base). e2fsprogs
+# holds the mke2fs that hack/cloudhv/build.sh makes the rootfs image with.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       gcc make pkg-config libssl-dev clang lld libclang-rt-14-dev \
       runc \
-      curl ca-certificates jq procps iproute2 strace \
+      curl ca-certificates jq procps iproute2 strace e2fsprogs \
       libprotobuf-c-dev protobuf-c-compiler protobuf-compiler libprotobuf-dev python3-protobuf \
       libnl-3-dev libnet1-dev libcap-dev libbsd-dev uuid-dev libaio-dev \
       libbz2-dev liblzma-dev libffi-dev libsqlite3-dev \

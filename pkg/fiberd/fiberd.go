@@ -33,6 +33,7 @@ import (
 
 	"github.com/helayoty/fiberd/pkg/artifact"
 	"github.com/helayoty/fiberd/pkg/backend"
+	chbackend "github.com/helayoty/fiberd/pkg/backend/cloudhv"
 	gvisorbackend "github.com/helayoty/fiberd/pkg/backend/gvisor"
 	hlbackend "github.com/helayoty/fiberd/pkg/backend/hyperlight"
 	procbackend "github.com/helayoty/fiberd/pkg/backend/proc"
@@ -147,6 +148,17 @@ type Runtime struct {
 	Gvisor       Gvisor
 	Runc         Runc
 	Hyperlight   Hyperlight
+	Cloudhv      Cloudhv
+}
+
+// Cloudhv is what the cloudhv backend needs, the VMM and the guest's
+// images that hack/cloudhv/build.sh makes.
+type Cloudhv struct {
+	VMM         string // -cloudhv-vmm
+	Kernel      string // -cloudhv-kernel
+	Rootfs      string // -cloudhv-rootfs
+	MemoryMiB   uint64 // -cloudhv-memory-mib
+	RestoreMode string // -cloudhv-restore-mode
 }
 
 // Engine is the device engine fiberd starts for each grant with a
@@ -230,7 +242,7 @@ func (c *Config) Bind(fs *flag.FlagSet) {
 	fs.DurationVar(&c.Trust.JWKSMaxStale, "jwks-max-stale", time.Hour, "refuse to verify when the key set is older than this (set to the lease TTL)")
 	fs.DurationVar(&c.Trust.MaxLease, "max-lease", 0, "-verifier=jwks: refuse grants signed for longer than this (exp - iat) or without a lease (0 accepts any)")
 
-	fs.StringVar(&c.Runtime.Name, "runtime", "stub", "runtime: stub (in-memory), or a sandbox backend on the host runtime: proc (fork zygote + criu from PATH; park/resume is offered with criu 4.2 or later whose `criu check` passes), runc (the zygote as an OCI container's init), gvisor (runsc sandbox per fiber), hyperlight (micro-VM snapshots through a helper process)")
+	fs.StringVar(&c.Runtime.Name, "runtime", "stub", "runtime: stub (in-memory), or a sandbox backend on the host runtime: proc (fork zygote + criu from PATH; park/resume is offered with criu 4.2 or later whose `criu check` passes), runc (the zygote as an OCI container's init), gvisor (runsc sandbox per fiber), hyperlight (micro-VM snapshots through a helper process), cloudhv (a Cloud Hypervisor micro-VM per fiber)")
 	fs.StringVar(&c.Runtime.StubTier, "runtime-tier", "FIBER_CHECKPOINT", "tier the stub runtime advertises (stub only)")
 	c.Runtime.Templates = map[string]string{}
 	fs.Func("template", "proc: digest=path [args] mapping a template digest to a zygote command (repeatable; key `default` catches the rest)",
@@ -249,6 +261,11 @@ func (c *Config) Bind(fs *flag.FlagSet) {
 	fs.StringVar(&c.Runtime.Runc.UsernsPool, "userns-pool", runcbackend.DefaultPool, "runc: START:SLOTS host id pool that grants' user namespaces take 65536-id slots from, picked by a hash of the grant uid. A pool overlapping /etc/subuid or /etc/subgid is refused")
 	fs.StringVar(&c.Runtime.Hyperlight.Helper, "hyperlight-helper", "", "hyperlight: helper executable speaking hack/hyperlight/PROTOCOL.md (the Rust helper, or fakehelper)")
 	fs.StringVar(&c.Runtime.Hyperlight.Guest, "hyperlight-guest", "", "hyperlight: guest binary the helper loads")
+	fs.StringVar(&c.Runtime.Cloudhv.VMM, "cloudhv-vmm", "", "cloudhv: the static cloud-hypervisor executable, or hack/cloudhv/fakevmm without KVM (hack/cloudhv/build.sh)")
+	fs.StringVar(&c.Runtime.Cloudhv.Kernel, "cloudhv-kernel", "", "cloudhv: the guest vmlinux")
+	fs.StringVar(&c.Runtime.Cloudhv.Rootfs, "cloudhv-rootfs", "", "cloudhv: the guest's read-only rootfs image (a directory for the fake VMM); -template commands are paths inside it")
+	fs.Uint64Var(&c.Runtime.Cloudhv.MemoryMiB, "cloudhv-memory-mib", 0, "cloudhv: each guest's memory in MiB (0 = 256)")
+	fs.StringVar(&c.Runtime.Cloudhv.RestoreMode, "cloudhv-restore-mode", "", "cloudhv: how a Clone restores the warm guest's memory, copy (default) or ondemand")
 
 	fs.StringVar(&c.Endpoint.Family, "endpoint-family", "unix", "address family fibers are served on: unix (sockets under <state>/run), inet4 or inet6 (tcp on -endpoint-host, a port per fiber); declared, never discovered")
 	fs.StringVar(&c.Endpoint.Host, "endpoint-host", "", "inet4/inet6: the one address the grant's fibers share and callers dial (default: what the home knows, else the loopback of the family)")
@@ -524,7 +541,7 @@ func RunContext(ctx context.Context, c *Config, newHome HomeFactory) error {
 			return fmt.Errorf("runtime-tier: %w", err)
 		}
 		rt = stub.NewWithTier(tier)
-	case "proc", "gvisor", "runc", "hyperlight":
+	case "proc", "gvisor", "runc", "hyperlight", "cloudhv":
 		if len(c.Runtime.Templates) == 0 && c.Registry.Templates == "" {
 			return fmt.Errorf("-runtime=%s needs a -template digest=path or a -registry to pull artifacts from", c.Runtime.Name)
 		}
@@ -538,6 +555,14 @@ func RunContext(ctx context.Context, c *Config, newHome HomeFactory) error {
 				return errors.New("-runtime=hyperlight needs -hyperlight-helper (hack/hyperlight/helper, or fakehelper without a hypervisor)")
 			}
 			be = hlbackend.New(hlbackend.Options{Helper: c.Runtime.Hyperlight.Helper, Guest: c.Runtime.Hyperlight.Guest})
+		case "cloudhv":
+			ch := c.Runtime.Cloudhv
+			if ch.VMM == "" || ch.Kernel == "" || ch.Rootfs == "" {
+				return errors.New("-runtime=cloudhv needs -cloudhv-vmm, -cloudhv-kernel and -cloudhv-rootfs (hack/cloudhv/build.sh builds them, or the fake VMM without KVM)")
+			}
+			be = chbackend.New(chbackend.Options{VMM: ch.VMM, Kernel: ch.Kernel, Rootfs: ch.Rootfs, StateDir: filepath.Join(c.Node.StateDir, "cloudhv"),
+				MemoryMiB: ch.MemoryMiB, RestoreMode: ch.RestoreMode,
+				UsernsPool: c.Runtime.Runc.UsernsPool, EngineUID: uint32(c.Runtime.Engine.UID)})
 		case "runc":
 			if c.Runtime.Runc.Rootfs == "" {
 				return errors.New("-runtime=runc needs -runc-rootfs (hack/gvisor/rootfs.sh builds one)")

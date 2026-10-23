@@ -144,6 +144,22 @@ conform-hyperlight: ## C1-C10 against the hyperlight backend with the real helpe
 	  CONFORM_HL_HELPER=/src/bin/hyperlight-helper CONFORM_HL_GUEST=/src/bin/hyperlight-guest \
 	  CONFORM_STATE=$(CONFORM_DIR)/conform-state-hyperlight-kvm hack/conform/stub.sh run
 
+## The cloudhv backend (pkg/backend/cloudhv): a Cloud Hypervisor micro-VM
+## per fiber. The fake VMM runs it without KVM. The W budget is 8 MiB
+## there, since the fake's leaf holds two Go runtimes besides the fiber.
+.PHONY: cloudhv-images conform-cloudhv-fake conform-cloudhv
+
+cloudhv-images: ## the pinned cloud-hypervisor, the guest kernel and the rootfs into bin/cloudhv, inside the dev container
+	hack/dev/run.sh hack/cloudhv/build.sh
+
+conform-cloudhv-fake: ## C1-C10 against the cloudhv backend over the fake VMM (no KVM), inside the Linux dev container
+	hack/dev/run.sh env CONFORM_RUNTIME=cloudhv CONFORM_SIGNED=1 CONFORM_W_BUDGET=8388608 \
+	  CONFORM_STATE=$(CONFORM_DIR)/conform-state-cloudhv hack/conform/stub.sh run
+
+conform-cloudhv: ## C1-C10 against the cloudhv backend with the real VMM (needs /dev/kvm on the host; make cloudhv-images first)
+	FIBERD_DEV_DOCKER_ARGS="--device /dev/kvm" hack/dev/run.sh env CONFORM_RUNTIME=cloudhv CONFORM_SIGNED=1 \
+	  CONFORM_CH_DIR=/src/bin/cloudhv CONFORM_STATE=$(CONFORM_DIR)/conform-state-cloudhv-kvm hack/conform/stub.sh run
+
 ## The Kubernetes example (examples/kubernetes, its own module): the issuer
 ## as a controller, a grant Pod with fiberd as PID 1, conformance from
 ## the host, the storm inside. What fiberd needs for it is pkg/fiberd and
