@@ -72,6 +72,9 @@ jobs:
             CONFORM_DEVICES="$MIG1" CONFORM_PEER_DEVICES="$MIG2" CONFORM_LAYOUT_DEVICES="$MIG1" \
             CONFORM_STATE=bin/conform-state-a100-proc \
             hack/conform/stub.sh run -test.run 'TestConformance/C14_GPUAnswer' 2>&1 | tee "$GPU_OUT/c14-proc.log"
+      # The NVIDIA toolkit's tmpfs over /proc/driver/nvidia/params stops runc
+      # mounting /proc in the fiber's user namespace. So the step unmounts every
+      # submount of /proc in the container first, and a failed unmount fails it.
       - name: C14 on runc against the real engine
         if: ${{ !cancelled() && steps.facts.outcome == 'success' }}
         env:
@@ -79,7 +82,9 @@ jobs:
           MIG2: ${{ steps.facts.outputs.mig2 }}
           GPU_NAME: ${{ steps.facts.outputs.gpu_name }}
         run: |
-          hack/dev/run.sh env CONFORM_RUNTIME=runc CONFORM_SIGNED=1 CONFORM_GPU=1 CONFORM_GPU_CLASS=gpu CONFORM_GPU_VM=a \
+          hack/dev/run.sh sh -ec '
+            for m in $(findmnt -R -l -n -o TARGET /proc | tail -n +2 | sort -r); do umount "$m"; done
+            exec "$@"' _ env CONFORM_RUNTIME=runc CONFORM_SIGNED=1 CONFORM_GPU=1 CONFORM_GPU_CLASS=gpu CONFORM_GPU_VM=a \
             CONFORM_ENGINE_ARGS="--pool-mb 64" CONFORM_GPU_NAME="$GPU_NAME" \
             CONFORM_DEVICES="$MIG1" CONFORM_PEER_DEVICES="$MIG2" CONFORM_LAYOUT_DEVICES="$MIG1" \
             CONFORM_STATE=bin/conform-state-a100-runc \
