@@ -92,6 +92,10 @@ var (
 	// are refused until the deny-list entry lapses. Like an expired lease,
 	// it is a capacity miss.
 	ErrGrantRevoked = errors.New("ledger: grant revoked on this home")
+	// ErrGrantChanged means a re-delivery of an admitted grant names
+	// another tenant, template or session class. Those fields key what
+	// the home holds for the grant, so they never change in place.
+	ErrGrantChanged = errors.New("ledger: a grant uid keeps its tenant, template and session class")
 	// ErrNeedsTier means the runtime's tier is below the grant's min_tier
 	// or what the session needs (a parked delta requires TierCheckpoint).
 	// A lesser mechanism never stands in.

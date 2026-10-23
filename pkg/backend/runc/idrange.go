@@ -34,7 +34,7 @@ type IDPool struct {
 	Slots uint32
 }
 
-// IDRange is one grant's map.
+// IDRange is one range key's map.
 type IDRange struct {
 	Start uint32 // the host id of the grant's root
 	Count uint32 // SlotIDs
@@ -135,38 +135,49 @@ func (p IDPool) checkSubIDFile(path string, f *os.File) error {
 	return nil
 }
 
-// Range is the grant's map. It depends on the grant uid and the pool
-// alone, so every home configured with the same pool gives the grant the
-// same host ids and a checkpoint restores on any of them.
-func (p IDPool) Range(grantUID string) IDRange {
-	return IDRange{Start: p.Start + p.slot(grantUID)*SlotIDs, Count: SlotIDs}
+// Range is the map of a range key, the grant's session domain or, for a
+// grant without a tenant, its uid. A session moves between homes that
+// each hold their own grant for it, and the domain is what those grants
+// share. The range depends on the key and the pool alone, so every home
+// configured with the same pool gives the session the same host ids and
+// its checkpoint, which keeps the map it was dumped with, restores on
+// any of them.
+func (p IDPool) Range(key string) IDRange {
+	return IDRange{Start: p.Start + p.slot(key)*SlotIDs, Count: SlotIDs}
 }
 
-// slot hashes the grant uid into the pool.
-func (p IDPool) slot(grantUID string) uint32 {
+// slot hashes the range key into the pool.
+func (p IDPool) slot(key string) uint32 {
 	h := fnv.New64a()
-	_, _ = h.Write([]byte(grantUID))
+	_, _ = h.Write([]byte(key))
 	return uint32(h.Sum64() % uint64(p.Slots))
 }
 
-// ErrRangeCollision means another grant admitted on this home holds the
-// slot the grant hashes to. The grant can run on a home that does not
-// hold the other one.
+// ErrRangeCollision means a grant of another range key admitted on this
+// home holds the slot the key hashes to. The grant can run on a home
+// that does not hold the other one.
 var ErrRangeCollision = errors.New("runc: user namespace id range is held by another grant on this home")
 
-// claims records which grant holds each slot and which of its users map
-// it on this home. The users are the warm zygote and every fiber criu
-// restored here, since a restored tree is a pid namespace of its own and
-// outlives the zygote. A fiber the zygote forked dies with its init, so
-// the zygote's hold covers it.
+// claims records which range key holds each slot, the grants of that key
+// that map it on this home, and which of each grant's users do. The
+// users are the warm zygote and every fiber criu restored here, since a
+// restored tree is a pid namespace of its own and outlives the zygote. A
+// fiber the zygote forked dies with its init, so the zygote's hold
+// covers it.
 type claims struct {
 	mu   sync.Mutex
 	pool IDPool
-	held map[uint32]*holder // slot -> who holds it
+	held map[uint32]*claim // slot -> who holds it
+}
+
+// claim is one held slot. Every grant in it has the key the slot was
+// claimed for, and the slot is free once the last of them lets go.
+type claim struct {
+	key    string
+	grants map[string]*holder // grant uid -> its users of the slot
 }
 
 type holder struct {
-	grant  string
 	warm   bool // the zygote is up, or on its way up
 	fibers int  // trees restored here and still running
 }
@@ -174,29 +185,35 @@ type holder struct {
 // busy reports whether someone still uses the range.
 func (h *holder) busy() bool { return h.warm || h.fibers > 0 }
 
-func newClaims(p IDPool) *claims { return &claims{pool: p, held: map[uint32]*holder{}} }
+func newClaims(p IDPool) *claims { return &claims{pool: p, held: map[uint32]*claim{}} }
 
 // check is acquire without taking the slot. It fails the same way.
-func (c *claims) check(grantUID string) error {
+func (c *claims) check(key string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	_, err := c.find(grantUID)
+	_, err := c.find(key)
 	return err
 }
 
-// acquire takes the grant's slot for one user. The warm zygote (warm) may
-// be acquired again while held and counts once. Each restored fiber
-// counts. A grant may hold its slot as both.
-func (c *claims) acquire(grantUID string, warm bool) error {
+// acquire takes the key's slot for one user of the grant. The warm
+// zygote (warm) may be acquired again while held and counts once. Each
+// restored fiber counts. A grant may hold its slot as both, and grants
+// of one key share the slot.
+func (c *claims) acquire(key, grantUID string, warm bool) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	h, err := c.find(grantUID)
+	cl, err := c.find(key)
 	if err != nil {
 		return err
 	}
-	if h == nil {
-		h = &holder{grant: grantUID}
-		c.held[c.pool.slot(grantUID)] = h
+	if cl == nil {
+		cl = &claim{key: key, grants: map[string]*holder{}}
+		c.held[c.pool.slot(key)] = cl
+	}
+	h, ok := cl.grants[grantUID]
+	if !ok {
+		h = &holder{}
+		cl.grants[grantUID] = h
 	}
 	if warm {
 		h.warm = true
@@ -206,31 +223,36 @@ func (c *claims) acquire(grantUID string, warm bool) error {
 	return nil
 }
 
-// find is the grant's holder, nil when the slot is free, or the
-// collision when another grant holds it.
-func (c *claims) find(grantUID string) (*holder, error) {
-	slot := c.pool.slot(grantUID)
-	h, ok := c.held[slot]
+// find is the key's claim, nil when the slot is free, or the collision
+// when another key holds it.
+func (c *claims) find(key string) (*claim, error) {
+	slot := c.pool.slot(key)
+	cl, ok := c.held[slot]
 	if !ok {
 		return nil, nil
 	}
-	if h.grant != grantUID {
-		return nil, fmt.Errorf("%w: grant %s and grant %s both hash to slot %d of %d (host ids from %d); a larger -userns-pool makes collisions rarer",
-			ErrRangeCollision, grantUID, h.grant, slot, c.pool.Slots, c.pool.Range(grantUID).Start)
+	if cl.key != key {
+		return nil, fmt.Errorf("%w: range keys %q and %q both hash to slot %d of %d (host ids from %d); a larger -userns-pool makes collisions rarer",
+			ErrRangeCollision, key, cl.key, slot, c.pool.Slots, c.pool.Range(key).Start)
 	}
-	return h, nil
+	return cl, nil
 }
 
-// release gives one user's hold back and reports whether the grant's
-// slot became free, so the caller can remove what the grant left on this
-// home. A release by a grant that does not hold the slot, or of a user
+// release gives one user's hold of the grant back and reports whether
+// the grant no longer uses the slot, so the caller can remove what the
+// grant left on this home. The slot is freed with its last grant. A
+// release by a grant that does not hold the slot under key, or of a user
 // it does not have, changes nothing.
-func (c *claims) release(grantUID string, warm bool) (free bool) {
+func (c *claims) release(key, grantUID string, warm bool) (free bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	slot := c.pool.slot(grantUID)
-	h, ok := c.held[slot]
-	if !ok || h.grant != grantUID {
+	slot := c.pool.slot(key)
+	cl, ok := c.held[slot]
+	if !ok || cl.key != key {
+		return false
+	}
+	h, ok := cl.grants[grantUID]
+	if !ok {
 		return false
 	}
 	switch {
@@ -242,6 +264,9 @@ func (c *claims) release(grantUID string, warm bool) (free bool) {
 	if h.busy() {
 		return false
 	}
-	delete(c.held, slot)
+	delete(cl.grants, grantUID)
+	if len(cl.grants) == 0 {
+		delete(c.held, slot)
+	}
 	return true
 }

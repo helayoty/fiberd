@@ -195,11 +195,20 @@ func (b *Backend) Platform() artifact.Platform {
 func (b *Backend) EndpointSchemes() []string { return []string{"unix"} }
 
 // MappedRoot implements backend.IDMapper.
-func (b *Backend) MappedRoot(grantUID string) (uint32, error) {
-	if err := b.l.claims.check(grantUID); err != nil {
+func (b *Backend) MappedRoot(key string) (uint32, error) {
+	if err := b.l.claims.check(key); err != nil {
 		return 0, err
 	}
-	return b.l.opt.Pool.Range(grantUID).Start, nil
+	return b.l.opt.Pool.Range(key).Start, nil
+}
+
+// rangeKey is the key the spec's id range is looked up by, its RangeKey
+// or, when the host gave none, its grant uid.
+func rangeKey(spec backend.WarmSpec) string {
+	if spec.RangeKey != "" {
+		return spec.RangeKey
+	}
+	return spec.GrantUID
 }
 
 func (l *launcher) Name() string { return "runc" }
@@ -334,6 +343,15 @@ const (
 	engineMount = "/host/engine"
 )
 
+// rangeFile, in every checkpoint, records the first host id of the range
+// the tree was dumped with. Its files and its map keep those ids, so the
+// restore refuses a range that starts anywhere else.
+const rangeFile = "fiberd-range.json"
+
+type rangeRecord struct {
+	Start uint32 `json:"start"`
+}
+
 func (l *launcher) runc(ctx context.Context, args ...string) (string, error) {
 	run := l.run
 	if run == nil {
@@ -395,22 +413,24 @@ const (
 	rebindEnv       = "FIBERD_CTL_REBIND=1"
 )
 
-// hold takes the grant's id range for one user, its warm zygote (warm)
-// or one fiber about to be restored here, and makes sure the grant's
-// root filesystem copy is there. The hold is given back by drop, and
-// the copy goes with the last hold. Taking the hold and making the copy
-// happen under one lock, so a drop that finds the grant free never
-// removes a copy a new hold has just found in place.
+// hold takes the grant's id range, by its range key, for one user, its
+// warm zygote (warm) or one fiber about to be restored here, and makes
+// sure the grant's root filesystem copy is there. The hold is given
+// back by drop, and the copy goes with the grant's last hold. Taking the
+// hold and making the copy happen under one lock, so a drop that finds
+// the grant free never removes a copy a new hold has just found in
+// place.
 func (l *launcher) hold(spec backend.WarmSpec, warm bool) (string, error) {
 	mu := l.fsLock(spec)
 	mu.Lock()
 	defer mu.Unlock()
-	if err := l.claims.acquire(spec.GrantUID, warm); err != nil {
+	key := rangeKey(spec)
+	if err := l.claims.acquire(key, spec.GrantUID, warm); err != nil {
 		return "", err
 	}
-	rootfs, err := l.ensureRootfs(spec, l.opt.Pool.Range(spec.GrantUID))
+	rootfs, err := l.ensureRootfs(spec, l.opt.Pool.Range(key))
 	if err != nil {
-		if l.claims.release(spec.GrantUID, warm) {
+		if l.claims.release(key, spec.GrantUID, warm) {
 			_ = os.RemoveAll(l.rootfs(spec))
 		}
 		return "", err
@@ -419,12 +439,12 @@ func (l *launcher) hold(spec backend.WarmSpec, warm bool) (string, error) {
 }
 
 // drop gives one user's hold on the grant's id range back and removes
-// the root filesystem copy with the last one.
+// the grant's root filesystem copy with its last one.
 func (l *launcher) drop(spec backend.WarmSpec, warm bool) {
 	mu := l.fsLock(spec)
 	mu.Lock()
 	defer mu.Unlock()
-	if l.claims.release(spec.GrantUID, warm) {
+	if l.claims.release(rangeKey(spec), spec.GrantUID, warm) {
 		_ = os.RemoveAll(l.rootfs(spec))
 	}
 }
@@ -444,7 +464,7 @@ func (l *launcher) Command(spec backend.WarmSpec, argv []string, ctl, logf *os.F
 			l.drop(spec, true)
 		}
 	}()
-	rng := l.opt.Pool.Range(spec.GrantUID)
+	rng := l.opt.Pool.Range(rangeKey(spec))
 	if err := prepareWorkDir(spec.WorkDir, rng); err != nil {
 		return nil, err
 	}
@@ -1044,11 +1064,22 @@ func shareImages(dir string, rng IDRange) error {
 // mount namespace, the run directory, the /sys bind, runc's device
 // binds and, for a grant on a registry template, the template bind,
 // which it also records beside the images in dir so the restore knows
-// to bind one. A fiber with a workspace lives in a copy of the
-// container's namespace, so every file it still holds through the
-// container's own mounts is named too, and recorded for the restore
-// (foreignDump). The backend names the workspace mount itself.
+// to bind one. It records the start of the tree's id range there too.
+// A fiber with a workspace lives in a copy of the container's
+// namespace, so every file it still holds through the container's own
+// mounts is named too, and recorded for the restore (foreignDump). The
+// backend names the workspace mount itself.
 func (l *launcher) DumpExtra(spec backend.WarmSpec, dir string, d proc.Dumped) ([]string, error) {
+	rrec, err := json.Marshal(rangeRecord{Start: l.opt.Pool.Range(rangeKey(spec)).Start})
+	if err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, err
+	}
+	if err := os.WriteFile(filepath.Join(dir, rangeFile), rrec, 0o600); err != nil {
+		return nil, err
+	}
 	extra := append([]string{"--external", "mnt[/host]:host", "--external", "mnt[/sys]:sys"}, netExtra...)
 	for _, d := range deviceBinds {
 		extra = append(extra, "--external", "mnt[/dev/"+d+"]:dev-"+d)
@@ -1137,15 +1168,37 @@ func engineBind(spec backend.WarmSpec, dir string) ([]string, error) {
 	return []string{"--external", "mnt[" + engineKey + "]:" + host}, nil
 }
 
+// checkRange refuses a checkpoint in dir that was dumped with an id range
+// starting anywhere but rng's, or that records none.
+func checkRange(dir string, rng IDRange) error {
+	b, err := os.ReadFile(filepath.Join(dir, rangeFile))
+	if errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("runc: checkpoint in %s records no id range (no %s)", dir, rangeFile)
+	}
+	if err != nil {
+		return err
+	}
+	var rec rangeRecord
+	if err := json.Unmarshal(b, &rec); err != nil {
+		return fmt.Errorf("runc: %s in %s: malformed", rangeFile, dir)
+	}
+	if rec.Start != rng.Start {
+		return fmt.Errorf("runc: checkpoint in %s was dumped with the id range at %d, and this restore maps %d", dir, rec.Start, rng.Start)
+	}
+	return nil
+}
+
 // RestoreExtra gives the restored tree the grant's root filesystem copy
 // on this home, its run directory at /host, this home's /sys bind and
 // the host's device nodes, and hands it the files its dump recorded as
 // held through the container's mounts, reopened on this home
 // (foreignInherit).
-// The tree maps the grant's id range, so it takes a hold on it, which
-// refuses a restore while another grant holds the slot and keeps the
+// The tree maps the id range of the grant's range key, the one it was
+// dumped with on any home, so it takes a hold on it, which refuses a
+// restore while a grant of another key holds the slot and keeps the
 // range and the copy for as long as the tree runs (until RestoredGone).
-// The copy is made when this home has not warmed the grant.
+// A checkpoint dumped with a range that starts elsewhere is refused
+// (checkRange). The copy is made when this home has not warmed the grant.
 func (l *launcher) RestoreExtra(spec backend.WarmSpec, dir string) (extra []string, held []proc.Inherit, err error) {
 	rootfs, err := l.hold(spec, false)
 	if err != nil {
@@ -1156,8 +1209,11 @@ func (l *launcher) RestoreExtra(spec backend.WarmSpec, dir string) (extra []stri
 			l.drop(spec, false)
 		}
 	}()
-	rng := l.opt.Pool.Range(spec.GrantUID)
+	rng := l.opt.Pool.Range(rangeKey(spec))
 	if err := prepareWorkDir(spec.WorkDir, rng); err != nil {
+		return nil, nil, err
+	}
+	if err := checkRange(dir, rng); err != nil {
 		return nil, nil, err
 	}
 	if err := shareImages(dir, rng); err != nil {

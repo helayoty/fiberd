@@ -55,7 +55,7 @@ func (r *Runtime) newWorkspace(fence core.Fence, g core.Grant) (*workspace, erro
 		return nil, err
 	}
 	_ = os.RemoveAll(dir)
-	owner, err := r.workspaceOwner(g.UID)
+	owner, err := r.workspaceOwner(g)
 	if err != nil {
 		return nil, err
 	}
@@ -76,20 +76,21 @@ func (r *Runtime) newWorkspace(fence core.Fence, g core.Grant) (*workspace, erro
 	return &workspace{dir: dir, ws: ws, budget: budget}, nil
 }
 
-// workspaceOwner is who owns a workspace of grantUID and everything
-// fiberd writes into it. A backend that maps the grant's root into a
-// user namespace (runc) gets that root, so the fiber, uid 0 inside,
-// owns its tree and can write what it was given. Host root's files
-// would read as nobody there. Any other backend's fiber runs as
-// fiberd's uid, and nil keeps fiberd's ids.
-func (r *Runtime) workspaceOwner(grantUID string) (*wsfs.Owner, error) {
+// workspaceOwner is who owns a workspace of g and everything fiberd
+// writes into it. A backend that maps the grant's root into a user
+// namespace (runc) gets that root, picked by the grant's range key, so
+// the fiber, uid 0 inside, owns its tree and can write what it was
+// given, on whichever home it resumes. Host root's files would read as
+// nobody there. Any other backend's fiber runs as fiberd's uid, and nil
+// keeps fiberd's ids.
+func (r *Runtime) workspaceOwner(g core.Grant) (*wsfs.Owner, error) {
 	m, ok := r.be.(backend.IDMapper)
 	if !ok {
 		return nil, nil
 	}
-	uid, err := m.MappedRoot(grantUID)
+	uid, err := m.MappedRoot(rangeKey(g))
 	if err != nil {
-		return nil, fmt.Errorf("host: workspace owner of grant %s: %w", grantUID, err)
+		return nil, fmt.Errorf("host: workspace owner of grant %s: %w", g.UID, err)
 	}
 	return &wsfs.Owner{UID: int(uid), GID: int(uid)}, nil
 }
@@ -99,8 +100,9 @@ func (r *Runtime) workspaceOwner(grantUID string) (*wsfs.Owner, error) {
 // criu restores a runc fiber's workspace bind from inside the restored
 // user namespace, as that root, and opens the tree by its path. Each
 // level stays fiberd's, with the owner's group and search alone (0710),
-// so no other grant and no other user gets in, nothing can be listed,
-// and the staging directory beside the tree stays fiberd's alone.
+// so no grant of another range key and no other user gets in, nothing
+// can be listed, and the staging directory beside the tree stays
+// fiberd's alone.
 // WorkspaceDir itself lets anyone search it (workspaceDirMode).
 func searchableBy(owner *wsfs.Owner, dirs ...string) error {
 	for _, d := range dirs {

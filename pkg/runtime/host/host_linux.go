@@ -687,7 +687,7 @@ func (r *Runtime) grantCgroup(g core.Grant) (cgroup.Dir, cgroup.Dir, error) {
 	if err := fcg.Ensure("memory", "pids"); err != nil {
 		return cgroup.Dir{}, cgroup.Dir{}, err
 	}
-	if err := r.delegateProcs(g.UID, fcg); err != nil {
+	if err := r.delegateProcs(rangeKey(g), fcg); err != nil {
 		return cgroup.Dir{}, cgroup.Dir{}, err
 	}
 	if err := r.guardFibers(g.UID, fcg); err != nil {
@@ -774,27 +774,38 @@ func (r *Runtime) leaf(parent cgroup.Dir, g core.Grant, name string) (cgroup.Dir
 			return leaf, err
 		}
 	}
-	if err := r.delegateProcs(g.UID, leaf); err != nil {
+	if err := r.delegateProcs(rangeKey(g), leaf); err != nil {
 		_ = rmdir(leaf)
 		return leaf, err
 	}
 	return leaf, nil
 }
 
-// delegateProcs hands the grant's mapped root, when the backend maps
-// one, the cgroup.procs of d and nothing else. A birth into a leaf needs
-// write access to it and to the fibers parent's, the nearest common
-// ancestor of the zygote's cgroup and the leaf. The grant cgroup's own
-// cgroup.procs stays root's, like the engine's leaf, so a fiber can
-// move itself to no cgroup outside the parent the guard is on. The
-// limits stay root's too, so a grant cannot raise its own memory.max or
-// make cgroups.
-func (r *Runtime) delegateProcs(grantUID string, d cgroup.Dir) error {
+// rangeKey is the key an IDMapper picks g's host id range by
+// (backend.WarmSpec.RangeKey), its session domain or, for a grant
+// without a tenant, its uid.
+func rangeKey(g core.Grant) string {
+	d, err := g.SessionDomain()
+	if err != nil {
+		return g.UID
+	}
+	return d
+}
+
+// delegateProcs hands the mapped root of range key key, when the backend
+// maps one, the cgroup.procs of d and nothing else. A birth into a leaf
+// needs write access to it and to the fibers parent's, the nearest
+// common ancestor of the zygote's cgroup and the leaf. The grant
+// cgroup's own cgroup.procs stays root's, like the engine's leaf, so a
+// fiber can move itself to no cgroup outside the parent the guard is on.
+// The limits stay root's too, so a grant cannot raise its own
+// memory.max or make cgroups.
+func (r *Runtime) delegateProcs(key string, d cgroup.Dir) error {
 	m, ok := r.be.(backend.IDMapper)
 	if !ok {
 		return nil
 	}
-	uid, err := m.MappedRoot(grantUID)
+	uid, err := m.MappedRoot(key)
 	if err != nil {
 		return err
 	}
@@ -898,8 +909,9 @@ func (r *Runtime) PrepareTemplate(ctx context.Context, g core.Grant) error {
 	r.mu.Unlock()
 	if m, ok := r.be.(backend.IDMapper); ok {
 		// Before anything is made for the grant. A grant whose id range
-		// another admitted grant holds cannot run on this home.
-		if _, err := m.MappedRoot(g.UID); err != nil {
+		// an admitted grant of another range key holds cannot run on
+		// this home.
+		if _, err := m.MappedRoot(rangeKey(g)); err != nil {
 			return err
 		}
 	}
@@ -947,7 +959,7 @@ func (r *Runtime) PrepareTemplate(ctx context.Context, g core.Grant) error {
 	defer func() { _ = removeSoon(pcg) }()
 
 	workDir := filepath.Join(r.cfg.RunDir, g.UID)
-	wspec := backend.WarmSpec{GrantUID: g.UID, Template: tpl, CgroupFD: int(zfd.Fd()), WorkDir: workDir, ProbeCgroupFD: probeFD,
+	wspec := backend.WarmSpec{GrantUID: g.UID, RangeKey: rangeKey(g), Template: tpl, CgroupFD: int(zfd.Fd()), WorkDir: workDir, ProbeCgroupFD: probeFD,
 		Devices: r.devicesOf(g.UID).Devices, Hide: r.hide}
 	// The device engine starts beside the warm instance, and the grant is
 	// warm once both are READY. The device channel is then the engine's
@@ -2260,7 +2272,7 @@ func (r *Runtime) resume(ctx context.Context, spec core.CloneSpec) (core.FiberHa
 	}
 	refused := r.pidsHits(gcg)
 	fb, err := r.be.Resume(ctx, backend.ResumeSpec{Dir: dir, Fence: f.id, Endpoint: bind, CgroupFD: int(lfd.Fd()), Deadline: spec.Deadline,
-		WarmID: spec.Grant.UID, WorkDir: workDir, Session: spec.Session, Generation: f.generation, Handoff: m.Handoff,
+		WarmID: spec.Grant.UID, RangeKey: rangeKey(spec.Grant), WorkDir: workDir, Session: spec.Session, Generation: f.generation, Handoff: m.Handoff,
 		Workspace: ws.root(), EnginePath: enginePath})
 	if err != nil {
 		err = r.pidsPressure(gcg, refused, spec.Grant.UID, err)
