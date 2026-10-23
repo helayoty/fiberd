@@ -1,6 +1,6 @@
 # Design: backends
 
-This doc explains what a [backend](../glossary.md#backend) is and how the four reference backends differ. It is for anyone choosing a backend or reading `pkg/backend`. Read [architecture.md](../architecture.md) first. The [runtime host](runtime-host.md) calls a backend only for the mechanism.
+This doc explains what a [backend](../glossary.md#backend) is and how the five reference backends differ. It is for anyone choosing a backend or reading `pkg/backend`. Read [architecture.md](../architecture.md) first. The [runtime host](runtime-host.md) calls a backend only for the mechanism.
 
 ## Purpose
 
@@ -13,7 +13,7 @@ The runtime host ([runtime-host.md](runtime-host.md)) decides when a [fiber](../
 | Interface | A backend implements it when |
 | --- | --- |
 | `Isolator` | its fibers run behind a kernel of their own. Only these serve untrusted grants |
-| `WorkspaceHolder` | it gives each fiber a private workspace at `/workspace`, captures it at park under `ParkSpec.Capture` with the fiber stopped and mounts it again at resume. Only these serve a grant with a [disk budget](../protocol.md#grant-fields). proc and runc implement it, and gVisor and Hyperlight do not |
+| `WorkspaceHolder` | it gives each fiber a private workspace at `/workspace`, captures it at park under `ParkSpec.Capture` with the fiber stopped and mounts it again at resume. Only these serve a grant with a [disk budget](../protocol.md#grant-fields). proc and runc implement it, and gVisor, Hyperlight and cloudhv do not |
 | `EndpointSchemer` | its fibers can serve more than unix sockets under the run directory |
 | `Handoffer` | its fibers read their incarnation record off a channel at birth, and a [handoff](../glossary.md#handoff) fiber keeps that channel for the connections the host passes it ([handoff.md](handoff.md)). The backend makes the pair where the fiber's checkpoint can carry it, and hands the host its end for a handoff fiber |
 | `IDMapper` | its fibers run in a user namespace mapped to a range of host ids |
@@ -37,6 +37,9 @@ flowchart LR
   subgraph hyperlight["Hyperlight"]
     H[helper process] -->|restore the warm snapshot| F4[micro-VM]
   end
+  subgraph cloudhv["cloudhv"]
+    S5[warm guest snapshot] -->|restore in a jailed VMM| F5[micro-VM]
+  end
 ```
 
 | Backend | One fiber is | Park and resume | Isolates tenants | [Tier](../glossary.md#tier) offered |
@@ -45,6 +48,7 @@ flowchart LR
 | runc | a forked child of the zygote inside the grant's container | as proc, with the container's mounts named as external, restored with the grant's rootfs copy | no, the host kernel as an unprivileged host uid | the same as proc |
 | gVisor | a `runsc` sandbox restored from the template image | `SIGUSR1`, the endpoint gone, then `runsc checkpoint`, a full image | yes, the Sentry serves its syscalls | `FIBER_SNAPSHOT` |
 | Hyperlight | a micro-VM inside the grant's helper process, with no process or leaf of its own | the helper's snapshot | yes, the hypervisor | `FIBER_SNAPSHOT` |
+| cloudhv | a Cloud Hypervisor micro-VM in a jailed VMM process of its own ([cloudhv.md](cloudhv.md)) | a VMM snapshot | yes, KVM | `FIBER_SNAPSHOT` |
 
 A backend whose tools are missing, such as `runsc` or the Hyperlight helper, offers no tier. fiberd then refuses to start, with an error that names the backend and the reason. runc does not look for `runc`, `unshare` or `mount` when it opens, so a home without them fails at warm instead ([user-namespaces.md](user-namespaces.md#security-notes-and-known-gaps)).
 

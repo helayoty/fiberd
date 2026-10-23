@@ -195,8 +195,8 @@ func (b *Backend) vmConfig(cmdline string) vmConfig {
 }
 
 // baseCmdline boots the read-only rootfs on the virtio-blk disk with the
-// guest init as PID 1. The guest powers off on a panic, which ends the
-// VMM.
+// guest init as PID 1. A panic reboots the guest (panic=-1) and leaves
+// the VMM running, which watch does not detect yet.
 const baseCmdline = "console=ttyS0 root=/dev/vda ro rootfstype=ext4 panic=-1 quiet init=" + guestInit
 
 // maxCmdline is x86's COMMAND_LINE_SIZE less its NUL.

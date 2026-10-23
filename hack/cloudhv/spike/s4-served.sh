@@ -13,7 +13,7 @@ set -euo pipefail
 prereqs
 
 RUNS=${S4_RUNS:-20}
-MODES=${S4_MODES:-copy ondemand file-private}
+MODES=${S4_MODES:-copy ondemand copyonwrite file-private}
 OUT=$SPIKE_DIR/s4
 trap cleanup EXIT
 rm -rf "$OUT"
@@ -31,6 +31,7 @@ for mode in $MODES; do
   case $mode in
     copy) src=$OUT/warm-anon/snap; args=(--mode copy) ;;
     ondemand) src=$OUT/warm-anon/snap; args=(--mode ondemand) ;;
+    copyonwrite) src=$OUT/warm-anon/snap; args=(--mode copyonwrite) ;;
     file-private) src=$OUT/warm-file/snap; args=(--mode copy --private-zones) ;;
     *) fail "unknown mode $mode" ;;
   esac

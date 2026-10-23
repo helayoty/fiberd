@@ -18,7 +18,7 @@ A suggested order is fiberd, home, grant, core, audit, runtime-host, backends, z
 | [file-transfer.md](file-transfer.md) | Moving files into and out of a fiber's workspace, and carrying it across a park | `pkg/rpc`, `pkg/runtime/host`, `pkg/backend/proc`, `pkg/backend/runc` |
 | [wsfs.md](wsfs.md) | The file layer of a fiber's workspace, hardened against a tree the fiber controls | `pkg/runtime/host/wsfs` |
 | [resources.md](resources.md) | The cgroup hierarchy, the memory formula and sizing | `pkg/runtime/host`, `pkg/sys/cgroup` |
-| [backends.md](backends.md) | The backend interface and how proc, runc, gVisor and Hyperlight make a fiber | `pkg/backend`, `pkg/backend/proc`, `pkg/backend/runc`, `pkg/backend/gvisor`, `pkg/backend/hyperlight` |
+| [backends.md](backends.md) | The backend interface and how proc, runc, gVisor, Hyperlight and cloudhv make a fiber | `pkg/backend`, `pkg/backend/proc`, `pkg/backend/runc`, `pkg/backend/gvisor`, `pkg/backend/hyperlight` |
 | [cloudhv.md](cloudhv.md) | How a Cloud Hypervisor fiber is a jailed micro-VM, and why a Clone restores copy-on-write | `pkg/backend/cloudhv` |
 | [sys.md](sys.md) | Cgroup delegation, [CRIU](../glossary.md#criu) dump and restore, capability narrowing and network namespaces | `pkg/sys/caps`, `pkg/sys/cgroup`, `pkg/sys/criu`, `pkg/sys/netns` |
 | [zygote.md](zygote.md) | The library a template links to, its wire protocol and how a [zygote](../glossary.md#zygote) forks a fiber | `sdk/c/template` |

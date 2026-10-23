@@ -75,7 +75,7 @@ An `UNTRUSTED` grant, the default, is admitted only on a backend that isolates t
 
 ## fiberd privileges
 
-With proc or runc, fiberd re-executes at start with only the capabilities that runtime needs. A fiberd that cannot drop the rest refuses to start, unless `-all-caps`. Nobody has measured what gVisor and Hyperlight need, so with them fiberd keeps what it started with. [sys.md](design/sys.md) explains each capability, and [kubernetes.md](design/kubernetes.md) how the example Pod applies the set.
+With proc or runc, fiberd re-executes at start with only the capabilities that runtime needs. A fiberd that cannot drop the rest refuses to start, unless `-all-caps`. Nobody has measured what gVisor, Hyperlight and cloudhv need, so with them fiberd keeps what it started with. cloudhv also needs root, to build each VMM's jail. [sys.md](design/sys.md) explains each capability, and [kubernetes.md](design/kubernetes.md) how the example Pod applies the set.
 
 ## Templates and deltas
 

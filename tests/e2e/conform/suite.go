@@ -442,7 +442,7 @@ func (c *client) c5(t *testing.T) {
 // C6: dirtied working set over w_budget_bytes -> the fiber is killed, the
 // ledger frees the slot, and an audit record is written with its fence.
 func (c *client) c6(t *testing.T) {
-	ctx, cancel := c.ctx(t, 2)
+	ctx, cancel := c.ctx(t, 3)
 	defer cancel()
 	budget := c.d.wBudget()
 	g, tok := c.grant(t, "c6", func(g *core.Grant) { g.WBudgetBytes = budget; g.FiberMax = 2 })
@@ -471,6 +471,16 @@ func (c *client) c6(t *testing.T) {
 		t.Fatalf("clone 2 after kill: %v", err)
 	}
 	defer c.release(ctx, a.GetFiberId(), b.GetFiberId())
+	c.logW(t, g.UID, budget, 1024)
+
+	// Then one fiber that dirties a quarter of the budget, for the log too.
+	c.release(ctx, a.GetFiberId(), b.GetFiberId())
+	if d, err := c.clone(ctx, tok, "", []byte(fmt.Sprintf(`{"dirty_bytes": %d}`, budget/4))); err != nil {
+		t.Logf("C6 W: clone that dirties %d bytes: %v", budget/4, err)
+	} else {
+		defer c.release(ctx, d.GetFiberId())
+		c.logW(t, g.UID, budget, budget/4)
+	}
 
 	if c.d.AuditHas == nil {
 		t.Log("no audit hook (-audit-file/-audit-cmd); audit record not checked")
@@ -493,6 +503,25 @@ func (c *client) c6(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("no audit record event=oom fence=%s", fence)
+	}
+}
+
+// logW logs the grant's W per running fiber a few seconds after birth,
+// which is what a runtime's W budget is sized from. It never fails C6.
+func (c *client) logW(t *testing.T, grantUID string, budget, dirtied uint64) {
+	t.Helper()
+	time.Sleep(3 * time.Second)
+	ctx, cancel := c.ctx(t, 1)
+	defer cancel()
+	st, err := c.waitStatus(ctx, grantUID, func(*grantv1.Status) bool { return true })
+	switch {
+	case err != nil:
+		t.Logf("C6 W: fibers that dirtied %d bytes: no status: %v", dirtied, err)
+	case st.GetRunning() == 0:
+		t.Logf("C6 W: fibers that dirtied %d bytes: none running, killed over the %d byte budget", dirtied, budget)
+	default:
+		t.Logf("C6 W: fibers that dirtied %d bytes: W %d bytes each 3s after birth (%d running, budget %d)",
+			dirtied, st.GetWUsedBytes()/uint64(st.GetRunning()), st.GetRunning(), budget)
 	}
 }
 

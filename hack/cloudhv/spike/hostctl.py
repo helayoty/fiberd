@@ -6,7 +6,7 @@ API socket (HTTP over a unix socket) and to the guest over hybrid vsock, and
 times each step in this process, so no shell or curl start-up is counted.
 
   hostctl.py boot     --ch BIN --run DIR --kernel K --initramfs I [--mem-file F] [--leaf CG]
-  hostctl.py restore  --ch BIN --run DIR --source SNAP [--mode copy|ondemand] [--private-zones] [--leaf CG]
+  hostctl.py restore  --ch BIN --run DIR --source SNAP [--mode copy|ondemand|copyonwrite] [--private-zones] [--leaf CG]
   hostctl.py api      SOCK METHOD ENDPOINT [JSON]
   hostctl.py call     VSOCK PORT LINE
   hostctl.py shutdown --run DIR
@@ -436,7 +436,7 @@ def main():
     r.add_argument("--ch", required=True)
     r.add_argument("--run", required=True)
     r.add_argument("--source", required=True, help="the snapshot directory")
-    r.add_argument("--mode", choices=["copy", "ondemand"], default="copy")
+    r.add_argument("--mode", choices=["copy", "ondemand", "copyonwrite"], default="copy")
     r.add_argument("--private-zones", action="store_true", help="map file-backed zones private (copy-on-write)")
     r.add_argument("--kernel")
     r.add_argument("--initramfs")

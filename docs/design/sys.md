@@ -38,5 +38,5 @@ fiberd re-executes with its keep set unless `-all-caps`. One that holds more but
 ## Security notes and known gaps
 
 - SYS_ADMIN is broad. Namespaces, mounts and cgroups need it, and it covers far more. The fibers hold none of it on proc, and on runc only inside their user namespace.
-- Unmeasured runtimes keep everything. With gVisor or Hyperlight fiberd runs with the capabilities it started with.
+- Unmeasured runtimes keep everything. With gVisor, Hyperlight or cloudhv fiberd runs with the capabilities it started with.
 - The measured sets assume fibers run as fiberd's user. A proc [template](../glossary.md#template) that switches user is likely to need more.
