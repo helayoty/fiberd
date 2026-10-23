@@ -63,7 +63,25 @@ REG_ADDR=${CONFORM_REGISTRY_ADDR:-127.0.0.1:18500}
 PEER_ADDR=${CONFORM_PEER_ADDR:-127.0.0.1:18488}
 PEER_NODE=${CONFORM_PEER_NODE:-conform-peer}
 PEER_STATE=$STATE-peer
-PEER_GPU=${CONFORM_PEER_GPU:-sim-peer}   # the GPU name the peer's engine declares
+# C14 on a real GPU. CONFORM_GPU_CLASS=gpu takes the engine's arguments
+# from CONFORM_ENGINE_ARGS (--pool-mb N in place of --sim-mb 64), and
+# CONFORM_DEVICES, CONFORM_PEER_DEVICES and CONFORM_LAYOUT_DEVICES are
+# the -devices of the target, the peer and the third home. A real engine
+# declares its GPU's own name, CONFORM_GPU_NAME, the same on two MIG
+# instances of one GPU, so the peer's is that name too.
+GPU_CLASS=${CONFORM_GPU_CLASS:-sim}   # the device class of C14's grants
+GPU_VM=${CONFORM_GPU_VM:-ci}          # the vm field of C14's events
+GPU_NAME=${CONFORM_GPU_NAME:-sim}     # the GPU the target's and the third home's engines declare
+ENGINE_ARGS=${CONFORM_ENGINE_ARGS:---sim-mb 64}
+PEER_GPU=sim-peer
+if [ "$GPU_CLASS" = gpu ]; then PEER_GPU=$GPU_NAME; fi
+PEER_GPU=${CONFORM_PEER_GPU:-$PEER_GPU}   # the GPU name the peer's engine declares
+DEVICE_FLAGS=()
+PEER_DEVICE_FLAGS=()
+LAYOUT_DEVICE_FLAGS=()
+if [ -n "${CONFORM_DEVICES:-}" ]; then DEVICE_FLAGS=(-devices "$CONFORM_DEVICES"); fi
+if [ -n "${CONFORM_PEER_DEVICES:-}" ]; then PEER_DEVICE_FLAGS=(-devices "$CONFORM_PEER_DEVICES"); fi
+if [ -n "${CONFORM_LAYOUT_DEVICES:-}" ]; then LAYOUT_DEVICE_FLAGS=(-devices "$CONFORM_LAYOUT_DEVICES"); fi
 LAYOUT_ADDR=${CONFORM_LAYOUT_ADDR:-127.0.0.1:18490}
 LAYOUT_NODE=${CONFORM_LAYOUT_NODE:-conform-layout}
 LAYOUT_STATE=$STATE-layout
@@ -73,6 +91,9 @@ GPU_VOLATILE=()   # -gpu-volatile for C14 on a backend whose restore restarts th
 if [ "$GPU" = 1 ]; then
   case "$RUNTIME" in proc | runc | gvisor | hyperlight | cloudhv) ;; *) echo "CONFORM_GPU=1: C14 runs on proc, runc, gvisor, hyperlight or cloudhv, not $RUNTIME" >&2; exit 2 ;; esac
   [ -z "${CONFORM_TEMPLATE:-}" ] || { echo "CONFORM_GPU=1: C14 needs the reference template, not CONFORM_TEMPLATE" >&2; exit 2; }
+  if [ "$GPU_CLASS" = gpu ] && [ -z "${CONFORM_ENGINE_ARGS:-}" ]; then
+    echo "CONFORM_GPU_CLASS=gpu needs a real engine's CONFORM_ENGINE_ARGS, such as --pool-mb 64" >&2; exit 2
+  fi
 fi
 # The engine-loss hook (C9) ends the grant's warm instance, its zygote,
 # through its cgroup leaf. Fork backends only.
@@ -93,13 +114,15 @@ if [ -z "${CONFORM_TEMPLATE:-}" ]; then
   # hyperlight and cloudhv get one only for C14, so their other rows' C8
   # stays as it was.
   case "$RUNTIME" in
-    proc | runc | gvisor) ENGINE_FLAGS=(-engine "$ENGINE --sim-mb 64") ;;
-    hyperlight | cloudhv) if [ "$GPU" = 1 ]; then ENGINE_FLAGS=(-engine "$ENGINE --sim-mb 64"); fi ;;
+    proc | runc | gvisor) ENGINE_FLAGS=(-engine "$ENGINE $ENGINE_ARGS") ;;
+    hyperlight | cloudhv) if [ "$GPU" = 1 ]; then ENGINE_FLAGS=(-engine "$ENGINE $ENGINE_ARGS"); fi ;;
   esac
   PEER_ENGINE=(${ENGINE_FLAGS[@]+"${ENGINE_FLAGS[@]}"})
   if [ "$GPU" = 1 ]; then
-    PEER_ENGINE=(-engine "$ENGINE --sim-mb 64 --sim-name $PEER_GPU")
-    LAYOUT_ENGINE=(-engine "$ENGINE --sim-mb 64 --layout raw512")
+    # A real engine refuses --sim-name, which names a --sim-mb pool's GPU.
+    PEER_ENGINE=(-engine "$ENGINE $ENGINE_ARGS --sim-name $PEER_GPU")
+    if [ "$GPU_CLASS" = gpu ]; then PEER_ENGINE=(-engine "$ENGINE $ENGINE_ARGS"); fi
+    LAYOUT_ENGINE=(-engine "$ENGINE $ENGINE_ARGS --layout raw512")
   fi
 fi
 # proc and runc fibers share the host kernel, so they serve trusted grants only.
@@ -187,7 +210,7 @@ start() {
   mkdir -p "$STATE"
   local verify; read -ra verify <<<"$(verify_flags)"
   bin/fiberd-testhooks -state "$STATE" -node-id "$NODE" "${verify[@]}" -insecure-plaintext \
-    -listen "$ADDR" "${RUNTIME_FLAGS[@]}" ${ENGINE_FLAGS[@]+"${ENGINE_FLAGS[@]}"} -admin-unsafe \
+    -listen "$ADDR" "${RUNTIME_FLAGS[@]}" ${ENGINE_FLAGS[@]+"${ENGINE_FLAGS[@]}"} ${DEVICE_FLAGS[@]+"${DEVICE_FLAGS[@]}"} -admin-unsafe \
     -stale-ttl 5s -status-interval 50ms >>"$LOG" 2>&1 &
   echo $! >"$STATE/pid"
   wait_healthy
@@ -199,7 +222,7 @@ start_peer() {
   mkdir -p "$PEER_STATE"
   local verify; read -ra verify <<<"$(verify_flags)"
   bin/fiberd-testhooks -state "$PEER_STATE" -node-id "$PEER_NODE" -cgroup-root "$CGROOT-peer" "${verify[@]}" -insecure-plaintext \
-    -listen "$PEER_ADDR" "${RUNTIME_FLAGS[@]}" ${PEER_ENGINE[@]+"${PEER_ENGINE[@]}"} -stale-ttl 5s -status-interval 50ms >>"$PEER_STATE.log" 2>&1 &
+    -listen "$PEER_ADDR" "${RUNTIME_FLAGS[@]}" ${PEER_ENGINE[@]+"${PEER_ENGINE[@]}"} ${PEER_DEVICE_FLAGS[@]+"${PEER_DEVICE_FLAGS[@]}"} -stale-ttl 5s -status-interval 50ms >>"$PEER_STATE.log" 2>&1 &
   echo $! >"$STATE/peer.pid"
   wait_healthy "$PEER_STATE" "$PEER_STATE.log"
 }
@@ -210,7 +233,7 @@ start_layout() {
   mkdir -p "$LAYOUT_STATE"
   local verify; read -ra verify <<<"$(verify_flags)"
   bin/fiberd-testhooks -state "$LAYOUT_STATE" -node-id "$LAYOUT_NODE" -cgroup-root "$CGROOT-layout" "${verify[@]}" -insecure-plaintext \
-    -listen "$LAYOUT_ADDR" "${RUNTIME_FLAGS[@]}" ${LAYOUT_ENGINE[@]+"${LAYOUT_ENGINE[@]}"} -stale-ttl 5s -status-interval 50ms >>"$LAYOUT_STATE.log" 2>&1 &
+    -listen "$LAYOUT_ADDR" "${RUNTIME_FLAGS[@]}" ${LAYOUT_ENGINE[@]+"${LAYOUT_ENGINE[@]}"} ${LAYOUT_DEVICE_FLAGS[@]+"${LAYOUT_DEVICE_FLAGS[@]}"} -stale-ttl 5s -status-interval 50ms >>"$LAYOUT_STATE.log" 2>&1 &
   echo $! >"$STATE/layout.pid"
   wait_healthy "$LAYOUT_STATE" "$LAYOUT_STATE.log"
 }
@@ -328,7 +351,8 @@ case "${1:-}" in
     GPU_FLAGS=()
     if [ "$GPU" = 1 ]; then
       start_layout
-      GPU_FLAGS=(-gpu -gpu-events "$STATE/gpu-events.ndjson" -gpu-backend "$RUNTIME" -peer-gpu-name "$PEER_GPU"
+      GPU_FLAGS=(-gpu -gpu-events "$STATE/gpu-events.ndjson" -gpu-backend "$RUNTIME" -gpu-vm "$GPU_VM" -gpu-class "$GPU_CLASS"
+        -gpu-name "$GPU_NAME" -peer-gpu-name "$PEER_GPU"
         -layout-target "$LAYOUT_ADDR" -layout-node-id "$LAYOUT_NODE" ${GPU_VOLATILE[@]+"${GPU_VOLATILE[@]}"})
     fi
     start

@@ -1,0 +1,133 @@
+# The GPU PoC on real hardware (docs/proposals/gpu-poc.md, "The hardware
+# runs"), on the self-hosted runner of VM A: one A100 split into two MIG
+# instances, kernel 6.17, Docker with the NVIDIA runtime. C14 runs on proc
+# and on runc with the real engine class, gpu, and the move test's local
+# phase moves a session from one MIG instance to the other.
+#
+# The repo is public, so no pull request may reach this runner. Only a
+# push to gpu-poc or a manual run starts it. Every step runs in the dev
+# container with --gpus all, as hack/gpu/move.sh runs it on the VM.
+name: gpu
+
+on:
+  push:
+    branches: [gpu-poc]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One run at a time owns the GPU. A newer run waits for it, never cancels it.
+concurrency:
+  group: gpu-a100
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  FIBERD_DEV_DOCKER_ARGS: --gpus all
+  GPU_OUT: bin/gpu-ci
+
+jobs:
+  a100:
+    name: C14 and the move test on VM A's A100 (two MIG instances)
+    runs-on: [self-hosted, linux, x64, gpu, a100]
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The runner keeps its files between runs, and the container writes
+      # them as root.
+      - name: clean the state an earlier run left
+        run: |
+          hack/dev/run.sh sh -c 'rm -rf bin/gpu-ci bin/conform-state-a100-*'
+          mkdir -p "$GPU_OUT"
+      - name: facts of VM A, and its first two MIG instances
+        id: facts
+        run: |
+          hack/dev/run.sh nvidia-smi -L | tee "$GPU_OUT/nvidia-smi.txt"
+          hack/dev/run.sh bash hack/gpu/facts.sh | tee "$GPU_OUT/facts-vm-a.txt" ||
+            echo "::warning::hack/gpu/facts.sh exited non-zero. Kept what it printed."
+          migs=$(sed -n 's/.*(UUID: \(MIG-[^)]*\)).*/\1/p' "$GPU_OUT/nvidia-smi.txt")
+          mig1=$(printf '%s\n' "$migs" | sed -n 1p)
+          mig2=$(printf '%s\n' "$migs" | sed -n 2p)
+          if [ -z "$mig1" ] || [ -z "$mig2" ]; then
+            echo "::error::VM A needs two MIG instances. nvidia-smi -L lists fewer."
+            exit 1
+          fi
+          name=$(hack/dev/run.sh nvidia-smi --query-gpu=name --format=csv,noheader | sed -n 1p)
+          echo "MIG 1 is $mig1, MIG 2 is $mig2, on $name"
+          { echo "mig1=$mig1"; echo "mig2=$mig2"; echo "gpu_name=$name"; } >>"$GITHUB_OUTPUT"
+      # The target and the third home drive MIG 1, the peer MIG 2.
+      - name: C14 on proc against the real engine
+        if: ${{ !cancelled() && steps.facts.outcome == 'success' }}
+        env:
+          MIG1: ${{ steps.facts.outputs.mig1 }}
+          MIG2: ${{ steps.facts.outputs.mig2 }}
+          GPU_NAME: ${{ steps.facts.outputs.gpu_name }}
+        run: |
+          hack/dev/run.sh env CONFORM_RUNTIME=proc CONFORM_SIGNED=1 CONFORM_GPU=1 CONFORM_GPU_CLASS=gpu CONFORM_GPU_VM=a \
+            CONFORM_ENGINE_ARGS="--pool-mb 64" CONFORM_GPU_NAME="$GPU_NAME" \
+            CONFORM_DEVICES="$MIG1" CONFORM_PEER_DEVICES="$MIG2" CONFORM_LAYOUT_DEVICES="$MIG1" \
+            CONFORM_STATE=bin/conform-state-a100-proc \
+            hack/conform/stub.sh run -test.run 'TestConformance/C14_GPUAnswer' 2>&1 | tee "$GPU_OUT/c14-proc.log"
+      - name: C14 on runc against the real engine
+        if: ${{ !cancelled() && steps.facts.outcome == 'success' }}
+        env:
+          MIG1: ${{ steps.facts.outputs.mig1 }}
+          MIG2: ${{ steps.facts.outputs.mig2 }}
+          GPU_NAME: ${{ steps.facts.outputs.gpu_name }}
+        run: |
+          hack/dev/run.sh env CONFORM_RUNTIME=runc CONFORM_SIGNED=1 CONFORM_GPU=1 CONFORM_GPU_CLASS=gpu CONFORM_GPU_VM=a \
+            CONFORM_ENGINE_ARGS="--pool-mb 64" CONFORM_GPU_NAME="$GPU_NAME" \
+            CONFORM_DEVICES="$MIG1" CONFORM_PEER_DEVICES="$MIG2" CONFORM_LAYOUT_DEVICES="$MIG1" \
+            CONFORM_STATE=bin/conform-state-a100-runc \
+            hack/conform/stub.sh run -test.run 'TestConformance/C14_GPUAnswer' 2>&1 | tee "$GPU_OUT/c14-runc.log"
+      # The test's homes keep their state in the container, so their logs
+      # are copied out before it ends.
+      - name: the move test's local phase, MIG 1 to MIG 2
+        if: ${{ !cancelled() && steps.facts.outcome == 'success' }}
+        env:
+          MIG1: ${{ steps.facts.outputs.mig1 }}
+          MIG2: ${{ steps.facts.outputs.mig2 }}
+        run: |
+          hack/dev/run.sh sh -ec '
+            make -s engine
+            rc=0
+            env FIBERD_GPU_MOVE=local FIBERD_GPU_MOVE_DEVICES_A1="$1" FIBERD_GPU_MOVE_DEVICES_A2="$2" \
+              FIBERD_GPU_ENGINE=/src/bin/refengine \
+              go test -tags "integration gpu" -count=1 -timeout 30m -v -run TestMoveAcrossGPUs ./tests/integration/gpu/ || rc=$?
+            mkdir -p bin/gpu-ci/move-state
+            find /var/lib/fiberd/gpu-move -name "*.log" -exec cp --parents {} bin/gpu-ci/move-state/ \; 2>/dev/null || true
+            exit "$rc"' _ "$MIG1" "$MIG2" 2>&1 | tee "$GPU_OUT/move.log"
+      - name: make the state readable for the upload (written as root inside the container)
+        if: always()
+        run: hack/dev/run.sh sh -c 'chmod -R a+rX bin; chown -R "$1" /src' _ "$(id -u):$(id -g)" || true
+      - name: keep C14's events on proc, one NDJSON line per step
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: gpu-events-a100-proc
+          path: bin/conform-state-a100-proc/gpu-events.ndjson
+          if-no-files-found: ignore
+      - name: keep C14's events on runc, one NDJSON line per step
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: gpu-events-a100-runc
+          path: bin/conform-state-a100-runc/gpu-events.ndjson
+          if-no-files-found: ignore
+      - name: keep the facts, the fiberd and engine logs, and the move test's output
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: gpu-a100-logs
+          path: |
+            bin/gpu-ci/**
+            bin/conform-state-a100-*.log
+            bin/conform-state-a100-*/**/*.log
+          if-no-files-found: ignore

@@ -255,6 +255,14 @@ func (c *client) c14(t *testing.T) {
 	b := &gpuHome{api: c.dial(t, c.d.Peer.Target), node: c.d.Peer.NodeID, gpu: g.PeerName, tok: tokB}
 	l := &gpuHome{api: c.dial(t, g.Layout.Target), node: g.Layout.NodeID, gpu: g.Name, tok: tokC}
 	session := uid("G")
+	// C14 compares no GPU names. Two MIG instances of one GPU declare the
+	// same name, so equal names on real GPUs are logged, as the move test
+	// logs them.
+	if g.Name == g.PeerName && g.Class == "gpu" {
+		t.Logf("C14: the target's and the peer's GPU are both %s, as two MIG instances of one GPU report", g.Name)
+	} else {
+		t.Logf("C14: the target's GPU is %s, the peer's %s, class %s", g.Name, g.PeerName, g.Class)
+	}
 	ev.emit(t, a, "facts", "", 1, nil)
 
 	// Scene 1. The clone, the fill, and the GPU nodes it cannot open.
