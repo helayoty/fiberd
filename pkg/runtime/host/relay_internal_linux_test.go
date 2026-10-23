@@ -158,8 +158,8 @@ func TestRelayedEndpoints(t *testing.T) {
 			}, errText: "restore failed",
 			check: func(t *testing.T, r *Runtime, _ *sandboxBackend, _ core.FiberHandle) {
 				refusesDial(t, "tcp://127.0.0.1:20000")
-				if heldPorts(r) != 0 || r.root.Child("g1").Child("f-1-1").Exists() {
-					t.Fatalf("%d ports held, leaf exists %v", heldPorts(r), r.root.Child("g1").Child("f-1-1").Exists())
+				if heldPorts(r) != 0 || r.root.Child("g1").Child(fibersDir).Child("f-1-1").Exists() {
+					t.Fatalf("%d ports held, leaf exists %v", heldPorts(r), r.root.Child("g1").Child(fibersDir).Child("f-1-1").Exists())
 				}
 			}},
 		{name: "a port fiberd cannot bind fails the clone and leaves nothing; freed, the next clone takes it",
@@ -172,7 +172,7 @@ func TestRelayedEndpoints(t *testing.T) {
 				return func() { _ = l.Close() }
 			}, errText: "relay for",
 			check: func(t *testing.T, r *Runtime, be *sandboxBackend, _ core.FiberHandle) {
-				if heldPorts(r) != 0 || r.root.Child("g1").Child("f-1-1").Exists() || be.fiber("g1/1/1") != nil {
+				if heldPorts(r) != 0 || r.root.Child("g1").Child(fibersDir).Child("f-1-1").Exists() || be.fiber("g1/1/1") != nil {
 					t.Fatal("the refused clone left a port, a leaf or a backend fiber")
 				}
 			}},
@@ -326,7 +326,7 @@ func TestRelayedResume(t *testing.T) {
 				return byHand(t, f, manifest{Fence: "g1/1/9", Backend: "fake", Endpoint: "tcp://127.0.0.1:20001", Relay: "/x/1-9.sock"})
 			}, errText: "parked behind a relay",
 			check: func(t *testing.T, f *parkFixture, _ string, _ core.FiberHandle) {
-				if f.r.root.Child("g1").Child("f-2-1").Exists() || heldPorts(f.r) != 1 {
+				if f.r.root.Child("g1").Child(fibersDir).Child("f-2-1").Exists() || heldPorts(f.r) != 1 {
 					t.Fatal("the refused resume left its leaf or a port")
 				}
 			}},
@@ -336,7 +336,7 @@ func TestRelayedResume(t *testing.T) {
 				return byHand(t, f, manifest{Fence: "g1/1/9", Backend: "fake", Endpoint: "tcp://127.0.0.1:20001"})
 			}, errText: "needs a relay",
 			check: func(t *testing.T, f *parkFixture, _ string, _ core.FiberHandle) {
-				if f.r.root.Child("g1").Child("f-2-1").Exists() || heldPorts(f.r) != 1 {
+				if f.r.root.Child("g1").Child(fibersDir).Child("f-2-1").Exists() || heldPorts(f.r) != 1 {
 					t.Fatal("the refused resume left its leaf or a port")
 				}
 			}},

@@ -48,7 +48,7 @@ func TestChannelBorrowedByFiberdAlone(t *testing.T) {
 		_ = rt.Release(ctx, hb.ID, true)
 	})
 	// A's host pid, from its leaf.
-	procs := filepath.Join(cgRoot, filepath.Base(rt.(interface{ CgroupRoot() string }).CgroupRoot()), ga.UID, "f-1-1", "cgroup.procs")
+	procs := filepath.Join(cgRoot, filepath.Base(rt.(interface{ CgroupRoot() string }).CgroupRoot()), ga.UID, "fibers", "f-1-1", "cgroup.procs")
 	pids := readPIDs(t, procs)
 	if len(pids) != 1 {
 		t.Fatalf("A's leaf holds %v, want one task", pids)

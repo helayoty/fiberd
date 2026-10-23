@@ -18,8 +18,9 @@ import (
 	"github.com/helayoty/fiberd/pkg/sys/cgroup"
 )
 
-// pooled is a sandbox restored ahead of its fiber in <grant>/pool/p-<n>.
-// The fiber keeps the leaf, since cgroup v2 cannot rename one.
+// pooled is a sandbox restored ahead of its fiber in
+// <grant>/fibers/pool/p-<n>. The fiber keeps the leaf, since cgroup v2
+// cannot rename one.
 type pooled struct {
 	id  string // the backend's handle
 	pid int
@@ -29,7 +30,8 @@ type pooled struct {
 	spent bool
 }
 
-// poolDir is the name of the grant cgroup's child the pool leaves live in.
+// poolDir is the name of the fibers parent's child the pool leaves live
+// in, under the grant's GPU guard like every other fiber leaf.
 const poolDir = "pool"
 
 func (r *Runtime) pooler() backend.Pooler {
@@ -59,7 +61,7 @@ func (r *Runtime) Fill(ctx context.Context, g core.Grant, deadline time.Duration
 	if err := r.poolRoom(z); err != nil {
 		return err
 	}
-	pcg := z.cg.Child(poolDir)
+	pcg := z.fcg.Child(poolDir)
 	if err := pcg.Ensure("memory", "pids"); err != nil {
 		return err
 	}
@@ -244,7 +246,7 @@ func (r *Runtime) sweepPools() {
 		return
 	}
 	for _, g := range grants {
-		pcg := g.Child(poolDir)
+		pcg := g.Child(fibersDir).Child(poolDir)
 		leaves, err := pcg.Children("")
 		if err != nil {
 			continue // no pool

@@ -149,14 +149,14 @@ func TestSandboxPerFiber(t *testing.T) {
 	// footprint: a fresh fiber sits near zero (within the sandbox's own
 	// variance) and growing the working set moves it by that much.
 	leafCurrent := func() string {
-		data, _ := os.ReadFile(filepath.Join(cgRoot, name, "g1", "f-1-1", "memory.current"))
+		data, _ := os.ReadFile(filepath.Join(cgRoot, name, "g1", "fibers", "f-1-1", "memory.current"))
 		return strings.TrimSpace(string(data))
 	}
 	// What the leaves are made of: anon and shmem (the sandbox's guest
 	// memory lives in a memfd) against file cache, which is reclaimable
 	// and varies from sandbox to sandbox.
 	statOf := func(leaf string) string {
-		data, _ := os.ReadFile(filepath.Join(cgRoot, name, "g1", leaf, "memory.stat"))
+		data, _ := os.ReadFile(filepath.Join(cgRoot, name, "g1", "fibers", leaf, "memory.stat"))
 		var keep []string
 		for _, l := range strings.Split(string(data), "\n") {
 			for _, k := range []string{"anon ", "file ", "shmem ", "kernel "} {

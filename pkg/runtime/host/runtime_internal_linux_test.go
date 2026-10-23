@@ -342,8 +342,9 @@ func TestPrepareTemplate(t *testing.T) {
 					t.Fatalf("warm spec = %+v", spec)
 				}
 				gcg := r.root.Child("g1")
-				if !gcg.Child("zygote").Exists() || gcg.Child("probe").Exists() {
-					t.Fatal("want the zygote cgroup kept and the probe removed")
+				fcg := gcg.Child(fibersDir)
+				if !fcg.Child("zygote").Exists() || fcg.Child("probe").Exists() {
+					t.Fatal("want the zygote cgroup kept under the fibers parent and the probe removed")
 				}
 				if got := cgUint(t, gcg, "pids.max"); got != 3*fiberPidsMax {
 					t.Fatalf("grant pids.max = %d, want %d", got, 3*fiberPidsMax)
@@ -442,20 +443,20 @@ func TestPrepareTemplate(t *testing.T) {
 		// The mapped root is the test's own uid, the one owner a chown
 		// without privilege may name. tests/integration/host TestDelegateProcs hands
 		// the file to a foreign uid.
-		{name: "an id mapper: the grant's cgroup.procs is handed to the mapped root", be: func() backend.Backend {
+		{name: "an id mapper: the fibers parent's cgroup.procs is handed to the mapped root", be: func() backend.Backend {
 			return &struct {
 				*fakeBackend
 				idMapperMixin
 			}{newFakeBackend(core.TierWarm), idMapperMixin{uid: uint32(os.Geteuid())}}
 		}, grant: sized,
-			before: func(t *testing.T, r *Runtime) { delegated(t, r.root.Child("g1")) },
+			before: func(t *testing.T, r *Runtime) { delegated(t, r.root.Child("g1").Child(fibersDir)) },
 			check: func(t *testing.T, r *Runtime, _ backend.Backend) {
-				gcg := r.root.Child("g1")
-				if got := fileOwner(t, filepath.Join(gcg.Path, "cgroup.procs")); got != uint32(os.Geteuid()) {
+				fcg := r.root.Child("g1").Child(fibersDir)
+				if got := fileOwner(t, filepath.Join(fcg.Path, "cgroup.procs")); got != uint32(os.Geteuid()) {
 					t.Fatalf("cgroup.procs owner = %d, want %d", got, os.Geteuid())
 				}
 			}},
-		{name: "an id mapper over a grant cgroup without cgroup.procs cannot delegate", be: func() backend.Backend {
+		{name: "an id mapper over a fibers parent without cgroup.procs cannot delegate", be: func() backend.Backend {
 			return &struct {
 				*fakeBackend
 				idMapperMixin
@@ -656,14 +657,14 @@ func TestClone(t *testing.T) {
 			b.endpointFile = true
 			return b
 		}, grant: g, prepare: true,
-			before: func(t *testing.T, r *Runtime) { delegated(t, r.root.Child("g1").Child("f-1-1")) },
+			before: func(t *testing.T, r *Runtime) { delegated(t, r.root.Child("g1").Child(fibersDir).Child("f-1-1")) },
 			spec:   core.CloneSpec{Grant: g, Fence: fence, Deadline: 2 * time.Second, Payload: []byte("hello")},
 			check: func(t *testing.T, r *Runtime, be backend.Backend, h core.FiberHandle) {
 				sock := filepath.Join(r.cfg.RunDir, "g1", "1-1.sock")
 				if h.ID != "g1/1/1" || h.Endpoint != "unix://"+sock {
 					t.Fatalf("handle = %+v", h)
 				}
-				leaf := r.root.Child("g1").Child("f-1-1")
+				leaf := r.root.Child("g1").Child(fibersDir).Child("f-1-1")
 				if cgUint(t, leaf, "memory.max") != 64*mib || cgFile(t, leaf, "memory.oom.group") != "1" ||
 					cgUint(t, leaf, "pids.max") != fiberPidsMax || cgFile(t, leaf, "memory.swap.max") != "0" {
 					t.Fatalf("leaf %s: memory.max %s oom.group %s pids.max %s", leaf.Path, cgFile(t, leaf, "memory.max"),
@@ -706,7 +707,7 @@ func TestClone(t *testing.T) {
 			return b
 		}, grant: g, prepare: true, spec: core.CloneSpec{Grant: g, Fence: fence}, errText: "fork refused",
 			check: func(t *testing.T, r *Runtime, _ backend.Backend, _ core.FiberHandle) {
-				if r.root.Child("g1").Child("f-1-1").Exists() || len(r.fibers) != 0 {
+				if r.root.Child("g1").Child(fibersDir).Child("f-1-1").Exists() || len(r.fibers) != 0 {
 					t.Fatal("a refused clone left its leaf or its record")
 				}
 			}},
@@ -716,14 +717,14 @@ func TestClone(t *testing.T) {
 			return b
 		}, grant: g, prepare: true, spec: core.CloneSpec{Grant: g, Fence: fence}, wantErr: context.DeadlineExceeded,
 			check: func(t *testing.T, r *Runtime, _ backend.Backend, _ core.FiberHandle) {
-				leaf := r.root.Child("g1").Child("f-1-1")
+				leaf := r.root.Child("g1").Child(fibersDir).Child("f-1-1")
 				waitFor(t, "the leaf to be removed", func() bool { return !leaf.Exists() })
 			}},
 		{name: "no budget: the leaf has no memory ceiling", be: func() backend.Backend { return newFakeBackend(core.TierWarm) },
 			grant: core.Grant{UID: "g1", TemplateDigest: "sha256:tmpl"}, prepare: true,
 			spec: core.CloneSpec{Grant: core.Grant{UID: "g1", TemplateDigest: "sha256:tmpl"}, Fence: fence},
 			check: func(t *testing.T, r *Runtime, _ backend.Backend, _ core.FiberHandle) {
-				leaf := r.root.Child("g1").Child("f-1-1")
+				leaf := r.root.Child("g1").Child(fibersDir).Child("f-1-1")
 				if limit(t, leaf, "memory.max") != "max" {
 					t.Fatalf("memory.max = %s", limit(t, leaf, "memory.max"))
 				}
@@ -789,7 +790,7 @@ func TestClone(t *testing.T) {
 		}, mod: func(c *Config) { c.Handoff, c.HandoffKey = handoffRouter(), handoffKey },
 			grant: handoffG, prepare: true, spec: core.CloneSpec{Grant: handoffG, Fence: fence, CallerCert: callerDER}, errText: "fake: netns gone",
 			check: func(t *testing.T, r *Runtime, _ backend.Backend, _ core.FiberHandle) {
-				if r.root.Child("g1").Child("f-1-1").Exists() {
+				if r.root.Child("g1").Child(fibersDir).Child("f-1-1").Exists() {
 					t.Fatal("the leaf was left behind")
 				}
 			}},
@@ -806,7 +807,7 @@ func TestClone(t *testing.T) {
 				return core.CloneSpec{Grant: g, Fence: fence, CallerCert: callerDER}
 			}(), errText: "names no caller",
 			check: func(t *testing.T, r *Runtime, _ backend.Backend, _ core.FiberHandle) {
-				if r.root.Child("g1").Child("f-1-1").Exists() || len(r.fibers) != 0 {
+				if r.root.Child("g1").Child(fibersDir).Child("f-1-1").Exists() || len(r.fibers) != 0 {
 					t.Fatal("the leaf or the record was left behind")
 				}
 			}},
@@ -814,7 +815,7 @@ func TestClone(t *testing.T) {
 			mod:   func(c *Config) { c.Handoff, c.HandoffKey = handoffRouter(), handoffKey },
 			grant: handoffG, prepare: true, spec: core.CloneSpec{Grant: handoffG, Fence: fence}, errText: "no caller certificate",
 			check: func(t *testing.T, r *Runtime, _ backend.Backend, _ core.FiberHandle) {
-				if r.root.Child("g1").Child("f-1-1").Exists() || len(r.fibers) != 0 {
+				if r.root.Child("g1").Child(fibersDir).Child("f-1-1").Exists() || len(r.fibers) != 0 {
 					t.Fatal("the leaf or the record was left behind")
 				}
 			}},
@@ -836,7 +837,7 @@ func TestClone(t *testing.T) {
 					!strings.Contains(err.Error(), "no free endpoint port in 20000-20001") {
 					t.Fatalf("third clone = %v, want the range exhausted", err)
 				}
-				if r.root.Child("g1").Child("f-1-3").Exists() {
+				if r.root.Child("g1").Child(fibersDir).Child("f-1-3").Exists() {
 					t.Fatal("the refused fiber's leaf was left behind")
 				}
 				r.mu.Lock()
@@ -852,7 +853,7 @@ func TestClone(t *testing.T) {
 			return sb
 		}, grant: g, prepare: true, spec: core.CloneSpec{Grant: g, Fence: fence},
 			check: func(t *testing.T, r *Runtime, _ backend.Backend, _ core.FiberHandle) {
-				leaf := r.root.Child("g1").Child("f-1-1")
+				leaf := r.root.Child("g1").Child(fibersDir).Child("f-1-1")
 				if got := cgUint(t, leaf, "memory.max"); got != (64+20+10+32)*mib {
 					t.Fatalf("memory.max = %d", got)
 				}
@@ -871,7 +872,7 @@ func TestClone(t *testing.T) {
 			},
 			spec: core.CloneSpec{Grant: g, Fence: fence}, errText: "not a directory",
 			check: func(t *testing.T, r *Runtime, _ backend.Backend, _ core.FiberHandle) {
-				if r.root.Child("g1").Child("f-1-1").Exists() {
+				if r.root.Child("g1").Child(fibersDir).Child("f-1-1").Exists() {
 					t.Fatal("the leaf was left behind")
 				}
 			}},
@@ -882,7 +883,7 @@ func TestClone(t *testing.T) {
 		}, mod: func(c *Config) { c.Handoff, c.HandoffKey = handoffRouter(), handoffKey },
 			grant: handoffG, prepare: true, spec: core.CloneSpec{Grant: handoffG, Fence: fence, CallerCert: callerDER}, errText: "restore failed",
 			check: func(t *testing.T, r *Runtime, _ backend.Backend, _ core.FiberHandle) {
-				if r.root.Child("g1").Child("f-1-1").Exists() || len(r.fibers) != 0 {
+				if r.root.Child("g1").Child(fibersDir).Child("f-1-1").Exists() || len(r.fibers) != 0 {
 					t.Fatal("the leaf or the record was left behind")
 				}
 				if _, ok := r.cfg.Handoff.Key("g1/1/1"); ok {
@@ -892,10 +893,10 @@ func TestClone(t *testing.T) {
 		// The kernel's refusal of one leaf more is tests/integration/host TestLeafRefused.
 		{name: "a leaf that cannot be made", be: func() backend.Backend { return newFakeBackend(core.TierWarm) },
 			grant: g, prepare: true, spec: core.CloneSpec{Grant: g, Fence: fence},
-			before:  func(t *testing.T, r *Runtime) { inTheWay(t, r.root.Child("g1"), "f-1-1") },
+			before:  func(t *testing.T, r *Runtime) { inTheWay(t, r.root.Child("g1").Child(fibersDir), "f-1-1") },
 			errText: "f-1-1",
 			check: func(t *testing.T, r *Runtime, _ backend.Backend, _ core.FiberHandle) {
-				if r.root.Child("g1").Child("f-1-1").Exists() || len(r.fibers) != 0 {
+				if r.root.Child("g1").Child(fibersDir).Child("f-1-1").Exists() || len(r.fibers) != 0 {
 					t.Fatal("the leaf or the record was left behind")
 				}
 			}},
@@ -905,13 +906,13 @@ func TestClone(t *testing.T) {
 				*idMapperMixin
 			}{newFakeBackend(core.TierWarm), &idMapperMixin{uid: uint32(os.Geteuid())}}
 		}, grant: g, prepare: true,
-			seed: func(t *testing.T, r *Runtime) { delegated(t, r.root.Child("g1")) },
+			seed: func(t *testing.T, r *Runtime) { delegated(t, r.root.Child("g1").Child(fibersDir)) },
 			before: func(t *testing.T, r *Runtime) {
 				r.be.(interface{ mapper() *idMapperMixin }).mapper().err = errors.New("fake: range revoked")
 			},
 			spec: core.CloneSpec{Grant: g, Fence: fence}, errText: "range revoked",
 			check: func(t *testing.T, r *Runtime, _ backend.Backend, _ core.FiberHandle) {
-				if r.root.Child("g1").Child("f-1-1").Exists() {
+				if r.root.Child("g1").Child(fibersDir).Child("f-1-1").Exists() {
 					t.Fatal("the leaf was left behind")
 				}
 			}},
@@ -964,7 +965,7 @@ func TestFiberEnds(t *testing.T) {
 			if strings.Join(be.killedIDs(), ",") != h.ID {
 				t.Fatalf("killed %v", be.killedIDs())
 			}
-			if r.root.Child("g1").Child("f-1-1").Exists() || exists(endpoint.UnixPath(h.Endpoint)) {
+			if r.root.Child("g1").Child(fibersDir).Child("f-1-1").Exists() || exists(endpoint.UnixPath(h.Endpoint)) {
 				t.Fatal("leaf or socket left behind")
 			}
 			noExit(t, r)
@@ -977,11 +978,11 @@ func TestFiberEnds(t *testing.T) {
 			if e := waitExit(t, r); e != (core.FiberExit{FiberID: h.ID, Reason: "exit", Detail: "exit:3"}) {
 				t.Fatalf("exit = %+v", e)
 			}
-			waitFor(t, "the leaf to go", func() bool { return !r.root.Child("g1").Child("f-1-1").Exists() })
+			waitFor(t, "the leaf to go", func() bool { return !r.root.Child("g1").Child(fibersDir).Child("f-1-1").Exists() })
 		}},
 		// The kernel's own kill at memory.max is tests/integration/host TestLeafCeilings.
 		{name: "killed by the kernel for exceeding its budget: reported as oom", run: func(t *testing.T, r *Runtime, be *fakeBackend, h core.FiberHandle) {
-			cgSet(t, r.root.Child("g1").Child("f-1-1"), "memory.events", "low 0\nhigh 0\nmax 1\noom 1\noom_kill 1")
+			cgSet(t, r.root.Child("g1").Child(fibersDir).Child("f-1-1"), "memory.events", "low 0\nhigh 0\nmax 1\noom 1\noom_kill 1")
 			be.die(h.ID, "signal:SIGKILL")
 			if e := waitExit(t, r); e.Reason != "oom" || !strings.HasPrefix(e.Detail, "signal:SIGKILL oom_kill=") {
 				t.Fatalf("exit = %+v, want oom with the kill count", e)
@@ -1036,7 +1037,7 @@ func TestFiberEnds(t *testing.T) {
 		// TestOrphanKilledInLeaf. Here its task is gone by the release.
 		{name: "releasing an orphan of a previous fiberd kills its leaf and removes its files", run: func(t *testing.T, r *Runtime, _ *fakeBackend, _ core.FiberHandle) {
 			orphan := core.Fence{GrantUID: "g1", Epoch: 5, Seq: 5}
-			leaf := r.root.Child("g1").Child(leafName(orphan))
+			leaf := r.root.Child("g1").Child(fibersDir).Child(leafName(orphan))
 			if err := leaf.Create(0, false); err != nil {
 				t.Fatal(err)
 			}
@@ -1147,7 +1148,7 @@ func TestEnforceW(t *testing.T) {
 func TestFinishEvictsDevice(t *testing.T) {
 	withDevice := core.Grant{UID: "g1", TemplateDigest: "sha256:tmpl", WBudgetBytes: 64 * mib, DeviceBudget: core.DeviceBudget{Bytes: 50}}
 	noDevice := core.Grant{UID: "g1", TemplateDigest: "sha256:tmpl", WBudgetBytes: 64 * mib}
-	const leaf = "LEAF g1/1/1 /g1/f-1-1"
+	const leaf = "LEAF g1/1/1 /g1/fibers/f-1-1"
 	ended := []string{"UNLEAF g1/1/1", "EVICT g1/1/1"}
 	cases := []struct {
 		name  string
@@ -1282,7 +1283,7 @@ func TestWBytes(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			leaf := r.root.Child("g1").Child("f-1-1")
+			leaf := r.root.Child("g1").Child(fibersDir).Child("f-1-1")
 			if tc.charged > 0 {
 				charge(t, leaf, tc.charged)
 			}
@@ -1360,35 +1361,40 @@ func TestListAndPrune(t *testing.T) {
 			}
 			live := core.Fence{GrantUID: "stale", Epoch: 2, Seq: 1}
 			stale := r.root.Child("stale")
-			if err := stale.Ensure("memory", "pids"); err != nil {
-				t.Fatal(err)
+			fibers := stale.Child(fibersDir)
+			for _, d := range []cgroup.Dir{stale, fibers, fibers.Child(poolDir)} {
+				if err := d.Ensure("memory", "pids"); err != nil {
+					t.Fatal(err)
+				}
 			}
-			for _, leaf := range []cgroup.Dir{stale.Child(leafName(live)), stale.Child("f-2-2"), stale.Child("f-garbage"), stale.Child("zygote")} {
+			for _, leaf := range []cgroup.Dir{fibers.Child(leafName(live)), fibers.Child("f-2-2"), fibers.Child("f-garbage"), fibers.Child("zygote"), fibers.Child(poolDir).Child("p-3"), stale.Child("engine")} {
 				if err := leaf.Create(0, false); err != nil {
 					t.Fatal(err)
 				}
 			}
-			cgSet(t, stale.Child(leafName(live)), "cgroup.procs", "4242")
-			cgSet(t, stale.Child("f-garbage"), "cgroup.procs", "4243")
+			cgSet(t, fibers.Child(leafName(live)), "cgroup.procs", "4242")
+			cgSet(t, fibers.Child("f-garbage"), "cgroup.procs", "4243")
 			list, err := r.List(ctx)
 			if err != nil || len(list) != 1 || list[0].ID != live.String() || list[0].Endpoint != tc.endpoint(r, live) {
 				t.Fatalf("List = %+v %v, want only %s", list, err, live)
 			}
-			// A grant with a cgroup nested two deep cannot be pruned. Only
-			// leaves are removed, and a leaf with a child is not empty.
+			// A grant with a cgroup nested below a leaf cannot be pruned.
+			// Only the levels the runtime makes are removed, and a leaf
+			// with a child is not empty.
 			deep := r.root.Child("deep")
-			if err := deep.Ensure("memory"); err != nil {
-				t.Fatal(err)
+			for _, d := range []cgroup.Dir{deep, deep.Child(fibersDir), deep.Child(fibersDir).Child("f-1-1")} {
+				if err := d.Ensure("memory"); err != nil {
+					t.Fatal(err)
+				}
 			}
-			if err := deep.Child("f-1-1").Ensure("memory"); err != nil {
-				t.Fatal(err)
-			}
-			if err := deep.Child("f-1-1").Child("inner").Create(0, false); err != nil {
+			inner := deep.Child(fibersDir).Child("f-1-1").Child("inner")
+			if err := inner.Create(0, false); err != nil {
 				t.Fatal(err)
 			}
 			r.PruneGrants(map[string]bool{"kept": true})
-			if stale.Exists() || !r.root.Child("kept").Child("zygote").Exists() || !deep.Child("f-1-1").Child("inner").Exists() {
-				t.Fatalf("stale exists %v, kept zygote exists %v, deep inner exists %v", stale.Exists(), r.root.Child("kept").Child("zygote").Exists(), deep.Child("f-1-1").Child("inner").Exists())
+			keptZygote := r.root.Child("kept").Child(fibersDir).Child("zygote")
+			if stale.Exists() || !keptZygote.Exists() || !inner.Exists() {
+				t.Fatalf("stale exists %v, kept zygote exists %v, deep inner exists %v", stale.Exists(), keptZygote.Exists(), inner.Exists())
 			}
 			// A root that is gone lists nothing and prunes nothing.
 			gone := &Runtime{root: cgroup.Root(filepath.Join(t.TempDir(), "nope")), cfg: r.cfg}
@@ -1935,7 +1941,7 @@ func TestDropTemplate(t *testing.T) {
 			r := newTestRuntime(t, be, nil)
 			ctx := context.Background()
 			gcg := r.root.Child("g1")
-			cgroups := []cgroup.Dir{gcg.Child("zygote"), gcg}
+			cgroups := []cgroup.Dir{gcg.Child(fibersDir).Child("zygote"), gcg.Child(fibersDir), gcg}
 			if tc.warm {
 				if err := r.PrepareTemplate(ctx, g); err != nil {
 					t.Fatal(err)

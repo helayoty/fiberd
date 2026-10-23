@@ -128,7 +128,7 @@ audit() {
 # The fiberd subtree sits under the job step's cgroup; find the grant's
 # zygote leaf by name.
 engine_kill() {
-  dexec sh -c "kill -9 \$(cat \$(find /sys/fs/cgroup -path '*/grants/$1/zygote/cgroup.procs' | head -1))"
+  dexec sh -c "kill -9 \$(cat \$(find /sys/fs/cgroup -path '*/grants/$1/fibers/zygote/cgroup.procs' | head -1))"
 }
 
 scope_lost() { admin -X POST http://x/scope-lost >/dev/null; }

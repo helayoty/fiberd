@@ -83,7 +83,7 @@ func TestFiberFilter(t *testing.T) {
 		}
 		fiberCG, zygoteCG := cgroupOf(t, pid), cgroupOf(t, zygotePID)
 		if filepath.Base(fiberCG) != "f-1-1" || filepath.Dir(fiberCG) != filepath.Dir(zygoteCG) {
-			t.Errorf("fiber cgroup %q, zygote's %q, want <grant>/f-1-1 beside <grant>/zygote", fiberCG, zygoteCG)
+			t.Errorf("fiber cgroup %q, zygote's %q, want <grant>/fibers/f-1-1 beside <grant>/fibers/zygote", fiberCG, zygoteCG)
 		}
 	})
 	if got := talk(t, h.Endpoint, "incr"); got != "1" {

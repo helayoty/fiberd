@@ -341,7 +341,7 @@ func TestDensity(t *testing.T) {
 			}
 			h.watch = []*grantv1.Status{{GrantUid: a.uid, Pooled: uint32(tc.warm)}}
 			for dir, n := range tc.cgroups {
-				d := filepath.Join(root, a.uid, dir)
+				d := filepath.Join(root, a.uid, "fibers", dir)
 				if err := os.MkdirAll(d, 0o755); err != nil {
 					t.Fatal(err)
 				}
@@ -350,7 +350,7 @@ func TestDensity(t *testing.T) {
 				}
 			}
 			for _, dir := range tc.bare {
-				if err := os.MkdirAll(filepath.Join(root, a.uid, dir), 0o755); err != nil {
+				if err := os.MkdirAll(filepath.Join(root, a.uid, "fibers", dir), 0o755); err != nil {
 					t.Fatal(err)
 				}
 			}

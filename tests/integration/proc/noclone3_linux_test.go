@@ -225,9 +225,9 @@ func TestForkFallbackWithoutClone3(t *testing.T) {
 			zygotePID := atoiOrFatal(t, "fiber's PPid", procStatus(t, pid, "PPid"))
 			fiberCG, zygoteCG := cgroupOf(t, pid), cgroupOf(t, zygotePID)
 			// The runtime's leaf for fence 1/1 sits beside the zygote's
-			// cgroup under the grant's.
+			// cgroup under the grant's fibers parent.
 			if filepath.Base(fiberCG) != "f-1-1" || filepath.Base(zygoteCG) != "zygote" || filepath.Dir(fiberCG) != filepath.Dir(zygoteCG) {
-				t.Fatalf("fiber cgroup %q, zygote's %q, want <grant>/f-1-1 beside <grant>/zygote", fiberCG, zygoteCG)
+				t.Fatalf("fiber cgroup %q, zygote's %q, want <grant>/fibers/f-1-1 beside <grant>/fibers/zygote", fiberCG, zygoteCG)
 			}
 			if got := talk(t, h.Endpoint, "incr"); got != "1" {
 				t.Fatalf("incr = %q", got)

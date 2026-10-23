@@ -131,8 +131,8 @@ func TestLeafRefused(t *testing.T) {
 			if err := clone(1); err == nil || !strings.Contains(err.Error(), "f-1-1") {
 				t.Fatalf("Clone = %v, want the leaf refused", err)
 			}
-			if gcg.Child("f-1-1").Exists() || be.cloned() != 0 {
-				t.Fatalf("leaf exists %v, %d clones asked, want nothing left and the backend never asked", gcg.Child("f-1-1").Exists(), be.cloned())
+			if leafOf(r, "g1", "f-1-1").Exists() || be.cloned() != 0 {
+				t.Fatalf("leaf exists %v, %d clones asked, want nothing left and the backend never asked", leafOf(r, "g1", "f-1-1").Exists(), be.cloned())
 			}
 			if tc.lift {
 				if err := os.WriteFile(filepath.Join(gcg.Path, "cgroup.max.descendants"), []byte("max"), 0o644); err != nil {
@@ -140,8 +140,8 @@ func TestLeafRefused(t *testing.T) {
 				}
 			}
 			err := clone(2)
-			if tc.lift && (err != nil || !gcg.Child("f-1-2").Exists() || be.cloned() != 1) {
-				t.Fatalf("Clone after the lift = %v, leaf exists %v, %d clones", err, gcg.Child("f-1-2").Exists(), be.cloned())
+			if tc.lift && (err != nil || !leafOf(r, "g1", "f-1-2").Exists() || be.cloned() != 1) {
+				t.Fatalf("Clone after the lift = %v, leaf exists %v, %d clones", err, leafOf(r, "g1", "f-1-2").Exists(), be.cloned())
 			}
 			if !tc.lift && err == nil {
 				t.Fatal("a second clone under the cap succeeded")
@@ -255,9 +255,9 @@ func TestBootSweepsPool(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := testConfig(t, newFake(core.TierWarm))
 			root := cgroup.Root(cfg.CgroupRoot)
-			g1 := root.Child("g1")
+			g1 := root.Child("g1").Child("fibers")
 			pool := g1.Child("pool")
-			for _, d := range []cgroup.Dir{root, g1, pool} {
+			for _, d := range []cgroup.Dir{root, root.Child("g1"), g1, pool} {
 				if err := d.Ensure("memory", "pids"); err != nil {
 					t.Fatal(err)
 				}
@@ -337,7 +337,7 @@ func TestDelegateProcs(t *testing.T) {
 			if _, err := r.Clone(ctx, core.CloneSpec{Grant: sized, Fence: core.Fence{GrantUID: "g1", Epoch: 1, Seq: 1}}); err != nil {
 				t.Fatal(err)
 			}
-			for _, d := range []cgroup.Dir{gcg, gcg.Child("f-1-1")} {
+			for _, d := range []cgroup.Dir{gcg.Child("fibers"), leafOf(r, "g1", "f-1-1")} {
 				if got := fileOwner(t, filepath.Join(d.Path, "cgroup.procs")); got != 100000 {
 					t.Fatalf("%s cgroup.procs owner = %d, want 100000", d.Path, got)
 				}

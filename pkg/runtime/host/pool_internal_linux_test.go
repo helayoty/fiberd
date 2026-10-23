@@ -21,7 +21,7 @@ var poolGrant = core.Grant{UID: "g1", TemplateDigest: "sha256:tmpl", FiberMax: 4
 
 // poolLeaf is the n-th pool leaf of the grant.
 func poolLeaf(r *Runtime, n string) cgroup.Dir {
-	return r.root.Child("g1").Child(poolDir).Child("p-" + n)
+	return r.root.Child("g1").Child(fibersDir).Child(poolDir).Child("p-" + n)
 }
 
 // fillOne fills the grant's pool with one sandbox and returns its id.
@@ -62,7 +62,7 @@ func TestPoolLeaves(t *testing.T) {
 			if f == nil || !f.pooled || f.cg.Path != poolLeaf(r, "1").Path || f.pid == 0 {
 				t.Fatalf("fiber = %+v, want one in %s", f, poolLeaf(r, "1").Path)
 			}
-			if r.root.Child("g1").Child("f-1-1").Exists() {
+			if r.root.Child("g1").Child(fibersDir).Child("f-1-1").Exists() {
 				t.Fatal("a fresh leaf was made for a pooled fiber")
 			}
 			if ff := be.fiber(h.ID); ff == nil || ff.spec.CgroupFD < 0 || ff.spec.Deadline != time.Second || !ff.spec.OwnPIDNS {
@@ -243,7 +243,7 @@ func TestFillRefused(t *testing.T) {
 				t.Fatalf("Fill = %v, want an error mentioning %q", err, tc.errText)
 			}
 			waitFor(t, "no pool leaf to remain", func() bool {
-				leaves, _ := r.root.Child("g1").Child(poolDir).Children("")
+				leaves, _ := r.root.Child("g1").Child(fibersDir).Child(poolDir).Children("")
 				return len(leaves) == 0
 			})
 			if r.Pooled("g1") != 0 {
@@ -274,9 +274,9 @@ func TestBootSweepsPool(t *testing.T) {
 			be := newPoolBackend(core.TierWarm)
 			cfg := testConfig(t, be)
 			root := cgroup.Root(cfg.CgroupRoot)
-			g1 := root.Child("g1")
+			g1 := root.Child("g1").Child(fibersDir)
 			pool := g1.Child(poolDir)
-			for _, d := range []cgroup.Dir{root, g1, pool} {
+			for _, d := range []cgroup.Dir{root, root.Child("g1"), g1, pool} {
 				if err := d.Ensure("memory", "pids"); err != nil {
 					t.Fatal(err)
 				}
@@ -290,7 +290,7 @@ func TestBootSweepsPool(t *testing.T) {
 			cgSet(t, live, "cgroup.procs", "4242")
 			var others []cgroup.Dir
 			for i := 1; i < tc.grants; i++ {
-				p := root.Child(fmt.Sprintf("g%d", i+1)).Child(poolDir)
+				p := root.Child(fmt.Sprintf("g%d", i+1)).Child(fibersDir).Child(poolDir)
 				if err := p.Child("p-1").Ensure("memory", "pids"); err != nil {
 					t.Fatal(err)
 				}
@@ -341,7 +341,7 @@ func TestCloneTakesPool(t *testing.T) {
 				r.mu.Lock()
 				f := r.fibers[h.ID]
 				r.mu.Unlock()
-				if f == nil || f.cg.Path != poolLeaf(r, "1").Path || r.root.Child("g1").Child("f-1-1").Exists() || r.Pooled("g1") != 0 {
+				if f == nil || f.cg.Path != poolLeaf(r, "1").Path || r.root.Child("g1").Child(fibersDir).Child("f-1-1").Exists() || r.Pooled("g1") != 0 {
 					t.Fatalf("fiber = %+v, pooled %d", f, r.Pooled("g1"))
 				}
 				if ff := be.fiber(h.ID); ff == nil || ff.spec.Deadline != 2*time.Second {
@@ -350,7 +350,7 @@ func TestCloneTakesPool(t *testing.T) {
 			}},
 		{name: "the pool is empty: restored on demand",
 			check: func(t *testing.T, r *Runtime, be *poolBackend, h core.FiberHandle) {
-				if !r.root.Child("g1").Child("f-1-1").Exists() {
+				if !r.root.Child("g1").Child(fibersDir).Child("f-1-1").Exists() {
 					t.Fatal("no fresh leaf")
 				}
 			}},
@@ -377,8 +377,8 @@ func TestCloneTakesPool(t *testing.T) {
 					t.Fatalf("on-demand fiber = %+v, want a deadline under 2s less the failed hand-out", ff)
 				}
 				waitFor(t, "the pool leaf to go", func() bool { return !poolLeaf(r, "1").Exists() })
-				if !r.root.Child("g1").Child("f-1-1").Exists() || r.Pooled("g1") != 0 {
-					t.Fatalf("fresh leaf exists %v, pooled %d", r.root.Child("g1").Child("f-1-1").Exists(), r.Pooled("g1"))
+				if !r.root.Child("g1").Child(fibersDir).Child("f-1-1").Exists() || r.Pooled("g1") != 0 {
+					t.Fatalf("fresh leaf exists %v, pooled %d", r.root.Child("g1").Child(fibersDir).Child("f-1-1").Exists(), r.Pooled("g1"))
 				}
 				noExit(t, r)
 			}},
@@ -406,7 +406,7 @@ func TestCloneTakesPool(t *testing.T) {
 				return s
 			}, wantErr: context.DeadlineExceeded,
 			check: func(t *testing.T, r *Runtime, be *poolBackend, _ core.FiberHandle) {
-				if be.fiber("g1/1/1") != nil || r.root.Child("g1").Child("f-1-1").Exists() {
+				if be.fiber("g1/1/1") != nil || r.root.Child("g1").Child(fibersDir).Child("f-1-1").Exists() {
 					t.Fatal("a restore was tried with no time left")
 				}
 				waitFor(t, "the pool leaf to go", func() bool { return !poolLeaf(r, "1").Exists() })
@@ -437,8 +437,8 @@ func TestCloneTakesPool(t *testing.T) {
 				return core.CloneSpec{Grant: poolGrant, Source: core.SourceDelta, Ref: dir, Fence: core.Fence{GrantUID: "g1", Epoch: 2, Seq: 1}}
 			},
 			check: func(t *testing.T, r *Runtime, be *poolBackend, h core.FiberHandle) {
-				if r.Pooled("g1") != 1 || !r.root.Child("g1").Child("f-2-1").Exists() {
-					t.Fatalf("pooled %d, resumed leaf exists %v", r.Pooled("g1"), r.root.Child("g1").Child("f-2-1").Exists())
+				if r.Pooled("g1") != 1 || !r.root.Child("g1").Child(fibersDir).Child("f-2-1").Exists() {
+					t.Fatalf("pooled %d, resumed leaf exists %v", r.Pooled("g1"), r.root.Child("g1").Child(fibersDir).Child("f-2-1").Exists())
 				}
 			}},
 	}

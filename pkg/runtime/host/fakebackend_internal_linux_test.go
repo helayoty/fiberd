@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -977,6 +978,8 @@ var plainTree = os.Getenv("FIBERD_CGROUP_ROOT") == ""
 func init() {
 	if plainTree {
 		rmdir = plainRmdir
+		// A plain directory is no cgroup to attach the GPU guard to.
+		attachGPUGuard = func(string) (io.Closer, error) { return io.NopCloser(nil), nil }
 	}
 }
 

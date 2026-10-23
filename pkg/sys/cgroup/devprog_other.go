@@ -12,11 +12,17 @@ func AttachGPUGuard(string) (*GPUGuard, error) {
 	return nil, errors.New("cgroup: gpu guard: only on Linux")
 }
 
+// NVIDIAPresent is false off Linux.
+func NVIDIAPresent() bool { return false }
+
 // Dir is empty off Linux.
 func (g *GPUGuard) Dir() string { return "" }
 
 // Close does nothing off Linux.
 func (g *GPUGuard) Close() error { return nil }
+
+// Release has nothing to release off Linux.
+func (g *GPUGuard) Release() error { return nil }
 
 // Covered is false off Linux.
 func (g *GPUGuard) Covered(string) (bool, error) { return false, nil }

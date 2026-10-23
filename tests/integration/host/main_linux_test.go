@@ -99,9 +99,10 @@ func prepared(t *testing.T, be backend.Backend, g core.Grant, mod func(*host.Con
 	return r, h
 }
 
-// leafOf is the cgroup of the fiber under the runtime's root.
+// leafOf is the cgroup of the fiber under the runtime's root, below the
+// grant's fibers parent.
 func leafOf(r *host.Runtime, grantUID, leaf string) cgroup.Dir {
-	return cgroup.Root(r.CgroupRoot()).Child(grantUID).Child(leaf)
+	return cgroup.Root(r.CgroupRoot()).Child(grantUID).Child("fibers").Child(leaf)
 }
 
 // waitFor polls cond until it holds or the deadline passes.

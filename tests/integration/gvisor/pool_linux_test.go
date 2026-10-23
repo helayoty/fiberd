@@ -172,7 +172,7 @@ func TestPooledRevocation(t *testing.T) {
 			if got := talk(t, h.Endpoint, "fence"); got != h.ID {
 				t.Fatalf("fence = %q, want %q", got, h.ID)
 			}
-			pool := filepath.Join(cgRoot, life, "g1", "pool")
+			pool := filepath.Join(cgRoot, life, "g1", "fibers", "pool")
 			if leaves, _ := filepath.Glob(filepath.Join(pool, "p-*")); len(leaves) != 2 || rt.Pooled("g1") != 1 {
 				t.Fatalf("pool leaves %v, pooled %d, want two leaves and one waiting", leaves, rt.Pooled("g1"))
 			}

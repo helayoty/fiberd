@@ -190,7 +190,7 @@ func TestNoAckNoServe(t *testing.T) {
 			if _, err := os.Stat(ep); err == nil {
 				t.Fatalf("%s exists after the failed resume", ep)
 			}
-			leaf := filepath.Join(rt.(interface{ CgroupRoot() string }).CgroupRoot(), g.UID, "f-1-2", "cgroup.procs")
+			leaf := filepath.Join(rt.(interface{ CgroupRoot() string }).CgroupRoot(), g.UID, "fibers", "f-1-2", "cgroup.procs")
 			deadline := time.Now().Add(5 * time.Second)
 			procs := ""
 			for time.Now().Before(deadline) {

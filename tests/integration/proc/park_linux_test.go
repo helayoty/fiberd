@@ -40,7 +40,7 @@ func hold(t *testing.T, endpoint, line, want string) net.Conn {
 // that is gone.
 func leafProcs(t *testing.T, rt core.Runtime, g core.Grant, epoch, seq int) string {
 	t.Helper()
-	leaf := filepath.Join(rt.(interface{ CgroupRoot() string }).CgroupRoot(), g.UID, fmt.Sprintf("f-%d-%d", epoch, seq), "cgroup.procs")
+	leaf := filepath.Join(rt.(interface{ CgroupRoot() string }).CgroupRoot(), g.UID, "fibers", fmt.Sprintf("f-%d-%d", epoch, seq), "cgroup.procs")
 	b, err := os.ReadFile(leaf)
 	if errors.Is(err, os.ErrNotExist) {
 		return ""

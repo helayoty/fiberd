@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -83,6 +84,11 @@ type Runtime struct {
 	stopOnce sync.Once
 	// identities maps a grant uid to the handoff identity its fibers get.
 	identities map[string]handoffIdentity
+	// guards holds each grant's GPU guard, attached to its fibers parent
+	// when the grant's cgroup is made and closed when that cgroup is
+	// pruned. guardsMu guards it.
+	guardsMu sync.Mutex
+	guards   map[string]io.Closer
 
 	// parents is the content-addressed store of template checkpoints:
 	// <TemplateCache>/parents/<sha256>/ (a self-checkpoint, or a symlink
@@ -152,7 +158,8 @@ type warm struct {
 	// images, or a self-checkpoint taken after READY.
 	parentSHA string
 	cg        cgroup.Dir // <root>/<grant>
-	zcg       cgroup.Dir // <root>/<grant>/zygote
+	fcg       cgroup.Dir // <root>/<grant>/fibers, the parent of every cgroup a fiber's code runs in
+	zcg       cgroup.Dir // <root>/<grant>/fibers/zygote
 	minBytes  uint64     // memory.min held for the instance's pages
 	pool      []*pooled  // sandboxes restored ahead of their fibers, oldest first
 	noPool    bool       // the backend said this template cannot pool
@@ -331,6 +338,7 @@ func New(cfg Config) (*Runtime, error) {
 		cfg: cfg, be: cfg.Backend, root: root, tier: tier, host: host, hide: hide, ownRootfs: ownRootfs,
 		relay: relay, relaySlots: make(chan struct{}, relayMaxTotal),
 		warms: map[string]*warm{}, fibers: map[string]*fiber{}, ports: map[int]string{}, socks: map[string]string{},
+		guards:    map[string]io.Closer{},
 		exits:     make(chan core.FiberExit, 1024),
 		poolExits: make(chan string, 64),
 		stop:      make(chan struct{}),
@@ -654,26 +662,99 @@ func (r *Runtime) leafMax(g core.Grant) uint64 {
 	return g.WBudgetBytes + total + total/2 + 32<<20
 }
 
+// fibersDir names the grant cgroup's child every cgroup a fiber's code
+// can run in sits under: the zygote, the probe, the pool and the fiber
+// leaves. The engine's leaf stays beside it, under the grant alone.
+const fibersDir = "fibers"
+
 // grantCgroup makes the grant's cgroup with its controllers and its
-// task limit.
-func (r *Runtime) grantCgroup(g core.Grant) (cgroup.Dir, error) {
+// task limit, and under it the fibers parent with the GPU guard
+// attached. It returns both. The guard is on before anything can run
+// under the parent, since every leaf is made below it afterwards.
+func (r *Runtime) grantCgroup(g core.Grant) (cgroup.Dir, cgroup.Dir, error) {
 	gcg := r.root.Child(g.UID)
 	if err := gcg.Ensure("memory", "pids"); err != nil {
-		return cgroup.Dir{}, err
+		return cgroup.Dir{}, cgroup.Dir{}, err
 	}
 	if r.limitsTasks() {
 		if err := gcg.SetPidsMax(grantPids(g)); err != nil {
-			return cgroup.Dir{}, err
+			return cgroup.Dir{}, cgroup.Dir{}, err
 		}
 	}
-	if err := r.delegateProcs(g.UID, gcg); err != nil {
-		return cgroup.Dir{}, err
+	fcg := gcg.Child(fibersDir)
+	if err := fcg.Ensure("memory", "pids"); err != nil {
+		return cgroup.Dir{}, cgroup.Dir{}, err
 	}
-	return gcg, nil
+	if err := r.delegateProcs(g.UID, fcg); err != nil {
+		return cgroup.Dir{}, cgroup.Dir{}, err
+	}
+	if err := r.guardFibers(g.UID, fcg); err != nil {
+		return cgroup.Dir{}, cgroup.Dir{}, err
+	}
+	return gcg, fcg, nil
 }
 
-// fiberLeaf makes a fiber's leaf under parent, with its memory ceiling,
-// group OOM and task limit.
+// attachGPUGuard attaches the GPU guard to a cgroup directory. Closing
+// what it returns releases the descriptor and never detaches the
+// program, so fibers left running when fiberd stops, or after a prune's
+// kill failed, keep the guard until their cgroup is removed. A seam for
+// tests, whose plain tree holds no cgroup to attach to.
+var attachGPUGuard = func(dir string) (io.Closer, error) {
+	g, err := cgroup.AttachGPUGuard(dir)
+	if err != nil {
+		return nil, err
+	}
+	return keptGuard{g}, nil
+}
+
+// keptGuard closes a guard by releasing it, never by detaching it.
+type keptGuard struct{ g *cgroup.GPUGuard }
+
+func (k keptGuard) Close() error { return k.g.Release() }
+
+// guardFibers attaches the GPU guard to the grant's fibers parent, once
+// per grant. Every grant gets it, with or without a device budget: a
+// fiber reaches the GPU through the engine alone, and a grant with no
+// budget may not reach it at all. On a host that holds the NVIDIA
+// driver a failed attach refuses the grant, since its fibers would run
+// unguarded beside a GPU. A host without the driver has no device to
+// guard, so the failure is only logged there (a fiberd without CAP_BPF,
+// or a kernel without cgroup device programs).
+func (r *Runtime) guardFibers(grantUID string, fcg cgroup.Dir) error {
+	r.guardsMu.Lock()
+	defer r.guardsMu.Unlock()
+	if r.guards[grantUID] != nil {
+		return nil
+	}
+	guard, err := attachGPUGuard(fcg.Path)
+	if err != nil {
+		if cgroup.NVIDIAPresent() {
+			return fmt.Errorf("host: gpu guard for grant %s: %w", grantUID, err)
+		}
+		log.Printf("host: grant %s runs without the gpu guard, this host has no NVIDIA driver: %v", grantUID, err)
+		return nil
+	}
+	r.guards[grantUID] = guard
+	return nil
+}
+
+// dropGuard releases the grant's GPU guard, if it has one. The program
+// stays on the cgroup, and the kernel drops it with the cgroup.
+func (r *Runtime) dropGuard(grantUID string) {
+	r.guardsMu.Lock()
+	guard := r.guards[grantUID]
+	delete(r.guards, grantUID)
+	r.guardsMu.Unlock()
+	if guard == nil {
+		return
+	}
+	if err := guard.Close(); err != nil {
+		log.Printf("host: gpu guard of grant %s: %v", grantUID, err)
+	}
+}
+
+// fiberLeaf makes a fiber's leaf under parent, the grant's fibers
+// parent, with its memory ceiling, group OOM and task limit.
 func (r *Runtime) fiberLeaf(parent cgroup.Dir, g core.Grant, fence core.Fence) (cgroup.Dir, error) {
 	return r.leaf(parent, g, leafName(fence))
 }
@@ -700,8 +781,12 @@ func (r *Runtime) leaf(parent cgroup.Dir, g core.Grant, name string) (cgroup.Dir
 
 // delegateProcs hands the grant's mapped root, when the backend maps
 // one, the cgroup.procs of d and nothing else. A birth into a leaf needs
-// write access to it and to the grant cgroup's. The limits stay root's,
-// so a grant cannot raise its own memory.max or make cgroups.
+// write access to it and to the fibers parent's, the nearest common
+// ancestor of the zygote's cgroup and the leaf. The grant cgroup's own
+// cgroup.procs stays root's, like the engine's leaf, so a fiber can
+// move itself to no cgroup outside the parent the guard is on. The
+// limits stay root's too, so a grant cannot raise its own memory.max or
+// make cgroups.
 func (r *Runtime) delegateProcs(grantUID string, d cgroup.Dir) error {
 	m, ok := r.be.(backend.IDMapper)
 	if !ok {
@@ -833,11 +918,11 @@ func (r *Runtime) PrepareTemplate(ctx context.Context, g core.Grant) error {
 		}
 	}()
 
-	gcg, err := r.grantCgroup(g)
+	gcg, fcg, err := r.grantCgroup(g)
 	if err != nil {
 		return err
 	}
-	zcg := gcg.Child("zygote")
+	zcg := fcg.Child("zygote")
 	if err := zcg.Create(0, false); err != nil {
 		return err
 	}
@@ -847,8 +932,9 @@ func (r *Runtime) PrepareTemplate(ctx context.Context, g core.Grant) error {
 	}
 	defer func() { _ = zfd.Close() }()
 
-	// An empty leaf a backend may measure one fiber's footprint in.
-	pcg := gcg.Child("probe")
+	// An empty leaf a backend may measure one fiber's footprint in. It
+	// runs template code, so it sits under the guard with the rest.
+	pcg := fcg.Child("probe")
 	probeFD := -1
 	if err := pcg.Create(0, false); err == nil {
 		if pf, err := pcg.Open(); err == nil {
@@ -894,7 +980,7 @@ func (r *Runtime) PrepareTemplate(ctx context.Context, g core.Grant) error {
 	if err != nil {
 		return err
 	}
-	z := &warm{grantUID: g.UID, digest: g.TemplateDigest, template: tpl, id: w.ID, pid: w.PID, cg: gcg, zcg: zcg}
+	z := &warm{grantUID: g.UID, digest: g.TemplateDigest, template: tpl, id: w.ID, pid: w.PID, cg: gcg, fcg: fcg, zcg: zcg}
 
 	// The parent pages for deltas: the artifact's checkpoint when there
 	// is one; otherwise checkpoint the warm instance now, leaving it
@@ -948,8 +1034,10 @@ func (r *Runtime) PrepareTemplate(ctx context.Context, g core.Grant) error {
 		}
 	}
 	// The template's pages are shared by every fiber. Reclaiming them
-	// would make each fiber fault them back in.
-	for _, d := range []cgroup.Dir{zcg, gcg} {
+	// would make each fiber fault them back in. memory.min protects only
+	// what every ancestor protects too, so the fibers parent is set with
+	// the zygote's cgroup and the grant's.
+	for _, d := range []cgroup.Dir{zcg, fcg, gcg} {
 		if err := d.SetMemoryMin(zbytes); err != nil {
 			log.Printf("host: protect template of %s: %v", g.UID, err)
 		}
@@ -1094,7 +1182,8 @@ func isHex64(s string) bool {
 }
 
 // Pressure implements core.PressureSource: PSI memory "some avg10" on the
-// grant's cgroup (warm instance and every fiber leaf).
+// grant's cgroup, the one the ceiling is set on. It holds the fibers
+// parent (warm instance and every fiber leaf) and the engine's leaf.
 func (r *Runtime) Pressure(grantUID string) (float64, error) {
 	p, err := r.root.Child(grantUID).PSI()
 	if err != nil {
@@ -1185,7 +1274,7 @@ func (r *Runtime) DropTemplate(grantUID string) {
 	r.discard(ps)
 	r.be.Unwarm(z.id)
 	r.dropEngineDir(grantUID)
-	for _, d := range []cgroup.Dir{z.zcg, z.cg} {
+	for _, d := range []cgroup.Dir{z.zcg, z.fcg, z.cg} {
 		if err := d.SetMemoryMin(0); err != nil {
 			log.Printf("host: unprotect template of %s: %v", grantUID, err)
 		}
@@ -1419,7 +1508,7 @@ func (r *Runtime) start(ctx context.Context, z *warm, spec core.CloneSpec, p *po
 	var err error
 	if p != nil {
 		leaf = p.cg
-	} else if leaf, err = r.fiberLeaf(z.cg, spec.Grant, spec.Fence); err != nil {
+	} else if leaf, err = r.fiberLeaf(z.fcg, spec.Grant, spec.Fence); err != nil {
 		return core.FiberHandle{}, err
 	}
 	// giveUp undoes the leaf when the birth fails before the backend is asked.
@@ -1804,7 +1893,7 @@ func (r *Runtime) resume(ctx context.Context, spec core.CloneSpec) (core.FiberHa
 			return core.FiberHandle{}, err
 		}
 	}
-	gcg, err := r.grantCgroup(spec.Grant)
+	gcg, fcg, err := r.grantCgroup(spec.Grant)
 	if err != nil {
 		return core.FiberHandle{}, err
 	}
@@ -1818,7 +1907,7 @@ func (r *Runtime) resume(ctx context.Context, spec core.CloneSpec) (core.FiberHa
 			return core.FiberHandle{}, err
 		}
 	}
-	leaf, err := r.fiberLeaf(gcg, spec.Grant, spec.Fence)
+	leaf, err := r.fiberLeaf(fcg, spec.Grant, spec.Fence)
 	if err != nil {
 		return core.FiberHandle{}, err
 	}
@@ -2105,7 +2194,7 @@ func (r *Runtime) Release(ctx context.Context, fiberID string, discard bool) err
 // killOrphan ends a leaf left by a previous fiberd: kill everything in it,
 // wait for it to empty, remove it and the endpoint it served on.
 func (r *Runtime) killOrphan(ctx context.Context, fence core.Fence) error {
-	leaf := r.root.Child(fence.GrantUID).Child(leafName(fence))
+	leaf := r.root.Child(fence.GrantUID).Child(fibersDir).Child(leafName(fence))
 	if !leaf.Exists() {
 		return nil
 	}
@@ -2132,9 +2221,11 @@ func (r *Runtime) killOrphan(ctx context.Context, fence core.Fence) error {
 }
 
 // PruneGrants removes leftover cgroups of grants not in keep: the warm
-// instance's cgroup (its process is gone or killed here) and its fiber
-// leaves. A task killed here is still exiting when its cgroup is
-// removed, so each removal is retried briefly.
+// instance's cgroup (its process is gone or killed here), its fiber
+// leaves, its pool, its fibers parent and the engine's leaf, each level
+// the runtime makes and nothing deeper. A task killed here is still
+// exiting when its cgroup is removed, so each removal is retried
+// briefly. The grant's GPU guard goes with its parent.
 func (r *Runtime) PruneGrants(keep map[string]bool) {
 	grants, err := r.root.Children("")
 	if err != nil {
@@ -2145,10 +2236,16 @@ func (r *Runtime) PruneGrants(keep map[string]bool) {
 			continue
 		}
 		_ = g.Kill()
-		leaves, _ := g.Children("")
-		for _, l := range leaves {
-			_ = l.Kill()
-			_ = removeSoon(l)
+		r.dropGuard(g.Name())
+		fibers := g.Child(fibersDir)
+		pool, _ := fibers.Child(poolDir).Children("")
+		under, _ := fibers.Children("")
+		top, _ := g.Children("")
+		for _, level := range [][]cgroup.Dir{pool, under, top} {
+			for _, l := range level {
+				_ = l.Kill()
+				_ = removeSoon(l)
+			}
 		}
 		if err := removeSoon(g); err == nil {
 			log.Printf("host: pruned stale grant cgroup %s", g.Name())
@@ -2279,7 +2376,7 @@ func (r *Runtime) List(context.Context) ([]core.FiberHandle, error) {
 	}
 	var out []core.FiberHandle
 	for _, g := range grants {
-		leaves, err := g.Children("f-")
+		leaves, err := g.Child(fibersDir).Children("f-")
 		if err != nil {
 			continue
 		}
@@ -2353,6 +2450,15 @@ func (r *Runtime) Close() {
 	r.enginesMu.Unlock()
 	for _, uid := range dirs {
 		r.dropEngineDir(uid)
+	}
+	r.guardsMu.Lock()
+	guarded := make([]string, 0, len(r.guards))
+	for uid := range r.guards {
+		guarded = append(guarded, uid)
+	}
+	r.guardsMu.Unlock()
+	for _, uid := range guarded {
+		r.dropGuard(uid)
 	}
 	r.mu.Lock()
 	var relays []*relay

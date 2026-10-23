@@ -143,7 +143,7 @@ audit() {
 own_cgroup='own=/sys/fs/cgroup$(cut -d: -f3 /proc/1/cgroup | head -1); own=${own%/fiberd}; [ -d "$own" ] || own=/sys/fs/cgroup'
 
 engine_kill() {
-  kexec sh -c "$own_cgroup; kill -9 \$(cat \$own/grants/$1/zygote/cgroup.procs)"
+  kexec sh -c "$own_cgroup; kill -9 \$(cat \$own/grants/$1/fibers/zygote/cgroup.procs)"
 }
 
 scope_lost() { admin -X POST http://x/scope-lost >/dev/null; }
