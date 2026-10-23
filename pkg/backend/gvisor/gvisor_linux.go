@@ -102,6 +102,11 @@ const (
 	// runsc requires a restore's mounts to match the checkpoint's.
 	channelMount = "/fiberd/channel"
 	poolSocket   = "pool.sock"
+	// engineMount is where a grant's device engine directory is bound,
+	// read-only over its own place in /host, so no sandbox can replace
+	// the socket its siblings dial. Every fiber finds the socket in it as
+	// FIBERD_ENGINE.
+	engineMount = "/host/engine"
 	// tokenBytes is the size of a restore's one-shot token.
 	tokenBytes = 16
 	// claimWait is how long an accepted connection has to send its
@@ -210,6 +215,10 @@ type warm struct {
 	// the registry template's executable. Empty for a template that
 	// lives in the rootfs.
 	template string
+	// engine is the host directory bound at engineMount in every sandbox
+	// of this instance, the grant's device engine directory. Empty for a
+	// grant without an engine.
+	engine string
 	// channel is the host directory bound at channelMount in every sandbox
 	// of this instance, <state>/channel/<n>, holding the pool socket ln
 	// listens on.
@@ -639,9 +648,9 @@ type spec struct {
 
 // writeBundle creates <dir>/config.json. workDir is bind-mounted at
 // /host, channel read-only at channelMount, template (when set) read-only at
-// backend.TemplateMount, and images, when set, turns on the
-// workload-triggered checkpoint.
-func (b *Backend) writeBundle(dir string, argv, env []string, workDir, channel, images, template string) error {
+// backend.TemplateMount, engine (when set) read-only at engineMount, and
+// images, when set, turns on the workload-triggered checkpoint.
+func (b *Backend) writeBundle(dir string, argv, env []string, workDir, channel, images, template, engine string) error {
 	var s spec
 	s.OCIVersion = "1.0.2"
 	s.Process.Cwd = "/"
@@ -671,6 +680,10 @@ func (b *Backend) writeBundle(dir string, argv, env []string, workDir, channel, 
 	add(channelMount, "bind", channel, backend.TemplateMountOptions...)
 	if template != "" {
 		add(backend.TemplateMount, "bind", template, backend.TemplateMountOptions...)
+	}
+	if engine != "" {
+		// After /host, since it covers the engine directory's place there.
+		add(engineMount, "bind", engine, backend.TemplateMountOptions...)
 	}
 	if images != "" {
 		s.Annotations = map[string]string{
@@ -905,7 +918,14 @@ func (b *Backend) Warm(ctx context.Context, sp backend.WarmSpec) (backend.Warm, 
 	marker := filepath.Join(sp.WorkDir, readyMarker)
 	_ = os.Remove(marker)
 	bundle := filepath.Join(w.dir, "bundle")
-	if err := b.writeBundle(bundle, w.argv, []string{"FIBERD_FENCE=none"}, sp.WorkDir, w.channel, "", w.template); err != nil {
+	env := []string{"FIBERD_FENCE=none"}
+	if sp.EnginePath != "" {
+		// Nothing forks, so no zygote hands the socket on. Every fiber is
+		// a copy of this process and finds it in the environment.
+		w.engine = filepath.Dir(sp.EnginePath)
+		env = append(env, "FIBERD_ENGINE="+filepath.Join(engineMount, filepath.Base(sp.EnginePath)))
+	}
+	if err := b.writeBundle(bundle, w.argv, env, sp.WorkDir, w.channel, "", w.template, w.engine); err != nil {
 		return backend.Warm{}, err
 	}
 	if _, err := b.runsc(ctx, sp.CgroupFD, "run", "--detach", "--bundle", bundle, w.cid); err != nil {
@@ -1430,7 +1450,7 @@ func (b *Backend) restore(ctx context.Context, w *warm, x *box, images string, a
 	// grant's run directory is every sandbox's /host, read and write, so
 	// a bundle there could be rewritten by a sibling before runsc read
 	// it, or planted as a link for fiberd to write through.
-	if err := b.writeBundle(x.bundle, argv, append([]string{"FIBERD_TOKEN=" + x.token}, env...), w.workDir, w.channel, "", w.template); err != nil {
+	if err := b.writeBundle(x.bundle, argv, append([]string{"FIBERD_TOKEN=" + x.token}, env...), w.workDir, w.channel, "", w.template, w.engine); err != nil {
 		b.forgetToken(w, x)
 		return err
 	}
@@ -1828,10 +1848,14 @@ func (b *Backend) Resume(ctx context.Context, sp backend.ResumeSpec) (backend.Fi
 	// path is wherever this home verified its copy. A checkpoint and a
 	// home that disagree about having one cannot restore, since runsc
 	// requires the mounts to match, so that is refused here by name.
-	parked := false
+	// So is a device engine's directory.
+	parked, engined := false, false
 	for _, m := range s.Mounts {
-		if m.Destination == backend.TemplateMount {
+		switch m.Destination {
+		case backend.TemplateMount:
 			parked = true
+		case engineMount:
+			engined = true
 		}
 	}
 	// The resumed sandbox takes its identity from the warm instance's
@@ -1847,6 +1871,10 @@ func (b *Backend) Resume(ctx context.Context, sp backend.ResumeSpec) (backend.Fi
 		return backend.Fiber{}, fmt.Errorf("gvisor: park image was taken with a registry template at %s, which warm instance %q does not have here", backend.TemplateMount, sp.WarmID)
 	case !parked && w.template != "":
 		return backend.Fiber{}, fmt.Errorf("gvisor: park image was taken without a template at %s, which warm instance %q binds here", backend.TemplateMount, sp.WarmID)
+	case engined && w.engine == "":
+		return backend.Fiber{}, fmt.Errorf("gvisor: park image was taken with a device engine's directory at %s, which warm instance %q does not have here", engineMount, sp.WarmID)
+	case !engined && w.engine != "":
+		return backend.Fiber{}, fmt.Errorf("gvisor: park image was taken without a device engine's directory at %s, which warm instance %q binds here", engineMount, sp.WarmID)
 	}
 	return b.start(ctx, w, sp.Dir, s.Process.Args, "resume", sp.Fence, sp.Endpoint, nil, sp.Session, sp.Generation, sp.CgroupFD, sp.Deadline)
 }

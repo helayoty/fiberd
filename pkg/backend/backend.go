@@ -63,7 +63,9 @@ type WarmSpec struct {
 	Devices []string
 	// EnginePath is the host path of the grant's device engine socket,
 	// which the warm instance gets as FIBERD_ENGINE_PATH and hands every
-	// fiber as FIBERD_ENGINE. "" when the grant has no engine.
+	// fiber as FIBERD_ENGINE. A backend whose fibers are copies of the
+	// warm instance (gvisor) sets FIBERD_ENGINE itself. "" when the grant
+	// has no engine.
 	EnginePath string
 	// ProbeCgroupFD is an open fd of an empty cgroup a backend may use
 	// to measure what one fiber of this template costs (Warm.Bytes), by

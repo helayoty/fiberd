@@ -1442,6 +1442,12 @@ static int gvisor_serve_once(const char *fence, const char *ep, const unsigned c
     (void)fz_gvisor_ack();
     size_t db = (size_t)payload_num(payload, plen, "\"dirty_bytes\"");
     if (db) dirty(db);
+    /* And its device slice, as a forked fiber takes it. FIBERD_ENGINE
+     * comes from the warm sandbox's spec, which every copy keeps.
+     * SIGUSR1 stays blocked outside the wait, so a park never cuts a
+     * request to the engine short. */
+    unsigned long long dev = payload_num(payload, plen, "\"device_bytes\"");
+    if (dev) { char rp[128]; device_reserve(dev, rp, sizeof rp); }
     while (!park_requested) {
         if (wait_readable(s) < 0) continue;
         int c = accept4(s, NULL, NULL, SOCK_CLOEXEC);

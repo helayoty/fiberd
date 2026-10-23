@@ -60,13 +60,14 @@ MOB=$STATE-mobility   # the registry's blobs, the shared keys, the artifact
 ENGINE_HOOK=()
 # The device engine fiberd starts for each grant with a device budget,
 # the reference one with a simulated device, which is what C8 budgets.
-# proc and runc run it with the reference template, and run builds it.
+# proc, runc and gvisor run it with the reference template, and run
+# builds it.
 # A CONFORM_TEMPLATE (the Python ones) reserves no slice, so it runs
 # without one, and C8's grant is refused loudly, which conformance
 # accepts.
 ENGINE=${CONFORM_ENGINE:-$PWD/bin/refengine}
 ENGINE_FLAGS=()
-if [ -z "${CONFORM_TEMPLATE:-}" ] && { [ "$RUNTIME" = proc ] || [ "$RUNTIME" = runc ]; }; then
+if [ -z "${CONFORM_TEMPLATE:-}" ] && { [ "$RUNTIME" = proc ] || [ "$RUNTIME" = runc ] || [ "$RUNTIME" = gvisor ]; }; then
   ENGINE_FLAGS=(-engine "$ENGINE --sim-mb 64")
 fi
 # proc and runc fibers share the host kernel, so they serve trusted grants only.
@@ -85,7 +86,7 @@ if [ "$RUNTIME" = proc ]; then
   ENGINE_HOOK=(-engine-kill-cmd "$0 engine-kill \$1")
 elif [ "$RUNTIME" = gvisor ]; then
   TIER=${CONFORM_TIER:-FIBER_SNAPSHOT}
-  RUNTIME_FLAGS=(-runtime gvisor -gvisor-rootfs "$GVISOR_ROOTFS" -template "default=${CONFORM_TEMPLATE:-/bin/refzygote --heap-mb 32 --gvisor}")
+  RUNTIME_FLAGS=(-runtime gvisor -gvisor-rootfs "$GVISOR_ROOTFS" -template "default=${CONFORM_TEMPLATE:-/bin/refzygote --heap-mb 32 --gvisor}" ${ENGINE_FLAGS[@]+"${ENGINE_FLAGS[@]}"})
 elif [ "$RUNTIME" = runc ]; then
   WORKSPACES=(-workspaces)
   TIER=${CONFORM_TIER:-FIBER_CHECKPOINT}
