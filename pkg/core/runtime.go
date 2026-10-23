@@ -99,12 +99,26 @@ type FiberStats struct {
 	DeviceUsedBytes uint64
 }
 
-// DeviceCapable is implemented by runtimes whose warm template can hold
-// device state for its fibers (an engine that reports slices). A grant
-// with a device budget is admitted only where this answers true; the
-// class is the grant's DeviceBudget.Class ("" for any).
+// DeviceCapable is implemented by runtimes that start a device engine
+// for a grant, which holds device state for its fibers and reports
+// their slices. DeviceOffer is the class and capacity the grant's engine
+// declared before READY, and capacity 0 when the grant has none. A grant
+// with a device budget is admitted only where DeviceFits holds.
 type DeviceCapable interface {
-	OffersDevice(grantUID, class string) bool
+	DeviceOffer(grantUID string) (class string, capacity uint64)
+}
+
+// DeviceFits is the class rule. An empty class asked takes any engine,
+// and otherwise the classes must be equal. An engine with no capacity
+// fits nothing. The refusal wraps ErrNeedsDevice and names both classes.
+func DeviceFits(asked, class string, capacity uint64) error {
+	if capacity == 0 {
+		return fmt.Errorf("%w: grant asks class %q, the engine declares class %q with no capacity", ErrNeedsDevice, asked, class)
+	}
+	if asked != "" && asked != class {
+		return fmt.Errorf("%w: grant asks class %q, the engine declares class %q", ErrNeedsDevice, asked, class)
+	}
+	return nil
 }
 
 // Isolator is implemented by runtimes that can say whether their fibers

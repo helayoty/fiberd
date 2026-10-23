@@ -81,7 +81,7 @@ jobs:
       # crate installs its pinned toolchain on the first cargo call.
       - if: runner.os == 'Linux'
         run: make zygote-test
-      # The reference zygote's C unit test of the engine's fence parse and the tcp endpoint's bind, built as make zygote is.
+      # The reference zygote's C unit test of the tcp endpoint's bind, built as make zygote is.
       - if: runner.os == 'Linux'
         run: make zygote-c-test
       # The storm baseline's C workload, its unit test, built as make storm-grower is.

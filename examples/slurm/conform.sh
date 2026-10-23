@@ -90,7 +90,7 @@ job() {
   id=$(dexec sbatch --parsable --ntasks=1 --cpus-per-task=4 --mem=1G --job-name=fiberd-conform \
         --export=ALL,FIBERD_GRANT="$tok" -o /var/log/fiberd-conform.out /usr/local/bin/fiberd-job.sh \
         -verifier jwks -issuer "$ISSUER_URL" -insecure-plaintext -runtime proc \
-        -template "default=/usr/local/bin/refzygote --heap-mb 16 --device-mb 64" \
+        -template "default=/usr/local/bin/refzygote --heap-mb 16" \
         -endpoint-family inet4 -admin-unsafe -stale-ttl 20s)
   echo "$id" > "$STATE/job.id"
   wait_for 90 "fiberd in job $id" healthy

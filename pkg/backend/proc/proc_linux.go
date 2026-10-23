@@ -565,13 +565,6 @@ type zygote struct {
 	pmu     sync.Mutex
 	pend    map[string]*pending // fence -> the Clone waiting for CLONED
 	gone    chan struct{}
-
-	// The engine's device reports (DEVICE lines), when it sends any.
-	dmu    sync.Mutex
-	dev    map[string]uint64 // fence -> slice bytes
-	devUse uint64
-	devCap uint64
-	devOK  bool
 }
 
 // pending is a Clone waiting on the zygote's answer. The reader builds
@@ -644,13 +637,21 @@ const (
 // narrowed, records the mount point of its grant's directory in the
 // fiber's namespace. The dump names that mount runDirKey, an external
 // mount, and the restore binds the resuming grant's run directory there.
+// A grant with a device engine has the engine's directory bound
+// read-only at engineDir under it. The dump names that mount engineKey,
+// and the restore binds the resuming grant's engine directory there.
 const (
 	runDirFile = "fiberd-rundir.json"
 	runDirKey  = "rundir"
+	engineDir  = "engine"
+	engineKey  = "engine"
 )
 
 type runDirRecord struct {
 	MountPoint string `json:"mountpoint"`
+	// Engine says the engine's directory was a mount of its own at
+	// <MountPoint>/engine.
+	Engine bool `json:"engine,omitempty"`
 }
 
 // handoffFile, in a checkpoint of a handoff fiber, records the inode
@@ -887,6 +888,10 @@ func (b *Backend) Warm(ctx context.Context, spec backend.WarmSpec) (backend.Warm
 			// The device channel: the one grant-specific thing an engine
 			// needs at warm-up (a CUDA engine reads it as its visible set).
 			cmd.Env = append(cmd.Env, "FIBERD_DEVICES="+strings.Join(spec.Devices, ","))
+		}
+		if spec.EnginePath != "" {
+			// The zygote hands it to every fiber as FIBERD_ENGINE.
+			cmd.Env = append(cmd.Env, "FIBERD_ENGINE_PATH="+spec.EnginePath)
 		}
 		// The zygote's (and so every fiber's) working directory is its own run
 		// directory, never fiberd's: criu's parasite creates scratch
@@ -1205,7 +1210,9 @@ func mountExtra(pid int, runDir, dir string) ([]string, error) {
 		return nil, err
 	}
 	if extra != nil && runDir != "" && mountedAt(pid, runDir) {
-		rec, err := json.Marshal(runDirRecord{MountPoint: runDir})
+		engine := filepath.Join(runDir, engineDir)
+		rd := runDirRecord{MountPoint: runDir, Engine: mountedAt(pid, engine)}
+		rec, err := json.Marshal(rd)
 		if err != nil {
 			return nil, err
 		}
@@ -1213,6 +1220,9 @@ func mountExtra(pid int, runDir, dir string) ([]string, error) {
 			return nil, err
 		}
 		extra = append(extra, "--external", "mnt["+runDir+"]:"+runDirKey)
+		if rd.Engine {
+			extra = append(extra, "--external", "mnt["+engine+"]:"+engineKey)
+		}
 	}
 	return extra, nil
 }
@@ -1272,83 +1282,8 @@ func (b *Backend) read(z *zygote, rd *bufio.Reader) {
 				pid, _ := strconv.Atoi(fields[1])
 				b.exited(z, pid, fields[2])
 			}
-		case "DEVICE":
-			// DEVICE <fence|-> <bytes> <capacity|0>: the engine's own
-			// accounting, per fiber or for the whole device.
-			if len(fields) >= 4 {
-				used, _ := strconv.ParseUint(fields[2], 10, 64)
-				capacity, _ := strconv.ParseUint(fields[3], 10, 64)
-				z.dmu.Lock()
-				if z.dev == nil {
-					z.dev = map[string]uint64{}
-				}
-				switch {
-				case fields[1] == "-":
-					z.devUse, z.devCap, z.devOK = used, capacity, true
-				case used == 0:
-					delete(z.dev, fields[1])
-				default:
-					z.dev[fields[1]] = used
-				}
-				z.dmu.Unlock()
-			}
 		}
 	}
-}
-
-// FiberDevice implements backend.DeviceReporter from the engine's lines.
-func (b *Backend) FiberDevice(fiberID string) (uint64, bool) {
-	b.mu.Lock()
-	f, ok := b.fibers[fiberID]
-	var z *zygote
-	if ok {
-		z = b.zygotes[f.warmID]
-	}
-	b.mu.Unlock()
-	if z == nil {
-		return 0, false
-	}
-	z.dmu.Lock()
-	defer z.dmu.Unlock()
-	if !z.devOK {
-		return 0, false
-	}
-	return z.dev[fiberID], true
-}
-
-// WarmDevice implements backend.DeviceReporter.
-func (b *Backend) WarmDevice(warmID string) (used, capacity uint64, ok bool) {
-	b.mu.Lock()
-	z := b.zygotes[warmID]
-	b.mu.Unlock()
-	if z == nil {
-		return 0, 0, false
-	}
-	z.dmu.Lock()
-	defer z.dmu.Unlock()
-	return z.devUse, z.devCap, z.devOK
-}
-
-// EvictDevice implements backend.DeviceReporter: EVICT <fence> to the
-// engine, which drops the slice and reports it gone. The engine is found
-// by the fence's grant, not through the fiber's entry, since the host
-// evicts after the fiber's exit, when finish has forgotten it. A grant
-// with no zygote has no engine left, and so no slice to drop.
-func (b *Backend) EvictDevice(fiberID string) error {
-	fence, err := core.ParseFence(fiberID)
-	if err != nil {
-		return fmt.Errorf("proc: no engine for %q: %w", fiberID, err)
-	}
-	b.mu.Lock()
-	z := b.zygotes[fence.GrantUID]
-	b.mu.Unlock()
-	if z == nil {
-		return nil
-	}
-	if _, err := z.ctl.Write([]byte("EVICT " + fiberID + "\n")); err != nil {
-		return fmt.Errorf("proc: send EVICT: %w", err)
-	}
-	return nil
 }
 
 // take removes and returns the Clone waiting on fence, if any. Whoever
@@ -1433,8 +1368,7 @@ func (b *Backend) exited(z *zygote, zpid int, status string) {
 	}
 }
 
-// finish forgets a fiber, and its device slice with it, and reports its
-// end. The engine still holds the slice until the host's EVICT.
+// finish forgets a fiber and reports its end.
 func (b *Backend) finish(f *fiber, status string) {
 	b.mu.Lock()
 	if b.fibers[f.id] != f {
@@ -1445,13 +1379,7 @@ func (b *Backend) finish(f *fiber, status string) {
 	if f.zpid != 0 {
 		delete(b.byPID, pidKey{f.warmID, f.zpid})
 	}
-	z := b.zygotes[f.warmID]
 	b.mu.Unlock()
-	if z != nil {
-		z.dmu.Lock()
-		delete(z.dev, f.id)
-		z.dmu.Unlock()
-	}
 	b.exits <- backend.Exit{FiberID: f.id, Status: status}
 }
 
@@ -1934,7 +1862,17 @@ func runDirInherit(dir, workDir string) ([]string, string, error) {
 	if err := os.MkdirAll(workDir, 0o755); err != nil {
 		return nil, "", err
 	}
-	return []string{"--external", "mnt[" + runDirKey + "]:" + filepath.Clean(workDir)}, rec.MountPoint, nil
+	args := []string{"--external", "mnt[" + runDirKey + "]:" + filepath.Clean(workDir)}
+	if rec.Engine {
+		// The resuming grant's engine made its directory before the
+		// resume. It is never made here, since it must be the engine's.
+		engine := filepath.Join(filepath.Clean(workDir), engineDir)
+		if st, err := os.Lstat(engine); err != nil || !st.IsDir() {
+			return nil, "", fmt.Errorf("proc: checkpoint %s binds a device engine's directory and the resuming grant has none at %s", dir, engine)
+		}
+		args = append(args, "--external", "mnt["+engineKey+"]:"+engine)
+	}
+	return args, rec.MountPoint, nil
 }
 
 // Resume restores a checkpoint into the given cgroup; criu stays as the
@@ -2194,6 +2132,5 @@ var (
 	_ backend.Handoffer        = (*Backend)(nil)
 	_ backend.SelfCheckpointer = (*Backend)(nil)
 	_ backend.DeltaCodec       = (*Backend)(nil)
-	_ backend.DeviceReporter   = (*Backend)(nil)
 	_ backend.WorkspaceHolder  = (*Backend)(nil)
 )

@@ -247,28 +247,34 @@ func TestNewPlatform(t *testing.T) {
 }
 
 // TestBackendFacts checks what the runtime relays from its backend's optional
-// interfaces, and the answer without them.
+// interfaces and from the grant's device engine, and the answer without them.
 func TestBackendFacts(t *testing.T) {
 	sb := newSandboxBackend(core.TierSnapshot)
 	sb.deadlineMixin = deadlineMixin{create: 3 * time.Second, resume: 9 * time.Second}
-	sb.used, sb.capacity, sb.reported = 25, 100, true
-	noDevice := newSandboxBackend(core.TierSnapshot)
-	noDevice.capacity, noDevice.reported = 0, true
+	// engineFacts is what the grant's device engine declared and uses.
+	type engineFacts struct {
+		class          string
+		capacity, used uint64
+	}
 	cases := []struct {
 		name            string
 		be              backend.Backend
+		engine          *engineFacts
 		isolates        bool
 		create, resume  time.Duration
-		offersDevice    bool
+		deviceClass     string
+		deviceCapacity  uint64
 		devicePressure  float64
 		handsOff        bool
 		handoffRouterOn bool
 		workspaces      bool
 	}{
 		{name: "a fork backend", be: newFakeBackend(core.TierWarm)},
-		{name: "a sandbox backend with a device", be: sb, isolates: true, create: 3 * time.Second, resume: 9 * time.Second,
-			offersDevice: true, devicePressure: 25, handsOff: true, handoffRouterOn: true},
-		{name: "a sandbox whose engine reports no capacity", be: noDevice, isolates: true, handsOff: true, handoffRouterOn: true},
+		{name: "a sandbox backend with a device engine", be: sb, engine: &engineFacts{class: "sim", capacity: 100, used: 25},
+			isolates: true, create: 3 * time.Second, resume: 9 * time.Second,
+			deviceClass: "sim", deviceCapacity: 100, devicePressure: 25, handsOff: true, handoffRouterOn: true},
+		{name: "an engine that declares no capacity", be: newSandboxBackend(core.TierSnapshot), engine: &engineFacts{class: "sim"},
+			isolates: true, deviceClass: "sim", handsOff: true, handoffRouterOn: true},
 		{name: "a handoff backend without a router", be: newSandboxBackend(core.TierSnapshot), isolates: true},
 		{name: "a backend with workspaces", be: workspaceBackend{newFakeBackend(core.TierWarm), workspaceMixin{true}}, workspaces: true},
 		{name: "a backend that says it has no workspaces", be: workspaceBackend{newFakeBackend(core.TierWarm), workspaceMixin{false}}},
@@ -286,8 +292,11 @@ func TestBackendFacts(t *testing.T) {
 			if c, rs := r.DefaultDeadlines("g1"); c != tc.create || rs != tc.resume {
 				t.Fatalf("DefaultDeadlines = %s %s, want %s %s", c, rs, tc.create, tc.resume)
 			}
-			if got := r.OffersDevice("g1", "gpu"); got != tc.offersDevice {
-				t.Fatalf("OffersDevice = %v, want %v", got, tc.offersDevice)
+			if tc.engine != nil {
+				injectEngine(t, r, "g1", tc.engine.class, tc.engine.capacity, tc.engine.used)
+			}
+			if class, capacity := r.DeviceOffer("g1"); class != tc.deviceClass || capacity != tc.deviceCapacity {
+				t.Fatalf("DeviceOffer = %q %d, want %q %d", class, capacity, tc.deviceClass, tc.deviceCapacity)
 			}
 			p, err := r.DevicePressure().Pressure("g1")
 			if err != nil || p != tc.devicePressure {
@@ -1068,39 +1077,38 @@ func TestFiberEnds(t *testing.T) {
 	}
 }
 
-// TestEnforceW checks that a backend that reports W or device use itself has
-// its fibers' budgets held by the host, which kills and reports an overrun as
-// the kernel would.
+// TestEnforceW checks that a fiber whose W its backend reports, or whose
+// device slice its grant's engine reports, has its budgets held by the host,
+// which kills and reports an overrun as the kernel would.
 func TestEnforceW(t *testing.T) {
 	g := core.Grant{UID: "g1", TemplateDigest: "sha256:tmpl", WBudgetBytes: 1000, DeviceBudget: core.DeviceBudget{Bytes: 50}}
 	fence := core.Fence{GrantUID: "g1", Epoch: 1, Seq: 1}
-	// deviceOnly reports devices but not W.
-	type deviceOnly struct {
-		*fakeBackend
-		*deviceMixin
-	}
 	cases := []struct {
 		name       string
 		be         func() backend.Backend
 		grant      core.Grant
 		w, device  uint64
 		wantDetail string // "" = no exit
+		// statDevice is the slice Stats shows when the fiber lives on.
+		statDevice uint64
 	}{
 		{name: "W over budget", be: func() backend.Backend { return newSandboxBackend(core.TierSnapshot) }, grant: g, w: 2000, device: 10,
 			wantDetail: "signal:SIGKILL W=2000 over budget 1000"},
 		{name: "device slice over budget", be: func() backend.Backend { return newSandboxBackend(core.TierSnapshot) }, grant: g, w: 100, device: 80,
 			wantDetail: "signal:SIGKILL device 80 over budget 50"},
-		{name: "within both budgets", be: func() backend.Backend { return newSandboxBackend(core.TierSnapshot) }, grant: g, w: 999, device: 50},
-		{name: "a device-only backend leaves W to the kernel", be: func() backend.Backend {
-			return &deviceOnly{newFakeBackend(core.TierWarm), &deviceMixin{}}
-		}, grant: g, w: 5000, device: 80, wantDetail: "signal:SIGKILL device 80 over budget 50"},
+		{name: "within both budgets", be: func() backend.Backend { return newSandboxBackend(core.TierSnapshot) }, grant: g, w: 999, device: 50, statDevice: 50},
+		{name: "a fork backend with an engine leaves W to the kernel", be: func() backend.Backend { return newFakeBackend(core.TierWarm) },
+			grant: g, w: 5000, device: 80, wantDetail: "signal:SIGKILL device 80 over budget 50"},
+		// Without a device budget no slice is the fiber's, whatever the
+		// engine says.
 		{name: "no budgets: never enforced", be: func() backend.Backend { return newSandboxBackend(core.TierSnapshot) },
 			grant: core.Grant{UID: "g1", TemplateDigest: "sha256:tmpl"}, w: 1 << 40, device: 1 << 40},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			be := tc.be()
-			r := newTestRuntime(t, be, nil)
+			r := newTestRuntime(t, be, func(c *Config) { c.Engine = []string{"/bin/true"} })
+			fe := injectEngine(t, r, "g1", "sim", 1<<41, 0)
 			ctx := context.Background()
 			if err := r.PrepareTemplate(ctx, tc.grant); err != nil {
 				t.Fatal(err)
@@ -1112,12 +1120,12 @@ func TestEnforceW(t *testing.T) {
 			if w, ok := be.(interface{ setW(string, uint64) }); ok {
 				w.setW(h.ID, tc.w)
 			}
-			be.(interface{ setDevice(string, uint64) }).setDevice(h.ID, tc.device)
+			fe.setSlice(h.ID, tc.device)
 			if tc.wantDetail == "" {
 				noExit(t, r)
 				st, err := r.Stats(ctx, h.ID)
-				if _, reports := be.(backend.WReporter); err != nil || (reports && st.WUsedBytes != tc.w) || st.DeviceUsedBytes != tc.device {
-					t.Fatalf("Stats = %+v %v, want W %d device %d", st, err, tc.w, tc.device)
+				if _, reports := be.(backend.WReporter); err != nil || (reports && st.WUsedBytes != tc.w) || st.DeviceUsedBytes != tc.statDevice {
+					t.Fatalf("Stats = %+v %v, want W %d device %d", st, err, tc.w, tc.statDevice)
 				}
 				return
 			}
@@ -1133,60 +1141,63 @@ func TestEnforceW(t *testing.T) {
 }
 
 // TestFinishEvictsDevice checks that a fiber with a device budget has its
-// slice evicted however it ends, so the engine never keeps a dead fiber's
-// slice. A park evicts twice, once before its dump and once as the fiber
-// ends. On main only the park evicted, once, so every other row saw none.
+// leaf unmapped and its slice evicted however it ends, so the engine never
+// keeps a dead fiber's slice. Its leaf is mapped at birth. A park unmaps
+// and evicts before its dump and evicts once more as the fiber ends.
 func TestFinishEvictsDevice(t *testing.T) {
 	withDevice := core.Grant{UID: "g1", TemplateDigest: "sha256:tmpl", WBudgetBytes: 64 * mib, DeviceBudget: core.DeviceBudget{Bytes: 50}}
 	noDevice := core.Grant{UID: "g1", TemplateDigest: "sha256:tmpl", WBudgetBytes: 64 * mib}
+	const leaf = "LEAF g1/1/1 /g1/f-1-1"
+	ended := []string{"UNLEAF g1/1/1", "EVICT g1/1/1"}
 	cases := []struct {
 		name  string
 		grant core.Grant
-		end   func(t *testing.T, r *Runtime, sb *sandboxBackend, id string)
-		want  []string
+		end   func(t *testing.T, r *Runtime, sb *sandboxBackend, fe *fakeEngine, id string)
+		birth []string // the lines to the engine at birth
+		want  []string // the lines to the engine as the fiber ends
 	}{
-		{name: "the fiber exits on its own", grant: withDevice, want: []string{"g1/1/1"},
-			end: func(t *testing.T, r *Runtime, sb *sandboxBackend, id string) {
+		{name: "the fiber exits on its own", grant: withDevice, birth: []string{leaf}, want: ended,
+			end: func(t *testing.T, r *Runtime, sb *sandboxBackend, _ *fakeEngine, id string) {
 				sb.die(id, "exit:0")
 				waitExit(t, r)
 			}},
-		{name: "the fiber is killed from outside", grant: withDevice, want: []string{"g1/1/1"},
-			end: func(t *testing.T, r *Runtime, sb *sandboxBackend, id string) {
+		{name: "the fiber is killed from outside", grant: withDevice, birth: []string{leaf}, want: ended,
+			end: func(t *testing.T, r *Runtime, sb *sandboxBackend, _ *fakeEngine, id string) {
 				sb.die(id, "signal:SIGKILL")
 				waitExit(t, r)
 			}},
-		{name: "the host kills it over its device budget", grant: withDevice, want: []string{"g1/1/1"},
-			end: func(t *testing.T, r *Runtime, sb *sandboxBackend, id string) {
-				sb.setDevice(id, 80)
+		{name: "the host kills it over its device budget", grant: withDevice, birth: []string{leaf}, want: ended,
+			end: func(t *testing.T, r *Runtime, _ *sandboxBackend, fe *fakeEngine, id string) {
+				fe.setSlice(id, 80)
 				if e := waitExit(t, r); e.Reason != "oom" {
 					t.Fatalf("exit = %+v, want oom", e)
 				}
 			}},
-		{name: "a release", grant: withDevice, want: []string{"g1/1/1"},
-			end: func(t *testing.T, r *Runtime, _ *sandboxBackend, id string) {
+		{name: "a release", grant: withDevice, birth: []string{leaf}, want: ended,
+			end: func(t *testing.T, r *Runtime, _ *sandboxBackend, _ *fakeEngine, id string) {
 				if err := r.Release(context.Background(), id, false); err != nil {
 					t.Fatalf("Release: %v", err)
 				}
 			}},
-		{name: "a release that discards", grant: withDevice, want: []string{"g1/1/1"},
-			end: func(t *testing.T, r *Runtime, _ *sandboxBackend, id string) {
+		{name: "a release that discards", grant: withDevice, birth: []string{leaf}, want: ended,
+			end: func(t *testing.T, r *Runtime, _ *sandboxBackend, _ *fakeEngine, id string) {
 				if err := r.Release(context.Background(), id, true); err != nil {
 					t.Fatalf("Release: %v", err)
 				}
 			}},
-		{name: "a park", grant: withDevice, want: []string{"g1/1/1", "g1/1/1"},
-			end: func(t *testing.T, r *Runtime, _ *sandboxBackend, id string) {
+		{name: "a park", grant: withDevice, birth: []string{leaf}, want: append(ended, "EVICT g1/1/1"),
+			end: func(t *testing.T, r *Runtime, _ *sandboxBackend, _ *fakeEngine, id string) {
 				if _, err := r.Park(context.Background(), id, false); err != nil {
 					t.Fatalf("Park: %v", err)
 				}
 			}},
-		{name: "the warm instance ends", grant: withDevice, want: []string{"g1/1/1"},
-			end: func(t *testing.T, r *Runtime, sb *sandboxBackend, _ string) {
+		{name: "the warm instance ends", grant: withDevice, birth: []string{leaf}, want: ended,
+			end: func(t *testing.T, r *Runtime, sb *sandboxBackend, _ *fakeEngine, _ string) {
 				sb.warmGone("g1")
 				waitExit(t, r)
 			}},
-		{name: "no device budget, nothing to evict", grant: noDevice,
-			end: func(t *testing.T, r *Runtime, sb *sandboxBackend, id string) {
+		{name: "no device budget, nothing to map or evict", grant: noDevice,
+			end: func(t *testing.T, r *Runtime, sb *sandboxBackend, _ *fakeEngine, id string) {
 				sb.die(id, "exit:0")
 				waitExit(t, r)
 			}},
@@ -1194,7 +1205,8 @@ func TestFinishEvictsDevice(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			sb := newSandboxBackend(core.TierSnapshot)
-			r := newTestRuntime(t, sb, nil)
+			r := newTestRuntime(t, sb, func(c *Config) { c.Engine = []string{"/bin/true"} })
+			fe := injectEngine(t, r, "g1", "sim", 1000, 0)
 			ctx := context.Background()
 			if err := r.PrepareTemplate(ctx, tc.grant); err != nil {
 				t.Fatal(err)
@@ -1203,12 +1215,12 @@ func TestFinishEvictsDevice(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got := sb.evictedIDs(); len(got) != 0 {
-				t.Fatalf("evicted %v while the fiber runs", got)
+			if got := fe.lines(100 * time.Millisecond); strings.Join(got, ",") != strings.Join(tc.birth, ",") {
+				t.Fatalf("the engine got %q while the fiber runs, want %q", got, tc.birth)
 			}
-			tc.end(t, r, sb, h.ID)
-			if got := sb.evictedIDs(); strings.Join(got, ",") != strings.Join(tc.want, ",") {
-				t.Fatalf("evicted %v, want %v", got, tc.want)
+			tc.end(t, r, sb, fe, h.ID)
+			if got := fe.lines(100 * time.Millisecond); strings.Join(got, ",") != strings.Join(tc.want, ",") {
+				t.Fatalf("the engine got %q as the fiber ended, want %q", got, tc.want)
 			}
 		})
 	}
@@ -1976,13 +1988,15 @@ func TestDropTemplate(t *testing.T) {
 }
 
 // TestCloseStopsEnforceW checks that the W executioner, which New starts
-// for a backend whose fibers carry an overhead, report W or hold a
-// device, ends with the runtime. Before the stop channel it slept in a
-// loop for ever, so every closed runtime left a goroutine behind.
+// for a backend whose fibers carry an overhead or report W, or for a home
+// with a device engine, ends with the runtime. Before the stop channel it
+// slept in a loop for ever, so every closed runtime left a goroutine
+// behind.
 func TestCloseStopsEnforceW(t *testing.T) {
 	cases := []struct {
 		name string
 		be   func() backend.Backend
+		mod  func(*Config)
 	}{
 		{name: "a backend with a fixed overhead", be: func() backend.Backend {
 			return &struct {
@@ -1996,17 +2010,13 @@ func TestCloseStopsEnforceW(t *testing.T) {
 				*wReporterMixin
 			}{newFakeBackend(core.TierWarm), &wReporterMixin{}}
 		}},
-		{name: "a backend that reports device use", be: func() backend.Backend {
-			return &struct {
-				*fakeBackend
-				*deviceMixin
-			}{newFakeBackend(core.TierWarm), &deviceMixin{}}
-		}},
+		{name: "a home with a device engine", be: func() backend.Backend { return newFakeBackend(core.TierWarm) },
+			mod: func(c *Config) { c.Engine = []string{"/bin/true"} }},
 		{name: "a backend without an executioner", be: func() backend.Backend { return newFakeBackend(core.TierWarm) }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			r := newTestRuntime(t, tc.be(), nil)
+			r := newTestRuntime(t, tc.be(), tc.mod)
 			r.Close()
 			r.Close() // a second Close is harmless
 			goleak.VerifyNone(t)

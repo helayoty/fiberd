@@ -484,48 +484,89 @@ type wMeterMixin struct{ counter string }
 
 func (m wMeterMixin) WCounter() string { return m.counter }
 
-type deviceMixin struct {
-	dmu            sync.Mutex
-	fiberUse       map[string]uint64
-	used, capacity uint64
-	reported       bool
-	evicted        []string
-	evictErr       error
+// fakeEngine is a device engine a test put in place of a started one.
+// Nothing runs behind it. The test sets slices as the engine's DEVICE
+// lines would, and reads the lines fiberd sent on the other end of fd 3.
+type fakeEngine struct {
+	e    *engine
+	peer *net.UnixConn
 }
 
-func (m *deviceMixin) setDevice(fiberID string, used uint64) {
-	m.dmu.Lock()
-	defer m.dmu.Unlock()
-	if m.fiberUse == nil {
-		m.fiberUse = map[string]uint64{}
+// injectEngine gives r a running engine for grantUID that declared class
+// and capacity and uses used. A warm or a resume that wants an engine
+// finds this one and launches none, so a test that needs wantsEngine
+// sets Config.Engine and injects before PrepareTemplate.
+func injectEngine(t *testing.T, r *Runtime, grantUID, class string, capacity, used uint64) *fakeEngine {
+	t.Helper()
+	fds, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_SEQPACKET|syscall.SOCK_CLOEXEC, 0)
+	if err != nil {
+		t.Fatalf("socketpair: %v", err)
 	}
-	m.fiberUse[fiberID] = used
+	var conns [2]*net.UnixConn
+	for i, fd := range fds {
+		f := os.NewFile(uintptr(fd), "fake-engine")
+		c, err := net.FileConn(f)
+		_ = f.Close()
+		if err != nil {
+			t.Fatalf("fake engine fd 3: %v", err)
+		}
+		conns[i] = c.(*net.UnixConn)
+	}
+	// stop waits on done, and nothing runs to close it.
+	first, done := make(chan struct{}), make(chan struct{})
+	close(first)
+	close(done)
+	// Leaves sit under the runtime's root, so a LEAF names them from it.
+	e := &engine{
+		grantUID: grantUID, dir: r.engineDir(grantUID), sock: r.enginePath(grantUID), cg: r.root.Child(grantUID).Child("engine"),
+		first: first, stopc: make(chan struct{}), done: done,
+		conn: conns[0], up: true, class: class, layout: "fake", capacity: capacity, used: used,
+		slices: map[string]uint64{}, leaves: map[string]string{}, cgRoot: r.root.Path,
+	}
+	r.enginesMu.Lock()
+	if r.engines == nil {
+		r.engines = map[string]*engine{}
+	}
+	r.engines[grantUID] = e
+	// The directory counts as made, so a warm never hands it to the
+	// engine's uid, which a test that is not root cannot.
+	if r.engineDirs == nil {
+		r.engineDirs = map[string]bool{}
+	}
+	r.engineDirs[grantUID] = true
+	r.enginesMu.Unlock()
+	t.Cleanup(func() { _ = conns[1].Close() })
+	return &fakeEngine{e: e, peer: conns[1]}
 }
 
-func (m *deviceMixin) FiberDevice(fiberID string) (uint64, bool) {
-	m.dmu.Lock()
-	defer m.dmu.Unlock()
-	u, ok := m.fiberUse[fiberID]
-	return u, ok
+// setSlice is a DEVICE line for fence, n bytes.
+func (f *fakeEngine) setSlice(fence string, n uint64) {
+	f.e.mu.Lock()
+	defer f.e.mu.Unlock()
+	f.e.slices[fence] = n
 }
 
-func (m *deviceMixin) WarmDevice(string) (uint64, uint64, bool) {
-	m.dmu.Lock()
-	defer m.dmu.Unlock()
-	return m.used, m.capacity, m.reported
+// setDown marks the engine gone, as its exit would, so every line to it
+// fails.
+func (f *fakeEngine) setDown() {
+	f.e.mu.Lock()
+	defer f.e.mu.Unlock()
+	f.e.up = false
 }
 
-func (m *deviceMixin) EvictDevice(fiberID string) error {
-	m.dmu.Lock()
-	defer m.dmu.Unlock()
-	m.evicted = append(m.evicted, fiberID)
-	return m.evictErr
-}
-
-func (m *deviceMixin) evictedIDs() []string {
-	m.dmu.Lock()
-	defer m.dmu.Unlock()
-	return append([]string(nil), m.evicted...)
+// lines is every line fiberd sent since the last call, each without its
+// newline. It stops once none comes for quiet.
+func (f *fakeEngine) lines(quiet time.Duration) []string {
+	var got []string
+	buf := make([]byte, engineLineMax+1)
+	for {
+		_ = f.peer.SetReadDeadline(time.Now().Add(quiet))
+		n, err := f.peer.Read(buf)
+		if err != nil || n == 0 {
+			return got
+		}
+		got = append(got, strings.TrimSuffix(string(buf[:n]), "\n"))
+	}
 }
 
 // poolMixin pools restored sandboxes, as gvisor does. A pooled sandbox
@@ -890,13 +931,12 @@ func newWorkspaceBackend(tier core.Tier) workspaceCodecBackend {
 }
 
 // sandboxBackend is a backend whose fibers are sandboxes. It has a fixed
-// footprint, reports W and devices itself, isolates tenants, and offers
-// handoff and tcp endpoints.
+// footprint, reports W itself, isolates tenants, and offers handoff and
+// tcp endpoints.
 type sandboxBackend struct {
 	*fakeBackend
 	overheadMixin
 	*wReporterMixin
-	*deviceMixin
 	isolatorMixin
 	handoffMixin
 	schemesMixin
@@ -907,7 +947,7 @@ type sandboxBackend struct {
 func newSandboxBackend(tier core.Tier) *sandboxBackend {
 	fb := newFakeBackend(tier)
 	fb.channels = true
-	return &sandboxBackend{fakeBackend: fb, wReporterMixin: &wReporterMixin{}, deviceMixin: &deviceMixin{},
+	return &sandboxBackend{fakeBackend: fb, wReporterMixin: &wReporterMixin{},
 		isolatorMixin: isolatorMixin{true}, handoffMixin: handoffMixin{true},
 		schemesMixin: schemesMixin{[]string{"unix", "tcp"}}}
 }
@@ -1260,7 +1300,6 @@ var (
 	_ backend.SelfCheckpointer = (*codecBackend)(nil)
 	_ backend.Overheader       = (*sandboxBackend)(nil)
 	_ backend.WReporter        = (*sandboxBackend)(nil)
-	_ backend.DeviceReporter   = (*sandboxBackend)(nil)
 	_ backend.Isolator         = (*sandboxBackend)(nil)
 	_ backend.Handoffer        = (*sandboxBackend)(nil)
 	_ backend.EndpointSchemer  = (*sandboxBackend)(nil)

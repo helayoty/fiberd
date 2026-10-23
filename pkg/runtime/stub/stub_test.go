@@ -24,10 +24,10 @@ func TestCapabilities(t *testing.T) {
 			if got := c.rt.Tier(); got != c.tier {
 				t.Fatalf("Tier = %s, want %s", got, c.tier)
 			}
-			// The stub runs no code, so it isolates, offers a device for
-			// every template and is never under pressure.
-			if !c.rt.IsolatesTenants() || !c.rt.OffersDevice("g", "gpu") {
-				t.Fatal("the stub must isolate and offer devices")
+			// The stub runs no code, so it isolates, declares a sim
+			// engine for every grant and is never under pressure.
+			if class, capacity := c.rt.DeviceOffer("g"); !c.rt.IsolatesTenants() || class != "sim" || capacity == 0 {
+				t.Fatalf("the stub must isolate and declare a sim engine, got class %q capacity %d", class, capacity)
 			}
 			if p, err := c.rt.Pressure("g"); p != 0 || err != nil {
 				t.Fatalf("Pressure = %v, %v; want 0, nil", p, err)

@@ -68,10 +68,10 @@ type payload struct {
 	DeviceBytes uint64 `json:"device_bytes"`
 }
 
-// OffersDevice implements core.DeviceCapable: the stub simulates an
-// engine for every template, so device budgets are admitted and enforced
-// on the payload's device_bytes.
-func (r *Runtime) OffersDevice(string, string) bool { return true }
+// DeviceOffer implements core.DeviceCapable: the stub simulates an
+// engine of class sim for every grant, so device budgets of that class
+// are admitted and enforced on the payload's device_bytes.
+func (r *Runtime) DeviceOffer(string) (string, uint64) { return "sim", 1 << 40 }
 
 func (r *Runtime) Clone(_ context.Context, spec core.CloneSpec) (core.FiberHandle, error) {
 	r.mu.Lock()

@@ -55,10 +55,20 @@ PEER_ADDR=${CONFORM_PEER_ADDR:-127.0.0.1:18488}
 PEER_NODE=${CONFORM_PEER_NODE:-conform-peer}
 PEER_STATE=$STATE-peer
 MOB=$STATE-mobility   # the registry's blobs, the shared keys, the artifact
-# The engine-loss hook (C9) reaches the zygote through its cgroup leaf:
-# fork backends only. --device-mb gives the reference zygote a simulated
-# device, which is what C8 budgets.
+# The engine-loss hook (C9) ends the grant's warm instance, its zygote,
+# through its cgroup leaf. Fork backends only.
 ENGINE_HOOK=()
+# The device engine fiberd starts for each grant with a device budget,
+# the reference one with a simulated device, which is what C8 budgets.
+# proc and runc run it with the reference template, and run builds it.
+# A CONFORM_TEMPLATE (the Python ones) reserves no slice, so it runs
+# without one, and C8's grant is refused loudly, which conformance
+# accepts.
+ENGINE=${CONFORM_ENGINE:-$PWD/bin/refengine}
+ENGINE_FLAGS=()
+if [ -z "${CONFORM_TEMPLATE:-}" ] && { [ "$RUNTIME" = proc ] || [ "$RUNTIME" = runc ]; }; then
+  ENGINE_FLAGS=(-engine "$ENGINE --sim-mb 64")
+fi
 # proc and runc fibers share the host kernel, so they serve trusted grants only.
 ISOLATION=UNTRUSTED
 if [ "$RUNTIME" = proc ] || [ "$RUNTIME" = runc ]; then ISOLATION=TRUSTED; fi
@@ -67,10 +77,10 @@ WORKSPACES=()
 if [ "$RUNTIME" = proc ]; then
   WORKSPACES=(-workspaces)
   TIER=${CONFORM_TIER:-FIBER_CHECKPOINT}   # what proc offers when criu check passes
-  RUNTIME_FLAGS=(-runtime proc -template "default=${CONFORM_TEMPLATE:-$PWD/bin/refzygote --heap-mb 32 --device-mb 64}")
+  RUNTIME_FLAGS=(-runtime proc -template "default=${CONFORM_TEMPLATE:-$PWD/bin/refzygote --heap-mb 32}" ${ENGINE_FLAGS[@]+"${ENGINE_FLAGS[@]}"})
   if [ "$MOBILITY" = 1 ]; then
     RUNTIME_FLAGS=(-runtime proc -registry "http://$REG_ADDR/zygotes/ref" -delta-registry "http://$REG_ADDR/deltas"
-      -delta-key "$MOB/delta-key.json" -delta-seal-key "$MOB/delta-seal-key.json")
+      -delta-key "$MOB/delta-key.json" -delta-seal-key "$MOB/delta-seal-key.json" ${ENGINE_FLAGS[@]+"${ENGINE_FLAGS[@]}"})
   fi
   ENGINE_HOOK=(-engine-kill-cmd "$0 engine-kill \$1")
 elif [ "$RUNTIME" = gvisor ]; then
@@ -79,7 +89,7 @@ elif [ "$RUNTIME" = gvisor ]; then
 elif [ "$RUNTIME" = runc ]; then
   WORKSPACES=(-workspaces)
   TIER=${CONFORM_TIER:-FIBER_CHECKPOINT}
-  RUNTIME_FLAGS=(-runtime runc -runc-rootfs "$GVISOR_ROOTFS" -template "default=${CONFORM_TEMPLATE:-/bin/refzygote --heap-mb 32 --device-mb 64}")
+  RUNTIME_FLAGS=(-runtime runc -runc-rootfs "$GVISOR_ROOTFS" -template "default=${CONFORM_TEMPLATE:-/bin/refzygote --heap-mb 32}" ${ENGINE_FLAGS[@]+"${ENGINE_FLAGS[@]}"})
   ENGINE_HOOK=(-engine-kill-cmd "$0 engine-kill \$1")
 elif [ "$RUNTIME" = hyperlight ]; then
   # CONFORM_HL_HELPER selects the helper: the Rust one where KVM exists,
@@ -154,7 +164,7 @@ mobility_setup() {
   for _ in $(seq 1 50); do curl -sf "http://$REG_ADDR/v2/" >/dev/null 2>&1 && break; sleep 0.1; done
   bin/grant-issuer keygen -alg EdDSA -out "$MOB/delta-key.json" >/dev/null
   bin/grant-issuer keygen -alg A256GCM -out "$MOB/delta-seal-key.json" >/dev/null
-  bin/zygotectl build -zygote bin/refzygote -args "--heap-mb 32 --device-mb 64" -seal-to "$MOB/fleet-pub.json" -out "$MOB/art" >/dev/null
+  bin/zygotectl build -zygote bin/refzygote -args "--heap-mb 32" -seal-to "$MOB/fleet-pub.json" -out "$MOB/art" >/dev/null
   bin/zygotectl push -dir "$MOB/art" -ref "http://$REG_ADDR/zygotes/ref:conform"
 }
 
@@ -199,8 +209,8 @@ scope_lost() {
   curl -sf --unix-socket "$STATE/private/admin.sock" -X POST http://x/scope-lost >/dev/null
 }
 
-# engine-kill <grant>: end the grant's zygote (its engine) as a crash
-# would, through the cgroup leaf the runtime keeps it in.
+# engine-kill <grant>: end the grant's warm instance, its zygote, as a
+# crash would (C9), through the cgroup leaf the runtime keeps it in.
 engine_kill() {
   local procs="$CGROOT/$1/zygote/cgroup.procs"
   [ -r "$procs" ] || { echo "engine-kill: no zygote cgroup for $1" >&2; return 1; }
@@ -224,6 +234,7 @@ case "${1:-}" in
     rm -f bin/grant-conform
     go test -c -tags integration -o bin/grant-conform ./tests/e2e/conform
     if [ "$RUNTIME" = proc ] && [ -z "${CONFORM_TEMPLATE:-}" ]; then make -s zygote; fi
+    if [ ${#ENGINE_FLAGS[@]} -gt 0 ] && [ -z "${CONFORM_ENGINE:-}" ]; then make -s engine; fi
     if [ "$RUNTIME" = gvisor ] || [ "$RUNTIME" = runc ]; then "$ROOTFS_SH" "$GVISOR_ROOTFS" >/dev/null; fi
     if [ "$RUNTIME" = hyperlight ] && [ -z "${CONFORM_HL_HELPER:-}" ]; then
       go build -o bin/fakehelper ./hack/hyperlight/fakehelper; echo "fake guest" > bin/fake-guest.bin
