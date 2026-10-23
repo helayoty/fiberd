@@ -66,4 +66,4 @@ The child's install is one small filter and takes no node-wide lock, so births d
 - On proc the program does not filter the mount calls, since each child mounts its own `/proc` after the clone. A proc fiber has no capability to mount.
 - Capabilities belong to a thread. On runc, an engine thread the template starts before `fz_serve` keeps the container's set. No fiber inherits it, since every fiber forks from the serving thread.
 - The address check refuses the zygote's ordinary `clone3` and, on runc, `move_mount` calls, not code built to jump to the library's instructions. Such code is the template's own, behind the TRUSTED mark.
-- gVisor and Hyperlight fibers get no filter. Their boundary is the Sentry and the hypervisor.
+- gVisor, Hyperlight and cloudhv fibers get no filter. Their boundary is the Sentry and the hypervisor. fiberd passes no `--seccomp` flag, so each cloudhv VMM runs under Cloud Hypervisor's own default filters.
