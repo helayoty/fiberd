@@ -263,7 +263,9 @@ gpu_home_in() {
     devices=(-devices "$dev")
   fi
   rm -rf "$GPU_STATE" "$GPU_DIR/home"
-  mkdir -p "$GPU_STATE" "$GPU_DIR/home"
+  # The engine runs as its own uid and must reach <state>/run/<grant>/engine.
+  # A state dir fiberd creates itself is 0700 and would block it, so make it here.
+  mkdir -p "$GPU_STATE" "$GPU_STATE/home" "$GPU_DIR/home"
   go build -o bin/ ./cmd/fiberd ./cmd/grant-issuer ./hack/fibctl
   make -s zygote engine
   bin/grant-issuer keygen -alg EdDSA -out "$GPU_STATE/issuer-key.json" >/dev/null
@@ -278,9 +280,11 @@ gpu_home_in() {
 
 # gpu_mint is the row's grant, with a device budget of the engine's
 # class, minted in the home's container. The uid is fixed, as mint's is.
+# Its W budget is 64Mi, since a resume restores the whole image (about
+# 33 MiB) into the fiber's cgroup, and 32Mi got CRIU OOM-killed.
 gpu_mint() {
   gpu_exec bin/grant-issuer mint -key "$GPU_STATE/issuer-key.json" -issuer "http://$GPU_ISSUER" \
-    -aud "$GPU_NODE" -uid "$GPU_GRANT" -tenant kata -template sha256:conform -max 2 -warm 1 -w-budget 32Mi \
+    -aud "$GPU_NODE" -uid "$GPU_GRANT" -tenant kata -template sha256:conform -max 2 -warm 1 -w-budget 64Mi \
     -device-budget 16Mi -device-class "$GPU_CLASS" -min-tier FIBER_CHECKPOINT -isolation TRUSTED -ttl 2h
 }
 
