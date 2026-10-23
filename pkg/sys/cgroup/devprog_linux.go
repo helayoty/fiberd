@@ -247,7 +247,8 @@ func nvidiaMajorsOf(text string) []uint32 {
 		if len(fields) != 2 || !strings.HasPrefix(fields[1], "nvidia") {
 			continue
 		}
-		n, err := strconv.ParseUint(fields[0], 10, 32)
+		// A char major is 12 bits (MINORBITS 20 of a 32-bit dev_t).
+		n, err := strconv.ParseUint(fields[0], 10, 12)
 		if err != nil || n == nvidiaMajor {
 			continue
 		}
