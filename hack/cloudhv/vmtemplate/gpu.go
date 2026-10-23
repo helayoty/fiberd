@@ -33,7 +33,8 @@ func engineSend(line string) string {
 	}
 	c, err := dialEngine()
 	if err != nil {
-		return "err engine unreachable"
+		// The reason goes in the reply so a failed C14 shows it.
+		return "err engine unreachable " + oneLine(err.Error(), 160)
 	}
 	defer func() { _ = c.Close() }()
 	_ = c.SetDeadline(time.Now().Add(5 * time.Second))
@@ -46,6 +47,15 @@ func engineSend(line string) string {
 		reply = reply[:i]
 	}
 	return reply
+}
+
+// oneLine is s with its line breaks as spaces, cut to at most n bytes.
+func oneLine(s string, n int) string {
+	s = strings.NewReplacer("\r", " ", "\n", " ").Replace(s)
+	if len(s) > n {
+		s = s[:n]
+	}
+	return s
 }
 
 // engineHash is the hash in an engine reply "ok <hash>", 16 lowercase
