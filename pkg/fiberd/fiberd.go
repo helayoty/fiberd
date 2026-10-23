@@ -267,7 +267,7 @@ func (c *Config) Bind(fs *flag.FlagSet) {
 	fs.StringVar(&c.Runtime.Cloudhv.Kernel, "cloudhv-kernel", "", "cloudhv: the guest vmlinux")
 	fs.StringVar(&c.Runtime.Cloudhv.Rootfs, "cloudhv-rootfs", "", "cloudhv: the guest's read-only rootfs image (a directory for the fake VMM); -template commands are paths inside it")
 	fs.Uint64Var(&c.Runtime.Cloudhv.MemoryMiB, "cloudhv-memory-mib", 0, "cloudhv: each guest's memory in MiB (0 = 256)")
-	fs.StringVar(&c.Runtime.Cloudhv.RestoreMode, "cloudhv-restore-mode", "", "cloudhv: how a Clone restores the warm guest's memory, copy (default) or ondemand")
+	fs.StringVar(&c.Runtime.Cloudhv.RestoreMode, "cloudhv-restore-mode", "", "cloudhv: how a Clone restores the warm guest's memory, copyonwrite (default), copy or ondemand")
 
 	fs.StringVar(&c.Endpoint.Family, "endpoint-family", "unix", "address family fibers are served on: unix (sockets under <state>/run), inet4 or inet6 (tcp on -endpoint-host, a port per fiber); declared, never discovered")
 	fs.StringVar(&c.Endpoint.Host, "endpoint-host", "", "inet4/inet6: the one address the grant's fibers share and callers dial (default: what the home knows, else the loopback of the family)")

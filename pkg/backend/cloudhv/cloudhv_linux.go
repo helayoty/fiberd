@@ -13,9 +13,10 @@
 //     read-only rootfs and vsock, vm.boot, wait for the guest init's
 //     ready line, vm.pause and vm.snapshot, end the VMM. The snapshot is
 //     the warm instance. No process stays behind.
-//   - Clone: start a VMM in the fiber's leaf restoring the warm snapshot,
-//     vm.resume, send INCARNATE on the control port and wait for served.
-//     The fiber's unix endpoint is spliced to guest port 1024.
+//   - Clone: start a VMM in the fiber's leaf restoring the warm snapshot
+//     copy-on-write, vm.resume, send INCARNATE on the control port and
+//     wait for served. The fiber's unix endpoint is spliced to guest port
+//     1024.
 //   - Park: the guest stops serving, vm.pause, vm.snapshot, the images
 //     move to the park directory, and the VMM ends unless the park is Sync.
 //   - Resume: as Clone, restoring the park instead.
@@ -25,12 +26,15 @@
 // /dev/kvm alone (jail_linux.go), so every snapshot names the same paths
 // and two restores of one snapshot never meet. A VMM sits in its fiber's
 // leaf, so W is the leaf's memory.current less what the restore cost,
-// which Fiber.Footprint reports. Tier FIBER_SNAPSHOT. No delta codec, no
-// pool, no workspaces, and no handoff grants, since a passed TCP socket
-// cannot cross into a VM.
+// which Fiber.Footprint reports. A clone shares the warm guest's pages
+// until it writes them, so W counts the pages the fiber writes, as it
+// does for proc. Tier FIBER_SNAPSHOT. No delta codec, no pool, no
+// workspaces, and no handoff grants, since a passed TCP socket cannot
+// cross into a VM.
 package cloudhv
 
 import (
+	"bufio"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -57,8 +61,9 @@ const (
 	defaultVCPUs     = 1
 
 	// The deadlines a clone or resume without one of its own gets. A
-	// restore copies the whole guest in, then the guest init answers
-	// INCARNATE. Unmeasured until S4 logs it, so they are generous.
+	// clone maps the warm guest copy-on-write and a resume copies its
+	// whole park in, then the guest init answers INCARNATE. Unmeasured
+	// until S4 logs it, so they are generous.
 	createDeadline = 5 * time.Second  // spike S4
 	resumeDeadline = 10 * time.Second // spike S4
 
@@ -151,8 +156,8 @@ func (b *Backend) probe() (facts, error) {
 		return facts{}, errors.New("no guest kernel or rootfs (-cloudhv-kernel, -cloudhv-rootfs; hack/cloudhv/build.sh builds them)")
 	case o.StateDir == "":
 		return facts{}, errors.New("no state directory")
-	case o.RestoreMode != "" && o.RestoreMode != "copy" && o.RestoreMode != "ondemand":
-		return facts{}, fmt.Errorf("restore mode %q is neither copy nor ondemand", o.RestoreMode)
+	case o.RestoreMode != "" && o.RestoreMode != "copy" && o.RestoreMode != "ondemand" && o.RestoreMode != "copyonwrite":
+		return facts{}, fmt.Errorf("restore mode %q is not copyonwrite, copy or ondemand", o.RestoreMode)
 	}
 	if err := checkIDs(o.UsernsPool, o.EngineUID); err != nil {
 		return facts{}, err
@@ -201,16 +206,17 @@ func (b *Backend) IsolatesTenants() bool { return true }
 // this backend and names it.
 func (b *Backend) Handoff() bool { return false }
 
-// DefaultDeadlines are fixed. Every restore copies the same guest size.
+// DefaultDeadlines are fixed. Every guest has the same size, so no warm
+// instance needs floors of its own.
 func (b *Backend) DefaultDeadlines(string) (time.Duration, time.Duration) {
 	return createDeadline, resumeDeadline
 }
 
-// FiberOverheadBytes is the whole guest plus the VMM, since a restore
-// that copies the snapshot pays for every page of it (spike S1). The
-// host adds it to each leaf's memory.max. W itself is measured from the
-// footprint each Clone reports.
-func (b *Backend) FiberOverheadBytes() uint64 { return b.guestBytes() + vmmOverhead }
+// FiberOverheadBytes is the VMM, what a fiber costs besides the guest
+// pages it shares with the warm snapshot. The host only checks that the
+// backend is an Overheader and takes the numbers it sizes leaves by from
+// Warm. W itself is measured from the footprint each Clone reports.
+func (b *Backend) FiberOverheadBytes() uint64 { return vmmOverhead }
 
 func (b *Backend) guestBytes() uint64 { return b.opt.MemoryMiB << 20 }
 
@@ -259,7 +265,7 @@ type facts struct {
 }
 
 // readFacts takes the VMM's release from the first line `--version`
-// prints ("cloud-hypervisor v53.0"), hashes the kernel and the rootfs,
+// prints ("cloud-hypervisor v54.0"), hashes the kernel and the rootfs,
 // and reads the CPU from /proc/cpuinfo.
 func readFacts(version, kernel, rootfs string) (facts, error) {
 	words := strings.Fields(strings.SplitN(version, "\n", 2)[0])
@@ -420,9 +426,11 @@ func (b *Backend) Warm(ctx context.Context, sp backend.WarmSpec) (backend.Warm, 
 	if old != nil && old.dir != dir {
 		_ = os.RemoveAll(old.dir)
 	}
-	// One fiber costs the whole guest, which its restore copies in, and
-	// the VMM (spike S1).
-	return backend.Warm{ID: w.id, PID: 0, Bytes: b.guestBytes(), TotalBytes: b.guestBytes() + vmmOverhead}, nil
+	// A clone shares the guest's pages copy-on-write, so its fixed
+	// footprint is the VMM. A resume copies its park in whole, so the
+	// leaf's ceiling, which the host sizes from TotalBytes, keeps room
+	// for the guest.
+	return backend.Warm{ID: w.id, PID: 0, Bytes: vmmOverhead, TotalBytes: b.guestBytes() + vmmOverhead}, nil
 }
 
 // logPath is the grant's log, where every VMM of the grant writes its
@@ -488,14 +496,22 @@ func (b *Backend) Clone(ctx context.Context, warmID string, sp backend.FiberSpec
 	if err != nil {
 		return backend.Fiber{}, err
 	}
-	// spike S1: copy is the default. v53.0 offers only copy and ondemand.
-	// Copy-on-write needs v54.0, and its pin would move together in
-	// hack/cloudhv/build.sh and hack/cloudhv/spike/env.sh.
-	mode := b.opt.RestoreMode
-	if mode == "" {
-		mode = "copy"
+	return b.birth(ctx, w.id, w.dir, cloneMode(b.opt.RestoreMode), w.engine, logPath(w.workDir), sp.Fence, sp.Endpoint, sp.CgroupFD, sp.Deadline, createDeadline, line)
+}
+
+// cloneMode is the memory_restore_mode a Clone restores with, opt unless
+// it is "". Copy-on-write is the default. It maps the warm snapshot's
+// memory-ranges privately over guest RAM, so a clone shares the warm
+// guest's clean pages in the page cache and owns only the pages it
+// writes, and W counts those. The file must stay unchanged while clones
+// live, and it does. takeSnapshot renames a re-warm's files in as fresh
+// inodes and Unwarm unlinks them, so a live clone keeps the inode it
+// mapped.
+func cloneMode(opt string) string {
+	if opt == "" {
+		return "copyonwrite"
 	}
-	return b.birth(ctx, w.id, w.dir, mode, w.engine, logPath(w.workDir), sp.Fence, sp.Endpoint, sp.CgroupFD, sp.Deadline, createDeadline, line)
+	return opt
 }
 
 // Resume restores a park in the new leaf and hands the guest its new
@@ -577,11 +593,7 @@ func (b *Backend) birth(ctx context.Context, grantUID, from, mode, engine, logp,
 	}
 	ctx, cancel := context.WithTimeout(ctx, deadline)
 	defer cancel()
-	src := "source_url=file://" + vmFrom
-	if mode != "copy" {
-		src += ",memory_restore_mode=" + mode
-	}
-	v, err := b.launch(ctx, grantUID, from, engine, logp, cgroupFD, []string{"--restore", src})
+	v, err := b.launch(ctx, grantUID, from, engine, logp, cgroupFD, []string{"--restore", restoreArg(mode)})
 	if err != nil {
 		return backend.Fiber{}, fmt.Errorf("cloudhv: %s: %w", fence, err)
 	}
@@ -592,12 +604,16 @@ func (b *Backend) birth(ctx context.Context, grantUID, from, mode, engine, logp,
 	if err := v.waitState(ctx, "Paused"); err != nil {
 		return fail(err)
 	}
+	if mode == "copyonwrite" {
+		checkCopyOnWrite(v, from, logp)
+	}
 	if err := v.api.put(ctx, "vm.resume", nil); err != nil {
 		return fail(err)
 	}
-	// What the restore cost the leaf, before the fiber dirties anything:
-	// the host takes W as the leaf's count less this.
-	footprint := leafBytes(cgroupFD)
+	// What the restore cost the leaf, before the fiber dirties anything.
+	// The host takes W as the leaf's count less this. With copy-on-write
+	// it holds the VMM and the few pages the restore touched.
+	footprint := restoreFootprint(leafBytes(cgroupFD), b.guestBytes()+vmmOverhead, mode)
 	if err := v.guest(ctx, line, "served", stateReady, stateParked); err != nil {
 		return fail(err)
 	}
@@ -616,6 +632,84 @@ func (b *Backend) birth(ctx context.Context, grantUID, from, mode, engine, logp,
 	b.mu.Unlock()
 	go b.watch(f)
 	return backend.Fiber{ID: fence, PID: v.proc.Pid(), Footprint: footprint}, nil
+}
+
+// restoreFootprint is the footprint a restore reports, the leaf's count
+// read right after it. A copy holds the whole guest, so when the count
+// cannot be read, whole stands in for it, since the host would otherwise
+// fall back to Warm's Bytes, the VMM alone, and take the copied guest
+// for working set. Any other mode starts small, and 0 leaves the host to
+// that fallback.
+func restoreFootprint(read, whole uint64, mode string) uint64 {
+	if read == 0 && mode == "copy" {
+		return whole
+	}
+	return read
+}
+
+// restoreArg is the --restore value for a restore of vmFrom in mode.
+// Copy is the VMM's default, so it is left unnamed.
+func restoreArg(mode string) string {
+	src := "source_url=file://" + vmFrom
+	if mode != "copy" {
+		src += ",memory_restore_mode=" + mode
+	}
+	return src
+}
+
+// checkCopyOnWrite adds a line to the grant's log when a copy-on-write
+// restore fell back to copy. No API says which mode a VMM used, so the
+// VMM's maps tell. A copy-on-write guest maps the snapshot's
+// memory-ranges, and a copied one does not. An empty memory-ranges is
+// the fake's, which holds no guest, so it is skipped. Nothing here
+// fails the clone.
+func checkCopyOnWrite(v *vm, from, logp string) {
+	if st, err := os.Stat(filepath.Join(from, "memory-ranges")); err != nil || st.Size() == 0 {
+		return
+	}
+	mapped, err := pidMapsFile(v.proc.Pid(), "memory-ranges")
+	if err != nil || mapped {
+		return
+	}
+	out, err := os.OpenFile(logp, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		return
+	}
+	_, _ = fmt.Fprintf(out, "cloudhv: VMM %s restored %s by copy, not copy-on-write, so W counts the whole guest\n", v.id, from)
+	_ = out.Close()
+}
+
+// pidMapsFile reports whether the process maps a file of the given base
+// name.
+func pidMapsFile(pid int, name string) (bool, error) {
+	f, err := os.Open("/proc/" + strconv.Itoa(pid) + "/maps")
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = f.Close() }()
+	return mapsFile(f, name), nil
+}
+
+// mapsFile reports whether a /proc/<pid>/maps listing maps a file whose
+// last path element is name. A line is address, perms, offset, dev,
+// inode and pathname, and the pathname is the rest of the line, spaces
+// and all. A file since unlinked, marked " (deleted)", still counts. The
+// base name alone is compared, since the kernel names a file in the
+// VMM's mount namespace by a path fiberd does not choose, and a VMM that
+// copied its snapshot in maps no memory-ranges at all.
+func mapsFile(r io.Reader, name string) bool {
+	sc := bufio.NewScanner(r)
+	for sc.Scan() {
+		rest := sc.Text()
+		for range 5 {
+			_, rest, _ = strings.Cut(strings.TrimLeft(rest, " "), " ")
+		}
+		p := strings.TrimSuffix(strings.TrimSpace(rest), " (deleted)")
+		if strings.HasPrefix(p, "/") && filepath.Base(p) == name {
+			return true
+		}
+	}
+	return false
 }
 
 // watch reports the fiber's end once its VMM has ended, however it did.

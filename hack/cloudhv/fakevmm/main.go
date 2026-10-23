@@ -47,7 +47,7 @@ import (
 // version is what --version and vmm.ping report. The release is the one
 // the backend's spikes pin, marked as the fake's, so parity never mixes
 // a fake snapshot with a real one.
-const version = "v53.0-fakevmm"
+const version = "v54.0-fakevmm"
 
 // The guest's ports, as the guest init has them, and the host port of
 // the engine, the one host port the fake forwards.
@@ -67,7 +67,7 @@ const readyTimeout = 2 * time.Minute
 
 func main() {
 	apiSocket := flag.String("api-socket", "", "path=<socket> (or the bare path) of the API socket")
-	restore := flag.String("restore", "", "source_url=file://<dir>[,memory_restore_mode=copy|ondemand][,resume=false]")
+	restore := flag.String("restore", "", "source_url=file://<dir>[,memory_restore_mode=copy|ondemand|copyonwrite][,prefault=on][,resume=false]")
 	logFile := flag.String("log-file", "", "where the fake logs, besides stderr")
 	_ = flag.Bool("v", false, "verbose (accepted, ignored)")
 	_ = flag.String("seccomp", "true", "accepted, ignored: the fake has no guest to filter for")
@@ -331,38 +331,50 @@ func (m *vmm) snapshot(body []byte) (any, error) {
 	return nil, nil
 }
 
-// restoreFrom takes --restore's option string and leaves the VM paused
-// with the template ready again in the snapshot's phase. A guest that
-// was serving when snapshotted comes back parked, since the fake carries
-// no connection or memory over. It refuses the options v53.0 refuses, so
-// a run over the fake catches a mode the pinned VMM would not take.
-func (m *vmm) restoreFrom(opts string) error {
-	var dir string
-	onDemand, prefault := false, false
+// parseRestore reads --restore's option string and returns the snapshot
+// directory. It refuses the options v54.0 refuses, so a run over the fake
+// catches a mode the pinned VMM would not take. The mode is copy when
+// none is named.
+func parseRestore(opts string) (dir string, err error) {
+	mode, prefault := "copy", false
 	for _, kv := range strings.Split(opts, ",") {
 		k, v, _ := strings.Cut(kv, "=")
 		switch k {
 		case "source_url":
 			d, ok := strings.CutPrefix(v, "file://")
 			if !ok {
-				return &apiError{http.StatusBadRequest, "source_url is not file://"}
+				return "", &apiError{http.StatusBadRequest, "source_url is not file://"}
 			}
 			dir = d
 		case "memory_restore_mode":
-			// v53.0 takes copy and ondemand only. copyonwrite is v54.0's.
-			if v != "copy" && v != "ondemand" {
-				return &apiError{http.StatusBadRequest, "invalid memory_restore_mode " + strconv.Quote(v)}
+			// The modes v54.0 takes.
+			switch v {
+			case "copy", "ondemand", "copyonwrite":
+			default:
+				return "", &apiError{http.StatusBadRequest, "invalid memory_restore_mode " + strconv.Quote(v)}
 			}
-			onDemand = v == "ondemand"
+			mode = v
 		case "prefault":
 			prefault = v == "on" || v == "true"
 		case "resume":
 		default:
-			return &apiError{http.StatusBadRequest, "unknown restore option " + strconv.Quote(k)}
+			return "", &apiError{http.StatusBadRequest, "unknown restore option " + strconv.Quote(k)}
 		}
 	}
-	if onDemand && prefault {
-		return &apiError{http.StatusBadRequest, "'prefault' cannot be combined with 'memory_restore_mode=ondemand'"}
+	if prefault && mode != "copy" {
+		return "", &apiError{http.StatusBadRequest, "'prefault' requires 'memory_restore_mode=copy'"}
+	}
+	return dir, nil
+}
+
+// restoreFrom takes --restore's option string and leaves the VM paused
+// with the template ready again in the snapshot's phase. A guest that
+// was serving when snapshotted comes back parked, since the fake carries
+// no connection or memory over.
+func (m *vmm) restoreFrom(opts string) error {
+	dir, err := parseRestore(opts)
+	if err != nil {
+		return err
 	}
 	raw, err := os.ReadFile(filepath.Join(dir, "config.json"))
 	if err != nil {

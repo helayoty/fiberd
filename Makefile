@@ -145,8 +145,10 @@ conform-hyperlight: ## C1-C10 against the hyperlight backend with the real helpe
 	  CONFORM_STATE=$(CONFORM_DIR)/conform-state-hyperlight-kvm hack/conform/stub.sh run
 
 ## The cloudhv backend (pkg/backend/cloudhv): a Cloud Hypervisor micro-VM
-## per fiber. The fake VMM runs it without KVM. The W budget is 8 MiB
-## there, since the fake's leaf holds two Go runtimes besides the fiber.
+## per fiber. The fake VMM runs it without KVM. The W budget is 8 MiB on
+## both. The fake's leaf holds two Go runtimes besides the fiber. A VM's
+## guest kernel and Go template write pages of their own at birth, which
+## a copy-on-write clone counts as W (not yet measured on KVM).
 .PHONY: cloudhv-images conform-cloudhv-fake conform-cloudhv
 
 cloudhv-images: ## the pinned cloud-hypervisor, the guest kernel and the rootfs into bin/cloudhv, inside the dev container
@@ -157,7 +159,7 @@ conform-cloudhv-fake: ## C1-C10 against the cloudhv backend over the fake VMM (n
 	  CONFORM_STATE=$(CONFORM_DIR)/conform-state-cloudhv hack/conform/stub.sh run
 
 conform-cloudhv: ## C1-C10 against the cloudhv backend with the real VMM, and C11 and C14 over a peer home (needs /dev/kvm on the host; make cloudhv-images first)
-	FIBERD_DEV_DOCKER_ARGS="--device /dev/kvm" hack/dev/run.sh env CONFORM_RUNTIME=cloudhv CONFORM_SIGNED=1 CONFORM_GPU=1 \
+	FIBERD_DEV_DOCKER_ARGS="--device /dev/kvm" hack/dev/run.sh env CONFORM_RUNTIME=cloudhv CONFORM_SIGNED=1 CONFORM_GPU=1 CONFORM_W_BUDGET=8388608 \
 	  CONFORM_CH_DIR=/src/bin/cloudhv CONFORM_STATE=$(CONFORM_DIR)/conform-state-cloudhv-kvm hack/conform/stub.sh run
 
 ## The Kubernetes example (examples/kubernetes, its own module): the issuer
