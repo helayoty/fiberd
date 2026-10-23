@@ -4,15 +4,17 @@
 #
 # The sha256 values are the digests GitHub records for each release asset
 # (api.github.com/repos/<repo>/releases/tags/<tag>, the "digest" field),
-# read on 2026-10-22. A download that does not match is refused.
+# read on 2026-10-22, and v54.0's on 2026-10-23. A download that does not
+# match is refused.
 
-# Cloud Hypervisor v53.0, released 2026-07-12. The static x86_64 binary.
-CH_VERSION=v53.0
+# Cloud Hypervisor v54.0, released 2026-10-14. The static x86_64 binary.
+CH_VERSION=v54.0
 CH_URL=https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/$CH_VERSION/cloud-hypervisor-static
-CH_SHA256=${CH_SHA256:-448af3d4e59b22c2987f7df94c213ad40fb53a10d437e42b5ee6c4fce7c29ecc}
+CH_SHA256=${CH_SHA256:-4f4f98a3d661a40f3e5272627cc895a1b2e525f2f6bedf5f895f9cd21ba5c65b}
 
 # The guest kernel v53.0's own integration tests download
-# (scripts/test-util.sh, download_linux). Built from ch_defconfig, which has
+# (scripts/test-util.sh, download_linux), kept on v54.0, whose tests moved
+# to ch-release-v7.2.8-20261009. Built from ch_defconfig, which has
 # virtio-vsock, virtio-blk, virtio-console and initramfs support built in.
 KERNEL_TAG=ch-release-v6.16.9-20260508
 KERNEL_URL=https://github.com/cloud-hypervisor/linux/releases/download/$KERNEL_TAG/vmlinux-x86_64
