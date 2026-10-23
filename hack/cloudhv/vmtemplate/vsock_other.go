@@ -11,7 +11,7 @@ import (
 
 // dialEngine reaches the engine only under the fake VMM off Linux, since
 // AF_VSOCK is Linux's.
-func dialEngine() (net.Conn, error) {
+func dialEngine() (engineConn, error) {
 	port, err := hostPort()
 	if err != nil {
 		return nil, err
