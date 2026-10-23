@@ -25,7 +25,7 @@ allow="$allow __addtf3 __multf3 __subtf3 __unordtf2 __udivti3"
 # memmove is copy_within, which lock_sys uses on mountinfo.
 allow="$allow memmove"
 # The child's path (child.rs, mounts.rs) and the sys seam.
-allow="$allow syscall prctl openat close _exit mount umount2 mkdir open"
+allow="$allow syscall prctl openat close _exit mount umount2 statfs mkdir open"
 allow="$allow stat chdir dup2 fcntl socketpair recvmsg setsid signal sigemptyset sigprocmask strcmp"
 # The fiber side and the gVisor side (fiber.rs).
 allow="$allow poll send socket connect usleep read"
