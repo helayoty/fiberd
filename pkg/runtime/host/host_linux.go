@@ -176,6 +176,7 @@ type fiber struct {
 	port     int    // tcp endpoints: the port held while running or parked
 	sock     string // the unix socket path the backend serves under the run directory, "" for none
 	birth    string // the fence the fiber was born under, which it holds in memory across resumes
+	session  string // the session it was cloned or resumed under, "" when anonymous
 	// generation counts the fiber's lineage: 1 when born from the warm
 	// instance, the parked generation plus one when resumed. A park
 	// writes it into the manifest, so the count survives a move.
@@ -1629,7 +1630,7 @@ func (r *Runtime) start(ctx context.Context, z *warm, spec core.CloneSpec, p *po
 	}
 	// A fiber born from the warm instance, forked or restored from its
 	// image, starts its lineage at generation 1.
-	f := &fiber{id: spec.Fence.String(), grantUID: spec.Grant.UID, cg: leaf, endpoint: url, port: port, sock: sock, birth: spec.Fence.String(),
+	f := &fiber{id: spec.Fence.String(), grantUID: spec.Grant.UID, session: spec.Session, cg: leaf, endpoint: url, port: port, sock: sock, birth: spec.Fence.String(),
 		generation: 1, budget: spec.Grant.WBudgetBytes, devMax: spec.Grant.DeviceBudget.Bytes,
 		quota: deltaQuota(spec.Grant), handoff: handoff, relay: rl, ws: ws, done: make(chan struct{}), pooled: p != nil}
 	// Registered before the backend answers so an exit that races the
@@ -1955,6 +1956,7 @@ func (r *Runtime) Park(ctx context.Context, fiberID string, sync bool) (string, 
 	}
 	if savedSlice {
 		log.Printf("host: parked device slice of %s: delta=%d slice=%d bytes, saved in %s", fiberID, m.WBytes, sliceBytes, saveTime)
+		devEvents.parked(f.grantUID, f.session, fiberID, m.WBytes, sliceBytes, saveTime)
 	}
 	err = writeJSON(filepath.Join(dir, "manifest.json"), m)
 	parentsDone()
@@ -2244,7 +2246,9 @@ func (r *Runtime) resume(ctx context.Context, spec core.CloneSpec) (core.FiberHa
 			unwind()
 			return core.FiberHandle{}, fmt.Errorf("host: resume %s: restore its device slice: %w", dir, err)
 		}
-		log.Printf("host: restored device slice of %s: %d bytes in %s", spec.Fence, n, time.Since(t0))
+		took := time.Since(t0)
+		log.Printf("host: restored device slice of %s: %d bytes in %s", spec.Fence, n, took)
+		devEvents.restored(spec.Grant.UID, spec.Session, spec.Fence.String(), n, took)
 	}
 	// The engine learns the leaf's fence before the restored fiber runs.
 	// The slice is already reserved under the fence by the RESTORE above,
@@ -2258,7 +2262,7 @@ func (r *Runtime) resume(ctx context.Context, spec core.CloneSpec) (core.FiberHa
 	// lineage, whichever home parked it. The backend tells it so on its
 	// channel, and a handoff fiber gets a fresh channel from the backend
 	// in place of its parked one, with that record first on it.
-	f := &fiber{id: spec.Fence.String(), grantUID: spec.Grant.UID, cg: leaf, port: port, sock: sock, birth: birth.String(),
+	f := &fiber{id: spec.Fence.String(), grantUID: spec.Grant.UID, session: spec.Session, cg: leaf, port: port, sock: sock, birth: birth.String(),
 		generation: m.Generation + 1, endpoint: served, budget: spec.Grant.WBudgetBytes, devMax: spec.Grant.DeviceBudget.Bytes,
 		quota: deltaQuota(spec.Grant), handoff: m.Handoff, relay: rl, ws: ws, done: make(chan struct{})}
 	r.mu.Lock()

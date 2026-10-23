@@ -11,6 +11,7 @@ package fiberd
 import (
 	"context"
 	"crypto/ed25519"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -22,6 +23,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -748,6 +750,11 @@ func RunContext(ctx context.Context, c *Config, newHome HomeFactory) error {
 	healthz := rpc.HealthFunc(ep.Current, h.Health(), rt.Tier(), auditHealth)
 	admin := http.NewServeMux()
 	admin.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { rpc.WriteHealth(w, healthz()) })
+	// The device report, when the runtime starts engines. Without it the
+	// mux answers 404.
+	if dr, ok := rt.(core.DeviceReporter); ok {
+		admin.HandleFunc("GET /device", func(w http.ResponseWriter, req *http.Request) { serveDevice(w, req, dr) })
+	}
 	c.hooks.register(admin, h, ag, healthz)
 	adminSock := c.AdminSocket()
 	_ = os.Remove(adminSock)
@@ -833,4 +840,21 @@ func RunContext(ctx context.Context, c *Config, newHome HomeFactory) error {
 		return fmt.Errorf("serve: %w", err)
 	}
 	return nil
+}
+
+// serveDevice answers GET /device on the admin socket with the runtime's
+// engines and its device events after ?since=, a decimal seq. A since
+// that is not one is a 400.
+func serveDevice(w http.ResponseWriter, req *http.Request, dr core.DeviceReporter) {
+	var since uint64
+	if q := req.URL.Query(); q.Has("since") {
+		n, err := strconv.ParseUint(q.Get("since"), 10, 64)
+		if err != nil {
+			http.Error(w, "since: want a decimal event seq", http.StatusBadRequest)
+			return
+		}
+		since = n
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(dr.DeviceReport(since))
 }
