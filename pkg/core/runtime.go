@@ -245,7 +245,8 @@ type RemoteDelta struct {
 // FindDelta may return a *RemoteMiss as its error when the session exists
 // but this home must not take it (the state was made on an incompatible
 // platform); fiberd turns that into a miss naming the preferred home.
-// Any other error means the store is unreachable.
+// One wrapping ErrDeviceMismatch is a FailedPrecondition instead. Any
+// other error means the store is unreachable.
 type DeltaFinder interface {
 	FindDelta(ctx context.Context, g Grant, session string) (RemoteDelta, bool, error)
 	ClaimDelta(ctx context.Context, g Grant, session string, rd RemoteDelta) (deltaRef string, err error)

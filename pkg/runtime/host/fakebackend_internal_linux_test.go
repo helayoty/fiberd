@@ -486,11 +486,17 @@ type wMeterMixin struct{ counter string }
 func (m wMeterMixin) WCounter() string { return m.counter }
 
 // fakeEngine is a device engine a test put in place of a started one.
-// Nothing runs behind it. The test sets slices as the engine's DEVICE
-// lines would, and reads the lines fiberd sent on the other end of fd 3.
+// Nothing runs behind it, so a responder goroutine on the far end of fd 3
+// records every line fiberd sent and answers HOLD, SAVE and RESTORE as
+// the engine would (HELD, SAVED with the fence's slice, RESTORED). fiberd
+// reads those answers through its own serve goroutine. The test sets
+// slices as the engine's DEVICE lines would and reads the recorded lines.
 type fakeEngine struct {
 	e    *engine
 	peer *net.UnixConn
+	mu   sync.Mutex
+	got  []string // the lines fiberd sent, recorded in order
+	cur  int      // how many of got a lines call has already returned
 }
 
 // injectEngine gives r a running engine for grantUID that declared class
@@ -536,8 +542,47 @@ func injectEngine(t *testing.T, r *Runtime, grantUID, class string, capacity, us
 	}
 	r.engineDirs[grantUID] = true
 	r.enginesMu.Unlock()
+	fe := &fakeEngine{e: e, peer: conns[1]}
+	// fiberd's own reader, so a reply reaches the exchange waiting for it.
+	go func() { _ = e.serve(conns[0]) }()
+	// The far end records requests and answers the reply-bearing ones.
+	go fe.respond()
 	t.Cleanup(func() { _ = conns[1].Close() })
-	return &fakeEngine{e: e, peer: conns[1]}
+	return fe
+}
+
+// respond reads every line fiberd sends, records it, and answers HOLD,
+// SAVE and RESTORE. A SAVE or RESTORE carries a descriptor, which this
+// read drops (no ancillary buffer), as the real engine never needs the
+// path. It ends when the socket closes.
+func (f *fakeEngine) respond() {
+	buf := make([]byte, engineLineMax+1)
+	for {
+		n, err := f.peer.Read(buf)
+		if err != nil || n == 0 {
+			return
+		}
+		line := strings.TrimSuffix(string(buf[:n]), "\n")
+		f.mu.Lock()
+		f.got = append(f.got, line)
+		f.mu.Unlock()
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		fence, reply := fields[1], ""
+		switch fields[0] {
+		case "HOLD":
+			reply = "HELD " + fence
+		case "SAVE":
+			reply = fmt.Sprintf("SAVED %s %d %s", fence, f.e.slice(fence), strings.Repeat("0", 16))
+		case "RESTORE":
+			reply = fmt.Sprintf("RESTORED %s %d", fence, f.e.slice(fence))
+		default:
+			continue // LEAF, UNLEAF, EVICT, UNHOLD: no reply
+		}
+		_, _ = f.peer.Write([]byte(reply + "\n"))
+	}
 }
 
 // setSlice is a DEVICE line for fence, n bytes.
@@ -556,18 +601,26 @@ func (f *fakeEngine) setDown() {
 }
 
 // lines is every line fiberd sent since the last call, each without its
-// newline. It stops once none comes for quiet.
+// newline. It waits until none has arrived for quiet, so a reply fiberd
+// is still waiting on does not cut it short.
 func (f *fakeEngine) lines(quiet time.Duration) []string {
-	var got []string
-	buf := make([]byte, engineLineMax+1)
 	for {
-		_ = f.peer.SetReadDeadline(time.Now().Add(quiet))
-		n, err := f.peer.Read(buf)
-		if err != nil || n == 0 {
-			return got
+		f.mu.Lock()
+		n := len(f.got)
+		f.mu.Unlock()
+		time.Sleep(quiet)
+		f.mu.Lock()
+		grew := len(f.got) != n
+		f.mu.Unlock()
+		if !grew {
+			break
 		}
-		got = append(got, strings.TrimSuffix(string(buf[:n]), "\n"))
 	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := append([]string(nil), f.got[f.cur:]...)
+	f.cur = len(f.got)
+	return out
 }
 
 // poolMixin pools restored sandboxes, as gvisor does. A pooled sandbox

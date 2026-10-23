@@ -340,6 +340,11 @@ impl Map {
         }
         self.relays.contains(cgroup) && self.leaves.values().any(|f| f.as_slice() == fence)
     }
+
+    /// Whether any cgroup has a LEAF for fence.
+    pub fn leafed(&self, fence: &[u8]) -> bool {
+        self.leaves.values().any(|f| f.as_slice() == fence)
+    }
 }
 
 // ---- seal ----

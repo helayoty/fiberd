@@ -3,8 +3,8 @@
 //! the accounting, and a Device does the bytes. Sim is the device for
 //! `--sim-mb`, host memory. The CUDA device (M6, cuda.rs) implements the
 //! same trait over one device allocation. A slice is a fence, an offset
-//! and a length, so a later SAVE can read it out and a RESTORE can place
-//! one and write it back (M5).
+//! and a length, so SAVE reads it out in pieces and RESTORE places one
+//! and writes the pieces back (slice.rs).
 
 // ---- the device trait ----
 
@@ -49,6 +49,10 @@ pub trait Device {
     fn fill(&mut self, off: u64, len: u64, seed: u64) -> Result<(), Fault>;
     /// FNV-1a 64 over len bytes at off.
     fn hash(&mut self, off: u64, len: u64) -> Result<u64, Fault>;
+    /// Copies buf's length of bytes at off into buf, for SAVE.
+    fn read_at(&mut self, off: u64, buf: &mut [u8]) -> Result<(), Fault>;
+    /// Copies buf over the bytes at off, for RESTORE.
+    fn write_at(&mut self, off: u64, buf: &[u8]) -> Result<(), Fault>;
     /// Moves len bytes from from to to, ranges that may overlap, so the
     /// pool can close its gaps. Any failure is Fatal, since a half-done
     /// move leaves another fiber's slice torn.
@@ -163,6 +167,18 @@ impl Device for Sim {
         Ok(h.finish())
     }
 
+    fn read_at(&mut self, off: u64, buf: &mut [u8]) -> Result<(), Fault> {
+        let len = u64::try_from(buf.len()).map_err(|_| RANGE)?;
+        buf.copy_from_slice(self.range(off, len)?);
+        Ok(())
+    }
+
+    fn write_at(&mut self, off: u64, buf: &[u8]) -> Result<(), Fault> {
+        let len = u64::try_from(buf.len()).map_err(|_| RANGE)?;
+        self.range(off, len)?.copy_from_slice(buf);
+        Ok(())
+    }
+
     fn copy(&mut self, from: u64, to: u64, len: u64) -> Result<(), Fault> {
         // Both ranges are checked first, since copy_within panics on
         // one past the end.
@@ -178,6 +194,9 @@ impl Device for Sim {
 
 // ---- slices and accounting ----
 
+/// The layout ENGINE declares and a slice file names. Slices are whole
+/// UNITs of raw bytes.
+pub const LAYOUT: &str = "raw256";
 /// The unit a slice is rounded up to, the `raw256` layout's.
 pub const UNIT: u64 = 256;
 /// Most slices at once, as the zygote engine had.
@@ -221,6 +240,11 @@ impl Pool {
         }
     }
 
+    /// The device's class, `sim` or `gpu`.
+    pub fn class(&self) -> &'static str {
+        self.dev.class()
+    }
+
     /// Bytes held by every slice.
     pub fn used(&self) -> u64 {
         self.used
@@ -242,8 +266,7 @@ impl Pool {
         self.slices.iter().position(|s| s.fence == fence)
     }
 
-    /// The fence's offset and length, for fill and sum, and for SAVE
-    /// later.
+    /// The fence's offset and length, for fill, sum, read and write.
     fn slice(&self, fence: &[u8]) -> Option<(u64, u64)> {
         let s = self.slices.get(self.find(fence)?)?;
         Some((s.off, s.len))
@@ -310,6 +333,32 @@ impl Pool {
             return Ok(None);
         };
         self.dev.hash(off, len).map(Some)
+    }
+
+    /// read copies buf's length of the fence's slice, from at bytes into
+    /// it, out to buf. SAVE reads a slice this way, one piece at a time.
+    pub fn read(&mut self, fence: &[u8], at: u64, buf: &mut [u8]) -> Result<(), Fault> {
+        let off = self.inside(fence, at, buf.len())?;
+        self.dev.read_at(off, buf)
+    }
+
+    /// write copies buf over the fence's slice, from at bytes into it.
+    /// RESTORE fills a fresh slice this way, one piece at a time.
+    pub fn write(&mut self, fence: &[u8], at: u64, buf: &[u8]) -> Result<(), Fault> {
+        let off = self.inside(fence, at, buf.len())?;
+        self.dev.write_at(off, buf)
+    }
+
+    /// The pool offset of at in the fence's slice, when n bytes from
+    /// there lie inside it. No slice, or a range past it, is a bug in the
+    /// caller, which checked the slice's size first, so it is a fault.
+    fn inside(&self, fence: &[u8], at: u64, n: usize) -> Result<u64, Fault> {
+        let (off, len) = self.slice(fence).ok_or(RANGE)?;
+        let n = u64::try_from(n).map_err(|_| RANGE)?;
+        if at.checked_add(n).is_none_or(|end| end > len) {
+            return Err(RANGE);
+        }
+        off.checked_add(at).ok_or(RANGE)
     }
 
     /// place finds len free bytes, the first gap that fits, else the

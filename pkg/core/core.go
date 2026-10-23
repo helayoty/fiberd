@@ -487,7 +487,8 @@ func (a *Core) locate(ctx context.Context, g Grant, session string) (StatusCode,
 		var rm *RemoteMiss
 		if errors.As(err, &rm) {
 			// Found, but this home must not take it (platform parity):
-			// a miss that names where the state is, like too-large.
+			// a miss that names where the state is, like too-large. A
+			// device engine that does not fit is a FailedPrecondition.
 			return a.missCode(err), err
 		}
 		log.Printf("mobility: find %s/%s: %v", g.UID, session, err)
@@ -832,7 +833,7 @@ func (a *Core) BumpEpoch(ctx context.Context, reason string) (uint64, error) {
 // matching boot bias. A tier, device, isolation, handoff or workspace
 // gap is neither. It is FailedPrecondition.
 func (a *Core) missCode(err error) StatusCode {
-	if errors.Is(err, ErrNeedsTier) || errors.Is(err, ErrNeedsDevice) || errors.Is(err, ErrNeedsIsolation) || errors.Is(err, ErrNeedsHandoff) || errors.Is(err, ErrNeedsWorkspace) || errors.Is(err, ErrNoTenant) {
+	if errors.Is(err, ErrNeedsTier) || errors.Is(err, ErrNeedsDevice) || errors.Is(err, ErrDeviceMismatch) || errors.Is(err, ErrNeedsIsolation) || errors.Is(err, ErrNeedsHandoff) || errors.Is(err, ErrNeedsWorkspace) || errors.Is(err, ErrNoTenant) {
 		return NeedsTier
 	}
 	if a.Health != nil && !a.Health.Healthy(time.Now()) {

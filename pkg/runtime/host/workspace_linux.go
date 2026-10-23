@@ -21,6 +21,12 @@ import (
 // publish, claim, export and import with the rest of the directory.
 const workspaceTar = "workspace.tar"
 
+// deviceSlice is the device engine's saved slice in a delta directory,
+// beside workspaceTar. A park writes it when the fiber held one and a
+// resume restores from it. It rides seal, signature, quota, publish,
+// claim, export and import with the rest of the directory.
+const deviceSlice = "device.slice"
+
 // workspace is one fiber's workspace on this home: a directory under
 // WorkspaceDir that wsfs owns, with the fiber's tree at root/ and
 // fiberd's staging beside it. The backend mounts root/ at

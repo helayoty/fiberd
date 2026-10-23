@@ -1,12 +1,14 @@
 //! fd 3, the engine's channel to fiberd. A SOCK_SEQPACKET unix socket
 //! where one message is one line of at most 256 bytes, ending in a
-//! newline. The engine sends ENGINE, GPU, READY, DEVICE and ERROR, and
-//! fiberd sends LEAF, UNLEAF, RELAY and EVICT. A message from fiberd may
-//! carry descriptors, which M5's SAVE and RESTORE will take. This
-//! milestone closes every one that arrives.
+//! newline. The engine sends ENGINE, GPU, READY, DEVICE, HELD, SAVED,
+//! RESTORED and ERROR, and fiberd sends LEAF, UNLEAF, RELAY, EVICT,
+//! HOLD, UNHOLD, SAVE and RESTORE. A message from fiberd may carry
+//! descriptors. SAVE and RESTORE take exactly one, the slice file, and
+//! every other descriptor that arrives is closed.
 
 // ---- the channel ----
 
+use std::fs::File;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 use std::ptr;
 
@@ -128,12 +130,12 @@ impl AsFd for Ctl {
 // ---- receiving ----
 
 /// What one non-blocking read of fd 3 gave.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub enum Recv {
-    /// One line, its newline cut off.
-    Line(Vec<u8>),
+    /// One line, its newline cut off, with the descriptors it carried.
+    Line(Vec<u8>, Passed),
     /// A message that is no line, too long or with no newline at its
-    /// end.
+    /// end. Its descriptors are closed.
     Bad,
     /// Nothing pending.
     Empty,
@@ -141,16 +143,45 @@ pub enum Recv {
     Closed,
 }
 
+/// The descriptors one message carried. Dropping it closes them, so a
+/// line that takes none closes what it was sent by letting go.
+#[derive(Debug)]
+pub enum Passed {
+    /// The message carried no descriptor.
+    None,
+    /// It carried one, the slice file of a SAVE or RESTORE.
+    One(OwnedFd),
+    /// It carried more than one, or more than the buffer holds. Every
+    /// one that arrived is closed.
+    Many,
+}
+
+impl Passed {
+    /// file takes the one descriptor as a regular file, with MSG_CTRUNC
+    /// and a count other than one both refused. A socket, a directory or
+    /// a pipe is refused too, so the slice code only ever reads and
+    /// writes at offsets of a plain file. Whatever is refused is closed.
+    pub fn file(self) -> Option<File> {
+        let Passed::One(fd) = self else {
+            return None;
+        };
+        let file = File::from(fd);
+        let regular = file.metadata().ok()?.file_type().is_file();
+        regular.then_some(file)
+    }
+}
+
 /// Room for the descriptors one message may carry, more than any line
-/// will send. Extra ones the kernel drops and closes itself.
+/// will send. Extra ones the kernel drops and closes itself, and flags
+/// MSG_CTRUNC, which take_passed reads as too many.
 const CMSG_WORDS: usize = 16;
 
 impl Ctl {
     /// recv reads one pending message without blocking, with recvmsg so
-    /// the descriptors it carries arrive too. They are closed at once in
-    /// this milestone. A zero-length read is fiberd closing the socket,
-    /// since fiberd never sends an empty message. msghdr's lengths are
-    /// size_t on glibc and narrower on musl, hence the casts.
+    /// the descriptors it carries arrive too, close-on-exec. A
+    /// zero-length read is fiberd closing the socket, since fiberd never
+    /// sends an empty message. msghdr's lengths are size_t on glibc and
+    /// narrower on musl, hence the casts.
     #[allow(clippy::unnecessary_cast)]
     pub fn recv(&self) -> Recv {
         let mut buf = [0u8; LINE_MAX + 1];
@@ -183,7 +214,9 @@ impl Ctl {
                     _ => Recv::Closed,
                 };
             }
-            close_passed(&mh);
+            // The descriptors are taken before any return, so no path
+            // out of here leaks one.
+            let passed = take_passed(&mh);
             let Ok(n) = usize::try_from(r) else {
                 return Recv::Closed;
             };
@@ -194,18 +227,27 @@ impl Ctl {
                 return Recv::Bad;
             }
             return match buf.get(..n) {
-                Some([line @ .., b'\n']) => Recv::Line(line.to_vec()),
+                Some([line @ .., b'\n']) => Recv::Line(line.to_vec(), passed),
                 _ => Recv::Bad,
             };
         }
     }
 }
 
-/// close_passed closes every descriptor an SCM_RIGHTS message put in
-/// this process. M5 takes the one SAVE and RESTORE carry instead.
-/// cmsg_len is size_t on glibc and narrower on musl, hence the cast.
+/// take_passed owns every descriptor an SCM_RIGHTS message put in this
+/// process and sorts them by count. A truncated control message
+/// (MSG_CTRUNC) is too many, whatever arrived, since the kernel closed
+/// the rest itself and the line cannot have meant one. The count a
+/// header claims is bounded by the buffer's end, so a header is never
+/// read past it. cmsg_len is size_t on glibc and narrower on musl, hence
+/// the cast.
 #[allow(clippy::unnecessary_cast)]
-fn close_passed(mh: &libc::msghdr) {
+fn take_passed(mh: &libc::msghdr) -> Passed {
+    let mut fds: Vec<OwnedFd> = Vec::new();
+    let end = mh
+        .msg_control
+        .addr()
+        .saturating_add(mh.msg_controllen as usize);
     // SAFETY: mh is the header recvmsg just filled, and its control
     // buffer is live. CMSG_FIRSTHDR and CMSG_NXTHDR stay inside
     // msg_controllen, which the kernel set.
@@ -216,28 +258,40 @@ fn close_passed(mh: &libc::msghdr) {
         if h.cmsg_level == libc::SOL_SOCKET && h.cmsg_type == libc::SCM_RIGHTS {
             // SAFETY: CMSG_LEN of 0 is the header's own length, a const.
             let head = unsafe { libc::CMSG_LEN(0) } as usize;
-            let count = (h.cmsg_len as usize).saturating_sub(head) / size_of::<c_int>();
+            let claimed = (h.cmsg_len as usize).saturating_sub(head) / size_of::<c_int>();
             // SAFETY: c is a valid cmsghdr, so its data follows it.
             let data = unsafe { libc::CMSG_DATA(c) }.cast::<c_int>();
-            for i in 0..count {
-                // SAFETY: the kernel wrote count descriptors after the
-                // header, inside the control buffer, maybe unaligned.
+            let room = end.saturating_sub(data.addr()) / size_of::<c_int>();
+            for i in 0..claimed.min(room) {
+                // SAFETY: the kernel wrote the descriptors after the
+                // header, inside the control buffer, maybe unaligned, and
+                // i stays short of the buffer's end.
                 let fd = unsafe { ptr::read_unaligned(data.add(i)) };
                 if fd >= 0 {
                     // SAFETY: the kernel just installed fd here and
-                    // nothing else owns it, so dropping closes it once.
-                    drop(unsafe { OwnedFd::from_raw_fd(fd) });
+                    // nothing else owns it, so OwnedFd closes it once.
+                    fds.push(unsafe { OwnedFd::from_raw_fd(fd) });
                 }
             }
         }
         // SAFETY: as for CMSG_FIRSTHDR, c is a header of mh's buffer.
         c = unsafe { libc::CMSG_NXTHDR(mh, c) };
     }
+    if mh.msg_flags & libc::MSG_CTRUNC != 0 {
+        return Passed::Many;
+    }
+    let mut it = fds.into_iter();
+    match (it.next(), it.next()) {
+        (None, _) => Passed::None,
+        (Some(fd), None) => Passed::One(fd),
+        (Some(_), Some(_)) => Passed::Many,
+    }
 }
 
 // ---- control lines ----
 
-/// One line from fiberd. No line is acked, a refusal sends ERROR.
+/// One line from fiberd. A refusal sends ERROR. HOLD, SAVE and RESTORE
+/// are answered, with HELD, SAVED and RESTORED, and no other line is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Control<'a> {
     /// `LEAF <fence> <cgroup>`
@@ -259,7 +313,27 @@ pub enum Control<'a> {
     },
     /// `EVICT <fence>`
     Evict {
-        /// The fence whose slice goes.
+        /// The fence whose slice goes, and any hold on it.
+        fence: &'a [u8],
+    },
+    /// `HOLD <fence>`
+    Hold {
+        /// The fence whose requests get `err held` from now on.
+        fence: &'a [u8],
+    },
+    /// `UNHOLD <fence>`
+    Unhold {
+        /// The fence whose hold is lifted. Its slice stays.
+        fence: &'a [u8],
+    },
+    /// `SAVE <fence>`, with the slice file as its one descriptor.
+    Save {
+        /// The held fence whose slice is written out.
+        fence: &'a [u8],
+    },
+    /// `RESTORE <fence>`, with the slice file as its one descriptor.
+    Restore {
+        /// The fence the slice is placed under.
         fence: &'a [u8],
     },
 }
@@ -279,11 +353,20 @@ pub fn parse(line: &mut [u8]) -> Option<Control<'_>> {
         (b"UNLEAF", 2) => Control::Unleaf { fence: b },
         (b"RELAY", 2) => Control::Relay { cgroup: b },
         (b"EVICT", 2) => Control::Evict { fence: b },
+        (b"HOLD", 2) => Control::Hold { fence: b },
+        (b"UNHOLD", 2) => Control::Unhold { fence: b },
+        (b"SAVE", 2) => Control::Save { fence: b },
+        (b"RESTORE", 2) => Control::Restore { fence: b },
         _ => return None,
     };
     let fence = match ctl {
-        Control::Leaf { fence, .. } => fence,
-        Control::Unleaf { fence } | Control::Evict { fence } => fence,
+        Control::Leaf { fence, .. }
+        | Control::Unleaf { fence }
+        | Control::Evict { fence }
+        | Control::Hold { fence }
+        | Control::Unhold { fence }
+        | Control::Save { fence }
+        | Control::Restore { fence } => fence,
         Control::Relay { .. } => return Some(ctl),
     };
     proto::valid_fence(fence).then_some(ctl)

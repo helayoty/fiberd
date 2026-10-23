@@ -6,7 +6,10 @@
 //! from the kernel and from fiberd's LEAF lines, never from the request,
 //! and it reports every slice to fiberd on fd 3. The protocol is
 //! bin/gpu-poc/PROTOCOL.md. With `--sim-mb` the pool is host memory,
-//! and without it the pool is GPU memory through libcuda (cuda.rs).
+//! and without it the pool is GPU memory through libcuda (cuda.rs). For
+//! a park fiberd holds a fence, so its fiber's requests get `err held`,
+//! and saves its slice to a file, and at resume it restores the slice
+//! under the new fence (slice.rs).
 //!
 //! One thread serves everything. A poll loop watches fd 3 and the
 //! listening socket, takes every pending fd 3 line first, then answers
@@ -20,7 +23,9 @@ mod cuda;
 mod peer;
 mod pool;
 mod proto;
+mod slice;
 
+use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fs;
 use std::io::{ErrorKind, Read, Write};
@@ -30,10 +35,10 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use crate::ctl::{Control, Ctl, Recv};
+use crate::ctl::{Control, Ctl, Passed, Recv};
 use crate::cuda::Cuda;
 use crate::peer::Map;
-use crate::pool::{Device, Fault, Pool, Reserved, Sim};
+use crate::pool::{Device, Fault, LAYOUT, Pool, Reserved, SLICES_MAX, Sim};
 use crate::proto::{LINE_MAX, Reply, Request};
 
 /// How long a fiber has to send its request line once connected. One
@@ -53,11 +58,11 @@ fn die(why: &str) -> ! {
     std::process::exit(2)
 }
 
-/// failed turns a device error into the request's reply. A fatal one
-/// ends the engine, since the pool may be poisoned for every fiber, and
-/// fiberd sets every slice to zero. A soft one fails this request alone
-/// with `err device`.
-fn failed(f: Fault) -> Reply {
+/// soft turns a device error into the one-word reason of the reply. A
+/// fatal one ends the engine, since the pool may be poisoned for every
+/// fiber, and fiberd sets every slice to zero. A soft one fails this
+/// request or control line alone, as `device`.
+fn soft(f: Fault) -> &'static str {
     match f {
         Fault::Fatal(word) => {
             eprintln!("refengine: device fault: {word}");
@@ -65,8 +70,23 @@ fn failed(f: Fault) -> Reply {
         }
         Fault::Soft(word) => {
             eprintln!("refengine: device error: {word}");
-            Reply::Err("device")
+            "device"
         }
+    }
+}
+
+/// failed turns a device error into the request's reply, `err device`,
+/// or ends the engine as soft does.
+fn failed(f: Fault) -> Reply {
+    Reply::Err(soft(f))
+}
+
+/// reason is the ERROR token of a failed SAVE or RESTORE. A device fault
+/// goes through soft, so a fatal one ends the engine here.
+fn reason(why: slice::Why) -> &'static str {
+    match why {
+        slice::Why::Device(f) => soft(f),
+        other => other.token(),
     }
 }
 
@@ -134,7 +154,7 @@ fn main() {
     let ctl = Ctl::open().unwrap_or_else(|e| die(&e));
     let mut dev = open_device(&args).unwrap_or_else(|e| die(&e));
     let (class, cap) = (dev.class(), dev.capacity());
-    ctl.send(&format!("ENGINE {class} {cap} 1 raw256"));
+    ctl.send(&format!("ENGINE {class} {cap} 1 {LAYOUT}"));
     let (name, cc, driver) = dev.gpu();
     let gpu = format!("GPU {} {} {}", word(&name), word(&cc), word(&driver));
     ctl.send(&gpu);
@@ -154,6 +174,7 @@ fn main() {
         ctl,
         map,
         pool,
+        held: HashSet::new(),
         listener,
     };
     engine.serve()
@@ -238,6 +259,11 @@ struct Engine {
     ctl: Ctl,
     map: Map,
     pool: Pool,
+    /// The fences fiberd holds for a park. A request naming one gets
+    /// `err held`, whether or not it has a slice, so a parking fiber
+    /// cannot reserve a slice the park would miss. Bounded as the slice
+    /// table is, and EVICT or UNHOLD empties a seat.
+    held: HashSet<Vec<u8>>,
     listener: UnixListener,
 }
 
@@ -249,7 +275,7 @@ impl Engine {
     fn drain(&mut self) {
         loop {
             match self.ctl.recv() {
-                Recv::Line(mut line) => self.control(&mut line),
+                Recv::Line(mut line, passed) => self.control(&mut line, passed),
                 Recv::Bad => self.ctl.error(b"-", "proto"),
                 Recv::Empty => return,
                 Recv::Closed => ctl::gone("closed"),
@@ -257,8 +283,10 @@ impl Engine {
         }
     }
 
-    /// control does one line from fiberd. A refusal is an ERROR line.
-    fn control(&mut self, line: &mut [u8]) {
+    /// control does one line from fiberd, with the descriptors it
+    /// carried. A refusal is an ERROR line. SAVE and RESTORE take the
+    /// descriptors, and every other line drops them here, closed.
+    fn control(&mut self, line: &mut [u8], passed: Passed) {
         match ctl::parse(line) {
             None => self.ctl.error(b"-", "proto"),
             Some(Control::Leaf { fence, cgroup }) => {
@@ -273,10 +301,87 @@ impl Engine {
                 }
             }
             Some(Control::Evict { fence }) => {
+                self.held.remove(fence);
                 self.pool.release(fence);
                 self.report(fence);
             }
+            Some(Control::Hold { fence }) => self.hold(fence),
+            Some(Control::Unhold { fence }) => {
+                self.held.remove(fence);
+            }
+            Some(Control::Save { fence }) => self.save(fence, passed),
+            Some(Control::Restore { fence }) => self.restore(fence, passed),
         }
+    }
+
+    /// hold answers HOLD with HELD. Nothing is in flight for the fence,
+    /// since fd 3 is read between connections and, inside one, before
+    /// the pool is touched. From here on request refuses the fence.
+    fn hold(&mut self, fence: &[u8]) {
+        if !self.held.contains(fence) {
+            if self.held.len() >= SLICES_MAX {
+                self.ctl.error(fence, "full");
+                return;
+            }
+            self.held.insert(fence.to_vec());
+        }
+        let fence = String::from_utf8_lossy(fence);
+        self.ctl.send(&format!("HELD {fence}"));
+    }
+
+    /// save writes the held fence's slice to the one descriptor and
+    /// answers SAVED. The slice stays, still held, so a park that fails
+    /// later can UNHOLD and let the fiber run on.
+    fn save(&mut self, fence: &[u8], passed: Passed) {
+        let Some(file) = passed.file() else {
+            self.ctl.error(fence, "fd");
+            return;
+        };
+        if !self.held.contains(fence) {
+            self.ctl.error(fence, "unheld");
+            return;
+        }
+        match slice::save(&file, &mut self.pool, fence) {
+            Ok((bytes, hash)) => {
+                let fence = String::from_utf8_lossy(fence);
+                self.ctl.send(&format!("SAVED {fence} {bytes} {hash:016x}"));
+            }
+            Err(why) => self.ctl.error(fence, reason(why)),
+        }
+    }
+
+    /// restore places the slice in the one descriptor under fence, a new
+    /// fence that needs no LEAF yet, and answers RESTORED, then the
+    /// DEVICE pair. A header the engine cannot take leaves the pool as
+    /// it was. A failure after that leaves the fence with no slice, and
+    /// the DEVICE pair says so. A fence that is held, has a LEAF or has a
+    /// slice already is `busy`, so a fiberd bug cannot overwrite a live
+    /// fiber's slice.
+    fn restore(&mut self, fence: &[u8], passed: Passed) {
+        let Some(file) = passed.file() else {
+            self.ctl.error(fence, "fd");
+            return;
+        };
+        if self.held.contains(fence) || self.map.leafed(fence) || self.pool.bytes(fence) > 0 {
+            self.ctl.error(fence, "busy");
+            return;
+        }
+        let header = slice::header(&file, self.pool.class(), self.pool.capacity());
+        let header = match header {
+            Ok(h) => h,
+            Err(why) => {
+                self.ctl.error(fence, reason(why));
+                return;
+            }
+        };
+        match slice::restore(&file, &header, &mut self.pool, fence) {
+            Ok(bytes) => {
+                let fence = String::from_utf8_lossy(fence);
+                self.ctl.send(&format!("RESTORED {fence} {bytes}"));
+            }
+            Err(why) => self.ctl.error(fence, reason(why)),
+        }
+        self.report(fence);
     }
 
     /// report sends the fence's slice and then the whole pool, the two
@@ -370,8 +475,13 @@ impl Engine {
         self.request(req)
     }
 
-    /// request does what an allowed request asks of the pool.
+    /// request does what an allowed request asks of the pool. A held
+    /// fence is refused here, after every drain answer may have done, so
+    /// a HOLD read during this very connection already counts.
     fn request(&mut self, req: Request<'_>) -> Reply {
+        if req.fence().is_some_and(|f| self.held.contains(f)) {
+            return Reply::Err("held");
+        }
         match req {
             Request::Stat => Reply::Stat(self.pool.used(), self.pool.capacity()),
             Request::Reserve { fence, bytes } => match self.pool.reserve(fence, bytes) {

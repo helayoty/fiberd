@@ -1143,8 +1143,9 @@ func TestEnforceW(t *testing.T) {
 
 // TestFinishEvictsDevice checks that a fiber with a device budget has its
 // leaf unmapped and its slice evicted however it ends, so the engine never
-// keeps a dead fiber's slice. Its leaf is mapped at birth. A park unmaps
-// and evicts before its dump and evicts once more as the fiber ends.
+// keeps a dead fiber's slice. Its leaf is mapped at birth. A park holds the
+// slice, then unmaps and evicts it after its dump, and the exit path skips
+// the fence the park held, so it does not evict a second time.
 func TestFinishEvictsDevice(t *testing.T) {
 	withDevice := core.Grant{UID: "g1", TemplateDigest: "sha256:tmpl", WBudgetBytes: 64 * mib, DeviceBudget: core.DeviceBudget{Bytes: 50}}
 	noDevice := core.Grant{UID: "g1", TemplateDigest: "sha256:tmpl", WBudgetBytes: 64 * mib}
@@ -1186,7 +1187,7 @@ func TestFinishEvictsDevice(t *testing.T) {
 					t.Fatalf("Release: %v", err)
 				}
 			}},
-		{name: "a park", grant: withDevice, birth: []string{leaf}, want: append(ended, "EVICT g1/1/1"),
+		{name: "a park", grant: withDevice, birth: []string{leaf}, want: []string{"HOLD g1/1/1", "UNLEAF g1/1/1", "EVICT g1/1/1"},
 			end: func(t *testing.T, r *Runtime, _ *sandboxBackend, _ *fakeEngine, id string) {
 				if _, err := r.Park(context.Background(), id, false); err != nil {
 					t.Fatalf("Park: %v", err)

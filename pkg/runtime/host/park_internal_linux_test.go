@@ -293,12 +293,14 @@ func TestPark(t *testing.T) {
 					t.Fatal("the park did not happen")
 				}
 			}},
-		{name: "a device slice is evicted before the checkpoint", be: func() backend.Backend { return newSandboxBackend(core.TierSnapshot) },
+		{name: "a device slice is held before the checkpoint, then evicted", be: func() backend.Backend { return newSandboxBackend(core.TierSnapshot) },
 			grant: core.Grant{UID: "g1", TemplateDigest: "sha256:tmpl", WBudgetBytes: 64 * mib, DeviceBudget: core.DeviceBudget{Bytes: 100}}, engine: true,
 			check: func(t *testing.T, f *parkFixture, ref string) {
-				// Mapped at birth, unmapped and evicted before the dump, and
-				// evicted once more as the fiber ends.
-				want := "LEAF g1/1/1 /g1/fibers/f-1-1,UNLEAF g1/1/1,EVICT g1/1/1,EVICT g1/1/1"
+				// Mapped at birth, held before the dump (the slice is 0 here,
+				// so no SAVE), then unmapped and evicted after the dump. The
+				// exit path skips the fence the park held, so there is no
+				// second evict.
+				want := "LEAF g1/1/1 /g1/fibers/f-1-1,HOLD g1/1/1,UNLEAF g1/1/1,EVICT g1/1/1"
 				if got := f.engine.lines(100 * time.Millisecond); strings.Join(got, ",") != want {
 					t.Fatalf("the engine got %q, want %s", got, want)
 				}

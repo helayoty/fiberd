@@ -4,8 +4,9 @@
 //! seal. The pool is one cuMemAlloc_v2 in the device's primary context,
 //! current on the one serving thread. fill, hash and moves go through
 //! one host buffer of CHUNK bytes, so a slice of any size costs that
-//! much host memory and no more. A sticky driver error ends the engine,
-//! and any other fails the one request.
+//! much host memory and no more. SAVE and RESTORE copy through a bounded
+//! buffer of their own (slice.rs), one piece per call. A sticky driver
+//! error ends the engine, and any other fails the one request.
 //!
 //! After the seal the driver makes ioctls on the /dev/nvidia* files it
 //! opened at cuInit, maps and unmaps memory, waits on futexes and may
@@ -536,6 +537,24 @@ impl Device for Cuda {
             done += n;
         }
         Ok(h.finish())
+    }
+
+    fn read_at(&mut self, off: u64, buf: &mut [u8]) -> Result<(), Fault> {
+        let n = buf.len();
+        let src = self.at(off, n as u64)?;
+        // SAFETY: buf is n live bytes the driver writes, and at checked
+        // src..src+n. A copy to pageable memory is done when it returns.
+        let rc = unsafe { (self.api.cu_memcpy_dtoh)(buf.as_mut_ptr().cast(), src, n) };
+        self.api.after(rc)
+    }
+
+    fn write_at(&mut self, off: u64, buf: &[u8]) -> Result<(), Fault> {
+        let n = buf.len();
+        let dst = self.at(off, n as u64)?;
+        // SAFETY: buf is n live bytes, and at checked dst..dst+n. A copy
+        // from pageable memory has staged the bytes when it returns.
+        let rc = unsafe { (self.api.cu_memcpy_htod)(dst, buf.as_ptr().cast(), n) };
+        self.api.after(rc)
     }
 
     /// A move down goes front to back and a move up back to front, so no
