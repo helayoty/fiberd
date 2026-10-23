@@ -65,14 +65,17 @@ pub trait Device {
 /// lives as long as the engine. mem is empty until allocate.
 pub struct Sim {
     cap: u64,
+    name: String,
     mem: &'static mut [u8],
 }
 
 impl Sim {
-    /// A device of capacity bytes, not yet allocated.
-    pub fn new(capacity: u64) -> Sim {
+    /// A device of capacity bytes, not yet allocated, whose GPU line
+    /// says name.
+    pub fn new(capacity: u64, name: &str) -> Sim {
         Sim {
             cap: capacity,
+            name: name.to_owned(),
             mem: Default::default(),
         }
     }
@@ -139,7 +142,7 @@ impl Device for Sim {
     }
 
     fn gpu(&self) -> (String, String, String) {
-        ("sim".to_owned(), "0.0".to_owned(), "0".to_owned())
+        (self.name.clone(), "0.0".to_owned(), "0".to_owned())
     }
 
     fn capacity(&self) -> u64 {
@@ -194,8 +197,8 @@ impl Device for Sim {
 
 // ---- slices and accounting ----
 
-/// The layout ENGINE declares and a slice file names. Slices are whole
-/// UNITs of raw bytes.
+/// The layout ENGINE declares and a slice file names, unless `--layout`
+/// names another. Slices are whole UNITs of raw bytes either way.
 pub const LAYOUT: &str = "raw256";
 /// The unit a slice is rounded up to, the `raw256` layout's.
 pub const UNIT: u64 = 256;
@@ -223,17 +226,20 @@ pub enum Reserved {
 /// capacity.
 pub struct Pool {
     dev: Box<dyn Device>,
+    layout: String,
     cap: u64,
     used: u64,
     slices: Vec<Slice>,
 }
 
 impl Pool {
-    /// An empty pool over dev, allocated and zeroed.
-    pub fn new(dev: Box<dyn Device>) -> Pool {
+    /// An empty pool over dev, allocated and zeroed, whose slices are
+    /// of layout.
+    pub fn new(dev: Box<dyn Device>, layout: &str) -> Pool {
         let cap = dev.capacity();
         Pool {
             dev,
+            layout: layout.to_owned(),
             cap,
             used: 0,
             slices: Vec::new(),
@@ -243,6 +249,11 @@ impl Pool {
     /// The device's class, `sim` or `gpu`.
     pub fn class(&self) -> &'static str {
         self.dev.class()
+    }
+
+    /// The layout ENGINE declared, which every slice file names.
+    pub fn layout(&self) -> &str {
+        &self.layout
     }
 
     /// Bytes held by every slice.

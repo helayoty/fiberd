@@ -283,6 +283,11 @@ func (h *Helper) clone(fence, endpoint, payloadHex string, st *state, born birth
 		b.mu.Unlock()
 	}
 	h.say("W %s %d", fence, b.w())
+	// And its device slice, which the engine reports and fiberd holds
+	// against the grant's device budget, as a refzygote fiber's.
+	if dev := payloadNum(payload, `"device_bytes"`); dev > 0 {
+		_ = b.engine("reserve " + strconv.FormatUint(dev, 10))
+	}
 	h.spawn(b.serve)
 }
 
