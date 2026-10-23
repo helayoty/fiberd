@@ -30,6 +30,13 @@
 # back. seal-check then reads every blob the registry holds. Each must be
 # sealed, or be the zygote or its config.
 #
+# CONFORM_GPU=1 runs C14 on proc, runc, gvisor or hyperlight with the
+# reference template. It needs the registry, the shared keys and the peer,
+# which it sets up on every one of them, and a third home over the same
+# registry and keys whose engine declares another layout (--layout
+# raw512). The peer's engine names another GPU (--sim-name). C14 writes
+# its events to $STATE/gpu-events.ndjson.
+#
 # fiberd is bin/fiberd-testhooks, fiberd built with -tags
 # fiberd_testhooks so -admin-unsafe and the issuer and scope-lost hooks exist.
 set -euo pipefail
@@ -54,21 +61,42 @@ REG_ADDR=${CONFORM_REGISTRY_ADDR:-127.0.0.1:18500}
 PEER_ADDR=${CONFORM_PEER_ADDR:-127.0.0.1:18488}
 PEER_NODE=${CONFORM_PEER_NODE:-conform-peer}
 PEER_STATE=$STATE-peer
+PEER_GPU=${CONFORM_PEER_GPU:-sim-peer}   # the GPU name the peer's engine declares
+LAYOUT_ADDR=${CONFORM_LAYOUT_ADDR:-127.0.0.1:18490}
+LAYOUT_NODE=${CONFORM_LAYOUT_NODE:-conform-layout}
+LAYOUT_STATE=$STATE-layout
 MOB=$STATE-mobility   # the registry's blobs, the shared keys, the artifact
+GPU=${CONFORM_GPU:-0}
+if [ "$GPU" = 1 ]; then
+  case "$RUNTIME" in proc | runc | gvisor | hyperlight) ;; *) echo "CONFORM_GPU=1: C14 runs on proc, runc, gvisor or hyperlight, not $RUNTIME" >&2; exit 2 ;; esac
+  [ -z "${CONFORM_TEMPLATE:-}" ] || { echo "CONFORM_GPU=1: C14 needs the reference template, not CONFORM_TEMPLATE" >&2; exit 2; }
+fi
 # The engine-loss hook (C9) ends the grant's warm instance, its zygote,
 # through its cgroup leaf. Fork backends only.
 ENGINE_HOOK=()
 # The device engine fiberd starts for each grant with a device budget,
 # the reference one with a simulated device, which is what C8 budgets.
-# proc, runc and gvisor run it with the reference template, and run
-# builds it.
+# proc, runc, gvisor and hyperlight run it with the reference template,
+# and run builds it. The peer's engine names another GPU, and the third
+# home's declares another layout.
 # A CONFORM_TEMPLATE (the Python ones) reserves no slice, so it runs
 # without one, and C8's grant is refused loudly, which conformance
 # accepts.
 ENGINE=${CONFORM_ENGINE:-$PWD/bin/refengine}
 ENGINE_FLAGS=()
-if [ -z "${CONFORM_TEMPLATE:-}" ] && { [ "$RUNTIME" = proc ] || [ "$RUNTIME" = runc ] || [ "$RUNTIME" = gvisor ]; }; then
-  ENGINE_FLAGS=(-engine "$ENGINE --sim-mb 64")
+PEER_ENGINE=()
+LAYOUT_ENGINE=()
+if [ -z "${CONFORM_TEMPLATE:-}" ]; then
+  # hyperlight gets one only for C14, so its KVM row's C8 stays as it was.
+  case "$RUNTIME" in
+    proc | runc | gvisor) ENGINE_FLAGS=(-engine "$ENGINE --sim-mb 64") ;;
+    hyperlight) if [ "$GPU" = 1 ]; then ENGINE_FLAGS=(-engine "$ENGINE --sim-mb 64"); fi ;;
+  esac
+  PEER_ENGINE=(${ENGINE_FLAGS[@]+"${ENGINE_FLAGS[@]}"})
+  if [ "$GPU" = 1 ]; then
+    PEER_ENGINE=(-engine "$ENGINE --sim-mb 64 --sim-name $PEER_GPU")
+    LAYOUT_ENGINE=(-engine "$ENGINE --sim-mb 64 --layout raw512")
+  fi
 fi
 # proc and runc fibers share the host kernel, so they serve trusted grants only.
 ISOLATION=UNTRUSTED
@@ -78,19 +106,18 @@ WORKSPACES=()
 if [ "$RUNTIME" = proc ]; then
   WORKSPACES=(-workspaces)
   TIER=${CONFORM_TIER:-FIBER_CHECKPOINT}   # what proc offers when criu check passes
-  RUNTIME_FLAGS=(-runtime proc -template "default=${CONFORM_TEMPLATE:-$PWD/bin/refzygote --heap-mb 32}" ${ENGINE_FLAGS[@]+"${ENGINE_FLAGS[@]}"})
+  RUNTIME_FLAGS=(-runtime proc -template "default=${CONFORM_TEMPLATE:-$PWD/bin/refzygote --heap-mb 32}")
   if [ "$MOBILITY" = 1 ]; then
-    RUNTIME_FLAGS=(-runtime proc -registry "http://$REG_ADDR/zygotes/ref" -delta-registry "http://$REG_ADDR/deltas"
-      -delta-key "$MOB/delta-key.json" -delta-seal-key "$MOB/delta-seal-key.json" ${ENGINE_FLAGS[@]+"${ENGINE_FLAGS[@]}"})
+    RUNTIME_FLAGS=(-runtime proc -registry "http://$REG_ADDR/zygotes/ref")
   fi
   ENGINE_HOOK=(-engine-kill-cmd "$0 engine-kill \$1")
 elif [ "$RUNTIME" = gvisor ]; then
   TIER=${CONFORM_TIER:-FIBER_SNAPSHOT}
-  RUNTIME_FLAGS=(-runtime gvisor -gvisor-rootfs "$GVISOR_ROOTFS" -template "default=${CONFORM_TEMPLATE:-/bin/refzygote --heap-mb 32 --gvisor}" ${ENGINE_FLAGS[@]+"${ENGINE_FLAGS[@]}"})
+  RUNTIME_FLAGS=(-runtime gvisor -gvisor-rootfs "$GVISOR_ROOTFS" -template "default=${CONFORM_TEMPLATE:-/bin/refzygote --heap-mb 32 --gvisor}")
 elif [ "$RUNTIME" = runc ]; then
   WORKSPACES=(-workspaces)
   TIER=${CONFORM_TIER:-FIBER_CHECKPOINT}
-  RUNTIME_FLAGS=(-runtime runc -runc-rootfs "$GVISOR_ROOTFS" -template "default=${CONFORM_TEMPLATE:-/bin/refzygote --heap-mb 32}" ${ENGINE_FLAGS[@]+"${ENGINE_FLAGS[@]}"})
+  RUNTIME_FLAGS=(-runtime runc -runc-rootfs "$GVISOR_ROOTFS" -template "default=${CONFORM_TEMPLATE:-/bin/refzygote --heap-mb 32}")
   ENGINE_HOOK=(-engine-kill-cmd "$0 engine-kill \$1")
 elif [ "$RUNTIME" = hyperlight ]; then
   # CONFORM_HL_HELPER selects the helper: the Rust one where KVM exists,
@@ -112,6 +139,13 @@ elif [ "$RUNTIME" = cloudhv ]; then
 else
   TIER=${CONFORM_TIER:-FIBER_CHECKPOINT}
   RUNTIME_FLAGS=(-runtime stub -runtime-tier "$TIER")
+fi
+# Session mobility (C11, and C14 on every runtime it runs on): every home
+# publishes and claims through the registry with the shared keys.
+SHARED=0
+if [ "$MOBILITY" = 1 ] || [ "$GPU" = 1 ]; then
+  SHARED=1
+  RUNTIME_FLAGS+=(-delta-registry "http://$REG_ADDR/deltas" -delta-key "$MOB/delta-key.json" -delta-seal-key "$MOB/delta-seal-key.json")
 fi
 
 wait_healthy() { # [state dir] [log]
@@ -146,7 +180,7 @@ start() {
   mkdir -p "$STATE"
   local verify; read -ra verify <<<"$(verify_flags)"
   bin/fiberd-testhooks -state "$STATE" -node-id "$NODE" "${verify[@]}" -insecure-plaintext \
-    -listen "$ADDR" "${RUNTIME_FLAGS[@]}" -admin-unsafe \
+    -listen "$ADDR" "${RUNTIME_FLAGS[@]}" ${ENGINE_FLAGS[@]+"${ENGINE_FLAGS[@]}"} -admin-unsafe \
     -stale-ttl 5s -status-interval 50ms >>"$LOG" 2>&1 &
   echo $! >"$STATE/pid"
   wait_healthy
@@ -158,21 +192,37 @@ start_peer() {
   mkdir -p "$PEER_STATE"
   local verify; read -ra verify <<<"$(verify_flags)"
   bin/fiberd-testhooks -state "$PEER_STATE" -node-id "$PEER_NODE" -cgroup-root "$CGROOT-peer" "${verify[@]}" -insecure-plaintext \
-    -listen "$PEER_ADDR" "${RUNTIME_FLAGS[@]}" -stale-ttl 5s -status-interval 50ms >>"$PEER_STATE.log" 2>&1 &
+    -listen "$PEER_ADDR" "${RUNTIME_FLAGS[@]}" ${PEER_ENGINE[@]+"${PEER_ENGINE[@]}"} -stale-ttl 5s -status-interval 50ms >>"$PEER_STATE.log" 2>&1 &
   echo $! >"$STATE/peer.pid"
   wait_healthy "$PEER_STATE" "$PEER_STATE.log"
 }
 
-# The registry, the shared keys, and the template: the reference zygote
-# built with its images sealed to the fleet's public wrap key, which the
-# seal key's keygen writes beside it. Prints the template digest.
-mobility_setup() {
+# The third home, for C14 alone: the peer's registry and keys, and an
+# engine that declares another layout, so it must refuse the session.
+start_layout() {
+  mkdir -p "$LAYOUT_STATE"
+  local verify; read -ra verify <<<"$(verify_flags)"
+  bin/fiberd-testhooks -state "$LAYOUT_STATE" -node-id "$LAYOUT_NODE" -cgroup-root "$CGROOT-layout" "${verify[@]}" -insecure-plaintext \
+    -listen "$LAYOUT_ADDR" "${RUNTIME_FLAGS[@]}" ${LAYOUT_ENGINE[@]+"${LAYOUT_ENGINE[@]}"} -stale-ttl 5s -status-interval 50ms >>"$LAYOUT_STATE.log" 2>&1 &
+  echo $! >"$STATE/layout.pid"
+  wait_healthy "$LAYOUT_STATE" "$LAYOUT_STATE.log"
+}
+
+# The registry and the shared keys, which every home that moves sessions
+# uses.
+shared_setup() {
   mkdir -p "$MOB"
   bin/conform-registry -addr "$REG_ADDR" -dir "$MOB/blobs" >>"$MOB/registry.log" 2>&1 &
   echo $! >"$STATE/registry.pid"
   for _ in $(seq 1 50); do curl -sf "http://$REG_ADDR/v2/" >/dev/null 2>&1 && break; sleep 0.1; done
   bin/grant-issuer keygen -alg EdDSA -out "$MOB/delta-key.json" >/dev/null
   bin/grant-issuer keygen -alg A256GCM -out "$MOB/delta-seal-key.json" >/dev/null
+}
+
+# The template, after shared_setup: the reference zygote built with its
+# images sealed to the fleet's public wrap key, which the seal key's
+# keygen writes beside it. Prints the template digest.
+mobility_setup() {
   bin/zygotectl build -zygote bin/refzygote -args "--heap-mb 32" -seal-to "$MOB/fleet-pub.json" -out "$MOB/art" >/dev/null
   bin/zygotectl push -dir "$MOB/art" -ref "http://$REG_ADDR/zygotes/ref:conform"
 }
@@ -235,7 +285,7 @@ case "${1:-}" in
   scope-lost) scope_lost ;;
   seal-check) seal_check ;;
   run)
-    rm -rf "$STATE" "$PEER_STATE" "$PEER_STATE.log" "$MOB"; mkdir -p "$STATE"
+    rm -rf "$STATE" "$PEER_STATE" "$PEER_STATE.log" "$LAYOUT_STATE" "$LAYOUT_STATE.log" "$MOB"; mkdir -p "$STATE"
     go build -o bin/ ./cmd/grant-issuer
     go build -tags fiberd_testhooks -o bin/fiberd-testhooks ./cmd/fiberd
     # bin/ is shared between the macOS host and the Linux container; go
@@ -249,27 +299,41 @@ case "${1:-}" in
       go build -o bin/fakehelper ./hack/hyperlight/fakehelper; echo "fake guest" > bin/fake-guest.bin
     fi
     if [ "$RUNTIME" = cloudhv ] && [ -z "${CONFORM_CH_DIR:-}" ]; then hack/cloudhv/build.sh fake >/dev/null; fi
-    trap 'stop; for p in issuer peer registry; do stop_pidfile "$STATE/$p.pid"; done' EXIT
+    trap 'stop; for p in issuer peer layout registry; do stop_pidfile "$STATE/$p.pid"; done' EXIT
     mint=(-mint insecure-json)
     if [ "$SIGNED" = 1 ]; then
       start_issuer
       mint=(-mint jwt -issuer-key "$STATE/issuer-key.json" -issuer "$ISSUER_URL")
     fi
     MOB_FLAGS=()
+    if [ "$SHARED" = 1 ]; then
+      go build -o bin/conform-registry ./hack/conform/registry
+      shared_setup
+      MOB_FLAGS=(-peer-target "$PEER_ADDR" -peer-node-id "$PEER_NODE")
+    fi
     if [ "$MOBILITY" = 1 ]; then
       go build -o bin/ ./cmd/zygotectl
-      go build -o bin/conform-registry ./hack/conform/registry
       TEMPLATE=$(mobility_setup)
       echo "template $TEMPLATE, its images sealed to the fleet key in $MOB/fleet-pub.json"
-      start_peer
-      MOB_FLAGS=(-template "$TEMPLATE" -peer-target "$PEER_ADDR" -peer-node-id "$PEER_NODE" -seal-check-cmd "$0 seal-check")
+      MOB_FLAGS+=(-template "$TEMPLATE" -seal-check-cmd "$0 seal-check")
+    fi
+    if [ "$SHARED" = 1 ]; then start_peer; fi
+    GPU_FLAGS=()
+    if [ "$GPU" = 1 ]; then
+      start_layout
+      GPU_FLAGS=(-gpu -gpu-events "$STATE/gpu-events.ndjson" -gpu-backend "$RUNTIME" -peer-gpu-name "$PEER_GPU"
+        -layout-target "$LAYOUT_ADDR" -layout-node-id "$LAYOUT_NODE")
     fi
     start
     bin/grant-conform -test.v -target "$ADDR" -target-tier "$TIER" -node-id "$NODE" -isolation "$ISOLATION" -fiber-warm "$WARM" -w-budget "$W_BUDGET" "${mint[@]}" \
       -restart-cmd "$0 restart" -cp-health-cmd "$0 issuer-reachable \$1" -audit-file "$STATE/private/audit.jsonl" \
-      -scope-cmd "$0 scope-lost" ${ENGINE_HOOK[@]+"${ENGINE_HOOK[@]}"} ${MOB_FLAGS[@]+"${MOB_FLAGS[@]}"} ${WORKSPACES[@]+"${WORKSPACES[@]}"} "${@:2}"
-    if [ "$MOBILITY" = 1 ]; then
+      -scope-cmd "$0 scope-lost" ${ENGINE_HOOK[@]+"${ENGINE_HOOK[@]}"} ${MOB_FLAGS[@]+"${MOB_FLAGS[@]}"} ${WORKSPACES[@]+"${WORKSPACES[@]}"} \
+      ${GPU_FLAGS[@]+"${GPU_FLAGS[@]}"} "${@:2}"
+    if [ "$SHARED" = 1 ]; then
       grep -h 'published parent checkpoint\|claimed\|pulled parent' "$LOG" "$PEER_STATE.log" | sed 's/^/mobility: /' || true
+    fi
+    if [ "$GPU" = 1 ]; then
+      grep -h 'fits engine\|parked device slice' "$LOG" "$PEER_STATE.log" "$LAYOUT_STATE.log" | sed 's/^/gpu: /' || true
     fi
     if [ "$WARM" -gt 0 ]; then
       pooled=$(grep -c '"detail":"pooled"' "$STATE/private/audit.jsonl" || true)

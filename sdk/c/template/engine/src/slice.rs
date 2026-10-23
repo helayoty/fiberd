@@ -14,7 +14,7 @@ use std::fs::File;
 use std::io::ErrorKind;
 use std::os::unix::fs::FileExt;
 
-use crate::pool::{Fault, LAYOUT, Pool, Reserved, UNIT};
+use crate::pool::{Fault, Pool, Reserved, UNIT};
 use crate::proto::{self, Fnv};
 
 /// The first word of a header.
@@ -22,8 +22,8 @@ const MAGIC: &[u8] = b"fiberd-slice";
 /// The format's version, the header's second word.
 const VERSION: &[u8] = b"1";
 /// Longest header read. The longest one the engine writes, with a
-/// 20-digit byte count, is under 90 bytes, so a file whose first line
-/// outgrows this is not a slice file.
+/// 64-byte layout and a 20-digit byte count, is 122 bytes, so a file
+/// whose first line outgrows this is not a slice file.
 const HEADER_MAX: usize = 128;
 /// The host buffer a copy goes through, a multiple of UNIT.
 const CHUNK: usize = 1 << 20;
@@ -88,17 +88,17 @@ pub struct Header {
 /// line is the header for a slice of bytes with hash, newline included.
 /// Its length does not depend on the hash, so save knows where the
 /// bytes go before it has hashed them.
-fn line(class: &str, bytes: u64, hash: u64) -> String {
-    format!("fiberd-slice 1 {class} {LAYOUT} {bytes} {hash:016x}\n")
+fn line(class: &str, layout: &str, bytes: u64, hash: u64) -> String {
+    format!("fiberd-slice 1 {class} {layout} {bytes} {hash:016x}\n")
 }
 
-/// header reads and checks the file's header against class, the
-/// engine's own, and capacity, the pool's. The order of the checks is
+/// header reads and checks the file's header against the pool's class,
+/// layout and capacity, the engine's own. The order of the checks is
 /// the order of the reasons. A line that is not six words of the right
 /// shape is `header`, then class, layout, and a byte count the pool
 /// could never hold is `capacity`. A zero count, or one that is not
 /// whole UNITs, is `header`, since the engine never writes one.
-pub fn header(file: &File, class: &str, capacity: u64) -> Result<Header, Why> {
+pub fn header(file: &File, pool: &Pool) -> Result<Header, Why> {
     let mut buf = [0u8; HEADER_MAX];
     let got = read_head(file, &mut buf)?;
     let head = buf.get(..got).ok_or(Why::Header)?;
@@ -115,10 +115,10 @@ pub fn header(file: &File, class: &str, capacity: u64) -> Result<Header, Why> {
     if words.next().is_some() || magic != MAGIC || version != VERSION {
         return Err(Why::Header);
     }
-    if kind != class.as_bytes() {
+    if kind != pool.class().as_bytes() {
         return Err(Why::Class);
     }
-    if layout != LAYOUT.as_bytes() {
+    if layout != pool.layout().as_bytes() {
         return Err(Why::Layout);
     }
     let bytes = proto::dec_u64(bytes).ok_or(Why::Header)?;
@@ -126,7 +126,7 @@ pub fn header(file: &File, class: &str, capacity: u64) -> Result<Header, Why> {
     if bytes == 0 || !bytes.is_multiple_of(UNIT) {
         return Err(Why::Header);
     }
-    if bytes > capacity {
+    if bytes > pool.capacity() {
         return Err(Why::Capacity);
     }
     let data = nl.checked_add(1).ok_or(Why::Header)?;
@@ -157,8 +157,9 @@ pub fn save(file: &File, pool: &mut Pool, fence: &[u8]) -> Result<(u64, u64), Wh
     if bytes == 0 {
         return Err(Why::None);
     }
-    let class = pool.class();
-    let data = u64::try_from(line(class, bytes, 0).len()).map_err(|_| Why::Io)?;
+    let (class, layout) = (pool.class(), pool.layout().to_owned());
+    let data = line(class, &layout, bytes, 0).len();
+    let data = u64::try_from(data).map_err(|_| Why::Io)?;
     let end = data.checked_add(bytes).ok_or(Why::Io)?;
     let mut buf = vec![0u8; CHUNK];
     let mut h = Fnv::new();
@@ -173,7 +174,7 @@ pub fn save(file: &File, pool: &mut Pool, fence: &[u8]) -> Result<(u64, u64), Wh
         done = done.checked_add(n as u64).ok_or(Why::Io)?;
     }
     let hash = h.finish();
-    let head = line(class, bytes, hash);
+    let head = line(class, &layout, bytes, hash);
     file.write_all_at(head.as_bytes(), 0).map_err(|_| Why::Io)?;
     file.set_len(end).map_err(|_| Why::Io)?;
     Ok((bytes, hash))

@@ -100,31 +100,31 @@ conform-stub: ## run C1-C10 against a stub-runtime fiberd (all hooks wired)
 conform-signed: ## same, over real signed grants: grant-issuer serve + -verifier=jwks
 	CONFORM_SIGNED=1 CONFORM_STATE=$(BIN)/conform-state-signed hack/conform/stub.sh run
 
-conform-proc: ## C1-C10 against the fork runtime with real cgroups, warmed from an artifact with sealed images, and C11 moving a session to a peer home and back, inside the Linux dev container
-	hack/dev/run.sh env CONFORM_RUNTIME=proc CONFORM_SIGNED=1 CONFORM_STATE=$(CONFORM_DIR)/conform-state-proc hack/conform/stub.sh run
+conform-proc: ## C1-C10 against the fork runtime with real cgroups, warmed from an artifact with sealed images, C11 moving a session to a peer home and back, and C14 moving a device slice, inside the Linux dev container
+	hack/dev/run.sh env CONFORM_RUNTIME=proc CONFORM_SIGNED=1 CONFORM_GPU=1 CONFORM_STATE=$(CONFORM_DIR)/conform-state-proc hack/conform/stub.sh run
 
 conform-proc-python: ## C1-C10 against the fork runtime with the Python reference template (sdk/python), inside the Linux dev container
 	hack/dev/run.sh sh -ec 'hack/python/build.sh; env CONFORM_RUNTIME=proc CONFORM_SIGNED=1 CONFORM_W_BUDGET=8388608 \
 	  CONFORM_TEMPLATE="$$PWD/hack/python/template.sh --heap-mb 32" CONFORM_STATE=$(CONFORM_DIR)/conform-state-proc-python hack/conform/stub.sh run'
 
-conform-gvisor: ## C1-C10 against the gvisor backend (a runsc sandbox per fiber), with a pool of 2 per grant, inside the Linux dev container
-	hack/dev/run.sh env CONFORM_RUNTIME=gvisor CONFORM_SIGNED=1 CONFORM_WARM=2 CONFORM_STATE=$(CONFORM_DIR)/conform-state-gvisor hack/conform/stub.sh run
+conform-gvisor: ## C1-C10 against the gvisor backend (a runsc sandbox per fiber), with a pool of 2 per grant, and C11 and C14 over a peer home, inside the Linux dev container
+	hack/dev/run.sh env CONFORM_RUNTIME=gvisor CONFORM_SIGNED=1 CONFORM_WARM=2 CONFORM_GPU=1 CONFORM_STATE=$(CONFORM_DIR)/conform-state-gvisor hack/conform/stub.sh run
 
 conform-gvisor-python: ## C1-C10 against the gvisor backend with the Python reference template in a rootfs with CPython (hack/python/rootfs.sh), pooled, inside the Linux dev container
 	hack/dev/run.sh env CONFORM_RUNTIME=gvisor CONFORM_SIGNED=1 CONFORM_WARM=2 CONFORM_W_BUDGET=8388608 CONFORM_ROOTFS_SH=hack/python/rootfs.sh \
 	  CONFORM_GVISOR_ROOTFS=/var/lib/fiberd/gvisor-rootfs-python CONFORM_TEMPLATE="/usr/bin/python3 -m fiberd.template.ref --heap-mb 32" \
 	  CONFORM_STATE=$(CONFORM_DIR)/conform-state-gvisor-python hack/conform/stub.sh run
 
-conform-runc: ## C1-C10 against the runc backend (the zygote as an OCI container's init), inside the Linux dev container
-	hack/dev/run.sh env CONFORM_RUNTIME=runc CONFORM_SIGNED=1 CONFORM_STATE=$(CONFORM_DIR)/conform-state-runc hack/conform/stub.sh run
+conform-runc: ## C1-C10 against the runc backend (the zygote as an OCI container's init), and C11 and C14 over a peer home, inside the Linux dev container
+	hack/dev/run.sh env CONFORM_RUNTIME=runc CONFORM_SIGNED=1 CONFORM_GPU=1 CONFORM_STATE=$(CONFORM_DIR)/conform-state-runc hack/conform/stub.sh run
 
 conform-runc-python: ## C1-C10 against the runc backend with the Python reference template in the same rootfs, inside the Linux dev container
 	hack/dev/run.sh env CONFORM_RUNTIME=runc CONFORM_SIGNED=1 CONFORM_W_BUDGET=8388608 CONFORM_ROOTFS_SH=hack/python/rootfs.sh \
 	  CONFORM_GVISOR_ROOTFS=/var/lib/fiberd/gvisor-rootfs-python CONFORM_TEMPLATE="/usr/bin/python3 -m fiberd.template.ref --heap-mb 32" \
 	  CONFORM_STATE=$(CONFORM_DIR)/conform-state-runc-python hack/conform/stub.sh run
 
-conform-hyperlight-fake: ## C1-C10 against the hyperlight backend over the fake helper (no hypervisor), inside the Linux dev container
-	hack/dev/run.sh env CONFORM_RUNTIME=hyperlight CONFORM_SIGNED=1 CONFORM_STATE=$(CONFORM_DIR)/conform-state-hyperlight hack/conform/stub.sh run
+conform-hyperlight-fake: ## C1-C10 against the hyperlight backend over the fake helper (no hypervisor), and C11 and C14 over a peer home, inside the Linux dev container
+	hack/dev/run.sh env CONFORM_RUNTIME=hyperlight CONFORM_SIGNED=1 CONFORM_GPU=1 CONFORM_STATE=$(CONFORM_DIR)/conform-state-hyperlight hack/conform/stub.sh run
 
 conform-logs: ## list the logs the dev-container conformance targets left in $(CONFORM_DIR)
 	hack/dev/run.sh find $(CONFORM_DIR) -path '*conform-state-*' -name '*.log'

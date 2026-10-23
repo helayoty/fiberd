@@ -1,7 +1,9 @@
 name: conformance
 
 # The conformance suite (tests/e2e/conform, C1-C10) against every backend,
-# and the overcommit storm.
+# and the overcommit storm. C14, the GPU answer check, runs on proc, runc,
+# gvisor and the fake Hyperlight helper, and each of those jobs keeps its
+# events as the gpu-events-<backend> artifact.
 on:
   push:
     branches: [main]
@@ -32,6 +34,17 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: make conform-proc
+      - name: make C14's events readable for the upload (written as root inside the container)
+        if: always()
+        run: sudo chmod a+rX bin/conform-state-proc bin/conform-state-proc/gpu-events.ndjson 2>/dev/null || true
+      - name: keep C14's events, one NDJSON line per step
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: gpu-events-proc
+          path: bin/conform-state-proc/gpu-events.ndjson
+          if-no-files-found: ignore
 
   conform-proc-python:
     name: conformance C1-C10 against the proc backend with the Python reference template (sdk/python)
@@ -47,6 +60,17 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: make linux-gvisor-check
       - run: make conform-gvisor
+      - name: make C14's events readable for the upload (written as root inside the container)
+        if: always()
+        run: sudo chmod a+rX bin/conform-state-gvisor bin/conform-state-gvisor/gpu-events.ndjson 2>/dev/null || true
+      - name: keep C14's events, one NDJSON line per step
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: gpu-events-gvisor
+          path: bin/conform-state-gvisor/gpu-events.ndjson
+          if-no-files-found: ignore
       - name: make the state readable for the upload (written as root inside the container)
         if: failure()
         run: sudo chmod -R a+rX bin/conform-state-gvisor 2>/dev/null || true
@@ -88,6 +112,17 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: make conform-runc
+      - name: make C14's events readable for the upload (written as root inside the container)
+        if: always()
+        run: sudo chmod a+rX bin/conform-state-runc bin/conform-state-runc/gpu-events.ndjson 2>/dev/null || true
+      - name: keep C14's events, one NDJSON line per step
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: gpu-events-runc
+          path: bin/conform-state-runc/gpu-events.ndjson
+          if-no-files-found: ignore
 
   conform-runc-python:
     name: conformance C1-C10 against the runc backend with the Python reference template (sdk/python)
@@ -102,6 +137,17 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: make conform-hyperlight-fake
+      - name: make C14's events readable for the upload (written as root inside the container)
+        if: always()
+        run: sudo chmod a+rX bin/conform-state-hyperlight bin/conform-state-hyperlight/gpu-events.ndjson 2>/dev/null || true
+      - name: keep C14's events, one NDJSON line per step
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: gpu-events-hyperlight
+          path: bin/conform-state-hyperlight/gpu-events.ndjson
+          if-no-files-found: ignore
 
   conform-hyperlight:
     name: conformance C1-C10 against the hyperlight backend with the Rust helper (KVM)

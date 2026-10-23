@@ -93,19 +93,24 @@ fn reason(why: slice::Why) -> &'static str {
 // ---- arguments ----
 
 /// The command line, `--grant <grant> --socket <path> [--sim-mb N]
-/// [--pool-mb N]`. `--pool-mb` sizes a CUDA pool, so it goes without
-/// `--sim-mb`.
+/// [--pool-mb N] [--sim-name <name>] [--layout <name>]`. `--pool-mb`
+/// sizes a CUDA pool, so it goes without `--sim-mb`, and `--sim-name`
+/// names a `--sim-mb` pool's GPU. `--layout` replaces the built-in
+/// LAYOUT, for test homes whose engines must not fit each other.
 struct Args {
     grant: String,
     socket: PathBuf,
     sim_mb: Option<u64>,
     pool_mb: Option<u64>,
+    sim_name: Option<String>,
+    layout: Option<String>,
 }
 
 impl Args {
     /// parse reads each flag once, with its value as the next argument.
     fn parse(mut it: impl Iterator<Item = OsString>) -> Result<Args, String> {
         let (mut grant, mut socket, mut sim_mb, mut pool_mb) = (None, None, None, None);
+        let (mut sim_name, mut layout) = (None, None);
         while let Some(flag) = it.next() {
             let flag = flag.to_string_lossy().into_owned();
             let value = it.next().ok_or_else(|| format!("{flag} needs a value"))?;
@@ -123,6 +128,16 @@ impl Args {
                     let mb = mb.ok_or("--pool-mb needs a whole number of MiB, at least 1")?;
                     pool_mb.replace(mb).is_some()
                 }
+                "--sim-name" => {
+                    let name = Some(text).filter(|n| !n.is_empty());
+                    let name = name.ok_or("--sim-name needs a name")?;
+                    sim_name.replace(name).is_some()
+                }
+                "--layout" => {
+                    let l = Some(text).filter(|l| token(l));
+                    let l = l.ok_or("--layout needs one word of printable ASCII")?;
+                    layout.replace(l).is_some()
+                }
                 _ => return Err(format!("unknown flag {flag}")),
             };
             if seen {
@@ -138,8 +153,16 @@ impl Args {
             socket: socket.ok_or("--socket is required")?,
             sim_mb,
             pool_mb,
+            sim_name,
+            layout,
         })
     }
+}
+
+/// token reports whether s fits the ENGINE line and a slice header as
+/// one word, printable ASCII with no space and at most NAME_MAX bytes.
+fn token(s: &str) -> bool {
+    !s.is_empty() && s.len() <= NAME_MAX && s.bytes().all(|b| b.is_ascii_graphic())
 }
 
 // ---- start ----
@@ -154,12 +177,13 @@ fn main() {
     let ctl = Ctl::open().unwrap_or_else(|e| die(&e));
     let mut dev = open_device(&args).unwrap_or_else(|e| die(&e));
     let (class, cap) = (dev.class(), dev.capacity());
-    ctl.send(&format!("ENGINE {class} {cap} 1 {LAYOUT}"));
+    let layout = args.layout.as_deref().unwrap_or(LAYOUT);
+    ctl.send(&format!("ENGINE {class} {cap} 1 {layout}"));
     let (name, cc, driver) = dev.gpu();
     let gpu = format!("GPU {} {} {}", word(&name), word(&cc), word(&driver));
     ctl.send(&gpu);
     dev.allocate().unwrap_or_else(|e| die(&e));
-    let pool = Pool::new(dev);
+    let pool = Pool::new(dev, layout);
     // The map's tables take their random hash keys here, before the
     // seal, so nothing after it asks the kernel for randomness.
     let map = Map::default();
@@ -187,6 +211,9 @@ fn main() {
 fn open_device(args: &Args) -> Result<Box<dyn Device>, String> {
     let first = first_device();
     let Some(mb) = args.sim_mb else {
+        if args.sim_name.is_some() {
+            return Err("--sim-name names a --sim-mb pool's GPU".to_owned());
+        }
         let Some(entry) = first else {
             let none = "FIBERD_DEVICES names no device and --sim-mb is not set";
             return Err(none.to_owned());
@@ -201,7 +228,8 @@ fn open_device(args: &Args) -> Result<Box<dyn Device>, String> {
     if let Some(d) = first {
         eprintln!("refengine: simulated pool, device {d} is not opened");
     }
-    Ok(Box::new(Sim::new(cap)))
+    let name = args.sim_name.as_deref().unwrap_or("sim");
+    Ok(Box::new(Sim::new(cap, name)))
 }
 
 /// The first entry of FIBERD_DEVICES, a comma-separated list.
@@ -366,7 +394,7 @@ impl Engine {
             self.ctl.error(fence, "busy");
             return;
         }
-        let header = slice::header(&file, self.pool.class(), self.pool.capacity());
+        let header = slice::header(&file, &self.pool);
         let header = match header {
             Ok(h) => h,
             Err(why) => {

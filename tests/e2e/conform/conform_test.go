@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"testing"
 	"time"
 
@@ -46,6 +47,16 @@ var (
 	peerTarget = flag.String("peer-target", "", "host:port of a second home sharing the target's delta registry and keys (C11)")
 	peerNode   = flag.String("peer-node-id", "", "the peer's node id, the audience of its grants (C11)")
 	sealCheck  = flag.String("seal-check-cmd", "", "hook: exit non-zero if the registry the homes share holds template memory in the clear (C11)")
+	gpuRun     = flag.Bool("gpu", false, "C14: a device slice survives a park and a move to the peer, and a third home of another engine layout refuses the session (needs -peer-target and -layout-target)")
+	gpuClass   = flag.String("gpu-class", "sim", "device class of C14's grants: sim for the reference engine's simulated pool, gpu on hardware")
+	gpuEvents  = flag.String("gpu-events", "", "C14 writes one NDJSON line per step to this file")
+	gpuVM      = flag.String("gpu-vm", "ci", "the vm field of C14's events")
+	gpuBackend = flag.String("gpu-backend", "", "the backend field of C14's events, the target's runtime")
+	gpuName    = flag.String("gpu-name", "sim", "the GPU the target's and the third home's engines declare, for C14's events")
+	peerGPU    = flag.String("peer-gpu-name", "sim", "the GPU the peer's engine declares, for C14's events")
+	layTarget  = flag.String("layout-target", "", "host:port of a third home sharing the registry and keys, whose engine declares another layout (C14)")
+	layNode    = flag.String("layout-node-id", "", "the third home's node id, the audience of its grants (C14)")
+	gpuLayouts = flag.String("gpu-layouts", "raw256,raw512", "the session's layout and the third home's, comma-separated, which its refusal must name (C14)")
 )
 
 func TestMain(m *testing.M) {
@@ -125,6 +136,14 @@ func TestConformance(t *testing.T) {
 			t.Fatal("-peer-target needs -peer-node-id")
 		}
 		d.Peer = &Peer{Target: *peerTarget, NodeID: *peerNode}
+	}
+	if *gpuRun {
+		lays := strings.Split(*gpuLayouts, ",")
+		if d.Peer == nil || *layTarget == "" || *layNode == "" || len(lays) != 2 {
+			t.Fatal("-gpu needs -peer-target, -layout-target, -layout-node-id and two -gpu-layouts")
+		}
+		d.GPU = &GPU{Class: *gpuClass, Layout: &Peer{Target: *layTarget, NodeID: *layNode}, Layouts: [2]string{lays[0], lays[1]},
+			Events: *gpuEvents, VM: *gpuVM, Backend: *gpuBackend, Name: *gpuName, PeerName: *peerGPU}
 	}
 	if *sealCheck != "" {
 		cmd := *sealCheck

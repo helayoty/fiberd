@@ -379,6 +379,13 @@ fn fiber_thread(ctl: Ctl, fence: String, endpoint: PathBuf, mut sb: MultiUseSand
         dirtied += n.max(0) as u64;
     }
     ctl.say(format!("W {fence} {dirtied}"));
+    // And its device slice, which the engine reports and fiberd holds
+    // against the grant's device budget, as a refzygote fiber's. The
+    // guest's GpuFill reserves it under the fiber's own fence.
+    let dev = payload_num(&payload, "\"device_bytes\"");
+    if dev > 0 {
+        let _ = sb.call::<String>("GpuFill", (0u64, dev));
+    }
 
     let mut serving = true;
     loop {

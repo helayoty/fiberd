@@ -20,6 +20,9 @@
 //
 // -peer-target and -peer-node-id name a second home that shares the
 // target's delta registry and keys. C11 moves a session to it and back.
+// -gpu runs C14, which moves a session's device slice to the peer and
+// has a third home, -layout-target and -layout-node-id, whose engine
+// declares another layout refuse it. -gpu-events records each step.
 //
 // Cases whose hook is missing are skipped, and say so.
 package main
