@@ -82,14 +82,14 @@ When a spike fails, also paste the last lines of `ch.log` and `serial.log` from 
 
 | What | Pinned to | sha256 |
 | --- | --- | --- |
-| Cloud Hypervisor | `v53.0`, published 2026-07-12, asset `cloud-hypervisor-static` | `448af3d4e59b22c2987f7df94c213ad40fb53a10d437e42b5ee6c4fce7c29ecc` |
+| Cloud Hypervisor | `v54.0`, published 2026-10-14, asset `cloud-hypervisor-static` | `4f4f98a3d661a40f3e5272627cc895a1b2e525f2f6bedf5f895f9cd21ba5c65b` |
 | Guest kernel | `cloud-hypervisor/linux` release `ch-release-v6.16.9-20260508`, asset `vmlinux-x86_64` | `9d3570b47d5abb069ca00edfbfcef4c68306a9c3d078a01f10082b258f1001b8` |
 
-The sha256 values are the digests GitHub records for each asset, read from the releases API on 2026-10-22. `setup.sh` refuses a file that does not match. If you move to another release, empty the pin in `env.sh`. The script then refuses to install, prints the hash it downloaded, and waits for you to pin it.
+The sha256 values are the digests GitHub records for each asset, read from the releases API on 2026-10-22, and v54.0's on 2026-10-23. `setup.sh` refuses a file that does not match. If you move to another release, empty the pin in `env.sh`. The script then refuses to install, prints the hash it downloaded, and waits for you to pin it.
 
-v54.0 was a week old when these were written, so the spikes pin v53.0. The kernel is the one v53.0's own integration tests download (`scripts/test-util.sh`, `download_linux`).
+The spikes and the backend pin v54.0 for its `copyonwrite` restore mode. The table below was read in v53.0 and rechecked in v54.0 for the calls fiberd makes. The kernel is the one v53.0's own integration tests download (`scripts/test-util.sh`, `download_linux`), kept on v54.0, whose tests moved to `ch-release-v7.2.8-20261009`.
 
-## What was checked against v53.0
+## What was checked against v53.0 and v54.0
 
 Every API call and flag the spikes use was read in the `v53.0` tag of `cloud-hypervisor/cloud-hypervisor`, or in the kernel branch named below.
 
@@ -99,7 +99,7 @@ Every API call and flag the spikes use was read in the `v53.0` tag of `cloud-hyp
 | `vm.create`, `vm.boot`, `vm.pause`, `vm.resume`, `vm.snapshot`, `vm.restore`, `vm.info`, `vmm.ping`, `vmm.shutdown` | `docs/api.md`, REST table | All present. `vm.snapshot` needs a paused VM. The table lists "created but not booted" for `vm.restore`, while `docs/snapshot_restore.md` restores into a fresh VMM. The spikes restore with the `--restore` flag, which avoids the question |
 | `vm.create` body fields `cpus`, `memory`, `payload.kernel`, `payload.initramfs`, `payload.cmdline`, `vsock`, `serial`, `console`, `rng` | `vmm/src/api/openapi/cloud-hypervisor.yaml`, `VmConfig` and its parts | Present with these names. `ConsoleMode` is one of `Off`, `Pty`, `Tty`, `File`, `Socket`, `Null`. `vm.info`'s `state` is one of `Created`, `Running`, `Shutdown`, `Paused` |
 | `vm.snapshot` body `{"destination_url": "file://<dir>"}` | the same file, `VmSnapshotConfig`, and `docs/snapshot_restore.md` | The directory must exist. It gets `config.json`, `state.json` and `memory-ranges` |
-| `--restore source_url=file://<dir>,memory_restore_mode=copy\|ondemand` | `vmm/src/config.rs`, `RestoreConfig::SYNTAX`, and `docs/snapshot_restore.md` | The VM comes back paused unless `resume=true`. `copy` is the default. `ondemand` uses userfaultfd and fails rather than fall back. It refuses `prefault=on` |
+| `--restore source_url=file://<dir>,memory_restore_mode=copy\|ondemand\|copyonwrite` | `vmm/src/config.rs`, `RestoreConfig::SYNTAX`, and `docs/snapshot_restore.md` | The VM comes back paused unless `resume=true`. `copy` is the default. `ondemand` uses userfaultfd and fails rather than fall back. `copyonwrite` is new in v54.0 and maps `memory-ranges` `MAP_PRIVATE`. `prefault=on` needs `copy` |
 | Editing `config.json` between snapshot and restore | `docs/snapshot_restore.md` | Described as allowed for special cases |
 | Memory zones, `file=`, `shared=` | `docs/memory.md`, `--memory-zone` | `--memory size=0` plus zones. `shared=off` maps the file `MAP_PRIVATE` |
 | A shared, file-backed zone is left out of the snapshot | `vmm/src/memory_manager.rs`, `memory_range_table` | A region that is file-backed, `MAP_SHARED`, and whose file still has a link is skipped, since the file holds its bytes. A restore with `shared=false` opens the file read-only (`open_backing_file`) |

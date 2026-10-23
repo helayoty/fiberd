@@ -37,7 +37,7 @@ Every call is HTTP/1.1 on `--api-socket path=<socket>`, under `/api/v1/`, one re
 | `vm.resume` | PUT | none | After a restore, a Sync park, and a failed park |
 | `vmm.shutdown` | PUT | none | Every end of a VMM |
 
-A restore is the command line flag `--restore source_url=file://<dir>`, with `,memory_restore_mode=ondemand` when the backend is told to. v53.0 knows `copy` and `ondemand` alone. Copy-on-write comes with v54.0. The VM comes up paused. Every path the backend names is a path inside the VMM's mount namespace (`/fiberd/vm/...`), the same in every VMM, so a snapshot restores in any fiber's namespace.
+A restore is the command line flag `--restore source_url=file://<dir>[,memory_restore_mode=<mode>]`. A Clone restores with `memory_restore_mode=copyonwrite` (v54.0), unless the backend is told `copy` or `ondemand`. A Resume restores in copy mode, which needs no option. The fake takes the same three modes, and it refuses `prefault` with any mode but `copy`, as v54.0 does. The VM comes up paused. Every path the backend names is a path inside the VMM's mount namespace (`/fiberd/vm/...`), the same in every VMM, so a snapshot restores in any fiber's namespace.
 
 The fake's snapshot is `config.json` (the body of `vm.create`), `state.json` (the guest init's state) and an empty `memory-ranges`. Its restore starts the template afresh and puts the guest init in the recorded state, so the template's memory does not survive a park there.
 

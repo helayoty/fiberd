@@ -285,10 +285,10 @@ One `cloud-hypervisor` process per fiber, started inside the fiber's leaf, so le
 
 ### The pinned release
 
-The spikes pin Cloud Hypervisor `v53.0` and the guest kernel its own tests use. `hack/cloudhv/spike/README.md` lists what was checked in that tag's source and docs. These hold in `v53.0`.
+The spikes and the backend pin Cloud Hypervisor `v54.0`. The guest kernel is the one `v53.0`'s own tests use. `hack/cloudhv/spike/README.md` lists what was checked in the source and docs. These hold in `v54.0`.
 
 - The REST API has `vm.create`, `vm.boot`, `vm.pause`, `vm.resume`, `vm.snapshot`, `vm.restore`, `vm.info` and `vmm.shutdown`.
-- `--restore source_url=file://<dir>` brings a VM back paused. A restore picks `memory_restore_mode=copy` (the default) or `ondemand` (userfaultfd).
+- `--restore source_url=file://<dir>` brings a VM back paused. A restore picks `memory_restore_mode=copy` (the default), `ondemand` (userfaultfd) or `copyonwrite` (a private mapping of the snapshot's memory).
 - The API table lists "created but not booted" for `vm.restore`, while the snapshot guide restores into a fresh VMM. The backend uses the `--restore` flag, which avoids the question.
 - Seccomp is on by default. Landlock exists and is off unless asked.
 
@@ -321,15 +321,16 @@ Every Clone and Resume sends the agent one line, `INCARNATE <generation> <fence>
 
 ### Memory and W
 
-fiberd's value is many cheap copies of one warm template. If each Clone copies the whole warm memory, a micro-VM fiber costs its full memory size, not its dirty pages. Spike S1 measures it.
+fiberd's value is many cheap copies of one warm template. If each Clone copied the whole warm memory, a micro-VM fiber would cost its full memory size, not its dirty pages. So a Clone restores copy-on-write.
 
-| Way to restore | Cost per Clone | Status in `v53.0` |
+| Way to restore | Cost per Clone | Status in `v54.0` |
 | --- | --- | --- |
-| `memory_restore_mode=copy` | The whole guest, in private memory | The default |
+| `memory_restore_mode=copyonwrite` | Only the pages the fiber writes. The rest is the warm snapshot's page cache | New in `v54.0`. The backend's default for a Clone |
+| `memory_restore_mode=copy` | The whole guest, in private memory | The VMM's default. Every Resume uses it |
 | `memory_restore_mode=ondemand` | The pages touched, still private | Present. Needs userfaultfd and refuses `prefault=on` |
-| A file-backed memory zone. The warm VM maps it shared, so the snapshot skips it. Each Clone's `config.json` maps it private | Only the pages the fiber dirties, shared page cache for the rest | Built from two source facts (`memory_range_table` skips a shared file-backed region, and `shared=off` maps the file `MAP_PRIVATE`). It works only if S1 says so (**verify**) |
+| A file-backed memory zone. The warm VM maps it shared, so the snapshot skips it. Each Clone's `config.json` maps it private | Only the pages the fiber dirties, shared page cache for the rest | Not used by the backend. S1 still tries it |
 
-If only a full copy works, the backend still answers the question at a higher W per fiber, and the design records the cost. With copy-on-write, W is the VMM's private dirty pages. Without it, `Overheader` reports the guest size, so the host does not mistake the copy for working set.
+With copy-on-write, a fiber's W counts the pages it writes, as for proc. Its fixed footprint is the VMM alone. Its leaf's ceiling still leaves room for the whole guest, since a Resume copies its park in whole. When a Clone's restore falls back to copy, fiberd writes a line to the grant's log, and that fiber's W counts the whole guest.
 
 ### Isolation
 

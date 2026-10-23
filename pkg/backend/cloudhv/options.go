@@ -17,9 +17,10 @@ type Options struct {
 	MemoryMiB uint64
 	// VCPUs is each guest's vCPU count, 1 when zero.
 	VCPUs int
-	// RestoreMode is how a Clone restores the warm snapshot's memory:
-	// "" or "copy" copies it in whole, "ondemand" faults it in lazily
-	// through userfaultfd.
+	// RestoreMode is how a Clone restores the warm snapshot's memory.
+	// "" or "copyonwrite", the default, maps it copy-on-write, so a clone
+	// owns only the pages it writes. "copy" copies it in whole, and
+	// "ondemand" faults it in lazily through userfaultfd.
 	// A Resume always copies, since a park directory is not fiberd's to
 	// keep unchanged for the VM's lifetime.
 	RestoreMode string
