@@ -1905,7 +1905,7 @@ func (b *Backend) Resume(ctx context.Context, spec backend.ResumeSpec) (backend.
 			workDir = filepath.Dir(spec.Endpoint)
 		}
 		var err error
-		wspec = backend.WarmSpec{GrantUID: spec.WarmID, WorkDir: workDir}
+		wspec = backend.WarmSpec{GrantUID: spec.WarmID, RangeKey: spec.RangeKey, WorkDir: workDir}
 		if extra, held, err = b.opt.Launcher.RestoreExtra(wspec, spec.Dir); err != nil {
 			return backend.Fiber{}, err
 		}

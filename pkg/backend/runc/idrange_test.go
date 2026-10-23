@@ -209,7 +209,7 @@ func colliding(p IDPool, grant string) string {
 	}
 }
 
-// TestClaims checks that a slot is held by one grant at a time and for as
+// TestClaims checks that a slot is held by one range key at a time and for as
 // long as any user of the grant has it, the warm zygote or a restored fiber.
 // The zygote's hold counts once however often it is taken, each fiber's
 // counts, the slot is free once the last user lets go, and a release by a
@@ -223,26 +223,26 @@ func TestClaims(t *testing.T) {
 	}{
 		{name: "two grants in one slot", run: func(t *testing.T, c *claims) {
 			g2 := colliding(pool, "g1")
-			if err := c.acquire("g1", warm); err != nil {
+			if err := c.acquire("g1", "g1", warm); err != nil {
 				t.Fatal(err)
 			}
 			if err := c.check(g2); !errors.Is(err, ErrRangeCollision) {
 				t.Fatalf("check(%s) = %v, want ErrRangeCollision", g2, err)
 			}
-			if err := c.acquire(g2, warm); !errors.Is(err, ErrRangeCollision) {
+			if err := c.acquire(g2, g2, warm); !errors.Is(err, ErrRangeCollision) {
 				t.Fatalf("acquire(%s) = %v, want ErrRangeCollision", g2, err)
 			}
-			if err := c.acquire(g2, fiber); !errors.Is(err, ErrRangeCollision) {
+			if err := c.acquire(g2, g2, fiber); !errors.Is(err, ErrRangeCollision) {
 				t.Fatalf("acquire(%s, fiber) = %v, want ErrRangeCollision", g2, err)
 			}
 		}},
 		{name: "warm twice counts once", run: func(t *testing.T, c *claims) {
 			for i := 0; i < 2; i++ {
-				if err := c.acquire("g1", warm); err != nil {
+				if err := c.acquire("g1", "g1", warm); err != nil {
 					t.Fatalf("acquire %d: %v", i, err)
 				}
 			}
-			if !c.release("g1", warm) {
+			if !c.release("g1", "g1", warm) {
 				t.Fatal("one release of the zygote did not free the slot")
 			}
 		}},
@@ -255,82 +255,82 @@ func TestClaims(t *testing.T) {
 					other = o
 				}
 			}
-			if err := c.acquire(g, warm); err != nil {
+			if err := c.acquire(g, g, warm); err != nil {
 				t.Fatal(err)
 			}
-			if err := c.acquire(other, warm); err != nil {
+			if err := c.acquire(other, other, warm); err != nil {
 				t.Fatalf("acquire(%s) = %v, want nil", other, err)
 			}
 		}},
 		{name: "release frees the slot", run: func(t *testing.T, c *claims) {
 			g2 := colliding(pool, "g1")
-			if err := c.acquire("g1", warm); err != nil {
+			if err := c.acquire("g1", "g1", warm); err != nil {
 				t.Fatal(err)
 			}
-			if !c.release("g1", warm) {
+			if !c.release("g1", "g1", warm) {
 				t.Fatal("release did not report the slot free")
 			}
-			if err := c.acquire(g2, warm); err != nil {
+			if err := c.acquire(g2, g2, warm); err != nil {
 				t.Fatalf("acquire after release = %v, want nil", err)
 			}
 		}},
 		{name: "a restored fiber holds the slot after the zygote is gone", run: func(t *testing.T, c *claims) {
 			g2 := colliding(pool, "g1")
-			if err := c.acquire("g1", warm); err != nil {
+			if err := c.acquire("g1", "g1", warm); err != nil {
 				t.Fatal(err)
 			}
-			if err := c.acquire("g1", fiber); err != nil {
+			if err := c.acquire("g1", "g1", fiber); err != nil {
 				t.Fatal(err)
 			}
-			if c.release("g1", warm) {
+			if c.release("g1", "g1", warm) {
 				t.Fatal("the zygote's release freed a slot a fiber still uses")
 			}
 			if err := c.check(g2); !errors.Is(err, ErrRangeCollision) {
 				t.Fatalf("check(%s) with a fiber of g1 live = %v, want ErrRangeCollision", g2, err)
 			}
-			if !c.release("g1", fiber) {
+			if !c.release("g1", "g1", fiber) {
 				t.Fatal("the last fiber's release did not free the slot")
 			}
-			if err := c.acquire(g2, warm); err != nil {
+			if err := c.acquire(g2, g2, warm); err != nil {
 				t.Fatalf("acquire after the last user = %v, want nil", err)
 			}
 		}},
 		{name: "every restored fiber counts", run: func(t *testing.T, c *claims) {
 			for i := 0; i < 3; i++ {
-				if err := c.acquire("g1", fiber); err != nil {
+				if err := c.acquire("g1", "g1", fiber); err != nil {
 					t.Fatal(err)
 				}
 			}
-			if c.release("g1", fiber) {
+			if c.release("g1", "g1", fiber) {
 				t.Fatal("the first release, with two fibers left, freed the slot")
 			}
-			if c.release("g1", fiber) {
+			if c.release("g1", "g1", fiber) {
 				t.Fatal("the second release, with one fiber left, freed the slot")
 			}
-			if !c.release("g1", fiber) {
+			if !c.release("g1", "g1", fiber) {
 				t.Fatal("the third release did not free the slot")
 			}
 		}},
 		{name: "re-warming with fibers live is not a collision", run: func(t *testing.T, c *claims) {
-			if err := c.acquire("g1", fiber); err != nil {
+			if err := c.acquire("g1", "g1", fiber); err != nil {
 				t.Fatal(err)
 			}
-			if err := c.acquire("g1", warm); err != nil {
+			if err := c.acquire("g1", "g1", warm); err != nil {
 				t.Fatalf("warm with a fiber live = %v, want nil", err)
 			}
-			if c.release("g1", fiber) {
+			if c.release("g1", "g1", fiber) {
 				t.Fatal("the fiber's release freed a slot the zygote holds")
 			}
-			if !c.release("g1", warm) {
+			if !c.release("g1", "g1", warm) {
 				t.Fatal("the zygote's release did not free the slot")
 			}
 		}},
 		{name: "release by a non-holder keeps the slot", run: func(t *testing.T, c *claims) {
 			g2 := colliding(pool, "g1")
-			if err := c.acquire("g1", warm); err != nil {
+			if err := c.acquire("g1", "g1", warm); err != nil {
 				t.Fatal(err)
 			}
-			if c.release(g2, warm) || c.release(g2, fiber) {
+			if c.release(g2, g2, warm) || c.release(g2, g2, fiber) {
 				t.Fatal("a stranger's release reported the slot free")
 			}
 			if err := c.check(g2); !errors.Is(err, ErrRangeCollision) {
@@ -338,26 +338,26 @@ func TestClaims(t *testing.T) {
 			}
 		}},
 		{name: "release of a user the grant does not have changes nothing", run: func(t *testing.T, c *claims) {
-			if err := c.acquire("g1", warm); err != nil {
+			if err := c.acquire("g1", "g1", warm); err != nil {
 				t.Fatal(err)
 			}
-			if c.release("g1", fiber) {
+			if c.release("g1", "g1", fiber) {
 				t.Fatal("releasing a fiber the grant never restored freed the slot")
 			}
-			if c.release("g1", fiber) {
+			if c.release("g1", "g1", fiber) {
 				t.Fatal("a second such release freed the slot")
 			}
-			if !c.release("g1", warm) {
+			if !c.release("g1", "g1", warm) {
 				t.Fatal("the zygote's release did not free the slot")
 			}
-			if c.release("g1", warm) {
+			if c.release("g1", "g1", warm) {
 				t.Fatal("a release of a free slot reported it freed")
 			}
 		}},
 		{name: "collision names the slot, the ids and the remedy", run: func(t *testing.T, c *claims) {
 			g2 := colliding(pool, "g1")
-			_ = c.acquire("g1", warm)
-			err := c.acquire(g2, warm)
+			_ = c.acquire("g1", "g1", warm)
+			err := c.acquire(g2, g2, warm)
 			for _, want := range []string{"g1", fmt.Sprintf("slot %d of %d", pool.slot("g1"), pool.Slots), fmt.Sprintf("from %d", pool.Range("g1").Start), "larger -userns-pool"} {
 				if err == nil || !strings.Contains(err.Error(), want) {
 					t.Fatalf("err = %v, want it to mention %q", err, want)

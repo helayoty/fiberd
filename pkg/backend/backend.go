@@ -50,6 +50,12 @@ type Template struct {
 // WarmSpec asks for one warm instance of a template for a grant.
 type WarmSpec struct {
 	GrantUID string
+	// RangeKey picks the grant's host id range on an IDMapper. It is the
+	// grant's session domain, which every home's grant for a moving
+	// session shares, or the grant uid for a grant without a tenant, so
+	// a checkpoint restores on another home with the map it was dumped
+	// with. Grants with one key share the range on a home.
+	RangeKey string
 	Template Template
 	// CgroupFD is an open fd of the cgroup the warm instance must be born
 	// in (its own leaf under the grant). -1 when the host has none.
@@ -203,6 +209,8 @@ type ResumeSpec struct {
 	// WarmID names the grant's warm instance the fiber is resumed under
 	// (its template, and for a launcher its container's root and mounts).
 	WarmID string
+	// RangeKey picks the grant's host id range (WarmSpec.RangeKey).
+	RangeKey string
 	// WorkDir is the grant's run directory (WarmSpec.WorkDir).
 	WorkDir string
 	// Session is the name the caller gave the Clone that resumes the
@@ -337,15 +345,16 @@ type WorkspaceHolder interface {
 
 // IDMapper is implemented by backends whose warm instance and fibers run
 // in a user namespace of the grant's own, mapped to a range of host ids
-// with the grant's root at its start. The host hands that uid the one
-// thing the instance must write on its own, the cgroup.procs of the
-// grant's cgroup and of each fiber leaf, so a birth into a leaf works.
-// Every limit stays the host's.
+// with the grant's root at its start. The range is picked by the grant's
+// range key (WarmSpec.RangeKey). The host hands that uid the one thing
+// the instance must write on its own, the cgroup.procs of the grant's
+// cgroup and of each fiber leaf, so a birth into a leaf works. Every
+// limit stays the host's.
 type IDMapper interface {
-	// MappedRoot is the host uid the grant's root maps to. It fails when
-	// the grant cannot have its range on this home because another
-	// admitted grant holds it.
-	MappedRoot(grantUID string) (uint32, error)
+	// MappedRoot is the host uid the root of a grant with range key key
+	// maps to. It fails when the grant cannot have its range on this home
+	// because an admitted grant of another key holds it.
+	MappedRoot(key string) (uint32, error)
 }
 
 // Platformer is implemented by backends whose checkpoints depend on

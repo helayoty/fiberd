@@ -552,7 +552,7 @@ type DeltaDiscarder interface {
 // admissions of the same UID wait for the first and share its result. One
 // that carries a longer lease, or finds the first failed, then admits
 // itself. A second delivery of an already-admitted grant refreshes it in
-// place.
+// place, unless it changes the tenant, template or session class.
 func (a *Core) Admit(ctx context.Context, g Grant) (StatusCode, error) {
 	if g.MinTier > a.Runtime.Tier() {
 		return NeedsTier, fmt.Errorf("%w: grant needs %s, runtime is %s", ErrNeedsTier, g.MinTier, a.Runtime.Tier())
@@ -594,10 +594,10 @@ func (a *Core) Admit(ctx context.Context, g Grant) (StatusCode, error) {
 		}
 		// The first admission's result stands in for this one when it
 		// admitted a lease at least as long as this grant's. Otherwise it
-		// failed, or this grant renews the lease, and this admission runs
-		// itself. Another admission may have started meanwhile, so the
-		// slot is taken under the lock again.
-		if held, ok := a.Ledger.Grant(g.UID); ok && !renewsLease(held, g) {
+		// failed, or this grant renews the lease or changes the grant's
+		// identity, and this admission runs itself. Another admission may
+		// have started meanwhile, so the slot is taken under the lock again.
+		if held, ok := a.Ledger.Grant(g.UID); ok && !renewsLease(held, g) && !changesIdentity(held, g) {
 			return OK, nil
 		}
 		a.admitMu.Lock()
@@ -616,6 +616,13 @@ func (a *Core) Admit(ctx context.Context, g Grant) (StatusCode, error) {
 	// and yields what it admitted.
 	if a.Revoked != nil && a.Revoked.Denied(g.UID, g.LeaseExpiry, a.Ledger.Now()) {
 		return a.missCode(ErrGrantRevoked), fmt.Errorf("%w: %s", ErrGrantRevoked, g.UID)
+	}
+	// A re-delivery keeps the admitted grant's identity. The runtime keys
+	// what it holds for the grant (runc's user-ID range, a warm zygote's
+	// rootfs) by it, so a change in place would move them under a live
+	// zygote.
+	if held, ok := a.Ledger.Grant(g.UID); ok && changesIdentity(held, g) {
+		return Invalid, fmt.Errorf("%w: grant %s", ErrGrantChanged, g.UID)
 	}
 
 	// The device channel comes before the template: an engine needs its
@@ -707,6 +714,13 @@ func renewsLease(held, g Grant) bool {
 		return false
 	}
 	return g.LeaseExpiry.IsZero() || held.LeaseExpiry.Before(g.LeaseExpiry)
+}
+
+// changesIdentity reports whether g names another tenant, template or
+// session class than the admitted grant held. Those fields make the
+// grant's session domain, which is fixed while the grant is admitted.
+func changesIdentity(held, g Grant) bool {
+	return held.Tenant != g.Tenant || held.TemplateDigest != g.TemplateDigest || held.Policy.SessionClass != g.Policy.SessionClass
 }
 
 // releaseDevices gives a grant's device channel back, if it holds one.

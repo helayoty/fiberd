@@ -363,7 +363,8 @@ func TestCommandRefusals(t *testing.T) {
 			}},
 		{name: "another grant holds the slot", wantIs: ErrRangeCollision,
 			setup: func(t *testing.T, l *launcher, _ *backend.WarmSpec) {
-				if err := l.claims.acquire(colliding(testPool, "g1"), false); err != nil {
+				o := colliding(testPool, "g1")
+				if err := l.claims.acquire(o, o, false); err != nil {
 					t.Fatal(err)
 				}
 			}},
@@ -397,7 +398,7 @@ func TestCommandRefusals(t *testing.T) {
 			if tc.wantIs != nil && !errors.Is(err, tc.wantIs) {
 				t.Fatalf("Command = %v, want %v", err, tc.wantIs)
 			}
-			if l.claims.release(spec.GrantUID, true) {
+			if l.claims.release(spec.GrantUID, spec.GrantUID, true) {
 				t.Fatal("the failed Command kept the zygote's hold on the slot")
 			}
 			if exists(l.rootfs(spec)) {
@@ -636,7 +637,7 @@ func TestRelease(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			l, f := newLauncher(t, nil)
 			spec := warmSpec(t, "g1")
-			if err := l.claims.acquire(spec.GrantUID, true); err != nil {
+			if err := l.claims.acquire(spec.GrantUID, spec.GrantUID, true); err != nil {
 				t.Fatal(err)
 			}
 			if err := os.MkdirAll(l.bundle(spec), 0o755); err != nil {
@@ -657,7 +658,7 @@ func TestRelease(t *testing.T) {
 			if exists(l.templateDir(spec)) || l.stagedFor(spec) != "" {
 				t.Error("the staged template survived Release")
 			}
-			if l.claims.release("g1", true) || l.claims.release("g1", false) {
+			if l.claims.release("g1", "g1", true) || l.claims.release("g1", "g1", false) {
 				t.Error("the slot is still held")
 			}
 		})
@@ -727,6 +728,7 @@ func TestDumpExtra(t *testing.T) {
 				f.mapping(fiberPID, 0x400000, 0x47e000, "r-xp", "/zyg", reg(mntRootfs, 19))
 				l, d = f.launcher(), proc.Dumped{PID: fiberPID, Zygote: zygotePID, Workspace: true}
 			}
+			l.opt.Pool = identityPool
 			got, err := l.DumpExtra(backend.WarmSpec{GrantUID: "g1", Template: tc.template}, dir, d)
 			if tc.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
@@ -826,7 +828,7 @@ func TestMappedRoot(t *testing.T) {
 			l, _ := newLauncher(t, nil)
 			b := &Backend{l: l}
 			if tc.held != "" {
-				if err := l.claims.acquire(tc.held, true); err != nil {
+				if err := l.claims.acquire(tc.held, tc.held, true); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -959,7 +961,7 @@ func TestHoldDrop(t *testing.T) {
 			if exists(l.rootfs(spec)) {
 				t.Fatal("a failed copy was left")
 			}
-			if l.claims.release(spec.GrantUID, fiber) {
+			if l.claims.release(spec.GrantUID, spec.GrantUID, fiber) {
 				t.Fatal("the failed hold kept the slot")
 			}
 		}},
@@ -975,7 +977,8 @@ func TestHoldDrop(t *testing.T) {
 			}
 		}},
 		{name: "a collision makes no copy", run: func(t *testing.T, l *launcher, spec backend.WarmSpec) {
-			if err := l.claims.acquire(colliding(identityPool, spec.GrantUID), warm); err != nil {
+			o := colliding(identityPool, spec.GrantUID)
+			if err := l.claims.acquire(o, o, warm); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := l.hold(spec, warm); !errors.Is(err, ErrRangeCollision) {
@@ -1134,7 +1137,8 @@ func TestRestoreExtraRefusals(t *testing.T) {
 	}{
 		{name: "another grant holds the slot", wantIs: ErrRangeCollision,
 			setup: func(t *testing.T, l *launcher, spec *backend.WarmSpec) {
-				if err := l.claims.acquire(colliding(identityPool, spec.GrantUID), true); err != nil {
+				o := colliding(identityPool, spec.GrantUID)
+				if err := l.claims.acquire(o, o, true); err != nil {
 					t.Fatal(err)
 				}
 			}},
@@ -1155,7 +1159,7 @@ func TestRestoreExtraRefusals(t *testing.T) {
 			if err == nil || (tc.wantErr != "" && !strings.Contains(err.Error(), tc.wantErr)) || (tc.wantIs != nil && !errors.Is(err, tc.wantIs)) {
 				t.Fatalf("RestoreExtra = %v, want %q %v", err, tc.wantErr, tc.wantIs)
 			}
-			if l.claims.release(spec.GrantUID, false) {
+			if l.claims.release(spec.GrantUID, spec.GrantUID, false) {
 				t.Fatal("the failed RestoreExtra kept the fiber's hold")
 			}
 			if exists(l.rootfs(spec)) {
