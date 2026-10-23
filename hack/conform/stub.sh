@@ -30,12 +30,14 @@
 # back. seal-check then reads every blob the registry holds. Each must be
 # sealed, or be the zygote or its config.
 #
-# CONFORM_GPU=1 runs C14 on proc, runc, gvisor or hyperlight with the
-# reference template. It needs the registry, the shared keys and the peer,
-# which it sets up on every one of them, and a third home over the same
-# registry and keys whose engine declares another layout (--layout
-# raw512). The peer's engine names another GPU (--sim-name). C14 writes
-# its events to $STATE/gpu-events.ndjson.
+# CONFORM_GPU=1 runs C14 on proc, runc, gvisor, hyperlight or cloudhv
+# with the reference template. It needs the registry, the shared keys
+# and the peer, which it sets up on every one of them, and a third home
+# over the same registry and keys whose engine declares another layout
+# (--layout raw512). The peer's engine names another GPU (--sim-name).
+# C14 writes its events to $STATE/gpu-events.ndjson. Over the fake VMM,
+# whose restore restarts the guest, C14 runs its weaker check
+# (-gpu-volatile).
 #
 # fiberd is bin/fiberd-testhooks, fiberd built with -tags
 # fiberd_testhooks so -admin-unsafe and the issuer and scope-lost hooks exist.
@@ -67,8 +69,9 @@ LAYOUT_NODE=${CONFORM_LAYOUT_NODE:-conform-layout}
 LAYOUT_STATE=$STATE-layout
 MOB=$STATE-mobility   # the registry's blobs, the shared keys, the artifact
 GPU=${CONFORM_GPU:-0}
+GPU_VOLATILE=()   # -gpu-volatile for C14 on a backend whose restore restarts the guest
 if [ "$GPU" = 1 ]; then
-  case "$RUNTIME" in proc | runc | gvisor | hyperlight) ;; *) echo "CONFORM_GPU=1: C14 runs on proc, runc, gvisor or hyperlight, not $RUNTIME" >&2; exit 2 ;; esac
+  case "$RUNTIME" in proc | runc | gvisor | hyperlight | cloudhv) ;; *) echo "CONFORM_GPU=1: C14 runs on proc, runc, gvisor, hyperlight or cloudhv, not $RUNTIME" >&2; exit 2 ;; esac
   [ -z "${CONFORM_TEMPLATE:-}" ] || { echo "CONFORM_GPU=1: C14 needs the reference template, not CONFORM_TEMPLATE" >&2; exit 2; }
 fi
 # The engine-loss hook (C9) ends the grant's warm instance, its zygote,
@@ -76,9 +79,9 @@ fi
 ENGINE_HOOK=()
 # The device engine fiberd starts for each grant with a device budget,
 # the reference one with a simulated device, which is what C8 budgets.
-# proc, runc, gvisor and hyperlight run it with the reference template,
-# and run builds it. The peer's engine names another GPU, and the third
-# home's declares another layout.
+# proc, runc, gvisor, hyperlight and cloudhv run it with the reference
+# template, and run builds it. The peer's engine names another GPU, and
+# the third home's declares another layout.
 # A CONFORM_TEMPLATE (the Python ones) reserves no slice, so it runs
 # without one, and C8's grant is refused loudly, which conformance
 # accepts.
@@ -87,10 +90,11 @@ ENGINE_FLAGS=()
 PEER_ENGINE=()
 LAYOUT_ENGINE=()
 if [ -z "${CONFORM_TEMPLATE:-}" ]; then
-  # hyperlight gets one only for C14, so its KVM row's C8 stays as it was.
+  # hyperlight and cloudhv get one only for C14, so their other rows' C8
+  # stays as it was.
   case "$RUNTIME" in
     proc | runc | gvisor) ENGINE_FLAGS=(-engine "$ENGINE --sim-mb 64") ;;
-    hyperlight) if [ "$GPU" = 1 ]; then ENGINE_FLAGS=(-engine "$ENGINE --sim-mb 64"); fi ;;
+    hyperlight | cloudhv) if [ "$GPU" = 1 ]; then ENGINE_FLAGS=(-engine "$ENGINE --sim-mb 64"); fi ;;
   esac
   PEER_ENGINE=(${ENGINE_FLAGS[@]+"${ENGINE_FLAGS[@]}"})
   if [ "$GPU" = 1 ]; then
@@ -136,6 +140,9 @@ elif [ "$RUNTIME" = cloudhv ]; then
   CH_DIR=${CONFORM_CH_DIR:-$PWD/bin/cloudhv-fake}
   RUNTIME_FLAGS=(-runtime cloudhv -cloudhv-vmm "$CH_DIR/cloud-hypervisor" -cloudhv-kernel "$CH_DIR/vmlinux"
     -cloudhv-rootfs "$CH_DIR/rootfs.img" -template "default=/fiberd/vmtemplate --heap-mb 32")
+  # The fake VMM restarts the guest on a restore, which loses the hash
+  # gpufill kept, so C14 checks the engine's sum under the new fence.
+  if [ "$GPU" = 1 ] && [ -z "${CONFORM_CH_DIR:-}" ]; then GPU_VOLATILE=(-gpu-volatile); fi
 else
   TIER=${CONFORM_TIER:-FIBER_CHECKPOINT}
   RUNTIME_FLAGS=(-runtime stub -runtime-tier "$TIER")
@@ -322,7 +329,7 @@ case "${1:-}" in
     if [ "$GPU" = 1 ]; then
       start_layout
       GPU_FLAGS=(-gpu -gpu-events "$STATE/gpu-events.ndjson" -gpu-backend "$RUNTIME" -peer-gpu-name "$PEER_GPU"
-        -layout-target "$LAYOUT_ADDR" -layout-node-id "$LAYOUT_NODE")
+        -layout-target "$LAYOUT_ADDR" -layout-node-id "$LAYOUT_NODE" ${GPU_VOLATILE[@]+"${GPU_VOLATILE[@]}"})
     fi
     start
     bin/grant-conform -test.v -target "$ADDR" -target-tier "$TIER" -node-id "$NODE" -isolation "$ISOLATION" -fiber-warm "$WARM" -w-budget "$W_BUDGET" "${mint[@]}" \

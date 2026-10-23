@@ -223,6 +223,11 @@ type ResumeSpec struct {
 	// WorkspaceMount where the parked fiber had its own. "" when the
 	// parked fiber had none.
 	Workspace string
+	// EnginePath is the host path of the grant's device engine socket
+	// (WarmSpec.EnginePath), for a backend that links the engine per
+	// fiber and may resume with no warm instance (cloudhv). "" when the
+	// grant has no engine. Other backends ignore it.
+	EnginePath string
 }
 
 // EndpointSchemer is implemented by backends that can serve fibers on

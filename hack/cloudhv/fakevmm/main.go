@@ -9,7 +9,10 @@
 // a child process, from inside the rootfs, which must be a directory
 // here. The fake then does what the guest init does in a VM, over the
 // unix sockets a real VMM would make: the vsock socket with its
-// "CONNECT <port>" handshake, the control port and the endpoint port. A
+// "CONNECT <port>" handshake, the control port and the endpoint port.
+// The template reaches host port 5000, the engine, through a guest-side
+// socket the fake forwards to <vsock socket>_5000, as a real VMM
+// forwards a guest's connection, so the host sees the VMM as its peer. A
 // snapshot is a config.json, a state.json and an empty memory-ranges,
 // and a restore starts the template afresh in the phase the snapshot
 // recorded, so park and resume round-trip. The template's memory is not
@@ -46,11 +49,18 @@ import (
 // a fake snapshot with a real one.
 const version = "v53.0-fakevmm"
 
-// The guest's ports, as the guest init has them.
+// The guest's ports, as the guest init has them, and the host port of
+// the engine, the one host port the fake forwards.
 const (
 	endpointPort = 1024
 	controlPort  = 1025
+	enginePort   = 5000
 )
+
+// guestVsock is the name, beside the vsock socket, under which the fake
+// plays the guest's side of a host port, guest.vsock_<port>. The template
+// finds it in FIBERD_FAKE_VSOCK, where in a VM it would use AF_VSOCK.
+const guestVsock = "guest.vsock"
 
 // readyTimeout bounds the template's own init.
 const readyTimeout = 2 * time.Minute
@@ -409,6 +419,7 @@ type guest struct {
 	vsock    string
 	endpoint string
 	ln       net.Listener
+	host     net.Listener // the guest side of host port enginePort
 
 	ctl sync.Mutex // one control exchange at a time, as the guest init has
 
@@ -454,14 +465,25 @@ func (m *vmm) startGuest(phase string) (*guest, error) {
 	}
 	parent, child := os.NewFile(uintptr(fds[0]), "channel"), os.NewFile(uintptr(fds[1]), "channel-child")
 	defer func() { _ = child.Close() }()
+	dir := filepath.Dir(cfg.Vsock.Socket)
 	g := &guest{m: m, ch: parent, rd: bufio.NewReader(parent), vsock: cfg.Vsock.Socket,
-		endpoint: filepath.Join(filepath.Dir(cfg.Vsock.Socket), "fiber.sock"), phase: phase, splice: map[net.Conn]struct{}{}}
+		endpoint: filepath.Join(dir, "fiber.sock"), phase: phase, splice: map[net.Conn]struct{}{}}
+	// The guest side of the engine's port listens before the template
+	// starts, so its first request finds it.
+	guestSide := filepath.Join(dir, guestVsock)
+	guestPort := guestSide + "_" + strconv.Itoa(enginePort)
+	_ = os.Remove(guestPort)
+	if g.host, err = net.Listen("unix", guestPort); err != nil {
+		_ = parent.Close()
+		return nil, err
+	}
 	cmd := exec.Command(filepath.Join(rootfs, argv[0]), argv[1:]...)
-	cmd.Env = []string{"FIBERD_ENDPOINT=" + g.endpoint, "FIBERD_ENGINE=vsock://2:5000", "FIBERD_FAKE_VSOCK=" + g.vsock}
+	cmd.Env = []string{"FIBERD_ENDPOINT=" + g.endpoint, "FIBERD_ENGINE=vsock://2:" + strconv.Itoa(enginePort), "FIBERD_FAKE_VSOCK=" + guestSide}
 	cmd.ExtraFiles = []*os.File{child}
 	cmd.Stdout, cmd.Stderr = m.console(), m.console()
 	if err := cmd.Start(); err != nil {
 		_ = parent.Close()
+		_ = g.host.Close()
 		return nil, fmt.Errorf("start template %s: %w", argv[0], err)
 	}
 	g.cmd = cmd
@@ -484,6 +506,7 @@ func (m *vmm) startGuest(phase string) (*guest, error) {
 	}
 	if err != nil {
 		g.kill()
+		_ = g.host.Close()
 		return nil, err
 	}
 	// A template that ends is a guest that powered off, which ends the
@@ -496,9 +519,11 @@ func (m *vmm) startGuest(phase string) (*guest, error) {
 	_ = os.Remove(g.vsock)
 	if g.ln, err = net.Listen("unix", g.vsock); err != nil {
 		g.kill()
+		_ = g.host.Close()
 		return nil, err
 	}
 	go g.acceptVsock()
+	go g.acceptHost(enginePort)
 	return g, nil
 }
 
@@ -671,6 +696,13 @@ func (g *guest) serveEndpoint(c net.Conn) {
 		g.untrack(c, t)
 		return
 	}
+	splice(c, t)
+	g.untrack(c, t)
+}
+
+// splice copies both ways between a and b until both directions end,
+// half-closing the other side when one reaches its end.
+func splice(a, b net.Conn) {
 	done := make(chan struct{}, 2)
 	pipe := func(dst, src net.Conn) {
 		_, _ = io.Copy(dst, src)
@@ -679,11 +711,40 @@ func (g *guest) serveEndpoint(c net.Conn) {
 		}
 		done <- struct{}{}
 	}
-	go pipe(t, c)
-	go pipe(c, t)
+	go pipe(b, a)
+	go pipe(a, b)
 	<-done
 	<-done
-	g.untrack(c, t)
+}
+
+// acceptHost serves the guest side of host port port. Each connection
+// the template makes there is one its guest made to the host, which the
+// fake connects on to <vsock socket>_<port> and splices, as Cloud
+// Hypervisor's vsock muxer does. The name there is fiberd's, made before
+// the VMM started, and the host's end sees this process as its peer.
+func (g *guest) acceptHost(port int) {
+	for {
+		c, err := g.host.Accept()
+		if err != nil {
+			return
+		}
+		go g.forward(c, port)
+	}
+}
+
+// forward is one guest connection to host port port, dropped when the VM
+// is paused or nothing listens on the host's side.
+func (g *guest) forward(c net.Conn, port int) {
+	defer func() { _ = c.Close() }()
+	if !g.running() {
+		return
+	}
+	h, err := net.Dial("unix", g.vsock+"_"+strconv.Itoa(port))
+	if err != nil {
+		return
+	}
+	defer func() { _ = h.Close() }()
+	splice(c, h)
 }
 
 // track records a splice's two ends, so a park can drop them, and

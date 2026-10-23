@@ -93,11 +93,14 @@ type Backend struct {
 	closed bool
 }
 
-// warm is a grant's warm snapshot. No process holds it.
+// warm is a grant's warm snapshot. No process holds it. engine is the
+// host path of the grant's engine socket, which every fiber's guest
+// reaches on host port enginePort, "" when the grant has no engine.
 type warm struct {
 	id      string
 	dir     string
 	workDir string
+	engine  string
 }
 
 // fiber is one VMM serving one fence.
@@ -382,7 +385,9 @@ func (b *Backend) Warm(ctx context.Context, sp backend.WarmSpec) (backend.Warm, 
 	if err := os.MkdirAll(sp.WorkDir, 0o755); err != nil {
 		return backend.Warm{}, err
 	}
-	v, err := b.launch(ctx, sp.GrantUID, "", logPath(sp.WorkDir), sp.CgroupFD, nil)
+	// The warm guest gets no engine link. Nothing speaks for a fiber yet,
+	// and no LEAF names the warm leaf.
+	v, err := b.launch(ctx, sp.GrantUID, "", "", logPath(sp.WorkDir), sp.CgroupFD, nil)
 	if err != nil {
 		return backend.Warm{}, err
 	}
@@ -407,7 +412,7 @@ func (b *Backend) Warm(ctx context.Context, sp backend.WarmSpec) (backend.Warm, 
 	if err := b.snapshot(ctx, v, dir); err != nil {
 		return backend.Warm{}, err
 	}
-	w := &warm{id: sp.GrantUID, dir: dir, workDir: sp.WorkDir}
+	w := &warm{id: sp.GrantUID, dir: dir, workDir: sp.WorkDir, engine: sp.EnginePath}
 	b.mu.Lock()
 	old := b.warms[w.id]
 	b.warms[w.id] = w
@@ -490,12 +495,14 @@ func (b *Backend) Clone(ctx context.Context, warmID string, sp backend.FiberSpec
 	if mode == "" {
 		mode = "copy"
 	}
-	return b.birth(ctx, w.id, w.dir, mode, logPath(w.workDir), sp.Fence, sp.Endpoint, sp.CgroupFD, sp.Deadline, createDeadline, line)
+	return b.birth(ctx, w.id, w.dir, mode, w.engine, logPath(w.workDir), sp.Fence, sp.Endpoint, sp.CgroupFD, sp.Deadline, createDeadline, line)
 }
 
 // Resume restores a park in the new leaf and hands the guest its new
 // incarnation. The endpoint and engine paths are the same in every VM,
-// so nothing in the guest is rewritten.
+// so nothing in the guest is rewritten. The engine link comes from this
+// home's warm instance of the grant, or from ResumeSpec.EnginePath when
+// the home has none.
 func (b *Backend) Resume(ctx context.Context, sp backend.ResumeSpec) (backend.Fiber, error) {
 	if b.tier < core.TierSnapshot {
 		return backend.Fiber{}, fmt.Errorf("cloudhv: unusable: %w", b.why)
@@ -504,7 +511,13 @@ func (b *Backend) Resume(ctx context.Context, sp backend.ResumeSpec) (backend.Fi
 	if err != nil {
 		return backend.Fiber{}, err
 	}
-	return b.birth(ctx, sp.WarmID, sp.Dir, "copy", logPath(sp.WorkDir), sp.Fence, sp.Endpoint, sp.CgroupFD, sp.Deadline, resumeDeadline, line)
+	engine := sp.EnginePath
+	b.mu.Lock()
+	if w := b.warms[sp.WarmID]; w != nil {
+		engine = w.engine
+	}
+	b.mu.Unlock()
+	return b.birth(ctx, sp.WarmID, sp.Dir, "copy", engine, logPath(sp.WorkDir), sp.Fence, sp.Endpoint, sp.CgroupFD, sp.Deadline, resumeDeadline, line)
 }
 
 // incarnationLine is what the guest init learns a fiber by:
@@ -549,9 +562,11 @@ func appendHexOrDash(line, b []byte) []byte {
 
 // birth starts a VMM in the leaf restoring the snapshot in from, resumes
 // it, records what the restore cost the leaf, and sends the incarnation.
-// The fiber is returned once the guest says served and its endpoint is
-// bound. A guest that never says so is ended.
-func (b *Backend) birth(ctx context.Context, grantUID, from, mode, logp, fence, ep string, cgroupFD int, deadline, floor time.Duration, line []byte) (backend.Fiber, error) {
+// The VMM is the engine's peer for its guest, born in the fiber's leaf,
+// which the host sent LEAF for before the Clone or Resume. The fiber is
+// returned once the guest says served and its endpoint is bound. A guest
+// that never says so is ended.
+func (b *Backend) birth(ctx context.Context, grantUID, from, mode, engine, logp, fence, ep string, cgroupFD int, deadline, floor time.Duration, line []byte) (backend.Fiber, error) {
 	defer clear(line)
 	if deadline <= 0 {
 		deadline = floor
@@ -562,7 +577,7 @@ func (b *Backend) birth(ctx context.Context, grantUID, from, mode, logp, fence, 
 	if mode != "copy" {
 		src += ",memory_restore_mode=" + mode
 	}
-	v, err := b.launch(ctx, grantUID, from, logp, cgroupFD, []string{"--restore", src})
+	v, err := b.launch(ctx, grantUID, from, engine, logp, cgroupFD, []string{"--restore", src})
 	if err != nil {
 		return backend.Fiber{}, fmt.Errorf("cloudhv: %s: %w", fence, err)
 	}

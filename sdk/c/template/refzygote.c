@@ -127,6 +127,7 @@
 #include <sys/syscall.h>
 #include <sys/uio.h>
 #include <linux/netlink.h>
+#include <linux/vm_sockets.h>
 
 #ifdef FZ_TLS
 #include <openssl/bio.h>
@@ -239,26 +240,87 @@ static unsigned cur_generation;
 /* The fence the engine should file the slice under. */
 static const char *current_fence(void) { return cur_fence[0] ? cur_fence : "?"; }
 
+/* vsock_field reads a decimal u32 at *p that ends at the byte stop, and
+ * moves *p past stop. */
+static int vsock_field(const char **p, char stop, unsigned *out) {
+    const char *s = *p;
+    unsigned long long v = 0;
+    if (*s < '0' || *s > '9') return -1;
+    for (; *s >= '0' && *s <= '9'; s++) {
+        v = v * 10 + (unsigned)(*s - '0');
+        if (v > UINT32_MAX) return -1;
+    }
+    if (*s != stop) return -1;
+    *out = (unsigned)v;
+    *p = s + 1;
+    return 0;
+}
+
+/* engine_dial connects to the engine at eng, FIBERD_ENGINE. That is a
+ * unix socket path, bare or as unix://<path>, or vsock://<cid>:<port>,
+ * the host as a cloudhv guest reaches it. The cloudhv fake VMM has no
+ * AF_VSOCK and names a unix socket prefix in FIBERD_FAKE_VSOCK instead,
+ * whose <prefix>_<port> it forwards as the real VMM forwards the port.
+ * It returns the connected socket, or -1 with why set. */
+static int engine_dial(const char *eng, const char **why) {
+    struct sockaddr_un a = { .sun_family = AF_UNIX };
+    int m;
+    *why = "err engine address";
+    if (strncmp(eng, "vsock://", 8) == 0) {
+        const char *p = eng + 8;
+        unsigned cid = 0, port = 0;
+        if (vsock_field(&p, ':', &cid) < 0 || vsock_field(&p, 0, &port) < 0) return -1;
+        const char *fake = getenv("FIBERD_FAKE_VSOCK");
+        if (!fake) {
+            *why = "err engine unreachable";
+            int s = socket(AF_VSOCK, SOCK_STREAM | SOCK_CLOEXEC, 0);
+            if (s < 0) return -1;
+            struct sockaddr_vm v = { .svm_family = AF_VSOCK, .svm_cid = cid, .svm_port = port };
+            if (connect(s, (struct sockaddr *)&v, sizeof v) < 0) { close(s); return -1; }
+            return s;
+        }
+        m = snprintf(a.sun_path, sizeof a.sun_path, "%s_%u", fake, port);
+    } else {
+        if (strncmp(eng, "unix://", 7) == 0) eng += 7;
+        m = snprintf(a.sun_path, sizeof a.sun_path, "%s", eng);
+    }
+    if (m < 0 || (size_t)m >= sizeof a.sun_path) return -1;
+    *why = "err engine unreachable";
+    int s = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (s < 0) return -1;
+    if (connect(s, (struct sockaddr *)&a, sizeof a) < 0) { close(s); return -1; }
+    return s;
+}
+
 /* engine_send sends one line to the engine on a fresh connection and
  * returns the engine's one-line reply, in reply, or an "err ..." of its
- * own when the engine cannot be reached. */
+ * own when the engine cannot be reached. The reply is read up to its
+ * newline, since over vsock it may come in more than one piece. */
 static const char *engine_send(const char *req, char *reply, size_t n) {
     const char *eng = getenv("FIBERD_ENGINE");
     if (!eng) return "err no engine";
-    if (strncmp(eng, "unix://", 7) == 0) eng += 7;
     char buf[256];
     int m = snprintf(buf, sizeof buf, "%s\n", req);
     if (m < 0 || (size_t)m >= sizeof buf) return "err line too long";
-    int s = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
-    if (s < 0) return "err socket";
-    struct sockaddr_un a = { .sun_family = AF_UNIX };
-    snprintf(a.sun_path, sizeof a.sun_path, "%s", eng);
-    if (connect(s, (struct sockaddr *)&a, sizeof a) < 0) { close(s); return "err engine unreachable"; }
+    const char *why;
+    int s = engine_dial(eng, &why);
+    if (s < 0) return why;
+    /* A reply may come in pieces over vsock, so the read loops to its
+     * newline, bounded in time so a silent engine cannot hang the fiber. */
+    struct timeval tv = { .tv_sec = 10 };
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
     (void)!write(s, buf, (size_t)m);
-    ssize_t r = read(s, reply, n - 1);
+    size_t got = 0;
+    while (got + 1 < n) {
+        ssize_t r = read(s, reply + got, n - 1 - got);
+        if (r < 0 && errno == EINTR) continue;
+        if (r <= 0) break;
+        got += (size_t)r;
+        if (memchr(reply, '\n', got)) break;
+    }
     close(s);
-    if (r <= 0) return "err no reply";
-    reply[r] = 0; reply[strcspn(reply, "\r\n")] = 0;
+    if (got == 0) return "err no reply";
+    reply[got] = 0; reply[strcspn(reply, "\r\n")] = 0;
     return reply;
 }
 
