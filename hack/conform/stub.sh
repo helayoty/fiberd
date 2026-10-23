@@ -100,6 +100,14 @@ elif [ "$RUNTIME" = hyperlight ]; then
   HL_TEMPLATE="guest --heap-mb 32"
   [ -n "${CONFORM_HL_HELPER:-}" ] || HL_TEMPLATE="guest --init-ms 20"
   RUNTIME_FLAGS=(-runtime hyperlight -hyperlight-helper "$HL_HELPER" -hyperlight-guest "$HL_GUEST" -template "default=$HL_TEMPLATE")
+elif [ "$RUNTIME" = cloudhv ]; then
+  # CONFORM_CH_DIR holds the real VMM and guest images (make
+  # cloudhv-images), else bin/cloudhv-fake gets the fake VMM and a
+  # directory rootfs (built below). The template is a path in the rootfs.
+  TIER=${CONFORM_TIER:-FIBER_SNAPSHOT}
+  CH_DIR=${CONFORM_CH_DIR:-$PWD/bin/cloudhv-fake}
+  RUNTIME_FLAGS=(-runtime cloudhv -cloudhv-vmm "$CH_DIR/cloud-hypervisor" -cloudhv-kernel "$CH_DIR/vmlinux"
+    -cloudhv-rootfs "$CH_DIR/rootfs.img" -template "default=/fiberd/vmtemplate --heap-mb 32")
 else
   TIER=${CONFORM_TIER:-FIBER_CHECKPOINT}
   RUNTIME_FLAGS=(-runtime stub -runtime-tier "$TIER")
@@ -239,6 +247,7 @@ case "${1:-}" in
     if [ "$RUNTIME" = hyperlight ] && [ -z "${CONFORM_HL_HELPER:-}" ]; then
       go build -o bin/fakehelper ./hack/hyperlight/fakehelper; echo "fake guest" > bin/fake-guest.bin
     fi
+    if [ "$RUNTIME" = cloudhv ] && [ -z "${CONFORM_CH_DIR:-}" ]; then hack/cloudhv/build.sh fake >/dev/null; fi
     trap 'stop; for p in issuer peer registry; do stop_pidfile "$STATE/$p.pid"; done' EXIT
     mint=(-mint insecure-json)
     if [ "$SIGNED" = 1 ]; then
