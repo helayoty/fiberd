@@ -58,10 +58,11 @@ An `UNTRUSTED` grant, the default, is admitted only on a backend that isolates t
 | --- | --- | --- |
 | gVisor | yes | a fiber's syscalls are served by its sandbox's Sentry, gVisor's kernel in user space |
 | Hyperlight | yes | a fiber is a micro-VM guest behind the hypervisor |
+| Cloud Hypervisor | yes | a fiber is a micro-VM guest behind KVM, its VMM jailed as a per-grant uid |
 | runc | no | its own namespaces and root filesystem, on the host kernel |
 | proc | no | a forked process on the host kernel |
 
-[backends.md](design/backends.md) compares the four.
+[backends.md](design/backends.md) compares the other four, and [cloudhv.md](design/cloudhv.md) covers Cloud Hypervisor.
 
 ## Fiber isolation
 
@@ -81,6 +82,8 @@ With proc or runc, fiberd re-executes at start with only the capabilities that r
 A template is pulled by the digest the grant names and checked again on every [warm](glossary.md#warm). Its images, the zygote's memory at READY, are sealed by `zygotectl build -seal-to` to the fleet's public wrap key, which `grant-issuer keygen -alg A256GCM` writes beside the master seal key. Authors hold only that public half. A home that warms from the images derives the private half from `-delta-seal-key`, opens them, and checks their hash first. Every parent checkpoint a home pushes is sealed under a key derived from the master and the parent's own hash, and signed. A home takes a parent only if it is signed as that checkpoint, opens as that checkpoint, and hashes to it. Every [delta](glossary.md#delta) a home publishes is signed with `-delta-key` and sealed with AES-256-GCM under a key derived for its session domain, the grant's [tenant](glossary.md#tenant) and [session class](glossary.md#session-class), and it expires 24 hours after the [park](glossary.md#park). A home takes only a delta signed by a key it trusts, for the domain and session it asked for. Import, which takes a session exported as files, needs the signed manifest of the checkpoint the delta builds on, opens a copy of that checkpoint to check its hash before it signs it as its own, and seals for the importing grant's domain, never the one the export names. [artifact.md](design/artifact.md) has the formats and the key derivation.
 
 On the home, template memory sits in the clear in fiberd's own stores, the parent store, `zygote-images/` and the unpacked author images under the template cache, and gVisor's `templates/` under its state directory. Each is 0700, and the checkpoints fiberd takes or pulls into them are 0600. The parent store is pruned of every checkpoint no warm instance and no local delta names. gVisor's templates live on a tmpfs by default, so they never reach a disk. A proc zygote that shares the mount namespace with a gVisor home copies that tmpfs at its `unshare`, and a fiber that kept it would keep the tmpfs alive after the gVisor home detached it, so a later park would write the template images into the proc fiber's delta. So the zygote detaches every mount another fiberd home made from its namespace before its first fiber. It knows fiberd's file systems by their `fiberd-` mount source and a restore root by its being a bind of `/` ([zygote.md](design/zygote.md)).
+
+On Cloud Hypervisor the warm guest's memory sits in the warm snapshot's `memory-ranges` file, which only root can write. Every clone of the grant maps it copy-on-write ([cloudhv.md](design/cloudhv.md#copy-on-write-restore)).
 
 ## Audit
 

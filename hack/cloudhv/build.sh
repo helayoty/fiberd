@@ -22,11 +22,12 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
-# Cloud Hypervisor v53.0, the static x86_64 build. The same pins as the
-# spikes, read from the release assets' digests on 2026-10-22.
-CH_VERSION=v53.0
+# Cloud Hypervisor v54.0, the static x86_64 build. The same pins as the
+# spikes, read from the release assets' digests on 2026-10-22, and
+# v54.0's on 2026-10-23.
+CH_VERSION=v54.0
 CH_URL=https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/$CH_VERSION/cloud-hypervisor-static
-CH_SHA256=448af3d4e59b22c2987f7df94c213ad40fb53a10d437e42b5ee6c4fce7c29ecc
+CH_SHA256=4f4f98a3d661a40f3e5272627cc895a1b2e525f2f6bedf5f895f9cd21ba5c65b
 KERNEL_TAG=ch-release-v6.16.9-20260508
 KERNEL_URL=https://github.com/cloud-hypervisor/linux/releases/download/$KERNEL_TAG/vmlinux-x86_64
 KERNEL_PREBUILT_SHA256=9d3570b47d5abb069ca00edfbfcef4c68306a9c3d078a01f10082b258f1001b8
