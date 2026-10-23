@@ -497,9 +497,11 @@ func (m *move) startHome(t *testing.T, spec homeSpec) *home {
 		t.Fatal(err)
 	}
 	h.conn, h.api = conn, grantv1.NewFibersClient(conn)
+	// The test parks its fibers itself, and a pressure park would race it.
+	// avg10 never exceeds 100, so these watermarks turn pressure parks off.
 	g := core.Grant{UID: h.uid, Audience: spec.name, Tenant: "acme", TemplateDigest: m.tpl.digest, FiberMax: 4,
 		WBudgetBytes: 64 << 20, MinTier: core.TierCheckpoint, LeaseExpiry: time.Now().Add(time.Hour).Truncate(time.Second),
-		Policy: core.Policy{Isolation: core.Trusted}, DeviceBudget: core.DeviceBudget{Bytes: deviceBudget}}
+		Policy: core.Policy{Isolation: core.Trusted, PSISomeAvg10Shed: 100, PSISomeAvg10Park: 100}, DeviceBudget: core.DeviceBudget{Bytes: deviceBudget}}
 	if h.token, err = m.is.Mint(g); err != nil {
 		t.Fatal(err)
 	}
