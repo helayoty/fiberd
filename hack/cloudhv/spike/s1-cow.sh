@@ -7,9 +7,10 @@
 # One warm guest is snapshotted, then restored S1_COUNT times (64), all left
 # running together. Each clone answers its incarnation, then dirties
 # SPIKE_DIRTY_MB like a fiber would. Then every VMM's smaps_rollup is read.
-# Three ways to restore, each where v53.0 has it.
+# Four ways to restore, each as v54.0 has it.
 #   copy          the default, memory-ranges copied into fresh anonymous RAM
 #   ondemand      memory_restore_mode=ondemand, pages faulted in by userfaultfd
+#   copyonwrite   memory_restore_mode=copyonwrite, memory-ranges mapped private
 #   file-private  guest RAM is a file. The warm VM maps it shared, so the
 #                 snapshot skips it. Each restore maps it private instead
 # A mode that fails to restore is reported as such, and the next one runs.
@@ -18,7 +19,7 @@ set -euo pipefail
 prereqs
 
 COUNT=${S1_COUNT:-64}
-MODES=${S1_MODES:-copy ondemand file-private}
+MODES=${S1_MODES:-copy ondemand copyonwrite file-private}
 OUT=$SPIKE_DIR/s1
 trap cleanup EXIT
 rm -rf "$OUT"
@@ -44,6 +45,7 @@ for mode in $MODES; do
   case $mode in
     copy) src=$OUT/warm-anon/snap; args=(--mode copy) ;;
     ondemand) src=$OUT/warm-anon/snap; args=(--mode ondemand) ;;
+    copyonwrite) src=$OUT/warm-anon/snap; args=(--mode copyonwrite) ;;
     file-private) src=$OUT/warm-file/snap; args=(--mode copy --private-zones) ;;
     *) fail "unknown mode $mode" ;;
   esac

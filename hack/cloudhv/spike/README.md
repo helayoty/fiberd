@@ -14,19 +14,21 @@ Nothing here was run by its author. Every number comes from your run.
 | S4 | How long from VMM start on a snapshot to the guest's served line | `s4-served.sh` | min, median and max of 20 runs per restore mode |
 | S5 | Which CPU facts a snapshot depends on | `s5-cpu.sh` | Both hosts' CPU facts, the flags only one has, and whether restore, resume and served worked |
 
-S1 tries three restore modes.
+S1 tries four restore modes.
 
 ```mermaid
 flowchart LR
   W["warm guest, booted and dirtied"] --> P["vm.pause, vm.snapshot"]
   P --> C["copy: memory-ranges copied into new RAM"]
   P --> O["ondemand: userfaultfd faults pages in"]
+  P --> V["copyonwrite: each clone maps memory-ranges private"]
   P --> F["file-private: guest RAM is a file, each clone maps it private"]
 ```
 
 - **copy** is the default restore. Each clone holds the whole guest.
 - **ondemand** is `memory_restore_mode=ondemand`. Pages come in on first touch, but still into private memory.
-- **file-private** boots the warm guest with its RAM in a file mapped shared. The snapshot then skips that memory, since the file holds it. Each restore gets a copy of `config.json` with the zone's `shared` set to false, so it maps the file `MAP_PRIVATE`. That is copy-on-write against the page cache, which is the cheap Clone fiberd wants.
+- **copyonwrite** is `memory_restore_mode=copyonwrite`, new in v54.0. Each clone maps the plain snapshot's `memory-ranges` `MAP_PRIVATE`, so it owns only the pages it writes. The `cloudhv` backend clones this way.
+- **file-private** boots the warm guest with its RAM in a file mapped shared. The snapshot then skips that memory, since the file holds it. Each restore gets a copy of `config.json` with the zone's `shared` set to false, so it maps the file `MAP_PRIVATE`. That is copy-on-write against the page cache.
 
 The design also asks for a comparison with the Firecracker comparator on the same runner. That stays with `bench-compare.yml`, which already runs Firecracker.
 
@@ -65,7 +67,7 @@ Everything lands in `SPIKE_DIR`, `/var/tmp/cloudhv-spike` by default. `sudo` dro
 | `SPIKE_WARM_MB` | 32 | What the warm guest dirties before its snapshot |
 | `SPIKE_DIRTY_MB` | 4 | What each S1 clone dirties after it is served |
 | `S1_COUNT` | 64 | Clones alive at once in S1. Copy mode lowers it to what fits in 80% of free memory |
-| `S1_MODES`, `S4_MODES` | `copy ondemand file-private` | Restore modes to try |
+| `S1_MODES`, `S4_MODES` | `copy ondemand copyonwrite file-private` | Restore modes to try |
 | `S4_RUNS` | 20 | Runs per mode in S4 |
 | `S5_MEM_MB` | 64 | Guest RAM for the S5 snapshot |
 
