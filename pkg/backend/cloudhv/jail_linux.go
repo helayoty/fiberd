@@ -685,6 +685,38 @@ func takeSnapshot(src, dst string) error {
 	return nil
 }
 
+// shareSnapshot lets the grant's VMM read the snapshot in dir through
+// the vmFrom bind, as takeSnapshot leaves a park of this home: dir 0750
+// and each regular file 0640 in the VMM's group. A park claimed from
+// another home is unsealed by fiberd into files of its own, 0600, which
+// keep the VMM out.
+func shareSnapshot(dir, grantUID string) error {
+	_, gid := jailIDs(grantUID)
+	if err := os.Chown(dir, -1, int(gid)); err != nil {
+		return err
+	}
+	if err := os.Chmod(dir, 0o750); err != nil {
+		return err
+	}
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	for _, e := range ents {
+		if !e.Type().IsRegular() {
+			continue
+		}
+		p := filepath.Join(dir, e.Name())
+		if err := os.Chown(p, -1, int(gid)); err != nil {
+			return err
+		}
+		if err := os.Chmod(p, 0o640); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // copyFile copies the regular file at src into a fresh inode at dst,
 // 0600 and fiberd's, replacing a same-named file only once the copy is
 // whole. src is opened without following a symlink and checked again

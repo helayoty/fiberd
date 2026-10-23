@@ -517,6 +517,10 @@ func (b *Backend) Resume(ctx context.Context, sp backend.ResumeSpec) (backend.Fi
 		engine = w.engine
 	}
 	b.mu.Unlock()
+	// A park claimed from another home is fiberd's alone until here.
+	if err := shareSnapshot(sp.Dir, sp.WarmID); err != nil {
+		return backend.Fiber{}, fmt.Errorf("cloudhv: %s: share the park %s: %w", sp.Fence, sp.Dir, err)
+	}
 	return b.birth(ctx, sp.WarmID, sp.Dir, "copy", engine, logPath(sp.WorkDir), sp.Fence, sp.Endpoint, sp.CgroupFD, sp.Deadline, resumeDeadline, line)
 }
 
