@@ -114,9 +114,9 @@ func (h *home) mappedRoot(t *testing.T, grant string) int {
 	return int(uid)
 }
 
-// leaf is the fiber's cgroup directory.
+// leaf is the fiber's cgroup directory, under the grant's fibers parent.
 func (h *home) leaf(f core.Fence) string {
-	return filepath.Join(h.cgRoot, f.GrantUID, fmt.Sprintf("f-%d-%d", f.Epoch, f.Seq))
+	return filepath.Join(h.cgRoot, f.GrantUID, "fibers", fmt.Sprintf("f-%d-%d", f.Epoch, f.Seq))
 }
 
 // fiberPID is the fiber's root process as the host sees it, found in its
@@ -146,7 +146,7 @@ func fields(s string) string { return strings.Join(strings.Fields(s), " ") }
 // zygotePID is the grant's zygote, the container's init.
 func (h *home) zygotePID(t *testing.T, grant string) int {
 	t.Helper()
-	procs, err := os.ReadFile(filepath.Join(h.cgRoot, grant, "zygote", "cgroup.procs"))
+	procs, err := os.ReadFile(filepath.Join(h.cgRoot, grant, "fibers", "zygote", "cgroup.procs"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -405,8 +405,11 @@ func TestCgroupDelegationIsProcsOnly(t *testing.T) {
 		wantUID  int
 		writable bool // by the mapped root
 	}{
-		{name: "grant cgroup.procs", path: filepath.Join(grantCG, "cgroup.procs"), wantUID: start, writable: true},
+		{name: "fibers parent cgroup.procs", path: filepath.Join(grantCG, "fibers", "cgroup.procs"), wantUID: start, writable: true},
 		{name: "leaf cgroup.procs", path: filepath.Join(hm.leaf(fence), "cgroup.procs"), wantUID: start, writable: true},
+		{name: "grant cgroup.procs", path: filepath.Join(grantCG, "cgroup.procs"), wantUID: 0},
+		{name: "fibers parent directory", path: filepath.Join(grantCG, "fibers"), wantUID: 0},
+		{name: "fibers parent subtree_control", path: filepath.Join(grantCG, "fibers", "cgroup.subtree_control"), wantUID: 0},
 		{name: "grant directory", path: grantCG, wantUID: 0},
 		{name: "grant memory.high", path: filepath.Join(grantCG, "memory.high"), wantUID: 0},
 		{name: "grant pids.max", path: filepath.Join(grantCG, "pids.max"), wantUID: 0},
@@ -415,7 +418,7 @@ func TestCgroupDelegationIsProcsOnly(t *testing.T) {
 		{name: "leaf memory.max", path: filepath.Join(hm.leaf(fence), "memory.max"), wantUID: 0},
 		{name: "leaf pids.max", path: filepath.Join(hm.leaf(fence), "pids.max"), wantUID: 0},
 		{name: "leaf cgroup.kill", path: filepath.Join(hm.leaf(fence), "cgroup.kill"), wantUID: 0},
-		{name: "zygote cgroup.procs", path: filepath.Join(grantCG, "zygote", "cgroup.procs"), wantUID: 0},
+		{name: "zygote cgroup.procs", path: filepath.Join(grantCG, "fibers", "zygote", "cgroup.procs"), wantUID: 0},
 		{name: "root cgroup.procs", path: filepath.Join(hm.cgRoot, "cgroup.procs"), wantUID: 0},
 	}
 	for _, tc := range cases {
@@ -708,7 +711,7 @@ func TestResumeAfterEngineLoss(t *testing.T) {
 			if tc.killWarm {
 				// As the conformance suite's engine-loss hook does, through
 				// the zygote's cgroup.
-				if err := os.WriteFile(filepath.Join(hm.cgRoot, g.UID, "zygote", "cgroup.kill"), []byte("1"), 0); err != nil {
+				if err := os.WriteFile(filepath.Join(hm.cgRoot, g.UID, "fibers", "zygote", "cgroup.kill"), []byte("1"), 0); err != nil {
 					t.Fatal(err)
 				}
 				copyDir := filepath.Join(hm.stateDir, "rootfs", "w-"+g.UID)

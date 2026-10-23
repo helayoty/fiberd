@@ -218,7 +218,7 @@ func TestWorkspaceOwner(t *testing.T) {
 			}
 			// A mapper hands the grant's and the leaf's cgroup.procs to the
 			// mapped root, so the fake tree carries them.
-			r := newTestRuntime(t, be, func(c *Config) { delegatedUnder(c.CgroupRoot, "g1", "g1/f-1-1") })
+			r := newTestRuntime(t, be, func(c *Config) { delegatedUnder(c.CgroupRoot, "g1", "g1/fibers", "g1/fibers/f-1-1") })
 			g := core.Grant{UID: "g1", TemplateDigest: "sha256:tmpl", FiberMax: 2, WBudgetBytes: 64 * mib, DiskBudgetBytes: 1 << 20}
 			ctx := context.Background()
 			if err := r.PrepareTemplate(ctx, g); err != nil {
@@ -493,7 +493,7 @@ func TestWorkspaceResumeRefused(t *testing.T) {
 			if exists(f.r.workspaceDir(next)) {
 				t.Fatal("the refused resume left a workspace behind")
 			}
-			if f.r.root.Child(g.UID).Child(leafName(next)).Exists() {
+			if f.r.root.Child(g.UID).Child(fibersDir).Child(leafName(next)).Exists() {
 				t.Fatal("the refused resume left its leaf behind")
 			}
 			f.r.mu.Lock()

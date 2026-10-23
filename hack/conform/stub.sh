@@ -220,7 +220,7 @@ scope_lost() {
 # engine-kill <grant>: end the grant's warm instance, its zygote, as a
 # crash would (C9), through the cgroup leaf the runtime keeps it in.
 engine_kill() {
-  local procs="$CGROOT/$1/zygote/cgroup.procs"
+  local procs="$CGROOT/$1/fibers/zygote/cgroup.procs"
   [ -r "$procs" ] || { echo "engine-kill: no zygote cgroup for $1" >&2; return 1; }
   local p; for p in $(cat "$procs"); do kill -9 "$p" 2>/dev/null || true; done
 }

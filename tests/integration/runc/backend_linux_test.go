@@ -180,7 +180,7 @@ func TestCommandPreparesTheBundle(t *testing.T) {
 			if want := filepath.Join(hm.runDir, g.UID); hostSrc != want {
 				t.Errorf("/host mount source = %q, want %q", hostSrc, want)
 			}
-			if want := strings.TrimPrefix(filepath.Join(hm.cgRoot, g.UID, "zygote"), "/sys/fs/cgroup"); cfg.Linux.CgroupsPath != want {
+			if want := strings.TrimPrefix(filepath.Join(hm.cgRoot, g.UID, "fibers", "zygote"), "/sys/fs/cgroup"); cfg.Linux.CgroupsPath != want {
 				t.Errorf("cgroupsPath = %q, want %q", cfg.Linux.CgroupsPath, want)
 			}
 		}},

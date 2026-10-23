@@ -43,7 +43,7 @@ func gone(path string) bool {
 // has noticed (the container and its bundle are gone).
 func (h *home) killZygote(t *testing.T, grant string) {
 	t.Helper()
-	if err := os.WriteFile(filepath.Join(h.cgRoot, grant, "zygote", "cgroup.kill"), []byte("1"), 0); err != nil {
+	if err := os.WriteFile(filepath.Join(h.cgRoot, grant, "fibers", "zygote", "cgroup.kill"), []byte("1"), 0); err != nil {
 		t.Fatal(err)
 	}
 	waitFor(t, "zygote bundle released", func() bool { return gone(filepath.Join(h.stateDir, "bundles", "w-"+grant)) })

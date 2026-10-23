@@ -262,7 +262,8 @@ func (a *Adapter) Resume(ctx context.Context, h compare.Handle) (compare.Handle,
 	return a.handle(f, strings.TrimPrefix(h.Meta["session"], "s-"))
 }
 
-// Density reads the grant's cgroup subtree. The fibers' leaves are
+// Density reads the grant's fibers subtree, <grant>/fibers, which holds
+// everything but the device engine. The fibers' leaves are
 // f-<epoch>-<seq>, the template's is zygote, and pooled sandboxes are
 // pool/p-<n>, which a fiber handed one keeps. With no handles it is
 // what stands between activations, the zygote and a full pool. A
@@ -273,7 +274,7 @@ func (a *Adapter) Density(ctx context.Context, hs []compare.Handle) (int64, erro
 	if a.o.CgroupRoot == "" {
 		return 0, compare.ErrUnsupported
 	}
-	grantDir := filepath.Join(a.o.CgroupRoot, a.uid)
+	grantDir := filepath.Join(a.o.CgroupRoot, a.uid, "fibers")
 	zygote, err := compare.CgroupMemory(filepath.Join(grantDir, "zygote"))
 	if err != nil {
 		return 0, err

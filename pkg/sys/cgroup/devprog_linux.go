@@ -119,6 +119,18 @@ func (g *GPUGuard) Close() error {
 	return nil
 }
 
+// Release closes the program's descriptor and leaves the program
+// attached. The cgroup keeps it until the cgroup itself is removed, so
+// every process still in it stays guarded. Safe to call more than once.
+func (g *GPUGuard) Release() error {
+	if g.progFD < 0 {
+		return nil
+	}
+	fd := g.progFD
+	g.progFD = -1
+	return unix.Close(fd)
+}
+
 // Covered reports whether this guard's program runs for the processes
 // of leaf, a cgroup directory at or below the guard's own. It asks the
 // kernel for the device programs in effect there (BPF_PROG_QUERY with
@@ -177,6 +189,39 @@ func nvidiaMajors() ([]uint32, error) {
 		return []uint32{nvidiaMajor}, nil
 	}
 	return nvidiaMajorsOf(string(text)), nil
+}
+
+// NVIDIAPresent reports whether the NVIDIA driver holds a character
+// major on this host, as /proc/devices lists it. A host whose
+// /proc/devices cannot be read is taken to have none, like one that
+// never loaded the driver.
+func NVIDIAPresent() bool {
+	text, err := os.ReadFile("/proc/devices")
+	if err != nil {
+		return false
+	}
+	return nvidiaNamed(string(text))
+}
+
+// nvidiaNamed reports whether text, a /proc/devices listing, names a
+// character device of the NVIDIA driver.
+func nvidiaNamed(text string) bool {
+	chars := false
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		switch line {
+		case "Character devices:":
+			chars = true
+			continue
+		case "Block devices:":
+			chars = false
+			continue
+		}
+		if fields := strings.Fields(line); chars && len(fields) == 2 && strings.HasPrefix(fields[1], "nvidia") {
+			return true
+		}
+	}
+	return false
 }
 
 // nvidiaMajorsOf parses the "Character devices:" section of a

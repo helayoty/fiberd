@@ -137,7 +137,7 @@ func TestPark(t *testing.T) {
 					t.Fatal("the delta is not there")
 				}
 				noExit(t, f.r)
-				if f.r.root.Child("g1").Child("f-1-1").Exists() || len(f.r.fibers) != 0 {
+				if f.r.root.Child("g1").Child(fibersDir).Child("f-1-1").Exists() || len(f.r.fibers) != 0 {
 					t.Fatal("the parked fiber's leaf or record remains")
 				}
 				if len(f.fake().killedIDs()) != 0 {
@@ -298,7 +298,7 @@ func TestPark(t *testing.T) {
 			check: func(t *testing.T, f *parkFixture, ref string) {
 				// Mapped at birth, unmapped and evicted before the dump, and
 				// evicted once more as the fiber ends.
-				want := "LEAF g1/1/1 /g1/f-1-1,UNLEAF g1/1/1,EVICT g1/1/1,EVICT g1/1/1"
+				want := "LEAF g1/1/1 /g1/fibers/f-1-1,UNLEAF g1/1/1,EVICT g1/1/1,EVICT g1/1/1"
 				if got := f.engine.lines(100 * time.Millisecond); strings.Join(got, ",") != want {
 					t.Fatalf("the engine got %q, want %s", got, want)
 				}
@@ -311,7 +311,7 @@ func TestPark(t *testing.T) {
 			before: func(t *testing.T, f *parkFixture) { f.engine.setDown() },
 			check: func(t *testing.T, f *parkFixture, ref string) {
 				// The EVICT and UNLEAF fail, and the park goes on.
-				if got := f.engine.lines(100 * time.Millisecond); strings.Join(got, ",") != "LEAF g1/1/1 /g1/f-1-1" {
+				if got := f.engine.lines(100 * time.Millisecond); strings.Join(got, ",") != "LEAF g1/1/1 /g1/fibers/f-1-1" {
 					t.Fatalf("the engine got %q, want only the birth's LEAF", got)
 				}
 				if !f.r.HasDelta(ref) {
@@ -445,7 +445,7 @@ func TestResume(t *testing.T) {
 				if merged, _ := os.ReadFile(filepath.Join(ref, "merged")); string(merged) != parent || len(cb.merged) != 1 {
 					t.Fatalf("merged = %q, %v", merged, cb.merged)
 				}
-				leaf := f.r.root.Child("g1").Child("f-2-1")
+				leaf := f.r.root.Child("g1").Child(fibersDir).Child("f-2-1")
 				if !leaf.Exists() || cgUint(t, leaf, "memory.max") != 64*mib {
 					t.Fatal("the resumed fiber has no leaf of its own")
 				}
@@ -489,7 +489,7 @@ func TestResume(t *testing.T) {
 			},
 			errText: "parked on a tcp endpoint, this home serves unix",
 			check: func(t *testing.T, f *parkFixture, _ string, _ core.FiberHandle) {
-				if f.r.root.Child("g1").Child("f-2-1").Exists() {
+				if f.r.root.Child("g1").Child(fibersDir).Child("f-2-1").Exists() {
 					t.Fatal("the leaf was left behind")
 				}
 			}},
@@ -499,7 +499,7 @@ func TestResume(t *testing.T) {
 			},
 			errText: "scheme must be unix or tcp",
 			check: func(t *testing.T, f *parkFixture, _ string, _ core.FiberHandle) {
-				if f.r.root.Child("g1").Child("f-2-1").Exists() {
+				if f.r.root.Child("g1").Child(fibersDir).Child("f-2-1").Exists() {
 					t.Fatal("the leaf was left behind")
 				}
 			}},
@@ -509,7 +509,7 @@ func TestResume(t *testing.T) {
 			return cb
 		}, grant: g, ref: parkFirst, errText: "criu restore failed",
 			check: func(t *testing.T, f *parkFixture, _ string, _ core.FiberHandle) {
-				if f.r.root.Child("g1").Child("f-2-1").Exists() || len(f.r.fibers) != 0 {
+				if f.r.root.Child("g1").Child(fibersDir).Child("f-2-1").Exists() || len(f.r.fibers) != 0 {
 					t.Fatal("the leaf or the record was left behind")
 				}
 				if exists(filepath.Join(f.r.cfg.RunDir, "g1", "1-1.sock")) {
@@ -545,7 +545,7 @@ func TestResume(t *testing.T) {
 				if err == nil || !strings.Contains(err.Error(), "held by g1/2/1") {
 					t.Fatalf("resume on a held port = %v", err)
 				}
-				if f.r.root.Child("g1").Child("f-3-1").Exists() {
+				if f.r.root.Child("g1").Child(fibersDir).Child("f-3-1").Exists() {
 					t.Fatal("the refused resume left its leaf")
 				}
 				// Discarding the parked fiber's delta gives its port back.
@@ -589,7 +589,7 @@ func TestResume(t *testing.T) {
 			},
 			errText: "hand connections",
 			check: func(t *testing.T, f *parkFixture, _ string, _ core.FiberHandle) {
-				if f.r.root.Child("g1").Child("f-2-1").Exists() {
+				if f.r.root.Child("g1").Child(fibersDir).Child("f-2-1").Exists() {
 					t.Fatal("the leaf was left behind")
 				}
 			}},
@@ -600,7 +600,7 @@ func TestResume(t *testing.T) {
 				*selfCheckpointMixin
 				*idMapperMixin
 			}{newFakeBackend(core.TierCheckpoint), &codecMixin{}, &selfCheckpointMixin{}, &idMapperMixin{uid: uint32(os.Geteuid())}}
-		}, grant: g, mod: func(c *Config) { delegatedUnder(c.CgroupRoot, "g1", "g1/f-1-1") },
+		}, grant: g, mod: func(c *Config) { delegatedUnder(c.CgroupRoot, "g1", "g1/fibers", "g1/fibers/f-1-1") },
 			ref: func(t *testing.T, f *parkFixture) string {
 				ref := parkFirst(t, f)
 				f.be.(interface{ mapper() *idMapperMixin }).mapper().err = errors.New("fake: range revoked")
@@ -614,12 +614,12 @@ func TestResume(t *testing.T) {
 				if err := f.r.PrepareTemplate(context.Background(), core.Grant{UID: "tiny", TemplateDigest: "sha256:tmpl", FiberMax: 1, WBudgetBytes: 64 * mib}); err != nil {
 					t.Fatal(err)
 				}
-				inTheWay(t, f.r.root.Child("tiny"), "f-2-1")
+				inTheWay(t, f.r.root.Child("tiny").Child(fibersDir), "f-2-1")
 				return manifestOnly(t, f, manifest{Fence: "tiny/1/1", Backend: "fake", Endpoint: "unix:///x.sock"}, nil)
 			},
 			errText: "f-2-1",
 			check: func(t *testing.T, f *parkFixture, _ string, _ core.FiberHandle) {
-				if f.r.root.Child("tiny").Child("f-2-1").Exists() {
+				if f.r.root.Child("tiny").Child(fibersDir).Child("f-2-1").Exists() {
 					t.Fatal("the leaf was left behind")
 				}
 			}},
@@ -632,7 +632,7 @@ func TestResume(t *testing.T) {
 			},
 			errText: "restore failed",
 			check: func(t *testing.T, f *parkFixture, _ string, _ core.FiberHandle) {
-				if f.r.root.Child("g1").Child("f-2-1").Exists() || len(f.r.fibers) != 0 {
+				if f.r.root.Child("g1").Child(fibersDir).Child("f-2-1").Exists() || len(f.r.fibers) != 0 {
 					t.Fatal("the leaf or the record was left behind")
 				}
 				if exists(filepath.Join(f.r.cfg.RunDir, "g1", "1-1.sock")) {
@@ -652,7 +652,7 @@ func TestResume(t *testing.T) {
 			},
 			errText: "netns gone",
 			check: func(t *testing.T, f *parkFixture, _ string, _ core.FiberHandle) {
-				if f.r.root.Child("g1").Child("f-2-1").Exists() {
+				if f.r.root.Child("g1").Child(fibersDir).Child("f-2-1").Exists() {
 					t.Fatal("the leaf was left behind")
 				}
 			}},
@@ -791,7 +791,7 @@ func TestReleaseOrphan(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Cleanup(r.Close)
-			leaf := r.root.Child("g1").Child(leafName(orphan))
+			leaf := r.root.Child("g1").Child(fibersDir).Child(leafName(orphan))
 			cgSet(t, leaf, "cgroup.procs", "4242")
 			list, err := r.List(context.Background())
 			if err != nil || len(list) != 1 || list[0].ID != orphan.String() {
@@ -879,7 +879,7 @@ func TestResumeRefusesHeldSocket(t *testing.T) {
 				if got := mustSay(t, f.h.Endpoint, "ping"); got != "g1/1/1:ping" {
 					t.Fatalf("the holder answered %q after the refused resume", got)
 				}
-				if f.r.root.Child("g1").Child("f-2-1").Exists() || heldPorts(f.r) != boolInt(tc.relayed) {
+				if f.r.root.Child("g1").Child(fibersDir).Child("f-2-1").Exists() || heldPorts(f.r) != boolInt(tc.relayed) {
 					t.Fatalf("the refused resume left its leaf or a port (%d held)", heldPorts(f.r))
 				}
 				return
@@ -899,7 +899,7 @@ func TestResumeRefusesHeldSocket(t *testing.T) {
 			if got := mustSay(t, resumed.Endpoint, "ping"); got != "g1/2/1:ping" {
 				t.Fatalf("the holder answered %q after the refused clone", got)
 			}
-			if f.r.root.Child("g1").Child("f-1-2").Exists() || heldPorts(f.r) != 2*boolInt(tc.relayed) {
+			if f.r.root.Child("g1").Child(fibersDir).Child("f-1-2").Exists() || heldPorts(f.r) != 2*boolInt(tc.relayed) {
 				t.Fatalf("the refused clone left its leaf or a port (%d held)", heldPorts(f.r))
 			}
 			// The holder's end frees the name.
@@ -1211,7 +1211,7 @@ func TestResumeW(t *testing.T) {
 			}{fb, overheadMixin{}}
 			g := core.Grant{UID: "g1", TemplateDigest: "sha256:tmpl", FiberMax: 2}
 			f := newParkFixture(t, be, g, nil)
-			charge(t, f.r.root.Child("g1").Child("f-1-1"), 5*mib)
+			charge(t, f.r.root.Child("g1").Child(fibersDir).Child("f-1-1"), 5*mib)
 			ctx := context.Background()
 			ref, err := f.r.Park(ctx, f.h.ID, false)
 			if err != nil {
@@ -1229,7 +1229,7 @@ func TestResumeW(t *testing.T) {
 			if err != nil {
 				t.Fatalf("resume: %v", err)
 			}
-			charge(t, f.r.root.Child("g1").Child("f-2-1"), 5*mib)
+			charge(t, f.r.root.Child("g1").Child(fibersDir).Child("f-2-1"), 5*mib)
 			st, err := f.r.Stats(ctx, h.ID)
 			if err != nil || (st.WUsedBytes > 0) != tc.positive {
 				t.Fatalf("Stats = %+v %v, want W above zero %v", st, err, tc.positive)
