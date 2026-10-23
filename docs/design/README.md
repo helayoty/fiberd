@@ -19,6 +19,7 @@ A suggested order is fiberd, home, grant, core, audit, runtime-host, backends, z
 | [wsfs.md](wsfs.md) | The file layer of a fiber's workspace, hardened against a tree the fiber controls | `pkg/runtime/host/wsfs` |
 | [resources.md](resources.md) | The cgroup hierarchy, the memory formula and sizing | `pkg/runtime/host`, `pkg/sys/cgroup` |
 | [backends.md](backends.md) | The backend interface and how proc, runc, gVisor and Hyperlight make a fiber | `pkg/backend`, `pkg/backend/proc`, `pkg/backend/runc`, `pkg/backend/gvisor`, `pkg/backend/hyperlight` |
+| [cloudhv.md](cloudhv.md) | How a Cloud Hypervisor fiber is a jailed micro-VM, and why a Clone restores copy-on-write | `pkg/backend/cloudhv` |
 | [sys.md](sys.md) | Cgroup delegation, [CRIU](../glossary.md#criu) dump and restore, capability narrowing and network namespaces | `pkg/sys/caps`, `pkg/sys/cgroup`, `pkg/sys/criu`, `pkg/sys/netns` |
 | [zygote.md](zygote.md) | The library a template links to, its wire protocol and how a [zygote](../glossary.md#zygote) forks a fiber | `sdk/c/template` |
 | [seccomp.md](seccomp.md) | The fiber filter every proc and runc zygote installs, and the runc capability set | `sdk/c/template` |
@@ -50,3 +51,4 @@ These have no design doc of their own.
 | `cmd/audit-verify` | Checks a home's audit spool |
 | `cmd/zygotectl` | Builds, pushes, pulls and inspects template artifacts |
 | [hack/hyperlight/PROTOCOL.md](../../hack/hyperlight/PROTOCOL.md) | The line protocol between fiberd and the Hyperlight helper process |
+| [hack/cloudhv/PROTOCOL.md](../../hack/cloudhv/PROTOCOL.md) | The API calls, vsock ports and control lines between fiberd, a Cloud Hypervisor VMM and its guest |
