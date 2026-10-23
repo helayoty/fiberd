@@ -11,7 +11,13 @@
 //! again. W is what the guest dirtied through `Dirty`, which the helper
 //! tracks and reports. The command log never shows a seed or a payload.
 //!
-//!   hyperlight-helper --guest <path> [--heap-mb N]     (fd 3 = control)
+//! A guest reaches the grant's device engine only through the `Engine`
+//! host function, which each sandbox gets bound to the fence fiberd named
+//! for it. The helper puts that fence in every line, so a guest can act on
+//! its own slice alone. fiberd sends the engine RELAY for the helper's
+//! cgroup, which lets it name the fences of its fibers.
+//!
+//!   hyperlight-helper --guest <path> [--heap-mb N] [--engine <sock>]  (fd 3 = control)
 //!   hyperlight-helper --guest <path> --check           (self-test, no fd 3)
 //!   hyperlight-helper --version                        (the snapshot facts)
 
@@ -19,7 +25,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::fd::FromRawFd;
-use std::os::unix::net::UnixListener;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
@@ -27,6 +33,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
+use hyperlight_host::func::Registerable;
 use hyperlight_host::sandbox::snapshot::{OciTag, Snapshot};
 use hyperlight_host::{HostFunctions, MultiUseSandbox, SandboxBuilder};
 
@@ -106,10 +113,12 @@ struct Args {
     guest: PathBuf,
     heap_mb: u64,
     check: bool,
+    /// The grant's engine socket, None when the grant has no engine.
+    engine: Option<PathBuf>,
 }
 
 fn parse_args() -> Result<Args> {
-    let mut a = Args { guest: PathBuf::new(), heap_mb: 32, check: false };
+    let mut a = Args { guest: PathBuf::new(), heap_mb: 32, check: false, engine: None };
     let mut it = std::env::args().skip(1);
     while let Some(k) = it.next() {
         match k.as_str() {
@@ -120,6 +129,7 @@ fn parse_args() -> Result<Args> {
             "--guest" => a.guest = PathBuf::from(it.next().context("--guest needs a path")?),
             "--heap-mb" => a.heap_mb = it.next().context("--heap-mb needs a number")?.parse()?,
             "--check" => a.check = true,
+            "--engine" => a.engine = Some(PathBuf::from(it.next().context("--engine needs a path")?)),
             // The template command's first word names the guest for
             // fiberd's benefit; anything else is unknown.
             "guest" => {}
@@ -153,8 +163,101 @@ fn warm(args: &Args) -> Result<Arc<Snapshot>> {
     sb.snapshot().context("warm snapshot")
 }
 
-fn from_snapshot(s: Arc<Snapshot>) -> Result<MultiUseSandbox> {
-    MultiUseSandbox::from_snapshot(s, HostFunctions::default(), None).context("sandbox from snapshot")
+fn from_snapshot(s: Arc<Snapshot>, hf: HostFunctions) -> Result<MultiUseSandbox> {
+    MultiUseSandbox::from_snapshot(s, hf, None).context("sandbox from snapshot")
+}
+
+/// The host functions of a fiber's sandbox. `Engine` is bound here to the
+/// fence fiberd named on CLONE or RESUME, never to one the guest gives.
+fn host_functions(engine: Option<&Path>, fence: &str) -> Result<HostFunctions> {
+    let mut hf = HostFunctions::default();
+    let engine = engine.map(Path::to_path_buf);
+    let fence = fence.to_string();
+    hf.register_host_function("Engine", move |line: String| -> hyperlight_host::Result<String> {
+        Ok(engine_call(engine.as_deref(), &fence, &line))
+    })
+    .context("register Engine")?;
+    Ok(hf)
+}
+
+/// Longest line to or from the engine, its newline counted.
+const ENGINE_LINE_MAX: usize = 256;
+
+/// How long one engine request may take, so a stuck engine cannot hold
+/// the fiber's thread, and with it a park.
+const ENGINE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// What `Engine` answers the guest for line: the engine's reply to the
+/// request engine_line makes of it, or an `err` of the helper's own.
+fn engine_call(engine: Option<&Path>, fence: &str, line: &str) -> String {
+    let Some(req) = engine_line(fence, line) else {
+        return "err proto".to_string();
+    };
+    let Some(path) = engine else {
+        return "err no engine".to_string();
+    };
+    match ask_engine(path, &req) {
+        Ok(reply) if !reply.is_empty() => reply,
+        Ok(_) => "err no reply".to_string(),
+        Err(_) => "err engine unreachable".to_string(),
+    }
+}
+
+/// The engine request for a guest's line, with the fiber's fence put in
+/// by the helper. The guest gives `reserve <n>`, `fill <n>`, `release` or
+/// `sum`, one space apart, with n decimal digits. Nothing it can send
+/// holds a fence, a second line or another token, so the request names
+/// this fiber alone. Anything else is None.
+fn engine_line(fence: &str, line: &str) -> Option<String> {
+    if !valid_fence(fence) {
+        return None;
+    }
+    let mut words = line.split(' ');
+    let verb = words.next()?;
+    let arg = words.next();
+    if words.next().is_some() {
+        return None;
+    }
+    let req = match (verb, arg) {
+        ("reserve" | "fill", Some(n)) if is_decimal(n) => format!("{verb} {fence} {n}"),
+        ("release" | "sum", None) => format!("{verb} {fence}"),
+        _ => return None,
+    };
+    (req.len() < ENGINE_LINE_MAX).then_some(req)
+}
+
+/// Whether f is a fence as the engine takes one. Printable ASCII with no
+/// space, and not the `-` its DEVICE lines use for the pool.
+fn valid_fence(f: &str) -> bool {
+    !f.is_empty() && f != "-" && f.bytes().all(|b| (0x21..=0x7e).contains(&b))
+}
+
+/// Whether s is one to twenty decimal digits, a u64's longest.
+fn is_decimal(s: &str) -> bool {
+    !s.is_empty() && s.len() <= 20 && s.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// One request on a fresh connection to the engine, and its reply line.
+fn ask_engine(path: &Path, req: &str) -> std::io::Result<String> {
+    let mut s = UnixStream::connect(path)?;
+    s.set_read_timeout(Some(ENGINE_TIMEOUT))?;
+    s.set_write_timeout(Some(ENGINE_TIMEOUT))?;
+    s.write_all(format!("{req}\n").as_bytes())?;
+    let mut reply = String::new();
+    BufReader::new(s.take(ENGINE_LINE_MAX as u64)).read_line(&mut reply)?;
+    Ok(reply.trim_end().to_string())
+}
+
+/// The fiber's `gpufill <seed> <bytes>`, through the guest's GpuFill.
+fn gpu_fill(sb: &mut MultiUseSandbox, args: &str) -> String {
+    let mut words = args.split(' ');
+    let (Some(seed), Some(bytes), None) = (words.next(), words.next(), words.next()) else {
+        return "err usage: gpufill <seed> <bytes>".to_string();
+    };
+    let (Ok(seed), Ok(bytes)) = (seed.parse::<u64>(), bytes.parse::<u64>()) else {
+        return "err usage: gpufill <seed> <bytes>".to_string();
+    };
+    sb.call::<String>("GpuFill", (seed, bytes)).unwrap_or_else(|e| format!("err {e}"))
 }
 
 fn payload_num(payload: &[u8], key: &str) -> u64 {
@@ -336,6 +439,11 @@ fn fiber_thread(ctl: Ctl, fence: String, endpoint: PathBuf, mut sb: MultiUseSand
                         "seed" => kept_seed.clone().unwrap_or_else(|| "-".to_string()),
                         "pid" => "0".to_string(),
                         "rss" => dirtied.to_string(),
+                        "gpucheck" => sb.call::<String>("GpuCheck", ()).unwrap_or_else(|e| format!("err {e}")),
+                        _ if l.starts_with("gpufill ") => gpu_fill(&mut sb, &l[8..]),
+                        _ if l.starts_with("gpuopen ") => {
+                            sb.call::<String>("GpuOpen", l[8..].to_string()).unwrap_or_else(|e| format!("err {e}"))
+                        }
                         "quit" => break,
                         _ if l.starts_with("dirty ") => {
                             let n: i64 = l[6..].trim().parse().unwrap_or(0);
@@ -402,14 +510,14 @@ fn check(args: &Args) -> Result<()> {
     let snap = warm(args)?;
     eprintln!("warm sandbox + Init({} MiB) + snapshot: {:?}", args.heap_mb, t.elapsed());
     let t = Instant::now();
-    let mut sb = from_snapshot(snap.clone())?;
+    let mut sb = from_snapshot(snap.clone(), host_functions(None, "check/1")?)?;
     let pong: String = sb.call("Ping", ())?;
     eprintln!("sandbox from snapshot + Ping = {pong}: {:?}", t.elapsed());
     let t = Instant::now();
     let g: i64 = sb.call("Incarnate", (1i64, "check/1".to_string(), vec![1u8; SEED_BYTES]))?;
     eprintln!("Incarnate(1, check/1, seed): {:?}, generation = {g}", t.elapsed());
     let r1: u64 = sb.call("Random", ())?;
-    let mut other = from_snapshot(snap.clone())?;
+    let mut other = from_snapshot(snap.clone(), HostFunctions::default())?;
     let _: i64 = other.call("Incarnate", (1i64, "check/2".to_string(), vec![2u8; SEED_BYTES]))?;
     let r2: u64 = other.call("Random", ())?;
     if r1 == r2 {
@@ -419,12 +527,25 @@ fn check(args: &Args) -> Result<()> {
     let n: i64 = sb.call("Incr", ())?;
     let d: i64 = sb.call("Dirty", 1i64 << 20)?;
     eprintln!("Incr = {n}, Dirty(1 MiB) = {d}");
+    // The GPU probes with no engine. Each must answer, never fail.
+    let probes: [(&str, String); 3] = [
+        ("GpuCheck", sb.call("GpuCheck", ())?),
+        ("GpuFill", sb.call("GpuFill", (1u64, 4096u64))?),
+        ("GpuOpen", sb.call("GpuOpen", "/dev/nvidia0".to_string())?),
+    ];
+    let want = ["err none", "err no engine", "ENOENT"];
+    for ((name, got), want) in probes.iter().zip(want) {
+        if got != want {
+            return Err(anyhow!("{name} without an engine = {got:?}, want {want:?}"));
+        }
+    }
+    eprintln!("GpuCheck, GpuFill and GpuOpen without an engine: {want:?}");
     let dir = std::env::temp_dir().join(format!("fiberd-hl-check-{}", std::process::id()));
     let t = Instant::now();
     let bytes = park(&mut sb, &dir, false)?;
     eprintln!("park (Snapshot::save): {:?}, {} bytes", t.elapsed(), bytes);
     let t = Instant::now();
-    let mut back = from_snapshot(resume_snapshot(&dir)?)?;
+    let mut back = from_snapshot(resume_snapshot(&dir)?, host_functions(None, "check/2")?)?;
     let n2: i64 = back.call("Get", ())?;
     eprintln!("resume (Snapshot::load + sandbox): {:?}, counter = {n2}", t.elapsed());
     let _ = std::fs::remove_dir_all(&dir);
@@ -478,11 +599,15 @@ fn main() -> Result<()> {
                         continue;
                     }
                 };
+                // The sandbox's Engine is bound to the line's fence alone.
+                let hf = host_functions(args.engine.as_deref(), &fence);
                 let (endpoint, payload, sb, kind, keep_seed) = if f[0] == "CLONE" {
-                    (PathBuf::from(f[2]), if f[4] == "-" { Vec::new() } else { unhex(f[4]) }, from_snapshot(snap.clone()), "clone", false)
+                    let sb = hf.and_then(|hf| from_snapshot(snap.clone(), hf));
+                    (PathBuf::from(f[2]), if f[4] == "-" { Vec::new() } else { unhex(f[4]) }, sb, "clone", false)
                 } else {
                     let park = Path::new(f[2]);
-                    (PathBuf::from(f[3]), Vec::new(), resume_snapshot(park).and_then(from_snapshot), "resume", keep_seed_noted(park))
+                    let sb = hf.and_then(|hf| resume_snapshot(park).and_then(|s| from_snapshot(s, hf)));
+                    (PathBuf::from(f[3]), Vec::new(), sb, "resume", keep_seed_noted(park))
                 };
                 match sb {
                     Ok(sb) => {

@@ -14,6 +14,11 @@
 // cgroup (the ceiling still holds), exits are reported by fence, and W
 // is what the helper reports the guest dirtied (backend.WReporter). Tier
 // FIBER_SNAPSHOT. No delta codec: a park is what the helper wrote.
+//
+// A grant with a device engine hands the helper the engine's socket. A
+// guest reaches it only through the helper, which puts the fiber's fence
+// in each request, so the helper's cgroup speaks for every fiber and the
+// host sends the engine RELAY for it (RelaysEngine).
 package hyperlight
 
 import (
@@ -227,6 +232,11 @@ func (b *Backend) Tier() core.Tier { return b.tier }
 // hypervisor.
 func (b *Backend) IsolatesTenants() bool { return true }
 
+// RelaysEngine is true because a fiber has no process of its own. Its
+// engine requests come from the helper, in the warm instance's cgroup,
+// with the fiber's fence put in by the helper, never by the guest.
+func (b *Backend) RelaysEngine() bool { return true }
+
 // Platform reports the helper's facts, because a snapshot depends on them
 // and not on the host kernel or libc. A backend without a usable helper
 // warms nothing, and says so here.
@@ -272,6 +282,9 @@ func (b *Backend) Warm(ctx context.Context, sp backend.WarmSpec) (backend.Warm, 
 	args := []string{}
 	if b.opt.Guest != "" {
 		args = append(args, "--guest", b.opt.Guest)
+	}
+	if sp.EnginePath != "" {
+		args = append(args, "--engine", sp.EnginePath)
 	}
 	// The template command's own arguments, after the helper's; the
 	// first word is the guest's name for the helper's benefit.

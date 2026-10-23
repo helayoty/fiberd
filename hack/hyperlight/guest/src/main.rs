@@ -4,22 +4,26 @@
 //! sandbox and snapshots it; every fiber is a sandbox restored from that
 //! snapshot, told who it is with `Incarnate` before it serves, and the
 //! helper maps the fiber's line protocol (ping, incr, get, dirty, random,
-//! generation, fence) onto the guest functions below. State lives in
-//! guest memory, so it travels with a snapshot: that is what park and
-//! resume move, and why every incarnation is reseeded.
+//! generation, fence, gpufill, gpucheck, gpuopen) onto the guest functions
+//! below. State lives in guest memory, so it travels with a snapshot: that
+//! is what park and resume move, and why every incarnation is reseeded.
+//!
+//! The guest reaches the grant's device engine only through the helper's
+//! `Engine` host function, which puts the fiber's own fence in each line.
 //!
 //! Build: `cargo hyperlight build --release` (hack/hyperlight/build.sh).
 #![no_std]
 #![no_main]
 extern crate alloc;
 
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicI64, Ordering};
 
 use hyperlight_guest_bin::error::Result;
-use hyperlight_guest_bin::guest_function;
+use hyperlight_guest_bin::{guest_function, host_function};
 
 static COUNTER: AtomicI64 = AtomicI64::new(0);
 
@@ -187,4 +191,61 @@ fn get() -> Result<i64> {
 #[guest_function("Dirty")]
 fn dirty(bytes: i64) -> Result<i64> {
     Ok(touch(bytes.max(0) as usize) as i64)
+}
+
+/// Engine sends one request to the grant's device engine and returns its
+/// reply. The guest names the verb and at most one number. The helper
+/// puts this fiber's fence in and refuses anything else with `err proto`.
+#[host_function("Engine")]
+fn engine(line: String) -> Result<String>;
+
+/// The hash of the slice the last GpuFill filled, empty before one. It
+/// lives in guest memory, so a park carries it to the resumed fiber.
+static GPU_HASH: Cell<String> = Cell(UnsafeCell::new(String::new()));
+
+/// GpuFill reserves `bytes` of the device under this fiber's fence, fills
+/// them from `seed` and keeps the hash. Returns the fill's reply, `ok
+/// <hash>`, or the first reply that was not ok.
+#[guest_function("GpuFill")]
+fn gpu_fill(seed: u64, bytes: u64) -> Result<String> {
+    // SAFETY: single-threaded guest, see Cell.
+    let kept = unsafe { &mut *GPU_HASH.0.get() };
+    // A failed fill may have zeroed the slice, so the old hash goes first.
+    kept.clear();
+    let reserved = engine(format!("reserve {bytes}"))?;
+    if reserved != "ok" {
+        return Ok(reserved);
+    }
+    let filled = engine(format!("fill {seed}"))?;
+    if let Some(hash) = filled.strip_prefix("ok ") {
+        kept.push_str(hash);
+    }
+    Ok(filled)
+}
+
+/// GpuCheck asks the engine for the slice's hash now. Returns `ok` when it
+/// is the kept one, `mismatch <kept> <now>` when not, `err none` before
+/// any fill, or the engine's own error.
+#[guest_function("GpuCheck")]
+fn gpu_check() -> Result<String> {
+    // SAFETY: single-threaded guest, see Cell.
+    let kept = unsafe { (*GPU_HASH.0.get()).clone() };
+    if kept.is_empty() {
+        return Ok(String::from("err none"));
+    }
+    let sum = engine(String::from("sum"))?;
+    if let Some(now) = sum.strip_prefix("ok ") {
+        if now == kept {
+            return Ok(String::from("ok"));
+        }
+        return Ok(format!("mismatch {kept} {now}"));
+    }
+    Ok(sum)
+}
+
+/// GpuOpen is the fiber's attempt to open a GPU node. A Hyperlight guest
+/// has no file system and no device, so every path is missing.
+#[guest_function("GpuOpen")]
+fn gpu_open(_path: String) -> Result<String> {
+    Ok(String::from("ENOENT"))
 }

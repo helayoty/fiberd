@@ -968,6 +968,7 @@ func (r *Runtime) PrepareTemplate(ctx context.Context, g core.Grant) error {
 	}
 	w, err := r.be.Warm(ctx, wspec)
 	var eng *engine
+	started := false
 	if engineDone != nil {
 		res := <-engineDone
 		switch {
@@ -977,9 +978,18 @@ func (r *Runtime) PrepareTemplate(ctx context.Context, g core.Grant) error {
 		case res.err == nil && err != nil && res.started:
 			r.dropEngine(res.e)
 		}
-		eng = res.e
+		eng, started = res.e, res.started
 	}
 	if err != nil {
+		return err
+	}
+	// A warm instance that speaks for its fibers is let name their
+	// fences, before any of them runs.
+	if err := r.relayDevice(eng, zcg); err != nil {
+		r.be.Unwarm(w.ID)
+		if started {
+			r.dropEngine(eng)
+		}
 		return err
 	}
 	z := &warm{grantUID: g.UID, digest: g.TemplateDigest, template: tpl, id: w.ID, pid: w.PID, cg: gcg, fcg: fcg, zcg: zcg}
