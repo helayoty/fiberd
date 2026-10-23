@@ -711,6 +711,16 @@ func (e *engine) restore(ctx context.Context, fence string, fd int, timeout time
 		if err != nil {
 			return 0, fmt.Errorf("host: RESTORE %s: bad bytes %q", fence, f[2])
 		}
+		// The DEVICE pair after RESTORED finds no LEAF for the fence
+		// yet, so apply drops it. The reply itself says the slice, and
+		// the next park must see it, else it saves nothing.
+		if n > 0 {
+			e.mu.Lock()
+			if e.up {
+				e.slices[fence] = n
+			}
+			e.mu.Unlock()
+		}
 		return n, nil
 	case f[0] == "ERROR":
 		return 0, fmt.Errorf("host: RESTORE %s: %s", fence, engineReason(f))
