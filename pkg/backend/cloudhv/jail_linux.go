@@ -38,6 +38,7 @@ type jailSpec struct {
 	Rootfs   string   // host file, or a directory for the fake VMM, shown read-only at vmRootfs
 	RunDir   string   // host directory from prepareRunDir, shown read-write at vmRun
 	From     string   // host snapshot directory shown read-only at vmFrom, "" for a fresh boot
+	Engine   string   // host path of the grant's engine socket, whose directory is shown read-only at vmEngine, "" for none
 	CgroupFD int      // the leaf the VMM is born in, -1 for none
 	Log      *os.File // the VMM's stdout and stderr, where the guest's console goes too
 	API      *os.File // the bound API socket, which the VMM gets as descriptor apiFD
@@ -112,6 +113,7 @@ type stageSpec struct {
 	Rootfs string
 	RunDir string
 	From   string
+	Engine string // the engine's host directory
 }
 
 // Mount flags of the VMM's view.
@@ -142,20 +144,30 @@ func jailProbe() error {
 // prepareRunDir makes dir for one VMM of the grant, with dir/snap for
 // its snapshots. Both are root's, in the VMM's group, so the VMM can
 // make its sockets and snapshot files there and fiberd, as root, can
-// connect to them. dir is sticky, so a socket root makes there (the
-// engine's, in M10b) is one the VMM can connect to, once root gives its
-// group write on it, but not unlink or rename. The rest of the host
-// sees none of it, since dir's parent is root's alone.
+// connect to them. dir is sticky, so a name root makes there is one the
+// VMM can use but not unlink or rename, nor rename anything over. The
+// rest of the host sees none of it, since dir's parent is root's alone.
 //
 // Every name root wants to own in dir, it must make before the VMM
 // starts, since a name the VMM makes first is the VMM's to replace. The
-// API socket is bound here before launch starts the VMM for that reason,
-// and the engine link M10b adds, vsock.sock_5000, must be made the same
-// way, before the VMM starts.
-func prepareRunDir(dir, grantUID string) error {
+// API socket is bound here before launch starts the VMM for that reason.
+// So is the engine's name, when engine names the grant's engine socket.
+// A guest that connects to host port enginePort has the VMM connect to
+// vsock.sock_5000, which is made here as root's symlink to the socket
+// as the jail shows it, beneath vmEngine. It dangles on the host, and
+// only the VMM, inside its jail, follows it. A symlink rather than a
+// bind of the socket, since an engine that restarts binds a new socket
+// in the same directory, which the jail's bind of the directory shows.
+func prepareRunDir(dir, grantUID, engine string) error {
 	_, gid := jailIDs(grantUID)
 	if err := ownDir(dir, gid, os.ModeSticky|0o770); err != nil {
 		return err
+	}
+	if engine != "" {
+		link := filepath.Join(dir, vsockSock+"_"+strconv.Itoa(enginePort))
+		if err := os.Symlink(vmEngine+"/"+filepath.Base(engine), link); err != nil {
+			return err
+		}
 	}
 	return ownDir(filepath.Join(dir, snapDir), gid, 0o770)
 }
@@ -190,7 +202,14 @@ func startJailed(sp jailSpec) (process, error) {
 			return nil, err
 		}
 	}
-	spec := stageSpec{UID: uid, GID: gid, VMM: sp.VMM, Args: sp.Args, Kernel: sp.Kernel, Rootfs: sp.Rootfs, RunDir: sp.RunDir, From: sp.From}
+	engineDir := ""
+	if sp.Engine != "" {
+		engineDir = filepath.Dir(sp.Engine)
+		if err := checkReadable("engine directory", engineDir, uid, gid, false); err != nil {
+			return nil, err
+		}
+	}
+	spec := stageSpec{UID: uid, GID: gid, VMM: sp.VMM, Args: sp.Args, Kernel: sp.Kernel, Rootfs: sp.Rootfs, RunDir: sp.RunDir, From: sp.From, Engine: engineDir}
 	cmd, err := startStage(spec, sp.Log, sp.CgroupFD, sp.API)
 	if err != nil {
 		return nil, err
@@ -378,10 +397,10 @@ func probeIn() error {
 // enter builds the VMM's root on a tmpfs and pivots into it. The VMM
 // then sees its executable at vmBin, the kernel at vmKernel, the rootfs
 // at vmRootfs, its run directory at vmRun, the snapshot it restores at
-// vmFrom, a /dev with null, urandom and kvm, and a /proc of its own pid
-// namespace, which holds it alone. Nothing else of the host is there,
-// and nothing but vmRun takes a write. The engine's directory (M10b)
-// will be one more read-only bind here.
+// vmFrom, the grant's engine directory at vmEngine when it has one, a
+// /dev with null, urandom and kvm, and a /proc of its own pid namespace,
+// which holds it alone. Nothing else of the host is there, and nothing
+// but vmRun takes a write.
 //
 // The tmpfs sits on the run directory, the one host path the stage is
 // sure of. The directory is opened first, so the bind of it can name
@@ -421,6 +440,14 @@ func enter(sp stageSpec) error {
 	}
 	if sp.From != "" {
 		if err := bind(sp.From, root+vmFrom, roBind|unix.MS_NOEXEC); err != nil {
+			return err
+		}
+	}
+	// Read-only, so neither the VMM nor its guest can replace the socket
+	// the run directory's engine link names. connect needs no write on
+	// the mount, only on the socket, which the engine makes 0666.
+	if sp.Engine != "" {
+		if err := bind(sp.Engine, root+vmEngine, roBind|unix.MS_NOEXEC); err != nil {
 			return err
 		}
 	}

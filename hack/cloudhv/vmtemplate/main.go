@@ -15,11 +15,17 @@
 //	payload         -> the payload in hex, or "-"
 //	dirty <bytes>   -> ok        (grows the working set, charged as W)
 //	getenv <NAME>   -> value or "-"
-//	engine <line>   -> the engine's one-line reply over vsock (M10b)
+//	engine <line>   -> the engine's one-line reply over vsock
+//	gpufill <seed> <bytes> -> "ok <hash>" once a reserve of bytes under
+//	                  the fence and the engine's fill from seed succeed
+//	gpucheck        -> "ok", "mismatch <kept> <now>", or "err none"
+//	gpuopen <path>  -> "ok" or the errno's name of open(O_RDWR)
 //
-// The payload is JSON. "dirty_bytes" grows the fiber right after it
-// serves, which is how conformance case C6 drives a fiber over its W
-// budget, and "ready_delay_ms" waits before it binds.
+// The device probes answer as refzygote's do (gpu.go), engine errors
+// passed through. The payload is JSON. "dirty_bytes" grows the fiber
+// right after it serves, which is how conformance case C6 drives a fiber
+// over its W budget, "device_bytes" reserves a slice of the grant's
+// engine then, and "ready_delay_ms" waits before it binds.
 //
 // Build it static (CGO_ENABLED=0), since the guest's rootfs and the fake
 // VMM's jail hold no libraries.
@@ -56,6 +62,11 @@ type fiber struct {
 	dirtied    [][]byte
 	ln         net.Listener
 	conns      map[net.Conn]struct{}
+
+	// gpu takes the device probes one at a time. gpuHash is the hash of
+	// the last fill, which a park carries in a real VM.
+	gpu     sync.Mutex
+	gpuHash string
 }
 
 // heap is the warm state every copy shares, touched once at init.
@@ -160,6 +171,7 @@ func (f *fiber) incarnate(w []string) error {
 	clear(seed)
 	var knobs struct {
 		DirtyBytes   uint64 `json:"dirty_bytes"`
+		DeviceBytes  uint64 `json:"device_bytes"`
 		ReadyDelayMS uint64 `json:"ready_delay_ms"`
 	}
 	if len(payload) > 0 {
@@ -178,6 +190,9 @@ func (f *fiber) incarnate(w []string) error {
 	}
 	if knobs.DirtyBytes > 0 {
 		go f.dirty(knobs.DirtyBytes)
+	}
+	if knobs.DeviceBytes > 0 {
+		go f.reserveBirth(knobs.DeviceBytes)
 	}
 	return nil
 }
@@ -249,7 +264,11 @@ func (f *fiber) serve(c net.Conn) {
 	}()
 	sc := bufio.NewScanner(c)
 	for sc.Scan() {
-		if _, err := fmt.Fprintln(c, f.answer(strings.Fields(sc.Text()))); err != nil {
+		reply, ok := f.gpuProbe(sc.Text())
+		if !ok {
+			reply = f.answer(strings.Fields(sc.Text()))
+		}
+		if _, err := fmt.Fprintln(c, reply); err != nil {
 			return
 		}
 	}
@@ -261,11 +280,7 @@ func (f *fiber) answer(w []string) string {
 		return "err empty"
 	}
 	if w[0] == "engine" {
-		reply, err := engine(strings.Join(w[1:], " "))
-		if err != nil {
-			return "err " + err.Error()
-		}
-		return reply
+		return engineSend(strings.Join(w[1:], " "))
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -331,25 +346,6 @@ func (f *fiber) dirty(n uint64) {
 	f.mu.Lock()
 	f.dirtied = append(f.dirtied, b)
 	f.mu.Unlock()
-}
-
-// engine sends one line to the grant's engine, FIBERD_ENGINE, and reads
-// its one-line reply. Each request is one connection.
-func engine(line string) (string, error) {
-	c, err := dialEngine()
-	if err != nil {
-		return "", err
-	}
-	defer func() { _ = c.Close() }()
-	_ = c.SetDeadline(time.Now().Add(5 * time.Second))
-	if _, err := fmt.Fprintln(c, line); err != nil {
-		return "", err
-	}
-	reply, err := bufio.NewReader(c).ReadString('\n')
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(reply), nil
 }
 
 // hostPort reads FIBERD_ENGINE, "vsock://2:<port>", the host's CID and

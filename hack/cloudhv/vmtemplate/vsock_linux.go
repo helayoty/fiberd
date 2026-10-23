@@ -11,9 +11,9 @@ import (
 )
 
 // dialEngine connects to the engine on the host. Under the fake VMM,
-// which names its vsock socket in FIBERD_FAKE_VSOCK, that is the unix
-// socket a real VMM would connect to for the guest, <socket>_<port>. In
-// a VM it is AF_VSOCK to the host, CID 2.
+// which names its guest side of the host's ports in FIBERD_FAKE_VSOCK,
+// that is the unix socket <name>_<port>, which the fake forwards as a
+// real VMM forwards AF_VSOCK. In a VM it is AF_VSOCK to the host, CID 2.
 func dialEngine() (net.Conn, error) {
 	port, err := hostPort()
 	if err != nil {

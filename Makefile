@@ -152,12 +152,12 @@ conform-hyperlight: ## C1-C10 against the hyperlight backend with the real helpe
 cloudhv-images: ## the pinned cloud-hypervisor, the guest kernel and the rootfs into bin/cloudhv, inside the dev container
 	hack/dev/run.sh hack/cloudhv/build.sh
 
-conform-cloudhv-fake: ## C1-C10 against the cloudhv backend over the fake VMM (no KVM), inside the Linux dev container
-	hack/dev/run.sh env CONFORM_RUNTIME=cloudhv CONFORM_SIGNED=1 CONFORM_W_BUDGET=8388608 \
+conform-cloudhv-fake: ## C1-C10 against the cloudhv backend over the fake VMM (no KVM), and C11 and C14 over a peer home, inside the Linux dev container
+	hack/dev/run.sh env CONFORM_RUNTIME=cloudhv CONFORM_SIGNED=1 CONFORM_GPU=1 CONFORM_W_BUDGET=8388608 \
 	  CONFORM_STATE=$(CONFORM_DIR)/conform-state-cloudhv hack/conform/stub.sh run
 
-conform-cloudhv: ## C1-C10 against the cloudhv backend with the real VMM (needs /dev/kvm on the host; make cloudhv-images first)
-	FIBERD_DEV_DOCKER_ARGS="--device /dev/kvm" hack/dev/run.sh env CONFORM_RUNTIME=cloudhv CONFORM_SIGNED=1 \
+conform-cloudhv: ## C1-C10 against the cloudhv backend with the real VMM, and C11 and C14 over a peer home (needs /dev/kvm on the host; make cloudhv-images first)
+	FIBERD_DEV_DOCKER_ARGS="--device /dev/kvm" hack/dev/run.sh env CONFORM_RUNTIME=cloudhv CONFORM_SIGNED=1 CONFORM_GPU=1 \
 	  CONFORM_CH_DIR=/src/bin/cloudhv CONFORM_STATE=$(CONFORM_DIR)/conform-state-cloudhv-kvm hack/conform/stub.sh run
 
 ## The Kubernetes example (examples/kubernetes, its own module): the issuer

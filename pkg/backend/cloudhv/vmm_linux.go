@@ -33,6 +33,7 @@ const (
 	vmRootfs = "/fiberd/vm/rootfs" // the guest's root image, read-only
 	vmRun    = "/fiberd/vm/run"    // the VMM's own directory, read-write
 	vmFrom   = "/fiberd/vm/from"   // the snapshot a restore reads, read-only
+	vmEngine = "/fiberd/vm/engine" // the grant's engine directory, read-only
 	vmBin    = "/fiberd/vm/bin/vmm"
 
 	// Inside vmRun, and so inside the host run directory too.
@@ -43,12 +44,15 @@ const (
 )
 
 // The guest's vsock ports. The guest init serves the fiber's endpoint on
-// endpointPort and its control lines on controlPort. Port 5000 on the
-// host (CID 2) is the engine, which M10b links.
+// endpointPort and its control lines on controlPort. enginePort on the
+// host (CID 2) is the grant's engine. A guest connection to host port N
+// makes the VMM connect to its vsock socket's name with "_N" added, and
+// fiberd links that name for enginePort alone (prepareRunDir).
 const (
 	guestCID     = 3
 	endpointPort = 1024
 	controlPort  = 1025
+	enginePort   = 5000
 )
 
 // guestInit is where the rootfs keeps the guest init, which the kernel
@@ -354,14 +358,16 @@ func (v *vm) exited() string {
 
 // launch starts a VMM for the grant in the cgroup, restoring from the
 // snapshot directory from when it is not empty, with extra after the
-// API socket flag. It returns once the API answers.
-func (b *Backend) launch(ctx context.Context, grantUID, from, logp string, cgroupFD int, extra []string) (*vm, error) {
+// API socket flag. engine is the host path of the grant's engine socket,
+// which the guest reaches on enginePort, "" for none. It returns once
+// the API answers.
+func (b *Backend) launch(ctx context.Context, grantUID, from, engine, logp string, cgroupFD int, extra []string) (*vm, error) {
 	id, err := newID()
 	if err != nil {
 		return nil, err
 	}
 	run := b.runDir(id)
-	if err := prepareRunDir(run, grantUID); err != nil {
+	if err := prepareRunDir(run, grantUID, engine); err != nil {
 		return nil, fmt.Errorf("cloudhv: run directory of %s: %w", id, err)
 	}
 	apif, err := bindAPI(run + "/" + apiSock)
@@ -378,7 +384,7 @@ func (b *Backend) launch(ctx context.Context, grantUID, from, logp string, cgrou
 	defer func() { _ = logf.Close() }()
 	args := append([]string{"--api-socket", "fd=" + strconv.Itoa(apiFD)}, extra...)
 	proc, err := b.starter.Start(jailSpec{GrantUID: grantUID, VMM: b.opt.VMM, Args: args, Kernel: b.opt.Kernel,
-		Rootfs: b.opt.Rootfs, RunDir: run, From: from, CgroupFD: cgroupFD, Log: logf, API: apif})
+		Rootfs: b.opt.Rootfs, RunDir: run, From: from, Engine: engine, CgroupFD: cgroupFD, Log: logf, API: apif})
 	if err != nil {
 		_ = os.RemoveAll(run)
 		return nil, fmt.Errorf("cloudhv: start VMM: %w", err)

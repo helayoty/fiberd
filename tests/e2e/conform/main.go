@@ -23,6 +23,8 @@
 // -gpu runs C14, which moves a session's device slice to the peer and
 // has a third home, -layout-target and -layout-node-id, whose engine
 // declares another layout refuse it. -gpu-events records each step.
+// -gpu-volatile, for a backend whose restore restarts the guest, checks
+// the engine's sum under the new fence in place of gpucheck.
 //
 // Cases whose hook is missing are skipped, and say so.
 package main

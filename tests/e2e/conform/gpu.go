@@ -47,6 +47,11 @@ type GPU struct {
 	Name string
 	// PeerName is the GPU the peer's engine declares.
 	PeerName string
+	// Volatile says the backend's restore restarts the guest (the fake
+	// VMM), so the hash gpufill kept is gone after a resume. C14 then
+	// asks the engine for the slice's hash under the new fence itself,
+	// a weaker check than gpucheck.
+	Volatile bool
 }
 
 const (
@@ -306,13 +311,17 @@ func (c *client) c14(t *testing.T) {
 	ev.emit(t, b, "claim", "", 3, map[string]any{"ms": since(t0), "answer": "claimed from " + a.node})
 	ev.emit(t, b, "resume", id, 3, map[string]any{"answer": r2.GetKind().String()})
 	t0 = time.Now()
-	checked, err := ask(ctx, r2.GetEndpoint(), "gpucheck")
-	if err != nil {
-		ev.fail(t, b, id, 3, "gpucheck on the peer: %v", err)
-	}
-	ev.emit(t, b, "check", id, 3, map[string]any{"ms": since(t0), "answer": checked})
-	if checked != "ok" {
-		ev.fail(t, b, id, 3, "gpucheck on the peer = %q, want ok: the slice did not survive the move", checked)
+	if g.Volatile {
+		c.c14Volatile(ctx, t, ev, b, id, r2.GetEndpoint(), filled, t0)
+	} else {
+		checked, err := ask(ctx, r2.GetEndpoint(), "gpucheck")
+		if err != nil {
+			ev.fail(t, b, id, 3, "gpucheck on the peer: %v", err)
+		}
+		ev.emit(t, b, "check", id, 3, map[string]any{"ms": since(t0), "answer": checked})
+		if checked != "ok" {
+			ev.fail(t, b, id, 3, "gpucheck on the peer = %q, want ok: the slice did not survive the move", checked)
+		}
 	}
 
 	// Scene 4. Parked again, the session is refused by an engine of
@@ -349,4 +358,29 @@ func (c *client) c14(t *testing.T) {
 		ev.fail(t, b, r4.GetFiberId(), 4, "clone on the peer after the refusal kind = %v, want RESUME: the session left the registry", r4.GetKind())
 	}
 	ev.emit(t, b, "resume", r4.GetFiberId(), 4, map[string]any{"ms": since(t0), "answer": r4.GetKind().String()})
+}
+
+// c14Volatile is scene 3's check on a backend whose restore restarts the
+// guest, which loses the hash gpufill kept. The resumed fiber names its
+// fence, which must be the Clone reply's fiber id, and the engine's hash
+// of the slice under that fence, asked through the fiber, must be the
+// one gpufill returned.
+func (c *client) c14Volatile(ctx context.Context, t *testing.T, ev *gpuStream, b *gpuHome, id, ep, filled string, t0 time.Time) {
+	t.Helper()
+	t.Logf("C14 on %s: its restore restarts the guest, so the weaker check runs, engine sum under the new fence against gpufill's hash", c.d.GPU.Backend)
+	fence, err := ask(ctx, ep, "fence")
+	if err != nil {
+		ev.fail(t, b, id, 3, "fence on the peer: %v", err)
+	}
+	if fence != id {
+		ev.fail(t, b, id, 3, "the resumed fiber names fence %q, want %q, the Clone reply's", fence, id)
+	}
+	summed, err := ask(ctx, ep, "engine sum "+fence)
+	if err != nil {
+		ev.fail(t, b, id, 3, "engine sum on the peer: %v", err)
+	}
+	ev.emit(t, b, "check", id, 3, map[string]any{"ms": since(t0), "answer": summed, "volatile": true})
+	if summed != filled {
+		ev.fail(t, b, id, 3, "engine sum %s on the peer = %q, want %q from gpufill: the slice did not survive the move", fence, summed, filled)
+	}
 }

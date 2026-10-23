@@ -2252,10 +2252,16 @@ func (r *Runtime) resume(ctx context.Context, spec core.CloneSpec) (core.FiberHa
 	r.mu.Lock()
 	r.fibers[f.id] = f
 	r.mu.Unlock()
+	// A backend that links the engine per fiber may resume with no warm
+	// instance here, so the spec names the engine too.
+	enginePath := ""
+	if r.wantsEngine(spec.Grant) {
+		enginePath = r.enginePath(spec.Grant.UID)
+	}
 	refused := r.pidsHits(gcg)
 	fb, err := r.be.Resume(ctx, backend.ResumeSpec{Dir: dir, Fence: f.id, Endpoint: bind, CgroupFD: int(lfd.Fd()), Deadline: spec.Deadline,
 		WarmID: spec.Grant.UID, WorkDir: workDir, Session: spec.Session, Generation: f.generation, Handoff: m.Handoff,
-		Workspace: ws.root()})
+		Workspace: ws.root(), EnginePath: enginePath})
 	if err != nil {
 		err = r.pidsPressure(gcg, refused, spec.Grant.UID, err)
 		r.mu.Lock()

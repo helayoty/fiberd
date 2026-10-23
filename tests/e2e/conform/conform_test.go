@@ -57,6 +57,7 @@ var (
 	layTarget  = flag.String("layout-target", "", "host:port of a third home sharing the registry and keys, whose engine declares another layout (C14)")
 	layNode    = flag.String("layout-node-id", "", "the third home's node id, the audience of its grants (C14)")
 	gpuLayouts = flag.String("gpu-layouts", "raw256,raw512", "the session's layout and the third home's, comma-separated, which its refusal must name (C14)")
+	gpuWeak    = flag.Bool("gpu-volatile", false, "C14: the target's restore restarts the guest (cloudhv over the fake VMM), so after the resume it compares the engine's sum under the new fence with gpufill's hash, a weaker check than gpucheck")
 )
 
 func TestMain(m *testing.M) {
@@ -143,7 +144,7 @@ func TestConformance(t *testing.T) {
 			t.Fatal("-gpu needs -peer-target, -layout-target, -layout-node-id and two -gpu-layouts")
 		}
 		d.GPU = &GPU{Class: *gpuClass, Layout: &Peer{Target: *layTarget, NodeID: *layNode}, Layouts: [2]string{lays[0], lays[1]},
-			Events: *gpuEvents, VM: *gpuVM, Backend: *gpuBackend, Name: *gpuName, PeerName: *peerGPU}
+			Events: *gpuEvents, VM: *gpuVM, Backend: *gpuBackend, Name: *gpuName, PeerName: *peerGPU, Volatile: *gpuWeak}
 	}
 	if *sealCheck != "" {
 		cmd := *sealCheck
