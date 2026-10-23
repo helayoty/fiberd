@@ -1220,7 +1220,9 @@ func validClass(s string) bool {
 		return false
 	}
 	for _, c := range s {
-		if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-') {
+		lower := c >= 'a' && c <= 'z'
+		digit := c >= '0' && c <= '9'
+		if !lower && !digit && c != '-' {
 			return false
 		}
 	}
