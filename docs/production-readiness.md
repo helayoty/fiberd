@@ -16,7 +16,6 @@ This page lists what stands between the reference implementation and a productio
 | Mobility | An unreachable registry falls back to a fresh session | No fresh-state fallback where continuity matters | [artifact.md](design/artifact.md) |
 | Audit | Park and Release write their record after the change ([protocol.md](protocol.md#outcomes)). The spool is local, and the first failed fsync poisons sync records until restart | Copy the spool off the host, monitor failures, restart after an fsync failure | [audit.md](design/audit.md) |
 | Watch | No batch boundary and no deletion tombstone | Reconcile through another inventory | [core.md](design/core.md) |
-| Device class | Admission checks for nonzero capacity, not the requested class | Enforce class compatibility | [runtime-host.md](design/runtime-host.md) |
 | Grant directory | Whoever can write the grants directory can deny a UID on that home | Only the control plane can write it | [home.md](design/home.md) |
 
 ## Operations

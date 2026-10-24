@@ -21,10 +21,9 @@ flowchart LR
     D[parked state undeletable] --> G5[gate 5]
     W[Watch has no tombstone] --> G12[gate 12]
   end
-  subgraph M[Mobility, audit and devices]
+  subgraph M[Mobility and audit]
     C[fresh-state fallback] --> G6[gate 6]
     A[local spool, fsync poison] --> G7[gate 7]
-    DC[device class not checked] --> G13[gate 13]
   end
   subgraph X[Every deployment]
     G2[gate 2]
@@ -50,9 +49,8 @@ flowchart LR
 10. Issuers change only the lease of a grant UID and mint a new UID for any other change ([core.md](core.md)).
 11. Only the control plane can write each home's grant directory ([home.md](home.md)).
 12. Callers reconcile their grants through an inventory other than Watch ([core.md](core.md)).
-13. A grant with a [device budget](../glossary.md#device-budget) runs only on homes whose [engine](../glossary.md#engine) has the class it asks for ([runtime-host.md](runtime-host.md)).
 
 ## Security notes and known gaps
 
-- Passing the gates does not make proc or runc isolate tenants. Untrusted grants still need gVisor or Hyperlight ([backends.md](backends.md)).
+- Passing the gates does not make proc or runc isolate tenants. Untrusted grants still need gVisor, Hyperlight or cloudhv ([backends.md](backends.md)).
 - The gates are a checklist, not a test suite. Only gate 9 is executable as shipped.

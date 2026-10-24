@@ -68,7 +68,7 @@ The grant Pod keeps its state, the [epoch](glossary.md#epoch) included, in `/var
 | `spec.lease` | The signed lifetime, renewed at half-life. Defaults to `10m` |
 | `spec.durability` | `best-effort` or `sync` audit records. Sync records are fsynced to the Pod's local spool and nothing ships them |
 | `spec.sessionClass` | The grant's [session class](glossary.md#session-class), signed into its policy. The grant's [tenant](glossary.md#tenant) is the CapacityGrant's namespace |
-| `spec.deviceBudget` | The [device budget](glossary.md#device-budget), when the template is an [engine](glossary.md#engine) |
+| `spec.deviceBudget` | The [device budget](glossary.md#device-budget), when the home runs an [engine](glossary.md#engine) |
 | `spec.pod.image` | An image containing `fiberd-k8s` |
 | `spec.pod.runtime` | fiberd's [backend](glossary.md#backend), `proc` (default), `runc`, `gvisor` or `hyperlight`. `gvisor` needs `-gvisor-rootfs <dir>` in `spec.pod.args`, and the example image ships one at `/usr/share/fiberd/gvisor-rootfs` |
 | `spec.pod.args` | Appended fiberd flags, such as `-template` and `-parity` |

@@ -13,10 +13,12 @@ flowchart TB
   H["home cgroup, the outer limit"] --> A["fiberd/, fiberd's own processes"]
   H --> R["grants/, capped a reserve below the home"]
   R --> G["grant UID: memory.high, memory.max, pids.max"]
-  G --> Z["zygote/: the warm template, memory.min"]
-  G --> F1["f-epoch-seq: one fiber, memory.max = L"]
-  G --> F2["f-epoch-seq: another fiber"]
-  G --> P["pool/p-n: a pooled sandbox, memory.max = L"]
+  G --> FS["fibers/: the GPU guard"]
+  G --> E["engine/: the device engine, if any"]
+  FS --> Z["zygote/: the warm template, memory.min"]
+  FS --> F1["f-epoch-seq: one fiber, memory.max = L"]
+  FS --> F2["f-epoch-seq: another fiber"]
+  FS --> P["pool/p-n: a pooled sandbox, memory.max = L"]
 ```
 
 - **Delegation.** fiberd moves its own processes into a `fiberd` leaf and carves `grants/` beside it ([sys.md](sys.md)).

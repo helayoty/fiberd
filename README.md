@@ -17,10 +17,10 @@ fiberd works with the scheduler, not instead of it. Fast starts from a warm copy
 
 - **Placement once, instances locally.** The scheduler places a signed block of capacity once. The home creates instances inside it with no API write or scheduler call per instance, so the scheduler sees one placement instead of one object per instance.
 - **Every instance stays checkable.** Each fiber's [fence](docs/glossary.md#fence) ties it to its grant and to fiberd's [epoch](docs/glossary.md#epoch), so revocation and restarts reach every fiber. Each operation lands in a hash-chained audit log with signed checkpoints. A caller that misses gets a typed answer that says whether to back off or fall back.
-- **One contract, any scheduler, any isolation.** The same grant works on Kubernetes, Slurm or a bare host, and over plain processes, runc, gVisor or Hyperlight.
+- **One contract, any scheduler, any isolation.** The same grant works on Kubernetes, Slurm or a bare host, and over plain processes, runc, gVisor, Hyperlight or Cloud Hypervisor.
 - **Sessions move.** A parked session can resume on another home, verified and sealed to its tenant.
 
-The fastest path, proc and runc, shares the host kernel, so it suits trusted code. Untrusted code runs on gVisor or Hyperlight, where a fiber is a snapshot restore.
+The fastest path, proc and runc, shares the host kernel, so it suits trusted code. Untrusted code runs on gVisor, Hyperlight or Cloud Hypervisor, where a fiber is a snapshot restore.
 
 ## The four verbs
 

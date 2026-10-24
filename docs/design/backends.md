@@ -19,7 +19,6 @@ The runtime host ([runtime-host.md](runtime-host.md)) decides when a [fiber](../
 | `IDMapper` | its fibers run in a user namespace mapped to a range of host ids |
 | `Platformer` | its checkpoints depend on something other than the host kernel and libc |
 | `DeadlineAdvisor`, `Overheader`, `WMeter`, `WReporter` | a [clone](../glossary.md#clone) is slower than a fork, a fiber has a fixed footprint, or [W](../glossary.md#w-working-set) comes from another counter or from the backend itself |
-| `DeviceReporter` | its [warm](../glossary.md#warm) instance is an [engine](../glossary.md#engine) that owns device state |
 | `SelfCheckpointer`, `DeltaCodec` | it can checkpoint the warm instance while running and store a park as a [delta](../glossary.md#delta) over it |
 | `Pooler` | it can restore a sandbox before its fiber exists and hand it an identity later |
 

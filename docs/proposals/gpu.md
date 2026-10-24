@@ -1,6 +1,6 @@
 # GPU fibers on proc and runc
 
-Status: proposal for [#4](https://github.com/helayoty/fiberd/issues/4). Nothing here is implemented.
+Status: built for [#4](https://github.com/helayoty/fiberd/issues/4) through the [GPU PoC](gpu-poc.md), which changed parts of this design. The PoC also does two things this cut left out. A park keeps the slice, and gVisor, Hyperlight and a micro-VM backend share the engine too. The text below is the design as proposed.
 
 ## Summary
 

@@ -38,7 +38,7 @@ sequenceDiagram
 - **Resume.** A resumed fiber holds its birth [fence](../glossary.md#fence) in memory and learns the new one, its [generation](../glossary.md#generation) and a fresh seed from the record the backend sends on its channel after the restore ([zygote.md](zygote.md)). A Hyperlight fiber gets the same from its helper before it serves ([backends.md](backends.md)). The backend hands the fiber back once it has acked that record, or once the helper says it serves, so nothing is routed to one that never serves again. The host writes nothing under the grant's directory for it.
 - **[Relay](../glossary.md#relay).** Under a TCP family, a backend that cannot bind TCP is told the fiber's unix socket. The host listens on the fiber's port and splices each connection to it, from before the backend's Clone until the fiber ends ([networking.md](networking.md)).
 - **Delta quota.** Before a checkpoint, the grant's parked bytes plus the fiber's W plus its workspace's apparent size must fit in 4 × `fibers.max` × W budget, or 1 GiB when either is unlimited. `workspace.tar` counts toward the parked bytes like every file in the delta directory. A park over the quota is refused with [shed](../glossary.md#clone-misses), and the fiber keeps running.
-- **Device seam.** A [home](../glossary.md#home) may provision a [device channel](../glossary.md#device-channel) for a grant, and its devices reach the warm instance's environment. An [engine](../glossary.md#engine) reports each fiber's device slice and its own use and capacity. The host kills a fiber over its [device budget](../glossary.md#device-budget), evicts the slice before a park, and feeds occupancy to the pressure ladder.
+- **Device seam.** A [home](../glossary.md#home) may provision a [device channel](../glossary.md#device-channel) for a grant. The host starts the grant's [engine](../glossary.md#engine) in its own leaf beside the fibers, as its own uid, and hands it those devices. The engine reports each fiber's device slice and its own use and capacity. The host kills a fiber over its [device budget](../glossary.md#device-budget), saves the slice into the [delta](../glossary.md#delta) at a park and restores it at a resume, and feeds occupancy to the pressure ladder. A cgroup device program on the fibers' parent keeps every fiber off NVIDIA's device nodes, so a fiber reaches the GPU only through the engine.
 
 ```mermaid
 flowchart TB
@@ -52,5 +52,4 @@ flowchart TB
 
 ## Security notes and known gaps
 
-- **Device class not enforced.** A grant asking for a device is admitted when the engine reports any capacity. The host does not compare `device_budget.class` with the engine.
 - **Rest of the filesystem.** Paths outside the hidden list are protected only by their owners' permissions.

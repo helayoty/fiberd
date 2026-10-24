@@ -27,7 +27,7 @@ A [template](#template) linked with fiberd's small library, libfiberzygote, so [
 A [template](#template) that has started and finished its setup, and waits to make [fibers](#fiber). [fiberd](#fiberd) keeps one warm instance per [grant](#grant), so a new fiber skips the slow start.
 
 ## Fiber
-One worker made from a [warm](#warm) [template](#template). On proc and runc it is a forked process, and on gVisor and Hyperlight it is a sandbox restored from a snapshot of the template, so it starts in milliseconds and costs mainly the memory it writes, its [W](#w-working-set). A running fiber counts toward the grant's `fibers.max`, and a [parked](#park) session does not.
+One worker made from a [warm](#warm) [template](#template). On proc and runc it is a forked process, and on gVisor, Hyperlight and cloudhv it is a sandbox restored from a snapshot of the template, so it starts in milliseconds and costs mainly the memory it writes, its [W](#w-working-set). A running fiber counts toward the grant's `fibers.max`, and a [parked](#park) session does not.
 
 ## Clone
 The one call that returns a [fiber](#fiber) for a [grant](#grant). The caller may name a [session](#session), and [fiberd](#fiberd) then creates a new fiber, attaches to the one a running session already has, or resumes a [parked](#park) session from its [delta](#delta). The caller may also send up to 4096 opaque bytes, which the new fiber reads and fiberd never interprets.
@@ -97,13 +97,13 @@ A way to reach [fibers](#fiber) through one shared address, which a [grant](#gra
 [fiberd](#fiberd)'s TCP listener in front of a fiber whose [backend](#backend) cannot bind TCP, such as runc, gVisor or Hyperlight. It copies each connection's bytes to the fiber's unix socket without reading them.
 
 ## Backend
-The mechanism that makes a [fiber](#fiber), chosen with [fiberd](#fiberd)'s `-runtime` flag. It is proc (a plain process), runc (a container), gVisor (a sandbox with its own kernel in user space) or Hyperlight (a small virtual machine), and they differ in start time and in how strongly they keep tenants apart. The flag also accepts `stub`, an in-memory runtime for tests that runs no code.
+The mechanism that makes a [fiber](#fiber), chosen with [fiberd](#fiberd)'s `-runtime` flag. It is proc (a plain process), runc (a container), gVisor (a sandbox with its own kernel in user space), Hyperlight (a small virtual machine) or cloudhv (a Cloud Hypervisor micro-VM), and they differ in start time and in how strongly they keep tenants apart. The flag also accepts `stub`, an in-memory runtime for tests that runs no code.
 
 ## Engine
-A [warm](#warm) template that owns device state, such as a GPU's memory, and lends each [fiber](#fiber) a slice of it. It reports every slice to [fiberd](#fiberd), and the reference template simulates one.
+A process [fiberd](#fiberd) starts beside a grant's [warm](#warm) template when the grant has a [device budget](#device-budget). It owns device state, such as a GPU's memory, and lends each [fiber](#fiber) a slice of it. It reports every slice to fiberd. The reference engine, refengine, drives a GPU through CUDA or simulates one.
 
 ## Device budget
-The most of an [engine](#engine)'s device state one [fiber](#fiber) may hold, the device-side twin of the W [budget](#budget). A fiber over it is killed, and a home whose template is not an engine refuses a grant that sets one.
+The most of an [engine](#engine)'s device state one [fiber](#fiber) may hold, the device-side twin of the W [budget](#budget). A fiber over it is killed, and a home that runs no engine refuses a grant that sets one.
 
 ## Device channel
 The devices a [home](#home) hands a [grant](#grant)'s [engine](#engine), such as a static device list, a Kubernetes Dynamic Resource Allocation (DRA) claim or a Slurm job's generic resources (GRES). The home provides it before the template warms and takes it back with the grant.
