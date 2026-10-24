@@ -19,7 +19,7 @@ flowchart LR
   B --> K["the child closes the clone3 and move_mount gates, before template code"]
 ```
 
-The zygote installs one program before READY, on every thread, so an engine thread started earlier is covered too. The zygote and every fiber run under it. Each child then adds a small filter of its own that answers `clone3` with ENOSYS and `move_mount` with EPERM from any address, before template code runs. A child that cannot add it ends with exit 126. CRIU dumps and restores both, so a resumed fiber keeps them, in the fresh user namespace a runc restore puts it in too. A zygote that cannot install its program sends `ERROR ? seccomp filter: <reason>` instead of READY.
+The zygote installs one program before READY, on every thread, so a thread started earlier is covered too. The zygote and every fiber run under it. Each child then adds a small filter of its own that answers `clone3` with ENOSYS and `move_mount` with EPERM from any address, before template code runs. A child that cannot add it ends with exit 126. CRIU dumps and restores both, so a resumed fiber keeps them, in the fresh user namespace a runc restore puts it in too. A zygote that cannot install its program sends `ERROR ? seccomp filter: <reason>` instead of READY.
 
 The program allows by default. A refusal is an errno and not a kill, because libraries probe and fall back (glibc without `clone3`, libuv without io_uring).
 
@@ -48,7 +48,7 @@ So the zygote's program allows `clone3` only when `seccomp_data.instruction_poin
 | Who calls `clone3` | Zygote program | Child filter | Result |
 | --- | --- | --- | --- |
 | the library's birth, in the zygote | allowed | none | the child is born in its leaf |
-| any other code in the zygote, such as libc starting an engine thread | ENOSYS | none | ENOSYS |
+| any other code in the zygote, such as libc starting a thread | ENOSYS | none | ENOSYS |
 | a fiber, from any address | allowed at the instruction | ENOSYS | ENOSYS |
 
 The child's install is one small filter and takes no node-wide lock, so births do not queue on each other.
@@ -64,6 +64,6 @@ The child's install is one small filter and takes no node-wide lock, so births d
 
 - The filter is a denylist. It narrows the kernel's unprivileged surface, and a new call is allowed until it is named. `ioctl` passes except for the two commands that change a file's project quota, so a proc fiber cannot leave its workspace disk budget. A proc fiber owns its files in the initial user namespace, where `fs/fileattr.c`'s `fileattr_set_prepare` lets an owner set `fsx_projid` and toggle `FS_XFLAG_PROJINHERIT`. `FS_IOC_FSSETXATTR` and its syscall twin `file_setattr` set the project id, and `FS_IOC_SETFLAGS` clears `PROJINHERIT` on a directory so new files land in project 0. A runc fiber is in a nested user namespace, where the same kernel check refuses the change with EINVAL, so it is already safe. Its program refuses these too, since it is the fiber program plus the mount family. gVisor and Hyperlight fibers never reach the host kernel's `fileattr` path.
 - On proc the program does not filter the mount calls, since each child mounts its own `/proc` after the clone. A proc fiber has no capability to mount.
-- Capabilities belong to a thread. On runc, an engine thread the template starts before `fz_serve` keeps the container's set. No fiber inherits it, since every fiber forks from the serving thread.
+- Capabilities belong to a thread. On runc, a thread the template starts before `fz_serve` keeps the container's set. No fiber inherits it, since every fiber forks from the serving thread.
 - The address check refuses the zygote's ordinary `clone3` and, on runc, `move_mount` calls, not code built to jump to the library's instructions. Such code is the template's own, behind the TRUSTED mark.
 - gVisor and Hyperlight fibers get no filter. Their boundary is the Sentry and the hypervisor.

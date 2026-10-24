@@ -1,6 +1,6 @@
 # GPU PoC: one host engine on every backend, a cross-GPU move, and a micro-VM backend
 
-The design for the `gpu-poc` branch, 2026-10-22. It builds on the [GPU proposal](gpu.md) (decisions D1 to D6) and changes it where a review against the code found gaps. Nothing here is built yet. Claims still unchecked against source or hardware are marked **verify**. No speed here was measured.
+The design for the `gpu-poc` branch, 2026-10-22. It builds on the [GPU proposal](gpu.md) (decisions D1 to D6) and changes it where a review against the code found gaps. It is built and on main. Its done criteria hold except the A to B move, which needs a second GPU model ([#61](https://github.com/helayoty/fiberd/issues/61)). Claims marked **verify** were not rechecked after the build. No speed here was measured.
 
 ## The question
 
