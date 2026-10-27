@@ -46,7 +46,7 @@ These have no design doc of their own.
 | `pkg/runtime/stub` | An in-memory runtime for tests and the conformance suite |
 | `pkg/core/coretest` | Helpers for tests of code built on `pkg/core` |
 | `internal/cli` | The plumbing the commands share, which is subcommand dispatch and the version `-version` prints |
-| `cmd/fiberd` | fiberd on a standalone host |
+| `cmd/fiberd` | fiberd on a standalone host. `fiberd run` instead tries a template on one Linux machine, with fiberd inside its own process |
 | `cmd/grant-issuer` | The reference [issuer](../glossary.md#issuer), which mints grants and serves its public keys |
 | `cmd/audit-verify` | Checks a home's audit spool |
 | `cmd/zygotectl` | Builds, pushes, pulls and inspects template artifacts |

@@ -17,6 +17,8 @@ import (
 	"io"
 	"log"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/helayoty/fiberd/internal/cli"
 	"github.com/helayoty/fiberd/pkg/fiberd"
@@ -33,6 +35,13 @@ func main() {
 // 0 for a clean stop, -h or -version, 2 for bad flags, and 1 when the
 // fiberd fails.
 func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	if len(args) > 0 && args[0] == "run" {
+		ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		return cli.Run(args, "usage: fiberd run [flags] TEMPLATE [args]", map[string]cli.Command{
+			"run": func(a []string) error { return runTemplate(ctx, a, stdout, stderr) },
+		}, stderr)
+	}
 	fs := flag.NewFlagSet("fiberd", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	var c fiberd.Config
