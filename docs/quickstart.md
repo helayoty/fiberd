@@ -28,7 +28,7 @@ bin/fiberd run -n 3 examples/hello/hello.py     # fibers hello/1/1, hello/1/2 an
 On a terminal `fiberd run` shows a table, one row per fiber with its [fence](glossary.md#fence), the clone's time and what the fiber said.
 
 `-n` clones that many fibers from the one warm template, all running at once. Each is a fork of it, so the template's warm-up runs only once. 
-[demo.md](demo.md) shows fiberd in five steps of `fiberd run`, with `-park`, `-time` and `-max`. The steps below make the protocol calls one at a time, with a signed grant.
+[demo.md](../examples/fiberd-cli/cli-demo.md) shows fiberd in five steps of `fiberd run`, with `-park`, `-time` and `-max`. The steps below make the protocol calls one at a time, with a signed grant.
 
 ## Run the protocol on this machine
 

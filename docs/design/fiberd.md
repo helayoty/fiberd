@@ -24,7 +24,7 @@ flowchart TD
   S --> W[Serve the warm path]
 ```
 
-fiberd is a library whose entry point is `RunContext`. It stops when its context ends or on SIGINT or SIGTERM, so a binary or a test owns fiberd's lifetime through that context. The standalone binary is this library plus the standalone home. Its `run` subcommand instead runs fiberd briefly in the same process to try a template ([demo.md](../demo.md)). An integration builds its own binary from the library plus its own home.
+fiberd is a library whose entry point is `RunContext`. It stops when its context ends or on SIGINT or SIGTERM, so a binary or a test owns fiberd's lifetime through that context. The standalone binary is this library plus the standalone home.
 
 These checks fail the start.
 

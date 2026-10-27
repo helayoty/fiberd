@@ -67,7 +67,7 @@ func TestFiberdRunsHello(t *testing.T) {
 			`^3 fibers from one template, released\.$`,
 			`^The other 2 clones took p50 [0-9.]+ms, p99 [0-9.]+ms\.$`,
 		}},
-		// docs/demo.md quotes these rows.
+		// examples/fiberd-cli/cli-demo.md quotes these rows.
 		{name: "a table of a refusal", flags: []string{"-o", "table", "-n", "3", "-max", "2"}, template: hello, rows: []string{
 			`^  - +refused +clone 3, deferred: ledger: grant at fibers\.max, no capacity for a new fiber$`,
 			`^2 fibers from one template, released\. 1 clone refused, the grant holds 2\.$`,
