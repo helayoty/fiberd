@@ -12,6 +12,24 @@ You need Go 1.26 or newer and curl. The Linux steps below also need Docker.
 make build
 ```
 
+## Hello world via cli
+
+`fiberd run` is a one-shot mode of fiberd. It clones one fiber, or `-n` of them, from a [template](glossary.md#template), prints what each answers, and stops. [examples/hello/hello.py](../examples/hello/hello.py) is the smallest template, a fiber that answers with one line. `fiberd run` needs Linux, so on a Mac open the dev container with `hack/dev/run.sh bash` and run these steps there. The `make build` there puts Linux binaries in `bin/`, so run `make build` on the Mac again before the next section.
+
+```bash
+hack/python/build.sh                       # the Python SDK's extension, in the tree
+make build
+export PYTHONPATH=$PWD/sdk/python/src      # fiberd run passes it on to the template
+bin/fiberd run examples/hello/hello.py          # fiber hello/1/1 says hello, world
+bin/fiberd run -payload fiberd examples/hello/hello.py   # hello, fiberd
+bin/fiberd run -n 3 examples/hello/hello.py     # fibers hello/1/1, hello/1/2 and hello/1/3
+```
+
+On a terminal `fiberd run` shows a table, one row per fiber with its [fence](glossary.md#fence), the clone's time and what the fiber said.
+
+`-n` clones that many fibers from the one warm template, all running at once. Each is a fork of it, so the template's warm-up runs only once. 
+[demo.md](demo.md) shows fiberd in five steps of `fiberd run`, with `-park`, `-time` and `-max`. The steps below make the protocol calls one at a time, with a signed grant.
+
 ## Run the protocol on this machine
 
 [fiberd](glossary.md#fiberd) speaks gRPC and, with `-http`, a JSON gateway of the same service. Without a `-runtime` flag it uses the `stub` runtime ([backend](glossary.md#backend)), which runs no code, so it works on any OS. [Grants](glossary.md#grant) are signed tokens from `grant-issuer`, verified offline against the [issuer](glossary.md#issuer)'s published keys. `-insecure-plaintext` skips mutual TLS, for development only.
@@ -84,7 +102,7 @@ The grant is `TRUSTED` because proc fibers share the host kernel, and a home ref
 
 ## Write your own template
 
-A template is your program linked with libfiberzygote, in C or through the Python SDK. [sdk/c/template/README.md](../sdk/c/template/README.md) and [sdk/python/README.md](../sdk/python/README.md) each build one, and [design/zygote.md](design/zygote.md) is the contract it must keep. Point `-template` at it instead of refzygote.
+A template is your program linked with libfiberzygote, in C or through the Python SDK. [sdk/c/template/README.md](../sdk/c/template/README.md) and [sdk/python/README.md](../sdk/python/README.md) each build one, and [design/zygote.md](design/zygote.md) is the contract it must keep. Point `-template` at it instead of refzygote, or try it first with `fiberd run`.
 
 ## Conformance
 

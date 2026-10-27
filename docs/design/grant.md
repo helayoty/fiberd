@@ -53,7 +53,7 @@ The certificate's thumbprint is the caller on every call. Park, Release and the 
 
 **Admission completeness.** The RPC server refuses unknown fields at any depth before the core sees a Clone, so a caller cannot shape the workload the [template](../glossary.md#template) fixed ([protocol.md](../protocol.md#admission-completeness)).
 
-**Development modes.** The `insecure-json` verifier checks no signature and must be chosen explicitly. `-insecure-plaintext` is a separate switch. It serves without TLS and without caller identity, so every caller sees every grant.
+**Development modes.** The `insecure-json` verifier checks no signature and must be chosen explicitly. `-insecure-plaintext` is a separate switch. It serves without TLS and without caller identity, so every caller sees every grant. `fiberd run` is the exception. Its default, `-trust insecure`, turns both on, on loopback, to try a template on one machine.
 
 ## Security notes and known gaps
 
