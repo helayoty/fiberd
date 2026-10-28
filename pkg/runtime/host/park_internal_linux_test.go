@@ -12,12 +12,71 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
+	"github.com/helayoty/fiberd/pkg/artifact"
 	"github.com/helayoty/fiberd/pkg/backend"
 	"github.com/helayoty/fiberd/pkg/core"
 )
+
+type parkGrantVerifier struct{ grant core.Grant }
+
+func (v parkGrantVerifier) Verify(context.Context, []byte) (core.Grant, error) {
+	return v.grant, nil
+}
+
+func TestCoreParkPublicationConfiguration(t *testing.T) {
+	for _, configured := range []bool{false, true} {
+		t.Run(fmt.Sprintf("registry_configured=%v", configured), func(t *testing.T) {
+			g := core.Grant{UID: "g1", Tenant: "acme", TemplateDigest: "sha256:tmpl", FiberMax: 1, WBudgetBytes: 64 * mib,
+				Policy: core.Policy{Isolation: core.Trusted}}
+			rt := newTestRuntime(t, newCodecBackend(core.TierCheckpoint), func(cfg *Config) {
+				if configured {
+					cfg.DeltaRegistry = artifact.FileScheme + filepath.Join(t.TempDir(), "registry")
+					cfg.DeltaKeys = artifact.Keys{Signer: signingKey(t, "home"),
+						Seal: &artifact.SealKey{ID: "seal", Key: make([]byte, 32)}}
+				}
+			})
+			a := &core.Core{Runtime: rt, Ledger: core.NewLedger(1), Verify: parkGrantVerifier{g},
+				RateLimit: core.NewRateLimit(1000, 256<<20),
+				Store:     &core.SnapshotStore{Path: filepath.Join(t.TempDir(), "ledger.json")}}
+			ctx := context.Background()
+			req := core.CloneRequest{GrantJWT: []byte("grant"), Session: "S", Deadline: time.Second}
+			first, code, err := a.Clone(ctx, req)
+			if err != nil || code != core.OK {
+				t.Fatalf("Clone = %d, %v", code, err)
+			}
+			if configured {
+				blocked := filepath.Join(t.TempDir(), "not-a-directory")
+				if err := os.WriteFile(blocked, []byte("blocked"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				rt.cfg.DeltaRegistry = artifact.FileScheme + filepath.Join(blocked, "registry")
+			}
+			ref, code, err := a.Park(ctx, first.FiberID, true)
+			if ref == "" || !rt.HasDelta(ref) {
+				t.Fatalf("Park lost the checkpoint: %q, %d, %v", ref, code, err)
+			}
+			if configured {
+				if code != core.Internal || !errors.Is(err, syscall.ENOTDIR) {
+					t.Fatalf("configured publication failure = %d, %v", code, err)
+				}
+			} else if code != core.OK || err != nil {
+				t.Fatalf("local-only Park = %d, %v", code, err)
+			}
+			snap, err := a.Store.Load()
+			if err != nil || len(snap.Sessions) != 1 || snap.Sessions[0].State != core.StateParked || snap.Sessions[0].DeltaRef != ref {
+				t.Fatalf("saved checkpoint = %+v, %v", snap, err)
+			}
+			resumed, code, err := a.Clone(ctx, req)
+			if err != nil || code != core.OK || resumed.Kind != core.ActResume {
+				t.Fatalf("local resume = %+v, %d, %v", resumed, code, err)
+			}
+		})
+	}
+}
 
 // parkFixture is a runtime with one prepared grant and one running fiber,
 // as every park and resume test starts from.

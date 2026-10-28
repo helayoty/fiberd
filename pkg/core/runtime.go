@@ -211,6 +211,14 @@ type DeltaPublisher interface {
 	PublishDelta(ctx context.Context, deltaRef string, g Grant, session string) (remote string, err error)
 }
 
+// DeltaPublicationPolicy is an optional configuration switch for runtimes
+// that implement DeltaPublisher even when remote publication is disabled.
+// Without it, publication is attempted. True means configured, not that
+// the store is reachable or a checkpoint has been durably published.
+type DeltaPublicationPolicy interface {
+	PublishesDeltas() bool
+}
+
 // DeltaRetirer is implemented by runtimes that can withdraw a delta's
 // published copy. fiberd calls it once the session resumes here, so
 // the copy in the store no longer names state another home may take or
