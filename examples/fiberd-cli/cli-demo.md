@@ -119,4 +119,4 @@ bin/fiberd run -v -park examples/fiberd-cli/counter.py
 
 ## Next
 
-[architecture.md](../docs/architecture.md) explains what you just saw. To write a template of your own, start from [sdk/python/README.md](../sdk/python/README.md) and run it with `bin/fiberd run your_template.py`.
+[architecture.md](../../docs/architecture.md) explains what you just saw. To write a template of your own, start from [sdk/python/README.md](../../sdk/python/README.md) and run it with `bin/fiberd run your_template.py`.
