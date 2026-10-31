@@ -175,8 +175,7 @@ func templateCommand(args []string, pythonPath string) ([]string, error) {
 // trustArgs are fiberd's flags for a -trust mode. insecure is the only
 // one so far. A signed mode would add an issuer, signed grants and TLS.
 func trustArgs(trust string) ([]string, error) {
-	switch trust {
-	case "insecure":
+	if trust == "insecure" {
 		return []string{"-insecure-plaintext", "-verifier", "insecure-json"}, nil
 	}
 	return nil, fmt.Errorf("fiberd run: -trust %q unknown, want insecure", trust)
