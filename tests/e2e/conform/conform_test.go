@@ -19,7 +19,6 @@ import (
 
 	"github.com/helayoty/fiberd/pkg/core"
 	"github.com/helayoty/fiberd/pkg/grant"
-	"github.com/helayoty/fiberd/pkg/tlsconf"
 )
 
 var (
@@ -44,6 +43,7 @@ var (
 	tlsCA      = flag.String("tls-ca", "", "PEM CA bundle the target's certificate chains to (mutual TLS; empty dials plaintext)")
 	tlsCert    = flag.String("tls-cert", "", "PEM client certificate presented to the target")
 	tlsKey     = flag.String("tls-key", "", "PEM private key of -tls-cert")
+	tlsName    = flag.String("tls-server-name", "", "name the target's certificate must carry when it differs from the host in -target, for example a NodePort reached by IP")
 	peerTarget = flag.String("peer-target", "", "host:port of a second home sharing the target's delta registry and keys (C11)")
 	peerNode   = flag.String("peer-node-id", "", "the peer's node id, the audience of its grants (C11)")
 	sealCheck  = flag.String("seal-check-cmd", "", "hook: exit non-zero if the registry the homes share holds template memory in the clear (C11)")
@@ -87,7 +87,7 @@ func TestConformance(t *testing.T) {
 		t.Fatal(err)
 	}
 	d := Driver{Target: *target, TargetTier: tier, NodeID: *nodeID, Template: *template, FiberWarm: *fiberWarm, Isolation: iso, Timeout: *caseTO, WBudget: *wBudget, Workspaces: *workspaces}
-	if d.TLS, err = tlsconf.Client(*tlsCA, *tlsCert, *tlsKey); err != nil {
+	if d.TLS, d.CallerThumbprint, err = callerTLS(*tlsCA, *tlsCert, *tlsKey, *tlsName); err != nil {
 		t.Fatal(err)
 	}
 
