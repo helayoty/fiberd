@@ -1,6 +1,11 @@
 // Package tlsconf builds the control plane's TLS configurations, for the
 // fiberd's mutual-TLS server and for the callers that dial it. It also
 // names a caller from the certificate it presented.
+//
+// The server re-reads its certificate, key and client CA when the files
+// change, so a renewal cert-manager writes in place is served without a
+// restart. The files are checked at most once per second. A renewal
+// that fails to load keeps the previous pair and pool.
 package tlsconf
 
 import (
@@ -12,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"time"
 )
 
 var (
@@ -30,6 +36,11 @@ var (
 // and a client certificate signed by clientCA on every connection. With
 // plaintext set and no files it returns nil, which tells the caller to
 // serve without TLS.
+//
+// The certificate, key and client CA are re-read when their files
+// change, checked at most once per second, so a renewal written in
+// place is served without a restart. A renewal that fails to load keeps
+// the previous pair and pool. The files must load once here.
 func Server(certFile, keyFile, clientCAFile string, plaintext bool) (*tls.Config, error) {
 	set := certFile != "" || keyFile != "" || clientCAFile != ""
 	switch {
@@ -42,20 +53,11 @@ func Server(certFile, keyFile, clientCAFile string, plaintext bool) (*tls.Config
 	case certFile == "" || keyFile == "" || clientCAFile == "":
 		return nil, ErrPartialTLS
 	}
-	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
-	if err != nil {
-		return nil, fmt.Errorf("tlsconf: server certificate: %w", err)
-	}
-	pool, err := loadPool(clientCAFile)
+	r, err := newReloader(certFile, keyFile, clientCAFile, time.Now, time.Second)
 	if err != nil {
 		return nil, err
 	}
-	return &tls.Config{
-		MinVersion:   tls.VersionTLS13,
-		Certificates: []tls.Certificate{cert},
-		ClientAuth:   tls.RequireAndVerifyClientCert,
-		ClientCAs:    pool,
-	}, nil
+	return r.base(), nil
 }
 
 // Client returns a caller's TLS 1.3 configuration. It verifies fiberd
