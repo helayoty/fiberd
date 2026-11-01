@@ -18,12 +18,11 @@ cd "$(dirname "$0")/../../.."
 CLUSTER=${COMPARE_CLUSTER:-compare}
 REG_NAME=${COMPARE_REGISTRY:-compare-registry}
 REG_PORT=${COMPARE_REGISTRY_PORT:-5002}
-RUNSC_RELEASE=${RUNSC_RELEASE:-20260817.0}
-# Each binary's sha512, copied from gVisor's .sha512 files for the
-# release above (runsc's as docker/dev/Dockerfile pins them), so a
-# changed download fails instead of being checked against itself.
-RUNSC_SHA512_X86_64=84936438d583ec976800f464e75a83e1515f0890b451b9b4db219c4472b54ca9b106a6772ee683f1e64cce2128871d7637b14d800591f8451b8137f6c39fb2ef
-RUNSC_SHA512_AARCH64=6394fd161a4af0dc9a2c29f75c3016d05275a55744f124e12023fa7666a9f161c68d6ce3803ad49205c6a7b5bee0ad2ccf48edff340db344fdafec678c788aa4
+# The runsc release and each binary's sha512 come from the one pin in
+# docker/pins/runsc.env, so a changed download fails instead of being
+# checked against itself.
+# shellcheck source=docker/pins/runsc.env
+. docker/pins/runsc.env
 SHIM_SHA512_X86_64=b60d1c418b841ab046951cc7a91f490a221198fbe81ec55dc364432578fddd44e97063793ce6651be397af2f64ec47170dff77a45db277819c3fb08fec9f3ced
 SHIM_SHA512_AARCH64=a7c0147f635938225e41c9660b95ba5235121a142c11830794e2a52b472783547e2b089bdba4f1344d30f65aeee651b377a1cafadd262a134f5e1ac10c6bf4bb
 STATE=${COMPARE_STATE:-$PWD/bin/compare-state}

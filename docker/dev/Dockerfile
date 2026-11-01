@@ -65,14 +65,9 @@ RUN CRIU_VERSION="${CRIU_VERSION}" sh /tmp/fiberd-criu/install-criu.sh \
     && rm -rf /tmp/fiberd-criu
 
 # gVisor's runsc for the gvisor backend. Its systrap platform gives
-# FIBER_SNAPSHOT inside a privileged container without KVM. The release is
-# the newest with both aarch64 and x86_64 binaries. Each binary's sha512 is
-# copied here from gVisor's runsc.sha512, so the download is checked
-# against this file and not against the server.
-ARG RUNSC_RELEASE=20260817.0
-ARG RUNSC_SHA512_X86_64=84936438d583ec976800f464e75a83e1515f0890b451b9b4db219c4472b54ca9b106a6772ee683f1e64cce2128871d7637b14d800591f8451b8137f6c39fb2ef
-ARG RUNSC_SHA512_AARCH64=6394fd161a4af0dc9a2c29f75c3016d05275a55744f124e12023fa7666a9f161c68d6ce3803ad49205c6a7b5bee0ad2ccf48edff340db344fdafec678c788aa4
-RUN set -eu; arch=$(uname -m); \
+# FIBER_SNAPSHOT inside a privileged container without KVM.٧
+COPY docker/pins/runsc.env /tmp/fiberd-pins/
+RUN set -eu; . /tmp/fiberd-pins/runsc.env; arch=$(uname -m); \
     case "$arch" in \
       x86_64)  sum=$RUNSC_SHA512_X86_64 ;; \
       aarch64) sum=$RUNSC_SHA512_AARCH64 ;; \
@@ -81,7 +76,7 @@ RUN set -eu; arch=$(uname -m); \
     curl -fsSL "https://storage.googleapis.com/gvisor/releases/release/${RUNSC_RELEASE}/${arch}/runsc" -o /usr/local/bin/runsc; \
     echo "$sum  /usr/local/bin/runsc" | sha512sum -c - >/dev/null; \
     chmod 0755 /usr/local/bin/runsc; \
-    runsc --version
+    rm -rf /tmp/fiberd-pins; runsc --version
 
 # Rust, cargo-hyperlight and clang build the Hyperlight helper and guest
 # (hack/hyperlight). Building needs no hypervisor. Running the helper needs

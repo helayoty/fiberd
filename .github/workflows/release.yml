@@ -10,7 +10,7 @@ on:
   #
   # A dry run builds and checks the archives and SDK packages and
   # publishes nothing. It makes no tag, release, image or package, and
-  # attests nothing. The image is not built, since its job pushes it. The
+  # attests nothing. The images are not built, since their job pushes them. The
   # tag only names the files, so any valid one will do, from any branch.
   # The files are kept as the release-assets artifact.
   workflow_dispatch:
@@ -37,10 +37,13 @@ concurrency:
 
 env:
   IMAGE: ghcr.io/${{ github.repository }}
+  IMAGE_RUNC: ghcr.io/${{ github.repository }}-runc
+  IMAGE_GVISOR: ghcr.io/${{ github.repository }}-gvisor
   # The input on a manual run, the pushed tag otherwise.
   TAG: ${{ inputs.tag || github.ref_name }}
-  # The image's description, as docker/fiberd/Dockerfile labels it.
   DESCRIPTION: fiberd with criu and the zygote library
+  DESCRIPTION_RUNC: fiberd with runc for the runc runtime
+  DESCRIPTION_GVISOR: fiberd with runsc for the gVisor runtime
 
 jobs:
   validate-tag:
@@ -439,42 +442,120 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - id: metadata
+      - id: metadata-fiberd
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ${{ env.IMAGE }}
-          # The version of the tag and the revision of the commit it marks.
           tags: type=raw,value=${{ needs.validate-tag.outputs.version }}
-          # The action sets the description to the repository's, which may
-          # be empty, so it is set here.
           labels: |
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.description=${{ env.DESCRIPTION }}
-      - id: build
-        name: build and push by digest
+      - id: metadata-runc
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ env.IMAGE_RUNC }}
+          tags: type=raw,value=${{ needs.validate-tag.outputs.version }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.description=${{ env.DESCRIPTION_RUNC }}
+      - id: metadata-gvisor
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ env.IMAGE_GVISOR }}
+          tags: type=raw,value=${{ needs.validate-tag.outputs.version }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.description=${{ env.DESCRIPTION_GVISOR }}
+      - id: build-fiberd
+        name: build and push fiberd by digest
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: docker/fiberd/Dockerfile
+          target: fiberd
           platforms: ${{ matrix.platform }}
           build-args: VERSION=${{ env.TAG }}
-          labels: ${{ steps.metadata.outputs.labels }}
-          # GHCR makes a new package private. Make it public once, after the first push.
+          labels: ${{ steps.metadata-fiberd.outputs.labels }}
           outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
           cache-from: type=gha,scope=image-${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=image-${{ matrix.arch }}
           provenance: mode=max
           sbom: true
-      - name: record digest
+      - id: build-runc
+        name: build and push fiberd-runc by digest
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: docker/fiberd/Dockerfile
+          target: fiberd-runc
+          platforms: ${{ matrix.platform }}
+          build-args: VERSION=${{ env.TAG }}
+          labels: ${{ steps.metadata-runc.outputs.labels }}
+          outputs: type=image,name=${{ env.IMAGE_RUNC }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=image-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=image-${{ matrix.arch }}
+          provenance: mode=max
+          sbom: true
+      - id: build-gvisor
+        name: build and push fiberd-gvisor by digest
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: docker/fiberd/Dockerfile
+          target: fiberd-gvisor
+          platforms: ${{ matrix.platform }}
+          build-args: VERSION=${{ env.TAG }}
+          labels: ${{ steps.metadata-gvisor.outputs.labels }}
+          outputs: type=image,name=${{ env.IMAGE_GVISOR }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=image-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=image-${{ matrix.arch }}
+          provenance: mode=max
+          sbom: true
+      - name: smoke the pushed images
         shell: bash
+        env:
+          DIGEST_FIBERD: ${{ steps.build-fiberd.outputs.digest }}
+          DIGEST_RUNC: ${{ steps.build-runc.outputs.digest }}
+          DIGEST_GVISOR: ${{ steps.build-gvisor.outputs.digest }}
         run: |
-          mkdir -p "$RUNNER_TEMP/digests"
-          digest="${{ steps.build.outputs.digest }}"
-          touch "$RUNNER_TEMP/digests/${digest#sha256:}"
+          set -euo pipefail
+          docker run --rm "$IMAGE@$DIGEST_FIBERD" -version
+          docker run --rm "$IMAGE_RUNC@$DIGEST_RUNC" -version
+          docker run --rm "$IMAGE_GVISOR@$DIGEST_GVISOR" -version
+          docker run --rm --entrypoint runc "$IMAGE_RUNC@$DIGEST_RUNC" --version
+          docker run --rm --entrypoint runsc "$IMAGE_GVISOR@$DIGEST_GVISOR" --version
+          # The rootfs skeleton is a contract with deployments.
+          docker run --rm --entrypoint test "$IMAGE_RUNC@$DIGEST_RUNC" -d /usr/share/fiberd/rootfs/fiberd/template
+          docker run --rm --entrypoint test "$IMAGE_GVISOR@$DIGEST_GVISOR" -d /usr/share/fiberd/rootfs/fiberd/template
+      - name: record digests
+        shell: bash
+        env:
+          DIGEST_FIBERD: ${{ steps.build-fiberd.outputs.digest }}
+          DIGEST_RUNC: ${{ steps.build-runc.outputs.digest }}
+          DIGEST_GVISOR: ${{ steps.build-gvisor.outputs.digest }}
+        run: |
+          set -euo pipefail
+          for variant in fiberd runc gvisor; do
+            name=DIGEST_${variant^^}
+            mkdir -p "$RUNNER_TEMP/digests/$variant"
+            touch "$RUNNER_TEMP/digests/$variant/${!name#sha256:}"
+          done
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: digest-${{ matrix.arch }}
-          path: ${{ runner.temp }}/digests/*
+          name: digest-fiberd-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digests/fiberd/*
+          if-no-files-found: error
+          retention-days: 1
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: digest-runc-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digests/runc/*
+          if-no-files-found: error
+          retention-days: 1
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: digest-gvisor-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digests/gvisor/*
           if-no-files-found: error
           retention-days: 1
 
@@ -514,11 +595,11 @@ jobs:
           replacesArtifacts: true
 
   publish-image:
-    name: publish multi-arch image
+    name: publish multi-arch images
     needs: [validate-tag, build-image, release-draft]
     if: ${{ !inputs.dry_run }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 15
     permissions:
       contents: read
       packages: write
@@ -526,13 +607,14 @@ jobs:
       attestations: write
     outputs:
       digest: ${{ steps.manifest.outputs.digest }}
+      digest_runc: ${{ steps.manifest.outputs.digest_runc }}
+      digest_gvisor: ${{ steps.manifest.outputs.digest_gvisor }}
       previous: ${{ steps.previous.outputs.tags }}
     steps:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: digest-*
           path: ${{ runner.temp }}/digests
-          merge-multiple: true
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
@@ -546,45 +628,73 @@ jobs:
           TAGS: ${{ needs.validate-tag.outputs.image-tags }}
         run: |
           set -euo pipefail
-          # tag=digest for a tag that exists, tag= for one this run creates.
           prev=""
-          while read -r line; do
-            tag=${line#type=raw,value=}
-            [[ -n "$tag" ]] || continue
-            if d=$(docker buildx imagetools inspect "$IMAGE:$tag" --format '{{json .Manifest}}' 2>/dev/null | jq -er .digest); then
-              prev+="$tag=$d "
-            else
-              prev+="$tag= "
-            fi
-          done <<< "$TAGS"
+          for image in "$IMAGE" "$IMAGE_RUNC" "$IMAGE_GVISOR"; do
+            while read -r line; do
+              tag=${line#type=raw,value=}
+              [[ -n "$tag" ]] || continue
+              if d=$(docker buildx imagetools inspect "$image:$tag" --format '{{json .Manifest}}' 2>/dev/null | jq -er .digest); then
+                prev+="$image:$tag=$d "
+              else
+                prev+="$image:$tag= "
+              fi
+            done <<< "$TAGS"
+          done
           echo "tags=$prev" >> "$GITHUB_OUTPUT"
           echo "before: $prev"
       - id: metadata
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
-          images: ${{ env.IMAGE }}
+          images: |
+            ${{ env.IMAGE }}
+            ${{ env.IMAGE_RUNC }}
+            ${{ env.IMAGE_GVISOR }}
           # validate-tag computes these, since 0.x moves no MAJOR tag.
           tags: ${{ needs.validate-tag.outputs.image-tags }}
       - id: manifest
-        name: create the multi-arch manifest
+        name: create the multi-arch manifests
         shell: bash
         env:
           VERSION: ${{ needs.validate-tag.outputs.version }}
         working-directory: ${{ runner.temp }}/digests
         run: |
           set -euo pipefail
-          tags=$(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON")
-          # GHCR shows a multi-arch image's description from the index.
-          # shellcheck disable=SC2046,SC2086
-          docker buildx imagetools create $tags --annotation "index:org.opencontainers.image.description=$DESCRIPTION" \
-            $(printf "$IMAGE@sha256:%s " *)
-          digest=$(docker buildx imagetools inspect "$IMAGE:$VERSION" --format '{{json .Manifest}}' | jq -r .digest)
-          echo "digest=$digest" >> "$GITHUB_OUTPUT"
-      - name: attest image provenance
+          publish() {
+            local variant=$1 image=$2 description=$3 output=$4 tags dir refs=()
+            tags=$(jq -cr --arg image "$image" '.tags | map(select(startswith($image + ":"))) | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON")
+            for dir in "digest-$variant"-*; do
+              for f in "$dir"/*; do
+                refs+=("$image@sha256:$(basename "$f")")
+              done
+            done
+            # One digest per platform, amd64 and arm64.
+            [[ ${#refs[@]} -eq 2 ]] || { echo "expected 2 digests for $variant, found ${#refs[@]}" >&2; exit 1; }
+            # GHCR shows a multi-arch image's description from the index.
+            # shellcheck disable=SC2086
+            docker buildx imagetools create $tags --annotation "index:org.opencontainers.image.description=$description" "${refs[@]}"
+            digest=$(docker buildx imagetools inspect "$image:$VERSION" --format '{{json .Manifest}}' | jq -r .digest)
+            echo "$output=$digest" >> "$GITHUB_OUTPUT"
+          }
+          publish fiberd "$IMAGE" "$DESCRIPTION" digest
+          publish runc "$IMAGE_RUNC" "$DESCRIPTION_RUNC" digest_runc
+          publish gvisor "$IMAGE_GVISOR" "$DESCRIPTION_GVISOR" digest_gvisor
+      - name: attest fiberd provenance
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-name: ${{ env.IMAGE }}
           subject-digest: ${{ steps.manifest.outputs.digest }}
+          push-to-registry: true
+      - name: attest fiberd-runc provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE_RUNC }}
+          subject-digest: ${{ steps.manifest.outputs.digest_runc }}
+          push-to-registry: true
+      - name: attest fiberd-gvisor provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE_GVISOR }}
+          subject-digest: ${{ steps.manifest.outputs.digest_gvisor }}
           push-to-registry: true
 
   publish-release:
@@ -596,7 +706,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: add the image to the release notes
+      - name: add the images to the release notes
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -604,15 +714,23 @@ jobs:
           VERSION: ${{ needs.validate-tag.outputs.version }}
           PYTHON_VERSION: ${{ needs.validate-tag.outputs.python-version }}
           IMAGE_DIGEST: ${{ needs.publish-image.outputs.digest }}
+          IMAGE_RUNC_DIGEST: ${{ needs.publish-image.outputs.digest_runc }}
+          IMAGE_GVISOR_DIGEST: ${{ needs.publish-image.outputs.digest_gvisor }}
         run: |
           set -euo pipefail
           {
             cat <<EOF
-          ## Container image
+          ## Container images
 
-          \`${IMAGE}:${VERSION}\`
+          - \`${IMAGE}:${VERSION}\` holds fiberd, criu and the zygote library.
+          - \`${IMAGE_RUNC}:${VERSION}\` adds the runc fiberd was tested against and the rootfs mount points at \`/usr/share/fiberd/rootfs\`.
+          - \`${IMAGE_GVISOR}:${VERSION}\` adds the runsc fiberd was tested against and the rootfs mount points at \`/usr/share/fiberd/rootfs\`.
 
-          Digest: \`${IMAGE_DIGEST}\`
+          Digests:
+
+          - \`${IMAGE}@${IMAGE_DIGEST}\`
+          - \`${IMAGE_RUNC}@${IMAGE_RUNC_DIGEST}\`
+          - \`${IMAGE_GVISOR}@${IMAGE_GVISOR_DIGEST}\`
 
           ## Python SDK
 
@@ -628,6 +746,8 @@ jobs:
           sha256sum -c SHA256SUMS
           gh attestation verify fiberd_${VERSION}_linux_amd64.tar.gz --repo ${GITHUB_REPOSITORY}
           gh attestation verify oci://${IMAGE}@${IMAGE_DIGEST} --repo ${GITHUB_REPOSITORY}
+          gh attestation verify oci://${IMAGE_RUNC}@${IMAGE_RUNC_DIGEST} --repo ${GITHUB_REPOSITORY}
+          gh attestation verify oci://${IMAGE_GVISOR}@${IMAGE_GVISOR_DIGEST} --repo ${GITHUB_REPOSITORY}
           \`\`\`
 
           EOF
@@ -673,12 +793,6 @@ jobs:
           packages-dir: dist/
           attestations: true
 
-  # npm also comes after the GitHub release, since a published version can
-  # never be reused. Re-running this job finishes a release whose publish
-  # failed. Trusted publishing, so no token is stored. The publisher on
-  # npm names this repository, release.yml and the npm environment, and
-  # npm attaches the provenance statement itself. A pre-release goes to
-  # the next dist-tag, so a plain install keeps the last final release.
   publish-npm:
     name: publish to npm
     needs: [validate-tag, npm-package, publish-release]
@@ -703,8 +817,6 @@ jobs:
         env:
           VERSION: ${{ needs.validate-tag.outputs.version }}
           DIST_TAG: ${{ needs.validate-tag.outputs.prerelease == 'true' && 'next' || 'latest' }}
-          # Only for the first publish, before the package exists for a
-          # trusted publisher to attach to. Delete the secret afterwards.
           NPM_BOOTSTRAP_TOKEN: ${{ secrets.NPM_BOOTSTRAP_TOKEN }}
         shell: bash
         run: |
@@ -774,40 +886,48 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Tags that existed point back where they were. A tag this run
-          # created goes away with the version that carries it.
-          kept=()
-          for pair in $PREVIOUS; do
-            tag=${pair%%=*} digest=${pair#*=}
-            [[ -n "$digest" ]] || continue
-            if docker buildx imagetools create -t "$IMAGE:$tag" "$IMAGE@$digest"; then
-              echo "moved $tag back to $digest"
-            else
-              echo "::warning::could not move $tag back to $digest"
-            fi
-            kept+=("$tag")
-          done
-          owner=${GITHUB_REPOSITORY%/*} pkg=${GITHUB_REPOSITORY#*/}
+          owner=${GITHUB_REPOSITORY%/*}
           if [[ $(gh api "repos/$GITHUB_REPOSITORY" --jq .owner.type) == Organization ]]; then
-            base="orgs/$owner/packages/container/$pkg/versions"
+            kind="orgs/$owner"
           else
-            base="users/$owner/packages/container/$pkg/versions"
+            kind="users/$owner"
           fi
-          # Every version created since this run started is this run's, because
-          # one release runs at a time. A version that still holds an older tag
-          # is kept, since deleting it would remove that tag.
-          keep=$(printf '%s\n' "${kept[@]}" | jq -R . | jq -sc .)
-          if ! ids=$(gh api --paginate "$base" --jq ".[] | select(.created_at >= \"$STARTED\")
-              | select((.metadata.container.tags - $keep) == .metadata.container.tags) | .id" 2>/dev/null); then
-            echo "no image package yet; nothing pushed"
-            exit 0
-          fi
-          # GHCR refuses to delete a package's last tagged version (a failed
-          # first release). Report it and go on with the rest.
-          for id in $ids; do
-            if gh api -X DELETE "$base/$id"; then
-              echo "deleted image version $id"
-            else
-              echo "::warning::could not delete image version $id; remove it by hand"
+          # Each image is its own package. A package this run never pushed to
+          # does not exist yet, which is not an error.
+          for image in "$IMAGE" "$IMAGE_RUNC" "$IMAGE_GVISOR"; do
+            name=${image#"ghcr.io/$owner/"}
+            echo "cleaning $image"
+            # Tags that existed point back where they were. A tag this run
+            # created goes away with the version that carries it.
+            kept=()
+            for pair in $PREVIOUS; do
+              ref=${pair%%=*} digest=${pair#*=}
+              [[ "${ref%:*}" == "$image" && -n "$digest" ]] || continue
+              tag=${ref##*:}
+              if docker buildx imagetools create -t "$ref" "$image@$digest"; then
+                echo "moved $tag back to $digest"
+              else
+                echo "::warning::could not move $tag back to $digest"
+              fi
+              kept+=("$tag")
+            done
+            base="$kind/packages/container/$name/versions"
+            # Every version created since this run started is this run's, because
+            # one release runs at a time. A version that still holds an older tag
+            # is kept, since deleting it would remove that tag.
+            keep=$(printf '%s\n' "${kept[@]}" | jq -R . | jq -sc .)
+            if ! ids=$(gh api --paginate "$base" --jq ".[] | select(.created_at >= \"$STARTED\")
+                | select((.metadata.container.tags - $keep) == .metadata.container.tags) | .id" 2>/dev/null); then
+              echo "no package $name yet; nothing pushed"
+              continue
             fi
+            # GHCR refuses to delete a package's last tagged version (a failed
+            # first release). Report it and go on with the rest.
+            for id in $ids; do
+              if gh api -X DELETE "$base/$id"; then
+                echo "deleted $name version $id"
+              else
+                echo "::warning::could not delete $name version $id; remove it by hand"
+              fi
+            done
           done

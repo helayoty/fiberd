@@ -3,19 +3,14 @@
 # template, criu for FIBER_CHECKPOINT, runsc and a gVisor rootfs for
 # UNTRUSTED grants, and the conformance, storm and sessioncheck binaries
 # so an acceptance run can exec them inside the cluster. It is built
-# locally and never released. The release publishes the plain fiberd image
-# from docker/fiberd/Dockerfile. Local builds can start from
-# fiberd-dev:local. Without it the build starts from the plain Go image and
-# installs the same criu and the same pinned runsc.
+# locally and never released. The release publishes the fiberd, fiberd-runc
+# and fiberd-gvisor images from docker/fiberd/Dockerfile. Local builds can
+# start from fiberd-dev:local.
 #
 #   docker build -t fiberd:kind -f docker/kubernetes/Dockerfile .   (from the repo root)
 #
 # Both base images are pinned by digest. Refresh them with
-# `docker buildx imagetools inspect <image:tag>`. The criu tarball is checked
-# against the sha256 in hack/dev/install-criu.sh, and Go modules against the
-# Go sum database. Debian packages come from the base's snapshot of the
-# archive, so a newer base digest is the upgrade and `apt-get upgrade` is not
-# run.
+# `docker buildx imagetools inspect <image:tag>`.
 ARG DEV_IMAGE=golang:1.26-bookworm@sha256:dc9ad6c05acc7a88e5b71bde60a5fe3bd4b9f0db209011711b464107438a8107
 FROM ${DEV_IMAGE} AS build
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
@@ -35,12 +30,10 @@ RUN if ! command -v criu >/dev/null 2>&1; then \
     fi \
     && rm -rf /tmp/fiberd-criu
 # gVisor's runsc for the gvisor runtime, as docker/dev/Dockerfile installs
-# it: the same pinned release, each binary checked against the sha512 from
-# gVisor's runsc.sha512. The dev image already has it.
-ARG RUNSC_RELEASE=20260817.0
-ARG RUNSC_SHA512_X86_64=84936438d583ec976800f464e75a83e1515f0890b451b9b4db219c4472b54ca9b106a6772ee683f1e64cce2128871d7637b14d800591f8451b8137f6c39fb2ef
-ARG RUNSC_SHA512_AARCH64=6394fd161a4af0dc9a2c29f75c3016d05275a55744f124e12023fa7666a9f161c68d6ce3803ad49205c6a7b5bee0ad2ccf48edff340db344fdafec678c788aa4
-RUN set -eu; if ! command -v runsc >/dev/null 2>&1; then \
+# it: the release and the sha512 sums come from docker/pins/runsc.env, and
+# each binary is checked against its sum. The dev image already has it.
+COPY docker/pins/runsc.env /tmp/fiberd-pins/
+RUN set -eu; . /tmp/fiberd-pins/runsc.env; if ! command -v runsc >/dev/null 2>&1; then \
       arch=$(uname -m); \
       case "$arch" in \
         x86_64)  sum=$RUNSC_SHA512_X86_64 ;; \
@@ -50,7 +43,7 @@ RUN set -eu; if ! command -v runsc >/dev/null 2>&1; then \
       curl -fsSL "https://storage.googleapis.com/gvisor/releases/release/${RUNSC_RELEASE}/${arch}/runsc" -o /usr/local/bin/runsc; \
       echo "$sum  /usr/local/bin/runsc" | sha512sum -c - >/dev/null; \
       chmod 0755 /usr/local/bin/runsc; \
-    fi; runsc --version
+    fi; rm -rf /tmp/fiberd-pins; runsc --version
 # Rust for the zygote library (sdk/c/template/core), with the pins
 # of docker/dev/Dockerfile. rustup-init is a pinned release checked
 # against its published sha256, and rustup checks the toolchain against

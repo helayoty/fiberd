@@ -1,18 +1,22 @@
-# The fiberd image, the one the release publishes. It holds fiberd,
-# criu for FIBER_CHECKPOINT, and the zygote library (header and static
-# archive) so a template image can build its zygote from this one. The
-# licenses and notices are under /usr/share/doc.
+# The fiberd images, the ones the release publishes. One build stage holds
+# fiberd, criu for FIBER_CHECKPOINT, and the zygote library (header and
+# static archive) so a template image can build its zygote from this one.
 #
-#   docker build -t fiberd -f docker/fiberd/Dockerfile .   (from the repo root)
+#   fiberd         fiberd, criu and the zygote library.
+#   fiberd-runc    fiberd with the runc fiberd was built and tested against.
+#   fiberd-gvisor  fiberd with the runsc fiberd was built and tested against.
 #
-# The release passes --build-arg VERSION=<tag>, which fiberd -version prints.
+# The two variants are built on the plain image, so they share every layer
+# of it. Name the target, since the last stage is not the plain image.
 #
-# Both base images are pinned by digest. Refresh them with
-# `docker buildx imagetools inspect <image:tag>`. The criu tarball is checked
-# against the sha256 in hack/dev/install-criu.sh, and Go modules against the
-# Go sum database. Debian packages come from the base's snapshot of the
-# archive, so a newer base digest is the upgrade and `apt-get upgrade` is not
-# run.
+#   docker build --target fiberd -t fiberd -f docker/fiberd/Dockerfile .   (from the repo root)
+#
+# The licenses and notices are under /usr/share/doc. The release passes
+# --build-arg VERSION=<tag>, which fiberd -version prints.
+#
+# The base images are pinned by digest. Refresh them with
+# `docker buildx imagetools inspect <image:tag>`.
+ARG RUNTIME_BASE=debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587
 ARG DEV_IMAGE=golang:1.26-bookworm@sha256:dc9ad6c05acc7a88e5b71bde60a5fe3bd4b9f0db209011711b464107438a8107
 FROM ${DEV_IMAGE} AS build
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
@@ -71,7 +75,7 @@ RUN set -eu; mkdir -p /out/bin /out/lib /out/doc; \
       cargo build --release --locked --target-dir /tmp/core); \
     cp /tmp/core/release/libfiberzygote_core.a /out/lib/libfiberzygote.a
 
-FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587
+FROM ${RUNTIME_BASE} AS fiberd
 # Labels for local builds. The release workflow adds the rest.
 LABEL org.opencontainers.image.source="https://github.com/helayoty/fiberd" \
       org.opencontainers.image.description="fiberd with criu and the zygote library" \
@@ -92,3 +96,47 @@ COPY --from=build /out/doc /usr/share/doc/fiberd
 # (pkg/sys/caps).
 # tini is PID 1 and reaps the orphans a fiber or sandbox leaves.
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/fiberd"]
+
+# The mount points of a sandbox rootfs, as hack/gvisor/rootfs.sh makes them
+# plus the two every rootfs copy carries (docs/design/backends.md). Empty
+# directories owned by root. The deployment adds its workload binary.
+FROM ${RUNTIME_BASE} AS rootfs
+RUN install -d -m 0755 -o root -g root \
+      /skeleton /skeleton/bin /skeleton/proc /skeleton/dev /skeleton/tmp \
+      /skeleton/host /skeleton/workspace /skeleton/fiberd \
+      /skeleton/fiberd/channel /skeleton/fiberd/template
+
+# runsc, pinned in docker/pins/runsc.env and checked against its sha512.
+# curl and ca-certificates stay in this stage and never reach an image.
+FROM ${RUNTIME_BASE} AS runsc
+ARG DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
+COPY docker/pins/runsc.env /tmp/fiberd-pins/runsc.env
+RUN set -eu; . /tmp/fiberd-pins/runsc.env; arch=$(uname -m); \
+    case "$arch" in \
+      x86_64)  sum=$RUNSC_SHA512_X86_64 ;; \
+      aarch64) sum=$RUNSC_SHA512_AARCH64 ;; \
+      *) echo "no pinned runsc for $arch" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL "https://storage.googleapis.com/gvisor/releases/release/${RUNSC_RELEASE}/${arch}/runsc" -o /usr/local/bin/runsc; \
+    echo "$sum  /usr/local/bin/runsc" | sha512sum -c - >/dev/null; \
+    chmod 0755 /usr/local/bin/runsc; \
+    rm -rf /tmp/fiberd-pins; runsc --version
+
+# fiberd and the runc it was built and tested against. The entrypoint, tini
+# and the absence of a USER come from the fiberd stage.
+FROM fiberd AS fiberd-runc
+LABEL org.opencontainers.image.description="fiberd with runc for the runc runtime"
+ARG DEBIAN_FRONTEND=noninteractive
+RUN set -eu; apt-get update; \
+    apt-get install -y --no-install-recommends runc util-linux mount; \
+    rm -rf /var/lib/apt/lists/*; \
+    runc --version | grep -Eq '^runc version 1\.1\.' || { echo "runc must be the 1.1 series" >&2; runc --version >&2; exit 1; }
+COPY --from=rootfs /skeleton /usr/share/fiberd/rootfs
+
+# fiberd and the runsc it was built and tested against.
+FROM fiberd AS fiberd-gvisor
+LABEL org.opencontainers.image.description="fiberd with runsc for the gVisor runtime"
+COPY --from=runsc --chmod=0755 /usr/local/bin/runsc /usr/local/bin/runsc
+COPY --from=rootfs /skeleton /usr/share/fiberd/rootfs

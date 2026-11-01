@@ -55,7 +55,13 @@ tar -xzf fiberd_0.1.0_linux_amd64.tar.gz
 ./fiberd -version
 ```
 
-The image `ghcr.io/helayoty/fiberd:<version>` holds fiberd, criu and the zygote library.
+The release publishes three images, each with the same version tags.
+
+- `ghcr.io/helayoty/fiberd` holds fiberd, criu and the zygote library.
+- `ghcr.io/helayoty/fiberd-runc` adds the runc fiberd was built and tested against.
+- `ghcr.io/helayoty/fiberd-gvisor` adds the runsc fiberd was built and tested against.
+
+The two variants also hold the empty mount points of a sandbox rootfs at `/usr/share/fiberd/rootfs`. A deployment on the runc or gVisor runtime builds on one of them and adds its workload.
 
 ```bash
 gh attestation verify oci://ghcr.io/helayoty/fiberd:0.1.0 -R helayoty/fiberd

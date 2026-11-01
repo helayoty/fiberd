@@ -8,7 +8,7 @@ A `CapacityGrant` custom resource describes signed [fiber](glossary.md#fiber) ca
 
 ## Image
 
-The released `fiberd` image does not contain `fiberd-k8s`. Build the example image, which holds `fiberd-k8s`, `grant-controller`, the reference [zygote](glossary.md#zygote), [CRIU](glossary.md#criu), `runsc` and a gVisor rootfs, and point `spec.pod.image` at it.
+None of the released images contains `fiberd-k8s`. Build the example image, which holds `fiberd-k8s`, `grant-controller`, the reference [zygote](glossary.md#zygote), [CRIU](glossary.md#criu), `runsc` and a gVisor rootfs, and point `spec.pod.image` at it.
 
 ```bash
 docker build -t registry.example/fiberd-k8s:dev -f docker/kubernetes/Dockerfile .

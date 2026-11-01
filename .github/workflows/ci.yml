@@ -45,7 +45,7 @@ jobs:
       - run: make lint
 
   image:
-    name: build the fiberd image the release publishes (linux/amd64, not pushed)
+    name: build the fiberd images the release publishes (linux/amd64)
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -55,12 +55,38 @@ jobs:
         with:
           context: .
           file: docker/fiberd/Dockerfile
+          target: fiberd
           platforms: linux/amd64
           build-args: VERSION=ci
           tags: fiberd:ci
           load: true
           push: false
-      - run: docker run --rm fiberd:ci -version
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: docker/fiberd/Dockerfile
+          target: fiberd-runc
+          platforms: linux/amd64
+          build-args: VERSION=ci
+          tags: fiberd-runc:ci
+          load: true
+          push: false
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: docker/fiberd/Dockerfile
+          target: fiberd-gvisor
+          platforms: linux/amd64
+          build-args: VERSION=ci
+          tags: fiberd-gvisor:ci
+          load: true
+          push: false
+      - run: |
+          docker run --rm fiberd:ci -version
+          docker run --rm fiberd-runc:ci -version
+          docker run --rm fiberd-gvisor:ci -version
+          docker run --rm --entrypoint runc fiberd-runc:ci --version
+          docker run --rm --entrypoint runsc fiberd-gvisor:ci --version
 
   unit:
     name: unit tests (${{ matrix.os }}, non-root, coverage printed)
