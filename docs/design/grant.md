@@ -49,6 +49,8 @@ The verifier does not enforce `exp`. Lease expiry is a capacity miss the [core](
 - All three TLS files are set, `-tls-cert`, `-tls-key` and `-client-ca`.
 - `-insecure-plaintext` is set, and no TLS file is.
 
+fiberd re-reads the three files when their mtime or size changes, checked at most once per second. A renewal that fails to load keeps the previous certificate and client CA. It is logged once and retried when the files change again. A bad file at start still fails the start.
+
 The certificate's thumbprint is the caller on every call. Park, Release and the [file calls](../protocol.md#files) answer `NotFound` for a fiber whose grant is bound to another caller, the same as for a fiber that does not exist. Watch and the gateway's status report only the caller's grants.
 
 **Admission completeness.** The RPC server refuses unknown fields at any depth before the core sees a Clone, so a caller cannot shape the workload the [template](../glossary.md#template) fixed ([protocol.md](../protocol.md#admission-completeness)).
@@ -57,6 +59,6 @@ The certificate's thumbprint is the caller on every call. Park, Release and the 
 
 ## Security notes and known gaps
 
-- **Certificate rotation means re-minting.** The thumbprint covers the whole certificate, so a caller with a new certificate needs new grants. Keep leases short.
+- **A caller's certificate rotation means re-minting.** The thumbprint covers the whole certificate, so a caller with a new certificate needs new grants. Keep leases short.
 - **An unbound JWT is a bearer token.** Anyone holding it can spend the capacity at the named home. Keep tokens out of logs, annotations and readable files. Over plaintext only unbound grants work.
 - **Without `-max-lease`** a grant may carry no lease and never expire.

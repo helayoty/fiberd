@@ -27,6 +27,8 @@ flowchart LR
 
 Every control call, `Park`, `Release` and `Watch` included, runs over mutual TLS, and the caller is the identity in its client certificate. TLS terminates at fiberd, so a router in front of fiberd is itself an mTLS client and grants are bound to the router's certificate. [Grant verification](design/grant.md) has the transport rules, the checks and the development switch that turns TLS off.
 
+fiberd reloads its serving certificate, key and client CA when the files change, so a renewal that cert-manager writes in place needs no restart. A renewal that fails to load keeps the previous pair and is logged once.
+
 ## Grants
 
 fiberd verifies a grant's JSON Web Token (JWT) offline against the issuer's published keys, refuses one for another home or with a lease longer than `-max-lease`, and checks that its `cnf` (confirmation) claim names the caller's certificate, so a copied token cannot be replayed by another caller. A grant the home takes back is revoked and its grant UID deny-listed until every token for it has expired. The verifier is in [grant.md](design/grant.md) and revocation in [core.md](design/core.md).
@@ -105,4 +107,4 @@ Every state transition appends a hash-chained record to fiberd's private spool, 
 - Address-space layout randomisation (ASLR) is off for every [zygote](glossary.md#zygote) and its fibers, so the fibers of a template share one fixed memory layout on every home. A memory-corruption exploit inside a fiber is easier, because an address learned in one fiber holds in all of them.
 - Whoever can write the grant directory can deny a grant UID on that home ([home.md](design/home.md)).
 - Running fiberd itself inside a user namespace (a Pod with `hostUsers` set to false) is untested. runc's per-grant user namespace is a different thing and restores fine ([user-namespaces.md](design/user-namespaces.md)).
-- A certificate rotation means re-minting the caller's grants, and an unbound JWT is a bearer token ([grant.md](design/grant.md)).
+- A caller's certificate rotation means re-minting its grants (fiberd's own serving certificate reloads without that), and an unbound JWT is a bearer token ([grant.md](design/grant.md)).

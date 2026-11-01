@@ -1,7 +1,7 @@
 # A template with state. Each fiber counts the connections it answers.
 # The count lives in the fiber's memory, so a park and resume keeps it.
 #
-#   bin/fiberd run -park examples/hello/counter.py
+#   bin/fiberd run -park examples/fiberd-cli/counter.py
 import fiberd.template as ft
 
 ft.init()  # first, before any thread

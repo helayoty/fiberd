@@ -14,15 +14,15 @@ make build
 
 ## Hello world via cli
 
-`fiberd run` is a one-shot mode of fiberd. It clones one fiber, or `-n` of them, from a [template](glossary.md#template), prints what each answers, and stops. [examples/hello/hello.py](../examples/hello/hello.py) is the smallest template, a fiber that answers with one line. `fiberd run` needs Linux, so on a Mac open the dev container with `hack/dev/run.sh bash` and run these steps there. The `make build` there puts Linux binaries in `bin/`, so run `make build` on the Mac again before the next section.
+`fiberd run` is a one-shot mode of fiberd. It clones one fiber, or `-n` of them, from a [template](glossary.md#template), prints what each answers, and stops. [examples/fiberd-cli/hello.py](../examples/fiberd-cli/hello.py) is the smallest template, a fiber that answers with one line. `fiberd run` needs Linux, so on a Mac open the dev container with `hack/dev/run.sh bash` and run these steps there. The `make build` there puts Linux binaries in `bin/`, so run `make build` on the Mac again before the next section.
 
 ```bash
 hack/python/build.sh                       # the Python SDK's extension, in the tree
 make build
 export PYTHONPATH=$PWD/sdk/python/src      # fiberd run passes it on to the template
-bin/fiberd run examples/hello/hello.py          # fiber hello/1/1 says hello, world
-bin/fiberd run -payload fiberd examples/hello/hello.py   # hello, fiberd
-bin/fiberd run -n 3 examples/hello/hello.py     # fibers hello/1/1, hello/1/2 and hello/1/3
+bin/fiberd run examples/fiberd-cli/hello.py          # fiber hello/1/1 says hello, world
+bin/fiberd run -payload fiberd examples/fiberd-cli/hello.py   # hello, fiberd
+bin/fiberd run -n 3 examples/fiberd-cli/hello.py     # fibers hello/1/1, hello/1/2 and hello/1/3
 ```
 
 On a terminal `fiberd run` shows a table, one row per fiber with its [fence](glossary.md#fence), the clone's time and what the fiber said.

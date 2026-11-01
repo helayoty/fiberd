@@ -16,7 +16,7 @@ import (
 	"github.com/helayoty/fiberd/tests/internal/testenv"
 )
 
-// TestFiberdRunsHello runs the examples/hello templates the way the
+// TestFiberdRunsHello runs the examples/fiberd-cli templates the way the
 // quickstart and the demo do, through fiberd run, and reads what the
 // fibers answer and what fiberd run says it did.
 func TestFiberdRunsHello(t *testing.T) {
@@ -27,7 +27,7 @@ func TestFiberdRunsHello(t *testing.T) {
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build fiberd: %v\n%s", err, out)
 	}
-	hello, counter := "examples/hello/hello.py", "examples/hello/counter.py"
+	hello, counter := "examples/fiberd-cli/hello.py", "examples/fiberd-cli/counter.py"
 	// A pipe gets raw output, so the raw cases name no -o.
 	cases := []struct {
 		name     string
@@ -59,7 +59,7 @@ func TestFiberdRunsHello(t *testing.T) {
 			want:  "count 1\ncount 2\ncount 3\ncount 1\ncount 2\ncount 3\n",
 			notes: []string{"session s1 parked as hello/1/1 in ", "session s2 parked as hello/1/2 in "}},
 		{name: "a table of three fibers", flags: []string{"-o", "table", "-n", "3", "-time"}, template: hello, rows: []string{
-			`^fiberd is up\. Cloning 3 fibers from examples/hello/hello\.py\.$`,
+			`^fiberd is up\. Cloning 3 fibers from examples/fiberd-cli/hello\.py\.$`,
 			`^  FIBER +EVENT +TIME +SAYS$`,
 			`^  hello/1/1 +clone +[0-9.]+ms +hello, world$`,
 			`^  hello/1/2 +clone +[0-9.]+ms +hello, world$`,

@@ -24,14 +24,14 @@ make build
 export PYTHONPATH=$PWD/sdk/python/src
 ```
 
-The demo uses two templates, both in [examples/fiber-cli](../examples/fiberd-cli). `hello.py` answers each connection with `hello, world`. `counter.py` counts the connections it answers.
+The demo uses two templates from this folder. [hello.py](hello.py) answers each connection with `hello, world`. [counter.py](counter.py) counts the connections it answers.
 
 In the output below, `<ms>` stands for the times your machine prints. They describe that one run, not a comparison with anything.
 
 ## 1. One fiber
 
 ```bash
-bin/fiberd run examples/hello/hello.py
+bin/fiberd run examples/fiberd-cli/hello.py
 ```
 
 ```text
@@ -49,7 +49,7 @@ fiberd started the template, waited for it to warm, and forked one fiber from it
 ## 2. Many fibers from one warm template
 
 ```bash
-bin/fiberd run -n 50 -time examples/hello/hello.py
+bin/fiberd run -n 50 -time examples/fiberd-cli/hello.py
 ```
 
 ```text
@@ -75,7 +75,7 @@ bin/fiberd run -park examples/fiberd-cli/counter.py
 ```
 
 ```text
-fiberd is up. Cloning 1 fiber from examples/hello/counter.py.
+fiberd is up. Cloning 1 fiber from examples/fiberd-cli/counter.py.
 
   FIBER        EVENT    SESSION  TIME      SAYS
   hello/1/1    clone    s1       <ms>      count 1

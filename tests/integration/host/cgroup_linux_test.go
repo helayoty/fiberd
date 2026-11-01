@@ -187,10 +187,14 @@ func TestOrphanKilledInLeaf(t *testing.T) {
 			if leaf.Exists() || exists(sock) {
 				t.Fatal("the orphan's leaf or socket remain")
 			}
-			// The task is dead, reaped or not, so it only answers as a zombie.
-			if st, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat"); err == nil && !strings.Contains(string(st), ") Z ") {
-				t.Fatalf("the orphan's task %d is still alive: %s", pid, st)
-			}
+			// The task is dead, reaped or not, so it only answers as a
+			// zombie. Its leaf empties while the task is still in the
+			// kernel's exit path, a step before it turns into one, so the
+			// zombie is awaited rather than read at once.
+			waitFor(t, "the orphan's task to die", func() bool {
+				st, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
+				return err != nil || strings.Contains(string(st), ") Z ")
+			})
 			if list, err := r.List(ctx); err != nil || len(list) != 0 {
 				t.Fatalf("List after the release = %+v %v", list, err)
 			}

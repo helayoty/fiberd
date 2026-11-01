@@ -8,11 +8,15 @@ import (
 	"encoding/pem"
 	"errors"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/helayoty/fiberd/pkg/tlsconf"
 	"github.com/helayoty/fiberd/pkg/tlsconf/tlsconftest"
@@ -217,6 +221,332 @@ func TestHandshakeNamesCaller(t *testing.T) {
 			if fromFile, err := tlsconf.ThumbprintFile(cert); err != nil || fromFile != c.Thumbprint {
 				t.Fatalf("ThumbprintFile = %q %v, want %q", fromFile, err, c.Thumbprint)
 			}
+		})
+	}
+}
+
+// dialTLS runs one mutual-TLS handshake over loopback and returns the
+// client's view of it, with the server's error first when it had one.
+// It never fails the test itself, so goroutines may call it.
+func dialTLS(scfg, ccfg *tls.Config) (tls.ConnectionState, error) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return tls.ConnectionState{}, err
+	}
+	defer func() { _ = ln.Close() }()
+	srvErr := make(chan error, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			srvErr <- err
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		srvErr <- tls.Server(conn, scfg).Handshake()
+	}()
+	conn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		return tls.ConnectionState{}, err
+	}
+	defer func() { _ = conn.Close() }()
+	c := tls.Client(conn, ccfg)
+	cliErr := c.Handshake()
+	if serr := <-srvErr; serr != nil {
+		return c.ConnectionState(), serr
+	}
+	return c.ConnectionState(), cliErr
+}
+
+// touchLater moves every path's mtime one minute into the future, so
+// the reloader sees a change whatever the filesystem's mtime
+// granularity.
+func touchLater(t *testing.T, paths ...string) {
+	t.Helper()
+	at := time.Now().Add(time.Minute)
+	for _, p := range paths {
+		if err := os.Chtimes(p, at, at); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// Server keeps serving from the files cert-manager renews in place. A
+// handshake after the one-second check sees the new leaf, the new client
+// CA is enforced, and a broken renewal leaves the old pair in service.
+func TestServerReloadsWithoutRestart(t *testing.T) {
+	const srvName = "fiberd"
+	cases := []struct {
+		name string
+		// renew rewrites files under dir, given the CA and the leaf that
+		// were in service, and returns the CA the client is issued by.
+		renew      func(t *testing.T, dir string, ca, leaf tlsconftest.Pair) (clientCA tlsconftest.Pair, wantSerial int64)
+		wait       bool // sleep past the check interval before the handshake
+		foreignCA  bool // the client is issued by the CA that was replaced
+		alpn       []string
+		wantProto  string
+		wantRefuse bool
+	}{
+		{name: "a renewed leaf is served", wait: true,
+			renew: func(t *testing.T, dir string, ca, leaf tlsconftest.Pair) (tlsconftest.Pair, int64) {
+				renewed := ca.Server(t)
+				cert, key := renewed.Write(t, dir, srvName)
+				touchLater(t, cert, key)
+				return ca, renewed.Cert.SerialNumber.Int64()
+			}},
+		{name: "a client from the renewed ca is accepted", wait: true,
+			renew: func(t *testing.T, dir string, ca, leaf tlsconftest.Pair) (tlsconftest.Pair, int64) {
+				newCA := tlsconftest.NewCA(t, "ca2")
+				caFile, _ := newCA.Write(t, dir, "ca")
+				touchLater(t, caFile)
+				return newCA, leaf.Cert.SerialNumber.Int64()
+			}},
+		{name: "a client from the replaced ca is refused", wait: true, foreignCA: true, wantRefuse: true,
+			renew: func(t *testing.T, dir string, ca, leaf tlsconftest.Pair) (tlsconftest.Pair, int64) {
+				newCA := tlsconftest.NewCA(t, "ca2")
+				caFile, _ := newCA.Write(t, dir, "ca")
+				touchLater(t, caFile)
+				return newCA, 0
+			}},
+		{name: "a bad renewal keeps the old pair in service", wait: true,
+			renew: func(t *testing.T, dir string, ca, leaf tlsconftest.Pair) (tlsconftest.Pair, int64) {
+				_, otherKey := ca.Server(t).Write(t, t.TempDir(), "other")
+				bad, err := os.ReadFile(otherKey)
+				if err != nil {
+					t.Fatal(err)
+				}
+				keyFile := filepath.Join(dir, srvName+".key")
+				if err := os.WriteFile(keyFile, bad, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				touchLater(t, keyFile)
+				return ca, leaf.Cert.SerialNumber.Int64()
+			}},
+		{name: "h2 is negotiated through the snapshot", alpn: []string{"h2"}, wantProto: "h2",
+			renew: func(t *testing.T, dir string, ca, leaf tlsconftest.Pair) (tlsconftest.Pair, int64) {
+				return ca, leaf.Cert.SerialNumber.Int64()
+			}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			ca := tlsconftest.NewCA(t, "ca")
+			caFile, _ := ca.Write(t, dir, "ca")
+			leaf := ca.Server(t)
+			srvCert, srvKey := leaf.Write(t, dir, srvName)
+			scfg, err := tlsconf.Server(srvCert, srvKey, caFile, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(scfg.Certificates) != 0 || scfg.GetCertificate == nil || scfg.GetConfigForClient == nil {
+				t.Fatalf("cfg has %d static certificates, GetCertificate %v, GetConfigForClient %v, want none and both hooks", len(scfg.Certificates), scfg.GetCertificate != nil, scfg.GetConfigForClient != nil)
+			}
+
+			clientCA, wantSerial := tc.renew(t, dir, ca, leaf)
+			if tc.foreignCA {
+				clientCA = ca
+			}
+			// The client trusts the CA the server's leaf was issued by,
+			// which every case leaves in place.
+			ccfg := &tls.Config{MinVersion: tls.VersionTLS13, RootCAs: ca.Pool(), ServerName: "localhost",
+				Certificates: []tls.Certificate{clientCA.Client(t, "c").TLS()}, NextProtos: tc.alpn}
+			if tc.wait {
+				time.Sleep(1100 * time.Millisecond)
+			}
+			st, err := dialTLS(scfg, ccfg)
+			if tc.wantRefuse {
+				// The server's certificate request names the new CA. Go's
+				// client withholds a certificate that no named CA issued,
+				// so the server refuses for a missing certificate. A
+				// client that sent it anyway would be refused for an
+				// unknown authority. Both prove the old CA is gone.
+				refused := err != nil && (strings.Contains(err.Error(), "didn't provide a certificate") ||
+					strings.Contains(err.Error(), "unknown certificate authority") ||
+					strings.Contains(err.Error(), "unknown authority"))
+				if !refused {
+					t.Fatalf("handshake err = %v, want the old ca's client refused", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("handshake: %v", err)
+			}
+			if len(st.PeerCertificates) == 0 || st.PeerCertificates[0].SerialNumber.Int64() != wantSerial {
+				t.Fatalf("served serial %v, want %d", st.PeerCertificates, wantSerial)
+			}
+			if st.NegotiatedProtocol != tc.wantProto {
+				t.Fatalf("negotiated %q, want %q", st.NegotiatedProtocol, tc.wantProto)
+			}
+		})
+	}
+}
+
+// serving is Server's config over a CA and a leaf on disk, the way
+// fiberd holds it.
+type serving struct {
+	dir      string
+	ca, leaf tlsconftest.Pair
+	scfg     *tls.Config
+	started  time.Time // when scfg was built, which starts its first check interval
+}
+
+func newServing(t *testing.T) serving {
+	t.Helper()
+	s := serving{dir: t.TempDir(), ca: tlsconftest.NewCA(t, "ca")}
+	caFile, _ := s.ca.Write(t, s.dir, "ca")
+	s.leaf = s.ca.Server(t)
+	srvCert, srvKey := s.leaf.Write(t, s.dir, "fiberd")
+	cfg, err := tlsconf.Server(srvCert, srvKey, caFile, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.scfg, s.started = cfg, time.Now()
+	return s
+}
+
+// client is a mutual-TLS client of s issued by its CA.
+func (s serving) client(t *testing.T, alpn ...string) *tls.Config {
+	t.Helper()
+	return &tls.Config{MinVersion: tls.VersionTLS13, RootCAs: s.ca.Pool(), ServerName: "localhost",
+		Certificates: []tls.Certificate{s.ca.Client(t, "c").TLS()}, NextProtos: alpn}
+}
+
+// The config with no static certificate serves fiberd's HTTP gateway
+// the way fiberd runs it, and a renewal lands while handshakes are in
+// flight without failing any of them.
+func TestServerReloadsWhileServing(t *testing.T) {
+	cases := []struct {
+		name string
+		run  func(t *testing.T, s serving)
+	}{
+		{name: "http.Server serves and negotiates h2 from the hooks alone", run: func(t *testing.T, s serving) {
+			ln, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			hs := &http.Server{TLSConfig: s.scfg, ReadHeaderTimeout: time.Second,
+				Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })}
+			done := make(chan error, 1)
+			go func() { done <- hs.ServeTLS(ln, "", "") }()
+			defer func() {
+				_ = hs.Close()
+				if err := <-done; !errors.Is(err, http.ErrServerClosed) {
+					t.Errorf("ServeTLS = %v, want ErrServerClosed", err)
+				}
+			}()
+			tr := &http.Transport{TLSClientConfig: s.client(t), ForceAttemptHTTP2: true}
+			defer tr.CloseIdleConnections()
+			resp, err := (&http.Client{Transport: tr}).Get("https://" + ln.Addr().String() + "/")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != http.StatusNoContent || resp.ProtoMajor != 2 {
+				t.Fatalf("GET = %d over %s, want 204 over HTTP/2", resp.StatusCode, resp.Proto)
+			}
+			if resp.TLS == nil || len(resp.TLS.PeerCertificates) == 0 || resp.TLS.PeerCertificates[0].SerialNumber.Cmp(s.leaf.Cert.SerialNumber) != 0 {
+				t.Fatalf("served %+v, want the leaf on disk", resp.TLS)
+			}
+		}},
+		{name: "a renewal lands under concurrent handshakes without failing one", run: func(t *testing.T, s serving) {
+			ccfg := s.client(t)
+			renewed := s.ca.Server(t)
+			// One listener for every handshake, so the loopback port range
+			// is not burned through. Failures on either side are counted.
+			ln, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var mu sync.Mutex
+			var failed int
+			var firstErr error
+			record := func(err error) {
+				mu.Lock()
+				defer mu.Unlock()
+				failed++
+				if firstErr == nil {
+					firstErr = err
+				}
+			}
+			var servers sync.WaitGroup
+			go func() {
+				for {
+					conn, err := ln.Accept()
+					if err != nil {
+						return
+					}
+					servers.Add(1)
+					go func() {
+						defer servers.Done()
+						defer func() { _ = conn.Close() }()
+						if err := tls.Server(conn, s.scfg).Handshake(); err != nil {
+							record(err)
+						}
+					}()
+				}
+			}()
+			var sawNew atomic.Int64
+			stop := make(chan struct{})
+			var clients sync.WaitGroup
+			for range 8 {
+				clients.Add(1)
+				go func() {
+					defer clients.Done()
+					for {
+						select {
+						case <-stop:
+							return
+						default:
+						}
+						conn, err := net.Dial("tcp", ln.Addr().String())
+						if err != nil {
+							record(err)
+							continue
+						}
+						c := tls.Client(conn, ccfg)
+						if err := c.Handshake(); err != nil {
+							record(err)
+						} else {
+							if c.ConnectionState().PeerCertificates[0].SerialNumber.Cmp(renewed.Cert.SerialNumber) == 0 {
+								sawNew.Add(1)
+							}
+							// Wait for the server to finish and close, so its
+							// session tickets never hit a closed socket.
+							_, _ = c.Read(make([]byte, 1))
+						}
+						_ = conn.Close()
+						time.Sleep(5 * time.Millisecond)
+					}
+				}()
+			}
+			// The rewrite finishes well inside the first interval, so no
+			// load can ever see it half done. The first check after the
+			// interval, inside one of the racing handshakes, picks it up.
+			time.Sleep(200 * time.Millisecond)
+			cert, key := renewed.Write(t, s.dir, "fiberd")
+			touchLater(t, cert, key)
+			time.Sleep(time.Until(s.started.Add(1300 * time.Millisecond)))
+			close(stop)
+			clients.Wait()
+			_ = ln.Close()
+			servers.Wait()
+			mu.Lock()
+			n, first := failed, firstErr
+			mu.Unlock()
+			if n != 0 {
+				t.Fatalf("%d handshakes failed across the renewal, first: %v", n, first)
+			}
+			if sawNew.Load() == 0 {
+				t.Fatal("no concurrent handshake saw the renewed leaf")
+			}
+			st, err := dialTLS(s.scfg, ccfg)
+			if err != nil || st.PeerCertificates[0].SerialNumber.Cmp(renewed.Cert.SerialNumber) != 0 {
+				t.Fatalf("final handshake = %v, serial %v, want the renewed serial %v", err, st.PeerCertificates, renewed.Cert.SerialNumber)
+			}
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.run(t, newServing(t))
 		})
 	}
 }

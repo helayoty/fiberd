@@ -28,12 +28,12 @@ func TestTableView(t *testing.T) {
 		want  string
 	}{
 		{name: "clones and a refusal, timed", timed: true, run: func(v view) {
-			v.start("examples/hello/hello.py", 3)
+			v.start("examples/fiberd-cli/hello.py", 3)
 			v.step(step{fiber: "hello/1/1", event: eventClone, took: 412 * msec, says: []byte("hello, world\n")})
 			v.step(step{fiber: "hello/1/2", event: eventClone, took: 2 * msec, says: []byte("hello, world\n")})
 			v.refused(refusal{clone: 3, max: 2, err: errors.New("deferred: grant full")})
 			v.end(summary{fibers: 2, refused: 1, max: 2, took: []time.Duration{412 * msec, 2 * msec}})
-		}, want: "fiberd is up. Cloning 3 fibers from examples/hello/hello.py.\n\n" +
+		}, want: "fiberd is up. Cloning 3 fibers from examples/fiberd-cli/hello.py.\n\n" +
 			"  FIBER" + sp(8) + "EVENT" + sp(4) + "TIME" + sp(6) + "SAYS\n" +
 			"  hello/1/1" + sp(4) + "clone" + sp(4) + "412.0ms" + sp(3) + "hello, world\n" +
 			"  hello/1/2" + sp(4) + "clone" + sp(4) + "2.0ms" + sp(5) + "hello, world\n" +
@@ -42,13 +42,13 @@ func TestTableView(t *testing.T) {
 			"The first clone's time includes warming the template.\n" +
 			"The other clone took 2.0ms.\n"},
 		{name: "a park and resume", park: true, run: func(v view) {
-			v.start("examples/hello/counter.py", 1)
+			v.start("examples/fiberd-cli/counter.py", 1)
 			v.step(step{fiber: "hello/1/1", event: eventClone, session: "s1", took: 410 * msec, says: []byte("count 1\n")})
 			v.step(step{fiber: "hello/1/1", event: eventAsk, session: "s1", says: []byte("count 2\n")})
 			v.step(step{fiber: "hello/1/1", event: eventPark, session: "s1", took: 38 * msec})
 			v.step(step{fiber: "hello/1/2", event: eventResume, session: "s1", took: 24 * msec, says: []byte("count 3\n")})
 			v.end(summary{fibers: 1, max: 1, parked: 1, took: []time.Duration{410 * msec}})
-		}, want: "fiberd is up. Cloning 1 fiber from examples/hello/counter.py.\n\n" +
+		}, want: "fiberd is up. Cloning 1 fiber from examples/fiberd-cli/counter.py.\n\n" +
 			"  FIBER" + sp(8) + "EVENT" + sp(4) + "SESSION" + sp(2) + "TIME" + sp(6) + "SAYS\n" +
 			"  hello/1/1" + sp(4) + "clone" + sp(4) + "s1" + sp(7) + "410.0ms" + sp(3) + "count 1\n" +
 			"  hello/1/1" + sp(4) + "ask" + sp(6) + "s1" + sp(17) + "count 2\n" +
@@ -98,7 +98,7 @@ func TestRawView(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var out, notes bytes.Buffer
 			v := &rawView{out: &out, notes: &notes, timed: tc.timed}
-			v.start("examples/hello/counter.py", 2)
+			v.start("examples/fiberd-cli/counter.py", 2)
 			v.step(step{fiber: "hello/1/1", event: eventClone, session: "s1", took: 410 * msec, says: []byte("count 1\n")})
 			v.step(step{fiber: "hello/1/1", event: eventAsk, session: "s1", says: []byte("count 2\n")})
 			v.step(step{fiber: "hello/1/1", event: eventPark, session: "s1", took: 38 * msec})

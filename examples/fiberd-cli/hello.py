@@ -1,7 +1,7 @@
 # The smallest fiberd template. It warms once, and every fiber forked
 # from it answers each connection with one line.
 #
-#   bin/fiberd run examples/hello/hello.py
+#   bin/fiberd run examples/fiberd-cli/hello.py
 import fiberd.template as ft
 
 ft.init()  # first, before any thread
