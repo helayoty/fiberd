@@ -25,7 +25,7 @@
 #   SUITE=proc|runc|gvisor|hyperlight   the runtime (default proc)
 #   CONFORM=1              the conformance suite over SUITE, with fiberd
 #                          under setpriv, instead of tests/integration/SUITE
-#   CAPS="chown,kill,..."  candidates (default below)
+#   CAPS="chown,kill,..."  candidates (default: every capability setpriv knows)
 #   RUN="TestX|TestY"      only these tests (-test.run)
 #   CAPS_OUT=dir           logs (default bin/caps, kept after the container)
 #
@@ -40,7 +40,11 @@ cd "$(dirname "$0")/../.."
 
 SUITE=${SUITE:-proc}
 CONFORM=${CONFORM:-0}
-CAPS=${CAPS:-chown,dac_override,dac_read_search,fowner,fsetid,kill,setgid,setuid,setpcap,net_bind_service,net_raw,net_admin,sys_chroot,sys_ptrace,sys_admin,sys_resource,sys_nice,sys_time,mknod,audit_write,ipc_lock,checkpoint_restore}
+# Every capability by default, since a runtime's needs are not known
+# before the run. runsc re-executes itself with ambient capabilities,
+# and a shorter list missed one of them.
+known=$(setpriv --list-caps)
+CAPS=${CAPS:-$(paste -sd, <<<"$known")}
 RUN=${RUN:-.}
 OUT=$(realpath -m "${CAPS_OUT:-bin/caps}")
 CG=${FIBERD_CGROUP_ROOT:-/sys/fs/cgroup/fiberd}
@@ -48,7 +52,6 @@ case "$SUITE" in proc | runc | gvisor | hyperlight) ;; *) echo "SUITE=$SUITE: wa
 case "$CONFORM" in 0 | 1) ;; *) echo "CONFORM=$CONFORM: want 0 or 1"; exit 1 ;; esac
 rm -rf "$OUT"; mkdir -p "$OUT"
 
-known=$(setpriv --list-caps)
 IFS=, read -ra cand <<<"$CAPS"
 for c in "${cand[@]}"; do
   grep -qx "$c" <<<"$known" || { echo "setpriv does not know $c; drop it from CAPS"; exit 1; }

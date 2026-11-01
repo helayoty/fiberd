@@ -41,6 +41,9 @@ jobs:
     timeout-minutes: 360
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The helper build runs as root in the dev container and would make
+      # bin/ root-owned, which the summary's tee below could not write.
+      - run: mkdir -p bin
       - name: enable KVM for this runner
         if: inputs.suite == 'hyperlight'
         run: |
