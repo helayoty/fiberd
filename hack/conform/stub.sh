@@ -41,6 +41,11 @@
 #
 # fiberd is bin/fiberd-testhooks, fiberd built with -tags
 # fiberd_testhooks so -admin-unsafe and the issuer and scope-lost hooks exist.
+# CONFORM_FIBERD_WRAP is a command every home is started through, such as
+# the setpriv that hack/test/caps.sh measures capabilities with, and
+# CONFORM_ALL_CAPS=1 starts every home with -all-caps, so it keeps what
+# that command gave it. The checks, the issuer and the registry run as
+# the stub does.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
@@ -57,6 +62,10 @@ ISSUER_URL="http://$ISSUER_ADDR"
 GVISOR_ROOTFS=${CONFORM_GVISOR_ROOTFS:-/var/lib/fiberd/gvisor-rootfs}
 ROOTFS_SH=${CONFORM_ROOTFS_SH:-hack/gvisor/rootfs.sh}
 CGROOT=${FIBERD_CGROUP_ROOT:-/sys/fs/cgroup/fiberd}
+WRAP=()
+if [ -n "${CONFORM_FIBERD_WRAP:-}" ]; then read -ra WRAP <<<"$CONFORM_FIBERD_WRAP"; fi
+ALLCAPS=()
+if [ "${CONFORM_ALL_CAPS:-0}" = 1 ]; then ALLCAPS=(-all-caps); fi
 MOBILITY=0
 if [ "$RUNTIME" = proc ] && [ -z "${CONFORM_TEMPLATE:-}" ]; then MOBILITY=${CONFORM_MOBILITY:-1}; fi
 REG_ADDR=${CONFORM_REGISTRY_ADDR:-127.0.0.1:18500}
@@ -209,7 +218,7 @@ verify_flags() {
 start() {
   mkdir -p "$STATE"
   local verify; read -ra verify <<<"$(verify_flags)"
-  bin/fiberd-testhooks -state "$STATE" -node-id "$NODE" "${verify[@]}" -insecure-plaintext \
+  ${WRAP[@]+"${WRAP[@]}"} bin/fiberd-testhooks -state "$STATE" -node-id "$NODE" "${verify[@]}" ${ALLCAPS[@]+"${ALLCAPS[@]}"} -insecure-plaintext \
     -listen "$ADDR" "${RUNTIME_FLAGS[@]}" ${ENGINE_FLAGS[@]+"${ENGINE_FLAGS[@]}"} ${DEVICE_FLAGS[@]+"${DEVICE_FLAGS[@]}"} -admin-unsafe \
     -stale-ttl 5s -status-interval 50ms >>"$LOG" 2>&1 &
   echo $! >"$STATE/pid"
@@ -221,7 +230,7 @@ start() {
 start_peer() {
   mkdir -p "$PEER_STATE"
   local verify; read -ra verify <<<"$(verify_flags)"
-  bin/fiberd-testhooks -state "$PEER_STATE" -node-id "$PEER_NODE" -cgroup-root "$CGROOT-peer" "${verify[@]}" -insecure-plaintext \
+  ${WRAP[@]+"${WRAP[@]}"} bin/fiberd-testhooks -state "$PEER_STATE" -node-id "$PEER_NODE" -cgroup-root "$CGROOT-peer" "${verify[@]}" ${ALLCAPS[@]+"${ALLCAPS[@]}"} -insecure-plaintext \
     -listen "$PEER_ADDR" "${RUNTIME_FLAGS[@]}" ${PEER_ENGINE[@]+"${PEER_ENGINE[@]}"} ${PEER_DEVICE_FLAGS[@]+"${PEER_DEVICE_FLAGS[@]}"} -stale-ttl 5s -status-interval 50ms >>"$PEER_STATE.log" 2>&1 &
   echo $! >"$STATE/peer.pid"
   wait_healthy "$PEER_STATE" "$PEER_STATE.log"
@@ -232,7 +241,7 @@ start_peer() {
 start_layout() {
   mkdir -p "$LAYOUT_STATE"
   local verify; read -ra verify <<<"$(verify_flags)"
-  bin/fiberd-testhooks -state "$LAYOUT_STATE" -node-id "$LAYOUT_NODE" -cgroup-root "$CGROOT-layout" "${verify[@]}" -insecure-plaintext \
+  ${WRAP[@]+"${WRAP[@]}"} bin/fiberd-testhooks -state "$LAYOUT_STATE" -node-id "$LAYOUT_NODE" -cgroup-root "$CGROOT-layout" "${verify[@]}" ${ALLCAPS[@]+"${ALLCAPS[@]}"} -insecure-plaintext \
     -listen "$LAYOUT_ADDR" "${RUNTIME_FLAGS[@]}" ${LAYOUT_ENGINE[@]+"${LAYOUT_ENGINE[@]}"} ${LAYOUT_DEVICE_FLAGS[@]+"${LAYOUT_DEVICE_FLAGS[@]}"} -stale-ttl 5s -status-interval 50ms >>"$LAYOUT_STATE.log" 2>&1 &
   echo $! >"$STATE/layout.pid"
   wait_healthy "$LAYOUT_STATE" "$LAYOUT_STATE.log"

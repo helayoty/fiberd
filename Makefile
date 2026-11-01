@@ -64,7 +64,7 @@ endif
         python-build python-test python-dist python-proto python-proto-check \
         typescript-build typescript-skipped typescript-test typescript-proto typescript-proto-check \
         hyperlight-helper linux-hyperlight-check linux-hyperlight-test overcommit overcommit-baseline kind-up kind-down kind-image conform-kind slurm-up slurm-down conform-slurm example-knative example-knative-kvm example-kata example-kata-gpu example-substrate \
-        registry-start mobility linux-shell linux-check linux-gvisor-check linux-test linux-lint bench-e2e \
+        registry-start mobility linux-shell linux-check linux-gvisor-check linux-caps linux-test linux-lint bench-e2e \
         compare-phase0 compare-phase1 compare-phase2 compare-phase3 compare-phase4 compare-down
 
 all: build
@@ -389,6 +389,11 @@ linux-check: ## probe the container for cgroup v2, PSI, criu, gcc
 
 linux-gvisor-check: ## probe runsc in the container: run, checkpoint/restore, host unix sockets, self-checkpoint
 	hack/dev/run.sh hack/dev/gvisor-check.sh
+
+linux-caps: ## measure the capabilities a runtime needs (SUITE=proc|runc|gvisor|hyperlight, CONFORM=1 for the conformance suite, CAPS and RUN as hack/test/caps.sh says; HL=1 uses the real Hyperlight helper, which needs /dev/kvm and make hyperlight-helper first)
+	$(if $(HL),FIBERD_DEV_DOCKER_ARGS="--device /dev/kvm",) hack/dev/run.sh env SUITE='$(SUITE)' CONFORM='$(CONFORM)' CAPS='$(value CAPS)' RUN='$(value RUN)' \
+	  $(if $(HL),CONFORM_HL_HELPER=/src/bin/hyperlight-helper CONFORM_HL_GUEST=/src/bin/hyperlight-guest FIBERD_HL_HELPER=/src/bin/hyperlight-helper FIBERD_HL_GUEST=/src/bin/hyperlight-guest,) \
+	  hack/test/caps.sh
 
 linux-test: $(TS_DIST) ## unit tests as uid 1001 (the GitHub runner's uid, not nobody, so a chown to 65534 cannot pass by luck), then the integration suites as root, inside the container
 	hack/dev/run.sh sh -ec 'go mod download; for m in $(EXAMPLES); do (cd $$m && go mod download); done; \

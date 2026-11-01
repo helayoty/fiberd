@@ -1,0 +1,89 @@
+name: caps
+
+# Measures the capabilities a runtime needs, with hack/test/caps.sh, on a
+# runner that has what a laptop's dev container lacks. CI's kernel, Yama,
+# and /dev/kvm for the Hyperlight helper. Started by hand, never on a
+# push, since one measurement runs the suite once per candidate.
+#
+#   gh workflow run caps.yml --ref <branch> -f suite=gvisor
+#   gh workflow run caps.yml --ref <branch> -f suite=hyperlight -f conform=true
+#
+# The summary lands in the job summary, and bin/caps with every run's
+# log is the caps-<suite> artifact.
+on:
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: the runtime to measure
+        type: choice
+        options: [proc, runc, gvisor, hyperlight]
+        default: gvisor
+      conform:
+        description: measure over the conformance suite instead of the integration suite
+        type: boolean
+        default: false
+      caps:
+        description: candidate capabilities, comma-separated (empty for the script's list)
+        type: string
+        default: ""
+      run:
+        description: only these tests, a -test.run expression (empty for all)
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  measure:
+    name: measure ${{ inputs.suite }}${{ inputs.conform && ' over the conformance suite' || '' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: enable KVM for this runner
+        if: inputs.suite == 'hyperlight'
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+      - run: make hyperlight-helper
+        if: inputs.suite == 'hyperlight'
+      - name: the kernel and Yama this measurement ran under
+        run: |
+          uname -r
+          echo "ptrace_scope=$(cat /proc/sys/kernel/yama/ptrace_scope)"
+      - name: measure
+        shell: bash
+        env:
+          CAPS: ${{ inputs.caps }}
+          RUN: ${{ inputs.run }}
+        run: |
+          mkdir -p bin
+          make linux-caps SUITE='${{ inputs.suite }}' CONFORM='${{ inputs.conform && '1' || '' }}' \
+            CAPS="$CAPS" RUN="$RUN" HL='${{ inputs.suite == 'hyperlight' && '1' || '' }}' \
+            2>&1 | tee bin/caps-summary.txt
+      - name: put the summary on the run
+        if: always()
+        run: |
+          {
+            echo '## caps.sh, ${{ inputs.suite }}${{ inputs.conform && ', conformance suite' || ', integration suite' }}'
+            echo '```'
+            cat bin/caps-summary.txt 2>/dev/null || echo "no summary"
+            echo '```'
+          } >>"$GITHUB_STEP_SUMMARY"
+      - name: make the logs readable for the upload (written as root inside the container)
+        if: always()
+        run: sudo chmod -R a+rX bin/caps bin/caps-summary.txt 2>/dev/null || true
+      - name: keep every run's log
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: caps-${{ inputs.suite }}${{ inputs.conform && '-conform' || '' }}
+          path: |
+            bin/caps-summary.txt
+            bin/caps/*.log
+            bin/caps/*.pass
+          if-no-files-found: ignore
