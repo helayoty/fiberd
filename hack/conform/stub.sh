@@ -20,6 +20,11 @@
 #
 # State lives in $CONFORM_STATE (default bin/conform-state), so the
 # restart hook keeps the epoch file and the audit spool across restarts.
+# A run wipes it first, mounts included. runsc keeps the null network
+# namespace its sandboxes join bind-mounted under its root dir, and a
+# restarted home keeps the templates tmpfs of its previous life, so a
+# second run in the same mount namespace, as hack/test/caps.sh does,
+# finds both still mounted.
 #
 # The proc runtime with its own reference template runs the mobility
 # setup too (CONFORM_MOBILITY=0 turns it off). A local OCI registry keeps
@@ -292,6 +297,21 @@ stop_pidfile() {
 
 stop() { stop_pidfile "$STATE/pid"; }
 
+# wipe <path>... removes what an earlier run left, after unmounting
+# whatever is still mounted under each path, deepest first. Nothing is
+# mounted outside the container, so a mount point is this run's to drop.
+wipe() {
+  local d m
+  for d in "$@"; do
+    [ -d "$d" ] || continue
+    d=$(realpath "$d")
+    while read -r m; do
+      umount -l "$m" 2>/dev/null || echo "wipe: $m stays mounted" >&2
+    done < <(awk -v p="$d/" 'index($5, p) == 1 { print $5 }' /proc/self/mountinfo | sort -r)
+  done
+  rm -rf "$@"
+}
+
 issuer_reachable() {
   case "$1" in
     up)   curl -sf --unix-socket "$STATE/private/admin.sock" -X POST http://x/issuer -d '{"reachable":true}' >/dev/null ;;
@@ -324,7 +344,7 @@ case "${1:-}" in
   scope-lost) scope_lost ;;
   seal-check) seal_check ;;
   run)
-    rm -rf "$STATE" "$PEER_STATE" "$PEER_STATE.log" "$LAYOUT_STATE" "$LAYOUT_STATE.log" "$MOB"; mkdir -p "$STATE"
+    wipe "$STATE" "$PEER_STATE" "$PEER_STATE.log" "$LAYOUT_STATE" "$LAYOUT_STATE.log" "$MOB"; mkdir -p "$STATE"
     go build -o bin/ ./cmd/grant-issuer
     go build -tags fiberd_testhooks -o bin/fiberd-testhooks ./cmd/fiberd
     # bin/ is shared between the macOS host and the Linux container; go

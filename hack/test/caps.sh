@@ -131,6 +131,8 @@ n=$(wc -l <"$OUT/full.pass")
 [ "$n" -gt 0 ] || { echo "full: no test passed; see $OUT/full.log"; exit 1; }
 echo "full: $n tests pass with every capability"
 run baseline "${cand[@]}"
+# No test passing at all is the suite not running, not a capability.
+[ -s "$OUT/baseline.pass" ] || { echo "baseline: no test passed; see $OUT/baseline.log"; exit 1; }
 l=$(comm -23 "$OUT/full.pass" "$OUT/baseline.pass" | paste -sd' ')
 if [ -n "$l" ]; then
   echo "baseline: the ${#cand[@]} candidates are missing a capability; lost: $l (see $OUT/baseline.log)"
