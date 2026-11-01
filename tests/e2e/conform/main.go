@@ -18,6 +18,14 @@
 //	-scope-cmd     the home's scope is lost while it runs; it must revoke every fence
 //	-seal-check-cmd exit non-zero if the shared registry holds template memory in the clear (C11)
 //
+// -tls-ca, -tls-cert and -tls-key dial the target over mutual TLS. With
+// -tls-cert, every minted grant is bound to that certificate's thumbprint,
+// as a target serving TLS requires. -tls-server-name is the name the
+// target's certificate must carry when it differs from the host in -target,
+// for example a NodePort reached by IP. The peer and the third home are
+// dialled with the same settings, so their certificates must carry that
+// name too.
+//
 // -peer-target and -peer-node-id name a second home that shares the
 // target's delta registry and keys. C11 moves a session to it and back.
 // -gpu runs C14, which moves a session's device slice to the peer and

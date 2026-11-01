@@ -38,8 +38,14 @@ import (
 type Driver struct {
 	// Target is host:port of the Fibers service under test.
 	Target string
-	// TLS dials Target over mutual TLS. Nil dials plaintext.
+	// TLS dials Target over mutual TLS. Nil dials plaintext. The peer and
+	// the third home (mobility.go, gpu.go) dial with the same config, so one
+	// ServerName covers every home.
 	TLS *tls.Config
+	// CallerThumbprint is the x5t#S256 thumbprint of the certificate the
+	// harness presents. It goes into every minted grant. Empty leaves
+	// grants unbound, which a target serving TLS refuses.
+	CallerThumbprint string
 	// TargetTier is the tier the target advertises; C7 mints a grant one
 	// tier above it, C2 needs at least FIBER_CHECKPOINT.
 	TargetTier core.Tier
@@ -183,6 +189,8 @@ func (c *client) grant(t *testing.T, prefix string, mut func(g *core.Grant)) (co
 		MinTier:        core.TierBasic,
 		LeaseExpiry:    time.Now().Add(10 * time.Minute),
 		Policy:         core.Policy{Isolation: c.d.Isolation},
+		// Bound to the harness's certificate, which a TLS target requires.
+		CallerThumbprint: c.d.CallerThumbprint,
 	}
 	if mut != nil {
 		mut(&g)
