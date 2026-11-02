@@ -28,6 +28,7 @@ const (
 	SysAdmin      = 21
 	SysResource   = 24
 	SysTime       = 25
+	SetFCAP       = 31
 )
 
 // Proc is what the proc runtime needs, as hack/test/caps.sh measured it.
@@ -49,20 +50,47 @@ var Proc = []int{SetPCAP, NetAdmin, SysChroot, SysPtrace, SysAdmin, SysResource,
 // and the container's init are ended through their cgroups.
 var Runc = append(append([]int{}, Proc...), Chown, DACOverride, SetGID, SetUID)
 
+// GVisor is what the gVisor runtime needs, measured by running
+// tests/integration/gvisor and the conformance suite under setpriv with
+// each of the kernel's capabilities left out in turn. SysAdmin mounts the
+// templates tmpfs and makes the sandbox's namespaces. Without any one of
+// SetGID, SetUID and SetFCAP, runsc cannot fork and exec its gofer process
+// (EPERM), and the measurement sees no further than that. Nothing else is
+// needed. The sandbox's Sentry serves the fibers' syscalls, and CRIU is
+// not involved, so SysPtrace, SysChroot, NetAdmin, SysTime and SysResource
+// stay out.
+var GVisor = []int{SetGID, SetUID, SysAdmin, SetFCAP}
+
+// Hyperlight is what the Hyperlight runtime needs, measured the same way
+// with the Rust helper on KVM. Nothing. The helper opens /dev/kvm by its
+// file mode, and the guest is behind the hypervisor.
+var Hyperlight = []int{}
+
+// Engine is what a home with a device engine needs on top of its
+// runtime's set. The engine's directory goes to its uid (Chown), its
+// process drops to that uid and gid (SetUID, SetGID), and its bounding set
+// is emptied before the exec (SetPCAP).
+var Engine = []int{Chown, SetUID, SetGID, SetPCAP}
+
 // Names is how Kubernetes spells a capability in a container's
 // capabilities.
 var Names = map[int]string{Chown: "CHOWN", DACOverride: "DAC_OVERRIDE", DACReadSearch: "DAC_READ_SEARCH", Kill: "KILL",
 	SetGID: "SETGID", SetUID: "SETUID", SetPCAP: "SETPCAP", NetAdmin: "NET_ADMIN", SysChroot: "SYS_CHROOT", SysPtrace: "SYS_PTRACE",
-	SysAdmin: "SYS_ADMIN", SysResource: "SYS_RESOURCE", SysTime: "SYS_TIME"}
+	SysAdmin: "SYS_ADMIN", SysResource: "SYS_RESOURCE", SysTime: "SYS_TIME", SetFCAP: "SETFCAP"}
 
 // ForRuntime is the keep list for a runtime name, and false for a
-// runtime whose needs are not measured.
+// runtime whose needs are not measured. Hyperlight's list is empty, and
+// measured.
 func ForRuntime(name string) ([]int, bool) {
 	switch name {
 	case "proc":
 		return Proc, true
 	case "runc":
 		return Runc, true
+	case "gvisor":
+		return GVisor, true
+	case "hyperlight":
+		return Hyperlight, true
 	}
 	return nil, false
 }

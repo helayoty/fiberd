@@ -66,6 +66,6 @@ sequenceDiagram
 - The [epoch](../glossary.md#epoch), the ledger snapshot and the audit spool live on `emptyDir`. A container restart keeps them and a Pod replacement does not, so a replacement Pod can restart at epoch 1 and repeat old [fences](../glossary.md#fence).
 - There is no finalizer and no rollout. Deleting a CapacityGrant garbage-collects its Pod at once, and a changed `spec.pod` never reaches a running Pod.
 - Discovery and the JWKS are served over plain HTTP inside the cluster.
-- A runc Pod runs privileged, although the capability set runc needs is measured.
+- runc, gVisor and Hyperlight Pods run privileged, although the capability set each needs is measured.
 - On a node whose containerd applies its default AppArmor profile, the cgroupfs and sysctl remounts are denied, so an unprivileged Pod needs `appArmorProfile: Unconfined`, which the example does not set.
 - The example's grants are not bound to a certificate. The JWT in the Secret is a bearer token until its lease ends.

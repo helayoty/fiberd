@@ -95,7 +95,9 @@ func TestForRuntime(t *testing.T) {
 	}{
 		{name: "proc", runtime: "proc", measured: true, want: Proc},
 		{name: "runc", runtime: "runc", measured: true, want: Runc},
-		{name: "gvisor is not measured", runtime: "gvisor"},
+		{name: "gvisor", runtime: "gvisor", measured: true, want: GVisor},
+		{name: "hyperlight keeps nothing", runtime: "hyperlight", measured: true, want: []int{}},
+		{name: "cloudhv is not measured", runtime: "cloudhv"},
 		{name: "stub is not measured", runtime: "stub"},
 		{name: "unknown", runtime: "nope"},
 	}
@@ -139,6 +141,50 @@ func TestRuncSet(t *testing.T) {
 			}
 			if tc.inRunc && Names[tc.cap] == "" {
 				t.Fatalf("capability %d has no Kubernetes name", tc.cap)
+			}
+		})
+	}
+}
+
+// TestGVisorSet checks what gVisor keeps, each named for Kubernetes, and
+// what stays out. The Sentry serves the fibers' syscalls and CRIU is not
+// involved, so everything proc keeps for CRIU stays out, and so does
+// SETPCAP, which only the engine needs.
+func TestGVisorSet(t *testing.T) {
+	cases := []struct {
+		name     string
+		cap      int
+		inGVisor bool
+		inEngine bool
+	}{
+		{name: "SETGID", cap: SetGID, inGVisor: true, inEngine: true},
+		{name: "SETUID", cap: SetUID, inGVisor: true, inEngine: true},
+		{name: "SYS_ADMIN", cap: SysAdmin, inGVisor: true},
+		{name: "SETFCAP", cap: SetFCAP, inGVisor: true},
+		{name: "CHOWN is the engine's alone", cap: Chown, inEngine: true},
+		{name: "SETPCAP is the engine's alone", cap: SetPCAP, inEngine: true},
+		{name: "SYS_PTRACE stays out", cap: SysPtrace},
+		{name: "SYS_CHROOT stays out", cap: SysChroot},
+		{name: "NET_ADMIN stays out", cap: NetAdmin},
+		{name: "SYS_TIME stays out", cap: SysTime},
+		{name: "SYS_RESOURCE stays out", cap: SysResource},
+		{name: "DAC_OVERRIDE stays out", cap: DACOverride},
+		{name: "KILL stays out", cap: Kill},
+		{name: "CHECKPOINT_RESTORE stays out", cap: 40},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := slices.Contains(GVisor, tc.cap); got != tc.inGVisor {
+				t.Fatalf("GVisor has %d: %v, want %v", tc.cap, got, tc.inGVisor)
+			}
+			if got := slices.Contains(Engine, tc.cap); got != tc.inEngine {
+				t.Fatalf("Engine has %d: %v, want %v", tc.cap, got, tc.inEngine)
+			}
+			if (tc.inGVisor || tc.inEngine) && Names[tc.cap] == "" {
+				t.Fatalf("capability %d has no Kubernetes name", tc.cap)
+			}
+			if slices.Contains(Hyperlight, tc.cap) {
+				t.Fatalf("Hyperlight has %d, want nothing", tc.cap)
 			}
 		})
 	}

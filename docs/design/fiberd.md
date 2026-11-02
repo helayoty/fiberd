@@ -28,7 +28,7 @@ fiberd is a library whose entry point is `RunContext`. It stops when its context
 
 These checks fail the start.
 
-- **Capabilities.** Before anything else, with proc or runc, fiberd re-executes with only its measured capability set ([sys.md](sys.md)). If it cannot drop the rest, it exits, unless `-all-caps` is set.
+- **Capabilities.** Before anything else, fiberd re-executes with only the capabilities its runtime needs ([sys.md](sys.md)). Cloud Hypervisor and the stub are not measured, so with them fiberd keeps everything. If it cannot drop the rest, it exits, unless `-all-caps` is set.
 - **Transport.** TLS is checked first, so a bad setup leaves nothing half-started ([grant.md](grant.md)).
 - **Private directory.** It is created with mode 0700, and an existing one is reset to 0700. A symlink or a non-directory at that path is refused. A proc fiber runs as fiberd's uid and sees the state directory outside `private/` and `deltas/`, so a symlink it planted there would send the keys wherever it points.
 - **Verifier.** One must be named, and the JWKS verifier needs an [issuer](../glossary.md#issuer).

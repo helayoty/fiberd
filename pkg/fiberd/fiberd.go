@@ -230,7 +230,7 @@ func (c *Config) Bind(fs *flag.FlagSet) {
 	fs.StringVar(&c.Node.GrantsDir, "grants-dir", "", "directory polled for *.jwt files to pre-admit (warm before the first Clone)")
 	fs.DurationVar(&c.Node.StaleTTL, "stale-ttl", 30*time.Second, "the issuer counts as unreachable past this silence from the control plane")
 	fs.Func("devices", "comma-separated devices every grant's engine may drive (the home's device channel; empty = none)", c.parseDevices)
-	fs.BoolVar(&c.Node.AllCaps, "all-caps", false, "proc and runc: keep every capability. By default fiberd re-executes with only the measured set its runtime needs, and refuses to start if it cannot drop the rest")
+	fs.BoolVar(&c.Node.AllCaps, "all-caps", false, "keep every capability. By default fiberd re-executes with only the measured set its runtime needs (proc, runc, gvisor, hyperlight), and refuses to start if it cannot drop the rest")
 
 	fs.StringVar(&c.API.Listen, "listen", ":8484", "gRPC listen address for the Fibers service")
 	fs.StringVar(&c.API.HTTP, "http", "", "optional JSON gateway listen address (off when empty)")
@@ -298,17 +298,12 @@ func (c *Config) parseDevices(v string) error {
 }
 
 // NarrowCaps re-executes fiberd with only what its runtime needs in
-// its capability bounding set, unless -all-caps. Call it in main right
-// after parsing the flags, since the process starts over. Only proc and runc have
-// measured sets. It fails closed. If it cannot drop the extra, it returns
-// an error and the caller should exit.
+// its capability bounding set, unless -all-caps.
 func (c *Config) NarrowCaps() error {
 	keep, measured := caps.ForRuntime(c.Runtime.Name)
 	if measured && c.Runtime.Engine.Command != "" {
-		// The engine's directory goes to its uid (Chown), and its
-		// process drops to that uid and gid (SetUID, SetGID).
 		keep = append([]int(nil), keep...)
-		for _, n := range []int{caps.Chown, caps.SetUID, caps.SetGID} {
+		for _, n := range caps.Engine {
 			if !slices.Contains(keep, n) {
 				keep = append(keep, n)
 			}
@@ -321,7 +316,11 @@ func (c *Config) NarrowCaps() error {
 	for _, n := range keep {
 		names = append(names, caps.Names[n])
 	}
-	log.Printf("fiberd: re-executing with only %s in the capability bounding set (-all-caps keeps them all)", strings.Join(names, ", "))
+	set := "an empty capability bounding set"
+	if len(names) > 0 {
+		set = "only " + strings.Join(names, ", ") + " in the capability bounding set"
+	}
+	log.Printf("fiberd: re-executing with %s (-all-caps keeps them all)", set)
 	if err := capsNarrow(keep); err != nil {
 		return fmt.Errorf("fiberd: narrow capabilities for -runtime=%s: %w (grant CAP_SETPCAP, or pass -all-caps to keep every capability)", c.Runtime.Name, err)
 	}

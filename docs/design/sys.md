@@ -15,8 +15,8 @@ The backends share four needs that are not about any one sandbox. A [fiber](../g
 ```mermaid
 flowchart TD
   S[fiberd starts] --> M{runtime measured?}
-  M -->|gVisor, Hyperlight| K[keep everything] --> R[run]
-  M -->|proc, runc| E{holds anything outside the keep set?}
+  M -->|Cloud Hypervisor, stub| K[keep everything] --> R[run]
+  M -->|proc, runc, gVisor, Hyperlight| E{holds anything outside the keep set?}
   E -->|no| R
   E -->|"yes, with -all-caps"| R
   E -->|yes| D{CAP_SETPCAP held?}
@@ -30,6 +30,10 @@ flowchart TD
 | --- | --- | --- |
 | proc (7) | SYS_ADMIN, SYS_CHROOT, SYS_TIME, NET_ADMIN, SETPCAP, SYS_PTRACE, SYS_RESOURCE | Namespaces, mounts and cgroups. CRIU restoring a fiber's mount and time namespaces, and TCP repair. The [zygote](../glossary.md#zygote) emptying each fiber's bounding set. CRIU attaching to fibers it did not start, which Yama's default `ptrace_scope` 1 allows only with SYS_PTRACE, and raising its open-file limit |
 | runc (11) | the seven plus CHOWN, DAC_OVERRIDE, SETGID, SETUID | runc writes the mapped root's id maps and chowns `exec.fifo` to it. runc, criu and fiberd open files the mapped root owns with modes that keep root out. KILL is not needed, since fibers and the container's init end through their cgroups |
+| gVisor (4) | SYS_ADMIN, SETGID, SETUID, SETFCAP | SYS_ADMIN mounts the templates tmpfs and makes the sandbox's namespaces. Without any one of the other three, runsc cannot fork and exec its gofer process. The Sentry serves the fibers' syscalls and CRIU is not involved, so nothing proc keeps for CRIU is needed |
+| Hyperlight (0) | nothing | The helper opens `/dev/kvm` by its file mode, and the guest is behind the hypervisor |
+
+A home with a device [engine](../glossary.md#engine) keeps CHOWN, SETUID, SETGID and SETPCAP on top of its runtime's set. The engine's directory goes to its uid, its process drops to that uid and gid, and its bounding set is emptied before its exec.
 
 fiberd re-executes with its keep set unless `-all-caps`. One that holds more but lacks SETPCAP refuses to start rather than run with everything.
 
@@ -38,5 +42,5 @@ fiberd re-executes with its keep set unless `-all-caps`. One that holds more but
 ## Security notes and known gaps
 
 - SYS_ADMIN is broad. Namespaces, mounts and cgroups need it, and it covers far more. The fibers hold none of it on proc, and on runc only inside their user namespace.
-- Unmeasured runtimes keep everything. With gVisor or Hyperlight fiberd runs with the capabilities it started with.
+- Cloud Hypervisor and the stub are not measured. With them fiberd keeps the capabilities it started with.
 - The measured sets assume fibers run as fiberd's user. A proc [template](../glossary.md#template) that switches user is likely to need more.

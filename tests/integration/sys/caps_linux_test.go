@@ -219,6 +219,8 @@ func TestCapsNarrow(t *testing.T) {
 	}{
 		{name: "down to the proc set", keep: caps.Proc, wantGen: 1},
 		{name: "down to the runc set", keep: caps.Runc, wantGen: 1},
+		{name: "down to the gvisor set", keep: caps.GVisor, wantGen: 1},
+		{name: "down to nothing, the hyperlight set", keep: caps.Hyperlight, wantGen: 1},
 		{name: "nothing beyond keep, no re-exec", keep: allCaps, wantGen: 0},
 		{name: "an inheritable and ambient capability outside keep is dropped", keep: caps.Proc, wantGen: 1,
 			wrapper:   []string{setpriv, "--inh-caps=+chown", "--ambient-caps=+chown"},

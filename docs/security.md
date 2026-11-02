@@ -77,7 +77,7 @@ An `UNTRUSTED` grant, the default, is admitted only on a backend that isolates t
 
 ## fiberd privileges
 
-With proc or runc, fiberd re-executes at start with only the capabilities that runtime needs. A fiberd that cannot drop the rest refuses to start, unless `-all-caps`. Nobody has measured what gVisor and Hyperlight need, so with them fiberd keeps what it started with. [sys.md](design/sys.md) explains each capability, and [kubernetes.md](design/kubernetes.md) how the example Pod applies the set.
+With proc, runc, gVisor or Hyperlight, fiberd re-executes at start with only the capabilities that runtime needs, which for Hyperlight is none. A fiberd that cannot drop the rest refuses to start, unless `-all-caps`. Nobody has measured what Cloud Hypervisor needs, so with it fiberd keeps what it started with. [sys.md](design/sys.md) explains each capability, and [kubernetes.md](design/kubernetes.md) how the example Pod applies the set.
 
 ## Templates and deltas
 
@@ -98,7 +98,7 @@ Every state transition appends a hash-chained record to fiberd's private spool, 
 - runc has no egress, and costs a rootfs copy per grant.
 - A runc fiber reads fiberd's network devices under its read-only `/sys` ([user-namespaces.md](design/user-namespaces.md)).
 - `SYS_ADMIN` is broad.
-- Unmeasured runtimes keep every capability.
+- Cloud Hypervisor is not measured, so fiberd keeps every capability with it.
 - Only the template can reseed. A template that ignores its record serves the random state its copy carries. A park image holds the state the last seed produced, so two resumes of one park start alike until each reseeds from its own record. A Python template's fibers share one string hash seed ([sdk.md](design/sdk.md)). The aarch64 Hyperlight guest mixes no hardware entropy into the host's seed ([PROTOCOL.md](../hack/hyperlight/PROTOCOL.md)).
 - The fiber filter is a denylist, so a kernel call nobody has named yet is allowed, and `ioctl` is not filtered ([seccomp.md](design/seccomp.md)).
 - On runc, a thread a template starts before `fz_serve` keeps the container's capabilities. Its fibers do not ([seccomp.md](design/seccomp.md)).
