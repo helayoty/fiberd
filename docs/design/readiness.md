@@ -12,14 +12,13 @@ fiberd mints [fibers](../glossary.md#fiber) offline against a signed [grant](../
 flowchart LR
   subgraph T[Transport and grants]
     P[examples run plaintext] --> G1[gate 1]
-    GF[grant fields replaced in place] --> G10[gate 10]
-    LD[grant directory writable] --> G11[gate 11]
+    LD[grant directory writable] --> G10[gate 10]
   end
   subgraph S[State]
     E[epoch on emptyDir] --> G3[gate 3]
     R[release best effort] --> G4[gate 4]
     D[parked state undeletable] --> G5[gate 5]
-    W[Watch has no tombstone] --> G12[gate 12]
+    W[Watch has no tombstone] --> G11[gate 11]
   end
   subgraph M[Mobility and audit]
     C[fresh-state fallback] --> G6[gate 6]
@@ -46,9 +45,8 @@ flowchart LR
 7. A full disk and a failed fsync are visible in monitoring, and the spool is copied off the host where records matter.
 8. Readiness, [scope](../glossary.md#scope) loss, deletion and, where sessions must survive a stop, the [drain](../glossary.md#drain) within the platform's grace period are tested against the real platform, not only through the test hooks ([fiberd.md](fiberd.md)).
 9. The conformance suite passes on the exact production backend and configuration, and the benchmarks are re-run there with the method in [benchmarks.md](../benchmarks.md).
-10. Issuers change only the lease of a grant UID and mint a new UID for any other change ([core.md](core.md)).
-11. Only the control plane can write each home's grant directory ([home.md](home.md)).
-12. Callers reconcile their grants through an inventory other than Watch ([core.md](core.md)).
+10. Only the control plane can write each home's grant directory ([home.md](home.md)).
+11. Callers reconcile their grants through an inventory other than Watch ([core.md](core.md)).
 
 ## Security notes and known gaps
 

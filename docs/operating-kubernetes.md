@@ -82,7 +82,7 @@ The grant Pod keeps its state, the [epoch](glossary.md#epoch) included, in `/var
 | `spec.pod.labels`, `spec.pod.annotations` | Added to the Pod |
 | `spec.pod.unsafeAdmin` | Test-only controls, which need an image built with the test hooks ([fiberd.md](design/fiberd.md)). Keep it false |
 
-A changed `spec.pod` never reaches a running Pod, so recreate the `CapacityGrant` for a Pod-level change. Renewals reuse the resource UID as the grant UID, so change only the lease in place and create a new resource for anything else ([why](design/core.md#security-notes-and-known-gaps)).
+A changed `spec.pod` never reaches a running Pod, so recreate the `CapacityGrant` for a Pod-level change. Renewals reuse the resource UID as the grant UID, and fiberd refuses a known grant UID whose spec changed beyond the lease ([core.md](design/core.md#how-it-works)). Create a new resource for any other change.
 
 ## Example
 

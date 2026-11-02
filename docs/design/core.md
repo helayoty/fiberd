@@ -56,9 +56,10 @@ The commit is the step where the ledger records the new fiber as running. It kee
 - Parked sessions whose delta still exists are remembered. Every fiber the runtime still reports is from a prior epoch and is killed.
 - An epoch bump without a restart releases every running fiber and keeps grants and parked deltas ([home.md](home.md) says when).
 
-**Revocation.**
+**Leases and revocation.**
 
 - Every 5 seconds a reaper yields every grant whose [lease](../glossary.md#lease) lapsed. A valid token re-admits it.
+- A grant delivered again under an admitted UID may change only its lease, its caller's thumbprint and its token. Any other change is refused, so an [issuer](../glossary.md#issuer) mints a new UID for it. The lease becomes the delivered one, longer or shorter. The [warm](../glossary.md#warm) [template](../glossary.md#template) stays through a renewal.
 - When the home removes a grant, the grant is yielded and its UID also goes on a deny-list. Only the home delivering the grant again lifts the entry, never a Clone.
 - The deny-list is its own file, because an unreadable snapshot counts as empty and a deny-list never may. An unreadable deny-list fails the start.
 - An entry lasts until the later of the latest lease seen and `-max-lease` past removal (24 hours without it). A grant with no lease is denied for good.
@@ -74,7 +75,6 @@ The commit is the step where the ledger records the new fiber as running. It kee
 ## Security notes and known gaps
 
 - **Release is best effort.** Yield and the epoch bump log a failed runtime release and still drop the fiber from the ledger. The work can outlive its revocation while its slot looks free.
-- **Grant fields are not immutable per UID.** A redelivery by the home replaces the admitted fields in place, and the [warm](../glossary.md#warm) [template](../glossary.md#template) stays. A Clone whose token names another caller than the admitted grant is refused. Other fields are not compared, and the fiber runs under the admitted ones, so a lower W or device budget or a stricter durability delivered since the token was minted applies to it. [Issuers](../glossary.md#issuer) should change only the lease for a UID and mint a new UID for anything else.
 - **Revocation is per home.** Every home holding the grant must remove it.
 - **Watch has no tombstone.** A grant that leaves emits no record.
 - **Epoch loss.** A deleted epoch file looks like a first boot and restarts fences at 1, so the private state must live as long as the home's identity.

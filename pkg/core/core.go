@@ -270,10 +270,10 @@ func (a *Core) Clone(ctx context.Context, req CloneRequest) (CloneResponse, Stat
 			return CloneResponse{}, code, err
 		}
 	}
-	// The clone runs under the admitted grant, not the token's claims. The
-	// home may have delivered a lower W or device budget or a stricter
-	// durability since this token was minted, and an older token must not
-	// get around it. A grant revoked meanwhile is left to the ledger, which
+	// The clone runs under the admitted grant, not the token's claims. A
+	// token minted under the same UID may claim other budgets or another
+	// durability than the grant the home admitted, and it must not get
+	// around them. A grant revoked meanwhile is left to the ledger, which
 	// refuses the resolve.
 	if held, ok := a.Ledger.Grant(g.UID); ok {
 		if held.CallerThumbprint != g.CallerThumbprint {
@@ -611,11 +611,14 @@ func (a *Core) Admit(ctx context.Context, g Grant) (StatusCode, error) {
 			return DeferredFallback, ctx.Err()
 		}
 		// The first admission's result stands in for this one when it
-		// admitted a lease at least as long as this grant's. Otherwise it
-		// failed, or this grant renews the lease or changes the grant's
-		// identity, and this admission runs itself. Another admission may
-		// have started meanwhile, so the slot is taken under the lock again.
-		if held, ok := a.Ledger.Grant(g.UID); ok && !renewsLease(held, g) && !changesIdentity(held, g) {
+		// admitted the same grant for the same caller, with a lease at
+		// least as long. Otherwise it failed, or this grant renews the
+		// lease, names a new caller or changes a fixed field, and this
+		// admission runs itself. A changed fixed field is refused there.
+		// Another admission may have started meanwhile, so the slot is
+		// taken under the lock again.
+		if held, ok := a.Ledger.Grant(g.UID); ok && !renewsLease(held, g) &&
+			held.CallerThumbprint == g.CallerThumbprint && !changesFixedFields(held, g) {
 			return OK, nil
 		}
 		a.admitMu.Lock()
@@ -635,11 +638,11 @@ func (a *Core) Admit(ctx context.Context, g Grant) (StatusCode, error) {
 	if a.Revoked != nil && a.Revoked.Denied(g.UID, g.LeaseExpiry, a.Ledger.Now()) {
 		return a.missCode(ErrGrantRevoked), fmt.Errorf("%w: %s", ErrGrantRevoked, g.UID)
 	}
-	// A re-delivery keeps the admitted grant's identity. The runtime keys
-	// what it holds for the grant (runc's user-ID range, a warm zygote's
-	// rootfs) by it, so a change in place would move them under a live
-	// zygote.
-	if held, ok := a.Ledger.Grant(g.UID); ok && changesIdentity(held, g) {
+	// A re-delivery may move only the lease and the caller. The runtime
+	// keys what it holds for the grant (runc's user-ID range, a warm
+	// zygote's rootfs, its devices) by the rest, so a change in place
+	// would move them under a live zygote.
+	if held, ok := a.Ledger.Grant(g.UID); ok && changesFixedFields(held, g) {
 		return Invalid, fmt.Errorf("%w: grant %s", ErrGrantChanged, g.UID)
 	}
 
@@ -734,11 +737,22 @@ func renewsLease(held, g Grant) bool {
 	return g.LeaseExpiry.IsZero() || held.LeaseExpiry.Before(g.LeaseExpiry)
 }
 
-// changesIdentity reports whether g names another tenant, template or
-// session class than the admitted grant held. Those fields make the
-// grant's session domain, which is fixed while the grant is admitted.
-func changesIdentity(held, g Grant) bool {
-	return held.Tenant != g.Tenant || held.TemplateDigest != g.TemplateDigest || held.Policy.SessionClass != g.Policy.SessionClass
+// changesFixedFields reports whether g differs from the admitted grant
+// in anything but its lease, its caller thumbprint and its token. A
+// renewal moves the lease. The caller's client certificate rotates under
+// the same grant. Every mint signs a new token. Every other field is
+// fixed while the grant is admitted.
+//
+// It compares the whole Grant with those three fields taken from held.
+// A new Grant field is therefore fixed by default. A new field that may
+// change on a re-delivery must be added to the three here. A field that
+// is not comparable (a slice, a map) breaks the == below at compile
+// time and then needs its own comparison here.
+func changesFixedFields(held, g Grant) bool {
+	g.LeaseExpiry = held.LeaseExpiry
+	g.CallerThumbprint = held.CallerThumbprint
+	g.Token = held.Token
+	return g != held
 }
 
 // releaseDevices gives a grant's device channel back, if it holds one.

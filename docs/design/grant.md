@@ -59,6 +59,6 @@ The certificate's thumbprint is the caller on every call. Park, Release and the 
 
 ## Security notes and known gaps
 
-- **A caller's certificate rotation means re-minting.** The thumbprint covers the whole certificate, so a caller with a new certificate needs new grants. Keep leases short.
+- **A caller's certificate rotation means re-minting.** The thumbprint covers the whole certificate, so a caller with a new certificate needs its grants minted again for it, under the same UIDs or new ones. Keep leases short.
 - **An unbound JWT is a bearer token.** Anyone holding it can spend the capacity at the named home. Keep tokens out of logs, annotations and readable files. Over plaintext only unbound grants work.
 - **Without `-max-lease`** a grant may carry no lease and never expire.

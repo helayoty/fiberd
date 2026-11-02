@@ -170,15 +170,18 @@ func (c *waitCtx) Done() <-chan struct{} {
 
 // TestAdmitWaitsForInflight admits a grant twice at once. The second
 // waits for the first instead of warming the template again, and shares
-// what the first admitted. It admits itself when the first failed, or
-// when it carries a longer lease than the first admitted, so neither a
-// retry nor a renewal is lost. A second whose context ends stops waiting.
+// what the first admitted. It admits itself when the first failed, when
+// it carries a longer lease than the first admitted, or when it names a
+// new caller, so no retry, renewal or rotation is lost. A second that
+// changes a fixed field is refused. A second whose context ends stops
+// waiting.
 func TestAdmitWaitsForInflight(t *testing.T) {
 	lease := time.Now().Add(time.Hour)
 	cases := []struct {
 		name         string
-		firstErr     error         // what the first admission's template warm answers
-		secondLease  time.Duration // the second grant's lease, relative to the first's; 0 is the same
+		firstErr     error               // what the first admission's template warm answers
+		secondLease  time.Duration       // the second grant's lease, relative to the first's; 0 is the same
+		second       func(g *core.Grant) // changes the second grant further, nil for none
 		cancelSecond bool
 		wantFirst    core.StatusCode
 		wantSecond   core.StatusCode
@@ -196,6 +199,10 @@ func TestAdmitWaitsForInflight(t *testing.T) {
 			wantFirst: core.OK, wantSecond: core.OK, wantAdmitted: true, wantWarms: 2, wantLease: time.Hour},
 		{name: "a second with a shorter lease shares the first's success", secondLease: -30 * time.Minute,
 			wantFirst: core.OK, wantSecond: core.OK, wantAdmitted: true, wantWarms: 1},
+		{name: "a second for a new caller admits it after the first", second: func(g *core.Grant) { g.CallerThumbprint = "x5t-new" },
+			wantFirst: core.OK, wantSecond: core.OK, wantAdmitted: true, wantWarms: 2},
+		{name: "a second that changes a fixed field is refused after the first", second: func(g *core.Grant) { g.FiberMax = 8 },
+			wantFirst: core.OK, wantSecond: core.Invalid, wantErr: core.ErrGrantChanged, wantAdmitted: true, wantWarms: 1},
 	}
 	type result struct {
 		code core.StatusCode
@@ -228,6 +235,9 @@ func TestAdmitWaitsForInflight(t *testing.T) {
 			ctx := &waitCtx{Context: base, waiting: make(chan struct{})}
 			g2 := g
 			g2.LeaseExpiry = lease.Add(tc.secondLease)
+			if tc.second != nil {
+				tc.second(&g2)
+			}
 			second := make(chan result, 1)
 			go func() {
 				code, err := a.Admit(ctx, g2)
@@ -261,6 +271,104 @@ func TestAdmitWaitsForInflight(t *testing.T) {
 			}
 			if ok && !held.LeaseExpiry.Equal(lease.Add(tc.wantLease)) {
 				t.Fatalf("admitted lease = %s, want %s", held.LeaseExpiry.Sub(lease), tc.wantLease)
+			}
+			if ok && (held.CallerThumbprint != g2.CallerThumbprint || held.FiberMax != g.FiberMax) {
+				t.Fatalf("admitted caller %q fiber max %d, want %q %d", held.CallerThumbprint, held.FiberMax, g2.CallerThumbprint, g.FiberMax)
+			}
+		})
+	}
+}
+
+// TestAdmitRedeliveryKeepsFixedFields delivers an admitted grant again
+// under the same UID with one field changed. Only the lease, the caller
+// thumbprint and the token may change. A change to any other field is
+// refused and leaves the admitted grant as it was. An accepted
+// re-delivery replaces the admitted grant.
+func TestAdmitRedeliveryKeepsFixedFields(t *testing.T) {
+	lease := time.Now().Add(time.Hour)
+	base := core.Grant{
+		UID: "g1", Issuer: "https://issuer.example", Audience: "node-a", TemplateDigest: "sha256:t", Tenant: "acme",
+		FiberMax: 4, FiberWarm: 1, WBudgetBytes: 1 << 20, MinTier: core.TierWarm, LeaseExpiry: lease,
+		Policy: core.Policy{Durability: core.BestEffort, SessionClass: "chat", AuditClass: "default",
+			PSISomeAvg10Shed: 20, PSISomeAvg10Park: 40, Isolation: core.Untrusted, EndpointMode: core.EndpointDirect},
+		DeviceBudget:     core.DeviceBudget{Class: "sim"},
+		DiskBudgetBytes:  1 << 20,
+		CallerThumbprint: "x5t-old",
+		Token:            "token-old",
+	}
+	cases := []struct {
+		name    string
+		change  func(g *core.Grant)
+		want    core.StatusCode
+		wantErr error
+	}{
+		{name: "another issuer is refused", change: func(g *core.Grant) { g.Issuer = "https://other.example" },
+			want: core.Invalid, wantErr: core.ErrGrantChanged},
+		{name: "another audience is refused", change: func(g *core.Grant) { g.Audience = "node-b" },
+			want: core.Invalid, wantErr: core.ErrGrantChanged},
+		{name: "another template is refused", change: func(g *core.Grant) { g.TemplateDigest = "sha256:u" },
+			want: core.Invalid, wantErr: core.ErrGrantChanged},
+		{name: "another tenant is refused", change: func(g *core.Grant) { g.Tenant = "globex" },
+			want: core.Invalid, wantErr: core.ErrGrantChanged},
+		{name: "another fiber max is refused", change: func(g *core.Grant) { g.FiberMax = 8 },
+			want: core.Invalid, wantErr: core.ErrGrantChanged},
+		{name: "another fiber warm is refused", change: func(g *core.Grant) { g.FiberWarm = 2 },
+			want: core.Invalid, wantErr: core.ErrGrantChanged},
+		{name: "another W budget is refused", change: func(g *core.Grant) { g.WBudgetBytes = 2 << 20 },
+			want: core.Invalid, wantErr: core.ErrGrantChanged},
+		{name: "another min tier is refused", change: func(g *core.Grant) { g.MinTier = core.TierCheckpoint },
+			want: core.Invalid, wantErr: core.ErrGrantChanged},
+		{name: "another durability is refused", change: func(g *core.Grant) { g.Policy.Durability = core.Sync },
+			want: core.Invalid, wantErr: core.ErrGrantChanged},
+		{name: "another session class is refused", change: func(g *core.Grant) { g.Policy.SessionClass = "batch" },
+			want: core.Invalid, wantErr: core.ErrGrantChanged},
+		{name: "another audit class is refused", change: func(g *core.Grant) { g.Policy.AuditClass = "strict" },
+			want: core.Invalid, wantErr: core.ErrGrantChanged},
+		{name: "another shed watermark is refused", change: func(g *core.Grant) { g.Policy.PSISomeAvg10Shed = 25 },
+			want: core.Invalid, wantErr: core.ErrGrantChanged},
+		{name: "another park watermark is refused", change: func(g *core.Grant) { g.Policy.PSISomeAvg10Park = 45 },
+			want: core.Invalid, wantErr: core.ErrGrantChanged},
+		{name: "another isolation is refused", change: func(g *core.Grant) { g.Policy.Isolation = core.Trusted },
+			want: core.Invalid, wantErr: core.ErrGrantChanged},
+		{name: "another endpoint mode is refused", change: func(g *core.Grant) { g.Policy.EndpointMode = core.EndpointHandoff },
+			want: core.Invalid, wantErr: core.ErrGrantChanged},
+		{name: "another device budget is refused", change: func(g *core.Grant) { g.DeviceBudget.Bytes = 1 << 30 },
+			want: core.Invalid, wantErr: core.ErrGrantChanged},
+		{name: "another device class is refused", change: func(g *core.Grant) { g.DeviceBudget.Class = "gpu" },
+			want: core.Invalid, wantErr: core.ErrGrantChanged},
+		{name: "another disk budget is refused", change: func(g *core.Grant) { g.DiskBudgetBytes = 2 << 20 },
+			want: core.Invalid, wantErr: core.ErrGrantChanged},
+		{name: "a longer lease renews the grant", change: func(g *core.Grant) { g.LeaseExpiry = lease.Add(time.Hour) },
+			want: core.OK},
+		{name: "a shorter lease is admitted", change: func(g *core.Grant) { g.LeaseExpiry = lease.Add(-30 * time.Minute) },
+			want: core.OK},
+		{name: "a new caller thumbprint is admitted", change: func(g *core.Grant) { g.CallerThumbprint = "x5t-new" },
+			want: core.OK},
+		{name: "a new token is admitted", change: func(g *core.Grant) { g.Token = "token-new" },
+			want: core.OK},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a := newCore(t, "up", core.TierCheckpoint)
+			// The runtime routes connections and holds workspaces, so the
+			// endpoint mode and disk budget rows reach the field check.
+			a.Runtime = fakeRuntime{tier: core.TierCheckpoint, exits: make(chan core.FiberExit, 8), routes: true, workspaces: true}
+			ctx := context.Background()
+			if code, err := a.Admit(ctx, base); err != nil || code != core.OK {
+				t.Fatalf("first admit = %d %v, want OK", code, err)
+			}
+			g := base
+			tc.change(&g)
+			code, err := a.Admit(ctx, g)
+			if code != tc.want || !errors.Is(err, tc.wantErr) {
+				t.Fatalf("re-delivery = %d %v, want %d %v", code, err, tc.want, tc.wantErr)
+			}
+			want := g
+			if tc.want != core.OK {
+				want = base
+			}
+			if held, ok := a.Ledger.Grant("g1"); !ok || held != want {
+				t.Fatalf("admitted grant = %+v %v, want %+v", held, ok, want)
 			}
 		})
 	}
@@ -377,7 +485,7 @@ func (r *durableLog) Append(_ context.Context, d core.Durability, rec core.Audit
 // TestCloneUnderAdmittedGrant presents a token whose budgets differ from
 // the grant the home admitted under the same UID. The fiber runs under
 // the admitted W and device budgets and the admitted durability, so a
-// budget the home lowered since the token was minted is enforced. A grant
+// token cannot get around the budgets the home admitted. A grant
 // the home never delivered is admitted from the token and runs under it.
 func TestCloneUnderAdmittedGrant(t *testing.T) {
 	cases := []struct {
