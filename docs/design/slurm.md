@@ -36,7 +36,7 @@ The [home](../glossary.md#home) answers fiberd's questions from what Slurm tells
 
 **Grants.** The grant's audience is the node name. The main path is the job's environment. The submitter passes the token to `sbatch` as `FIBERD_GRANT`, and `fiberd-slurm` verifies it offline against the [issuer](../glossary.md#issuer)'s keys before it serves anything, then stages it in the grants directory, where the grant directory poll reads it. The optional prolog (`PrologFlags=Alloc`) is a second path. It only copies grants an issuer left in the node's spool, and it verifies nothing.
 
-**Job script.** `fiberd-job.sh` runs fiberd for as long as the allocation lasts and restarts it in place if it crashes or its `/healthz` answers 503 ([audit.md](audit.md#health)). A clean exit means fiberd left because its job ended, so the script ends too. The allocation, its cgroup and the state directory survive the restart, and the epoch bumps. slurmstepd signals the job script and the cgroups it made, not the ones fiberd carves beneath the step. So the script forwards SIGTERM to fiberd and exits only once fiberd has finished draining. A fiberd that lingers gets the node drained with "Kill task failed".
+**Job script.** `fiberd-job.sh` runs fiberd for as long as the allocation lasts and restarts it in place if it crashes or its `/healthz` answers 503 ([audit.md](audit.md#health)). A clean exit means fiberd left because its job ended, so the script ends too. The allocation, its cgroup and the state directory survive the restart, and the epoch bumps. slurmstepd signals the job script and the cgroups it made, not the ones fiberd carves beneath the step. So the script forwards SIGTERM to fiberd and exits only once fiberd has stopped. To keep sessions across that stop, set `-drain-timeout` below `KillWait`, so fiberd [drains](../glossary.md#drain) first ([fiberd.md](fiberd.md)). A fiberd that lingers past `KillWait` gets the node drained by Slurm with "Kill task failed".
 
 **Swap closed.** fiberd closes swap on the grant cgroup so the [pressure ladder](core.md) sees pressure ([resources.md](resources.md)), and the example's `cgroup.conf` gives jobs no swap as well.
 
@@ -46,4 +46,5 @@ The [home](../glossary.md#home) answers fiberd's questions from what Slurm tells
 
 - This example runs fiberd with `-insecure-plaintext`. Production serves mutual TLS ([grant verification](grant.md)).
 - Without a pids controller, the per-grant task limit is not enforced. Memory is the only bound on forks.
+- A cancelled or timed-out job can show as ended to the home's job probe while fiberd drains. The home then bumps the epoch, which ends every fiber not yet parked, and signals fiberd again, which ends the drain.
 - The grant travels in the job's environment (`FIBERD_GRANT`). It is a bearer token for whoever can read that environment until its lease ends.

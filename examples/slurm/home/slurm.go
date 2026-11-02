@@ -70,9 +70,12 @@ type Config struct {
 	RunProbe func(ctx context.Context, argv []string) ([]byte, error)
 	// OnJobEnd runs after the scope-loss hook when the job reached a
 	// terminal state: the allocation is over, so is fiberd. Default:
-	// SIGTERM to this process, which fiberd takes as a graceful stop
-	// (slurmstepd kills the step's own cgroups, not the ones fiberd made
-	// beneath them, so fiberd must leave on its own).
+	// SIGTERM to this process, so fiberd stops, after a drain when
+	// -drain-timeout is set. The scope-loss epoch bump has already ended
+	// the running fibers, so such a drain finds none, and one already
+	// under way ends at this second signal.
+	// slurmstepd kills the step's own cgroups, not the ones fiberd made
+	// beneath them, so fiberd must leave on its own.
 	OnJobEnd func()
 }
 

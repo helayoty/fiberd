@@ -154,13 +154,31 @@ func HealthFunc(epoch func() uint64, health *core.SourceHealth, tier core.Tier, 
 	}
 }
 
+// WithDraining adds "draining": true to what health returns while
+// draining reports true, for a readiness check. WriteHealth answers that
+// body with 503, so a readiness probe takes the home out of its endpoints
+// while it parks its sessions before it stops. A liveness check keeps
+// health unwrapped, since a 503 there means restart fiberd.
+func WithDraining(health func() map[string]any, draining func() bool) func() map[string]any {
+	return func() map[string]any {
+		m := health()
+		if draining() {
+			m["draining"] = true
+		}
+		return m
+	}
+}
+
 // WriteHealth writes a /healthz body. The status is 503 when the audit
 // spool is poisoned, because every Sync operation fails until fiberd
-// restarts. A probe that sees it restarts the home or drains it. An unreachable
-// issuer stays 200, since fiberd fences it and recovers on its own.
+// restarts. A probe that sees it restarts the home or drains it. A
+// readiness body from WithDraining is 503 too while fiberd drains before
+// it stops. An unreachable issuer stays 200, since fiberd fences it and
+// recovers on its own.
 func WriteHealth(w http.ResponseWriter, body map[string]any) {
 	w.Header().Set("Content-Type", "application/json")
-	if a, ok := body["audit"]; ok && a != "ok" {
+	a, audited := body["audit"]
+	if (audited && a != "ok") || body["draining"] == true {
 		w.WriteHeader(http.StatusServiceUnavailable)
 	}
 	_ = json.NewEncoder(w).Encode(body)

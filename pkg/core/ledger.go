@@ -253,7 +253,11 @@ func (h *sessionHold) release() {
 //
 // hold is nil for an anonymous fiber. Every unlock returned releases it,
 // on the error paths too.
-func (l *Ledger) resolveHeld(hold *sessionHold, grantUID, session string, tier Tier) (Action, Fence, string, func(Session) bool, func(), error) {
+//
+// refuse, when set, is asked inside commit's hold of l.mu, and a true
+// answer refuses the commit as a revocation would. Core passes Draining,
+// so a commit either lands before a drain lists the fibers or is refused.
+func (l *Ledger) resolveHeld(hold *sessionHold, grantUID, session string, tier Tier, refuse func() bool) (Action, Fence, string, func(Session) bool, func(), error) {
 	key := grantUID + "/" + session
 
 	l.mu.Lock()
@@ -297,6 +301,13 @@ func (l *Ledger) resolveHeld(hold *sessionHold, grantUID, session string, tier T
 		// the fiber or refuses it, never neither. Comparing the entry by
 		// pointer, not presence, catches a revoke then re-admission.
 		if l.grants[grantUID] != g || s.Fence.Epoch != l.epoch {
+			return false
+		}
+		// Asked under the same hold of l.mu. Drain sets its flag and only
+		// then lists the fibers, each list under l.mu. A commit that saw
+		// the flag clear held l.mu before that list began, so the list has
+		// its fiber. A commit that sees it set is refused here.
+		if refuse != nil && refuse() {
 			return false
 		}
 		committed = true

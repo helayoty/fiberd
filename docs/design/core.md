@@ -12,19 +12,20 @@ A [home](../glossary.md#home) mints [fibers](../glossary.md#fiber) locally, in m
 stateDiagram-v2
   [*] --> Running: create (new fence)
   Running --> Running: attach (same fence)
-  Running --> Parked: park
+  Running --> Parked: park, drain
   Parked --> Running: resume (new fence)
-  Running --> [*]: release, exit, yield, epoch bump
+  Running --> [*]: release, exit, yield, drain, epoch bump
   Parked --> [*]: claimed by another home
 ```
 
-- **Ends.** A running fiber ends by [release](../glossary.md#release), its own exit, a [yield](../glossary.md#yield) of its grant or an epoch bump. A parked one leaves when another home claims its [delta](../glossary.md#delta). A resumed delta is consumed by its resume. It stays on disk only while that fiber runs, and goes however the fiber ends, including a restart that finds the session was running. Parked deltas stay.
+- **Ends.** A running fiber ends by [release](../glossary.md#release), its own exit, a [yield](../glossary.md#yield) of its grant or an epoch bump. An opt-in [drain](../glossary.md#drain) before fiberd stops parks the named sessions and releases the rest. A parked one leaves when another home claims its [delta](../glossary.md#delta). A resumed delta is consumed by its resume. It stays on disk only while that fiber runs, and goes however the fiber ends, including a restart that finds the session was running. Parked deltas stay.
 - **Session gates.** Every Clone of one session name runs under that name's gate, so concurrent Clones and retries attach instead of creating a twin.
 - **Exits.** A fiber that dies on its own frees its slot and its session is forgotten. Its state is gone, so the ledger never calls it [parked](../glossary.md#park).
 
 ```mermaid
 flowchart TD
   V[Verify grant and caller] --> B{Clone rate limit left?}
+  V -- draining --> MISS
   B -- no --> SHED
   B -- yes --> R[Resolve under the session gate]
   R -- running session --> AT[Attach, same fence]

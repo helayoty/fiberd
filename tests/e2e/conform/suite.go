@@ -351,9 +351,9 @@ func (c *client) c3(t *testing.T) {
 	expectCode(t, "park with a pre-restart fiber id", perr, codes.NotFound)
 	_, rerr := c.api.Release(ctx, &grantv1.ReleaseRequest{FiberId: r1.GetFiberId()})
 	expectCode(t, "release with a pre-restart fiber id", rerr, codes.NotFound)
-	// New fence: strictly greater epoch. The session name is fresh again
-	// (no snapshot yet), so this is CREATE; with a ledger snapshot it may
-	// be RESUME. Either way the epoch moved.
+	// New fence: strictly greater epoch. A target that drains on its
+	// restart's SIGTERM parks S, so this is RESUME where it also keeps
+	// deltas durably, and CREATE otherwise. Either way the epoch moved.
 	r2, err := c.clone(ctx, tok, "S", nil)
 	if err != nil {
 		t.Fatalf("clone after restart: %v", err)

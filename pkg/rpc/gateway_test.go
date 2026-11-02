@@ -239,6 +239,11 @@ func TestGatewayHealthz(t *testing.T) {
 		{name: "an unreachable issuer and a poisoned spool are both reported", gw: &rpc.Gateway{Health: rpc.HealthFunc(func() uint64 { return 7 }, stale, core.TierBasic, poisoned)},
 			status: http.StatusServiceUnavailable,
 			want:   map[string]any{"epoch": float64(7), "tier": core.TierBasic.String(), "issuerReachable": false, "audit": "poisoned"}},
+		{name: "a home that is not draining has no draining key", gw: &rpc.Gateway{Health: rpc.WithDraining(rpc.HealthFunc(func() uint64 { return 8 }, fresh, core.TierBasic, ok), func() bool { return false })},
+			status: http.StatusOK, want: map[string]any{"epoch": float64(8), "tier": core.TierBasic.String(), "issuerReachable": true, "audit": "ok"}},
+		{name: "a draining home is 503 and says so", gw: &rpc.Gateway{Health: rpc.WithDraining(rpc.HealthFunc(func() uint64 { return 9 }, fresh, core.TierBasic, ok), func() bool { return true })},
+			status: http.StatusServiceUnavailable,
+			want:   map[string]any{"epoch": float64(9), "tier": core.TierBasic.String(), "issuerReachable": true, "audit": "ok", "draining": true}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

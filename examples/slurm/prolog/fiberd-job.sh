@@ -7,10 +7,11 @@
 # passed to fiberd-slurm; the grant comes from $FIBERD_GRANT or -grant.
 #
 # When the allocation ends (scancel, time limit) slurmstepd signals this
-# script; fiberd, which lives in a cgroup of its own beneath the step,
-# gets the signal forwarded and stops gracefully, taking its templates and
-# fibers with it, so the step drains before Slurm's KillWait and the node
-# is not drained for a "Kill task failed".
+# script. fiberd lives in a cgroup of its own beneath the step, so the
+# script forwards the SIGTERM. fiberd stops and takes its templates and
+# fibers with it, after parking its named sessions when -drain-timeout is
+# set. That budget must end before Slurm's KillWait, or the node is
+# drained for a "Kill task failed".
 #
 # While fiberd runs, the script polls its /healthz on the admin socket
 # every $FIBERD_HEALTH_EVERY seconds (default 10). A 503 means the audit
@@ -54,7 +55,7 @@ while [ "$stopping" = 0 ]; do
   watcher=$!
   wait "$fiberd"
   rc=$?
-  # A trapped signal ends the wait early. Wait again for fiberd's drain.
+  # A trapped signal ends the wait early. Wait again for fiberd to stop.
   [ "$stopping" = 1 ] && wait "$fiberd" 2>/dev/null
   kill "$watcher" 2>/dev/null
   wait "$watcher" 2>/dev/null

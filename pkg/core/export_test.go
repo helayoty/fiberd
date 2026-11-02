@@ -49,7 +49,7 @@ func (l *Ledger) Resolve(grantUID, session string, tier Tier) (Action, Fence, st
 	if session != "" {
 		hold = l.holdSession(grantUID, session)
 	}
-	return l.resolveHeld(hold, grantUID, session, tier)
+	return l.resolveHeld(hold, grantUID, session, tier, nil)
 }
 
 // SessionGates is how many per-session gates the ledger holds right now.

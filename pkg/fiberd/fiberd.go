@@ -103,6 +103,9 @@ type Config struct {
 	// auditHealth, when set, replaces the spool's Poisoned on /healthz.
 	// Tests use it, since a real fsync cannot be made to fail.
 	auditHealth func() error
+	// wrapRuntime, when set, wraps the runtime -runtime picked. Tests use
+	// it to hold a park.
+	wrapRuntime func(core.Runtime) core.Runtime
 }
 
 // Node is this home's identity and what it owns on the host.
@@ -114,6 +117,10 @@ type Node struct {
 	StaleTTL   time.Duration // -stale-ttl
 	Devices    []string      // -devices
 	AllCaps    bool          // -all-caps
+	// DrainTimeout is how long a SIGTERM may spend parking named sessions
+	// and ending anonymous fibers before fiberd stops. Zero, the default,
+	// stops at once, so the drain is opt-in.
+	DrainTimeout time.Duration // -drain-timeout
 }
 
 // API is where fiberd serves and how callers prove who they are.
@@ -229,6 +236,7 @@ func (c *Config) Bind(fs *flag.FlagSet) {
 	fs.StringVar(&c.Node.CgroupRoot, "cgroup-root", "/sys/fs/cgroup/fiberd", "delegated cgroup v2 subtree the runtime may carve (homes that own their cgroup ignore it)")
 	fs.StringVar(&c.Node.GrantsDir, "grants-dir", "", "directory polled for *.jwt files to pre-admit (warm before the first Clone)")
 	fs.DurationVar(&c.Node.StaleTTL, "stale-ttl", 30*time.Second, "the issuer counts as unreachable past this silence from the control plane")
+	fs.DurationVar(&c.Node.DrainTimeout, "drain-timeout", 0, "how long a SIGTERM may spend parking named sessions and ending anonymous fibers before fiberd stops. 0, the default, stops at once. A budget turns the drain on: clones are refused and the admin socket's /readyz answers 503 meanwhile, and a second signal stops at once")
 	fs.Func("devices", "comma-separated devices every grant's engine may drive (the home's device channel; empty = none)", c.parseDevices)
 	fs.BoolVar(&c.Node.AllCaps, "all-caps", false, "keep every capability. By default fiberd re-executes with only the measured set its runtime needs (proc, runc, gvisor, hyperlight), and refuses to start if it cannot drop the rest")
 
@@ -468,8 +476,43 @@ func (c *Config) endpointPolicy() (endpoint.Policy, error) {
 func (c *Config) AdminSocket() string { return filepath.Join(c.PrivateDir(), "admin.sock") }
 
 // Run is fiberd. It returns when the RPC server stops, on SIGINT or
-// SIGTERM.
+// SIGTERM. With -drain-timeout set, a SIGTERM drains first, for up to
+// that long.
 func Run(c *Config, newHome HomeFactory) error { return RunContext(context.Background(), c, newHome) }
+
+// watchSignals waits for SIGINT or SIGTERM, or for ctx to end, and then
+// calls stop. A SIGTERM with a timeout above zero runs drain first, for
+// at most that long. A second signal during the drain ends it early, and
+// the parks under way are waited for, since the runtime bounds them. From
+// then on signals are not caught, so a third one ends fiberd at once by
+// its default action.
+func watchSignals(ctx context.Context, stop context.CancelFunc, sigs chan os.Signal, timeout time.Duration, drain func(context.Context) core.DrainReport) {
+	defer stop()
+	var sig os.Signal
+	select {
+	case <-ctx.Done():
+		return
+	case sig = <-sigs:
+	}
+	if sig != syscall.SIGTERM || timeout <= 0 {
+		return
+	}
+	log.Printf("fiberd: SIGTERM, draining for up to %s", timeout)
+	dctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	done := make(chan core.DrainReport, 1)
+	go func() { done <- drain(dctx) }()
+	select {
+	case rep := <-done:
+		log.Printf("fiberd: drained, %s", rep)
+		return
+	case sig = <-sigs:
+		log.Printf("fiberd: %s during the drain, stopping now (another signal kills fiberd)", sig)
+		signal.Stop(sigs)
+		cancel()
+	}
+	log.Printf("fiberd: drain cut short, %s", <-done)
+}
 
 // RunContext is Run that also stops when ctx ends. A binary that owns its
 // process's lifetime, and a test, stop fiberd through ctx.
@@ -642,6 +685,9 @@ func RunContext(ctx context.Context, c *Config, newHome HomeFactory) error {
 	default:
 		return fmt.Errorf("runtime %q is not available yet", c.Runtime.Name)
 	}
+	if c.wrapRuntime != nil {
+		rt = c.wrapRuntime(rt)
+	}
 	private := c.PrivateDir()
 
 	// 1. Epoch: every prior fence is invalid from here on.
@@ -687,8 +733,19 @@ func RunContext(ctx context.Context, c *Config, newHome HomeFactory) error {
 		StatusInterval:     c.Timing.StatusEvery,
 	}
 
-	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	// Signals. Everything below stops when ctx ends, and the watcher ends
+	// it. SIGINT does so at once. SIGTERM drains first, when
+	// -drain-timeout allows, while the loops and servers still run. The
+	// watcher is waited for before the spool and the runtime close, since
+	// a drain writes to both.
+	ctx, stop := context.WithCancel(ctx)
+	var watcher sync.WaitGroup
+	defer watcher.Wait()
 	defer stop()
+	sigs := make(chan os.Signal, 2)
+	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sigs)
+	watcher.Go(func() { watchSignals(ctx, stop, sigs, c.Node.DrainTimeout, ag.Drain) })
 
 	// 3. Reconcile: the snapshot says what to re-admit and which parked
 	// sessions to remember; the runtime says what is actually running,
@@ -747,8 +804,13 @@ func RunContext(ctx context.Context, c *Config, newHome HomeFactory) error {
 		auditHealth = c.auditHealth
 	}
 	healthz := rpc.HealthFunc(ep.Current, h.Health(), rt.Tier(), auditHealth)
+	// /readyz is /healthz that also answers 503 while fiberd drains, for a
+	// readiness probe. /healthz stays as it is during a drain, since a
+	// 503 there means restart fiberd, which would cut the drain short.
+	readyz := rpc.WithDraining(healthz, ag.Draining)
 	admin := http.NewServeMux()
 	admin.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { rpc.WriteHealth(w, healthz()) })
+	admin.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) { rpc.WriteHealth(w, readyz()) })
 	// The device report, when the runtime starts engines. Without it the
 	// mux answers 404.
 	if dr, ok := rt.(core.DeviceReporter); ok {

@@ -56,6 +56,9 @@ End a [fiber](#fiber) and free its memory and its place under `fibers.max`. The 
 ## Yield
 Give up a [grant](#grant) on one [home](#home). [fiberd](#fiberd) revokes it, [releases](#release) its running fibers and keeps its parked [deltas](#delta). A lapsed [lease](#lease), a grant the home takes back and the last rung of the pressure ladder each yield a grant.
 
+## Drain
+What [fiberd](#fiberd) does on SIGTERM before it stops, when an operator gives it a time budget. Its [home](#home) takes no more [clones](#clone), [parks](#park) its named [sessions](#session) so they can resume elsewhere and [releases](#release) its anonymous fibers. Fibers it does not reach in time end when fiberd stops.
+
 ## Fence
 The identity of one run of a [fiber](#fiber), from the create or resume that starts it until it is parked or ends. It is made of the fiber's [grant](#grant), [fiberd](#fiberd)'s [epoch](#epoch) and a sequence number, and [Clone](#clone) returns it as the fiber ID, written `grant/epoch/seq`, such as `g1/1/2`.
 

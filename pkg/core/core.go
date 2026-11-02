@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -216,6 +217,10 @@ type Core struct {
 	refill   chan struct{}
 	filling  bool
 	lastFill string
+
+	// draining is set by Drain and never cleared. While it is set, Clone
+	// refuses and the refill loop starts nothing.
+	draining atomic.Bool
 }
 
 // Clone is the warm path. Every hop below is home-local memory or disk.
@@ -230,6 +235,11 @@ func (a *Core) Clone(ctx context.Context, req CloneRequest) (CloneResponse, Stat
 			return CloneResponse{}, Shed, fmt.Errorf("capability: %w", err)
 		}
 		return CloneResponse{}, Unauthenticated, fmt.Errorf("capability: %w", err)
+	}
+	// A draining home takes no clone, attach included. The caller falls
+	// back to its home's ordinary path, as for any miss on a healthy home.
+	if a.Draining() {
+		return CloneResponse{}, DeferredFallback, ErrDraining
 	}
 	g.Token = string(req.GrantJWT)
 	if a.NodeID != "" && g.Audience != a.NodeID {
@@ -302,7 +312,7 @@ func (a *Core) Clone(ctx context.Context, req CloneRequest) (CloneResponse, Stat
 	}
 
 	// 4. Ledger: resolve attach | resume | create, mint or reuse the fence.
-	act, fence, ref, commit, unlock, err := a.Ledger.resolveHeld(hold, g.UID, req.Session, a.Runtime.Tier())
+	act, fence, ref, commit, unlock, err := a.Ledger.resolveHeld(hold, g.UID, req.Session, a.Runtime.Tier(), a.Draining)
 	if err != nil {
 		if unlock != nil {
 			unlock()
@@ -388,6 +398,14 @@ func (a *Core) Clone(ctx context.Context, req CloneRequest) (CloneResponse, Stat
 	committed, ex, died := a.commitHeld(commit, Session{Name: req.Session, GrantUID: g.UID, State: StateRunning, Fence: fence, Handle: h, DeltaRef: spec.Ref})
 	if !committed {
 		code, cerr := a.swept(g, fence)
+		if a.Draining() {
+			// A drain began while the runtime worked, and the ledger refused
+			// the commit so the drain cannot miss the fiber. A refused
+			// resume never wrote its session, so the session stays parked
+			// with its delta, and retireDelta below is never reached, so
+			// the published copy stays too.
+			code, cerr = DeferredFallback, ErrDraining
+		}
 		if rerr := a.Runtime.Release(ctx, h.ID, false); rerr != nil {
 			// Not committed either, since there is no grant entry or epoch
 			// to count it under. The runtime's List at the next start finds
@@ -881,16 +899,24 @@ func (a *Core) swept(g Grant, fence Fence) (StatusCode, error) {
 // step fails. Otherwise the slot leaks and the delta is orphaned. A failed
 // sync audit is returned only after the snapshot and watchers see it.
 func (a *Core) Park(ctx context.Context, fiberID string, sync bool) (string, StatusCode, error) {
+	ref, _, code, err := a.park(ctx, fiberID, sync)
+	return ref, code, err
+}
+
+// park is Park that also says whether a named session's delta was
+// published. Drain counts it, since an unpublished session can resume
+// on this home only.
+func (a *Core) park(ctx context.Context, fiberID string, sync bool) (ref string, published bool, code StatusCode, err error) {
 	fence, ok := a.Ledger.Fiber(fiberID)
 	if !ok {
-		return "", NotFound, ErrFiberUnknown
+		return "", false, NotFound, ErrFiberUnknown
 	}
 	// Clone refuses a named session under a grant without a tenant, so
 	// this holds unless the grant was delivered again without one since.
 	// Nothing is parked, because a named delta is filed under the tenant.
 	if session := a.Ledger.FiberSession(fiberID); session != "" {
 		if g, known := a.Ledger.Grant(fence.GrantUID); known && g.Tenant == "" {
-			return "", NeedsTier, fmt.Errorf("%w: grant %s, session %q", ErrNoTenant, g.UID, session)
+			return "", false, NeedsTier, fmt.Errorf("%w: grant %s, session %q", ErrNoTenant, g.UID, session)
 		}
 		// The session's gate, which Clone holds through a resume. A
 		// Clone(S) that arrives during the park waits until the delta is
@@ -903,12 +929,12 @@ func (a *Core) Park(ctx context.Context, fiberID string, sync bool) (string, Sta
 	if ref == "" {
 		// Nothing was parked, so the fiber runs on and the ledger is right.
 		if errors.Is(perr, ErrDeltaQuota) {
-			return "", Shed, perr
+			return "", false, Shed, perr
 		}
 		if perr == nil {
 			perr = errors.New("park: the runtime returned no delta ref")
 		}
-		return "", Internal, perr
+		return "", false, Internal, perr
 	}
 	session, superseded := a.Ledger.OnPark(fiberID, ref)
 	if perr != nil {
@@ -922,6 +948,7 @@ func (a *Core) Park(ctx context.Context, fiberID string, sync bool) (string, Sta
 		if remote, err := pub.PublishDelta(ctx, ref, g, session); err != nil {
 			log.Printf("mobility: publish %s/%s: %v", fence.GrantUID, session, err)
 		} else {
+			published = true
 			_ = a.audit(ctx, BestEffort, AuditRecord{Event: "publish", Fence: fence, Session: session, Detail: remote})
 		}
 	}
@@ -934,11 +961,11 @@ func (a *Core) Park(ctx context.Context, fiberID string, sync bool) (string, Sta
 	a.notify()
 	switch {
 	case perr != nil:
-		return ref, Internal, perr
+		return ref, published, Internal, perr
 	case aerr != nil:
-		return ref, Internal, aerr
+		return ref, published, Internal, aerr
 	}
-	return ref, OK, nil
+	return ref, published, OK, nil
 }
 
 // Release destroys a fiber and frees its name. discard also drops the

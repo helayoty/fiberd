@@ -61,7 +61,8 @@ Every component below is code in fiberd process, except the [zygote](glossary.md
 - **Park, and resume on another home.** Park saves the session as a [delta](glossary.md#delta) and stops the fiber. The artifact and mobility component then seals, signs and publishes the delta. A clone of that session on another home finds the delta, checks its signature and [parity](glossary.md#parity), claims it and resumes it under a new fence.
 - **Release.** The ledger ends the fiber through the runtime host, frees its place under `fibers.max` and writes an audit record.
 - **Revocation of one grant.** The home removes the grant, or its lease runs out. fiberd [yields](glossary.md#yield) the grant, so its running fibers end and its parked deltas stay. A removed grant also goes on a deny-list, so its token cannot re-admit it. Other grants and the [epoch](glossary.md#epoch) are untouched.
-- **[Scope](glossary.md#scope) loss or fiberd restart.** Either one bumps the epoch, which releases every running fiber on the home and invalidates every earlier fence at once. Grants and parked deltas survive, and after a restart each grant must verify again before it serves.
+- **fiberd stop.** When the operator sets a drain budget, fiberd first [drains](glossary.md#drain) on SIGTERM. It answers every clone with a miss, parks and publishes its named sessions and releases its anonymous fibers. Any fiber still running ends with fiberd.
+- **[Scope](glossary.md#scope) loss or fiberd restart.** Either one bumps the epoch, which ends every fiber still running on the home and invalidates every earlier fence at once. Grants and parked deltas survive, and after a restart each grant must verify again before it serves.
 
 ## Guarantees
 

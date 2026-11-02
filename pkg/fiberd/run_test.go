@@ -32,6 +32,8 @@ import (
 	"github.com/helayoty/fiberd/pkg/fiberd"
 	"github.com/helayoty/fiberd/pkg/grant"
 	"github.com/helayoty/fiberd/pkg/home"
+	"github.com/helayoty/fiberd/pkg/rpc"
+	"github.com/helayoty/fiberd/pkg/runtime/stub"
 	"github.com/helayoty/fiberd/pkg/tlsconf"
 	"github.com/helayoty/fiberd/pkg/tlsconf/tlsconftest"
 )
@@ -597,6 +599,142 @@ func TestRunStopsOnSignal(t *testing.T) {
 				t.Fatal("Run did not stop on the signal")
 			}
 			noRunGoroutines(t)
+		})
+	}
+}
+
+// heldPark is the stub runtime whose Park waits until its ctx ends, as a
+// checkpoint that outlasts the drain would.
+type heldPark struct {
+	*stub.Runtime
+	entered chan string
+}
+
+func (h heldPark) Park(ctx context.Context, id string, _ bool) (string, error) {
+	h.entered <- id
+	<-ctx.Done()
+	return "", ctx.Err()
+}
+
+// audited reports whether the audit spool under state holds a record of
+// event for fiber.
+func audited(t *testing.T, state, event, fiber string) bool {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(state, "private", "audit.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range bytes.Split(b, []byte("\n")) {
+		var rec struct {
+			Event   string `json:"event"`
+			FiberID string `json:"fiber_id"`
+		}
+		if json.Unmarshal(line, &rec) == nil && rec.Event == event && rec.FiberID == fiber {
+			return true
+		}
+	}
+	return false
+}
+
+// TestRunDrainsOnSignal checks what fiberd does with its fibers on the
+// way out. A SIGTERM parks the named session into ledger.json and
+// releases the anonymous fiber. SIGINT, and a SIGTERM with
+// no -drain-timeout (the default, 0), stop without either. While a drain runs, /readyz is
+// 503 with "draining", /healthz stays 200, a clone is a DEFERRED_FALLBACK
+// miss, and a second SIGTERM ends a drain whose park is held, well before its
+// timeout.
+func TestRunDrainsOnSignal(t *testing.T) {
+	cases := []struct {
+		name     string
+		args     []string
+		sigs     []syscall.Signal
+		hold     bool // parks wait until the drain ends
+		parked   bool // the named session is parked in ledger.json afterwards
+		released bool // the anonymous fiber has a release record
+	}{
+		{name: "SIGTERM parks the named session and releases the anonymous fiber", args: []string{"-drain-timeout", "10s"},
+			sigs: []syscall.Signal{syscall.SIGTERM}, parked: true, released: true},
+		// SIGINT has a budget, so it is SIGINT that skips the drain.
+		{name: "SIGINT stops without a drain, even with a budget", args: []string{"-drain-timeout", "10s"}, sigs: []syscall.Signal{syscall.SIGINT}},
+		{name: "by default SIGTERM stops without a drain", sigs: []syscall.Signal{syscall.SIGTERM}},
+		{name: "a second SIGTERM ends a drain whose park is held", args: []string{"-drain-timeout", "1m"},
+			sigs: []syscall.Signal{syscall.SIGTERM, syscall.SIGTERM}, hold: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			state := stateDir(t)
+			c := newConfig(t, state, tc.args...)
+			entered := make(chan string, 8)
+			if tc.hold {
+				fiberd.SetWrapRuntime(c, func(rt core.Runtime) core.Runtime {
+					return heldPark{Runtime: rt.(*stub.Runtime), entered: entered}
+				})
+			}
+			r := start(t, c, fiberd.Standalone)
+			ctx := context.Background()
+			cl := dial(t, r.grpc, nil)
+			tok := jsonGrant(t, testGrant("g1"))
+			if _, err := cl.Clone(ctx, &grantv1.CloneRequest{GrantJwt: tok, Session: "s1"}); err != nil {
+				t.Fatalf("Clone(s1): %v", err)
+			}
+			anon, err := cl.Clone(ctx, &grantv1.CloneRequest{GrantJwt: tok})
+			if err != nil {
+				t.Fatalf("Clone: %v", err)
+			}
+			if err := syscall.Kill(os.Getpid(), tc.sigs[0]); err != nil {
+				t.Fatal(err)
+			}
+			if tc.hold {
+				select {
+				case <-entered:
+				case <-time.After(10 * time.Second):
+					t.Fatal("the drain did not start parking")
+				}
+				if code, h := adminDo(t, c, http.MethodGet, "/readyz", ""); code != http.StatusServiceUnavailable || h["draining"] != true {
+					t.Fatalf("readyz while draining = %d %v, want 503 with draining", code, h)
+				}
+				// Liveness is unchanged, so nothing restarts fiberd mid-drain.
+				if code, h := adminDo(t, c, http.MethodGet, "/healthz", ""); code != http.StatusOK || h["draining"] != nil {
+					t.Fatalf("healthz while draining = %d %v, want 200 without draining", code, h)
+				}
+				_, err := cl.Clone(ctx, &grantv1.CloneRequest{GrantJwt: tok})
+				if miss, ok := rpc.MissFromError(err); !ok || miss.GetCode() != grantv1.MissCode_DEFERRED_FALLBACK {
+					t.Fatalf("Clone while draining = %v, want a DEFERRED_FALLBACK miss", err)
+				}
+			}
+			for _, sig := range tc.sigs[1:] {
+				if err := syscall.Kill(os.Getpid(), sig); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// Run ends on the signal, so the cleanup must not stop it again.
+			r.stopped = true
+			select {
+			case err := <-r.done:
+				if err != nil {
+					t.Fatalf("Run = %v, want nil", err)
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatal("Run did not stop")
+			}
+			noRunGoroutines(t)
+			snap, err := (&core.SnapshotStore{Path: filepath.Join(state, "private", "ledger.json")}).Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			parked := false
+			for _, s := range snap.Sessions {
+				if s.Name == "s1" && s.State == core.StateParked {
+					parked = true
+				}
+			}
+			if parked != tc.parked {
+				t.Fatalf("s1 parked in ledger.json = %v, want %v", parked, tc.parked)
+			}
+			// A held drain may be cut before it reaches the anonymous fiber.
+			if released := audited(t, state, "release", anon.GetFiberId()); !tc.hold && released != tc.released {
+				t.Fatalf("anonymous fiber released = %v, want %v", released, tc.released)
+			}
 		})
 	}
 }

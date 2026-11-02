@@ -1,6 +1,6 @@
 # Design: fiberd process
 
-[fiberd](../glossary.md#fiberd) is one process per [home](../glossary.md#home). This doc covers how it starts and where it keeps its state. It is for readers changing startup or building a binary for a new home. Read [architecture.md](../architecture.md) first.
+[fiberd](../glossary.md#fiberd) is one process per [home](../glossary.md#home). This doc covers how it starts and stops and where it keeps its state. It is for readers changing startup or building a binary for a new home. Read [architecture.md](../architecture.md) first.
 
 ## Purpose
 
@@ -24,7 +24,7 @@ flowchart TD
   S --> W[Serve the warm path]
 ```
 
-fiberd is a library whose entry point is `RunContext`. It stops when its context ends or on SIGINT or SIGTERM, so a binary or a test owns fiberd's lifetime through that context. The standalone binary is this library plus the standalone home.
+fiberd is a library whose entry point is `RunContext`. A binary or a test owns fiberd's lifetime through its context. fiberd also stops on SIGINT or SIGTERM. The standalone binary is this library plus the standalone home.
 
 These checks fail the start.
 
@@ -67,7 +67,9 @@ The state layout keeps what fibers must never read under one hidden directory.
 
 The private directory is hidden rather than protected by file modes, and so are the [template](../glossary.md#template) cache and the deltas. A proc fiber warmed from a registry template still sees its own executable, bound back read-only inside the cache's cover, because [CRIU](../glossary.md#criu) needs the path to resolve. The full list of what fibers cannot see is in [runtime-host.md](runtime-host.md).
 
-**Test hooks.** The admin socket serves only a health check. A binary built with `-tags fiberd_testhooks` adds `-admin-unsafe` and two test controls, one forcing whether the [issuer](../glossary.md#issuer) counts as reachable and one simulating [scope](../glossary.md#scope) loss. It also adds two flags that pace the W sampler, the Watch stream and the pressure ladder, which the conformance runs turn down from the one-second default so the suite finishes in seconds. A normal build has neither the flags nor the handlers, and an embedding binary sets the cadence through the library's `Timing` field.
+**Stop.** SIGTERM stops fiberd at once unless `-drain-timeout` sets a budget. With one, fiberd first [drains](../glossary.md#drain) for up to that long. From the drain's first moment every Clone is a deferred miss, attach included, and `GET /readyz` on the admin socket answers 503 with `"draining": true`. `/readyz` is also 503 whenever `/healthz` is, so a readiness probe belongs on `/readyz` and a liveness probe on `/healthz`. fiberd parks the named sessions first, with sync, and publishes their deltas as any park does. Then it releases the anonymous fibers. A fiber the drain does not reach in time ends with the runtime. The ledger snapshot is saved either way, so the parked sessions resume after a restart.
+
+A second SIGTERM or a SIGINT ends the drain early. A binary that embeds fiberd should leave SIGTERM to it, because cancelling the context ends the drain at once. A home that should keep its sessions across a stop sets `-drain-timeout` below the platform's grace period, with room for the stop that follows. That is the Pod's `terminationGracePeriodSeconds` on Kubernetes and `KillWait` on Slurm, both 30 seconds by default.
 
 ## Security notes and known gaps
 

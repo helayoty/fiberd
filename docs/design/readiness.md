@@ -44,7 +44,7 @@ flowchart LR
 5. [Parked](../glossary.md#park) [deltas](../glossary.md#delta) and ports stay bounded under the deployment's retention policy, and anonymous parks are not used.
 6. Where cross-home resume matters, a fresh session after an unreachable registry is acceptable or ruled out.
 7. A full disk and a failed fsync are visible in monitoring, and the spool is copied off the host where records matter.
-8. Readiness, [scope](../glossary.md#scope) loss, drain and deletion are tested against the real platform, not only through the test hooks ([fiberd.md](fiberd.md)).
+8. Readiness, [scope](../glossary.md#scope) loss, deletion and, where sessions must survive a stop, the [drain](../glossary.md#drain) within the platform's grace period are tested against the real platform, not only through the test hooks ([fiberd.md](fiberd.md)).
 9. The conformance suite passes on the exact production backend and configuration, and the benchmarks are re-run there with the method in [benchmarks.md](../benchmarks.md).
 10. Issuers change only the lease of a grant UID and mint a new UID for any other change ([core.md](core.md)).
 11. Only the control plane can write each home's grant directory ([home.md](home.md)).

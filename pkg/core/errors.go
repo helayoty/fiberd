@@ -8,6 +8,9 @@ var (
 	ErrDeadline        = errors.New("fiberd: clone missed deadline")
 	ErrWrongAudience   = errors.New("fiberd: grant audience is not this home")
 	ErrNotReady        = errors.New("fiberd: template not ready on this home")
+	// ErrDraining means fiberd got SIGTERM and is parking and ending its
+	// fibers before it stops. Every clone is a miss from then on.
+	ErrDraining = errors.New("fiberd: home is draining before it stops")
 	// ErrVerifyUnavailable is wrapped by a Verifier that cannot decide
 	// because its key material is missing or stale, not because the token
 	// is bad. That is a reachability problem, so the answer is SHED (back

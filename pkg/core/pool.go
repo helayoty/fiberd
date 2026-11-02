@@ -140,7 +140,9 @@ func (a *Core) DrainPool(grantUID string, n int) int {
 // held grant may be tried again, zero when none is held.
 func (a *Core) refillPass(ctx context.Context) time.Time {
 	p := a.pooler()
-	if p == nil {
+	if p == nil || a.Draining() {
+		// A draining home is about to stop, so a sandbox filled now would
+		// only be killed.
 		return time.Time{}
 	}
 	var next time.Time

@@ -14,7 +14,8 @@ import (
 // TestHealthzAudit runs fiberd and poisons its audit spool. The admin
 // socket and the JSON gateway then answer /healthz with 503 and
 // "poisoned", without the fsync error, and Config.Healthz reports it. A healthy spool answers 200 with
-// "ok". The lane key stays in the body, so the two are read apart.
+// "ok". The lane key stays in the body, so the two are read apart. The
+// admin socket's /readyz answers the same while fiberd is not draining.
 func TestHealthzAudit(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -42,13 +43,14 @@ func TestHealthzAudit(t *testing.T) {
 				poison.Store(&tc.poison)
 			}
 			code, admin := adminDo(t, c, http.MethodGet, "/healthz", "")
+			rcode, ready := adminDo(t, c, http.MethodGet, "/readyz", "")
 			var gw map[string]any
 			gcode := getJSON(t, http.DefaultClient, "http://"+r.http.String()+"/healthz", &gw)
 			for face, got := range map[string]struct {
 				code int
 				body map[string]any
-			}{"admin socket": {code, admin}, "gateway": {gcode, gw}} {
-				if got.code != tc.status || got.body["audit"] != tc.audit || got.body["issuerReachable"] != true {
+			}{"admin socket": {code, admin}, "admin readyz": {rcode, ready}, "gateway": {gcode, gw}} {
+				if got.code != tc.status || got.body["audit"] != tc.audit || got.body["issuerReachable"] != true || got.body["draining"] != nil {
 					t.Fatalf("%s healthz = %d %v, want %d with audit %q and a healthy lane", face, got.code, got.body, tc.status, tc.audit)
 				}
 			}
