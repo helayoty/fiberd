@@ -1,6 +1,7 @@
 package host
 
 import (
+	"math"
 	"slices"
 	"strings"
 	"testing"
@@ -93,6 +94,16 @@ func TestConfigDerivations(t *testing.T) {
 			cfg:   Config{WorkspaceDir: "/var/lib/fiberd/workspaces/", RunDir: "/var/lib/fiberd/workspaces"},
 			grant: sized, grantPids: 5 * fiberPidsMax, quota: 4 * 4 * 32 << 20, ceiling: 160 << 20,
 			wantErr: "inside WorkspaceDir"},
+		// Regression: a grant from any verifier reaches the budget sums,
+		// and each of them wrapped in uint64 to a tiny quota or ceiling.
+		{name: "a quota that wraps once multiplied by four saturates", grant: core.Grant{FiberMax: 1 << 31, WBudgetBytes: 1 << 31},
+			grantPids: (1<<31 + 1) * fiberPidsMax, quota: math.MaxUint64, tmplBytes: 8 << 20, ceiling: (1<<62 + 8<<20) * 5 / 4, hide: []string{token}},
+		{name: "a fiber count times W that overflows saturates the quota and the ceiling", grant: core.Grant{FiberMax: 1 << 32, WBudgetBytes: 1 << 32},
+			grantPids: (1<<32 + 1) * fiberPidsMax, quota: math.MaxUint64, tmplBytes: 8 << 20, ceiling: math.MaxUint64, hide: []string{token}},
+		{name: "a template that overflows the block saturates the ceiling", grant: core.Grant{FiberMax: 1, WBudgetBytes: math.MaxUint64 - 1<<20},
+			grantPids: 2 * fiberPidsMax, quota: math.MaxUint64, tmplBytes: 8 << 20, ceiling: math.MaxUint64, hide: []string{token}},
+		{name: "a block whose quarter overflows the ceiling saturates", grant: core.Grant{FiberMax: 1, WBudgetBytes: 0xF << 60},
+			grantPids: 2 * fiberPidsMax, quota: math.MaxUint64, ceiling: math.MaxUint64, hide: []string{token}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -159,6 +170,55 @@ func TestTemplateFlag(t *testing.T) {
 				if ok != (want != nil) || !slices.Equal(argv, want) {
 					t.Fatalf("Command(%s) = %v %v, want %v", digest, argv, ok, want)
 				}
+			}
+		})
+	}
+}
+
+// TestFormatTemplateFlag checks that FormatTemplateFlag writes only what
+// ParseTemplateFlag and Command read back as the same digest and argv.
+func TestFormatTemplateFlag(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("0f", 32)
+	cases := []struct {
+		name    string
+		digest  string
+		command []string
+		want    string
+		// wantErr is a fragment of the error, "" for none.
+		wantErr string
+	}{
+		{name: "a command with arguments", digest: digest, command: []string{"/zyg/a", "--heap", "8", "--opt=x"},
+			want: digest + "=/zyg/a --heap 8 --opt=x"},
+		{name: "a command alone", digest: digest, command: []string{"/zyg/a"}, want: digest + "=/zyg/a"},
+		{name: "the default key is not a digest", digest: "default", command: []string{"/zyg/a"}, wantErr: "must match"},
+		{name: "a short digest", digest: "sha256:abc", command: []string{"/zyg/a"}, wantErr: "must match"},
+		{name: "an empty digest", command: []string{"/zyg/a"}, wantErr: "must match"},
+		{name: "no command", digest: digest, wantErr: "the command is empty"},
+		{name: "an empty element", digest: digest, command: []string{"/zyg/a", ""}, wantErr: "element 1"},
+		{name: "an element with a space", digest: digest, command: []string{"/zyg/a", "two words"}, wantErr: "element 1"},
+		{name: "an element with a tab", digest: digest, command: []string{"/zyg/a\tb"}, wantErr: "element 0"},
+		{name: "an element with a newline", digest: digest, command: []string{"/zyg/a", "x\n"}, wantErr: "holds whitespace"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := FormatTemplateFlag(tc.digest, tc.command)
+			if tc.wantErr != "" {
+				if err == nil || got != "" || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("FormatTemplateFlag = %q, %v, want an error holding %q", got, err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil || got != tc.want {
+				t.Fatalf("FormatTemplateFlag = %q, %v, want %q", got, err, tc.want)
+			}
+			// The round trip gives back the digest and the argv.
+			m := map[string]string{}
+			if err := ParseTemplateFlag(m, got); err != nil {
+				t.Fatalf("ParseTemplateFlag(%q): %v", got, err)
+			}
+			argv, ok := Config{Templates: m}.Command(tc.digest)
+			if _, own := m[tc.digest]; !own || !ok || !slices.Equal(argv, tc.command) {
+				t.Fatalf("Command(%s) after the round trip = %v %v (own entry %v), want %v", tc.digest, argv, ok, own, tc.command)
 			}
 		})
 	}

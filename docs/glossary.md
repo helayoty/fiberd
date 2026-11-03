@@ -3,7 +3,7 @@
 This page defines each fiberd term in one or two plain sentences, for anyone new to fiberd who has read the [README](../README.md). The other docs link here the first time they use a term.
 
 ## Grant
-A signed, time-limited permission to run one program on one [home](#home), with limits on how many [fibers](#fiber) it may have and how much memory each may use. The [issuer](#issuer) signs it once and the home checks the signature locally, so starting a fiber never waits on a remote service. On the wire the signed message is a `CapacityGrant`, and the Kubernetes example's custom resource of the same name asks its controller to sign one.
+A signed, time-limited permission to run one program on one [home](#home), with limits on how many [fibers](#fiber) it may have and how much memory each may use. The [issuer](#issuer) signs it once and the home checks the signature locally, so starting a fiber never waits on a remote service. On the wire the signed message is a `CapacityGrant`, and the Kubernetes controller's custom resource of the same name asks it to sign one.
 
 ## Issuer
 The control plane that decides who gets capacity and signs [grants](#grant). It publishes its public keys, so every [home](#home) can verify a grant offline.
@@ -12,7 +12,7 @@ The control plane that decides who gets capacity and signs [grants](#grant). It 
 How long a [grant](#grant) is valid, as its [issuer](#issuer) signed it. When the lease runs out the home [yields](#yield) the grant, and a token with a later lease admits it again.
 
 ## Home
-Where [fiberd](#fiberd) runs, such as a plain host, a Kubernetes Pod or a Slurm job. It delivers [grants](#grant) ahead of traffic and revokes one it takes back. It tells fiberd whether the [issuer](#issuer) is reachable, and gives fiberd a slice of the machine.
+Where [fiberd](#fiberd) runs, such as a plain host, a Kubernetes Pod or a Slurm job. The standalone and Kubernetes homes are part of fiberd, and `-home` picks one. It delivers [grants](#grant) ahead of traffic and revokes one it takes back. It tells fiberd whether the [issuer](#issuer) is reachable, and gives fiberd a slice of the machine.
 
 ## fiberd
 The one process on a [home](#home). It verifies [grants](#grant), keeps the record of every [fiber](#fiber) and [session](#session), serves the API that callers use to [clone](#clone), [park](#park) and [release](#release), and streams each grant's state to the callers that watch it.

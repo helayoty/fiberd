@@ -4,7 +4,7 @@
 // example's small API client instead of client-go.
 module github.com/helayoty/fiberd/bench/compare
 
-go 1.26
+go 1.26.0
 
 toolchain go1.26.7
 

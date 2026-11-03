@@ -188,7 +188,7 @@ func (h *Home) Grant(_ context.Context, tmpl herder.Template, memoryBytes uint64
 	g := core.Grant{
 		UID: GrantUID(tmpl), Audience: h.cfg.Audience, TemplateDigest: tmpl.Digest(), Tenant: h.cfg.Tenant,
 		FiberMax: h.cfg.FiberMax, FiberWarm: 1, WBudgetBytes: budget, MinTier: h.cfg.MinTier,
-		LeaseExpiry: now.Add(h.cfg.Lease),
+		LeaseExpiry: now.Add(h.cfg.Lease).Truncate(time.Second),
 		Policy:      core.Policy{Isolation: h.cfg.Isolation},
 	}
 	tok, err := h.issuer.Mint(g)

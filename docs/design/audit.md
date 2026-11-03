@@ -52,7 +52,7 @@ A poisoned spool shows on `GET /healthz`, both on the admin socket and on the JS
 
 Each platform turns the 503 into a restart or a drain.
 
-- **Kubernetes.** The grant Pod's liveness probe runs `fiberd-k8s -healthz`, which asks the admin socket's `/healthz` and fails on anything but 200. So the kubelet restarts fiberd. A startup probe holds it off while fiberd comes up ([operating-kubernetes.md](../operating-kubernetes.md#readiness-and-status)).
+- **Kubernetes.** The controller gives each grant Pod a liveness probe that runs `fiberd healthz`, which asks the admin socket's `/healthz` and fails on anything but a 200. So the kubelet restarts fiberd. A startup probe holds it off while fiberd comes up ([operating-kubernetes.md](../operating-kubernetes.md#readiness-and-status)).
 - **Slurm.** `fiberd-job.sh` polls `/healthz` every 10 seconds. On a 503 it stops fiberd, and its loop restarts it in the same allocation, as it does for a fiberd that crashes.
 - **Substrate.** `ateom-fiberd` answers `/readyz` with 503 while fiberd's `/healthz` is not 200, so no actor is placed on the worker.
 - **Knative and Kata.** They call fiberd but do not probe it, so they see only the failed Clones.

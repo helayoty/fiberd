@@ -116,6 +116,10 @@ func (d Driver) wBudget() uint64 {
 	return 1 << 20
 }
 
+// defaultTemplate is the template key minted grants carry when the driver
+// names none. A home serves it from its "default" -template entry.
+const defaultTemplate = "sha256:conform"
+
 // Run executes the seven cases as subtests.
 func Run(t *testing.T, d Driver) {
 	t.Helper()
@@ -123,7 +127,7 @@ func Run(t *testing.T, d Driver) {
 		t.Fatal("conform: Target, NodeID and Mint are required")
 	}
 	if d.Template == "" {
-		d.Template = "sha256:conform"
+		d.Template = defaultTemplate
 	}
 	c := newClient(t, d)
 	t.Run("C1_Idempotency", func(t *testing.T) { c.c1(t) })
@@ -188,7 +192,7 @@ func (c *client) grant(t *testing.T, prefix string, mut func(g *core.Grant)) (co
 		FiberMax:       2,
 		FiberWarm:      c.d.FiberWarm,
 		MinTier:        core.TierBasic,
-		LeaseExpiry:    time.Now().Add(10 * time.Minute),
+		LeaseExpiry:    time.Now().Add(10 * time.Minute).Truncate(time.Second),
 		Policy:         core.Policy{Isolation: c.d.Isolation},
 		// Bound to the harness's certificate, which a TLS target requires.
 		CallerThumbprint: c.d.CallerThumbprint,
@@ -386,7 +390,7 @@ func (c *client) c4(t *testing.T) {
 	}
 	ctx, cancel := c.ctx(t, 2)
 	defer cancel()
-	_, tok := c.grant(t, "c4", func(g *core.Grant) { g.LeaseExpiry = time.Now().Add(-time.Minute) })
+	_, tok := c.grant(t, "c4", func(g *core.Grant) { g.LeaseExpiry = time.Now().Add(-time.Minute).Truncate(time.Second) })
 	defer func() { _ = c.d.SetCPHealth(context.Background(), true) }()
 
 	if err := c.d.SetCPHealth(ctx, true); err != nil {

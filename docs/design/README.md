@@ -10,7 +10,7 @@ A suggested order is fiberd, home, grant, core, audit, runtime-host, backends, z
 | [audit.md](audit.md) | The hash-chained audit spool, its signed checkpoints and how it is verified | `pkg/core`, `cmd/audit-verify` |
 | [grant.md](grant.md) | Grant verification, caller identity over mutual TLS (Transport Layer Security) and admission | `pkg/grant`, `pkg/rpc`, `pkg/tlsconf` |
 | [fiberd.md](fiberd.md) | [fiberd](../glossary.md#fiberd)'s startup order, state layout and the checks that fail at start | `pkg/fiberd`, `cmd/fiberd` |
-| [home.md](home.md) | The [home](../glossary.md#home) interface, grant delivery, issuer reachability and [scope](../glossary.md#scope) loss | `pkg/home`, `pkg/home/standalone`, `pkg/home/grantdir` |
+| [home.md](home.md) | The [home](../glossary.md#home) interface, the core homes, grant delivery, issuer reachability and [scope](../glossary.md#scope) loss | `pkg/home`, `pkg/home/standalone`, `pkg/home/grantdir` |
 | [handoff.md](handoff.md) | Routing callers' TLS connections to [fibers](../glossary.md#fiber) through one address | `pkg/handoff`, `pkg/runtime/host` |
 | [artifact.md](artifact.md) | [Template](../glossary.md#template) artifacts, signing, sealing, moving [deltas](../glossary.md#delta) between homes, and [parity](../glossary.md#parity) | `pkg/artifact`, `pkg/runtime/host` |
 | [runtime-host.md](runtime-host.md) | [Warm](../glossary.md#warm) templates, per-fiber [cgroups](../glossary.md#cgroup), [W](../glossary.md#w-working-set) enforcement and what a fiber can see | `pkg/runtime/host` |
@@ -20,13 +20,13 @@ A suggested order is fiberd, home, grant, core, audit, runtime-host, backends, z
 | [resources.md](resources.md) | The cgroup hierarchy, the memory formula and sizing | `pkg/runtime/host`, `pkg/sys/cgroup` |
 | [backends.md](backends.md) | The backend interface and how proc, runc, gVisor and Hyperlight make a fiber | `pkg/backend`, `pkg/backend/proc`, `pkg/backend/runc`, `pkg/backend/gvisor`, `pkg/backend/hyperlight` |
 | [cloudhv.md](cloudhv.md) | How a Cloud Hypervisor fiber is a jailed micro-VM, and why a Clone restores copy-on-write | `pkg/backend/cloudhv` |
-| [sys.md](sys.md) | Cgroup delegation, [CRIU](../glossary.md#criu) dump and restore, capability narrowing and network namespaces | `pkg/sys/caps`, `pkg/sys/cgroup`, `pkg/sys/criu`, `pkg/sys/netns` |
+| [sys.md](sys.md) | Cgroup delegation, [CRIU](../glossary.md#criu) dump and restore, read-only container mounts, capability narrowing and network namespaces | `pkg/sys/caps`, `pkg/sys/cgroup`, `pkg/sys/criu`, `pkg/sys/mounts`, `pkg/sys/netns` |
 | [zygote.md](zygote.md) | The library a template links to, its wire protocol and how a [zygote](../glossary.md#zygote) forks a fiber | `sdk/c/template` |
 | [seccomp.md](seccomp.md) | The fiber filter every proc and runc zygote installs, and the runc capability set | `sdk/c/template` |
 | [sdk.md](sdk.md) | The SDK's four languages, how the Python binding brings the interpreter through a raw fork, and the rules it enforces | `sdk/python`, `sdk/go/client`, `sdk/typescript` |
 | [user-namespaces.md](user-namespaces.md) | Why runc fibers get a user namespace per grant, and how their ids are assigned | `pkg/backend/runc` |
 | [readiness.md](readiness.md) | The acceptance gates a deployment passes before production | none |
-| [kubernetes.md](kubernetes.md) | The Kubernetes home, its grant controller and the grant Pod | `examples/kubernetes` |
+| [kubernetes.md](kubernetes.md) | The Kubernetes home, the grant Pod it runs in and the retiring example controller | `pkg/home/kubernetes`, `examples/kubernetes` |
 | [slurm.md](slurm.md) | The Slurm home inside a job allocation | `examples/slurm` |
 | [knative.md](knative.md) | A Knative activator that scales from zero with fibers | `examples/knative` |
 | [kata.md](kata.md) | A Kata-style containerd shim whose Pod containers are fibers | `examples/kata` |
@@ -45,8 +45,9 @@ These have no design doc of their own.
 | `pkg/tlsconf/tlsconftest` | Throwaway certificates for tests that need mutual TLS |
 | `pkg/runtime/stub` | An in-memory runtime for tests and the conformance suite |
 | `pkg/core/coretest` | Helpers for tests of code built on `pkg/core` |
+| `pkg/home/kubernetes/fake` | An in-memory slice of the Kubernetes API, for tests of the Kubernetes home |
 | `internal/cli` | The plumbing the commands share, which is subcommand dispatch and the version `-version` prints |
-| `cmd/fiberd` | fiberd on a standalone host. `fiberd run` instead tries a template on one Linux machine, with fiberd inside its own process |
+| `cmd/fiberd` | The one fiberd binary. `-home` picks the home, `standalone` by default or `kubernetes` in a grant Pod. `fiberd healthz` and `fiberd readyz` ask a running fiberd for its health, for a probe. `fiberd run` instead tries a template on one Linux machine, with fiberd inside its own process |
 | `cmd/grant-issuer` | The reference [issuer](../glossary.md#issuer), which mints grants and serves its public keys |
 | `cmd/audit-verify` | Checks a home's audit spool |
 | `cmd/zygotectl` | Builds, pushes, pulls and inspects template artifacts |

@@ -55,6 +55,8 @@ The certificate's thumbprint is the caller on every call. Park, Release and the 
 
 **Admission completeness.** The RPC server refuses unknown fields at any depth before the core sees a Clone, so a caller cannot shape the workload the [template](../glossary.md#template) fixed ([protocol.md](../protocol.md#admission-completeness)).
 
+**Issuer.** The reference issuer, which `grant-issuer` and the Kubernetes controller use, checks each grant before it signs it and names every fault at once. Beyond the [grant field](../protocol.md#grant-fields) rules, each fiber count must fit in 32 bits, and four times `fibers.max` times `w_budget_bytes` must fit in 64. A set lease expiry must be whole seconds. A set template digest must be one key without whitespace or `=`. The issuer can sign from a key ring. Its newest key signs, and retired keys stay in the published key set, so the grants they signed still verify. Renewal signs a token this issuer signed again, with the same claims and a fresh lease of the same length. A token whose lease has run out can be renewed too.
+
 **Development modes.** The `insecure-json` verifier checks no signature and must be chosen explicitly. `-insecure-plaintext` is a separate switch. It serves without TLS and without caller identity, so every caller sees every grant. `fiberd run` is the exception. Its default, `-trust insecure`, turns both on, on loopback, to try a template on one machine.
 
 ## Security notes and known gaps
@@ -62,3 +64,4 @@ The certificate's thumbprint is the caller on every call. Park, Release and the 
 - **A caller's certificate rotation means re-minting.** The thumbprint covers the whole certificate, so a caller with a new certificate needs its grants minted again for it, under the same UIDs or new ones. Keep leases short.
 - **An unbound JWT is a bearer token.** Anyone holding it can spend the capacity at the named home. Keep tokens out of logs, annotations and readable files. Over plaintext only unbound grants work.
 - **Without `-max-lease`** a grant may carry no lease and never expire.
+- **A key ring holds private keys.** One stored key prints only its kid, algorithm and retirement time. A whole ring handed to a logger is encoded with every private key, so log only its kids.

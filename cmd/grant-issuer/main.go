@@ -9,8 +9,8 @@
 //	                    -min-tier FIBER_WARM -isolation TRUSTED -ttl 10m > grant.jwt
 //	grant-issuer serve  -key key.json -addr :8686 [-issuer http://issuer:8686]
 //
-// An integration runs the same issuer inside its control plane; the
-// Kubernetes example's grant-controller is one (examples/kubernetes).
+// A control plane runs the same issuer (pkg/grant.Issuer) inside itself; the
+// Kubernetes controller, github.com/Azure/fiberd-k8s-controller, is one.
 package main
 
 import (

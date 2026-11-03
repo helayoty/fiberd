@@ -28,6 +28,8 @@ const (
 	secretPath = "/api/v1/namespaces/tenant-a/secrets/conform-grant"
 	secretsDir = "/api/v1/namespaces/tenant-a/secrets"
 	keyPath    = "/api/v1/namespaces/fiberd-system/secrets/grant-issuer-key"
+	// template is a full sha256 digest, the only form Mint accepts.
+	template = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 )
 
 func seed(t *testing.T, srv *kubetest.Server) {
@@ -35,7 +37,7 @@ func seed(t *testing.T, srv *kubetest.Server) {
 		"apiVersion": "fiberd.io/v1alpha1", "kind": "CapacityGrant",
 		"metadata": map[string]any{"name": "conform", "namespace": "tenant-a", "uid": "cg-uid-1"},
 		"spec": map[string]any{
-			"template": "sha256:conform",
+			"template": template,
 			"fibers":   map[string]any{"max": 8, "warm": 1},
 			"wBudget":  "32Mi", "minTier": "FIBER_CHECKPOINT", "isolation": "TRUSTED", "lease": "10m",
 			"deviceBudget": map[string]any{"bytes": "4Mi", "class": "sim"},
@@ -135,7 +137,7 @@ func TestReconcileLifecycle(t *testing.T) {
 		{"the Secret holds a JWT addressed to the Pod, uid the resource's, expiring one lease from now", func(t *testing.T) {
 			g := minted(t, srv, c)
 			if g.UID != "cg-uid-1" || g.FiberMax != 8 || g.FiberWarm != 1 || g.WBudgetBytes != 32<<20 || g.MinTier != core.TierCheckpoint ||
-				g.TemplateDigest != "sha256:conform" || g.Policy.Isolation != core.Trusted || g.DeviceBudget.Bytes != 4<<20 ||
+				g.TemplateDigest != template || g.Policy.Isolation != core.Trusted || g.DeviceBudget.Bytes != 4<<20 ||
 				g.DeviceBudget.Class != "sim" || !g.LeaseExpiry.Equal(now.Add(10*time.Minute)) {
 				t.Fatalf("minted grant = %+v", g)
 			}

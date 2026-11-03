@@ -23,7 +23,7 @@ func mint(t *testing.T, uid string) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tok, err := (&grant.Issuer{Key: key, URL: "https://issuer.test"}).Mint(core.Grant{UID: uid, Audience: "node", LeaseExpiry: time.Now().Add(time.Hour)})
+	tok, err := (&grant.Issuer{Key: key, URL: "https://issuer.test"}).Mint(core.Grant{UID: uid, Audience: "node", LeaseExpiry: time.Now().Add(time.Hour).Truncate(time.Second)})
 	if err != nil {
 		t.Fatal(err)
 	}

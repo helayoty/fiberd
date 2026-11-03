@@ -189,12 +189,9 @@ func verifyParsed(tok *jwt.JSONWebToken, pub *jose.JSONWebKey, opts VerifyOption
 	return g, nil
 }
 
-// uidPattern is the Kubernetes DNS-1123 label rule. The UID becomes a
-// cgroup and run-directory name beside kernel files like memory.max, so it
-// must be one plain path segment ("." and ".." never match). Lowercase keeps
-// names distinct on case-insensitive filesystems. The length bound keeps
-// paths under the unix socket limit.
-var uidPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
+// uidPattern is core.UIDPattern, the DNS-1123 label rule. core documents
+// why a UID must fit it.
+var uidPattern = regexp.MustCompile(core.UIDPattern)
 
 // checkUID is the single check every verified grant passes through.
 func checkUID(uid string) error {
@@ -207,12 +204,9 @@ func checkUID(uid string) error {
 	return nil
 }
 
-// tenantPattern bounds a tenant name: one path segment of letters,
-// digits, ".", "_" and "-", at most 253 characters. It becomes the first
-// half of the session domain "<tenant>/<class or digest>", so "/" and
-// whitespace are out and the domain splits at its first "/" without
-// ambiguity. A Kubernetes namespace and a Slurm account both fit.
-var tenantPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$`)
+// tenantPattern is core.TenantPattern, one path segment of at most 253
+// characters. core documents why a tenant must fit it.
+var tenantPattern = regexp.MustCompile(core.TenantPattern)
 
 // checkTenant is the single check every verified grant's tenant passes
 // through. Empty is allowed: such a grant runs anonymous fibers only.

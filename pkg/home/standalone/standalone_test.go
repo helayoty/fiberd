@@ -51,10 +51,10 @@ func TestStandaloneGrantsDirDrivesAdmission(t *testing.T) {
 		settle time.Duration
 	}{
 		{name: "a grant file that verifies is admitted",
-			write: &core.Grant{UID: "pre-1", Audience: "node-a", FiberMax: 1, LeaseExpiry: time.Now().Add(time.Hour)},
+			write: &core.Grant{UID: "pre-1", Audience: "node-a", FiberMax: 1, LeaseExpiry: time.Now().Add(time.Hour).Truncate(time.Second)},
 			uid:   "pre-1", admitted: true},
 		{name: "a token that does not verify (wrong audience) is logged, not admitted",
-			write: &core.Grant{UID: "bad-1", Audience: "node-z", LeaseExpiry: time.Now().Add(time.Hour)},
+			write: &core.Grant{UID: "bad-1", Audience: "node-z", LeaseExpiry: time.Now().Add(time.Hour).Truncate(time.Second)},
 			uid:   "bad-1", settle: 60 * time.Millisecond},
 		{name: "removing the file revokes the grant", remove: "pre-1.jwt", uid: "pre-1"},
 	}

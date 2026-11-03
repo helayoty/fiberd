@@ -232,6 +232,9 @@ func (l *launcher) runcLog(spec backend.WarmSpec) string {
 	return filepath.Join(l.opt.StateDir, "bundles", l.cid(spec)+".runc.log")
 }
 
+// tailLimit bounds what logTails quotes of each log in an error.
+const tailLimit = 2048
+
 // logTails is what runc and the zygote last wrote, for an error about a
 // container that never came up. runc's log holds its error and the
 // stages before it. The zygote log holds runc's stdio and the template's

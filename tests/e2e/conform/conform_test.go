@@ -25,7 +25,7 @@ var (
 	target     = flag.String("target", "", "host:port of the Fibers service under test (required)")
 	targetTier = flag.String("target-tier", "FIBER_CHECKPOINT", "tier the target advertises")
 	nodeID     = flag.String("node-id", "", "audience for minted grants: the target's node id (required)")
-	template   = flag.String("template", "sha256:conform", "template digest for minted grants")
+	template   = flag.String("template", defaultTemplate, "template digest for minted grants")
 	fiberWarm  = flag.Int("fiber-warm", 0, "fibers.warm for minted grants: above zero the home pools sandboxes and the Pool case checks a clone is served from them")
 	isolation  = flag.String("isolation", "UNTRUSTED", "isolation for minted grants: TRUSTED for a target on proc or runc")
 	workspaces = flag.Bool("workspaces", false, "the target's runtime gives fibers a workspace (proc, runc): C12 uploads into one, parks, resumes and downloads")

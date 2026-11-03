@@ -8,7 +8,7 @@ Kata Containers plugs into Kubernetes as a containerd shim. Where the default sh
 
 ## How it works
 
-The shim runs on each node, started by containerd. The fiberd [home](../glossary.md#home) runs elsewhere, such as a grant Pod of the [Kubernetes example](kubernetes.md), and the shim dials it at the address the Pod names. Fibers run in that home, not in the application Pod.
+The shim runs on each node, started by containerd. The fiberd [home](../glossary.md#home) runs elsewhere, such as a [Kubernetes](kubernetes.md) grant Pod, and the shim dials it at the address the Pod names. Fibers run in that home, not in the application Pod.
 
 A Pod selects the `fiberd` RuntimeClass. containerd passes the Pod's `io.fiberd/*` annotations into the OCI spec through the runtime handler's `pod_annotations`. They name the [grant](../glossary.md#grant), the home's address, the [session](../glossary.md#session), what to do on stop, and an optional payload.
 

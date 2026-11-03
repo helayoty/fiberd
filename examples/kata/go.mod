@@ -3,7 +3,7 @@
 // go.mod. It builds against the checkout it sits in.
 module github.com/helayoty/fiberd/examples/kata
 
-go 1.26
+go 1.26.0
 
 toolchain go1.26.7
 

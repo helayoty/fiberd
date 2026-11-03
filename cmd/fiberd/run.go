@@ -93,8 +93,12 @@ func runTemplate(ctx context.Context, args []string, stdout, stderr io.Writer) e
 	if err != nil {
 		return err
 	}
-	// This may re-execute fiberd with fewer capabilities, so it comes
-	// before anything a re-exec would leave behind.
+	// The mounts come first, since the remount needs a capability that
+	// NarrowCaps may drop. NarrowCaps may re-execute fiberd with fewer
+	// capabilities, so it comes before anything a re-exec would leave behind.
+	if err := c.PrepareMounts(); err != nil {
+		return err
+	}
 	if err := c.NarrowCaps(); err != nil {
 		return err
 	}

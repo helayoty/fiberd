@@ -9,9 +9,6 @@ import (
 	"syscall"
 )
 
-// tailLimit bounds what logTails quotes of each log in an error.
-const tailLimit = 2048
-
 // tailFile is the end of the file at path for an error message: at most
 // limit bytes, and from the start of a line when the file is longer than
 // that. A missing, empty or unreadable file reads as "". The path is

@@ -88,7 +88,7 @@ Callers can use the [Go client](sdk/go/client), [Python client](sdk/python/READM
 
 ## Examples
 
-- [Kubernetes](examples/kubernetes/README.md) is a controller that turns each `CapacityGrant` custom resource into a signed grant and one Pod running fiberd.
+- [Kubernetes](docs/design/kubernetes.md) is a core home. A grant Pod runs fiberd's own image with `fiberd -home kubernetes`. The controller that turns each `CapacityGrant` custom resource into a signed grant and one grant Pod is a separate project, [fiberd-k8s-controller](https://github.com/Azure/fiberd-k8s-controller). The older controller in [examples/kubernetes](examples/kubernetes/README.md) is retiring.
 - [Slurm](examples/slurm/README.md) runs [fiberd](docs/glossary.md#fiberd) inside a job allocation.
 - [Knative](examples/knative/README.md) is an activator, the component that holds requests while a service scales from zero, here with fibers in Hyperlight micro-VMs.
 - [Kata-shaped shim](examples/kata/README.md) is a containerd shim, the plug-in that starts a Pod's containers. It has the shape of the Kata Containers shim without using Kata, and its containers are fibers.

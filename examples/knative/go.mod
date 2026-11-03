@@ -3,7 +3,7 @@
 // sits in.
 module github.com/helayoty/fiberd/examples/knative
 
-go 1.26
+go 1.26.0
 
 toolchain go1.26.7
 

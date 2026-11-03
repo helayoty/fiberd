@@ -12,9 +12,13 @@ package host
 import (
 	"errors"
 	"fmt"
+	"math"
+	"math/bits"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/helayoty/fiberd/pkg/artifact"
 	"github.com/helayoty/fiberd/pkg/backend"
@@ -227,7 +231,7 @@ func deltaQuota(g core.Grant) uint64 {
 	if g.FiberMax <= 0 || g.WBudgetBytes == 0 {
 		return defaultDeltaQuota
 	}
-	return 4 * uint64(g.FiberMax) * g.WBudgetBytes
+	return mulSat(mulSat(4, uint64(g.FiberMax)), g.WBudgetBytes)
 }
 
 // DefaultCeiling is Config.Ceiling when unset.
@@ -235,8 +239,28 @@ func DefaultCeiling(g core.Grant, templateBytes uint64) uint64 {
 	if g.FiberMax <= 0 || g.WBudgetBytes == 0 {
 		return 0
 	}
-	block := uint64(g.FiberMax)*g.WBudgetBytes + templateBytes
-	return block + block/4
+	block := addSat(mulSat(uint64(g.FiberMax), g.WBudgetBytes), templateBytes)
+	return addSat(block, block/4)
+}
+
+// mulSat is a*b, or math.MaxUint64 when the product overflows. A grant
+// from any verifier reaches the budget sums, not only one an issuer
+// validated, so a wrapped product must not leave a tiny ceiling.
+func mulSat(a, b uint64) uint64 {
+	hi, lo := bits.Mul64(a, b)
+	if hi != 0 {
+		return math.MaxUint64
+	}
+	return lo
+}
+
+// addSat is a+b, or math.MaxUint64 when the sum overflows.
+func addSat(a, b uint64) uint64 {
+	sum, carry := bits.Add64(a, b, 0)
+	if carry != 0 {
+		return math.MaxUint64
+	}
+	return sum
 }
 
 var ErrUnsupported = errors.New("host: not supported on this platform")
@@ -255,6 +279,29 @@ func ParseTemplateFlag(m map[string]string, v string) error {
 	m[strings.TrimSpace(k)] = strings.TrimSpace(cmd)
 	return nil
 }
+
+// FormatTemplateFlag is the -template value ParseTemplateFlag reads back
+// as digest and command, "digest=cmd arg arg". digest must match
+// core.TemplateDigestPattern. command must not be empty, and no element
+// may be empty or hold whitespace, since Command splits the line on
+// whitespace.
+func FormatTemplateFlag(digest string, command []string) (string, error) {
+	if !templateDigestRE.MatchString(digest) {
+		return "", fmt.Errorf("template: digest %q must match %s", digest, core.TemplateDigestPattern)
+	}
+	if len(command) == 0 {
+		return "", errors.New("template: the command is empty")
+	}
+	for i, arg := range command {
+		if arg == "" || strings.IndexFunc(arg, unicode.IsSpace) >= 0 {
+			return "", fmt.Errorf("template: command element %d %q is empty or holds whitespace", i, arg)
+		}
+	}
+	return digest + "=" + strings.Join(command, " "), nil
+}
+
+// templateDigestRE is core.TemplateDigestPattern compiled.
+var templateDigestRE = regexp.MustCompile(core.TemplateDigestPattern)
 
 // Command resolves the template command line for a digest from the
 // Templates map, falling back to the "default" entry. Registry pulls are

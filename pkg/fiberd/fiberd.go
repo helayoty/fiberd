@@ -1,11 +1,10 @@
 // Package fiberd is fiberd as a library: the flags, the wiring
 // of verifier, runtime, ledger, pressure ladder, admin socket and RPC
 // server, and the fixed startup order (epoch++ -> reconcile -> open
-// RPC). cmd/fiberd is this package plus the standalone home; an
-// integration builds its own binary from this package plus its home
-// (examples/kubernetes/cmd/fiberd-k8s is one). Nothing here knows which
-// home it runs under beyond the home.Home interface and the optional
-// interfaces below.
+// RPC). cmd/fiberd is this package plus the home its -home flag picks,
+// standalone or kubernetes. Control planes are separate projects that
+// drive that binary. Nothing here knows which home it runs under beyond
+// the home.Home interface and the optional interfaces below.
 package fiberd
 
 import (
@@ -50,6 +49,7 @@ import (
 	"github.com/helayoty/fiberd/pkg/runtime/host"
 	"github.com/helayoty/fiberd/pkg/runtime/stub"
 	"github.com/helayoty/fiberd/pkg/sys/caps"
+	"github.com/helayoty/fiberd/pkg/sys/mounts"
 	"github.com/helayoty/fiberd/pkg/tlsconf"
 )
 
@@ -342,6 +342,29 @@ var (
 	capsNarrow = caps.Narrow
 )
 
+// PrepareMounts makes the cgroup mount and the CRIU sysctls writable
+// where a container left them read-only, for every runtime but the stub,
+// which touches neither. A binary calls it before NarrowCaps. The remount
+// needs CAP_SYS_ADMIN, which a narrowed set may lack, and mounts survive
+// the re-exec. It is a no-op when the mounts are already writable.
+// Sysctls that stayed read-only are a warning, since fibers still get the
+// warm tier without them. Anything else keeps fiberd from starting.
+func (c *Config) PrepareMounts() error {
+	if c.Runtime.Name == "stub" {
+		return nil
+	}
+	err := prepareMounts()
+	if errors.Is(err, mounts.ErrSysctlsReadOnly) {
+		log.Printf("WARNING: %v, so fibers get the warm tier only", err)
+		return nil
+	}
+	return err
+}
+
+// prepareMounts is the mounts call PrepareMounts makes. Tests replace
+// it.
+var prepareMounts = mounts.Prepare
+
 // LoadDeltaKeys reads -delta-key, -delta-trust and -delta-seal-key. A
 // missing key is generated under -state on first use, and no other home
 // trusts or opens with it until it is shared. Without a delta registry
@@ -566,6 +589,9 @@ func RunContext(ctx context.Context, c *Config, newHome HomeFactory) error {
 			}
 		}
 	}
+
+	// The binary prepared the container's mounts with PrepareMounts before
+	// NarrowCaps, so a binary that skips that call gets no mount preparation.
 
 	// serving counts the goroutines that accept on a listener Run bound.
 	// Run returns only when they have, so the addresses are free again by

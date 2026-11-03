@@ -10,7 +10,7 @@ The caller sends [Clone](glossary.md#clone) to [fiberd](glossary.md#fiberd)'s co
 
 ## One family per home
 
-A home serves one address family, `unix`, `inet4` or `inet6`. fiberd defaults to `unix`, while the Kubernetes example's grant Pod defaults to `inet4`. A unix endpoint serves callers on the same host. Under `inet4` or `inet6` every backend gives callers `tcp://<home-ip>:<port>`, with a port per fiber from `30000` to `32767` by default. proc serves TCP itself, and runc, gVisor and Hyperlight fibers are reached through fiberd's [relay](glossary.md#relay) ([design/networking.md](design/networking.md)). Under Kubernetes this is how an `UNTRUSTED` grant's fibers are reached over the Pod IP.
+A home serves one address family, `unix`, `inet4` or `inet6`. fiberd defaults to `unix` in every home, and the Kubernetes controller sets `inet4` on its grant Pods by default. A unix endpoint serves callers on the same host. Under `inet4` or `inet6` every backend gives callers `tcp://<home-ip>:<port>`, with a port per fiber from `30000` to `32767` by default. proc serves TCP itself, and runc, gVisor and Hyperlight fibers are reached through fiberd's [relay](glossary.md#relay) ([design/networking.md](design/networking.md)). Under Kubernetes this is how an `UNTRUSTED` grant's fibers are reached over the Pod IP.
 
 ## Handoff
 

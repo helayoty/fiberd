@@ -23,10 +23,10 @@ import (
 func sample(now time.Time) core.Grant {
 	return core.Grant{
 		UID: "g-1", Issuer: "https://issuer.test", Audience: "node-a",
-		TemplateDigest: "sha256:abc", Tenant: "team-a", FiberMax: 4, FiberWarm: 1, WBudgetBytes: 1 << 20,
+		TemplateDigest: "sha256:" + strings.Repeat("ab", 32), Tenant: "team-a", FiberMax: 4, FiberWarm: 1, WBudgetBytes: 1 << 20,
 		MinTier: core.TierWarm, LeaseExpiry: now.Add(10 * time.Minute).Truncate(time.Second),
 		Policy:           core.Policy{Durability: core.Sync, PSISomeAvg10Park: 20, Isolation: core.Trusted, EndpointMode: core.EndpointHandoff},
-		CallerThumbprint: "x5t-of-the-caller",
+		CallerThumbprint: strings.Repeat("Q", 43),
 		DeviceBudget:     core.DeviceBudget{Bytes: 1 << 30, Class: "gpu"},
 		DiskBudgetBytes:  64 << 20,
 	}

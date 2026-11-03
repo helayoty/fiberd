@@ -343,7 +343,7 @@ func newE2EHome(t *testing.T, cgRoot, zygoteBin string, store bool) *e2eHome {
 func (h *e2eHome) mint(t *testing.T, d core.Durability) string {
 	t.Helper()
 	tok, err := h.issuer.Mint(core.Grant{
-		UID: fmt.Sprintf("bench-%d", time.Now().UnixNano()), Audience: benchNode, TemplateDigest: "sha256:ref",
+		UID: fmt.Sprintf("bench-%d", time.Now().UnixNano()), Audience: benchNode, TemplateDigest: "sha256:3ff6c05723bb069d19953340320fa9512f0be584742703e60226ded28bb43861",
 		LeaseExpiry: time.Now().Add(time.Hour).Truncate(time.Second),
 		Policy:      core.Policy{Durability: d, Isolation: core.Trusted},
 	})

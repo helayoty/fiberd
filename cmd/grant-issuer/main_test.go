@@ -222,11 +222,11 @@ func TestMint(t *testing.T) {
 				}
 			}},
 		{name: "every flag lands in the grant",
-			args: []string{"-uid", "g-7", "-template", "sha256:abc", "-max", "8", "-warm", "2", "-w-budget", "64Mi",
+			args: []string{"-uid", "g-7", "-template", "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", "-max", "8", "-warm", "2", "-w-budget", "64Mi",
 				"-min-tier", "FIBER_CHECKPOINT", "-ttl", "1h", "-durability", "sync", "-psi-shed", "40", "-psi-park", "20",
 				"-device-budget", "1Gi", "-device-class", "gpu", "-disk-budget", "256Mi", "-bind-cert", certFile, "-isolation", "TRUSTED", "-endpoint-mode", "HANDOFF"},
 			check: func(t *testing.T, g core.Grant) {
-				want := core.Grant{UID: "g-7", Issuer: "https://issuer.test", Audience: "node-a", TemplateDigest: "sha256:abc",
+				want := core.Grant{UID: "g-7", Issuer: "https://issuer.test", Audience: "node-a", TemplateDigest: "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
 					FiberMax: 8, FiberWarm: 2, WBudgetBytes: 64 << 20, MinTier: core.TierCheckpoint, LeaseExpiry: g.LeaseExpiry,
 					Policy: core.Policy{Durability: core.Sync, PSISomeAvg10Shed: 40, PSISomeAvg10Park: 20,
 						Isolation: core.Trusted, EndpointMode: core.EndpointHandoff},

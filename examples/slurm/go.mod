@@ -2,7 +2,7 @@
 // lands in fiberd's own go.mod. It builds against the checkout it sits in.
 module github.com/helayoty/fiberd/examples/slurm
 
-go 1.26
+go 1.26.0
 
 toolchain go1.26.7
 
@@ -21,6 +21,7 @@ require (
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.41.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260526163538-3dc84a4a5aaa // indirect
+	k8s.io/utils v0.0.0-20260626114624-be93311217bd // indirect
 	oras.land/oras-go/v2 v2.6.2 // indirect
 )
 

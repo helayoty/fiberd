@@ -72,7 +72,7 @@ func run(o opts) error {
 	}
 	g := core.Grant{
 		UID: fmt.Sprintf("check-%d", time.Now().Unix()), Audience: o.nodeID, TemplateDigest: "sha256:check", Tenant: o.tenant,
-		FiberMax: 2, WBudgetBytes: 32 << 20, LeaseExpiry: time.Now().Add(time.Hour),
+		FiberMax: 2, WBudgetBytes: 32 << 20, LeaseExpiry: time.Now().Add(time.Hour).Truncate(time.Second),
 		Policy: core.Policy{Isolation: iso},
 	}
 	tok, err := (&grant.Issuer{Key: key, URL: o.issuerURL}).Mint(g)

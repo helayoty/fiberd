@@ -119,7 +119,7 @@ func run(o opts) int {
 	perFiber := perInstance(o.ceiling, o.overcommit, o.fibers)
 	g := core.Grant{
 		UID: fmt.Sprintf("storm-%d", time.Now().Unix()), Audience: o.nodeID, TemplateDigest: "sha256:storm", Tenant: o.tenant,
-		FiberMax: o.fibers, WBudgetBytes: perFiber + 8<<20, LeaseExpiry: time.Now().Add(time.Hour),
+		FiberMax: o.fibers, WBudgetBytes: perFiber + 8<<20, LeaseExpiry: time.Now().Add(time.Hour).Truncate(time.Second),
 		Policy: core.Policy{PSISomeAvg10Shed: 5, PSISomeAvg10Park: 10, Isolation: iso},
 	}
 	tok, err := (&grant.Issuer{Key: key, URL: o.issuerURL}).Mint(g)

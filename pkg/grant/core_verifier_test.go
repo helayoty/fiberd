@@ -22,7 +22,7 @@ func TestCoreWithJWKSVerifier(t *testing.T) {
 	k, _ := grant.GenerateKey(jose.ES256)
 	other, _ := grant.GenerateKey(jose.ES256)
 	is := newIssuer(t, k)
-	now := time.Now()
+	now := time.Now().Truncate(time.Second)
 	cache := &grant.Cache{IssuerURL: is.srv.URL, MinRefresh: time.Hour, Now: func() time.Time { return now }}
 	v := &grant.Verifier{Cache: cache, Audience: "node-a", MaxStale: time.Hour, Now: func() time.Time { return now }}
 	health := core.NewSourceHealth(10*time.Second, time.Now())
