@@ -774,3 +774,90 @@ func TestReconcileHoldsBesideAdmitted(t *testing.T) {
 		})
 	}
 }
+
+// sweepingRuntime is a listingRuntime that sweeps its deltas at boot and
+// records what fiberd asked it to keep.
+type sweepingRuntime struct {
+	*listingRuntime
+	calls   int
+	keep    []string
+	removed int   // what SweepDeltas reports it removed
+	err     error // what SweepDeltas answers
+}
+
+func (s *sweepingRuntime) SweepDeltas(_ context.Context, keep []string) (int, error) {
+	s.calls++
+	s.keep = slices.Sorted(slices.Values(keep))
+	return s.removed, s.err
+}
+
+// TestReconcileSweepsDeltas boots from a snapshot with a parked session
+// of an admitted grant, one of a grant the verifier cannot check yet, a
+// session that was running, and a parked session whose delta is gone.
+// The runtime is asked once, after the restore, to keep the deltas of
+// the two parked sessions that remain, held one included, and the count
+// it reports lands in the report. A sweep that fails does not fail boot,
+// and a runtime that cannot list is never asked. Nor is one booting from
+// a ledger.json that did not parse, since the lost file may name every
+// delta on disk (regression: the empty snapshot Load returned for it swept
+// them all).
+func TestReconcileSweepsDeltas(t *testing.T) {
+	lease := time.Now().Add(time.Hour)
+	good := core.Grant{UID: "good", Tenant: "acme", Audience: "node-a", FiberMax: 1, LeaseExpiry: lease, Token: "good-token"}
+	held := core.Grant{UID: "held", Tenant: "acme", Audience: "node-a", FiberMax: 1, LeaseExpiry: lease, Token: "held-token"}
+	snap := core.Snapshot{Epoch: 1, Grants: []core.Grant{good, held}, Sessions: []core.SessionSnapshot{
+		{Name: "S1", GrantUID: "good", State: core.StateParked, DeltaRef: "d1"},
+		{Name: "S2", GrantUID: "held", State: core.StateParked, DeltaRef: "d2"},
+		{Name: "S3", GrantUID: "good", State: core.StateRunning, Fence: core.Fence{GrantUID: "good", Epoch: 1, Seq: 3}, DeltaRef: "d3"},
+		{Name: "S4", GrantUID: "good", State: core.StateParked, DeltaRef: "d4"},
+	}}
+	cases := []struct {
+		name      string
+		removed   int
+		sweepErr  error
+		listErr   error
+		torn      bool // ledger.json does not parse, and boot reads it
+		wantCalls int
+		wantKeep  []string
+		wantSwept int
+		wantErr   bool
+	}{
+		{name: "the parked sessions' deltas are kept and the count reported", removed: 3,
+			wantCalls: 1, wantKeep: []string{"d1", "d2"}, wantSwept: 3},
+		{name: "a sweep that fails does not fail boot", removed: 1, sweepErr: errors.New("rm: EBUSY"),
+			wantCalls: 1, wantKeep: []string{"d1", "d2"}, wantSwept: 1},
+		{name: "a runtime that cannot list is never asked", listErr: errors.New("runc list: EIO"), wantErr: true},
+		{name: "a snapshot that did not parse sweeps nothing", removed: 3, torn: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a := newCore(t, "up", core.TierCheckpoint)
+			a.Ledger = core.NewLedger(2)
+			a.Verify = acceptVerifier{grants: map[string]core.Grant{"good-token": good, "held-token": held}, unavailable: map[string]bool{"held-token": true}}
+			rt := &sweepingRuntime{listingRuntime: &listingRuntime{fakeRuntime: fakeRuntime{tier: core.TierCheckpoint},
+				deltas: map[string]bool{"d1": true, "d2": true}, listErr: tc.listErr}, removed: tc.removed, err: tc.sweepErr}
+			a.Runtime = rt
+			boot := snap
+			if tc.torn {
+				path := filepath.Join(t.TempDir(), "ledger.json")
+				if err := os.WriteFile(path, []byte(`{"epoch": 1, "grants": [`), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				var err error
+				if boot, err = (&core.SnapshotStore{Path: path}).Load(); err != nil {
+					t.Fatalf("Load of a torn snapshot = %v, want it read as empty", err)
+				}
+			}
+			rep, err := a.Reconcile(context.Background(), boot)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("Reconcile = %v, want error %v", err, tc.wantErr)
+			}
+			if rt.calls != tc.wantCalls || !slices.Equal(rt.keep, tc.wantKeep) {
+				t.Fatalf("SweepDeltas called %d times keeping %v, want %d keeping %v", rt.calls, rt.keep, tc.wantCalls, tc.wantKeep)
+			}
+			if rep.DeltasSwept != tc.wantSwept {
+				t.Fatalf("report swept %d, want %d", rep.DeltasSwept, tc.wantSwept)
+			}
+		})
+	}
+}

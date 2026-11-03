@@ -17,6 +17,12 @@ import (
 	"github.com/helayoty/fiberd/pkg/core"
 )
 
+// What a parked session's discard and the boot sweep ask of the runtime.
+var (
+	_ core.DeltaDeleter = (*Runtime)(nil)
+	_ core.DeltaSweeper = (*Runtime)(nil)
+)
+
 // remoteRecord is what remoteFile holds: the tag a delta was pushed
 // under and the digest it had there. Owned reads it back, and
 // RetireDelta deletes the tag while it still has that digest.
@@ -188,6 +194,45 @@ func (r *Runtime) FindDelta(ctx context.Context, g core.Grant, session string) (
 	return rd, true, nil
 }
 
+// resolvedPath is p with its symlinks resolved, or only cleaned when they
+// cannot be, as for a path that does not exist.
+func resolvedPath(p string) string {
+	if r, err := filepath.EvalSymlinks(p); err == nil {
+		return r
+	}
+	return filepath.Clean(p)
+}
+
+// DeleteDelta implements core.DeltaDeleter. It deletes the session's tag
+// while the tag still holds the digest FindDelta found, as a claim does,
+// and pulls nothing. The parent checkpoints the delta names stay, since
+// other sessions of the domain may name them too.
+func (r *Runtime) DeleteDelta(ctx context.Context, g core.Grant, session, handle string) (string, bool, error) {
+	if err := r.cfg.checkDeltaRegistry(); err != nil {
+		return "", false, err
+	}
+	repo, _, err := r.domainRepo(g)
+	if err != nil {
+		return "", false, err
+	}
+	ref := repo + ":" + sessionTag(session)
+	loc, found, err := artifact.Resolve(ctx, ref)
+	if err != nil {
+		return "", false, err
+	}
+	if !found || loc.Digest != handle {
+		return "", false, nil
+	}
+	removed, err := artifact.Delete(ctx, ref)
+	if err != nil {
+		return "", false, fmt.Errorf("host: discard %s: %w", ref, err)
+	}
+	if removed {
+		log.Printf("host: discarded %s@%s", ref, handle)
+	}
+	return ref + "@" + handle, removed, nil
+}
+
 // templateAt reports whether the executable of template digest is in the
 // template cache dir on this machine, where a proc restore reopens it.
 func templateAt(dir, digest string) bool {
@@ -291,17 +336,88 @@ func (r *Runtime) ReturnDelta(ctx context.Context, g core.Grant, session, deltaR
 // delta store is touched. A tcp port the parked fiber kept for its resume
 // goes back with the delta.
 func (r *Runtime) DiscardDelta(_ context.Context, ref string) error {
+	if err := r.inDeltaDir(ref); err != nil {
+		return err
+	}
+	err := r.removeDelta(ref)
+	r.pokePrune() // its parent, unless something else names it
+	return err
+}
+
+// inDeltaDir refuses a path that is not strictly inside this home's
+// delta store.
+func (r *Runtime) inDeltaDir(ref string) error {
 	rel, err := filepath.Rel(r.cfg.DeltaDir, ref)
 	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, "../") {
 		return fmt.Errorf("host: %s is not a delta of this home", ref)
 	}
+	return nil
+}
+
+// removeDelta removes one delta and gives back the port its parked
+// fiber kept. The caller has checked the path and pokes the prune.
+func (r *Runtime) removeDelta(ref string) error {
 	var m manifest
 	if err := readJSON(filepath.Join(ref, "manifest.json"), &m); err == nil && m.Fence != "" {
 		r.freePorts(m.Fence)
 	}
-	err = os.RemoveAll(ref)
-	r.pokePrune() // its parent, unless something else names it
-	return err
+	return os.RemoveAll(ref)
+}
+
+// SweepDeltas implements core.DeltaSweeper. It removes every entry of
+// <DeltaDir>/<grant>/ that keep does not name. That is a delta parked
+// here or a claimed copy no session names, or the staging file a crashed
+// park left. Names with a leading dot are scratch, which the store sweep
+// at start owns, and are left alone, as is anything outside DeltaDir.
+// Parents that only the removed deltas named are pruned once, at the end.
+func (r *Runtime) SweepDeltas(_ context.Context, keep []string) (int, error) {
+	// Paths are compared resolved, as HasDelta's stat sees them, so a
+	// DeltaDir spelt another way since the park (a symlink, a trailing
+	// slash) still keeps the delta it restored.
+	kept := make(map[string]bool, len(keep))
+	for _, ref := range keep {
+		kept[resolvedPath(ref)] = true
+	}
+	grants, err := os.ReadDir(r.cfg.DeltaDir)
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	removed := 0
+	var errs []error
+	for _, g := range grants {
+		if !g.IsDir() || strings.HasPrefix(g.Name(), ".") {
+			continue
+		}
+		dir := filepath.Join(r.cfg.DeltaDir, g.Name())
+		ents, err := os.ReadDir(dir)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		for _, e := range ents {
+			ref := filepath.Join(dir, e.Name())
+			if strings.HasPrefix(e.Name(), ".") || kept[resolvedPath(ref)] {
+				continue
+			}
+			if err := r.inDeltaDir(ref); err != nil {
+				errs = append(errs, err)
+				continue
+			}
+			if err := r.removeDelta(ref); err != nil {
+				errs = append(errs, err)
+				continue
+			}
+			log.Printf("host: swept %s, which no parked session names", ref)
+			removed++
+		}
+	}
+	if removed > 0 {
+		r.pokePrune()
+	}
+	return removed, errors.Join(errs...)
 }
 
 // ensureParent finds the parent sha in the store, or pulls it, in one

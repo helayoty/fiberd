@@ -842,7 +842,9 @@ func TestTenantKeepsSessionsApart(t *testing.T) {
 // TestNamedSessionNeedsTenant checks that a grant without a tenant runs
 // anonymous fibers only. A named Clone under it is refused up front as
 // FailedPrecondition, and so is a named Park should the grant be
-// delivered again without its tenant. Anonymous fibers clone and park.
+// delivered again without its tenant. Anonymous fibers clone, and their
+// park is refused as Invalid, since nothing could resume it (regression:
+// an anonymous park was taken, and its delta lay on disk unreachable).
 func TestNamedSessionNeedsTenant(t *testing.T) {
 	with := core.Grant{UID: "g1", Tenant: "acme", Audience: "A", TemplateDigest: "sha256:t", FiberMax: 4}
 	without := core.Grant{UID: "g1", Audience: "A", TemplateDigest: "sha256:t", FiberMax: 4}
@@ -853,12 +855,14 @@ func TestNamedSessionNeedsTenant(t *testing.T) {
 		redeliver *core.Grant // admitted again before the park
 		wantClone core.StatusCode
 		wantPark  core.StatusCode
+		wantErr   error // why the park was refused
 	}{
 		{name: "a named clone without a tenant is refused", grant: without, session: "S", wantClone: core.NeedsTier},
-		{name: "an anonymous clone and park without a tenant work", grant: without, wantClone: core.OK, wantPark: core.OK},
+		{name: "an anonymous clone works and its park is refused", grant: without, wantClone: core.OK,
+			wantPark: core.Invalid, wantErr: core.ErrAnonymousPark},
 		{name: "a named clone and park with a tenant work", grant: with, session: "S", wantClone: core.OK, wantPark: core.OK},
 		{name: "a named park is refused once the grant lost its tenant", grant: with, session: "S", redeliver: &without,
-			wantClone: core.OK, wantPark: core.NeedsTier},
+			wantClone: core.OK, wantPark: core.NeedsTier, wantErr: core.ErrNoTenant},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -886,8 +890,8 @@ func TestNamedSessionNeedsTenant(t *testing.T) {
 			}
 			st, _ := coretest.GrantStatus(a.Ledger, "g1")
 			if code != core.OK {
-				if !errors.Is(err, core.ErrNoTenant) {
-					t.Fatalf("park err = %v, want ErrNoTenant", err)
+				if !errors.Is(err, tc.wantErr) {
+					t.Fatalf("park err = %v, want %v", err, tc.wantErr)
 				}
 				if st.Running != 1 || st.Parked != 0 {
 					t.Fatalf("after a refused park: running %d parked %d, want the fiber still running", st.Running, st.Parked)

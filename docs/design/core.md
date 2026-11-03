@@ -15,10 +15,10 @@ stateDiagram-v2
   Running --> Parked: park, drain
   Parked --> Running: resume (new fence)
   Running --> [*]: release, exit, yield, drain, epoch bump
-  Parked --> [*]: claimed by another home
+  Parked --> [*]: discard, claimed by another home
 ```
 
-- **Ends.** A running fiber ends by [release](../glossary.md#release), its own exit, a [yield](../glossary.md#yield) of its grant or an epoch bump. An opt-in [drain](../glossary.md#drain) before fiberd stops parks the named sessions and releases the rest. A parked one leaves when another home claims its [delta](../glossary.md#delta). A resumed delta is consumed by its resume. It stays on disk only while that fiber runs, and goes however the fiber ends, including a restart that finds the session was running. Parked deltas stay.
+- **Ends.** A running fiber ends by [release](../glossary.md#release), its own exit, a [yield](../glossary.md#yield) of its grant or an epoch bump. An opt-in [drain](../glossary.md#drain) before fiberd stops parks the named sessions and releases the rest. A parked one leaves when a caller [discards](../glossary.md#discard) it or another home claims its [delta](../glossary.md#delta). A resumed delta is consumed by its resume. It stays on disk only while that fiber runs, and goes however the fiber ends, including a restart that finds the session was running. Parked deltas stay.
 - **Session gates.** Every Clone of one session name runs under that name's gate, so concurrent Clones and retries attach instead of creating a twin.
 - **Exits.** A fiber that dies on its own frees its slot and its session is forgotten. Its state is gone, so the ledger never calls it [parked](../glossary.md#park).
 
@@ -53,7 +53,7 @@ The commit is the step where the ledger records the new fiber as running. It kee
 
 - The epoch is a file in the private state directory, advanced on every start. A missing file starts at 1, as on a first boot. A corrupt or unreadable one jumps to the current Unix time instead of guessing.
 - Before it serves, [fiberd](fiberd.md) reconciles, rebuilding the ledger from its snapshot on the home's disk. The snapshot is only a cache, so a grant comes back only when its stored token verifies again. A failing or missing token drops the entry, and an undecidable one is held, with its parked sessions, unadmitted.
-- Parked sessions whose delta still exists are remembered. Every fiber the runtime still reports is from a prior epoch and is killed.
+- Parked sessions whose delta still exists are remembered. Every fiber the runtime still reports is from a prior epoch and is killed. Every delta that no parked session names is then removed ([artifact.md](artifact.md)).
 - An epoch bump without a restart releases every running fiber and keeps grants and parked deltas ([home.md](home.md) says when).
 
 **Leases and revocation.**

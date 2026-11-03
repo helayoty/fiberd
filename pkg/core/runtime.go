@@ -255,6 +255,25 @@ type DeltaFinder interface {
 	Owned(ctx context.Context, deltaRef string) bool
 }
 
+// DeltaDeleter is implemented by runtimes that can delete a session's
+// published delta from the shared store without pulling it. handle is
+// the RemoteDelta.Handle FindDelta returned, and the delete happens only
+// while the store still holds it, as a claim's does. removed is false
+// when the session is gone from the store or was parked again meanwhile.
+// remote names what was deleted, for the audit record.
+type DeltaDeleter interface {
+	DeleteDelta(ctx context.Context, g Grant, session, handle string) (remote string, removed bool, err error)
+}
+
+// DeltaSweeper is implemented by runtimes that keep parked deltas on
+// local disk. fiberd calls it once at boot, after the parked sessions are
+// restored, with every delta ref a parked session names. The runtime
+// removes every delta it holds that keep does not name, which no session
+// can resume, and reports how many.
+type DeltaSweeper interface {
+	SweepDeltas(ctx context.Context, keep []string) (removed int, err error)
+}
+
 // Runtime is the seam between the invariant core and a mechanism. This
 // interface is what keeps the core identical across homes and tiers.
 type Runtime interface {

@@ -33,6 +33,7 @@ const (
 	Fibers_Clone_FullMethodName     = "/fiberd.grant.v1.Fibers/Clone"
 	Fibers_Park_FullMethodName      = "/fiberd.grant.v1.Fibers/Park"
 	Fibers_Release_FullMethodName   = "/fiberd.grant.v1.Fibers/Release"
+	Fibers_Discard_FullMethodName   = "/fiberd.grant.v1.Fibers/Discard"
 	Fibers_Watch_FullMethodName     = "/fiberd.grant.v1.Fibers/Watch"
 	Fibers_Upload_FullMethodName    = "/fiberd.grant.v1.Fibers/Upload"
 	Fibers_Download_FullMethodName  = "/fiberd.grant.v1.Fibers/Download"
@@ -49,8 +50,17 @@ type FibersClient interface {
 	// home's tier, a parked session needs a tier the home lacks, or an
 	// untrusted grant reaches a home that does not isolate tenants.
 	Clone(ctx context.Context, in *CloneRequest, opts ...grpc.CallOption) (*CloneResponse, error)
+	// Park checkpoints a named session's fiber. A fiber without a session
+	// is refused with InvalidArgument, since nothing could resume it, so
+	// release it instead.
 	Park(ctx context.Context, in *ParkRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	Release(ctx context.Context, in *ReleaseRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// Discard deletes a parked session's delta by name, here and in the
+	// delta registry, and the session is forgotten. The next Clone of it
+	// creates. A running session is refused with InvalidArgument, so
+	// release its fiber with discard instead. A session neither parked
+	// here nor in the registry is NotFound.
+	Discard(ctx context.Context, in *DiscardRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	Watch(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (grpc.ServerStreamingClient[Status], error)
 	// Upload writes one file into a running fiber's workspace. The first
 	// message is the header. Each file call is authorized like Park, so
@@ -95,6 +105,16 @@ func (c *fibersClient) Release(ctx context.Context, in *ReleaseRequest, opts ...
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(emptypb.Empty)
 	err := c.cc.Invoke(ctx, Fibers_Release_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *fibersClient) Discard(ctx context.Context, in *DiscardRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, Fibers_Discard_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -172,8 +192,17 @@ type FibersServer interface {
 	// home's tier, a parked session needs a tier the home lacks, or an
 	// untrusted grant reaches a home that does not isolate tenants.
 	Clone(context.Context, *CloneRequest) (*CloneResponse, error)
+	// Park checkpoints a named session's fiber. A fiber without a session
+	// is refused with InvalidArgument, since nothing could resume it, so
+	// release it instead.
 	Park(context.Context, *ParkRequest) (*emptypb.Empty, error)
 	Release(context.Context, *ReleaseRequest) (*emptypb.Empty, error)
+	// Discard deletes a parked session's delta by name, here and in the
+	// delta registry, and the session is forgotten. The next Clone of it
+	// creates. A running session is refused with InvalidArgument, so
+	// release its fiber with discard instead. A session neither parked
+	// here nor in the registry is NotFound.
+	Discard(context.Context, *DiscardRequest) (*emptypb.Empty, error)
 	Watch(*emptypb.Empty, grpc.ServerStreamingServer[Status]) error
 	// Upload writes one file into a running fiber's workspace. The first
 	// message is the header. Each file call is authorized like Park, so
@@ -202,6 +231,9 @@ func (UnimplementedFibersServer) Park(context.Context, *ParkRequest) (*emptypb.E
 }
 func (UnimplementedFibersServer) Release(context.Context, *ReleaseRequest) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method Release not implemented")
+}
+func (UnimplementedFibersServer) Discard(context.Context, *DiscardRequest) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method Discard not implemented")
 }
 func (UnimplementedFibersServer) Watch(*emptypb.Empty, grpc.ServerStreamingServer[Status]) error {
 	return status.Error(codes.Unimplemented, "method Watch not implemented")
@@ -290,6 +322,24 @@ func _Fibers_Release_Handler(srv interface{}, ctx context.Context, dec func(inte
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Fibers_Discard_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DiscardRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(FibersServer).Discard(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Fibers_Discard_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(FibersServer).Discard(ctx, req.(*DiscardRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Fibers_Watch_Handler(srv interface{}, stream grpc.ServerStream) error {
 	m := new(emptypb.Empty)
 	if err := stream.RecvMsg(m); err != nil {
@@ -355,6 +405,10 @@ var Fibers_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Release",
 			Handler:    _Fibers_Release_Handler,
+		},
+		{
+			MethodName: "Discard",
+			Handler:    _Fibers_Discard_Handler,
 		},
 		{
 			MethodName: "ListFiles",

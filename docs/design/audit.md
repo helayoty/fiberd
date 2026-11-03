@@ -35,7 +35,7 @@ flowchart TD
 - **Group fsync.** One fsync runs at a time and covers every record written before it began. A burst of sync records costs one or two fsyncs, not one each.
 - **Poison.** The first failed fsync is sticky. The kernel drops the pages a failed fsync could not write, and a later fsync does not retry them. So every sync record fails until fiberd restarts, and best-effort records keep being written.
 
-How a failed record affects [Clone](../glossary.md#clone), [Park](../glossary.md#park) and [Release](../glossary.md#release) is in [protocol.md](../protocol.md#outcomes). Two cases belong to the spool.
+How a failed record affects [Clone](../glossary.md#clone), [Park](../glossary.md#park), [Release](../glossary.md#release) and [Discard](../glossary.md#discard) is in [protocol.md](../protocol.md#outcomes). Two cases belong to the spool.
 
 - **Migrate-in.** A session claimed from another home is recorded here as parked before its record is written. A failed sync record refuses that Clone, but the session stays parked on this home, so the next Clone of its name resumes it.
 - **Best effort.** A failure is logged and the operation succeeds. The next record written is a gap.

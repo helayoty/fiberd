@@ -255,6 +255,7 @@ export async function home(
     })),
     park: (_call, done) => done(null, {}),
     release: (_call, done) => done(null, {}),
+    discard: (_call, done) => done(null, {}),
     watch: (call) => call.end(),
     upload: files.upload,
     download: files.download,

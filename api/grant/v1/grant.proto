@@ -218,6 +218,13 @@ message ReleaseRequest {
   bool discard = 2;
 }
 
+// DiscardRequest names a parked session to delete. It carries the grant
+// as Clone does, since a parked session has no fiber to name.
+message DiscardRequest {
+  string grant_jwt = 1;
+  string session = 2;
+}
+
 // Status is the batched, per-grant view the home publishes. It is the
 // only thing a control plane ever sees; never individual fibers.
 message Status {
@@ -307,8 +314,17 @@ service Fibers {
   // home's tier, a parked session needs a tier the home lacks, or an
   // untrusted grant reaches a home that does not isolate tenants.
   rpc Clone(CloneRequest) returns (CloneResponse);
+  // Park checkpoints a named session's fiber. A fiber without a session
+  // is refused with InvalidArgument, since nothing could resume it, so
+  // release it instead.
   rpc Park(ParkRequest) returns (google.protobuf.Empty);
   rpc Release(ReleaseRequest) returns (google.protobuf.Empty);
+  // Discard deletes a parked session's delta by name, here and in the
+  // delta registry, and the session is forgotten. The next Clone of it
+  // creates. A running session is refused with InvalidArgument, so
+  // release its fiber with discard instead. A session neither parked
+  // here nor in the registry is NotFound.
+  rpc Discard(DiscardRequest) returns (google.protobuf.Empty);
   rpc Watch(google.protobuf.Empty) returns (stream Status);
   // Upload writes one file into a running fiber's workspace. The first
   // message is the header. Each file call is authorized like Park, so

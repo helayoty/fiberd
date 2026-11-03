@@ -56,6 +56,14 @@ func (g *Gateway) Handler() http.Handler {
 		resp, err := g.Server.Release(r.Context(), &req)
 		g.reply(w, resp, err)
 	})
+	mux.HandleFunc("POST /v1/discard", func(w http.ResponseWriter, r *http.Request) {
+		var req grantv1.DiscardRequest
+		if !g.decode(w, r, &req) {
+			return
+		}
+		resp, err := g.Server.Discard(r.Context(), &req)
+		g.reply(w, resp, err)
+	})
 	mux.HandleFunc("GET /v1/status", func(w http.ResponseWriter, r *http.Request) {
 		out := make([]json.RawMessage, 0)
 		for _, st := range g.Server.visible(r.Context(), g.Server.Core.Ledger.Statuses()) {

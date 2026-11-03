@@ -35,7 +35,7 @@ Verification does not reject a token merely because `exp` is in the past. Lease 
 - `issuer` identifies the authority that signed the grant.
 - `audience` names the home allowed to exercise the grant.
 - `template_digest` fixes the pre-admitted OCI template or artifact.
-- `tenant` names who the grant belongs to at the issuer, such as a Kubernetes namespace or a Slurm account. It is one path segment of letters, digits, `.`, `_` and `-`, at most 253 characters, starting with a letter or digit. A grant with any other value is refused as unauthenticated. A named [session](glossary.md#session) is filed under its tenant ([artifact.md](design/artifact.md)), so a grant without a tenant runs anonymous fibers only. A named `Clone` or `Park` under it fails with `FailedPrecondition`.
+- `tenant` names who the grant belongs to at the issuer, such as a Kubernetes namespace or a Slurm account. It is one path segment of letters, digits, `.`, `_` and `-`, at most 253 characters, starting with a letter or digit. A grant with any other value is refused as unauthenticated. A named [session](glossary.md#session) is filed under its tenant ([artifact.md](design/artifact.md)), so a grant without a tenant runs anonymous fibers only. A named `Clone`, a `Park` of a named session and a `Discard` under it fail with `FailedPrecondition`.
 - `fibers.max` limits concurrent running fibers for the grant. Zero means no protocol-level count limit, while the enclosing resource boundary still applies.
 - `fibers.warm` is how many sandboxes a gVisor home keeps restored ahead of the grant's clones, inside `fibers.max`.
 - `w_budget_bytes` is the per-fiber [W](glossary.md#w-working-set) ceiling. Zero means unlimited at this layer. Enforcement is described in [resources.md](resources.md).
@@ -51,7 +51,7 @@ Verification does not reject a token merely because `exp` is in the past. Lease 
 
 ## Fibers service
 
-The `Fibers` service has seven RPCs.
+The `Fibers` service has eight RPCs.
 
 ### Clone
 
@@ -89,25 +89,32 @@ The diagram follows action selection and successful completion. [Outcomes](#outc
 
 ### Park
 
-`Park(ParkRequest) returns (Empty)` checkpoints the identified running fiber and frees its place under `fibers.max`. A named session keeps the resulting [delta](glossary.md#delta) and can later RESUME. An anonymous fiber has no name through which its delta can be requested.
+`Park(ParkRequest) returns (Empty)` checkpoints the identified running fiber of a named session and frees its place under `fibers.max`. The session keeps the resulting [delta](glossary.md#delta) and can later RESUME. An anonymous fiber has no name to resume it by, so its Park fails with `InvalidArgument` and the fiber runs on. Release it instead.
 
 `sync=true` makes the runtime fsync the delta and its manifest before the reply, and the fiber keeps running until that is done.
 
 The fiber is asked to stop serving before it is checkpointed ([zygote.md](design/zygote.md)). One that keeps serving past the grant's resume deadline is not parked. The call fails with `Internal` and the fiber runs on.
 
-Do not Park an anonymous fiber when retained checkpoint files or a reserved TCP port would be unacceptable. The public API has no session handle with which to resume or discard that anonymous parked state.
-
 ### Release
 
 `Release(ReleaseRequest) returns (Empty)` terminates the identified running fiber and frees its place under `fibers.max`. This home then forgets the session's name, with or without `discard`, so the next Clone of that name is a CREATE.
 
-- A session that was resumed still has the delta it came from on the home's disk. `discard=true` removes it. Without `discard` it stays there, unused.
+- A session that was resumed still has the delta it came from on the home's disk. `discard=true` removes it. Without `discard` it stays there, unused, until fiberd next starts.
 - On a home with a delta registry, the copy published at the last park is withdrawn when the session resumes, so a Clone after Release does not find and resume that older state ([artifact.md](design/artifact.md)). If the withdrawal failed, a Release with `discard=true` tries again.
 - The next park of a resumed session removes the delta it came from, because the new delta supersedes it.
 
-Release looks up a running fiber ID, so the public API cannot use it to discard the delta of an already parked session.
+Release looks up a running fiber ID. To delete a session that is already parked, use [Discard](#discard).
 
 Calling Park or Release with an unknown or old-epoch fiber ID returns `NotFound`. So does a fiber whose grant is bound to another caller's certificate.
+
+### Discard
+
+`Discard(DiscardRequest) returns (Empty)` deletes a parked session's delta by name. The request carries `grant_jwt` and `session`, and the token is checked as Clone checks it, caller binding included. A success writes a `discard` audit record, and the next Clone of that session is a CREATE.
+
+- A session parked on this home loses its published copy first, then its delta and the TCP port it kept, and the home forgets it. If the delta registry cannot be reached, the call fails with `Internal` and nothing changes.
+- A session this home does not know is looked up in the delta registry, and its published copy is deleted there ([artifact.md](design/artifact.md)). So any home that shares the registry can discard it, under a grant of the same [tenant](glossary.md#tenant) and [session class](glossary.md#session-class).
+- A running session fails with `InvalidArgument`. Release its fiber with `discard=true` instead.
+- A session neither parked here nor in the registry returns `NotFound`.
 
 ### Watch
 
@@ -189,12 +196,12 @@ The core returns transport-independent outcomes, and the gRPC layer maps them as
 - A tier gap, a needs-tier [miss](glossary.md#clone-misses), becomes `FailedPrecondition`.
 - A malformed request becomes `InvalidArgument`.
 - An invalid grant, signature, issuer or audience becomes `Unauthenticated`.
-- An unknown fiber becomes `NotFound`.
+- An unknown fiber, and a session Discard finds nowhere, become `NotFound`.
 - A file call on a fiber whose grant has no workspace becomes `FailedPrecondition` with a `NoWorkspace` detail, so a client tells it apart from a tier gap.
 - A file larger than the disk budget becomes `ResourceExhausted` with no `Miss`, so a client never mistakes it for `SHED`.
 - A Clone runtime failure or missed deadline becomes `DEFERRED_FALLBACK`, whether or not the issuer is reachable. The grant's own task limit is the exception and becomes `SHED`.
 - Admission and template-preparation failures become a capacity miss chosen by whether the issuer is reachable, as below.
-- Park and Release runtime failures become `Internal`.
+- Park, Release and Discard runtime failures become `Internal`.
 - Audit failures can become `Internal`.
 
 Any other capacity miss, such as an unknown, full, expired or revoked grant, is chosen by whether the home reports the issuer reachable.
@@ -208,7 +215,7 @@ Every capacity miss carries a `Miss` detail. `SHED` tells the caller to wait for
 **Audit order.** Each call writes one audit record, and the calls order it differently against the state change.
 
 - **Clone.** A new fiber's record is written before the ledger counts the fiber as running. A failed record releases the fiber and frees its place again, so an `Internal` from Clone means no fiber was committed. An ATTACH writes its record before it answers.
-- **Park and Release.** The ledger changes first and the record follows, so an `Internal` from them can follow a change that already happened.
+- **Park, Release and Discard.** The change comes first and the record follows, so an `Internal` from them can follow a change that already happened.
 - **Lost replies.** A Clone whose reply was lost in transit may still have committed, so blindly retrying an anonymous Clone can create another fiber.
 
 ## JSON gateway
@@ -218,6 +225,7 @@ Starting fiberd with an HTTP address exposes a JSON face over the same core.
 - `POST /v1/clone`
 - `POST /v1/park`
 - `POST /v1/release`
+- `POST /v1/discard`
 - `GET /v1/status`
 - `GET /healthz`
 

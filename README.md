@@ -22,14 +22,15 @@ fiberd works with the scheduler, not instead of it. Fast starts from a warm copy
 
 The fastest path, proc and runc, shares the host kernel, so it suits trusted code. Untrusted code runs on gVisor, Hyperlight or Cloud Hypervisor, where a fiber is a snapshot restore.
 
-## The four verbs
+## fiberd verbs
 
 - **[Clone](docs/glossary.md#clone)** returns a fiber for a grant, anonymous or by [session](docs/glossary.md#session) name.
 - **[Park](docs/glossary.md#park)** saves a session and frees its fiber's memory.
 - **[Release](docs/glossary.md#release)** ends a fiber.
+- **[Discard](docs/glossary.md#discard)** deletes a parked session.
 - **Watch** streams a summary of each grant.
 
-[protocol.md](docs/protocol.md) is the wire contract for all four.
+[protocol.md](docs/protocol.md) is the wire contract for all verbs.
 
 ## Reading path
 

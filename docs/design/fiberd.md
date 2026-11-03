@@ -52,7 +52,8 @@ The state layout keeps what fibers must never read under one hidden directory.
     zygote-images/      self-checkpoints not yet filed, mode 0700
     <digest>/images/    author images opened for a warm, mode 0700, pruned
                         once no warm instance or delta names them
-  deltas/               parked deltas, also hidden from fibers
+  deltas/               parked deltas, also hidden from fibers, swept at
+                        start of those no parked session names
   workspaces/           running fibers' workspaces (-workspace-dir), mode
                         0700 (0711 on runc, whose mapped root walks to its
                         own), hidden from fibers, each mounted at /workspace

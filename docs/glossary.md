@@ -33,7 +33,7 @@ One worker made from a [warm](#warm) [template](#template). On proc and runc it 
 The one call that returns a [fiber](#fiber) for a [grant](#grant). The caller may name a [session](#session), and [fiberd](#fiberd) then creates a new fiber, attaches to the one a running session already has, or resumes a [parked](#park) session from its [delta](#delta). The caller may also send up to 4096 opaque bytes, which the new fiber reads and fiberd never interprets.
 
 ## Session
-A name the caller gives a [fiber](#fiber) whose state should last, such as "my worker". The name stays the same while the fiber behind it is parked, resumed or moved, and a clone without a name gets an anonymous fiber that nothing can resume later.
+A name the caller gives a [fiber](#fiber) whose state should last, such as "my worker". The name stays the same while the fiber behind it is parked, resumed or moved. A clone without a name gets an anonymous fiber, which cannot be parked.
 
 ## Tenant
 Who a [grant](#grant) belongs to at the [issuer](#issuer), such as a Kubernetes namespace or a Slurm account. A named [session](#session) is filed under its tenant, so a grant of another tenant never finds it, and a grant without a tenant runs anonymous [fibers](#fiber) only.
@@ -42,16 +42,19 @@ Who a [grant](#grant) belongs to at the [issuer](#issuer), such as a Kubernetes 
 A label in a [grant](#grant)'s policy that names, within the grant's [tenant](#tenant), the domain its [deltas](#delta) are published and encrypted under. Only a grant of the same tenant and class can resume them, and a grant without a class uses its [template](#template) digest in place of one.
 
 ## Park
-Save a running [session](#session)'s state as a [delta](#delta) and stop its [fiber](#fiber), which frees its memory and its place under `fibers.max`. A later [clone](#clone) of the same session resumes it, on this [home](#home) or on another one.
+Save a running [session](#session)'s state as a [delta](#delta) and stop its [fiber](#fiber), which frees its memory and its place under `fibers.max`. A later [clone](#clone) of the same session resumes it, on this [home](#home) or on another one. Only a named session can be parked.
 
 ## Delta
-The saved state of a [parked](#park) [session](#session). It is usually only what the fiber changed since it was forked from its [template](#template), so it is small enough to move to another [home](#home).
+The saved state of a [parked](#park) [session](#session). It is usually only what the fiber changed since it was forked from its [template](#template), so it is small enough to move to another [home](#home). It has no time limit on its home, so a parked session nobody needs should be [discarded](#discard).
 
 ## Registry
 The storage between [homes](#home) that holds templates and published [deltas](#delta), such as an OCI registry or a shared directory. fiberd treats it as untrusted, so nothing from it is used before its digest or signature checks pass. It holds template and tenant memory only sealed.
 
 ## Release
 End a [fiber](#fiber) and free its memory and its place under `fibers.max`. The caller may also discard the [session](#session)'s [delta](#delta), so the session cannot be resumed.
+
+## Discard
+Delete a [parked](#park) [session](#session)'s [delta](#delta) by name, on its [home](#home) and in the [registry](#registry). The next [clone](#clone) of that name creates a new fiber.
 
 ## Yield
 Give up a [grant](#grant) on one [home](#home). [fiberd](#fiberd) revokes it, [releases](#release) its running fibers and keeps its parked [deltas](#delta). A lapsed [lease](#lease), a grant the home takes back and the last rung of the pressure ladder each yield a grant.

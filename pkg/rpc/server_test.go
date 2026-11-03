@@ -1,10 +1,12 @@
 package rpc_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"net"
+	"net/http"
 	"net/http/httptest"
 	"sync"
 	"testing"
@@ -317,7 +319,8 @@ func TestCallerOwnsItsGrantsFibers(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			r, err := h.server.Clone(rpc.WithCaller(context.Background(), owner), &grantv1.CloneRequest{GrantJwt: g})
+			// A named session, since only a named session parks.
+			r, err := h.server.Clone(rpc.WithCaller(context.Background(), owner), &grantv1.CloneRequest{GrantJwt: g, Session: tc.name})
 			if err != nil {
 				t.Fatalf("clone by owner: %v", err)
 			}
@@ -341,6 +344,77 @@ func TestCallerOwnsItsGrantsFibers(t *testing.T) {
 			}
 			if listed != tc.wantListed {
 				t.Fatalf("status lists g1 = %v, want %v (%s)", listed, tc.wantListed, rec.Body.String())
+			}
+		})
+	}
+}
+
+// Discard names a session with the grant, as Clone does, so the caller is
+// the TLS peer checked against the grant's binding. A parked session is
+// discarded and the next Clone creates. A running one is InvalidArgument,
+// an unknown one NotFound, and another caller is Unauthenticated. The
+// gateway serves the same call at POST /v1/discard.
+func TestDiscard(t *testing.T) {
+	owner := tlsconf.Caller{Thumbprint: "owner-x5t"}
+	other := tlsconf.Caller{Thumbprint: "other-x5t"}
+	g := jsonGrant(t, core.Grant{UID: "g1", Audience: "node-a", Tenant: "acme"})
+	cases := []struct {
+		name     string
+		park     bool // S is cloned and parked first
+		run      bool // S is cloned and left running first
+		session  string
+		caller   tlsconf.Caller
+		gateway  bool // through POST /v1/discard
+		want     codes.Code
+		wantHTTP int
+	}{
+		{name: "the owner discards a parked session", park: true, session: "S", caller: owner, want: codes.OK},
+		{name: "the gateway discards a parked session", park: true, session: "S", caller: owner, gateway: true, wantHTTP: http.StatusOK},
+		{name: "a running session is InvalidArgument", run: true, session: "S", caller: owner, want: codes.InvalidArgument},
+		{name: "an unknown session is NotFound", session: "nope", caller: owner, want: codes.NotFound},
+		{name: "an unknown session through the gateway is 404", session: "nope", caller: owner, gateway: true, wantHTTP: http.StatusNotFound},
+		{name: "no session is InvalidArgument", caller: owner, want: codes.InvalidArgument},
+		{name: "another caller is Unauthenticated", park: true, session: "S", caller: other, want: codes.Unauthenticated},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t, core.TierCheckpoint, func(a *core.Core) { a.Verify = boundVerifier{thumbprint: owner.Thumbprint} })
+			mine := rpc.WithCaller(context.Background(), owner)
+			if tc.park || tc.run {
+				r, err := h.server.Clone(mine, &grantv1.CloneRequest{GrantJwt: g, Session: "S"})
+				if err != nil {
+					t.Fatalf("clone S: %v", err)
+				}
+				if tc.park {
+					if _, err := h.server.Park(mine, &grantv1.ParkRequest{FiberId: r.GetFiberId(), Sync: true}); err != nil {
+						t.Fatalf("park S: %v", err)
+					}
+				}
+			}
+			ctx := rpc.WithCaller(context.Background(), tc.caller)
+			req := &grantv1.DiscardRequest{GrantJwt: g, Session: tc.session}
+			var ok bool
+			if tc.gateway {
+				body, _ := protojson.Marshal(req)
+				rec := httptest.NewRecorder()
+				(&rpc.Gateway{Server: h.server}).Handler().ServeHTTP(rec, httptest.NewRequest("POST", "/v1/discard", bytes.NewReader(body)).WithContext(ctx))
+				if rec.Code != tc.wantHTTP {
+					t.Fatalf("POST /v1/discard = %d %s, want %d", rec.Code, rec.Body.String(), tc.wantHTTP)
+				}
+				ok = rec.Code == http.StatusOK
+			} else {
+				_, err := h.server.Discard(ctx, req)
+				if status.Code(err) != tc.want {
+					t.Fatalf("Discard = %v, want %v", err, tc.want)
+				}
+				ok = err == nil
+			}
+			if !ok || !tc.park {
+				return
+			}
+			r, err := h.server.Clone(mine, &grantv1.CloneRequest{GrantJwt: g, Session: "S"})
+			if err != nil || r.GetKind() != grantv1.CloneKind_CREATE {
+				t.Fatalf("clone S after the discard = %v %v, want CREATE", r.GetKind(), err)
 			}
 		})
 	}

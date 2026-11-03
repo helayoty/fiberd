@@ -133,6 +133,25 @@ func (s *Server) Release(ctx context.Context, req *grantv1.ReleaseRequest) (*emp
 	return &emptypb.Empty{}, nil
 }
 
+// Discard deletes a parked session by name. Like Clone it carries the
+// grant, so the caller is checked against the grant's binding from the
+// TLS peer, not through owns. Another tenant's session is not filed
+// under this grant's tenant, so it answers NotFound.
+func (s *Server) Discard(ctx context.Context, req *grantv1.DiscardRequest) (*emptypb.Empty, error) {
+	dreq := core.DiscardRequest{
+		GrantJWT: []byte(req.GetGrantJwt()),
+		Session:  req.GetSession(),
+	}
+	if c, ok := CallerFrom(ctx); ok {
+		dreq.CallerThumbprint = c.Thumbprint
+	}
+	code, err := s.Core.Discard(ctx, dreq)
+	if code != core.OK {
+		return nil, s.ToError(code, err)
+	}
+	return &emptypb.Empty{}, nil
+}
+
 // Watch streams one Status per admitted grant of the caller on every
 // change and at least every status interval, until the client goes away.
 func (s *Server) Watch(_ *emptypb.Empty, stream grantv1.Fibers_WatchServer) error {

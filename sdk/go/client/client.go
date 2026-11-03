@@ -1,5 +1,5 @@
 // Package client is the grant protocol from the caller's side: a client
-// for Clone, Park, Release and Watch that turns the two miss outcomes
+// for Clone, Park, Release, Discard and Watch that turns the two miss outcomes
 // into typed errors a consumer branches on. A consumer (a Knative
 // activator, a container shim, a virtual node) calls Clone with the
 // signed grant it holds; on DEFERRED_FALLBACK it takes its ordinary path
@@ -199,6 +199,16 @@ func (c *Client) Release(ctx context.Context, fiberID string, discard bool) erro
 	return classify(err)
 }
 
+// Discard deletes a parked session's delta under the grant, on the home
+// and in the delta registry. The home then forgets the session, so its
+// next Clone is a CREATE. A running session is refused with
+// InvalidArgument. Release its fiber instead. An unknown session is
+// NotFound.
+func (c *Client) Discard(ctx context.Context, grantJWT, session string) error {
+	_, err := c.api.Discard(ctx, &grantv1.DiscardRequest{GrantJwt: grantJWT, Session: session})
+	return classify(err)
+}
+
 // Status is one grant's line of the Watch stream.
 type Status struct {
 	GrantUID                string
@@ -232,7 +242,8 @@ func (c *Client) Watch(ctx context.Context, fn func(Status)) error {
 
 // NotFound reports a Park, Release or file call on a fiber the home does
 // not know, such as a prior epoch's fence or one already gone. For a file
-// call it also reports a missing file.
+// call it also reports a missing file. For Discard it reports a session
+// the home does not know.
 func NotFound(err error) bool { return status.Code(err) == codes.NotFound }
 
 // classify turns the protocol's errors into the typed ones.

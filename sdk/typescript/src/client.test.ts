@@ -10,6 +10,7 @@ import {
   MissCode,
   Status,
   type CloneRequest,
+  type DiscardRequest,
   type ParkRequest,
   type ReleaseRequest,
 } from "./generated/grant/v1/grant.js";
@@ -182,6 +183,36 @@ test("Park and Release accept fibers or IDs and match Python defaults", async (t
   await client.release(fiber.id, { discard: true });
   assert.deepEqual(parked, [{ fiberId: fiber.id, sync: true }, { fiberId: fiber.id, sync: false }]);
   assert.deepEqual(released, [{ fiberId: fiber.id, discard: false }, { fiberId: fiber.id, discard: true }]);
+});
+
+test("Discard sends the grant and session, and an unknown session is NotFound", async (t) => {
+  const discarded: DiscardRequest[] = [];
+  const { client } = await home(t, {
+    discard: (call, done) => {
+      discarded.push(call.request);
+      if (call.request.session === "nobody") done(rpcError(status.NOT_FOUND, "session nobody unknown"));
+      else if (call.request.session === "running") done(rpcError(status.INVALID_ARGUMENT, "session running is running"));
+      else done(null, {});
+    },
+  });
+  const cases = [
+    { name: "a parked session is discarded", token: "jwt", session: "D", rejects: undefined },
+    { name: "a refreshed token is resolved first", token: async () => "jwt-2", session: "D", rejects: undefined },
+    { name: "an unknown session is NotFound", token: "jwt", session: "nobody", rejects: NotFound },
+    { name: "a running session is the raw INVALID_ARGUMENT", token: "jwt", session: "running", rejects: { code: status.INVALID_ARGUMENT } },
+  ];
+  for (const { name, token, session, rejects } of cases) {
+    await t.test(name, async () => {
+      if (rejects === undefined) await client.discard(token, session);
+      else await assert.rejects(client.discard(token, session), rejects);
+    });
+  }
+  assert.deepEqual(discarded, [
+    { grantJwt: "jwt", session: "D" },
+    { grantJwt: "jwt-2", session: "D" },
+    { grantJwt: "jwt", session: "nobody" },
+    { grantJwt: "jwt", session: "running" },
+  ]);
 });
 
 test("all four RPCs classify protocol errors without retrying", async (t) => {

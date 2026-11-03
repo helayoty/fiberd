@@ -40,7 +40,7 @@ flowchart LR
 2. Grant replay, removal, lease expiry and an issuer-key outage behave as [core.md](core.md) and [grant.md](grant.md) describe, tested on the real platform.
 3. The [epoch](../glossary.md#epoch) survives a process restart and the intended home replacement, or the replacement starts under a new audience and grant UID.
 4. A failed runtime [release](../glossary.md#release) is retried or the capacity stays quarantined, checked by killing the [backend](../glossary.md#backend) under a release.
-5. [Parked](../glossary.md#park) [deltas](../glossary.md#delta) and ports stay bounded under the deployment's retention policy, and anonymous parks are not used.
+5. [Parked](../glossary.md#park) [deltas](../glossary.md#delta) and ports stay bounded under the deployment's retention policy, which [discards](../glossary.md#discard) the parked sessions it no longer needs.
 6. Where cross-home resume matters, a fresh session after an unreachable registry is acceptable or ruled out.
 7. A full disk and a failed fsync are visible in monitoring, and the spool is copied off the host where records matter.
 8. Readiness, [scope](../glossary.md#scope) loss, deletion and, where sessions must survive a stop, the [drain](../glossary.md#drain) within the platform's grace period are tested against the real platform, not only through the test hooks ([fiberd.md](fiberd.md)).

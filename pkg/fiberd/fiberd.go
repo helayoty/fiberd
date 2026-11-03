@@ -765,8 +765,8 @@ func RunContext(ctx context.Context, c *Config, newHome HomeFactory) error {
 		}
 		hrt.PruneGrants(keep)
 	}
-	log.Printf("reconcile: grants re-admitted=%d expired=%d unverified=%d parked restored=%d dropped=%d orphans killed=%d",
-		rep.GrantsReadmitted, rep.GrantsExpired, rep.GrantsUnverified, rep.ParkedRestored, rep.ParkedDropped, rep.OrphansKilled)
+	log.Printf("reconcile: grants re-admitted=%d expired=%d unverified=%d parked restored=%d dropped=%d orphans killed=%d deltas swept=%d",
+		rep.GrantsReadmitted, rep.GrantsExpired, rep.GrantsUnverified, rep.ParkedRestored, rep.ParkedDropped, rep.OrphansKilled, rep.DeltasSwept)
 	go ag.Run(ctx)
 	if sl, ok := h.(ScopeLoser); ok {
 		sl.OnScopeLost(func(ctx context.Context, reason string) {

@@ -148,6 +148,21 @@ export class Client {
     }, options.metadata ?? new Metadata(), rpcOptions, done), options);
   }
 
+  /**
+   * Deletes a parked session's delta under the grant, and the home forgets
+   * the session. Its next clone is a CREATE. An unknown session rejects
+   * with NotFound. A running session rejects with the raw INVALID_ARGUMENT
+   * gRPC error. Release its fiber instead.
+   */
+  async discard(token: Token, session: string, options: CallOptions = {}): Promise<void> {
+    validateDuration(options.timeoutMs, "timeoutMs");
+    const grantJwt = typeof token === "function" ? await resolveToken(token, options.signal) : token;
+    await unary((rpcOptions, done) => this.api.discard({
+      grantJwt,
+      session,
+    }, options.metadata ?? new Metadata(), rpcOptions, done), options);
+  }
+
   /** timeoutMs bounds the whole stream. Breaking out of for-await cancels the RPC. */
   async *watch(options: CallOptions = {}): AsyncGenerator<Status, void, void> {
     const rpcOptions = rpcOptionsFor(options);

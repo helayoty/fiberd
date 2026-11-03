@@ -73,6 +73,39 @@ def test_clone_attach_park_resume(client):
         last = f
 
 
+# Discard drops a parked session by name, so its next clone creates afresh.
+DISCARD = [
+    # the step, the session, the kind wanted, the error wanted
+    ("the first clone of a session creates", "clone", "D", Kind.CREATE, None),
+    ("discarding a running session is the raw InvalidArgument", "discard", "D", None, grpc.StatusCode.INVALID_ARGUMENT),
+    ("the fiber parks", "park", "D", None, None),
+    ("the parked session is discarded with the grant's token", "discard", "D", None, None),
+    ("the next clone of the name creates, not resumes", "clone", "D", Kind.CREATE, None),
+    ("discarding a session the home does not know is NotFound", "discard", "nobody", None, NotFound),
+]
+
+
+def test_discard(home, client):
+    first = None
+    for name, step, session, kind, err in DISCARD:
+        if step == "clone":
+            f = client.clone(TOKEN, session)
+            assert f.kind == kind, name
+            first = first or f
+        elif step == "park":
+            client.park(first)
+        elif err is NotFound:
+            with pytest.raises(NotFound, match=session):
+                client.discard(TOKEN, session)
+        elif err is not None:
+            with pytest.raises(grpc.RpcError) as e:
+                client.discard(TOKEN, session)
+            assert e.value.code() == err, name
+        else:
+            client.discard(lambda: TOKEN, session)
+            assert (home.last_discard.grant_jwt, home.last_discard.session) == (TOKEN, session), name
+
+
 MISSES = [
     # the home's state, the exception wanted, what it must say and carry
     ("a full grant with the issuer reachable is Deferred from the issuer", dict(fiber_max=0), Deferred,

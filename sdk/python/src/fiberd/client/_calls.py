@@ -53,6 +53,10 @@ def clone_request(token: Token, session: str | None, deadline: float | None, pay
     return req
 
 
+def discard_request(token: Token, session: str) -> grant_pb2.DiscardRequest:
+    return grant_pb2.DiscardRequest(grant_jwt=token() if callable(token) else token, session=session)
+
+
 def fence_from(f: grant_pb2.Fence) -> Fence:
     return Fence(f.grant_uid, f.epoch, f.seq)
 

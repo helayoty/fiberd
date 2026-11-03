@@ -50,6 +50,25 @@ def test_clone_attach_park_resume(home):
     assert home.last_clone.session == "S" and home.last_clone.payload == b""
 
 
+def test_discard(home):
+    async def life():
+        async with Client.dial(home.addr) as c:
+            first = await c.clone(TOKEN, "D")
+            with pytest.raises(grpc.aio.AioRpcError) as e:
+                await c.discard(TOKEN, "D")
+            assert e.value.code() == grpc.StatusCode.INVALID_ARGUMENT
+            await c.park(first)
+            await c.discard(TOKEN, "D")
+            again = await c.clone(TOKEN, "D")
+            with pytest.raises(NotFound, match="nobody"):
+                await c.discard(TOKEN, "nobody")
+            return first, again
+
+    first, again = asyncio.run(life())
+    assert (first.kind, again.kind) == (Kind.CREATE, Kind.CREATE)
+    assert (home.last_discard.grant_jwt, home.last_discard.session) == (TOKEN, "nobody")
+
+
 MISSES = [
     # the home's state, the exception wanted, what it carries
     ("a full grant with the issuer reachable is Deferred", dict(fiber_max=0, preferred_home="home-b"), Deferred, dict(preferred_home="home-b")),

@@ -149,6 +149,17 @@ class Client:
         except grpc.RpcError as e:
             raise classify(e) from None
 
+    async def discard(self, token: Token, session: str, *, timeout: float | None = None) -> None:
+        """Deletes a parked session's delta under the grant, and the home forgets the session. Its next clone is a CREATE.
+
+        Raises NotFound for a session the home does not know. A running
+        session is the raw INVALID_ARGUMENT grpc.aio.AioRpcError, release its fiber instead.
+        """
+        try:
+            await self._stubs.discard(_calls.discard_request(token, session), timeout=timeout)
+        except grpc.RpcError as e:
+            raise classify(e) from None
+
     async def watch(self, *, timeout: float | None = None) -> AsyncIterator[Status]:
         """Yields the home's per-grant status until the caller stops iterating or the stream breaks."""
         call = self._stubs.watch(empty_pb2.Empty(), timeout=timeout)

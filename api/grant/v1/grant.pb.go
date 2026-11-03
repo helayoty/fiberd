@@ -1138,6 +1138,60 @@ func (x *ReleaseRequest) GetDiscard() bool {
 	return false
 }
 
+// DiscardRequest names a parked session to delete. It carries the grant
+// as Clone does, since a parked session has no fiber to name.
+type DiscardRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	GrantJwt      string                 `protobuf:"bytes,1,opt,name=grant_jwt,json=grantJwt,proto3" json:"grant_jwt,omitempty"`
+	Session       string                 `protobuf:"bytes,2,opt,name=session,proto3" json:"session,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DiscardRequest) Reset() {
+	*x = DiscardRequest{}
+	mi := &file_grant_v1_grant_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DiscardRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DiscardRequest) ProtoMessage() {}
+
+func (x *DiscardRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_grant_v1_grant_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DiscardRequest.ProtoReflect.Descriptor instead.
+func (*DiscardRequest) Descriptor() ([]byte, []int) {
+	return file_grant_v1_grant_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *DiscardRequest) GetGrantJwt() string {
+	if x != nil {
+		return x.GrantJwt
+	}
+	return ""
+}
+
+func (x *DiscardRequest) GetSession() string {
+	if x != nil {
+		return x.Session
+	}
+	return ""
+}
+
 // Status is the batched, per-grant view the home publishes. It is the
 // only thing a control plane ever sees; never individual fibers.
 type Status struct {
@@ -1156,7 +1210,7 @@ type Status struct {
 
 func (x *Status) Reset() {
 	*x = Status{}
-	mi := &file_grant_v1_grant_proto_msgTypes[10]
+	mi := &file_grant_v1_grant_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1168,7 +1222,7 @@ func (x *Status) String() string {
 func (*Status) ProtoMessage() {}
 
 func (x *Status) ProtoReflect() protoreflect.Message {
-	mi := &file_grant_v1_grant_proto_msgTypes[10]
+	mi := &file_grant_v1_grant_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1181,7 +1235,7 @@ func (x *Status) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Status.ProtoReflect.Descriptor instead.
 func (*Status) Descriptor() ([]byte, []int) {
-	return file_grant_v1_grant_proto_rawDescGZIP(), []int{10}
+	return file_grant_v1_grant_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *Status) GetGrantUid() string {
@@ -1237,7 +1291,7 @@ type NoWorkspace struct {
 
 func (x *NoWorkspace) Reset() {
 	*x = NoWorkspace{}
-	mi := &file_grant_v1_grant_proto_msgTypes[11]
+	mi := &file_grant_v1_grant_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1249,7 +1303,7 @@ func (x *NoWorkspace) String() string {
 func (*NoWorkspace) ProtoMessage() {}
 
 func (x *NoWorkspace) ProtoReflect() protoreflect.Message {
-	mi := &file_grant_v1_grant_proto_msgTypes[11]
+	mi := &file_grant_v1_grant_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1262,7 +1316,7 @@ func (x *NoWorkspace) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NoWorkspace.ProtoReflect.Descriptor instead.
 func (*NoWorkspace) Descriptor() ([]byte, []int) {
-	return file_grant_v1_grant_proto_rawDescGZIP(), []int{11}
+	return file_grant_v1_grant_proto_rawDescGZIP(), []int{12}
 }
 
 // UploadHeader opens an Upload. It is the stream's first message and the
@@ -1286,7 +1340,7 @@ type UploadHeader struct {
 
 func (x *UploadHeader) Reset() {
 	*x = UploadHeader{}
-	mi := &file_grant_v1_grant_proto_msgTypes[12]
+	mi := &file_grant_v1_grant_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1298,7 +1352,7 @@ func (x *UploadHeader) String() string {
 func (*UploadHeader) ProtoMessage() {}
 
 func (x *UploadHeader) ProtoReflect() protoreflect.Message {
-	mi := &file_grant_v1_grant_proto_msgTypes[12]
+	mi := &file_grant_v1_grant_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1311,7 +1365,7 @@ func (x *UploadHeader) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UploadHeader.ProtoReflect.Descriptor instead.
 func (*UploadHeader) Descriptor() ([]byte, []int) {
-	return file_grant_v1_grant_proto_rawDescGZIP(), []int{12}
+	return file_grant_v1_grant_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *UploadHeader) GetFiberId() string {
@@ -1364,7 +1418,7 @@ type UploadRequest struct {
 
 func (x *UploadRequest) Reset() {
 	*x = UploadRequest{}
-	mi := &file_grant_v1_grant_proto_msgTypes[13]
+	mi := &file_grant_v1_grant_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1376,7 +1430,7 @@ func (x *UploadRequest) String() string {
 func (*UploadRequest) ProtoMessage() {}
 
 func (x *UploadRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_grant_v1_grant_proto_msgTypes[13]
+	mi := &file_grant_v1_grant_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1389,7 +1443,7 @@ func (x *UploadRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UploadRequest.ProtoReflect.Descriptor instead.
 func (*UploadRequest) Descriptor() ([]byte, []int) {
-	return file_grant_v1_grant_proto_rawDescGZIP(), []int{13}
+	return file_grant_v1_grant_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *UploadRequest) GetPart() isUploadRequest_Part {
@@ -1446,7 +1500,7 @@ type DownloadRequest struct {
 
 func (x *DownloadRequest) Reset() {
 	*x = DownloadRequest{}
-	mi := &file_grant_v1_grant_proto_msgTypes[14]
+	mi := &file_grant_v1_grant_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1458,7 +1512,7 @@ func (x *DownloadRequest) String() string {
 func (*DownloadRequest) ProtoMessage() {}
 
 func (x *DownloadRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_grant_v1_grant_proto_msgTypes[14]
+	mi := &file_grant_v1_grant_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1471,7 +1525,7 @@ func (x *DownloadRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DownloadRequest.ProtoReflect.Descriptor instead.
 func (*DownloadRequest) Descriptor() ([]byte, []int) {
-	return file_grant_v1_grant_proto_rawDescGZIP(), []int{14}
+	return file_grant_v1_grant_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *DownloadRequest) GetFiberId() string {
@@ -1512,7 +1566,7 @@ type FileInfo struct {
 
 func (x *FileInfo) Reset() {
 	*x = FileInfo{}
-	mi := &file_grant_v1_grant_proto_msgTypes[15]
+	mi := &file_grant_v1_grant_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1524,7 +1578,7 @@ func (x *FileInfo) String() string {
 func (*FileInfo) ProtoMessage() {}
 
 func (x *FileInfo) ProtoReflect() protoreflect.Message {
-	mi := &file_grant_v1_grant_proto_msgTypes[15]
+	mi := &file_grant_v1_grant_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1537,7 +1591,7 @@ func (x *FileInfo) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FileInfo.ProtoReflect.Descriptor instead.
 func (*FileInfo) Descriptor() ([]byte, []int) {
-	return file_grant_v1_grant_proto_rawDescGZIP(), []int{15}
+	return file_grant_v1_grant_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *FileInfo) GetPath() string {
@@ -1587,7 +1641,7 @@ type FileChunk struct {
 
 func (x *FileChunk) Reset() {
 	*x = FileChunk{}
-	mi := &file_grant_v1_grant_proto_msgTypes[16]
+	mi := &file_grant_v1_grant_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1599,7 +1653,7 @@ func (x *FileChunk) String() string {
 func (*FileChunk) ProtoMessage() {}
 
 func (x *FileChunk) ProtoReflect() protoreflect.Message {
-	mi := &file_grant_v1_grant_proto_msgTypes[16]
+	mi := &file_grant_v1_grant_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1612,7 +1666,7 @@ func (x *FileChunk) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FileChunk.ProtoReflect.Descriptor instead.
 func (*FileChunk) Descriptor() ([]byte, []int) {
-	return file_grant_v1_grant_proto_rawDescGZIP(), []int{16}
+	return file_grant_v1_grant_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *FileChunk) GetInfo() *FileInfo {
@@ -1641,7 +1695,7 @@ type ListFilesRequest struct {
 
 func (x *ListFilesRequest) Reset() {
 	*x = ListFilesRequest{}
-	mi := &file_grant_v1_grant_proto_msgTypes[17]
+	mi := &file_grant_v1_grant_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1653,7 +1707,7 @@ func (x *ListFilesRequest) String() string {
 func (*ListFilesRequest) ProtoMessage() {}
 
 func (x *ListFilesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_grant_v1_grant_proto_msgTypes[17]
+	mi := &file_grant_v1_grant_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1666,7 +1720,7 @@ func (x *ListFilesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListFilesRequest.ProtoReflect.Descriptor instead.
 func (*ListFilesRequest) Descriptor() ([]byte, []int) {
-	return file_grant_v1_grant_proto_rawDescGZIP(), []int{17}
+	return file_grant_v1_grant_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *ListFilesRequest) GetFiberId() string {
@@ -1693,7 +1747,7 @@ type ListFilesResponse struct {
 
 func (x *ListFilesResponse) Reset() {
 	*x = ListFilesResponse{}
-	mi := &file_grant_v1_grant_proto_msgTypes[18]
+	mi := &file_grant_v1_grant_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1705,7 +1759,7 @@ func (x *ListFilesResponse) String() string {
 func (*ListFilesResponse) ProtoMessage() {}
 
 func (x *ListFilesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_grant_v1_grant_proto_msgTypes[18]
+	mi := &file_grant_v1_grant_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1718,7 +1772,7 @@ func (x *ListFilesResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListFilesResponse.ProtoReflect.Descriptor instead.
 func (*ListFilesResponse) Descriptor() ([]byte, []int) {
-	return file_grant_v1_grant_proto_rawDescGZIP(), []int{18}
+	return file_grant_v1_grant_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *ListFilesResponse) GetFiles() []*FileInfo {
@@ -1793,7 +1847,10 @@ const file_grant_v1_grant_proto_rawDesc = "" +
 	"\x04sync\x18\x02 \x01(\bR\x04sync\"E\n" +
 	"\x0eReleaseRequest\x12\x19\n" +
 	"\bfiber_id\x18\x01 \x01(\tR\afiberId\x12\x18\n" +
-	"\adiscard\x18\x02 \x01(\bR\adiscard\"\xc1\x01\n" +
+	"\adiscard\x18\x02 \x01(\bR\adiscard\"G\n" +
+	"\x0eDiscardRequest\x12\x1b\n" +
+	"\tgrant_jwt\x18\x01 \x01(\tR\bgrantJwt\x12\x18\n" +
+	"\asession\x18\x02 \x01(\tR\asession\"\xc1\x01\n" +
 	"\x06Status\x12\x1b\n" +
 	"\tgrant_uid\x18\x01 \x01(\tR\bgrantUid\x12\x18\n" +
 	"\arunning\x18\x02 \x01(\rR\arunning\x12\x16\n" +
@@ -1861,11 +1918,12 @@ const file_grant_v1_grant_proto_rawDesc = "" +
 	"\x06RESUME\x10\x02*+\n" +
 	"\bMissCode\x12\b\n" +
 	"\x04SHED\x10\x00\x12\x15\n" +
-	"\x11DEFERRED_FALLBACK\x10\x012\xf5\x03\n" +
+	"\x11DEFERRED_FALLBACK\x10\x012\xb9\x04\n" +
 	"\x06Fibers\x12F\n" +
 	"\x05Clone\x12\x1d.fiberd.grant.v1.CloneRequest\x1a\x1e.fiberd.grant.v1.CloneResponse\x12<\n" +
 	"\x04Park\x12\x1c.fiberd.grant.v1.ParkRequest\x1a\x16.google.protobuf.Empty\x12B\n" +
-	"\aRelease\x12\x1f.fiberd.grant.v1.ReleaseRequest\x1a\x16.google.protobuf.Empty\x12:\n" +
+	"\aRelease\x12\x1f.fiberd.grant.v1.ReleaseRequest\x1a\x16.google.protobuf.Empty\x12B\n" +
+	"\aDiscard\x12\x1f.fiberd.grant.v1.DiscardRequest\x1a\x16.google.protobuf.Empty\x12:\n" +
 	"\x05Watch\x12\x16.google.protobuf.Empty\x1a\x17.fiberd.grant.v1.Status0\x01\x12E\n" +
 	"\x06Upload\x12\x1e.fiberd.grant.v1.UploadRequest\x1a\x19.fiberd.grant.v1.FileInfo(\x01\x12J\n" +
 	"\bDownload\x12 .fiberd.grant.v1.DownloadRequest\x1a\x1a.fiberd.grant.v1.FileChunk0\x01\x12R\n" +
@@ -1884,7 +1942,7 @@ func file_grant_v1_grant_proto_rawDescGZIP() []byte {
 }
 
 var file_grant_v1_grant_proto_enumTypes = make([]protoimpl.EnumInfo, 6)
-var file_grant_v1_grant_proto_msgTypes = make([]protoimpl.MessageInfo, 19)
+var file_grant_v1_grant_proto_msgTypes = make([]protoimpl.MessageInfo, 20)
 var file_grant_v1_grant_proto_goTypes = []any{
 	(Tier)(0),                     // 0: fiberd.grant.v1.Tier
 	(Durability)(0),               // 1: fiberd.grant.v1.Durability
@@ -1902,17 +1960,18 @@ var file_grant_v1_grant_proto_goTypes = []any{
 	(*Miss)(nil),                  // 13: fiberd.grant.v1.Miss
 	(*ParkRequest)(nil),           // 14: fiberd.grant.v1.ParkRequest
 	(*ReleaseRequest)(nil),        // 15: fiberd.grant.v1.ReleaseRequest
-	(*Status)(nil),                // 16: fiberd.grant.v1.Status
-	(*NoWorkspace)(nil),           // 17: fiberd.grant.v1.NoWorkspace
-	(*UploadHeader)(nil),          // 18: fiberd.grant.v1.UploadHeader
-	(*UploadRequest)(nil),         // 19: fiberd.grant.v1.UploadRequest
-	(*DownloadRequest)(nil),       // 20: fiberd.grant.v1.DownloadRequest
-	(*FileInfo)(nil),              // 21: fiberd.grant.v1.FileInfo
-	(*FileChunk)(nil),             // 22: fiberd.grant.v1.FileChunk
-	(*ListFilesRequest)(nil),      // 23: fiberd.grant.v1.ListFilesRequest
-	(*ListFilesResponse)(nil),     // 24: fiberd.grant.v1.ListFilesResponse
-	(*timestamppb.Timestamp)(nil), // 25: google.protobuf.Timestamp
-	(*emptypb.Empty)(nil),         // 26: google.protobuf.Empty
+	(*DiscardRequest)(nil),        // 16: fiberd.grant.v1.DiscardRequest
+	(*Status)(nil),                // 17: fiberd.grant.v1.Status
+	(*NoWorkspace)(nil),           // 18: fiberd.grant.v1.NoWorkspace
+	(*UploadHeader)(nil),          // 19: fiberd.grant.v1.UploadHeader
+	(*UploadRequest)(nil),         // 20: fiberd.grant.v1.UploadRequest
+	(*DownloadRequest)(nil),       // 21: fiberd.grant.v1.DownloadRequest
+	(*FileInfo)(nil),              // 22: fiberd.grant.v1.FileInfo
+	(*FileChunk)(nil),             // 23: fiberd.grant.v1.FileChunk
+	(*ListFilesRequest)(nil),      // 24: fiberd.grant.v1.ListFilesRequest
+	(*ListFilesResponse)(nil),     // 25: fiberd.grant.v1.ListFilesResponse
+	(*timestamppb.Timestamp)(nil), // 26: google.protobuf.Timestamp
+	(*emptypb.Empty)(nil),         // 27: google.protobuf.Empty
 }
 var file_grant_v1_grant_proto_depIdxs = []int32{
 	1,  // 0: fiberd.grant.v1.Policy.durability:type_name -> fiberd.grant.v1.Durability
@@ -1920,33 +1979,35 @@ var file_grant_v1_grant_proto_depIdxs = []int32{
 	3,  // 2: fiberd.grant.v1.Policy.endpoint_mode:type_name -> fiberd.grant.v1.EndpointMode
 	7,  // 3: fiberd.grant.v1.CapacityGrant.fibers:type_name -> fiberd.grant.v1.FiberLimits
 	0,  // 4: fiberd.grant.v1.CapacityGrant.min_tier:type_name -> fiberd.grant.v1.Tier
-	25, // 5: fiberd.grant.v1.CapacityGrant.lease_expiry:type_name -> google.protobuf.Timestamp
+	26, // 5: fiberd.grant.v1.CapacityGrant.lease_expiry:type_name -> google.protobuf.Timestamp
 	6,  // 6: fiberd.grant.v1.CapacityGrant.policy:type_name -> fiberd.grant.v1.Policy
 	8,  // 7: fiberd.grant.v1.CapacityGrant.device_budget:type_name -> fiberd.grant.v1.DeviceBudget
-	25, // 8: fiberd.grant.v1.CloneRequest.deadline:type_name -> google.protobuf.Timestamp
+	26, // 8: fiberd.grant.v1.CloneRequest.deadline:type_name -> google.protobuf.Timestamp
 	10, // 9: fiberd.grant.v1.CloneResponse.fence:type_name -> fiberd.grant.v1.Fence
 	4,  // 10: fiberd.grant.v1.CloneResponse.kind:type_name -> fiberd.grant.v1.CloneKind
 	5,  // 11: fiberd.grant.v1.Miss.code:type_name -> fiberd.grant.v1.MissCode
 	10, // 12: fiberd.grant.v1.Status.latest:type_name -> fiberd.grant.v1.Fence
-	18, // 13: fiberd.grant.v1.UploadRequest.header:type_name -> fiberd.grant.v1.UploadHeader
-	21, // 14: fiberd.grant.v1.FileChunk.info:type_name -> fiberd.grant.v1.FileInfo
-	21, // 15: fiberd.grant.v1.ListFilesResponse.files:type_name -> fiberd.grant.v1.FileInfo
+	19, // 13: fiberd.grant.v1.UploadRequest.header:type_name -> fiberd.grant.v1.UploadHeader
+	22, // 14: fiberd.grant.v1.FileChunk.info:type_name -> fiberd.grant.v1.FileInfo
+	22, // 15: fiberd.grant.v1.ListFilesResponse.files:type_name -> fiberd.grant.v1.FileInfo
 	11, // 16: fiberd.grant.v1.Fibers.Clone:input_type -> fiberd.grant.v1.CloneRequest
 	14, // 17: fiberd.grant.v1.Fibers.Park:input_type -> fiberd.grant.v1.ParkRequest
 	15, // 18: fiberd.grant.v1.Fibers.Release:input_type -> fiberd.grant.v1.ReleaseRequest
-	26, // 19: fiberd.grant.v1.Fibers.Watch:input_type -> google.protobuf.Empty
-	19, // 20: fiberd.grant.v1.Fibers.Upload:input_type -> fiberd.grant.v1.UploadRequest
-	20, // 21: fiberd.grant.v1.Fibers.Download:input_type -> fiberd.grant.v1.DownloadRequest
-	23, // 22: fiberd.grant.v1.Fibers.ListFiles:input_type -> fiberd.grant.v1.ListFilesRequest
-	12, // 23: fiberd.grant.v1.Fibers.Clone:output_type -> fiberd.grant.v1.CloneResponse
-	26, // 24: fiberd.grant.v1.Fibers.Park:output_type -> google.protobuf.Empty
-	26, // 25: fiberd.grant.v1.Fibers.Release:output_type -> google.protobuf.Empty
-	16, // 26: fiberd.grant.v1.Fibers.Watch:output_type -> fiberd.grant.v1.Status
-	21, // 27: fiberd.grant.v1.Fibers.Upload:output_type -> fiberd.grant.v1.FileInfo
-	22, // 28: fiberd.grant.v1.Fibers.Download:output_type -> fiberd.grant.v1.FileChunk
-	24, // 29: fiberd.grant.v1.Fibers.ListFiles:output_type -> fiberd.grant.v1.ListFilesResponse
-	23, // [23:30] is the sub-list for method output_type
-	16, // [16:23] is the sub-list for method input_type
+	16, // 19: fiberd.grant.v1.Fibers.Discard:input_type -> fiberd.grant.v1.DiscardRequest
+	27, // 20: fiberd.grant.v1.Fibers.Watch:input_type -> google.protobuf.Empty
+	20, // 21: fiberd.grant.v1.Fibers.Upload:input_type -> fiberd.grant.v1.UploadRequest
+	21, // 22: fiberd.grant.v1.Fibers.Download:input_type -> fiberd.grant.v1.DownloadRequest
+	24, // 23: fiberd.grant.v1.Fibers.ListFiles:input_type -> fiberd.grant.v1.ListFilesRequest
+	12, // 24: fiberd.grant.v1.Fibers.Clone:output_type -> fiberd.grant.v1.CloneResponse
+	27, // 25: fiberd.grant.v1.Fibers.Park:output_type -> google.protobuf.Empty
+	27, // 26: fiberd.grant.v1.Fibers.Release:output_type -> google.protobuf.Empty
+	27, // 27: fiberd.grant.v1.Fibers.Discard:output_type -> google.protobuf.Empty
+	17, // 28: fiberd.grant.v1.Fibers.Watch:output_type -> fiberd.grant.v1.Status
+	22, // 29: fiberd.grant.v1.Fibers.Upload:output_type -> fiberd.grant.v1.FileInfo
+	23, // 30: fiberd.grant.v1.Fibers.Download:output_type -> fiberd.grant.v1.FileChunk
+	25, // 31: fiberd.grant.v1.Fibers.ListFiles:output_type -> fiberd.grant.v1.ListFilesResponse
+	24, // [24:32] is the sub-list for method output_type
+	16, // [16:24] is the sub-list for method input_type
 	16, // [16:16] is the sub-list for extension type_name
 	16, // [16:16] is the sub-list for extension extendee
 	0,  // [0:16] is the sub-list for field type_name
@@ -1957,8 +2018,8 @@ func file_grant_v1_grant_proto_init() {
 	if File_grant_v1_grant_proto != nil {
 		return
 	}
-	file_grant_v1_grant_proto_msgTypes[12].OneofWrappers = []any{}
-	file_grant_v1_grant_proto_msgTypes[13].OneofWrappers = []any{
+	file_grant_v1_grant_proto_msgTypes[13].OneofWrappers = []any{}
+	file_grant_v1_grant_proto_msgTypes[14].OneofWrappers = []any{
 		(*UploadRequest_Header)(nil),
 		(*UploadRequest_Data)(nil),
 	}
@@ -1968,7 +2029,7 @@ func file_grant_v1_grant_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_grant_v1_grant_proto_rawDesc), len(file_grant_v1_grant_proto_rawDesc)),
 			NumEnums:      6,
-			NumMessages:   19,
+			NumMessages:   20,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

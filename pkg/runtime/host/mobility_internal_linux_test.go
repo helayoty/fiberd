@@ -625,6 +625,88 @@ func TestRetireDelta(t *testing.T) {
 	}
 }
 
+// TestDeleteDelta checks the store half of a discard. The session's tag
+// goes while it holds the digest found, and nothing is pulled. A tag a
+// later park moved on stays, a missing tag is nothing to delete, and a
+// home without a registry refuses.
+func TestDeleteDelta(t *testing.T) {
+	ctx := context.Background()
+	registry := artifact.FileScheme + filepath.Join(t.TempDir(), "registry")
+	seal := &artifact.SealKey{ID: "seal", Key: make([]byte, 32)}
+	platform := artifact.Platform{Arch: "arm64", Kernel: "6.10.0", Libc: "glibc 2.40", Backend: "fake"}
+	a := mobilityHome(t, "home-a", newCodecBackend(core.TierCheckpoint), artifact.Keys{Signer: signingKey(t, "home-a"), Seal: seal}, platform, registry)
+	g := core.Grant{UID: "g1", Tenant: "acme", TemplateDigest: "sha256:tmpl"}
+	parentPages := "template pages"
+	parentSHA := shaOf(parentPages)
+	if err := writeParentDir(filepath.Join(a.parentsDir(), parentSHA), parentPages); err != nil {
+		t.Fatal(err)
+	}
+	tag := domainRepoFor(a.cfg.DeltaRegistry, domainOf(t, g)) + ":" + sessionTag("S")
+	// park writes and publishes a delta of S under the fence and returns
+	// the digest the tag holds then.
+	park := func(t *testing.T, fence string) string {
+		t.Helper()
+		dir := filepath.Join(a.cfg.DeltaDir, "g1", strings.ReplaceAll(strings.TrimPrefix(fence, "g1/"), "/", "-"))
+		parkedDelta(t, dir, manifest{Fence: fence, GrantUID: "g1", Endpoint: "unix:///run/g1/x.sock", Template: g.TemplateDigest, Backend: "fake",
+			WBytes: 7, Delta: true, Parent: parentSHA, ParkedAt: time.Now().UTC().Format(time.RFC3339Nano)}, parentSHA)
+		if _, err := a.PublishDelta(ctx, dir, g, "S"); err != nil {
+			t.Fatalf("publish %s: %v", fence, err)
+		}
+		var rec remoteRecord
+		if err := readJSON(filepath.Join(dir, remoteFile), &rec); err != nil {
+			t.Fatal(err)
+		}
+		return rec.Digest
+	}
+	noRegistry := mobilityHome(t, "home-b", newCodecBackend(core.TierCheckpoint), artifact.Keys{Signer: signingKey(t, "home-b"), Seal: seal}, platform, "")
+	cases := []struct {
+		name string
+		home *Runtime // nil is a
+		// setup leaves the registry as the case needs it and returns the
+		// digest to delete.
+		setup       func(t *testing.T) string
+		wantErr     bool
+		wantRemoved bool
+		wantTag     bool // the tag still resolves afterwards
+	}{
+		{name: "the tag found is deleted", setup: func(t *testing.T) string { return park(t, "g1/1/1") }, wantRemoved: true},
+		{name: "a tag a later park moved on stays", setup: func(t *testing.T) string {
+			found := park(t, "g1/1/2")
+			park(t, "g1/1/3")
+			return found
+		}, wantTag: true},
+		{name: "no tag is nothing to delete", setup: func(*testing.T) string { return "sha256:gone" }},
+		{name: "a home without a registry refuses", home: noRegistry, setup: func(*testing.T) string { return "sha256:x" }, wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _ = artifact.Delete(ctx, tag)
+			handle := tc.setup(t)
+			home := tc.home
+			if home == nil {
+				home = a
+			}
+			remote, removed, err := home.DeleteDelta(ctx, g, "S", handle)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("DeleteDelta = %v, want error %v", err, tc.wantErr)
+			}
+			if removed != tc.wantRemoved {
+				t.Fatalf("DeleteDelta removed = %v, want %v", removed, tc.wantRemoved)
+			}
+			if tc.wantRemoved && remote != tag+"@"+handle {
+				t.Fatalf("DeleteDelta named %q, want %q", remote, tag+"@"+handle)
+			}
+			_, found, rerr := artifact.Resolve(ctx, tag)
+			if rerr != nil {
+				t.Fatal(rerr)
+			}
+			if found != tc.wantTag {
+				t.Fatalf("tag %s resolves = %v, want %v", tag, found, tc.wantTag)
+			}
+		})
+	}
+}
+
 // TestPullParentStore checks what a parent pull meets in the store: a
 // pull of its own in flight for the same parent, a dangling link an
 // earlier warm left where the parent belongs, or the parent filed by

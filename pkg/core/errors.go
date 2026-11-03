@@ -68,6 +68,17 @@ var (
 	// It is a FailedPrecondition, like a tier gap. Anonymous fibers are
 	// unaffected.
 	ErrNoTenant = errors.New("fiberd: named session needs a grant with a tenant")
+	// ErrAnonymousPark means Park named a fiber without a session. Its
+	// delta could never be resumed, since a resume is a Clone by session
+	// name, so nothing is parked. The caller releases the fiber.
+	ErrAnonymousPark = errors.New("fiberd: a fiber without a session cannot be resumed, release it instead")
+	// ErrSessionRunning means Discard named a session that runs. Its
+	// state is in the fiber, not in a delta, so the caller releases the
+	// fiber with discard instead.
+	ErrSessionRunning = errors.New("fiberd: the session is running, release its fiber with discard instead")
+	// ErrSessionUnknown means Discard named a session that is neither
+	// parked on this home nor in the delta registry.
+	ErrSessionUnknown = errors.New("fiberd: no parked session by that name")
 	// ErrNoPool is a Pooler's answer for a grant whose template cannot be
 	// restored ahead of its fibers. The refill loop remembers it.
 	ErrNoPool = errors.New("pool: the grant's template cannot pool")

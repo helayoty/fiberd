@@ -16,9 +16,9 @@ import (
 //	core.Shed             -> ResourceExhausted + Miss{SHED, retry_after_s}
 //	core.DeferredFallback -> Unavailable       + Miss{DEFERRED_FALLBACK, issuer}
 //	core.NeedsTier        -> FailedPrecondition
-//	core.Invalid          -> InvalidArgument
+//	core.Invalid          -> InvalidArgument (ErrAnonymousPark, ErrSessionRunning)
 //	core.Unauthenticated  -> Unauthenticated
-//	core.NotFound         -> NotFound
+//	core.NotFound         -> NotFound (ErrFiberUnknown, ErrSessionUnknown)
 //	core.NoWorkspace      -> FailedPrecondition + NoWorkspace
 //	core.OverBudget       -> ResourceExhausted, no Miss
 //	core.Internal         -> Internal

@@ -18,6 +18,8 @@ routes to preferred_home), on Shed it waits retry_after and tries again.
         c.park(f)
         c.release(f, discard=True)
 
+discard(jwt, "conv-42") drops a parked session by name, with no fiber to release.
+
 A fiber whose grant has a disk budget has a workspace, its /workspace.
 upload, download and list_files move files in and out of it.
 
@@ -188,6 +190,17 @@ class Client:
         """Ends the fiber. With discard its session's parked delta goes too. Raises NotFound for a fiber the home does not know."""
         try:
             self._stubs.release(grant_pb2.ReleaseRequest(fiber_id=_calls.fiber_id(fiber), discard=discard), timeout=timeout)
+        except grpc.RpcError as e:
+            raise classify(e) from None
+
+    def discard(self, token: Token, session: str, *, timeout: float | None = None) -> None:
+        """Deletes a parked session's delta under the grant, and the home forgets the session. Its next clone is a CREATE.
+
+        Raises NotFound for a session the home does not know. A running
+        session is the raw INVALID_ARGUMENT grpc.RpcError, release its fiber instead.
+        """
+        try:
+            self._stubs.discard(_calls.discard_request(token, session), timeout=timeout)
         except grpc.RpcError as e:
             raise classify(e) from None
 

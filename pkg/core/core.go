@@ -532,8 +532,9 @@ func (a *Core) locate(ctx context.Context, g Grant, session string) (StatusCode,
 		if !errors.Is(err, errSessionHeld) {
 			// The grant was revoked while the claim ran. The claim took the
 			// store's tag, so the copy at ref is the only one. It stays on
-			// disk, unregistered, and the caller gets the miss a revocation
-			// implies.
+			// disk, unregistered, until the next boot's sweep removes it,
+			// since no ledger entry names it. The caller gets the miss a
+			// revocation implies.
 			code, cerr := a.swept(g, Fence{GrantUID: g.UID, Epoch: a.Ledger.Epoch()})
 			log.Printf("WARNING: mobility: %s/%s was claimed from %s but its grant was revoked meanwhile (%v); the only copy of its state is kept at %s and is not registered", g.UID, session, rd.Home, cerr, ref)
 			_ = a.audit(ctx, BestEffort, AuditRecord{Event: "migrate-in", Fence: Fence{GrantUID: g.UID, Epoch: a.Ledger.Epoch()}, Session: session, Detail: fmt.Sprintf("from %s, kept unregistered at %s: %v", rd.Home, ref, cerr)})
@@ -777,8 +778,12 @@ func (a *Core) Revoke(grantUID string) {
 
 // Remove is the home taking a grant away (GrantRemoved). The
 // UID is denied until every token for it has expired. The grant is yielded
-// so its running fibers stop now, not at lease expiry. Parked deltas are
-// kept but cannot resume here while the UID is denied.
+// so its running fibers stop now, not at lease expiry. Parked deltas stay
+// on disk but cannot resume here while the UID is denied. They last until
+// the next boot only. Reconcile drops a session whose grant it does not
+// admit again and the sweep removes its delta, since the ledger keys a
+// session by grant UID. Only a copy published to the registry outlives the
+// grant, for another grant of the same tenant to claim.
 func (a *Core) Remove(ctx context.Context, grantUID string) {
 	if a.Revoked != nil {
 		g, known := a.Ledger.Grant(grantUID)
@@ -907,6 +912,7 @@ func (a *Core) swept(g Grant, fence Fence) (StatusCode, error) {
 }
 
 // Park checkpoints a named session's delta and frees its running tier.
+// An anonymous fiber is refused as Invalid, since nothing could resume it.
 //
 // The ledger follows the runtime. Once Runtime.Park returns a ref, the
 // delta exists, so the session is parked in the ledger even if a later
@@ -925,20 +931,24 @@ func (a *Core) park(ctx context.Context, fiberID string, sync bool) (ref string,
 	if !ok {
 		return "", false, NotFound, ErrFiberUnknown
 	}
+	// A resume is a Clone by session name, so an anonymous fiber's delta
+	// could never be resumed. Nothing is parked, and the fiber runs on.
+	session := a.Ledger.FiberSession(fiberID)
+	if session == "" {
+		return "", false, Invalid, fmt.Errorf("%w: fiber %s", ErrAnonymousPark, fiberID)
+	}
 	// Clone refuses a named session under a grant without a tenant, so
 	// this holds unless the grant was delivered again without one since.
 	// Nothing is parked, because a named delta is filed under the tenant.
-	if session := a.Ledger.FiberSession(fiberID); session != "" {
-		if g, known := a.Ledger.Grant(fence.GrantUID); known && g.Tenant == "" {
-			return "", false, NeedsTier, fmt.Errorf("%w: grant %s, session %q", ErrNoTenant, g.UID, session)
-		}
-		// The session's gate, which Clone holds through a resume. A
-		// Clone(S) that arrives during the park waits until the delta is
-		// parked and published, so it never resumes a checkpoint that
-		// is then published as the session's current state.
-		hold := a.Ledger.holdSession(fence.GrantUID, session)
-		defer hold.release()
+	if g, known := a.Ledger.Grant(fence.GrantUID); known && g.Tenant == "" {
+		return "", false, NeedsTier, fmt.Errorf("%w: grant %s, session %q", ErrNoTenant, g.UID, session)
 	}
+	// The session's gate, which Clone holds through a resume. A Clone(S)
+	// that arrives during the park waits until the delta is parked and
+	// published, so it never resumes a checkpoint that is then published
+	// as the session's current state.
+	hold := a.Ledger.holdSession(fence.GrantUID, session)
+	defer hold.release()
 	ref, perr := a.Runtime.Park(ctx, fiberID, sync)
 	if ref == "" {
 		// Nothing was parked, so the fiber runs on and the ledger is right.
@@ -1041,9 +1051,13 @@ func (a *Core) discardDelta(ctx context.Context, fence Fence, session, deltaRef 
 
 // Yield is the ladder's last rung and the reaper's verb: the grant is
 // revoked and every running fiber under it is released, each with its
-// audit record. Parked deltas are kept (they are the only state that
-// cannot be rebuilt). A valid token presented again re-admits the grant.
-// Only Remove denies it.
+// audit record. Parked deltas stay, since they are the only state that
+// cannot be rebuilt, and a valid token presented again re-admits the grant
+// and resumes them. Only Remove denies it. They last until the next boot
+// only. Reconcile drops a session whose grant it does not admit again and
+// the sweep removes its delta, since the ledger keys a session by grant
+// UID. Only a copy published to the registry outlives the grant, for
+// another grant of the same tenant to claim.
 func (a *Core) Yield(ctx context.Context, grantUID string, reason string) {
 	// Revoke first, then list. A clone that commits after the revocation
 	// is refused by the ledger and released by its Clone, so the list

@@ -14,7 +14,9 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 	"google.golang.org/protobuf/encoding/protojson"
 
@@ -126,6 +128,67 @@ func TestCloneAttachParkResume(t *testing.T) {
 				first = *f
 			}
 			last = *f
+		})
+	}
+}
+
+// Discard drops a parked session by name, so its next clone creates
+// afresh. A running session is refused, and a session the home does not
+// know is NotFound.
+func TestDiscard(t *testing.T) {
+	h := newHome(t, core.TierCheckpoint)
+	ctx := context.Background()
+	g := jsonGrant(t, core.Grant{UID: "g5", Audience: "node-a", Tenant: "acme", FiberMax: 2})
+
+	var first client.Fiber
+	clone := func() (*client.Fiber, error) {
+		f, err := h.client.Clone(ctx, g, "D", time.Second, nil)
+		return &f, err
+	}
+	park := func() (*client.Fiber, error) { return nil, h.client.Park(ctx, first.ID, true) }
+	discard := func(session string) func() (*client.Fiber, error) {
+		return func() (*client.Fiber, error) { return nil, h.client.Discard(ctx, g, session) }
+	}
+	steps := []struct {
+		name     string
+		op       func() (*client.Fiber, error) // nil fiber means not a clone
+		wantKind client.Kind
+		wantCode codes.Code
+	}{
+		{name: "the first clone of a session creates", op: clone, wantKind: client.Create},
+		{name: "discarding a running session is InvalidArgument", op: discard("D"), wantCode: codes.InvalidArgument},
+		{name: "the fiber parks", op: park},
+		{name: "the parked session is discarded", op: discard("D")},
+		{name: "the next clone of the name creates, not resumes", op: clone, wantKind: client.Create},
+		{name: "discarding a session the home does not know is NotFound", op: discard("nobody"), wantCode: codes.NotFound},
+	}
+	for _, st := range steps {
+		t.Run(st.name, func(t *testing.T) {
+			f, err := st.op()
+			if st.wantCode == codes.NotFound {
+				if !client.NotFound(err) {
+					t.Fatalf("err = %v, want NotFound", err)
+				}
+				return
+			}
+			if st.wantCode != codes.OK {
+				if status.Code(err) != st.wantCode {
+					t.Fatalf("err = %v, want %v", err, st.wantCode)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if f == nil {
+				return
+			}
+			if f.Kind != st.wantKind || f.Endpoint == "" {
+				t.Fatalf("clone = %+v, want kind %v with an endpoint", f, st.wantKind)
+			}
+			if first.ID == "" {
+				first = *f
+			}
 		})
 	}
 }

@@ -5,7 +5,7 @@
 // few out-of-band hooks (mint a grant, restart the target, flip
 // control-plane health, look up an audit record, end the engine, lose the
 // scope). C11 moves a session to a second home and back, when one is
-// given. With -gpu, C14 moves a session's device slice to it, and a third
+// given. C13 discards a parked session by name. With -gpu, C14 moves a session's device slice to it, and a third
 // home of another engine layout refuses the session. conform_test.go
 // wraps it as the `go test`-style grant-conform binary; homes provide
 // the hooks as shell commands.
@@ -138,6 +138,7 @@ func Run(t *testing.T, d Driver) {
 	t.Run("C10_ScopeRevocation", func(t *testing.T) { c.c10(t) })
 	t.Run("C11_SessionMobility", func(t *testing.T) { c.c11(t) })
 	t.Run("C12_Workspace", func(t *testing.T) { c.c12(t) })
+	t.Run("C13_Discard", func(t *testing.T) { c.c13(t) })
 	t.Run("C14_GPUAnswer", func(t *testing.T) { c.c14(t) })
 	if d.FiberWarm > 0 {
 		t.Run("Pool", func(t *testing.T) { c.pool(t) })

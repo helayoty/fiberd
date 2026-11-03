@@ -91,6 +91,14 @@ class DeviceBudget(_message.Message):
     bytes: int
     def __init__(self, bytes: _Optional[int] = ..., **kwargs) -> None: ...
 
+class DiscardRequest(_message.Message):
+    __slots__ = ["grant_jwt", "session"]
+    GRANT_JWT_FIELD_NUMBER: _ClassVar[int]
+    SESSION_FIELD_NUMBER: _ClassVar[int]
+    grant_jwt: str
+    session: str
+    def __init__(self, grant_jwt: _Optional[str] = ..., session: _Optional[str] = ...) -> None: ...
+
 class DownloadRequest(_message.Message):
     __slots__ = ["fiber_id", "offset", "path"]
     FIBER_ID_FIELD_NUMBER: _ClassVar[int]

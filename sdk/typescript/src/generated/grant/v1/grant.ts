@@ -304,6 +304,15 @@ export interface ReleaseRequest {
 }
 
 /**
+ * DiscardRequest names a parked session to delete. It carries the grant
+ * as Clone does, since a parked session has no fiber to name.
+ */
+export interface DiscardRequest {
+  grantJwt: string;
+  session: string;
+}
+
+/**
  * Status is the batched, per-grant view the home publishes. It is the
  * only thing a control plane ever sees; never individual fibers.
  */
@@ -1432,6 +1441,73 @@ export const ReleaseRequest: MessageFns<ReleaseRequest> = {
   },
 };
 
+function createBaseDiscardRequest(): DiscardRequest {
+  return { grantJwt: "", session: "" };
+}
+
+export const DiscardRequest: MessageFns<DiscardRequest> = {
+  encode(message: DiscardRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.grantJwt !== "") {
+      writer.uint32(10).string(message.grantJwt);
+    }
+    if (message.session !== "") {
+      writer.uint32(18).string(message.session);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): DiscardRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const previousRecursionDepth = (reader as any).__tsProtoDecodeDepth ?? 0;
+    if (previousRecursionDepth >= 100) {
+      throw new globalThis.Error("protobuf decode recursion limit exceeded");
+    }
+    (reader as any).__tsProtoDecodeDepth = previousRecursionDepth + 1;
+    try {
+      const end = length === undefined ? reader.len : reader.pos + length;
+      const message = createBaseDiscardRequest();
+      while (reader.pos < end) {
+        const tag = reader.uint32();
+        switch (tag >>> 3) {
+          case 1: {
+            if (tag !== 10) {
+              break;
+            }
+
+            message.grantJwt = reader.string();
+            continue;
+          }
+          case 2: {
+            if (tag !== 18) {
+              break;
+            }
+
+            message.session = reader.string();
+            continue;
+          }
+        }
+        if ((tag & 7) === 4 || tag === 0) {
+          break;
+        }
+        reader.skip(tag & 7);
+      }
+      return message;
+    } finally {
+      (reader as any).__tsProtoDecodeDepth = previousRecursionDepth;
+    }
+  },
+
+  create<I extends Exact<DeepPartial<DiscardRequest>, I>>(base?: I): DiscardRequest {
+    return DiscardRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<DiscardRequest>, I>>(object: I): DiscardRequest {
+    const message = createBaseDiscardRequest();
+    message.grantJwt = object.grantJwt ?? "";
+    message.session = object.session ?? "";
+    return message;
+  },
+};
+
 function createBaseStatus(): Status {
   return { grantUid: "", running: 0, parked: 0, wUsedBytes: 0n, latest: undefined, pooled: 0 };
 }
@@ -2167,6 +2243,11 @@ export const FibersService = {
     responseSerialize: (value: CloneResponse): Buffer => Buffer.from(CloneResponse.encode(value).finish()),
     responseDeserialize: (value: Buffer): CloneResponse => CloneResponse.decode(value),
   },
+  /**
+   * Park checkpoints a named session's fiber. A fiber without a session
+   * is refused with InvalidArgument, since nothing could resume it, so
+   * release it instead.
+   */
   park: {
     path: "/fiberd.grant.v1.Fibers/Park" as const,
     requestStream: false as const,
@@ -2182,6 +2263,22 @@ export const FibersService = {
     responseStream: false as const,
     requestSerialize: (value: ReleaseRequest): Buffer => Buffer.from(ReleaseRequest.encode(value).finish()),
     requestDeserialize: (value: Buffer): ReleaseRequest => ReleaseRequest.decode(value),
+    responseSerialize: (value: Empty): Buffer => Buffer.from(Empty.encode(value).finish()),
+    responseDeserialize: (value: Buffer): Empty => Empty.decode(value),
+  },
+  /**
+   * Discard deletes a parked session's delta by name, here and in the
+   * delta registry, and the session is forgotten. The next Clone of it
+   * creates. A running session is refused with InvalidArgument, so
+   * release its fiber with discard instead. A session neither parked
+   * here nor in the registry is NotFound.
+   */
+  discard: {
+    path: "/fiberd.grant.v1.Fibers/Discard" as const,
+    requestStream: false as const,
+    responseStream: false as const,
+    requestSerialize: (value: DiscardRequest): Buffer => Buffer.from(DiscardRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer): DiscardRequest => DiscardRequest.decode(value),
     responseSerialize: (value: Empty): Buffer => Buffer.from(Empty.encode(value).finish()),
     responseDeserialize: (value: Buffer): Empty => Empty.decode(value),
   },
@@ -2242,8 +2339,21 @@ export interface FibersServer extends UntypedServiceImplementation {
    * untrusted grant reaches a home that does not isolate tenants.
    */
   clone: handleUnaryCall<CloneRequest, CloneResponse>;
+  /**
+   * Park checkpoints a named session's fiber. A fiber without a session
+   * is refused with InvalidArgument, since nothing could resume it, so
+   * release it instead.
+   */
   park: handleUnaryCall<ParkRequest, Empty>;
   release: handleUnaryCall<ReleaseRequest, Empty>;
+  /**
+   * Discard deletes a parked session's delta by name, here and in the
+   * delta registry, and the session is forgotten. The next Clone of it
+   * creates. A running session is refused with InvalidArgument, so
+   * release its fiber with discard instead. A session neither parked
+   * here nor in the registry is NotFound.
+   */
+  discard: handleUnaryCall<DiscardRequest, Empty>;
   watch: handleServerStreamingCall<Empty, Status>;
   /**
    * Upload writes one file into a running fiber's workspace. The first
@@ -2283,6 +2393,11 @@ export interface FibersClient extends Client {
     options: Partial<CallOptions>,
     callback: (error: ServiceError | null, response: CloneResponse) => void,
   ): ClientUnaryCall;
+  /**
+   * Park checkpoints a named session's fiber. A fiber without a session
+   * is refused with InvalidArgument, since nothing could resume it, so
+   * release it instead.
+   */
   park(request: ParkRequest, callback: (error: ServiceError | null, response: Empty) => void): ClientUnaryCall;
   park(
     request: ParkRequest,
@@ -2303,6 +2418,25 @@ export interface FibersClient extends Client {
   ): ClientUnaryCall;
   release(
     request: ReleaseRequest,
+    metadata: Metadata,
+    options: Partial<CallOptions>,
+    callback: (error: ServiceError | null, response: Empty) => void,
+  ): ClientUnaryCall;
+  /**
+   * Discard deletes a parked session's delta by name, here and in the
+   * delta registry, and the session is forgotten. The next Clone of it
+   * creates. A running session is refused with InvalidArgument, so
+   * release its fiber with discard instead. A session neither parked
+   * here nor in the registry is NotFound.
+   */
+  discard(request: DiscardRequest, callback: (error: ServiceError | null, response: Empty) => void): ClientUnaryCall;
+  discard(
+    request: DiscardRequest,
+    metadata: Metadata,
+    callback: (error: ServiceError | null, response: Empty) => void,
+  ): ClientUnaryCall;
+  discard(
+    request: DiscardRequest,
     metadata: Metadata,
     options: Partial<CallOptions>,
     callback: (error: ServiceError | null, response: Empty) => void,

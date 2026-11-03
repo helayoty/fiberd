@@ -22,6 +22,10 @@ type Snapshot struct {
 	SavedAt  time.Time         `json:"saved_at"`
 	Grants   []Grant           `json:"grants"`
 	Sessions []SessionSnapshot `json:"sessions"`
+	// unreadable marks the empty snapshot Load returns for a file that
+	// did not parse. The deltas on disk may still be named by the lost
+	// file, so boot sweeps none. It is never persisted.
+	unreadable bool
 }
 
 type SessionSnapshot struct {
@@ -130,7 +134,7 @@ func (st *SnapshotStore) Load() (Snapshot, error) {
 		// A torn snapshot is a cache miss, not a fatal error: reality is
 		// rebuilt from the runtime; only parked sessions are forgotten.
 		log.Printf("snapshot: %s unreadable (%v); treating as empty", filepath.Base(st.Path), err)
-		return Snapshot{}, nil
+		return Snapshot{unreadable: true}, nil
 	}
 	return s, nil
 }
@@ -161,6 +165,9 @@ type ReconcileReport struct {
 	// the verifier could not check.
 	ParkedHeld    int
 	OrphansKilled int
+	// DeltasSwept counts deltas the runtime removed at boot because no
+	// parked session names them.
+	DeltasSwept int
 }
 
 // heldGrant is a snapshot entry Reconcile could not verify because the
@@ -183,6 +190,8 @@ type heldGrant struct {
 //     Clone(S) after restart resumes it under the new epoch.
 //  3. Each fiber the runtime still reports is from a prior epoch and is
 //     killed. Nothing minted before the restart validates after it.
+//  4. Each delta on the runtime's disk that no parked session names is
+//     removed, since nothing can resume it.
 //
 // Reality wins over the snapshot at every step. The snapshot is a file on
 // the home's disk, so only a grant's signature re-admits it, never the
@@ -275,9 +284,38 @@ func (a *Core) Reconcile(ctx context.Context, snap Snapshot) (ReconcileReport, e
 			a.discardDelta(ctx, s.Fence, s.Name, s.DeltaRef)
 		}
 	}
+	rep.DeltasSwept = a.sweepDeltas(ctx, snap)
 	a.persist()
 	a.notify()
 	return rep, nil
+}
+
+// sweepDeltas has the runtime remove every delta on its disk that no
+// parked session names, held ones included. Nothing can resume such a
+// delta. A crash between a park and the snapshot naming it leaves one,
+// and so do a discard whose files did not all go, a dropped session and
+// a claim whose grant was revoked meanwhile. Nothing is swept when the
+// snapshot was unreadable, since the lost file may name what is on disk.
+func (a *Core) sweepDeltas(ctx context.Context, snap Snapshot) int {
+	sw, ok := a.Runtime.(DeltaSweeper)
+	if !ok {
+		return 0
+	}
+	if snap.unreadable {
+		log.Printf("reconcile: deltas not swept, since the snapshot was unreadable")
+		return 0
+	}
+	keep := []string{}
+	for _, s := range a.snapshot().Sessions {
+		if s.State == StateParked && s.DeltaRef != "" {
+			keep = append(keep, s.DeltaRef)
+		}
+	}
+	n, err := sw.SweepDeltas(ctx, keep)
+	if err != nil {
+		log.Printf("reconcile: sweep deltas: %v", err)
+	}
+	return n
 }
 
 // reverify checks a snapshot entry's token the way Clone checks a

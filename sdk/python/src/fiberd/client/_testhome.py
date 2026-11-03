@@ -1,8 +1,9 @@
 """A home in this process for the client's unit tests, with the certificates and fibers they need. Not shipped (see setup.py).
 
-Home serves the seven methods over grpc.server with a ledger of a few
+Home serves the eight methods over grpc.server with a ledger of a few
 lines, answers the two misses and the tier gap the way pkg/rpc does, and
-keeps the last CloneRequest so a test can see what went on the wire. The
+keeps the last CloneRequest and DiscardRequest so a test can see what
+went on the wire. The
 file calls work on an in-memory workspace per fiber, under one disk
 budget, and keep what every upload sent. No process starts. The
 certificates come from cryptography, the fibers are threads with a socket
@@ -118,6 +119,7 @@ class Home:
     # download_gate, when set, holds every Download chunk after the first until the event is set.
     download_gate: threading.Event | None = None
     last_clone: grant_pb2.CloneRequest | None = None
+    last_discard: grant_pb2.DiscardRequest | None = None
     seq: int = 0
     lines: dict[str, _Line] = field(default_factory=dict)
     # workspaces maps a fiber to its files, each path to its content and mode.
@@ -190,6 +192,19 @@ class Home:
         with self.lock:
             self._running(req.fiber_id, context)
             del self.lines[req.fiber_id]
+        return empty_pb2.Empty()
+
+    def discard(self, req: grant_pb2.DiscardRequest, context: grpc.ServicerContext) -> empty_pb2.Empty:
+        self.last_discard = req
+        if not req.grant_jwt or not self._caller_ok(context):
+            context.abort(grpc.StatusCode.UNAUTHENTICATED, "grant: not the caller the grant is bound to")
+        with self.lock:
+            line = next((ln for ln in self.lines.values() if req.session and ln.session == req.session), None)
+            if line is None:
+                context.abort(grpc.StatusCode.NOT_FOUND, f"session {req.session} unknown")
+            if not line.parked:
+                context.abort(grpc.StatusCode.INVALID_ARGUMENT, f"session {req.session} is running, release its fiber instead")
+            del self.lines[line.fiber_id]
         return empty_pb2.Empty()
 
     def watch(self, _req: empty_pb2.Empty, context: grpc.ServicerContext):
@@ -306,6 +321,7 @@ class Home:
             "Clone": unary(self.clone, request_deserializer=grant_pb2.CloneRequest.FromString, response_serializer=grant_pb2.CloneResponse.SerializeToString),
             "Park": unary(self.park, request_deserializer=grant_pb2.ParkRequest.FromString, response_serializer=empty),
             "Release": unary(self.release, request_deserializer=grant_pb2.ReleaseRequest.FromString, response_serializer=empty),
+            "Discard": unary(self.discard, request_deserializer=grant_pb2.DiscardRequest.FromString, response_serializer=empty),
             "Watch": stream(self.watch, request_deserializer=empty_pb2.Empty.FromString, response_serializer=grant_pb2.Status.SerializeToString),
             "Upload": upstream(self.upload, request_deserializer=grant_pb2.UploadRequest.FromString, response_serializer=grant_pb2.FileInfo.SerializeToString),
             "Download": stream(self.download, request_deserializer=grant_pb2.DownloadRequest.FromString,
