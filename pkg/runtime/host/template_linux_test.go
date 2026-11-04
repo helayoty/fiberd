@@ -249,6 +249,22 @@ func TestResolveTemplateRegistry(t *testing.T) {
 				t.Fatalf("resolveTemplate with parity off = %v", err)
 			}
 		}},
+		// Regression: the images were opened before the parity gate, so a
+		// refused template left its pages unpacked in the clear and held
+		// from the prune for good.
+		{"a template parity refuses never has its images opened or held", func(t *testing.T) {
+			images := artifact.ImagesDir(cacheDir(imagedElsewhere))
+			_ = os.RemoveAll(images)
+			if _, err := r.resolveTemplate(ctx, imagedElsewhere); !errors.Is(err, ErrParity) {
+				t.Fatalf("resolveTemplate = %v, want ErrParity", err)
+			}
+			if exists(images) {
+				t.Error("the refused template's images were unpacked")
+			}
+			if n := r.imagesHeld[images]; n != 0 {
+				t.Errorf("the refused template's images are held %d times", n)
+			}
+		}},
 		// Author images are sealed to the fleet. Regression: they were
 		// unpacked in the clear, 0755 and 0644, from a plain tar.
 		{"sealed images are opened with the master and unpacked owner-only, or not at all", func(t *testing.T) {

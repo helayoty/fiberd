@@ -1130,26 +1130,12 @@ func (r *Runtime) resolveTemplate(ctx context.Context, digest string) (backend.T
 			return backend.Template{}, fmt.Errorf("%w %q: %w", ErrNoTemplate, digest, err)
 		}
 	}
-	// Author images are sealed to the fleet. A home that makes parents
-	// from them opens them with the master, checks their hash, and
-	// unpacks them owner-only, afresh on every resolve. Other homes leave
-	// them sealed. The unpacked images are held for the caller, since
-	// the prune takes images nothing names (releaseImages).
-	unpacked := false
-	if cfg.HasImages() && r.usesImages() {
-		if err := artifact.UnpackImages(dir, cfg, r.cfg.DeltaKeys.Seal); err != nil {
-			return backend.Template{}, fmt.Errorf("%w %q: cannot open its images: %w", ErrNoTemplate, digest, err)
-		}
-		unpacked = true
-		if r.imagesHeld == nil {
-			r.imagesHeld = map[string]int{}
-		}
-		r.imagesHeld[artifact.ImagesDir(dir)]++
-	}
 	// The parity gate. The executable must be for this instruction set,
 	// and if the artifact carries images (the template's pages, which
 	// every delta is computed against and every restore starts from) they
-	// must be from a host this one can restore them on.
+	// must be from a host this one can restore them on. It comes before
+	// the images are opened, so a template this home refuses never has
+	// its pages unpacked in the clear or held from the prune.
 	want := cfg.Platform()
 	if !cfg.HasImages() {
 		// A bare template brings an executable and no pages, so the
@@ -1167,6 +1153,22 @@ func (r *Runtime) resolveTemplate(ctx context.Context, digest string) (backend.T
 	}
 	if err := r.cfg.Parity.Check(r.host, want); err != nil {
 		return backend.Template{}, fmt.Errorf("%w: template %s built on %s: %w", ErrParity, digest[:19], cfg.Platform(), err)
+	}
+	// Author images are sealed to the fleet. A home that makes parents
+	// from them opens them with the master, checks their hash, and
+	// unpacks them owner-only, afresh on every resolve. Other homes leave
+	// them sealed. The unpacked images are held for the caller, since
+	// the prune takes images nothing names (releaseImages).
+	unpacked := false
+	if cfg.HasImages() && r.usesImages() {
+		if err := artifact.UnpackImages(dir, cfg, r.cfg.DeltaKeys.Seal); err != nil {
+			return backend.Template{}, fmt.Errorf("%w %q: cannot open its images: %w", ErrNoTemplate, digest, err)
+		}
+		unpacked = true
+		if r.imagesHeld == nil {
+			r.imagesHeld = map[string]int{}
+		}
+		r.imagesHeld[artifact.ImagesDir(dir)]++
 	}
 	tpl := backend.Template{Argv: append([]string{artifact.ZygotePath(dir)}, cfg.Args...), Digest: digest, Dir: dir, ZygoteSHA256: cfg.ZygoteSHA256}
 	if unpacked {
