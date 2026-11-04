@@ -64,7 +64,6 @@ jobs:
           cache-dependency-path: |
             go.sum
             hack/tools/go.sum
-            examples/kubernetes/go.sum
             bench/compare/go.sum
       # The Rust toolchain and cargo registry for the Hyperlight helper
       # live in the dev container's named volumes, as in ci.yml.

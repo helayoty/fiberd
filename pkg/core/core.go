@@ -142,6 +142,10 @@ type Core struct {
 	// NodeID is this home's identity; a grant's audience must match it.
 	// Empty disables the check (tests).
 	NodeID string
+	// SelfAdmitUID is the one grant UID this home self-admits on Clone.
+	// Empty admits any verified grant that names this home. Delivered
+	// grants are not subject to it.
+	SelfAdmitUID string
 	// RequireBoundGrants refuses grants without a caller certificate
 	// binding. Set it whenever the transport is mutual TLS.
 	RequireBoundGrants bool
@@ -266,6 +270,12 @@ func (a *Core) Clone(ctx context.Context, req CloneRequest) (CloneResponse, Stat
 	// here inline. The template is warmed synchronously; homes pre-warm grants
 	// they are told about ahead of time so this is normally a no-op.
 	if _, known := a.Ledger.Grant(g.UID); !known {
+		// The audience names a home, not a grant: a token minted for a
+		// terminated Pod verifies on the later Pod that reuses its name,
+		// and self-admitting it would re-mint the old grant's fences here.
+		if a.SelfAdmitUID != "" && g.UID != a.SelfAdmitUID {
+			return CloneResponse{}, Unauthenticated, fmt.Errorf("%w: uid=%q, this home self-admits only %q", ErrWrongAudience, g.UID, a.SelfAdmitUID)
+		}
 		if code, err := a.Admit(ctx, g); err != nil {
 			return CloneResponse{}, code, err
 		}

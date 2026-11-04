@@ -1,15 +1,16 @@
-# The fiberd homes under test, one CapacityGrant per backend, in the
-# Kubernetes example's shape (examples/kubernetes/kind/manifests). Each
-# home runs stock fiberd:kind and pulls its template, the static counter
-# with a 32 MiB heap, from the compare registry as a zygote artifact
-# (bench/compare/run/phase1.sh pushes it and renders this file: the
+# The fiberd homes under test, one CapacityGrant per backend. No phase
+# applies this file. The fiberd rows in kind wait for the controller
+# project (Azure/fiberd-k8s-controller) to mint grants there. Each
+# image: fiberd:controller-pending is a placeholder the controller's
+# image fills. Each home pulls its template, the static counter with a
+# 32 MiB heap, from the compare registry as a zygote artifact. The
 # @DIGEST@ placeholders are the artifacts' digests and @REGISTRY@ the
-# registry as the Pods reach it). The grant the client mints at run time
+# registry as the Pods reach it. The grant the client mints at run time
 # names the same digest and carries the per-instance limits (64 MiB
 # wBudget, from -w-budget). The resource's own grant only keeps the Pod
-# ready. Fibers are served on the Pod IP (inet4). For gvisor and runc the
-# fiberd relays each port to the sandbox's unix socket, so those rows
-# include one relay hop, about 20 to 40 us per request.
+# ready. Fibers are served on the Pod IP (inet4). For gvisor and runc
+# the fiberd relays each port to the sandbox's unix socket, so those
+# rows include one relay hop, about 20 to 40 us per request.
 apiVersion: fiberd.io/v1alpha1
 kind: CapacityGrant
 metadata:
@@ -23,7 +24,7 @@ spec:
   isolation: TRUSTED
   lease: 1h
   pod:
-    image: fiberd:kind
+    image: fiberd:controller-pending
     runtime: proc
     endpointFamily: inet4
     nodeName: compare-control-plane
@@ -47,7 +48,7 @@ spec:
   isolation: TRUSTED
   lease: 1h
   pod:
-    image: fiberd:kind
+    image: fiberd:controller-pending
     runtime: runc
     endpointFamily: inet4
     nodeName: compare-control-plane
@@ -74,7 +75,7 @@ spec:
   isolation: UNTRUSTED
   lease: 1h
   pod:
-    image: fiberd:kind
+    image: fiberd:controller-pending
     runtime: gvisor
     endpointFamily: inet4
     nodeName: compare-control-plane

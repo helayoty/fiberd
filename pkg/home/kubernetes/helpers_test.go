@@ -112,7 +112,7 @@ func newTestHome(t *testing.T, opts ...func(*kubernetes.Config)) *testHome {
 	for _, opt := range opts {
 		opt(&cfg)
 	}
-	h, err := kubernetes.New(cfg)
+	h, err := kubernetes.New(t.Context(), cfg)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

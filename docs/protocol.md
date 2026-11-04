@@ -195,7 +195,7 @@ The core returns transport-independent outcomes, and the gRPC layer maps them as
 - `DEFERRED_FALLBACK` becomes `Unavailable`. It includes `Miss{code: DEFERRED_FALLBACK, issuer, preferred_home}`. `preferred_home` names the home to send the next Clone to, set when the session's parked state should remain there ([clone misses](glossary.md#clone-misses)).
 - A tier gap, a needs-tier [miss](glossary.md#clone-misses), becomes `FailedPrecondition`.
 - A malformed request becomes `InvalidArgument`.
-- An invalid grant, signature, issuer or audience becomes `Unauthenticated`.
+- An invalid grant, signature, issuer or audience becomes `Unauthenticated`. So does a token for a grant not yet admitted, when the home names another grant UID as its own ([home.md](design/home.md)).
 - An unknown fiber, and a session Discard finds nowhere, become `NotFound`.
 - A file call on a fiber whose grant has no workspace becomes `FailedPrecondition` with a `NoWorkspace` detail, so a client tells it apart from a tier gap.
 - A file larger than the disk budget becomes `ResourceExhausted` with no `Miss`, so a client never mistakes it for `SHED`.

@@ -19,7 +19,7 @@ One binary carries every core home, and `-home` picks one. `fiberd -home standal
 | What does the home vouch for? | Nothing |
 | Which devices may an [engine](../glossary.md#engine) drive? | The static `-devices` set, its [device channel](../glossary.md#device-channel) |
 
-A home may also implement two optional interfaces. A **[scope](../glossary.md#scope) loser** reports when its scope is gone. An **endpoint hoster** knows the one address its [fibers](../glossary.md#fiber) share, such as a Pod IP, and fills `-endpoint-host` for an inet4 or inet6 family when the flag is empty. The Kubernetes home implements both. So does the Slurm home, an example outside core ([slurm.md](slurm.md)).
+A home may also implement three optional interfaces. A **[scope](../glossary.md#scope) loser** reports when its scope is gone. An **endpoint hoster** knows the one address its [fibers](../glossary.md#fiber) share, such as a Pod IP, and fills `-endpoint-host` for an inet4 or inet6 family when the flag is empty. A **self-admitter** names the one grant UID that Clone may admit on first sight. Clone refuses a token for any other UID as unauthenticated. Grants the home delivers are not affected. The Kubernetes home implements all three, and names its Pod UID. The Slurm home, an example outside core, implements the first two ([slurm.md](slurm.md)).
 
 A home that polls a control plane can reuse three pieces of `pkg/home`. They are a scope-loss queue that delivers each reason once, a health poll that marks the issuer reachable when a round answers, and a readiness gate that publishes whether any template is warm.
 

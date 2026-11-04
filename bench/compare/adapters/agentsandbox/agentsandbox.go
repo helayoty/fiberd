@@ -19,9 +19,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Azure/fiberd/examples/kubernetes/kube"
-
 	"github.com/Azure/fiberd/bench/compare"
+	"github.com/Azure/fiberd/bench/compare/kube"
 )
 
 const (

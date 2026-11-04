@@ -41,7 +41,6 @@ jobs:
           cache-dependency-path: |
             go.sum
             hack/tools/go.sum
-            examples/kubernetes/go.sum
       - run: make lint
 
   image:

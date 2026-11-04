@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"slices"
@@ -14,6 +15,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"k8s.io/klog/v2"
 
 	"github.com/Azure/fiberd/pkg/endpoint"
 	"github.com/Azure/fiberd/pkg/fiberd"
@@ -26,10 +29,29 @@ import (
 // defaultCgroup is -cgroup-root's default.
 const defaultCgroup = "/sys/fs/cgroup/fiberd"
 
+// signalCancelKey holds the cancel of the context fakeSignalCtx returns.
+type signalCancelKey struct{}
+
+// fakeSignalCtx is signalCtx without a handler. It installs nothing, so
+// no test sends a real signal. Its cancel rides on the context it
+// returns and stands in for SIGTERM.
+func fakeSignalCtx(ctx context.Context) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(ctx)
+	return context.WithValue(ctx, signalCancelKey{}, cancel), cancel
+}
+
+// fakeSignal ends a context fakeSignalCtx returned, as SIGTERM would. A
+// context without the seam is left alone, so the row that sent it fails.
+func fakeSignal(ctx context.Context) {
+	if cancel, ok := ctx.Value(signalCancelKey{}).(context.CancelFunc); ok {
+		cancel()
+	}
+}
+
 // testEnv reads nothing from the host. vars stands in for the
 // environment and ask for the admin socket. It builds no client and no
 // home and runs no fiberd unless a test replaces newKube, newHome and
-// runFiberd.
+// runFiberd. Its signal context installs no handler.
 func testEnv(vars map[string]string, ask func(ctx context.Context, c *fiberd.Config, path string) error) env {
 	return env{
 		getenv:   func(k string) string { return vars[k] },
@@ -37,12 +59,13 @@ func testEnv(vars map[string]string, ask func(ctx context.Context, c *fiberd.Con
 		newKube: func(context.Context) (kubehome.Kube, error) {
 			return nil, errors.New("no cluster in a unit test")
 		},
-		newHome: func(kubehome.Config) (home.Home, error) {
+		newHome: func(context.Context, kubehome.Config) (home.Home, error) {
 			return nil, errors.New("no home in a unit test")
 		},
 		runFiberd: func(context.Context, *fiberd.Config, fiberd.HomeFactory) error {
 			return errors.New("no fiberd in a unit test")
 		},
+		signalCtx: fakeSignalCtx,
 	}
 }
 
@@ -212,13 +235,22 @@ func TestBuildConfig(t *testing.T) {
 
 // TestRunExitCodes checks the exit codes of every form that stops
 // before serving. healthz and readyz ask the admin socket once, inside
-// the probe timeout, and exit 0 on a 200 and 1 on anything else.
+// the probe timeout, and exit 0 on a 200 and 1 on anything else. A
+// kubernetes home whose New a signal ends is a stop, and any other
+// cancellation is a failure.
 func TestRunExitCodes(t *testing.T) {
+	kubeArgs := []string{"-home", "kubernetes", "-pod-name", "grant-a-0", "-pod-namespace", "tenant", "-pod-uid", "uid-1",
+		"-runtime", "stub"}
 	cases := []struct {
 		name string
 		args []string
 		// sick makes the admin socket answer 503.
-		sick       bool
+		sick bool
+		// homeErr, when set, is what the kubernetes home's New returns.
+		homeErr error
+		// signalled sends the fake signal during New, which then fails
+		// with its context's error.
+		signalled  bool
 		wantCode   int
 		wantAsked  string // the path asked for, empty when nothing is
 		wantState  string // the -state the probe used, checked when set
@@ -251,9 +283,26 @@ func TestRunExitCodes(t *testing.T) {
 			wantStderr: []string{"flag provided but not defined: -nope"}},
 		{name: "readyz with an unknown home", args: []string{"readyz", "-home", "nomad"}, wantCode: 2,
 			wantStderr: []string{`-home "nomad" unknown`}},
+		{name: "a signal during the first grant fetch stops fiberd", args: kubeArgs,
+			signalled: true, wantCode: 0,
+			wantStderr: []string{"fiberd stopped before it started"}},
+		{name: "a cancellation that is not the signal's fails fiberd", args: kubeArgs,
+			homeErr: context.Canceled, wantCode: 1, wantStderr: []string{"fiberd failed"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.homeErr != nil || tc.signalled {
+				// serveKubernetes sets klog's logger and routes the standard
+				// log through it. Both are put back after the row.
+				out, flags := log.Writer(), log.Flags()
+				t.Cleanup(func() {
+					klog.ClearLogger()
+					log.SetOutput(out)
+					log.SetFlags(flags)
+				})
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
 			var asked []string
 			var state string
 			e := testEnv(nil, func(ctx context.Context, c *fiberd.Config, path string) error {
@@ -267,8 +316,20 @@ func TestRunExitCodes(t *testing.T) {
 				}
 				return nil
 			})
+			e.newKube = func(context.Context) (kubehome.Kube, error) { return fake.New("tenant"), nil }
+			e.newHome = func(ctx context.Context, _ kubehome.Config) (home.Home, error) {
+				if tc.signalled {
+					fakeSignal(ctx)
+					return nil, fmt.Errorf("kubernetes home: first grant fetch: %w", ctx.Err())
+				}
+				return nil, tc.homeErr
+			}
+			e.runFiberd = func(_ context.Context, c *fiberd.Config, newHome fiberd.HomeFactory) error {
+				_, err := newHome(c, nil)
+				return err
+			}
 			var stdout, stderr bytes.Buffer
-			code := e.run(context.Background(), tc.args, &stdout, &stderr)
+			code := e.run(ctx, tc.args, &stdout, &stderr)
 			if code != tc.wantCode {
 				t.Fatalf("run = %d, want %d: %s", code, tc.wantCode, stderr.String())
 			}
@@ -294,11 +355,18 @@ func TestRunExitCodes(t *testing.T) {
 	}
 }
 
+// factoryCtxKey marks the context a test builds the home factory with.
+type factoryCtxKey struct{}
+
 // TestHomeFactory checks the kubernetes home fiberd builds. It gets the
 // Pod identity, fiberd's stale TTL, grants dir, devices and endpoint
 // family, the grant fetch flags with -issuer, the key cache fiberd hands
-// the factory, and the client the Kube constructor built. A
-// constructor's error surfaces.
+// the factory, and the client the Kube constructor built. New runs under
+// the signal context derived from the one the factory was built with, so
+// a signal ends the first grant fetch. The factory stops that context
+// before it returns, built or not, so RunContext's own handler is the
+// only one left. A constructor's error surfaces, and only a signal's
+// marks it a stop.
 func TestHomeFactory(t *testing.T) {
 	podArgs := []string{"-home", "kubernetes", "-pod-name", "grant-a-0", "-pod-namespace", "tenant", "-pod-uid", "uid-1"}
 	jwks := &grant.Cache{}
@@ -308,8 +376,13 @@ func TestHomeFactory(t *testing.T) {
 		jwks    *grant.Cache
 		kubeErr error
 		homeErr error
-		want    kubehome.Config // Kube, Clock and Logger are not compared
-		wantErr string
+		// signalled sends the fake signal during New, which then fails
+		// with its context's error.
+		signalled bool
+		want      kubehome.Config // Kube, Clock and Logger are not compared
+		wantErr   string
+		// wantStop is whether the error wraps errStoppedBeforeStart.
+		wantStop bool
 	}{
 		{name: "the home gets the Pod, the flags and the key cache", jwks: jwks,
 			args: []string{"-stale-ttl", "45s", "-grants-dir", "/grants", "-devices", "nvidia0,nvidia1",
@@ -332,6 +405,8 @@ func TestHomeFactory(t *testing.T) {
 			wantErr: "kubernetes home: no service account"},
 		{name: "a home constructor error surfaces", homeErr: errors.New("pod has no uid"),
 			wantErr: "pod has no uid"},
+		{name: "a signal during the first grant fetch marks the error a stop", signalled: true,
+			wantErr: "first grant fetch: context canceled", wantStop: true},
 		{name: "a bad endpoint family", args: []string{"-endpoint-family", "ipx"},
 			wantErr: `endpoint family "ipx"`},
 	}
@@ -350,17 +425,46 @@ func TestHomeFactory(t *testing.T) {
 				}
 				return kube, nil
 			}
-			e.newHome = func(cfg kubehome.Config) (home.Home, error) {
-				got = &cfg
+			// sigCtx is what the signal seam returned. stopped is set when
+			// its cancel runs, and seen is stopped as New saw it.
+			var sigCtx context.Context
+			var stopped, seen bool
+			e.signalCtx = func(ctx context.Context) (context.Context, context.CancelFunc) {
+				sctx, cancel := fakeSignalCtx(ctx)
+				sigCtx = sctx
+				return sctx, func() {
+					stopped = true
+					cancel()
+				}
+			}
+			var gotCtx context.Context
+			e.newHome = func(ctx context.Context, cfg kubehome.Config) (home.Home, error) {
+				gotCtx, got, seen = ctx, &cfg, stopped
+				if tc.signalled {
+					fakeSignal(ctx)
+					return nil, fmt.Errorf("kubernetes home: first grant fetch: %w", ctx.Err())
+				}
 				return nil, tc.homeErr
 			}
+			ctx := context.WithValue(t.Context(), factoryCtxKey{}, tc.name)
 			var built home.Home
-			_, err = e.kubeHome(context.Background(), o.pod, o.grant, &built)(&o.fiberd, tc.jwks)
+			_, err = e.kubeHome(ctx, o.pod, o.grant, &built)(&o.fiberd, tc.jwks)
+			if got != nil {
+				if gotCtx != sigCtx {
+					t.Fatal("New did not get the context the signal seam returned")
+				}
+				if seen || !stopped {
+					t.Fatalf("the signal context was stopped before New %v, by the factory's return %v, want false true", seen, stopped)
+				}
+			}
+			if errors.Is(err, errStoppedBeforeStart) != tc.wantStop {
+				t.Fatalf("factory = %v, want a stop %v", err, tc.wantStop)
+			}
 			if tc.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 					t.Fatalf("factory = %v, want an error with %q", err, tc.wantErr)
 				}
-				if tc.homeErr == nil && got != nil {
+				if tc.homeErr == nil && !tc.signalled && got != nil {
 					t.Fatalf("the home was built after a failure: %+v", *got)
 				}
 				return
@@ -370,6 +474,9 @@ func TestHomeFactory(t *testing.T) {
 			}
 			if got == nil {
 				t.Fatal("the home was never built")
+			}
+			if gotCtx == nil || gotCtx.Value(factoryCtxKey{}) != tc.name {
+				t.Fatal("New did not get the context the factory was built with")
 			}
 			if got.Kube != kubehome.Kube(kube) {
 				t.Fatalf("home Kube %v, want the constructor's client", got.Kube)
@@ -442,7 +549,7 @@ func TestRunKubeClosesTheHome(t *testing.T) {
 			defer cancel()
 			e := testEnv(nil, nil)
 			e.newKube = func(context.Context) (kubehome.Kube, error) { return fake.New("tenant"), nil }
-			e.newHome = func(kubehome.Config) (home.Home, error) {
+			e.newHome = func(context.Context, kubehome.Config) (home.Home, error) {
 				if tc.homeErr != nil {
 					return nil, tc.homeErr
 				}

@@ -67,7 +67,7 @@ func TestConfigValidate(t *testing.T) {
 			if (err != nil) != (c.wantErr != "") || (err != nil && !strings.Contains(err.Error(), c.wantErr)) {
 				t.Fatalf("Validate = %v, want %q", err, c.wantErr)
 			}
-			if _, err := kubernetes.New(cfg); (err != nil) != (c.wantErr != "") {
+			if _, err := kubernetes.New(t.Context(), cfg); (err != nil) != (c.wantErr != "") {
 				t.Fatalf("New = %v, want an error %v", err, c.wantErr != "")
 			}
 		})
@@ -91,7 +91,7 @@ func TestNewDefaults(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			cfg := validConfig()
 			cfg.CgroupRoot = c.cgroupRoot
-			h, err := kubernetes.New(cfg)
+			h, err := kubernetes.New(t.Context(), cfg)
 			if err != nil {
 				t.Fatalf("New: %v", err)
 			}
@@ -246,7 +246,7 @@ func TestRunDeliversLossesInOrder(t *testing.T) {
 
 // TestScope checks what the home asserts before it has stored its Pod,
 // what a fully answered round adds, and that a failed round changes
-// nothing.
+// nothing. The self-admitted UID always matches the scope's pod_uid.
 func TestScope(t *testing.T) {
 	configOnly := []core.ScopeClaim{
 		{Name: "namespace", Value: testNamespace}, {Name: "pod", Value: testPod}, {Name: "pod_uid", Value: testPodUID}}
@@ -276,8 +276,15 @@ func TestScope(t *testing.T) {
 			if c.poll {
 				_ = h.Once(context.Background())
 			}
-			if got := h.Scope(); !slices.Equal(got, c.want) {
+			got := h.Scope()
+			if !slices.Equal(got, c.want) {
 				t.Fatalf("Scope = %v, want %v", got, c.want)
+			}
+			// The UID Clone self-admits is the Pod the scope names, in
+			// every state of the scope.
+			i := slices.IndexFunc(got, func(sc core.ScopeClaim) bool { return sc.Name == "pod_uid" })
+			if uid := h.SelfAdmitUID(); uid != testPodUID || i < 0 || got[i].Value != uid {
+				t.Fatalf("SelfAdmitUID = %q, want %q and the scope's pod_uid in %v", uid, testPodUID, got)
 			}
 		})
 	}

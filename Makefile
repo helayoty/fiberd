@@ -8,7 +8,7 @@ BIN     ?= bin
 PKGS    := ./...
 # Integrations are their own modules; test and lint run in each. The
 # activation comparison benchmark (bench/compare) is one more.
-EXAMPLES := examples/kubernetes examples/slurm examples/knative examples/kata examples/substrate bench/compare
+EXAMPLES := examples/slurm examples/knative examples/kata examples/substrate bench/compare
 
 # Hardening for every build of the zygote, refzygote and the storm's
 # baseline workload (storm-grower). The flags are
@@ -63,7 +63,7 @@ endif
         bench zygote zygote-core zygote-test zygote-c-test zygote-check storm-grower storm-grower-test fuzz fuzz-core conform-stub conform-signed conform-logs conform-proc conform-proc-python conform-gvisor conform-gvisor-python conform-runc conform-runc-python conform-hyperlight-fake conform-hyperlight \
         python-build python-test python-dist python-proto python-proto-check \
         typescript-build typescript-skipped typescript-test typescript-proto typescript-proto-check \
-        hyperlight-helper linux-hyperlight-check linux-hyperlight-test overcommit overcommit-baseline kind-up kind-down kind-image conform-kind slurm-up slurm-down conform-slurm example-knative example-knative-kvm example-kata example-kata-gpu example-substrate \
+        hyperlight-helper linux-hyperlight-check linux-hyperlight-test overcommit overcommit-baseline slurm-up slurm-down conform-slurm example-knative example-knative-kvm example-kata example-kata-gpu example-substrate \
         registry-start mobility linux-shell linux-check linux-gvisor-check linux-caps linux-test linux-lint bench-e2e \
         compare-phase0 compare-phase1 compare-phase2 compare-phase3 compare-phase4 compare-down
 
@@ -162,23 +162,6 @@ conform-cloudhv: ## C1-C10 against the cloudhv backend with the real VMM, and C1
 	FIBERD_DEV_DOCKER_ARGS="--device /dev/kvm" hack/dev/run.sh env CONFORM_RUNTIME=cloudhv CONFORM_SIGNED=1 CONFORM_GPU=1 CONFORM_W_BUDGET=8388608 \
 	  CONFORM_CH_DIR=/src/bin/cloudhv CONFORM_STATE=$(CONFORM_DIR)/conform-state-cloudhv-kvm hack/conform/stub.sh run
 
-## The Kubernetes example (examples/kubernetes, its own module): the issuer
-## as a controller, a grant Pod with fiberd as PID 1, conformance from
-## the host, the storm inside. What fiberd needs for it is pkg/fiberd and
-## pkg/home; everything Kubernetes lives in the example.
-
-kind-up: ## create the kind cluster (examples/kubernetes/kind/kind.yaml)
-	examples/kubernetes/kind/conform.sh up
-
-kind-down: ## delete the kind cluster
-	examples/kubernetes/kind/conform.sh down
-
-kind-image: ## build fiberd:kind (fiberd-k8s, grant-controller, zygote, criu, runsc and a gVisor rootfs) and load it into the cluster
-	examples/kubernetes/kind/conform.sh image
-
-conform-kind: ## C1-C10, the overcommit storm and an UNTRUSTED gVisor session check against grant Pods in kind (needs docker, kind, kubectl, go)
-	examples/kubernetes/kind/conform.sh run
-
 ## The Slurm example (examples/slurm, its own module): a one-node Slurm in
 ## Docker, fiberd as a job in its allocation's cgroup, conformance from
 ## the host, the storm inside.
@@ -199,13 +182,14 @@ example-knative: ## the activator over a Hyperlight home with the fake helper (n
 	hack/dev/run.sh examples/knative/run.sh
 
 ## The Kata-shaped example (examples/kata, its own module): a containerd
-## shim whose containers are fibers, as a RuntimeClass in the kind cluster
-## of the Kubernetes example.
+## shim whose containers are fibers, as a RuntimeClass in kind. Its kind
+## run waits for the controller project to create grant Pods and mint
+## grants in kind.
 
-example-kata: ## install the shim into the kind node and run Pods whose containers are fibers (needs docker, kind, kubectl, go)
+example-kata: ## Pods whose containers are fibers, in kind. Waits for the controller project, and exits 2 until then
 	examples/kata/kind/run.sh run
 
-example-kata-gpu: ## the GPU PoC's Kata row on VM A: Pods whose fibers use a host home's GPU engine, park and resume their slice (KATA_GPU_SIM=1 without a GPU)
+example-kata-gpu: ## the GPU PoC's Kata row on VM A, Pods whose fibers park and resume a GPU slice. Waits for the controller project, and exits 2 until then
 	examples/kata/kind/run.sh gpu
 
 ## The Agent Substrate example (examples/substrate, its own module): a
@@ -420,13 +404,13 @@ bench-e2e: ## time Clone over gRPC end to end, per stage (tests/bench/clone), in
 compare-phase0: ## host facts and load; exits 3 when load exceeds the core count
 	bench/compare/run/phase0.sh
 
-compare-phase1: ## kind cluster "compare": Pod warm and cold, fiberd proc and runc, agent-sandbox under runc, control-plane deltas
+compare-phase1: ## kind cluster "compare": Pod warm and cold, agent-sandbox under runc, control-plane deltas (fiberd rows wait for the controller)
 	bench/compare/run/phase1.sh
 
 compare-phase2: ## dev container: fiberd proc, runc and gVisor standalone over loopback, with resume and density
 	bench/compare/run/phase2.sh
 
-compare-phase3: ## kind cluster "compare": Pod gVisor, agent-sandbox gVisor, fiberd gVisor through the relay
+compare-phase3: ## kind cluster "compare": Pod gVisor and agent-sandbox gVisor (fiberd rows wait for the controller)
 	bench/compare/run/phase3.sh
 
 compare-phase4: ## a KVM host: phases 1 to 3 plus Firecracker and fiberd Hyperlight (COMPARE_GROUPS picks classes)

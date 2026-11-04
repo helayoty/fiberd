@@ -13,7 +13,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/Azure/fiberd/examples/kubernetes/kube"
+	"github.com/Azure/fiberd/bench/compare/kube"
 )
 
 // seen is one request the test server received.

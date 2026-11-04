@@ -192,7 +192,7 @@ type Home struct {
 
 	// stop ends what New started, the first grant fetch and the wait for
 	// the Pod's address. Close cancels it, and so does Run when its
-	// context ends.
+	// context ends. New's own context ends only the first fetch.
 	stopCtx context.Context
 	stop    context.CancelFunc
 	started atomic.Bool
@@ -223,11 +223,16 @@ type Home struct {
 // returns, retrying for up to GrantFetchTimeout. It fails when no grant
 // came by then, unless the grants directory holds an unexpired grant
 // file for the Pod. Run renews the grant from there.
-func New(cfg Config) (*Home, error) { return newHome(cfg, nil) }
+//
+// ctx bounds New's own work, which is the first grant fetch. When ctx
+// ends first, New closes the home and returns ctx's cause. ctx is not
+// the home's lifetime. Run's context and Close end the home once New
+// has returned it.
+func New(ctx context.Context, cfg Config) (*Home, error) { return newHome(ctx, cfg, nil) }
 
 // newHome is New. built, when set, is handed the home before the first
 // grant fetch.
-func newHome(cfg Config, built func(*Home)) (*Home, error) {
+func newHome(ctx context.Context, cfg Config, built func(*Home)) (*Home, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
@@ -260,8 +265,20 @@ func newHome(cfg Config, built func(*Home)) (*Home, error) {
 	if built != nil {
 		built(h)
 	}
-	if err := f.start(h.stopCtx, cfg.GrantFetchTimeout); err != nil {
+	// The first fetch ends on Close or when the caller's ctx ends,
+	// whichever comes first. Only Close ends the home's own context.
+	startCtx, cancel := context.WithCancel(h.stopCtx)
+	stopAfter := context.AfterFunc(ctx, cancel)
+	err = f.start(startCtx, cfg.GrantFetchTimeout)
+	stopAfter()
+	cancel()
+	if err != nil {
 		h.stop()
+		if errors.Is(err, context.Canceled) && ctx.Err() != nil {
+			// The caller's ctx cancelled the fetch. Its cause is the error
+			// to return, so a deadline reads as one.
+			return nil, fmt.Errorf("kubernetes home: first grant fetch: %w", context.Cause(ctx))
+		}
 		return nil, err
 	}
 	return h, nil
@@ -270,6 +287,11 @@ func newHome(cfg Config, built func(*Home)) (*Home, error) {
 func (h *Home) Name() string               { return Name }
 func (h *Home) Health() *core.SourceHealth { return h.health }
 func (h *Home) CgroupRoot() string         { return h.cgroupRoot }
+
+// SelfAdmitUID is the Pod UID, since the controller issues this Pod's
+// grant under it and a token for an earlier Pod of the same name must not
+// self-admit here.
+func (h *Home) SelfAdmitUID() string { return h.cfg.PodUID }
 
 // Ready reports whether any grant's template is warm, which is what the
 // Pod condition says once it is published.

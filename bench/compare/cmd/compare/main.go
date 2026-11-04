@@ -21,13 +21,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/Azure/fiberd/examples/kubernetes/kube"
-
 	"github.com/Azure/fiberd/bench/compare"
 	"github.com/Azure/fiberd/bench/compare/adapters/agentsandbox"
 	"github.com/Azure/fiberd/bench/compare/adapters/fiberd"
 	"github.com/Azure/fiberd/bench/compare/adapters/firecracker"
 	"github.com/Azure/fiberd/bench/compare/adapters/pod"
+	"github.com/Azure/fiberd/bench/compare/kube"
 	"github.com/Azure/fiberd/bench/compare/promtext"
 )
 

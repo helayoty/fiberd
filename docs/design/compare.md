@@ -8,7 +8,7 @@ fiberd claims that its protocol layer adds little overhead while removing the pe
 
 | Half | Measured as | Supported when |
 | --- | --- | --- |
-| Little overhead | Activation to first byte, per isolation class | fiberd gVisor is at or below a gVisor Pod and within 2x of an agent-sandbox pool hit. fiberd Hyperlight is within 2x of a Firecracker restore. fiberd proc on kind is within 2x of standalone proc |
+| Little overhead | Activation to first byte, per isolation class | fiberd gVisor is at or below a gVisor Pod and within 2x of an agent-sandbox pool hit. fiberd Hyperlight is within 2x of a Firecracker restore. Once the controller project lands, fiberd proc on kind is within 2x of standalone proc |
 | No per-instance control-plane cost | API server writes, stored objects, scheduler attempts and audit events per run | Zero for fiberd once its [grant](../glossary.md#grant) is placed, against at least 3 writes and 1 scheduling decision per Pod or claim |
 
 A pool hit that beats fiberd gVisor by more than 2x, or idle density no better than Pods, refutes the claim. Either result is reported, one class and one host per table.
@@ -25,7 +25,7 @@ agent-sandbox is the Kubernetes SIG's answer to warm sandboxes. Firecracker is p
 
 **One workload.** Every system runs `workload/counter.c` with a 32 MiB heap it touches at start. It is built once as a static PIE with the Makefile's `ZYGOTE_CFLAGS`. Pods, agent-sandbox and the Firecracker guest run it as a plain server. proc and runc run it as a [zygote](../glossary.md#zygote), whose fibers answer a park as the reference zygote's do. gVisor runs it as the sandbox's init with a self-checkpoint. Hyperlight is the exception. Its guest is the Rust guest in `hack/hyperlight/guest`, which speaks a line protocol and not HTTP. So proc runs under both framings in the same run, and the gap is reported.
 
-**Templates from a registry.** Every fiberd [home](../glossary.md#home) pulls the counter as a [template](../glossary.md#template) artifact from a [registry](../glossary.md#registry), the way a production home does, so no image carries the workload. Phase 1 packs one artifact per argument set and pushes each to the `compare` cluster's registry. The grant Pods run stock `fiberd:kind`, and the client names the digest in the grant it mints. Standalone, the runc and gVisor homes pull from the local registry, and proc takes a `-template` path.
+**Templates from a registry.** Every fiberd [home](../glossary.md#home) pulls the counter as a [template](../glossary.md#template) artifact from a [registry](../glossary.md#registry), the way a production home does, so no image carries the workload. Standalone, the runc and gVisor homes pull from the local registry, and proc takes a `-template` path.
 
 **First byte.** One client process times everything with its own monotonic clock. No server-side timestamp enters a number.
 
@@ -43,7 +43,7 @@ sequenceDiagram
   I-->>C: first byte of the first 200 (t_first_byte)
 ```
 
-Pods, claims and Firecracker return an address before the instance listens, so they are polled. The poll interval and the failed attempts are in every record as the quantization bound. A [clone](../glossary.md#clone) returns an endpoint that already listens, so fiberd's first request is the measurement. On kind, gVisor and runc fibers are reached through fiberd's [relay](../glossary.md#relay), one hop per request. The standalone rows over unix sockets bound that cost.
+Pods, claims and Firecracker return an address before the instance listens, so they are polled. The poll interval and the failed attempts are in every record as the quantization bound. A [clone](../glossary.md#clone) returns an endpoint that already listens, so fiberd's first request is the measurement.
 
 **Fairness.**
 
@@ -56,13 +56,13 @@ Pods, claims and Firecracker return an address before the instance listens, so t
 
 Runs can also [park](../glossary.md#park) an instance untimed and then time its resume to first byte, and hold idle instances for 30 seconds to read their memory from cgroups or the Firecracker process.
 
-**Phases.** Phase 0 records the host and its load. Phase 1 is the shared-kernel class on a kind cluster named `compare`, with control-plane deltas. Phase 2 is fiberd proc, runc and gVisor standalone in the dev container. Phase 3 is the sandboxed class on the same cluster. Phase 4 is everything again on one host with `/dev/kvm`, plus Firecracker and Hyperlight. Docker Desktop has no `/dev/kvm`, so the headline table comes from phase 4 alone.
+**Phases.** Phase 0 records the host and its load. Phase 1 is the shared-kernel class on a kind cluster named `compare`, with control-plane deltas. Phase 2 is fiberd proc, runc and gVisor standalone in the dev container. Phase 3 is the sandboxed class on the same cluster. Their fiberd rows wait for the controller project to create grant Pods and mint grants in kind, so both run only the comparators for now. Phase 4 is everything again on one host with `/dev/kvm`, plus Firecracker and Hyperlight. Docker Desktop has no `/dev/kvm`, so the headline table comes from phase 4 alone.
 
 **The workflow.** `bench-compare` is a GitHub workflow started only by hand. It runs phase 4 on an x86_64 `ubuntu-24.04` runner, which exposes `/dev/kvm`. The selected classes run in one job, so they share one host and one run. The runner's facts and load are recorded first, and the raw records are kept as an artifact.
 
 ## Security notes and known gaps
 
-- The homes serve plaintext. The client mints its own grants from the issuer's private key, which is copied into the client Pod.
+- The homes serve plaintext. The client mints its own grants from the issuer's private key.
 - The client Pod is privileged, to read the node's cgroups and remove images through containerd. The Firecracker adapter runs as root to make network namespaces.
 - The kind scheduler listens on every node address and skips authorization for `/metrics`. The client reads that page through the API server's Pod proxy, so it verifies the API server's certificate against the cluster CA and never the scheduler's self-signed one.
 - Control-plane deltas include the cluster's background traffic.

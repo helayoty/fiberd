@@ -8,8 +8,10 @@ import (
 	"io"
 	"log"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"k8s.io/client-go/rest"
@@ -46,16 +48,30 @@ type env struct {
 	askAdmin func(ctx context.Context, c *fiberd.Config, path string) error
 	// newKube builds the API client a kubernetes home talks through.
 	newKube func(ctx context.Context) (kubehome.Kube, error)
-	// newHome builds the kubernetes home from its config.
-	newHome func(cfg kubehome.Config) (home.Home, error)
+	// newHome builds the kubernetes home from its config. ctx bounds the
+	// build, which is the first grant fetch.
+	newHome func(ctx context.Context, cfg kubehome.Config) (home.Home, error)
 	// runFiberd runs fiberd with the home the factory builds.
 	runFiberd func(ctx context.Context, c *fiberd.Config, newHome fiberd.HomeFactory) error
+	// signalCtx derives a context that SIGINT or SIGTERM ends. Its stop
+	// unregisters the handler.
+	signalCtx func(ctx context.Context) (context.Context, context.CancelFunc)
 }
 
 // hostEnv is the real host.
 func hostEnv() env {
-	return env{getenv: os.Getenv, askAdmin: askAdmin, newKube: inClusterKube, newHome: newKubeHome, runFiberd: fiberd.RunContext}
+	return env{getenv: os.Getenv, askAdmin: askAdmin, newKube: inClusterKube, newHome: newKubeHome,
+		runFiberd: fiberd.RunContext, signalCtx: notifyStop}
 }
+
+// notifyStop is a context that SIGINT or SIGTERM ends.
+func notifyStop(ctx context.Context) (context.Context, context.CancelFunc) {
+	return signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+}
+
+// errStoppedBeforeStart marks a home build that a signal ended. It is a
+// stop, not a failure.
+var errStoppedBeforeStart = errors.New("stopped by a signal before fiberd started")
 
 // askAdmin is Config.Readyz for readyz and Config.Healthz otherwise.
 func askAdmin(ctx context.Context, c *fiberd.Config, path string) error {
@@ -76,8 +92,8 @@ func inClusterKube(ctx context.Context) (kubehome.Kube, error) {
 
 // newKubeHome is kubehome.New as a home.Home. A failed New is a nil
 // interface, never a nil *Home inside one.
-func newKubeHome(cfg kubehome.Config) (home.Home, error) {
-	h, err := kubehome.New(cfg)
+func newKubeHome(ctx context.Context, cfg kubehome.Config) (home.Home, error) {
+	h, err := kubehome.New(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -286,7 +302,9 @@ func (e env) probe(ctx context.Context, cmd string, args []string, stdout, stder
 // text logger on stderr, and fiberd's standard-library log lines land
 // there in the same format. PrepareMounts and then NarrowCaps run after
 // the logger is set and before RunContext, since NarrowCaps re-executes
-// the process.
+// the process. A signal while the home is built, which covers the first
+// grant fetch, ends the build with errStoppedBeforeStart. That exits 0,
+// as a stop after fiberd serves does.
 func (e env) serveKubernetes(ctx context.Context, o *options, stderr io.Writer) int {
 	logger := textlogger.NewLogger(textlogger.NewConfig(textlogger.Output(stderr)))
 	klog.SetLogger(logger)
@@ -301,6 +319,11 @@ func (e env) serveKubernetes(ctx context.Context, o *options, stderr io.Writer) 
 		return 1
 	}
 	if err := e.runKube(ctx, o); err != nil {
+		// A signal during the first grant fetch is a stop, not a failure.
+		if errors.Is(err, errStoppedBeforeStart) {
+			logger.Info("fiberd stopped before it started", "reason", err.Error())
+			return 0
+		}
 		logger.Error(err, "fiberd failed")
 		return 1
 	}
@@ -326,7 +349,11 @@ func (e env) runKube(ctx context.Context, o *options) error {
 // kubeHome is the factory for -home kubernetes. It builds the API client
 // when fiberd asks for its home, so a Pod without a service account
 // fails the run. ctx carries the logger. NewKube checks it once, and the
-// rest.Config timeout bounds discovery. The home it builds lands in
+// rest.Config timeout bounds discovery. New runs under a signal context
+// derived from ctx, so SIGINT or SIGTERM during the first grant fetch
+// ends it at once. RunContext installs its own handler only after the
+// factory returns, so nothing else catches a signal then. The build's
+// error then wraps errStoppedBeforeStart. The home it builds lands in
 // built, and ctx ending closes it, which cuts EndpointHost's wait short.
 // The grant fetch reaches the issuer fiberd verifies grants against.
 func (e env) kubeHome(ctx context.Context, pod podIdentity, fetch grantFetch, built *home.Home) fiberd.HomeFactory {
@@ -339,7 +366,8 @@ func (e env) kubeHome(ctx context.Context, pod podIdentity, fetch grantFetch, bu
 		if err != nil {
 			return nil, fmt.Errorf("kubernetes home: %w", err)
 		}
-		h, err := e.newHome(kubehome.Config{
+		sctx, stop := e.signalCtx(ctx)
+		h, err := e.newHome(sctx, kubehome.Config{
 			Kube:              kube,
 			PodName:           pod.Name,
 			PodNamespace:      pod.Namespace,
@@ -356,7 +384,16 @@ func (e env) kubeHome(ctx context.Context, pod podIdentity, fetch grantFetch, bu
 			CgroupRoot:        c.Node.CgroupRoot,
 			Logger:            klog.FromContext(ctx),
 		})
+		// The handler must not outlive the build. RunContext's own handler
+		// drains on SIGTERM. A lingering one here would cancel the run
+		// instead of letting it drain. stop cancels sctx too, so whether a
+		// signal ended the build is read first.
+		signalled := sctx.Err() != nil
+		stop()
 		if err != nil {
+			if signalled {
+				return nil, fmt.Errorf("%w: %w", errStoppedBeforeStart, err)
+			}
 			return nil, err
 		}
 		*built = h
@@ -366,3 +403,7 @@ func (e env) kubeHome(ctx context.Context, pod podIdentity, fetch grantFetch, bu
 		return h, nil
 	}
 }
+
+// Without it a renamed method would let the Kubernetes home self-admit
+// any grant naming it.
+var _ fiberd.SelfAdmitter = (*kubehome.Home)(nil)

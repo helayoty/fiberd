@@ -63,6 +63,9 @@ type (
 	// EndpointHoster knows the one address its fibers share (a Pod IP, a
 	// node address); it fills -endpoint-host when that is empty.
 	EndpointHoster interface{ EndpointHost() string }
+	// SelfAdmitter knows the one grant UID it may self-admit on Clone (a
+	// Pod UID). An empty answer admits any verified grant naming the home.
+	SelfAdmitter interface{ SelfAdmitUID() string }
 )
 
 // HomeFactory builds the home once the key cache exists. jwks is nil
@@ -757,6 +760,9 @@ func RunContext(ctx context.Context, c *Config, newHome HomeFactory) error {
 		Store:              store,
 		Revoked:            revoked,
 		StatusInterval:     c.Timing.StatusEvery,
+	}
+	if sa, ok := h.(SelfAdmitter); ok {
+		ag.SelfAdmitUID = sa.SelfAdmitUID()
 	}
 
 	// Signals. Everything below stops when ctx ends, and the watcher ends

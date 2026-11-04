@@ -1,8 +1,7 @@
-// Package kube is the slice of the Kubernetes API fiberd touches, as plain
-// HTTPS requests with the projected service-account token: get, list,
-// create, patch and delete on a handful of resources. fiberd is PID 1
-// of every grant Pod and the issuer controller is one small Deployment;
-// neither carries client-go for a dozen calls.
+// Package kube is the benchmark's small Kubernetes client. It sends plain
+// HTTPS requests with the projected service-account token. It covers
+// get, list, create, patch and delete on a handful of resources, so the
+// benchmark carries no client-go for a dozen calls.
 package kube
 
 import (

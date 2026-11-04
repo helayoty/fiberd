@@ -26,7 +26,7 @@ A suggested order is fiberd, home, grant, core, audit, runtime-host, backends, z
 | [sdk.md](sdk.md) | The SDK's four languages, how the Python binding brings the interpreter through a raw fork, and the rules it enforces | `sdk/python`, `sdk/go/client`, `sdk/typescript` |
 | [user-namespaces.md](user-namespaces.md) | Why runc fibers get a user namespace per grant, and how their ids are assigned | `pkg/backend/runc` |
 | [readiness.md](readiness.md) | The acceptance gates a deployment passes before production | none |
-| [kubernetes.md](kubernetes.md) | The Kubernetes home, the grant Pod it runs in and the retiring example controller | `pkg/home/kubernetes`, `examples/kubernetes` |
+| [kubernetes.md](kubernetes.md) | The Kubernetes home, the grant Pod it runs in and how it fetches its grant | `pkg/home/kubernetes` |
 | [slurm.md](slurm.md) | The Slurm home inside a job allocation | `examples/slurm` |
 | [knative.md](knative.md) | A Knative activator that scales from zero with fibers | `examples/knative` |
 | [kata.md](kata.md) | A Kata-style containerd shim whose Pod containers are fibers | `examples/kata` |

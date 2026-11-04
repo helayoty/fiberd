@@ -6,7 +6,7 @@ This example is a containerd shim whose containers are [fibers](../../docs/gloss
 
 ## What it proves
 
-It runs on the Kubernetes example's cluster, made with kind (Kubernetes in Docker, which runs a test cluster on one machine), with a `fiberd` RuntimeClass. It shows four things.
+In kind (Kubernetes in Docker, which runs a test cluster on one machine), with a `fiberd` RuntimeClass, it shows four things. That kind run waits for the controller project to create grant Pods and mint grants in kind.
 
 - A Pod's container becomes a fresh fiber, and `kubectl logs` names it.
 - Deleting the Pod with `on-stop=park` [parks](../../docs/glossary.md#park) its [session](../../docs/glossary.md#session) at the [home](../../docs/glossary.md#home).
@@ -17,10 +17,12 @@ Kubernetes and the Pod spec are unchanged beyond the `io.fiberd/*` annotations. 
 
 ## Run it
 
-Run it from the repository root. It needs Docker, kind, kubectl and Go.
+`make example-kata` waits for the controller project, [Azure/fiberd-k8s-controller](https://github.com/Azure/fiberd-k8s-controller). Until it lands, the target says so and exits 2.
+
+The shim installs on the node of an existing kind cluster, named `fiberd` unless `KIND_CLUSTER` says otherwise. Run it from the repository root. It needs Docker, kubectl and Go.
 
 ```bash
-make example-kata
+examples/kata/kind/run.sh shim
 ```
 
 ## Design

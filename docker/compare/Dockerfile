@@ -7,15 +7,14 @@
 #   docker build --target binaries -o bin/compare-bin               -f docker/compare/Dockerfile .
 #
 # counter is FROM scratch with one static counter, run by Pods and
-# agent-sandbox with --plain. client is the compare client Pod in kind:
-# the compare and summarize clients and crictl on the Kubernetes example
-# image. binaries exports the counters and the clients to a directory,
-# for the runs that need no image (the dev container and the KVM host).
-# The fiberd homes themselves run stock fiberd:kind
-# (docker/kubernetes/Dockerfile) and pull the static counter from the
-# compare registry as a zygote artifact, the way a production home gets
-# its templates (bench/compare/run/phase1.sh, standalone.sh). No image
-# carries the counter as a template.
+# agent-sandbox with --plain. client is the compare client Pod in kind.
+# It holds the compare and summarize clients and crictl on Debian slim,
+# the same pinned base as docker/fiberd. binaries exports the counters
+# and the clients to a directory, for the runs that need no image (the
+# dev container and the KVM host). The fiberd homes pull the static
+# counter from the compare registry as a zygote artifact, the way a
+# production home gets its templates (bench/compare/run/standalone.sh).
+# No image carries the counter as a template.
 #
 # The build stage is the dev image (make linux-check builds it). The
 # counter takes ZYGOTE_CFLAGS and ZYGOTE_LDFLAGS from the Makefile, with
@@ -25,7 +24,7 @@
 # keys (see docker/dev/Dockerfile). crictl is checked against its
 # published sha256.
 ARG BUILD_IMAGE=fiberd-dev:local
-ARG BASE_IMAGE=fiberd:kind
+ARG BASE_IMAGE=debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587
 
 FROM ${BUILD_IMAGE} AS build
 WORKDIR /src

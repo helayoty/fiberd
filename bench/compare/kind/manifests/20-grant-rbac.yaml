@@ -1,6 +1,7 @@
 # What a grant Pod's fiberd may do in the compare namespace, and what the
-# issuer may do here. Copies of the tenant bindings in
-# examples/kubernetes/kind/manifests/30-grant-rbac.yaml for this namespace.
+# issuer may do here. No phase applies this file. It goes with
+# 10-grants.yaml, which waits for the controller project to mint grants
+# in kind.
 apiVersion: v1
 kind: ServiceAccount
 metadata:

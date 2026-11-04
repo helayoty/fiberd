@@ -33,8 +33,10 @@ func (h *Home) PendingLosses() int { return h.losses.Pending() }
 func (h *Home) RunFetch(ctx context.Context) { h.fetch.run(ctx) }
 
 // NewWithHook is New, handing built the home before the first grant
-// fetch, so a test can Close it while New retries.
-func NewWithHook(cfg Config, built func(*Home)) (*Home, error) { return newHome(cfg, built) }
+// fetch, so a test can Close it or end ctx while New retries.
+func NewWithHook(ctx context.Context, cfg Config, built func(*Home)) (*Home, error) {
+	return newHome(ctx, cfg, built)
+}
 
 // SetJitter fixes the home's jitter draw. Call it from the NewWithHook
 // hook, before the first fetch.

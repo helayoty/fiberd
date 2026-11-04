@@ -11,10 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Azure/fiberd/examples/kubernetes/kube"
-	"github.com/Azure/fiberd/examples/kubernetes/kube/kubetest"
-
 	"github.com/Azure/fiberd/bench/compare"
+	"github.com/Azure/fiberd/bench/compare/kube"
+	"github.com/Azure/fiberd/bench/compare/kube/kubetest"
 )
 
 // counter is a loopback HTTP server answering 200 to everything. It

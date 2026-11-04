@@ -1,5 +1,5 @@
 // Package kubetest is an in-memory stand-in for the API server, enough
-// for the controller and the home to be tested without a cluster: objects
+// for the benchmark adapters to be tested without a cluster: objects
 // keyed by path, collections listed by prefix, merge patches applied,
 // uids assigned on create, owner references garbage-collected on delete.
 // Every request is recorded, and a test can make chosen requests fail.

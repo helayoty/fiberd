@@ -189,6 +189,8 @@ type fetchEnv struct {
 	preset    string // the grant file found at the start, empty for none
 	// built, when set, is handed the home before the first fetch.
 	built func(h *kubernetes.Home)
+	// ctx, when set, is New's context. Else New gets the test's context.
+	ctx context.Context
 	// home is what newHome built, nil when New failed.
 	home *kubernetes.Home
 }
@@ -331,9 +333,13 @@ func (e *fetchEnv) newHome(t *testing.T) (*kubernetes.Home, error) {
 		h   *kubernetes.Home
 		err error
 	}
+	ctx := e.ctx
+	if ctx == nil {
+		ctx = t.Context()
+	}
 	done := make(chan result, 1)
 	go func() {
-		h, err := kubernetes.NewWithHook(e.cfg, func(h *kubernetes.Home) {
+		h, err := kubernetes.NewWithHook(ctx, e.cfg, func(h *kubernetes.Home) {
 			h.SetJitter(0.5)
 			if e.built != nil {
 				e.built(h)
@@ -912,28 +918,52 @@ func TestFetchAfterStartOnFile(t *testing.T) {
 	}
 }
 
-// TestNewClosed checks that Close ends a New still retrying its first
-// fetch, with the context's error and no grant file.
+// TestNewClosed checks that Close, or the end of New's context, ends a
+// New still retrying its first fetch. New returns the cancellation, leaves
+// no grant file and closes the home.
 func TestNewClosed(t *testing.T) {
 	cases := []struct {
 		name    string
 		script  []answer
-		waiting bool // Close while New waits on the clock, else while a request is in flight
-		// wantFailLogs is how many lines log a failed fetch. A request
-		// Close cancelled is no failure.
+		waiting bool // stop while New waits on the clock, else while a request is in flight
+		// cancel ends New's context instead of calling Close.
+		cancel bool
+		// deadline ends New's context with context.DeadlineExceeded as
+		// its cause instead.
+		deadline bool
+		// wantErr is what New's error must wrap. Nil means the context's
+		// cancellation.
+		wantErr error
+		// wantFailLogs is how many lines log a failed fetch. A cancelled
+		// request is no failure.
 		wantFailLogs int
 	}{
 		{name: "Close while New waits to retry", script: []answer{{status: http.StatusInternalServerError}}, waiting: true,
 			wantFailLogs: 1},
 		{name: "Close while a request is in flight", script: []answer{{hang: true}}},
+		{name: "a cancelled context ends New while it waits to retry", script: []answer{{status: http.StatusInternalServerError}},
+			waiting: true, cancel: true, wantFailLogs: 1},
+		{name: "a cancelled context ends New during a request", script: []answer{{hang: true}}, cancel: true},
+		{name: "a context ended with a deadline cause ends New with that cause", script: []answer{{hang: true}}, deadline: true,
+			wantErr: context.DeadlineExceeded},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			e := newFetchEnv(t, c.script...)
+			var ctx context.Context
+			var cancel context.CancelFunc
+			var cancelCause context.CancelCauseFunc
+			if c.deadline {
+				ctx, cancelCause = context.WithCancelCause(t.Context())
+				cancel = func() { cancelCause(nil) }
+			} else {
+				ctx, cancel = context.WithCancel(t.Context())
+			}
+			defer cancel()
 			built := make(chan *kubernetes.Home, 1)
 			done := make(chan error, 1)
 			go func() {
-				_, err := kubernetes.NewWithHook(e.cfg, func(h *kubernetes.Home) {
+				_, err := kubernetes.NewWithHook(ctx, e.cfg, func(h *kubernetes.Home) {
 					h.SetJitter(0.5)
 					built <- h
 				})
@@ -949,15 +979,31 @@ func TestNewClosed(t *testing.T) {
 			if c.waiting {
 				waitFor(t, "New to wait on the clock", e.clock.HasWaiters)
 			}
-			h.Close()
+			switch {
+			case c.cancel:
+				cancel()
+			case c.deadline:
+				cancelCause(context.DeadlineExceeded)
+			default:
+				h.Close()
+			}
+			wantErr := c.wantErr
+			if wantErr == nil {
+				wantErr = context.Canceled
+			}
 			select {
 			case err := <-done:
 				noSecrets(t, "New's error", errText(err), e.secrets())
-				if !errors.Is(err, context.Canceled) {
-					t.Fatalf("New = %v, want the context's cancellation", err)
+				if !errors.Is(err, wantErr) {
+					t.Fatalf("New = %v, want %v", err, wantErr)
 				}
 			case <-time.After(10 * time.Second):
-				t.Fatal("New did not return after Close")
+				t.Fatal("New did not return after it was stopped")
+			}
+			// A closed home reads nothing from the cluster, so it finds
+			// no address for the Pod.
+			if got := h.EndpointHost(); got != "" {
+				t.Fatalf("EndpointHost = %q after New failed, want the home closed", got)
 			}
 			if got := e.ctl.count(); got != 1 {
 				t.Fatalf("the controller saw %d requests, want 1", got)
@@ -975,22 +1021,36 @@ func TestNewClosed(t *testing.T) {
 }
 
 // TestRunRenewsTheGrant checks that Run drives the renewal beside the
-// polls.
+// polls, and that New's context is not the home's lifetime.
 func TestRunRenewsTheGrant(t *testing.T) {
 	ok := answer{status: http.StatusOK}
 	cases := []struct {
 		name   string
 		script []answer
+		// endNewCtx ends New's context once New has returned.
+		endNewCtx bool
 	}{
 		{name: "Run renews the grant", script: []answer{ok, ok}},
+		{name: "a context ended after New returned does not stop the home", script: []answer{ok, ok}, endNewCtx: true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			e := newFetchEnv(t, c.script...)
+			newCtx, endNew := context.WithCancel(t.Context())
+			defer endNew()
+			e.ctx = newCtx
 			h, err := e.newHome(t)
 			noSecrets(t, "New's error", errText(err), e.secrets())
 			if err != nil {
 				t.Fatalf("New: %v", err)
+			}
+			if c.endNewCtx {
+				endNew()
+				// A stopped home reads nothing from the cluster, so the
+				// Pod's address shows the home still runs.
+				if got := h.EndpointHost(); got != "10.0.0.1" {
+					t.Fatalf("EndpointHost = %q after New's context ended, want the Pod's address", got)
+				}
 			}
 			ctx, cancel := context.WithCancel(context.Background())
 			done := make(chan struct{})

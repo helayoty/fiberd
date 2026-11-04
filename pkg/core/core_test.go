@@ -165,6 +165,7 @@ func TestCloneOutcomes(t *testing.T) {
 		wantErr      error
 		running      int    // the token's grant's running fibers after the clone
 		wantRoute    string // the routing key the response carries
+		unheld       bool   // the token's grant must not be in the ledger afterwards
 	}{
 		{name: "handoff grant answers the fiber's route", health: "up", tier: core.TierCheckpoint, grants: []core.Grant{handoff},
 			setup: routes, token: "gh", caller: "router-x5t", want: core.OK, running: 1, wantRoute: "rk-gh/1/1"},
@@ -210,6 +211,24 @@ func TestCloneOutcomes(t *testing.T) {
 			grants: []core.Grant{{UID: "gx", Tenant: "acme", Audience: "node-b"}}, token: "gx", want: core.Unauthenticated, wantErr: core.ErrWrongAudience},
 		{name: "first sight self-admits and creates", health: "down", tier: core.TierCheckpoint,
 			grants: []core.Grant{g1}, token: "g1", want: core.OK, running: 1},
+		// A home that knows its own grant refuses to self-admit any other,
+		// so a token for a terminated Pod whose name a later Pod reuses
+		// cannot re-mint fences on the new one.
+		{name: "a foreign UID is refused when the home names its own", health: "up", tier: core.TierCheckpoint, grants: []core.Grant{g1},
+			setup: func(t *testing.T, a *core.Core) { a.SelfAdmitUID = "g-own" },
+			token: "g1", want: core.Unauthenticated, wantErr: core.ErrWrongAudience, unheld: true},
+		{name: "the home's own UID is self-admitted", health: "down", tier: core.TierCheckpoint, grants: []core.Grant{g1},
+			setup: func(t *testing.T, a *core.Core) { a.SelfAdmitUID = "g1" },
+			token: "g1", want: core.OK, running: 1},
+		{name: "an empty SelfAdmitUID admits any UID", health: "down", tier: core.TierCheckpoint, grants: []core.Grant{trusted},
+			setup: func(t *testing.T, a *core.Core) { a.SelfAdmitUID = "" },
+			token: "gtr", want: core.OK, running: 1},
+		{name: "a delivered grant with a foreign UID still clones", health: "up", tier: core.TierCheckpoint, grants: []core.Grant{g1},
+			setup: func(t *testing.T, a *core.Core) {
+				a.SelfAdmitUID = "g-own"
+				a.Ledger.AdmitGrant(g1)
+			},
+			token: "g1", want: core.OK, running: 1},
 		{name: "full healthy is fallback", health: "up", tier: core.TierCheckpoint, grants: []core.Grant{g1},
 			setup: full, token: "g1", want: core.DeferredFallback, wantErr: core.ErrGrantFull, running: 1},
 		{name: "full unhealthy is shed", health: "down", tier: core.TierCheckpoint, grants: []core.Grant{g1},
@@ -321,6 +340,9 @@ func TestCloneOutcomes(t *testing.T) {
 			}
 			if st, _ := coretest.GrantStatus(a.Ledger, tc.token); st.Running != tc.running {
 				t.Fatalf("running = %d after clone, want %d", st.Running, tc.running)
+			}
+			if _, held := a.Ledger.Grant(tc.token); tc.unheld && held {
+				t.Fatalf("grant %q is in the ledger after a refused clone", tc.token)
 			}
 		})
 	}

@@ -282,9 +282,14 @@ type (
 		home.Home
 		lost chan func(context.Context, string)
 	}
+	selfAdmitHome struct {
+		home.Home
+		uid string
+	}
 )
 
-func (h hostedHome) EndpointHost() string { return h.host }
+func (h hostedHome) EndpointHost() string    { return h.host }
+func (h selfAdmitHome) SelfAdmitUID() string { return h.uid }
 func (h scopedHome) OnScopeLost(f func(context.Context, string)) {
 	h.lost <- f
 }
@@ -293,6 +298,13 @@ func hosted(host string) fiberd.HomeFactory {
 	return func(c *fiberd.Config, jwks *grant.Cache) (home.Home, error) {
 		h, err := fiberd.Standalone(c, jwks)
 		return hostedHome{Home: h, host: host}, err
+	}
+}
+
+func selfAdmitting(uid string) fiberd.HomeFactory {
+	return func(c *fiberd.Config, jwks *grant.Cache) (home.Home, error) {
+		h, err := fiberd.Standalone(c, jwks)
+		return selfAdmitHome{Home: h, uid: uid}, err
 	}
 }
 
@@ -484,6 +496,31 @@ func TestRunServes(t *testing.T) {
 			check: func(t *testing.T, r *running, _ fixture) {
 				if r.c.Endpoint.Host != "10.9.9.9" {
 					t.Fatalf("endpoint host %q, want the flag's", r.c.Endpoint.Host)
+				}
+			},
+		},
+		{
+			name: "the home's self-admit UID refuses any other grant",
+			home: selfAdmitting("own"),
+			check: func(t *testing.T, r *running, _ fixture) {
+				cl := dial(t, r.grpc, nil)
+				if _, err := cl.Clone(context.Background(),
+					&grantv1.CloneRequest{GrantJwt: jsonGrant(t, testGrant("foreign"))}); status.Code(err) != codes.Unauthenticated {
+					t.Fatalf("Clone of another UID: %v, want Unauthenticated", err)
+				}
+				if _, err := cl.Clone(context.Background(),
+					&grantv1.CloneRequest{GrantJwt: jsonGrant(t, testGrant("own"))}); err != nil {
+					t.Fatalf("Clone of the home's UID: %v", err)
+				}
+			},
+		},
+		{
+			name: "an empty self-admit UID admits any grant",
+			home: selfAdmitting(""),
+			check: func(t *testing.T, r *running, _ fixture) {
+				if _, err := dial(t, r.grpc, nil).Clone(context.Background(),
+					&grantv1.CloneRequest{GrantJwt: jsonGrant(t, testGrant("any"))}); err != nil {
+					t.Fatalf("Clone: %v", err)
 				}
 			},
 		},

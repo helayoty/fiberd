@@ -1,7 +1,7 @@
 // Package pod is the plain Pod comparator: `create pod`, wait for an IP,
 // poll until the first 200. runc or any RuntimeClass (gvisor), image on
 // the node (warm) or removed before every activation (cold). It speaks to
-// the API server through the Kubernetes example's small client.
+// the API server through the benchmark's small client in kube.
 package pod
 
 import (
@@ -13,9 +13,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Azure/fiberd/examples/kubernetes/kube"
-
 	"github.com/Azure/fiberd/bench/compare"
+	"github.com/Azure/fiberd/bench/compare/kube"
 )
 
 // Options configure the adapter.

@@ -16,7 +16,6 @@ REG=localhost:${COMPARE_REGISTRY_PORT:-5002}
 COUNTER_IMAGE=$REG/counter:latest
 NS=compare
 CLIENT=compare-client
-ISSUER_URL=http://grant-issuer.fiberd-system.svc:8080
 KC=(kubectl --context "kind-$CLUSTER")
 GO=${GO:-go}
 
@@ -48,25 +47,17 @@ wait_quiet_host() {
   require_quiet_host
 }
 
-# templates are the digests of the counter artifacts phase 1 pushed to
-# the compare registry, one per argument set, kept in the state
-# directory for the measuring phases (see phase1.sh deploy).
-TEMPLATES_ENV=$STATE/templates.env
-template_digest() { # template_digest <http|line|gvisor>
-  [ -f "$TEMPLATES_ENV" ] || { echo "no $TEMPLATES_ENV: run phase1.sh deploy first" >&2; exit 1; }
-  # shellcheck disable=SC1090
-  . "$TEMPLATES_ENV"
-  local var
-  var="DIGEST_$(echo "$1" | tr '[:lower:]' '[:upper:]')"
-  [ -n "${!var:-}" ] || { echo "no $var in $TEMPLATES_ENV" >&2; exit 1; }
-  echo "${!var}"
-}
+# FIBERD_IN_KIND is why the kind phases skip their fiberd rows. Those
+# rows need grant Pods, which the controller project
+# (Azure/fiberd-k8s-controller) mints, and the kind cluster runs no
+# controller. Phase 2 and phase 4 time fiberd outside Kubernetes.
+FIBERD_IN_KIND="fiberd in kind needs grant Pods from the controller project (Azure/fiberd-k8s-controller), and kind runs no controller"
+
+# skip_fiberd_kind names the fiberd rows a kind phase skips, and why.
+skip_fiberd_kind() { echo "== skipping $*: $FIBERD_IN_KIND" >&2; }
 
 # client_exec runs a command in the client Pod.
 client_exec() { "${KC[@]}" -n "$NS" exec "$CLIENT" -- "$@"; }
-
-# grant_ip is a grant Pod's IP, the home the fiberd adapter dials.
-grant_ip() { "${KC[@]}" -n "$NS" get pod "$1-grant" -o jsonpath='{.status.podIP}'; }
 
 # control_plane_flags are the counters sampled around every run. The
 # scheduler's page is read through the API server's Pod proxy, so the

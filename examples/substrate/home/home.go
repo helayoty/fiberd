@@ -6,7 +6,7 @@
 // sized by the actor's memory limit. Liveness is Substrate's node
 // supervisor answering on its socket (atelet, which is what would send
 // work); readiness is every minted grant's template warm. The cgroup
-// subtree is the Pod's own, as in the Kubernetes example.
+// subtree is the Pod's own, as in the Kubernetes home (pkg/home/kubernetes).
 package home
 
 import (

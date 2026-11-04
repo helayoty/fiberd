@@ -1,18 +1,17 @@
 #!/usr/bin/env bash
-# The Kata-shaped example end to end in kind, on top of the Kubernetes
-# example's cluster (its issuer controller and its `conform` grant Pod are
-# the home):
+# The Kata-shaped example in kind. shim installs it on the node of an
+# existing kind cluster:
 #
 #   1. build containerd-shim-fiberd-v1 for the node, copy it there, add
 #      the `fiberd` runtime handler to containerd and restart it;
-#   2. a RuntimeClass `fiberd`;
-#   3. mint a grant for the home (the conform grant Pod) and run a Pod
-#      with runtimeClassName: fiberd whose container carries it: the
-#      container becomes a fiber; kubectl logs shows which;
-#   4. delete the Pod: the fiber is released; run it again with
-#      on-stop=park and see the second incarnation resume.
+#   2. a RuntimeClass `fiberd`.
 #
-#   examples/kata/kind/run.sh run       (from the repo root; needs docker, kind, kubectl, go)
+#   examples/kata/kind/run.sh shim      (from the repo root; needs docker, kubectl, go)
+#
+# run and gpu need a home and its grants in the cluster. The controller
+# project (Azure/fiberd-k8s-controller) will create grant Pods and mint
+# grants in kind. Until it does, run, gpu, home and pod print why to
+# stderr and exit 2 (KATA_IN_KIND below).
 #
 # gpu is the GPU PoC's Kata row (docs/proposals/gpu-poc.md, M12), run on
 # VM A where kind runs. The home is a fiberd on this host, in the dev
@@ -33,10 +32,15 @@ cd "$(dirname "$0")/../../.."
 CLUSTER=${KIND_CLUSTER:-fiberd}
 NODE=$CLUSTER-control-plane
 NS=tenant-a
-HOME_POD=conform-grant
 KC=(kubectl --context "kind-$CLUSTER")
 STATE=${KATA_STATE:-bin/kata-state}
-K8S=examples/kubernetes/kind/conform.sh
+
+# KATA_IN_KIND is why run, gpu, home and pod stop. They need grant Pods
+# in the cluster, and the controller project does not make them yet.
+KATA_IN_KIND="the Kata example's kind run waits for the controller project (Azure/fiberd-k8s-controller) to create grant Pods and mint grants in kind"
+
+# waits_for_controller prints KATA_IN_KIND and exits 2.
+waits_for_controller() { echo "$KATA_IN_KIND" >&2; exit 2; }
 
 wait_for() { # wait_for <seconds> <description> <cmd...>
   local n=$1 what=$2; shift 2
@@ -46,13 +50,6 @@ wait_for() { # wait_for <seconds> <description> <cmd...>
   done
   echo "timed out waiting for $what" >&2
   return 1
-}
-
-# The home: the Kubernetes example's cluster, controller and conform grant.
-home() {
-  "$K8S" up
-  "$K8S" image
-  "$K8S" deploy
 }
 
 # The shim onto the node, and containerd's runtime handler.
@@ -76,27 +73,6 @@ shim() {
     wait_for 120 "node Ready" sh -c "${KC[*]} get node $NODE -o jsonpath='{.status.conditions[?(@.type==\"Ready\")].status}' | grep -q True"
   fi
   "${KC[@]}" apply -f examples/kata/kind/runtimeclass.yaml
-}
-
-# The workload's grant, minted once with the controller's key: the
-# audience is the home Pod's name (its node id), and the uid is fixed so
-# every Pod of the workload carries the same grant and a session parked
-# by one Pod is resumed by the next. A renewal keeps the uid too.
-mint() {
-  if [ ! -s "$STATE/grant.jwt" ]; then
-    "${KC[@]}" -n fiberd-system get secret grant-issuer-key -o jsonpath='{.data.key\.json}' | base64 -d >"$STATE/issuer-key.json"
-    go run ./cmd/grant-issuer mint -key "$STATE/issuer-key.json" -issuer http://grant-issuer.fiberd-system.svc:8080 \
-      -aud "$HOME_POD" -uid kata-demo-grant -tenant kata -template sha256:conform -max 2 -warm 1 -w-budget 32Mi \
-      -min-tier FIBER_CHECKPOINT -isolation TRUSTED -ttl 2h >"$STATE/grant.jwt"
-  fi
-  cat "$STATE/grant.jwt"
-}
-
-# pod <name> <on-stop>: a Pod whose one container is a fiber.
-pod() {
-  local name=$1 onstop=$2 tok
-  tok=$(mint)
-  fiber_pod "$name" "$onstop" "$tok" 127.0.0.1:30084 kata-demo
 }
 
 # fiber_pod <name> <on-stop> <grant> <home> <session>: a Pod whose one
@@ -127,31 +103,9 @@ EOF
     "${KC[@]}" -n "$NS" logs "$name"
 }
 
-status() { # the home's ledger, through its admin socket
-  "${KC[@]}" -n "$NS" exec "$HOME_POD" -c fiberd -- sh -c 'grep -c "" /var/lib/fiberd/private/audit.jsonl >/dev/null; tail -3 /var/lib/fiberd/private/audit.jsonl | cut -c1-160'
-}
-
-run() {
-  [ -n "${KATA_SKIP_HOME:-}" ] || home
-  shim
-  rm -f "$STATE/grant.jwt"
-  "${KC[@]}" -n "$NS" delete pod kata-1 kata-2 --ignore-not-found --wait=true >/dev/null
-  echo "--- a Pod whose container is a fiber (on-stop=park)"
-  pod kata-1 park | tee "$STATE/pod1.log"
-  grep -q "fiber .* CREATE session=kata-demo" "$STATE/pod1.log" || { echo "FAIL: first Pod's container was not a fresh fiber"; exit 1; }
-  "${KC[@]}" -n "$NS" delete pod kata-1 --wait=true >/dev/null
-  wait_for 30 "park recorded on the home" sh -c "${KC[*]} -n $NS exec $HOME_POD -c fiberd -- grep -q '\"event\":\"park\".*\"session\":\"kata-demo\"' /var/lib/fiberd/private/audit.jsonl"
-  echo "ok   deleted: the home parked session kata-demo"
-  echo "--- the same session again: the container resumes where it was"
-  pod kata-2 release | tee "$STATE/pod2.log"
-  grep -q "fiber .* RESUME session=kata-demo" "$STATE/pod2.log" || { echo "FAIL: second Pod's container did not resume the parked session"; exit 1; }
-  "${KC[@]}" -n "$NS" delete pod kata-2 --wait=true >/dev/null
-  wait_for 30 "release recorded on the home" sh -c "${KC[*]} -n $NS exec $HOME_POD -c fiberd -- grep -q '\"event\":\"release\".*kata-demo' /var/lib/fiberd/private/audit.jsonl"
-  echo "ok   deleted: the home released session kata-demo"
-  echo "PASS kata example: containers of a fiberd RuntimeClass Pod are fibers"
-}
-
-# ---- The GPU row.
+# ---- The GPU row. Its home is on the host, but its Pods need a kind
+# cluster with the tenant-a namespace, which the controller project will
+# make. Until then gpu stops at waits_for_controller.
 
 GPU_SESSION=kata-gpu
 GPU_NODE=kata-gpu-home
@@ -279,7 +233,8 @@ gpu_home_in() {
 }
 
 # gpu_mint is the row's grant, with a device budget of the engine's
-# class, minted in the home's container. The uid is fixed, as mint's is.
+# class, minted in the home's container. The uid is fixed so a session
+# parked by one Pod is resumed by the next.
 # Its W budget is 64Mi, since a resume restores the whole image (about
 # 33 MiB) into the fiber's cgroup, and 32Mi got CRIU OOM-killed.
 gpu_mint() {
@@ -299,8 +254,6 @@ endpoint_of() { sed -n 's/^fiber .* endpoint=\([^ ]*\) .*/\1/p' "$1" | sed -n 1p
 gpu() {
   local addr tok ep r log=$GPU_DIR/pod1.log log2=$GPU_DIR/pod2.log
   gpu_device
-  "$K8S" up
-  "${KC[@]}" apply -f examples/kubernetes/kind/manifests/00-namespaces.yaml >/dev/null
   shim
   addr=$(gpu_addr) || gpu_abort "no IPv4 gateway on the kind network"
   gpu_home_up "$addr"
@@ -359,11 +312,8 @@ gpu() {
 }
 
 case "${1:-}" in
-  home) home ;;
+  run | gpu | home | pod) waits_for_controller ;;
   shim) shim ;;
-  pod) pod "$2" "${3:-release}" ;;
-  run) run ;;
-  gpu) gpu ;;
   gpu-home) gpu_home_in "${2:-}" "${3:-}" ;;
-  *) echo "usage: $0 run|gpu|home|shim|pod <name> [park|release]" >&2; exit 2 ;;
+  *) echo "usage: $0 shim|run|gpu" >&2; exit 2 ;;
 esac

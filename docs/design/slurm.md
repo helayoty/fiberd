@@ -48,3 +48,4 @@ The [home](../glossary.md#home) answers fiberd's questions from what Slurm tells
 - Without a pids controller, the per-grant task limit is not enforced. Memory is the only bound on forks.
 - A cancelled or timed-out job can show as ended to the home's job probe while fiberd drains. The home then bumps the epoch, which ends every fiber not yet parked, and signals fiberd again, which ends the drain.
 - The grant travels in the job's environment (`FIBERD_GRANT`). It is a bearer token for whoever can read that environment until its lease ends.
+- The home names no grant UID as its own ([home.md](home.md)). A token from an earlier job on the same node, still within its lease, is admitted by a later job's fiberd on its first Clone.
