@@ -382,6 +382,14 @@ type DeadlineAdvisor interface {
 	DefaultDeadlines(warmID string) (create, resume time.Duration)
 }
 
+// SizeDeadline is how a DeadlineAdvisor that times a probe at warm sizes
+// a default: the floor or factor times what the probe measured, whichever
+// is larger, and never more than ceiling, so a pathological probe does
+// not leave clones waiting without end for a default they never set.
+func SizeDeadline(measured, floor time.Duration, factor int, ceiling time.Duration) time.Duration {
+	return min(max(floor, time.Duration(factor)*measured), ceiling)
+}
+
 // Overheader is implemented by backends whose fiber carries a fixed
 // footprint of its own besides the working set (a sandbox kernel, the
 // template's pages when they are not shared copy-on-write). The host adds

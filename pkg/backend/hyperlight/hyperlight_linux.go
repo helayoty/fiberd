@@ -28,6 +28,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"os"
 	"os/exec"
@@ -54,8 +55,28 @@ type Options struct {
 }
 
 const (
+	// The deadlines a clone or resume without one of its own gets.
+	// createDeadline and resumeDeadline are the floors. A warm instance
+	// whose probe clone took longer raises them to deadlineFactor times
+	// what the probe took (DefaultDeadlines), as gVisor does. A helper's
+	// clone is more than a sandbox from memory: it may start the
+	// template's program, and clones share the helper and the host's
+	// CPUs, so one sized for a small guest on an idle host is too short
+	// for a runtime's under load. deadlineCap bounds a probe that took
+	// pathologically long, so no clone waits without end for a default
+	// it never set.
 	createDeadline = 500 * time.Millisecond
 	resumeDeadline = 2 * time.Second
+	deadlineFactor = 4
+	deadlineCap    = 5 * time.Second
+	// probeEndWait bounds Warm's wait for the probe's EXITED, so the
+	// footprint the host reads once Warm returns is the warm instance's
+	// alone and holds no probe sandbox.
+	probeEndWait = 2 * time.Second
+	// probeLate is how near deadlineCap a probe's ERROR counts as the
+	// probe running out its time, from a helper that keeps the deadline
+	// on its CLONE line and answers just before fiberd's own timer fires.
+	probeLate      = 250 * time.Millisecond
 	versionTimeout = 5 * time.Second
 )
 
@@ -64,7 +85,7 @@ var ErrHelper = errors.New("hyperlight: helper error")
 // facts is what a helper's snapshots depend on. The helper reports it on
 // `--version` and on READY as one token each, in this order.
 //
-//	helper      the helper and its version ("fiberd-hyperlight-helper/0.2.0")
+//	helper      the helper and its version ("fiberd-hyperlight-helper/0.3.0")
 //	hyperlight  the hyperlight_host crate the helper was built with
 //	hypervisor  the one in use on this host (kvm, mshv)
 //	cpu         the CPU vendor string (GenuineIntel, AuthenticAMD)
@@ -167,6 +188,16 @@ type helper struct {
 	pmu  sync.Mutex
 	pend map[string]chan reply // fence -> reply
 	gone chan struct{}
+	// cloneTook is how long the probe clone at warm took from CLONE to
+	// CLONED, 0 when it measured nothing (DefaultDeadlines). published is
+	// set once Warm hands the instance to the host, and only then does
+	// helperGone report the helper's end. Both under Backend.mu.
+	cloneTook time.Duration
+	published bool
+	// probeEnd is closed by the probe's EXITED while Warm waits on it,
+	// under pmu.
+	probeFence string
+	probeEnd   chan struct{}
 }
 
 type reply struct {
@@ -178,6 +209,9 @@ type fiber struct {
 	id     string
 	warmID string
 	w      uint64
+	// h is the helper holding the fiber. Two warms of one grant share
+	// warmID, so a helper's end orphans only the fibers it held.
+	h *helper
 }
 
 // New opens the backend. The tier is FIBER_SNAPSHOT when the helper
@@ -247,12 +281,24 @@ func (b *Backend) Platform() artifact.Platform {
 	return b.facts.platform()
 }
 
-// DefaultDeadlines are fixed for every warm instance. The helper opens a
-// sandbox from a snapshot it holds in memory, so its cost does not grow
-// with the template as a gVisor restore does, and nothing is measured
-// at warm to size them from.
-func (b *Backend) DefaultDeadlines(string) (time.Duration, time.Duration) {
-	return createDeadline, resumeDeadline
+// DefaultDeadlines sizes the deadlines of a clone or resume without one
+// of its own from the probe clone the warm instance made. They are the
+// floors, raised to deadlineFactor times the probe and capped at
+// deadlineCap. An instance whose probe measured nothing, or one this
+// backend does not have, gets the floors.
+func (b *Backend) DefaultDeadlines(warmID string) (create, resume time.Duration) {
+	var took time.Duration
+	b.mu.Lock()
+	if h := b.warms[warmID]; h != nil {
+		took = h.cloneTook
+	}
+	b.mu.Unlock()
+	return sizeDeadline(took, createDeadline), sizeDeadline(took, resumeDeadline)
+}
+
+// sizeDeadline sizes one of the defaults (backend.SizeDeadline).
+func sizeDeadline(measured, floor time.Duration) time.Duration {
+	return backend.SizeDeadline(measured, floor, deadlineFactor, deadlineCap)
 }
 
 // FiberW implements backend.WReporter from the helper's W lines.
@@ -362,7 +408,150 @@ func (b *Backend) Warm(ctx context.Context, sp backend.WarmSpec) (backend.Warm, 
 	b.mu.Unlock()
 	go b.read(h, rd)
 	go func() { _ = proc.Wait() }()
+	took := b.probeClone(ctx, h, sp.WorkDir)
+	// The instance is the host's once it is published. A helper that
+	// ended before that fails the warm, and helperGone reports no end for
+	// an instance the host never had. A caller that gave up during the
+	// probe still gets it, sized from how long the probe ran: it was
+	// READY, and the host warms on demand under a clone's deadline, so a
+	// probe that does not fit that deadline must not cost the grant its
+	// warm instance.
+	b.mu.Lock()
+	current := b.warms[h.id]
+	if current == h {
+		h.cloneTook, h.published = took, true
+	}
+	b.mu.Unlock()
+	if current != h {
+		_ = uc.Close()
+		_ = proc.Kill()
+		if current != nil {
+			// Another warm of the grant took its place while it probed.
+			return backend.Warm{}, fmt.Errorf("hyperlight: another warm of %s took this one's place during its probe clone", sp.GrantUID)
+		}
+		return backend.Warm{}, fmt.Errorf("%w: helper for %s exited during its probe clone", ErrHelper, sp.GrantUID)
+	}
+	if took > 0 {
+		log.Printf("hyperlight: template of %s sized from a probe of %s, default deadlines create=%s resume=%s", h.id, took.Round(time.Millisecond),
+			sizeDeadline(took, createDeadline), sizeDeadline(took, resumeDeadline))
+	}
 	return backend.Warm{ID: h.id, PID: proc.Pid()}, nil
+}
+
+// probeClone makes one fiber from the warm snapshot, ends it, and returns
+// how long it took from CLONE to CLONED, what a clone costs and what
+// sizes the instance's default deadlines (DefaultDeadlines). A probe the
+// helper refused returns 0, which leaves the floors and is logged: a
+// helper that cannot clone fails its first real clone just the same, and
+// says why there. A probe that ran out its time returns deadlineCap, the
+// most any default may be, since a template that slow needs every bit of
+// it. One the caller cut short returns how long it ran, which the clone
+// took at least. The probe runs under the caller's context, as gVisor's
+// does, so a clone that warms the grant on demand pays for it. Its fence is the grant's own and no real fence (grant/epoch/seq)
+// can take it, and it is never a fiber of the backend's, so its W and
+// EXITED go nowhere.
+func (b *Backend) probeClone(ctx context.Context, h *helper, workDir string) time.Duration {
+	fence := h.id + "/probe"
+	endpoint := filepath.Join(workDir, "probe.sock")
+	_ = os.Remove(endpoint)
+	line, err := incarnationLine(fmt.Sprintf("CLONE %s %s %d -", fence, endpoint, deadlineMS(deadlineCap)), fence, 1)
+	if err != nil {
+		log.Printf("hyperlight: probe clone of %s: %v", h.id, err)
+		return 0
+	}
+	end := make(chan struct{})
+	h.pmu.Lock()
+	h.probeFence, h.probeEnd = fence, end
+	h.pmu.Unlock()
+	defer func() {
+		h.pmu.Lock()
+		h.probeEnd = nil
+		h.pmu.Unlock()
+		_ = os.Remove(endpoint)
+	}()
+	// The probe's answer is awaited by hand rather than through ask, so
+	// its pending entry outlives the probe's time: an answer that comes
+	// as the time runs out is still heard below, never dropped.
+	answer := make(chan reply, 1)
+	h.pmu.Lock()
+	h.pend[fence] = answer
+	h.pmu.Unlock()
+	defer h.reply(fence, reply{})
+	pctx, cancel := context.WithTimeout(ctx, deadlineCap)
+	defer cancel()
+	t0 := time.Now()
+	_, err = h.ctl.Write(append(line, '\n'))
+	clear(line)
+	if err != nil {
+		// A control socket that takes no line belongs to a helper that is
+		// going: its end is let register, so Warm fails rather than
+		// publish an instance already dead.
+		select {
+		case <-h.gone:
+		case <-time.After(probeEndWait):
+		}
+	} else {
+		select {
+		case r := <-answer:
+			err = r.err
+		case <-pctx.Done():
+			err = pctx.Err()
+		case <-h.gone:
+			err = fmt.Errorf("%w: helper exited", ErrHelper)
+		}
+	}
+	took := time.Since(t0)
+	timedOut := errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)
+	if err != nil && !timedOut {
+		// An ERROR: the helper made no sandbox, or freed it before it
+		// said so, so there is nothing to end or wait on, and a helper
+		// that is gone took everything with it. One that came as the
+		// probe's time ran out is a helper keeping the CLONE's deadline,
+		// and counts as running it out.
+		if took >= deadlineCap-probeLate {
+			log.Printf("hyperlight: probe clone of %s ran out its %s: %v; default deadlines go to the cap", h.id, deadlineCap, err)
+			return deadlineCap
+		}
+		log.Printf("hyperlight: probe clone of %s: %v; default deadlines stay at the floors", h.id, err)
+		return 0
+	}
+	// A probe that cloned, or one still cloning, is ended, and a helper
+	// ends one that clones after its KILL. Its sandbox is charged to the
+	// warm instance's cgroup until the helper frees it, so its EXITED is
+	// awaited, within probeEndWait.
+	// A late answer to the CLONE may still come on the same entry: an
+	// ERROR, from a helper keeping the CLONE's own deadline, means no
+	// sandbox to wait on.
+	late := answer
+	_, _ = h.ctl.Write([]byte("KILL " + fence + "\n"))
+	// The wait holds even for a caller that gave up: the host reads the
+	// warm instance's footprint as Warm returns, and a probe sandbox
+	// still alive would be counted in it for the instance's whole life.
+	wait := time.After(probeEndWait)
+	for done := false; !done; {
+		select {
+		case r := <-late:
+			done = r.err != nil // a late CLONED still has its EXITED to come
+		case <-end:
+			done = true
+		case <-h.gone:
+			done = true
+		case <-wait:
+			log.Printf("hyperlight: probe clone of %s did not exit within %s of its KILL; the footprint read now may count it", h.id, probeEndWait)
+			done = true
+		}
+	}
+	switch {
+	case timedOut && took < deadlineCap && ctx.Err() != nil:
+		// Cut short by the caller: the clone took at least this long,
+		// which still sizes the defaults better than the floors do.
+		log.Printf("hyperlight: probe clone of %s cut short after %s; default deadlines sized from that", h.id, took.Round(time.Millisecond))
+		return took
+	case timedOut:
+		log.Printf("hyperlight: probe clone of %s did not clone within %s; default deadlines go to the cap", h.id, deadlineCap)
+		return deadlineCap
+	}
+	return took
 }
 
 // end kills a helper that did not come up and reaps it, so a failed
@@ -421,6 +610,8 @@ func (b *Backend) read(h *helper, rd *bufio.Reader) {
 			b.mu.Unlock()
 			if fb != nil {
 				b.exits <- backend.Exit{FiberID: f[1], Status: status}
+			} else {
+				h.probeExited(f[1])
 			}
 		}
 	}
@@ -436,14 +627,25 @@ func (h *helper) reply(fence string, r reply) {
 	}
 }
 
+// probeExited ends Warm's wait for the probe when fence is the probe's.
+func (h *helper) probeExited(fence string) {
+	h.pmu.Lock()
+	if h.probeEnd != nil && fence == h.probeFence {
+		close(h.probeEnd)
+		h.probeEnd = nil
+	}
+	h.pmu.Unlock()
+}
+
 func (b *Backend) helperGone(h *helper) {
 	b.mu.Lock()
 	if b.warms[h.id] == h {
 		delete(b.warms, h.id)
 	}
+	published := h.published
 	var orphans []string
 	for id, f := range b.fibers {
-		if f.warmID == h.id {
+		if f.h == h {
 			orphans = append(orphans, id)
 			delete(b.fibers, id)
 		}
@@ -458,7 +660,9 @@ func (b *Backend) helperGone(h *helper) {
 	for _, id := range orphans {
 		b.exits <- backend.Exit{FiberID: id, Status: "signal:helper"}
 	}
-	b.exits <- backend.Exit{WarmID: h.id, Status: "helper exited"}
+	if published {
+		b.exits <- backend.Exit{WarmID: h.id, Status: "helper exited"}
+	}
 }
 
 // ask sends one line, which it zeroes once written since a CLONE or a
@@ -499,7 +703,8 @@ func (b *Backend) helperOf(fiberID string) (*helper, error) {
 	if !ok {
 		return nil, fmt.Errorf("hyperlight: unknown fiber %q", fiberID)
 	}
-	h := b.warms[f.warmID]
+	// The helper that holds it, not whichever warm of the grant is newest.
+	h := f.h
 	if h == nil {
 		return nil, fmt.Errorf("hyperlight: no helper for %q", fiberID)
 	}
@@ -565,7 +770,7 @@ func (b *Backend) start(ctx context.Context, h *helper, fence string, line []byt
 		ctx, cancel = context.WithTimeout(ctx, deadline)
 		defer cancel()
 	}
-	f := &fiber{id: fence, warmID: h.id}
+	f := &fiber{id: fence, warmID: h.id, h: h}
 	b.mu.Lock()
 	b.fibers[fence] = f // before the reply: a W or EXITED that races it is kept
 	b.mu.Unlock()

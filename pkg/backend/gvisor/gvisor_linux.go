@@ -452,10 +452,9 @@ func (b *Backend) DefaultDeadlines(warmID string) (create, resume time.Duration)
 	return sizeDeadline(took, createDeadline), sizeDeadline(took, resumeDeadline)
 }
 
-// sizeDeadline is the floor or deadlineFactor times the measured restore,
-// whichever is larger, and never more than deadlineCap.
+// sizeDeadline sizes one of the defaults (backend.SizeDeadline).
 func sizeDeadline(measured, floor time.Duration) time.Duration {
-	return min(max(floor, deadlineFactor*measured), deadlineCap)
+	return backend.SizeDeadline(measured, floor, deadlineFactor, deadlineCap)
 }
 
 // FiberOverheadBytes is 0, so the host measures the warm template

@@ -26,7 +26,7 @@ import (
 
 // Facts mirrors the Rust helper's snapshot facts (helper, hyperlight_host,
 // hypervisor, cpu). The fake has none of the last three.
-const Facts = "fakehelper/2 none none none"
+const Facts = "fakehelper/3 none none none"
 
 // SeedBytes is the seed every CLONE and RESUME carries, as hex.
 const SeedBytes = 32
@@ -40,6 +40,9 @@ type Helper struct {
 	mu      sync.Mutex
 	boxes   map[string]*sandbox
 	stopped bool // Serve is ending, so a late clone must not register
+	// births are the fences whose CLONE or RESUME is still in flight,
+	// true once a KILL overtook it, so the sandbox is ended as it comes.
+	births map[string]bool
 
 	stop chan struct{}  // closed when Serve ends, so a delayed clone gives up
 	wg   sync.WaitGroup // every goroutine the helper started
@@ -143,7 +146,7 @@ type state struct {
 // socket, "" when it has none. Every sandbox, endpoint and goroutine is
 // gone when it returns.
 func Serve(ctl net.Conn, log io.Writer, engine string) error {
-	h := &Helper{out: make(chan string, 256), log: log, engine: engine, boxes: map[string]*sandbox{}, stop: make(chan struct{})}
+	h := &Helper{out: make(chan string, 256), log: log, engine: engine, boxes: map[string]*sandbox{}, births: map[string]bool{}, stop: make(chan struct{})}
 	wrote := make(chan struct{})
 	go func() {
 		defer close(wrote)
@@ -173,6 +176,9 @@ func Serve(ctl net.Conn, log io.Writer, engine string) error {
 				h.say("ERROR %s %v", f[1], err)
 				continue
 			}
+			h.mu.Lock()
+			h.births[f[1]] = false
+			h.mu.Unlock()
 			if f[0] == "CLONE" {
 				b.kind = "clone"
 				h.spawn(func() { h.clone(f[1], f[2], f[4], nil, b) })
@@ -239,6 +245,7 @@ func payloadNum(p []byte, key string) uint64 {
 }
 
 func (h *Helper) clone(fence, endpoint, payloadHex string, st *state, born birth) {
+	defer h.unborn(fence)
 	var payload []byte
 	if payloadHex != "-" {
 		payload, _ = hex.DecodeString(payloadHex)
@@ -272,6 +279,15 @@ func (h *Helper) clone(fence, endpoint, payloadHex string, st *state, born birth
 	if h.stopped {
 		h.mu.Unlock()
 		b.end()
+		return
+	}
+	if h.births[fence] {
+		// fiberd gave up on this birth and ended it before it came, so
+		// it ends as it comes, and says so as every end does.
+		delete(h.births, fence)
+		h.mu.Unlock()
+		b.end()
+		h.say("EXITED %s exit:137", fence)
 		return
 	}
 	h.boxes[fence] = b
@@ -553,16 +569,23 @@ func (b *sandbox) end() {
 	b.mu.Unlock()
 }
 
-func (h *Helper) take(fence string) *sandbox {
+// unborn forgets a birth that ended, served or not.
+func (h *Helper) unborn(fence string) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
-	b := h.boxes[fence]
-	delete(h.boxes, fence)
-	return b
+	delete(h.births, fence)
+	h.mu.Unlock()
 }
 
 func (h *Helper) kill(fence, status string) {
-	b := h.take(fence)
+	// One hold of mu decides between a sandbox to end now and a birth to
+	// end as it comes, so a clone registering in between is never missed.
+	h.mu.Lock()
+	b := h.boxes[fence]
+	delete(h.boxes, fence)
+	if _, inFlight := h.births[fence]; b == nil && inFlight {
+		h.births[fence] = true
+	}
+	h.mu.Unlock()
 	if b == nil {
 		return
 	}
@@ -605,6 +628,7 @@ func (h *Helper) park(fence, dir string, sync bool) {
 }
 
 func (h *Helper) resume(fence, dir, endpoint string, born birth) {
+	defer h.unborn(fence)
 	data, err := os.ReadFile(filepath.Join(dir, "state.json"))
 	if err != nil {
 		h.say("ERROR %s %v", fence, err)

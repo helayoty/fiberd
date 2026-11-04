@@ -64,7 +64,7 @@ func TestPlatform(t *testing.T) {
 	}{
 		{name: "a usable helper", starter: says(kvmIntel),
 			want: artifact.Platform{Kernel: "hyperlight-hyperlight_host/0.17.0", Libc: "fiberd-hyperlight-helper/0.1.0+kvm+GenuineIntel"}},
-		{name: "the fake helper", starter: says(fake), want: artifact.Platform{Kernel: "hyperlight-none", Libc: "fakehelper/2+none+none"}},
+		{name: "the fake helper", starter: says(fake), want: artifact.Platform{Kernel: "hyperlight-none", Libc: "fakehelper/3+none+none"}},
 		{name: "no usable helper", starter: &fakeStarter{versionErr: errors.New("exit status 1")}, want: artifact.Platform{Kernel: "hyperlight-unusable", Libc: "n/a"}},
 	}
 	for _, tc := range cases {
@@ -99,7 +99,7 @@ func TestSurface(t *testing.T) {
 				t.Fatal("hyperlight implements backend.WorkspaceHolder, but its guest has no file system")
 			}
 		}},
-		{name: "the deadlines", check: func(t *testing.T) {
+		{name: "an instance it does not have gets the floors", check: func(t *testing.T) {
 			if c, r := be.DefaultDeadlines(""); c != 500*time.Millisecond || r != 2*time.Second {
 				t.Fatalf("DefaultDeadlines = %s, %s", c, r)
 			}
@@ -412,7 +412,7 @@ func newPipe(t *testing.T) *pipe {
 	t.Cleanup(func() { goleak.VerifyNone(t) })
 	t.Cleanup(func() { _ = ours.Close(); _ = theirs.Close() })
 	b := &Backend{warms: map[string]*helper{}, fibers: map[string]*fiber{}, exits: make(chan backend.Exit, 16), tier: core.TierSnapshot}
-	h := &helper{id: "g1", ctl: ours, pend: map[string]chan reply{}, gone: make(chan struct{})}
+	h := &helper{id: "g1", ctl: ours, pend: map[string]chan reply{}, gone: make(chan struct{}), published: true}
 	b.warms[h.id] = h
 	go b.read(h, bufio.NewReader(ours))
 	return &pipe{b: b, h: h, theirs: theirs, rd: bufio.NewReader(theirs)}
@@ -421,7 +421,7 @@ func newPipe(t *testing.T) *pipe {
 // fiber registers a fiber of the helper.
 func (p *pipe) fiber(id string) {
 	p.b.mu.Lock()
-	p.b.fibers[id] = &fiber{id: id, warmID: p.h.id}
+	p.b.fibers[id] = &fiber{id: id, warmID: p.h.id, h: p.h}
 	p.b.mu.Unlock()
 }
 
@@ -571,6 +571,9 @@ func TestReadLoop(t *testing.T) {
 			other := &helper{id: "g1"}
 			p.b.mu.Lock()
 			p.b.warms["g1"] = other
+			// A fiber of the replacement shares the grant's warm id, and is
+			// not the old helper's to orphan.
+			p.b.fibers["theirs"] = &fiber{id: "theirs", warmID: "g1", h: other}
 			p.b.mu.Unlock()
 			p.hangUp()
 			if e := awaitExit(t, p.b); e != (backend.Exit{WarmID: "g1", Status: "helper exited"}) {
@@ -578,6 +581,12 @@ func TestReadLoop(t *testing.T) {
 			}
 			if h, ok := p.b.warmOf("g1"); !ok || h != other {
 				t.Fatal("the replacement was removed")
+			}
+			p.b.mu.Lock()
+			_, kept := p.b.fibers["theirs"]
+			p.b.mu.Unlock()
+			if !kept {
+				t.Fatal("the old helper's end orphaned the replacement's fiber")
 			}
 		}},
 	}
@@ -809,7 +818,7 @@ func TestCommands(t *testing.T) {
 				await(t, p.h.gone)
 				p.b.mu.Lock()
 				p.b.warms[p.h.id] = p.h
-				p.b.fibers["f"] = &fiber{id: "f", warmID: p.h.id}
+				p.b.fibers["f"] = &fiber{id: "f", warmID: p.h.id, h: p.h}
 				p.b.mu.Unlock()
 			},
 			do: func(_ context.Context, p *pipe, _ string) error { return p.b.Kill("f") }},

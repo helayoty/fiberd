@@ -6,7 +6,6 @@ import (
 	"bufio"
 	"context"
 	"fmt"
-	"io"
 	"net"
 	"os"
 	"strings"
@@ -118,8 +117,25 @@ func (r *fakeRun) Wait() error {
 	return nil
 }
 
-// hold blocks until the backend hangs up or kills the helper.
-func (r *fakeRun) hold() { _, _ = io.Copy(io.Discard, r.ctl) }
+// hold blocks until the backend hangs up or kills the helper. It answers
+// the warm's probe clone and its KILL, as a helper that clones and ends
+// at once, and nothing else.
+func (r *fakeRun) hold() {
+	rd := bufio.NewReader(r.ctl)
+	for {
+		line, err := rd.ReadString('\n')
+		if err != nil {
+			return
+		}
+		f := strings.Fields(line)
+		switch {
+		case len(f) > 1 && f[0] == "CLONE" && strings.HasSuffix(f[1], "/probe"):
+			_, _ = fmt.Fprintf(r.ctl, "CLONED %s\n", f[1])
+		case len(f) > 1 && f[0] == "KILL" && strings.HasSuffix(f[1], "/probe"):
+			_, _ = fmt.Fprintf(r.ctl, "EXITED %s exit:137\n", f[1])
+		}
+	}
+}
 
 // ready is a body that reports the facts and serves nothing.
 func ready(facts string) func(r *fakeRun) {

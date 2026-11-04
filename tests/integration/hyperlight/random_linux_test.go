@@ -219,8 +219,16 @@ func TestSeedNeverLogged(t *testing.T) {
 				if strings.Contains(string(b), seed) {
 					t.Fatalf("%s holds the seed %s", l, seed)
 				}
-				if !strings.Contains(string(b), "helper: < CLONE "+h.ID+" ") || !strings.Contains(string(b), " 1 seed:32B") {
-					t.Fatalf("%s lacks the CLONE line with its seed by size:\n%s", l, b)
+				// The fiber's own line, whole: the warm's probe CLONE carries a
+				// seed by size too, and must not stand in for it.
+				var line string
+				for _, ln := range strings.Split(string(b), "\n") {
+					if strings.HasPrefix(ln, "helper: < CLONE "+h.ID+" ") {
+						line = ln
+					}
+				}
+				if !strings.HasSuffix(line, " 1 seed:32B") {
+					t.Fatalf("%s lacks the CLONE line of %s with its seed by size:\n%s", l, h.ID, b)
 				}
 			}
 			if strings.Contains(fiberdLog.String(), seed) {

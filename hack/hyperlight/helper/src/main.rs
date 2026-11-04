@@ -355,19 +355,38 @@ fn fiber_thread(ctl: Ctl, fence: String, endpoint: PathBuf, mut sb: MultiUseSand
     birth.seed.fill(0);
     match took {
         Ok(g) if g == birth.generation as i64 => {}
+        // A birth that failed frees its sandbox before it says so, as an
+        // end does, so a footprint read on the ERROR does not count it.
         Ok(g) => {
+            drop(sb);
             ctl.say(format!("ERROR {fence} incarnate: the guest took generation {g}, not {}", birth.generation));
             return;
         }
         Err(e) => {
+            drop(sb);
             ctl.say(format!("ERROR {fence} incarnate: {e}"));
             return;
         }
+    }
+    // A KILL that overtook the birth, because fiberd gave up on its
+    // deadline, ends it here: no CLONED, and nothing serves the endpoint.
+    // Nothing else can come before CLONED, so whatever else is queued
+    // waits for the loop.
+    let mut queued = None;
+    match cmds.try_recv() {
+        Ok(Cmd::Kill) => {
+            drop(sb);
+            ctl.say(format!("EXITED {fence} exit:137"));
+            return;
+        }
+        Ok(cmd) => queued = Some(cmd),
+        Err(_) => {}
     }
     let _ = std::fs::remove_file(&endpoint);
     let listener = match UnixListener::bind(&endpoint) {
         Ok(l) => l,
         Err(e) => {
+            drop(sb);
             ctl.say(format!("ERROR {fence} bind: {e}"));
             return;
         }
@@ -390,9 +409,12 @@ fn fiber_thread(ctl: Ctl, fence: String, endpoint: PathBuf, mut sb: MultiUseSand
     let mut serving = true;
     loop {
         // Commands from fiberd first.
-        match cmds.try_recv() {
+        match queued.take().map_or_else(|| cmds.try_recv(), Ok) {
             Ok(Cmd::Kill) => {
                 let _ = std::fs::remove_file(&endpoint);
+                // The sandbox's memory goes before its end is said, so a
+                // footprint read on EXITED does not count it.
+                drop(sb);
                 ctl.say(format!("EXITED {fence} exit:137"));
                 return;
             }
@@ -411,6 +433,7 @@ fn fiber_thread(ctl: Ctl, fence: String, endpoint: PathBuf, mut sb: MultiUseSand
                     }
                 }
                 if !sync {
+                    drop(sb);
                     ctl.say(format!("EXITED {fence} exit:0"));
                     return;
                 }
