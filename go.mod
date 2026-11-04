@@ -7,7 +7,7 @@ go 1.26.0
 toolchain go1.26.7
 
 require (
-	github.com/go-jose/go-jose/v4 v4.1.5
+	github.com/go-jose/go-jose/v4 v4.1.8
 	github.com/go-logr/logr v1.4.3
 	github.com/google/go-containerregistry v0.22.1
 	github.com/opencontainers/image-spec v1.1.1

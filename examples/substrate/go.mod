@@ -9,8 +9,8 @@ go 1.26.0
 toolchain go1.26.7
 
 require (
-	github.com/go-jose/go-jose/v4 v4.1.5
 	github.com/Azure/fiberd v0.0.0
+	github.com/go-jose/go-jose/v4 v4.1.8
 	golang.org/x/sys v0.47.0
 	google.golang.org/grpc v1.83.2
 	google.golang.org/protobuf v1.36.12

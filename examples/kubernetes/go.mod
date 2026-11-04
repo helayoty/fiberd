@@ -9,7 +9,7 @@ toolchain go1.26.7
 
 require (
 	github.com/Azure/fiberd v0.0.0
-	github.com/go-jose/go-jose/v4 v4.1.6
+	github.com/go-jose/go-jose/v4 v4.1.8
 )
 
 require (

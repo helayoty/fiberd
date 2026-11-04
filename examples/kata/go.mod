@@ -8,6 +8,7 @@ go 1.26.0
 toolchain go1.26.7
 
 require (
+	github.com/Azure/fiberd v0.0.0
 	github.com/containerd/containerd/api v1.10.0
 	github.com/containerd/containerd/v2 v2.2.9
 	github.com/containerd/errdefs v1.0.0
@@ -15,7 +16,6 @@ require (
 	github.com/containerd/fifo v1.1.0
 	github.com/containerd/plugin v1.0.0
 	github.com/containerd/ttrpc v1.2.7
-	github.com/Azure/fiberd v0.0.0
 	google.golang.org/grpc v1.83.2
 	google.golang.org/protobuf v1.36.12
 )
@@ -29,7 +29,7 @@ require (
 	github.com/containerd/go-runc v1.1.0 // indirect
 	github.com/containerd/log v0.1.0 // indirect
 	github.com/containerd/typeurl/v2 v2.2.3 // indirect
-	github.com/go-jose/go-jose/v4 v4.1.5 // indirect
+	github.com/go-jose/go-jose/v4 v4.1.8 // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/golang/groupcache v0.0.0-20241129210726-2c02b8208cf8 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
