@@ -100,6 +100,14 @@ CI runs the unit tests (`make test`) on linux/amd64 and macOS as a non-root user
 
 `make integration-tests` and `make linux-test` rebuild the TypeScript client first when its dependencies are installed (`npm ci --ignore-scripts --prefix sdk/typescript`, Node.js 22.12 or later). Without them they leave out the TypeScript suite and say so.
 
+### The dev image
+
+`hack/dev/run.sh`, and every `make` target that uses the dev container, pulls the image from `ghcr.io/azure/fiberd-dev`. The tag is a hash of `docker/dev/Dockerfile` and the files it copies, printed by `hack/dev/image-tag.sh`. The [dev-image workflow](.github/workflows/dev-image.yml) publishes that tag when those files change on main.
+
+When the tag is missing or the registry cannot be reached, `hack/dev/run.sh` builds the image locally. A change to those files therefore tests its own image. Set `FIBERD_DEV_BUILD=1` to force a local build.
+
+When the workflow fails, jobs keep working by building locally, which needs snapshot.debian.org. Fix the cause or wait out the outage, then re-run the failed jobs or start the workflow by hand. The workflow skips a tag that is already published, so refreshing what the image holds takes a change to one of those files.
+
 ## License
 
 [Apache-2.0](LICENSE).

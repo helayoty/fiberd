@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Run a command inside the Linux dev container with the repo mounted at
-# /src. Builds the image on first use (or when hack/dev changes).
+# /src. Pulls the image on first use, or when its inputs change, and builds
+# it when the registry does not have it.
 #
 #   hack/dev/run.sh bash                 interactive shell
 #   hack/dev/run.sh go test ./...        anything else
@@ -14,14 +15,31 @@ cd "$(dirname "$0")/../.."
 IMAGE=${FIBERD_DEV_IMAGE:-fiberd-dev:local}
 NAME=${FIBERD_DEV_NAME:-fiberd-dev}
 
-# Rebuild when the Dockerfile or entrypoint changed: their hash is kept as
-# a label on the image, so the check does not depend on clocks or on how
-# this host's `date` parses timestamps.
-want=$(cat docker/dev/Dockerfile docker/pins/runsc.env hack/dev/entrypoint.sh hack/dev/install-criu.sh \
-  | shasum -a 256 | cut -c1-16)
+# Most CI jobs have no time limit of their own, so a stalled registry must
+# fail the pull and reach the build. macOS has no timeout, and a person
+# watching there can interrupt.
+pull() {
+  if command -v timeout >/dev/null; then
+    timeout --foreground 1200 docker pull "$1"
+  else
+    docker pull "$1"
+  fi
+}
+
+# Replace the image when its inputs changed: their hash is kept as a label
+# on the image, so the check does not depend on clocks or on how this
+# host's `date` parses timestamps. A failed pull means a tag not published
+# yet, as on a change to the inputs, which then builds and tests its own
+# image, or a registry out of reach.
+want=$(bash hack/dev/image-tag.sh)
 have=$(docker image inspect -f '{{index .Config.Labels "io.fiberd.dev.hash"}}' "$IMAGE" 2>/dev/null || true)
-if [ "$want" != "$have" ]; then
-  docker build -t "$IMAGE" -f docker/dev/Dockerfile --label "io.fiberd.dev.hash=$want" . >&2
+remote=ghcr.io/azure/fiberd-dev:$want
+if [ "${FIBERD_DEV_BUILD:-}" = 1 ] || [ "$want" != "$have" ]; then
+  if [ "${FIBERD_DEV_BUILD:-}" != 1 ] && pull "$remote" >&2; then
+    docker tag "$remote" "$IMAGE"
+  else
+    docker build -t "$IMAGE" -f docker/dev/Dockerfile --label "io.fiberd.dev.hash=$want" . >&2
+  fi
 fi
 
 tty=""

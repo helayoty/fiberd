@@ -16,7 +16,7 @@
 # production home gets its templates (bench/compare/run/standalone.sh).
 # No image carries the counter as a template.
 #
-# The build stage is the dev image (make linux-check builds it). The
+# The build stage is the dev image (make linux-check pulls or builds it). The
 # counter takes ZYGOTE_CFLAGS and ZYGOTE_LDFLAGS from the Makefile, with
 # -static-pie in place of -pie for the static build, and links the
 # zygote library's archive, which the dev image's cargo builds. On aarch64

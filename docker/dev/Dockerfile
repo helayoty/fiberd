@@ -1,6 +1,7 @@
 # Development image for the parts of fiberd that need a Linux kernel, such
-# as the fork zygote, cgroup v2, PSI and CRIU. hack/dev/run.sh builds and
-# runs it for `make linux-shell`, `make linux-test` and `make conform-proc`.
+# as the fork zygote, cgroup v2, PSI and CRIU. hack/dev/run.sh pulls or
+# builds it, then runs it for `make linux-shell`, `make linux-test` and
+# `make conform-proc`.
 #
 # This is a workbench, not a runtime image. It runs --privileged with a
 # private cgroup namespace so fiberd can carve a delegated cgroup subtree

@@ -78,7 +78,7 @@ jobs:
           git archive "$old" | tar -x -C "$RUNNER_TEMP/old"
           # The summary's header names each side by ref and short commit.
           { echo "AB_OLD=$OLD_NAME ${old:0:7}"; echo "AB_NEW=$NEW_NAME $(git rev-parse --short=7 HEAD)"; } >> "$GITHUB_ENV"
-      - name: build the dev image
+      - name: pull or build the dev image
         run: hack/dev/run.sh true
       - name: run the A/B
         env:
