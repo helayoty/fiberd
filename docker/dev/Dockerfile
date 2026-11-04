@@ -197,10 +197,15 @@ RUN set -eu; cd /tmp; \
 # legacy.so, a file libssl3 still owns when dpkg unpacks it, and only
 # libssl3t64 declares the replacement, so dpkg refuses. The provider goes
 # first, allowed to take the file over, and libssl3 leaves with the rest.
+#
+# snapshot.debian.org is slow and drops fetches under load, which has
+# failed every job that builds this image in one CI run. The drop-in
+# gives the three apt calls below retries and a longer timeout per fetch.
 ARG DEBIAN_SID_SNAPSHOT=20261013T203804Z
 RUN set -eu; \
     echo "deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/${DEBIAN_SID_SNAPSHOT} sid main" > /etc/apt/sources.list.d/sid.list; \
     printf 'Package: *\nPin: release a=unstable\nPin-Priority: 100\n' > /etc/apt/preferences.d/sid; \
+    printf 'Acquire::Retries "5";\nAcquire::http::Timeout "120";\nAcquire::https::Timeout "120";\n' > /etc/apt/apt.conf.d/80-snapshot-retries; \
     apt-get update; \
     apt-get install -y --no-install-recommends -t sid -o Dpkg::Options::=--force-overwrite openssl-provider-legacy; \
     apt-get install -y --no-install-recommends -t sid \
