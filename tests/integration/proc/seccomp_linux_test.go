@@ -14,8 +14,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/helayoty/fiberd/pkg/core"
-	"github.com/helayoty/fiberd/tests/internal/testenv"
+	"github.com/Azure/fiberd/pkg/core"
+	"github.com/Azure/fiberd/tests/internal/testenv"
 )
 
 var (

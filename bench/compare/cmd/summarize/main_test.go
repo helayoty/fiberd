@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/helayoty/fiberd/bench/compare"
+	"github.com/Azure/fiberd/bench/compare"
 )
 
 // phaseRecords writes a cold run and three timed runs of one burst of 1

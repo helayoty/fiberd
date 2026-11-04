@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/helayoty/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/core"
 )
 
 // TestRemoveDenialLapse checks how long Remove denies a grant. A grant the

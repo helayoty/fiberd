@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/helayoty/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/core"
 )
 
 // hold opens a connection to the fiber's unix endpoint from the host

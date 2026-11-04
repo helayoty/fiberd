@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/helayoty/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/core"
 )
 
 // TestRandomPerIncarnation is the proc test of the same name across the

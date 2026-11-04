@@ -7,9 +7,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/helayoty/fiberd/pkg/core"
-	"github.com/helayoty/fiberd/pkg/tlsconf"
-	"github.com/helayoty/fiberd/pkg/tlsconf/tlsconftest"
+	"github.com/Azure/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/tlsconf"
+	"github.com/Azure/fiberd/pkg/tlsconf/tlsconftest"
 )
 
 func TestCallerTLS(t *testing.T) {

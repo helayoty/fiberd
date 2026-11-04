@@ -74,9 +74,9 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"github.com/helayoty/fiberd/pkg/backend"
-	"github.com/helayoty/fiberd/pkg/core"
-	"github.com/helayoty/fiberd/pkg/sys/criu"
+	"github.com/Azure/fiberd/pkg/backend"
+	"github.com/Azure/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/sys/criu"
 )
 
 // Options configure the fork backend.

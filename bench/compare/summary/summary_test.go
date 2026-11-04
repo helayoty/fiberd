@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/helayoty/fiberd/bench/compare"
+	"github.com/Azure/fiberd/bench/compare"
 )
 
 func act(run, burst int, ms float64, err string) compare.Record {

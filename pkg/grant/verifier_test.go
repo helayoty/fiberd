@@ -8,8 +8,8 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 
-	"github.com/helayoty/fiberd/pkg/core"
-	"github.com/helayoty/fiberd/pkg/grant"
+	"github.com/Azure/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/grant"
 )
 
 // The Verifier's own decisions, beyond what TestJWKSOffline covers. An

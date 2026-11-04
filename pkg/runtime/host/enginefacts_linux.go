@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/helayoty/fiberd/pkg/artifact"
-	"github.com/helayoty/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/artifact"
+	"github.com/Azure/fiberd/pkg/core"
 )
 
 // engineVersion is the protocol version every engine declares. The

@@ -2,7 +2,7 @@
 
 package fiberd
 
-import procbackend "github.com/helayoty/fiberd/pkg/backend/proc"
+import procbackend "github.com/Azure/fiberd/pkg/backend/proc"
 
 // procOptions configures the fork backend, which refuses every call off
 // Linux.

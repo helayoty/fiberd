@@ -9,8 +9,8 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 
-	grantv1 "github.com/helayoty/fiberd/api/grant/v1"
-	"github.com/helayoty/fiberd/pkg/core"
+	grantv1 "github.com/Azure/fiberd/api/grant/v1"
+	"github.com/Azure/fiberd/pkg/core"
 )
 
 // Peer is a second home that shares the target's delta registry and keys

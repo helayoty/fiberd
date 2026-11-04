@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/helayoty/fiberd/pkg/artifact"
+	"github.com/Azure/fiberd/pkg/artifact"
 )
 
 func TestParityCheck(t *testing.T) {

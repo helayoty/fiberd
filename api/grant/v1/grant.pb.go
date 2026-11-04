@@ -1927,7 +1927,7 @@ const file_grant_v1_grant_proto_rawDesc = "" +
 	"\x05Watch\x12\x16.google.protobuf.Empty\x1a\x17.fiberd.grant.v1.Status0\x01\x12E\n" +
 	"\x06Upload\x12\x1e.fiberd.grant.v1.UploadRequest\x1a\x19.fiberd.grant.v1.FileInfo(\x01\x12J\n" +
 	"\bDownload\x12 .fiberd.grant.v1.DownloadRequest\x1a\x1a.fiberd.grant.v1.FileChunk0\x01\x12R\n" +
-	"\tListFiles\x12!.fiberd.grant.v1.ListFilesRequest\x1a\".fiberd.grant.v1.ListFilesResponseB1Z/github.com/helayoty/fiberd/api/grant/v1;grantv1b\x06proto3"
+	"\tListFiles\x12!.fiberd.grant.v1.ListFilesRequest\x1a\".fiberd.grant.v1.ListFilesResponseB.Z,github.com/Azure/fiberd/api/grant/v1;grantv1b\x06proto3"
 
 var (
 	file_grant_v1_grant_proto_rawDescOnce sync.Once

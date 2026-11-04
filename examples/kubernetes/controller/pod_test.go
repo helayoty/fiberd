@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/helayoty/fiberd/examples/kubernetes/controller"
-	"github.com/helayoty/fiberd/examples/kubernetes/kube"
+	"github.com/Azure/fiberd/examples/kubernetes/controller"
+	"github.com/Azure/fiberd/examples/kubernetes/kube"
 )
 
 // TestBuildPod checks the grant Pod a CapacityGrant becomes. It pins

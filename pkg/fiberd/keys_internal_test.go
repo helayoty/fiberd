@@ -11,9 +11,9 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 
-	"github.com/helayoty/fiberd/pkg/artifact"
-	"github.com/helayoty/fiberd/pkg/endpoint"
-	"github.com/helayoty/fiberd/pkg/grant"
+	"github.com/Azure/fiberd/pkg/artifact"
+	"github.com/Azure/fiberd/pkg/endpoint"
+	"github.com/Azure/fiberd/pkg/grant"
 )
 
 func saveKey(t *testing.T, gen func() (*jose.JSONWebKey, error)) (string, string) {

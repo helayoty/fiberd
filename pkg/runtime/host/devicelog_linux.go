@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/helayoty/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/core"
 )
 
 // deviceLogSize is how many device events the ring holds.

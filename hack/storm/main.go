@@ -35,12 +35,12 @@ import (
 	"google.golang.org/protobuf/types/known/emptypb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	grantv1 "github.com/helayoty/fiberd/api/grant/v1"
-	"github.com/helayoty/fiberd/pkg/core"
-	"github.com/helayoty/fiberd/pkg/endpoint"
-	"github.com/helayoty/fiberd/pkg/grant"
-	"github.com/helayoty/fiberd/pkg/sys/cgroup"
-	"github.com/helayoty/fiberd/pkg/tlsconf"
+	grantv1 "github.com/Azure/fiberd/api/grant/v1"
+	"github.com/Azure/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/endpoint"
+	"github.com/Azure/fiberd/pkg/grant"
+	"github.com/Azure/fiberd/pkg/sys/cgroup"
+	"github.com/Azure/fiberd/pkg/tlsconf"
 )
 
 type opts struct {

@@ -29,7 +29,7 @@ import (
 	"sync"
 	"time"
 
-	fiberendpoint "github.com/helayoty/fiberd/pkg/endpoint"
+	fiberendpoint "github.com/Azure/fiberd/pkg/endpoint"
 )
 
 const (

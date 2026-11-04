@@ -18,8 +18,8 @@ import (
 
 	"go.uber.org/goleak"
 
-	fakehelper "github.com/helayoty/fiberd/hack/hyperlight/fakehelper/helper"
-	"github.com/helayoty/fiberd/pkg/backend"
+	fakehelper "github.com/Azure/fiberd/hack/hyperlight/fakehelper/helper"
+	"github.com/Azure/fiberd/pkg/backend"
 )
 
 // TestMain fails the package when a test leaves a goroutine behind, such

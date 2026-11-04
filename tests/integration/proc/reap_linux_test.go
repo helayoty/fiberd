@@ -12,7 +12,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/helayoty/fiberd/tests/internal/testenv"
+	"github.com/Azure/fiberd/tests/internal/testenv"
 )
 
 // TestWaitBoundedNeverBlocks pins that wait_bounded gives up after its

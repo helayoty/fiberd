@@ -8,7 +8,7 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 
-	"github.com/helayoty/fiberd/pkg/grant"
+	"github.com/Azure/fiberd/pkg/grant"
 )
 
 func TestGenerateKey(t *testing.T) {

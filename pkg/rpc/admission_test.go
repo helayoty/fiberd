@@ -19,9 +19,9 @@ import (
 	"google.golang.org/protobuf/types/dynamicpb"
 	"google.golang.org/protobuf/types/known/emptypb"
 
-	grantv1 "github.com/helayoty/fiberd/api/grant/v1"
-	"github.com/helayoty/fiberd/pkg/core"
-	"github.com/helayoty/fiberd/pkg/rpc"
+	grantv1 "github.com/Azure/fiberd/api/grant/v1"
+	"github.com/Azure/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/rpc"
 )
 
 // nodeDescriptor is a message with every shape RejectUnknown walks. It

@@ -15,10 +15,10 @@ import (
 	"testing"
 	"time"
 
-	procbackend "github.com/helayoty/fiberd/pkg/backend/proc"
-	"github.com/helayoty/fiberd/pkg/core"
-	"github.com/helayoty/fiberd/pkg/runtime/host"
-	"github.com/helayoty/fiberd/tests/internal/testenv"
+	procbackend "github.com/Azure/fiberd/pkg/backend/proc"
+	"github.com/Azure/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/runtime/host"
+	"github.com/Azure/fiberd/tests/internal/testenv"
 )
 
 // work holds the zygote and the deltas. It is not a tmpfs, so the images

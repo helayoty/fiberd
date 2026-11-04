@@ -14,10 +14,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/helayoty/fiberd/pkg/artifact"
-	"github.com/helayoty/fiberd/pkg/core"
-	fiberendpoint "github.com/helayoty/fiberd/pkg/endpoint"
-	"github.com/helayoty/fiberd/pkg/runtime/host"
+	"github.com/Azure/fiberd/pkg/artifact"
+	"github.com/Azure/fiberd/pkg/core"
+	fiberendpoint "github.com/Azure/fiberd/pkg/endpoint"
+	"github.com/Azure/fiberd/pkg/runtime/host"
 )
 
 // httpTo sends one HTTP request to a fiber's endpoint (a unix socket or

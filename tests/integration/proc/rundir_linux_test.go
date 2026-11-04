@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/helayoty/fiberd/pkg/core"
-	fiberendpoint "github.com/helayoty/fiberd/pkg/endpoint"
+	"github.com/Azure/fiberd/pkg/core"
+	fiberendpoint "github.com/Azure/fiberd/pkg/endpoint"
 )
 
 // TestFiberSeesOnlyItsRunDir pins that a proc fiber, which is euid 0,

@@ -41,7 +41,7 @@ SLO without a controlled production-like test.
 
 How fast a new instance of the same workload answers, from fiberd and from what a cluster uses today. The design and fairness rules are in [compare.md](design/compare.md). Kubernetes, Pods and agent-sandbox are the baselines fiberd runs beside, not rivals.
 
-- **Run.** [bench-compare 38463165214](https://github.com/helayoty/fiberd/actions/runs/38463165214), 2026-10-13, commit 183c156. GitHub ubuntu-24.04 runner, AMD EPYC 7763, 4 vCPU, 15 GiB, kernel 6.17. kind v0.30 (Kubernetes 1.34), runsc 20260817.0, Firecracker v1.17.0 with guest kernel 6.1.155.
+- **Run.** [bench-compare 38463165214](https://github.com/Azure/fiberd/actions/runs/38463165214), 2026-10-13, commit 183c156. GitHub ubuntu-24.04 runner, AMD EPYC 7763, 4 vCPU, 15 GiB, kernel 6.17. kind v0.30 (Kubernetes 1.34), runsc 20260817.0, Firecracker v1.17.0 with guest kernel 6.1.155.
 - **Workload.** A static HTTP counter holding a 32 MiB heap. Every instance gets a 64 MiB limit.
 - **Method.** Client clock from the activation request to the first 200. Median over 3 timed runs of each run's p50, cold run discarded. Bursts of 1, 10 and 50 at once. Every activation in this run succeeded. The host load before and after each row is in the raw records.
 
@@ -100,7 +100,7 @@ Idle memory is what each instance adds, read from its cgroup after 30 seconds id
 
 Every proc and runc fiber now gets its own channel and a record with a fresh seed, so the template can give each fiber its own random state. That costs about 70 to 100 µs per clone. The cost is accepted as the price of the per-fiber seed.
 
-- **Run.** [bench-ab 38983508961](https://github.com/helayoty/fiberd/actions/runs/38983508961), 2026-10-16. Old is main at c87de10, new is clone-signal at 60c4a26. GitHub ubuntu-24.04 runner, 4 vCPU, 15 GiB, kernel 6.17, amd64.
+- **Run.** [bench-ab 38983508961](https://github.com/Azure/fiberd/actions/runs/38983508961), 2026-10-16. Old is main at c87de10, new is clone-signal at 60c4a26. GitHub ubuntu-24.04 runner, 4 vCPU, 15 GiB, kernel 6.17, amd64.
 - **Method.** `hack/bench/ab.sh` in one job, old and new alternating, one discarded warm-up each, then 3 timed runs per side. The table is the median of the per-run p50. Every run passed. The host load before each run is in the raw logs.
 
 | p50, ms | main | clone-signal | change |
@@ -219,7 +219,7 @@ A separate GitHub-hosted `ubuntu-24.04` KVM run reported 39 ms for CREATE and 13
 
 This is a pressure observation rather than a backend microbenchmark. The storm runs once with fiberd, then once per baseline without fiberd, each in a job of the same size.
 
-- **Run.** [examples 39740368235](https://github.com/helayoty/fiberd/actions/runs/39740368235/job/119695857341), 2026-10-22, commit ba6c1a1, merged as 3eec46d. GitHub ubuntu-24.04 runner, image 20261012.601, kernel 6.17.0-1022-azure, amd64. The runner's CPU and memory were not recorded.
+- **Run.** [examples 39740368235](https://github.com/Azure/fiberd/actions/runs/39740368235/job/119695857341), 2026-10-22, commit ba6c1a1, merged as 3eec46d. GitHub ubuntu-24.04 runner, image 20261012.601, kernel 6.17.0-1022-azure, amd64. The runner's CPU and memory were not recorded.
 - **Environment.** The repository's one-node Slurm-in-Docker image, with cgroup v2, swap closed for jobs, and criu 4.2.1.
 - **Method.** One job per side, each `--mem=384M --cpus-per-task=8`, one after another on the same node. The proc backend and refzygote with a 64 MiB heap, under a 160 MiB grant ceiling. Eight instances grow by 2 MiB every 250 ms toward 320 MiB in all. One run.
 
@@ -333,7 +333,7 @@ The baselines grow by the same step each round, toward the same total demand. Th
 
 Every phase ends with one `storm summary:` line, which the CI overcommit job copies to its run's summary page.
 
-- **Run.** [conformance 39740368225](https://github.com/helayoty/fiberd/actions/runs/39740368225/job/119695857510), 2026-10-22, commit ba6c1a1, merged as 3eec46d. GitHub ubuntu-24.04 runner, image 20261012.601, kernel 6.17.0-1022-azure, amd64. The runner's CPU and memory were not recorded. One run.
+- **Run.** [conformance 39740368225](https://github.com/Azure/fiberd/actions/runs/39740368225/job/119695857510), 2026-10-22, commit ba6c1a1, merged as 3eec46d. GitHub ubuntu-24.04 runner, image 20261012.601, kernel 6.17.0-1022-azure, amd64. The runner's CPU and memory were not recorded. One run.
 
 | Side | OOM kills | Instances alive, of 8 | Parked | First park | First kill | Killed before growth | Parent killed |
 | --- | ---: | ---: | ---: | --- | --- | ---: | --- |

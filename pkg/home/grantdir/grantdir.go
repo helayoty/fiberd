@@ -15,8 +15,8 @@ import (
 	"sort"
 	"time"
 
-	"github.com/helayoty/fiberd/pkg/grant"
-	"github.com/helayoty/fiberd/pkg/home"
+	"github.com/Azure/fiberd/pkg/grant"
+	"github.com/Azure/fiberd/pkg/home"
 )
 
 // Poll returns grant events read from dir every `every`, until ctx ends. The

@@ -4,7 +4,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/helayoty/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/core"
 )
 
 // TestSessionGatesBounded pins that the per-session gate map is bounded

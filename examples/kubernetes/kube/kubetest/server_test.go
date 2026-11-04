@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/helayoty/fiberd/examples/kubernetes/kube/kubetest"
+	"github.com/Azure/fiberd/examples/kubernetes/kube/kubetest"
 )
 
 const (

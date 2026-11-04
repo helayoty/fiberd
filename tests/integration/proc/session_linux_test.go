@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/helayoty/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/core"
 )
 
 // TestSessionAtBirth pins that a fiber learns the session the caller

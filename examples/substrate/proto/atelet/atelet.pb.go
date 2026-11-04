@@ -551,7 +551,7 @@ const file_atelet_atelet_proto_rawDesc = "" +
 	"\bquantity\x18\x02 \x01(\tR\bquantity\"\x18\n" +
 	"\x16RegisterWorkerResponse2a\n" +
 	"\fAteomSupport\x12Q\n" +
-	"\x0eRegisterWorker\x12\x1d.atelet.RegisterWorkerRequest\x1a\x1e.atelet.RegisterWorkerResponse\"\x00BEZCgithub.com/helayoty/fiberd/examples/substrate/proto/atelet;ateletpbb\x06proto3"
+	"\x0eRegisterWorker\x12\x1d.atelet.RegisterWorkerRequest\x1a\x1e.atelet.RegisterWorkerResponse\"\x00BBZ@github.com/Azure/fiberd/examples/substrate/proto/atelet;ateletpbb\x06proto3"
 
 var (
 	file_atelet_atelet_proto_rawDescOnce sync.Once

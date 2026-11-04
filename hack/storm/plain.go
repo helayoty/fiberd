@@ -13,7 +13,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/helayoty/fiberd/pkg/sys/cgroup"
+	"github.com/Azure/fiberd/pkg/sys/cgroup"
 )
 
 // The baseline without fiberd (-plain). The same storm runs on plain

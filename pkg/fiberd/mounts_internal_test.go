@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/helayoty/fiberd/pkg/sys/mounts"
+	"github.com/Azure/fiberd/pkg/sys/mounts"
 )
 
 // TestPrepareMounts checks that fiberd prepares the container's mounts

@@ -12,13 +12,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/helayoty/fiberd/pkg/backend"
-	gvisorbackend "github.com/helayoty/fiberd/pkg/backend/gvisor"
-	procbackend "github.com/helayoty/fiberd/pkg/backend/proc"
-	runcbackend "github.com/helayoty/fiberd/pkg/backend/runc"
-	"github.com/helayoty/fiberd/pkg/core"
-	"github.com/helayoty/fiberd/pkg/runtime/host"
-	"github.com/helayoty/fiberd/tests/internal/testenv"
+	"github.com/Azure/fiberd/pkg/backend"
+	gvisorbackend "github.com/Azure/fiberd/pkg/backend/gvisor"
+	procbackend "github.com/Azure/fiberd/pkg/backend/proc"
+	runcbackend "github.com/Azure/fiberd/pkg/backend/runc"
+	"github.com/Azure/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/runtime/host"
+	"github.com/Azure/fiberd/tests/internal/testenv"
 )
 
 // work holds the rootfs and the sandboxed backends' state. It is not a

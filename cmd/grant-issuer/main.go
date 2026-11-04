@@ -34,11 +34,11 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 
-	"github.com/helayoty/fiberd/internal/cli"
-	"github.com/helayoty/fiberd/pkg/artifact"
-	"github.com/helayoty/fiberd/pkg/core"
-	"github.com/helayoty/fiberd/pkg/grant"
-	"github.com/helayoty/fiberd/pkg/tlsconf"
+	"github.com/Azure/fiberd/internal/cli"
+	"github.com/Azure/fiberd/pkg/artifact"
+	"github.com/Azure/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/grant"
+	"github.com/Azure/fiberd/pkg/tlsconf"
 )
 
 // version is set at link time with -ldflags "-X main.version=v0.1.0".

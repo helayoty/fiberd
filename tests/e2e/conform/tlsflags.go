@@ -6,7 +6,7 @@ import (
 	"crypto/tls"
 	"errors"
 
-	"github.com/helayoty/fiberd/pkg/tlsconf"
+	"github.com/Azure/fiberd/pkg/tlsconf"
 )
 
 // callerTLS turns the harness's TLS flags into the config it dials with and

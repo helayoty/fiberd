@@ -19,7 +19,7 @@ import (
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/containerd/v2/pkg/shim"
 
-	fshim "github.com/helayoty/fiberd/examples/kata/shim"
+	fshim "github.com/Azure/fiberd/examples/kata/shim"
 )
 
 // childEnv makes this test binary act as the shim daemon Manager.Start

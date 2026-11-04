@@ -24,9 +24,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/helayoty/fiberd/sdk/go/client"
+	"github.com/Azure/fiberd/sdk/go/client"
 
-	"github.com/helayoty/fiberd/examples/knative/activator"
+	"github.com/Azure/fiberd/examples/knative/activator"
 )
 
 type revisionFlags []activator.Revision

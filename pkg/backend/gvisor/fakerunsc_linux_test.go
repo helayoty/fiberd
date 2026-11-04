@@ -19,7 +19,7 @@ import (
 
 	"go.uber.org/goleak"
 
-	"github.com/helayoty/fiberd/pkg/backend"
+	"github.com/Azure/fiberd/pkg/backend"
 )
 
 // TestMain fails the package when a test leaves a goroutine behind, such

@@ -9,8 +9,8 @@ import (
 
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	grantv1 "github.com/helayoty/fiberd/api/grant/v1"
-	"github.com/helayoty/fiberd/pkg/core"
+	grantv1 "github.com/Azure/fiberd/api/grant/v1"
+	"github.com/Azure/fiberd/pkg/core"
 )
 
 // FromProto converts the wire message to the home-invariant core type.

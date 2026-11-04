@@ -15,10 +15,10 @@ import (
 	"testing"
 	"time"
 
-	runcbackend "github.com/helayoty/fiberd/pkg/backend/runc"
-	"github.com/helayoty/fiberd/pkg/core"
-	"github.com/helayoty/fiberd/pkg/runtime/host"
-	"github.com/helayoty/fiberd/tests/internal/testenv"
+	runcbackend "github.com/Azure/fiberd/pkg/backend/runc"
+	"github.com/Azure/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/runtime/host"
+	"github.com/Azure/fiberd/tests/internal/testenv"
 )
 
 var (

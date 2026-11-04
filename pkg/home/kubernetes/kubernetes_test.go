@@ -10,10 +10,10 @@ import (
 
 	"k8s.io/apimachinery/pkg/types"
 
-	"github.com/helayoty/fiberd/pkg/core"
-	"github.com/helayoty/fiberd/pkg/endpoint"
-	"github.com/helayoty/fiberd/pkg/home/kubernetes"
-	"github.com/helayoty/fiberd/pkg/home/kubernetes/fake"
+	"github.com/Azure/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/endpoint"
+	"github.com/Azure/fiberd/pkg/home/kubernetes"
+	"github.com/Azure/fiberd/pkg/home/kubernetes/fake"
 )
 
 func validConfig() kubernetes.Config {

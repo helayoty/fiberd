@@ -14,8 +14,8 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 
-	"github.com/helayoty/fiberd/pkg/core"
-	"github.com/helayoty/fiberd/pkg/grant"
+	"github.com/Azure/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/grant"
 )
 
 // issuer is a fake OIDC issuer: discovery + JWKS, with a swappable key set

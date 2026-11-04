@@ -15,8 +15,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/helayoty/fiberd/pkg/backend"
-	procbackend "github.com/helayoty/fiberd/pkg/backend/proc"
+	"github.com/Azure/fiberd/pkg/backend"
+	procbackend "github.com/Azure/fiberd/pkg/backend/proc"
 )
 
 // capSysAdmin is CAP_SYS_ADMIN's bit in the Cap* fields of /proc/<pid>/status.

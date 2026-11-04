@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/helayoty/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/core"
 )
 
 // TestWorkspaceQuotaEscapeRefused pins the file-transfer disk budget.
@@ -18,7 +18,7 @@ import (
 // the two ioctl commands and the file_setattr syscall that do it, each
 // with EPERM, so the escape is closed before a byte moves.
 //
-// This is a regression test for helayoty/fiberd#33. On the old filter,
+// This is a regression test for Azure/fiberd#33. On the old filter,
 // which did not look at ioctl and did not list file_setattr, the three
 // probes answer something other than EPERM.
 func TestWorkspaceQuotaEscapeRefused(t *testing.T) {

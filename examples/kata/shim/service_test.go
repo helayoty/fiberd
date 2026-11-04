@@ -32,15 +32,15 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/emptypb"
 
-	grantv1 "github.com/helayoty/fiberd/api/grant/v1"
-	"github.com/helayoty/fiberd/pkg/core"
-	"github.com/helayoty/fiberd/pkg/core/coretest"
-	"github.com/helayoty/fiberd/pkg/grant"
-	"github.com/helayoty/fiberd/pkg/rpc"
-	"github.com/helayoty/fiberd/pkg/runtime/stub"
-	"github.com/helayoty/fiberd/sdk/go/client"
+	grantv1 "github.com/Azure/fiberd/api/grant/v1"
+	"github.com/Azure/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/core/coretest"
+	"github.com/Azure/fiberd/pkg/grant"
+	"github.com/Azure/fiberd/pkg/rpc"
+	"github.com/Azure/fiberd/pkg/runtime/stub"
+	"github.com/Azure/fiberd/sdk/go/client"
 
-	fshim "github.com/helayoty/fiberd/examples/kata/shim"
+	fshim "github.com/Azure/fiberd/examples/kata/shim"
 )
 
 // The CRI annotations containerd puts in a container's spec.

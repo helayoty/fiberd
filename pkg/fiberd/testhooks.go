@@ -7,8 +7,8 @@ import (
 	"flag"
 	"net/http"
 
-	"github.com/helayoty/fiberd/pkg/core"
-	"github.com/helayoty/fiberd/pkg/home"
+	"github.com/Azure/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/home"
 )
 
 // IssuerReachableSetter is the override behind POST /issuer. A home

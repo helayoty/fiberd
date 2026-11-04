@@ -7,10 +7,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/helayoty/fiberd/pkg/endpoint"
+	"github.com/Azure/fiberd/pkg/endpoint"
 
-	"github.com/helayoty/fiberd/examples/kubernetes/kube"
-	"github.com/helayoty/fiberd/examples/kubernetes/kube/kubetest"
+	"github.com/Azure/fiberd/examples/kubernetes/kube"
+	"github.com/Azure/fiberd/examples/kubernetes/kube/kubetest"
 )
 
 // TestNewGivesUpWithoutAnAddress checks that New stops waiting for the

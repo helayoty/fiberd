@@ -2166,7 +2166,7 @@ const file_ateom_ateom_proto_rawDesc = "" +
 	"\x0fRestoreWorkload\x12\x1d.ateom.RestoreWorkloadRequest\x1a\x1e.ateom.RestoreWorkloadResponse\"\x00\x12U\n" +
 	"\x10GetWorkloadStats\x12\x1e.ateom.GetWorkloadStatsRequest\x1a\x1f.ateom.GetWorkloadStatsResponse\"\x00\x12g\n" +
 	"\x16GetActiveWorkloadStats\x12$.ateom.GetActiveWorkloadStatsRequest\x1a%.ateom.GetActiveWorkloadStatsResponse\"\x00\x12X\n" +
-	"\x11TerminateWorkload\x12\x1f.ateom.TerminateWorkloadRequest\x1a .ateom.TerminateWorkloadResponse\"\x00BCZAgithub.com/helayoty/fiberd/examples/substrate/proto/ateom;ateompbb\x06proto3"
+	"\x11TerminateWorkload\x12\x1f.ateom.TerminateWorkloadRequest\x1a .ateom.TerminateWorkloadResponse\"\x00B@Z>github.com/Azure/fiberd/examples/substrate/proto/ateom;ateompbb\x06proto3"
 
 var (
 	file_ateom_ateom_proto_rawDescOnce sync.Once

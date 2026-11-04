@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/helayoty/fiberd/pkg/sys/criu"
+	"github.com/Azure/fiberd/pkg/sys/criu"
 )
 
 // BuildOptions describe how to turn a zygote executable into an artifact.

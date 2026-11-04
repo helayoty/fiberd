@@ -28,11 +28,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/helayoty/fiberd/pkg/artifact"
-	"github.com/helayoty/fiberd/pkg/backend"
-	"github.com/helayoty/fiberd/pkg/backend/proc"
-	"github.com/helayoty/fiberd/pkg/sys/criu"
-	"github.com/helayoty/fiberd/pkg/sys/netns"
+	"github.com/Azure/fiberd/pkg/artifact"
+	"github.com/Azure/fiberd/pkg/backend"
+	"github.com/Azure/fiberd/pkg/backend/proc"
+	"github.com/Azure/fiberd/pkg/sys/criu"
+	"github.com/Azure/fiberd/pkg/sys/netns"
 )
 
 // Options configure the runc backend.

@@ -20,10 +20,10 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 
-	grantv1 "github.com/helayoty/fiberd/api/grant/v1"
-	"github.com/helayoty/fiberd/pkg/core"
-	"github.com/helayoty/fiberd/pkg/rpc"
-	"github.com/helayoty/fiberd/sdk/go/client"
+	grantv1 "github.com/Azure/fiberd/api/grant/v1"
+	"github.com/Azure/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/rpc"
+	"github.com/Azure/fiberd/sdk/go/client"
 )
 
 // fakeFiles serves the file calls from what a case set, and records what

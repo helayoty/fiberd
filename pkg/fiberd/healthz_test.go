@@ -11,7 +11,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/helayoty/fiberd/pkg/fiberd"
+	"github.com/Azure/fiberd/pkg/fiberd"
 )
 
 // TestHealthzAudit runs fiberd and poisons its audit spool. The admin

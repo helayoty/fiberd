@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/helayoty/fiberd/pkg/core"
-	"github.com/helayoty/fiberd/pkg/core/coretest"
+	"github.com/Azure/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/core/coretest"
 )
 
 // acceptVerifier returns whatever grant the token names: tests hand the

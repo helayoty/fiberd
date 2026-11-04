@@ -104,7 +104,7 @@ RUN set -eu; mkdir -p /out; \
 FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587
 # The release workflow adds version, revision, created and title labels.
 # These static ones cover local builds.
-LABEL org.opencontainers.image.source="https://github.com/helayoty/fiberd" \
+LABEL org.opencontainers.image.source="https://github.com/Azure/fiberd" \
       org.opencontainers.image.description="fiberd for Kubernetes: the grant Pod's fiberd (fiberd-k8s), the issuer controller (grant-controller), the reference zygote, criu, runc, runsc, and the conformance and storm binaries" \
       org.opencontainers.image.licenses="Apache-2.0"
 ARG DEBIAN_FRONTEND=noninteractive

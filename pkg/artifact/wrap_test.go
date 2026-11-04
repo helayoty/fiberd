@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/helayoty/fiberd/pkg/artifact"
+	"github.com/Azure/fiberd/pkg/artifact"
 )
 
 func masterKey(fill byte) *artifact.SealKey {

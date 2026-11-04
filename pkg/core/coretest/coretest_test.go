@@ -3,8 +3,8 @@ package coretest_test
 import (
 	"testing"
 
-	"github.com/helayoty/fiberd/pkg/core"
-	"github.com/helayoty/fiberd/pkg/core/coretest"
+	"github.com/Azure/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/core/coretest"
 )
 
 func TestGrantStatus(t *testing.T) {

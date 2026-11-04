@@ -11,12 +11,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/helayoty/fiberd/pkg/core"
-	"github.com/helayoty/fiberd/pkg/grant"
-	fhome "github.com/helayoty/fiberd/pkg/home"
-	"github.com/helayoty/fiberd/pkg/sys/cgroup"
+	"github.com/Azure/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/grant"
+	fhome "github.com/Azure/fiberd/pkg/home"
+	"github.com/Azure/fiberd/pkg/sys/cgroup"
 
-	"github.com/helayoty/fiberd/examples/substrate/herder"
+	"github.com/Azure/fiberd/examples/substrate/herder"
 )
 
 // TestWhatTheHomeOffers checks the home's fixed answers to fiberd.

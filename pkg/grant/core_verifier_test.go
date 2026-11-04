@@ -8,9 +8,9 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 
-	"github.com/helayoty/fiberd/pkg/core"
-	"github.com/helayoty/fiberd/pkg/grant"
-	"github.com/helayoty/fiberd/pkg/runtime/stub"
+	"github.com/Azure/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/grant"
+	"github.com/Azure/fiberd/pkg/runtime/stub"
 )
 
 // fiberd with the real verifier: a signed grant is admitted and served;

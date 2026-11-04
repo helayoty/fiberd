@@ -12,7 +12,7 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 
-	"github.com/helayoty/fiberd/pkg/artifact"
+	"github.com/Azure/fiberd/pkg/artifact"
 )
 
 // sealChunk is the plaintext size of one sealed chunk, a wire constant.

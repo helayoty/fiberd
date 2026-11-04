@@ -22,9 +22,9 @@ import (
 	"github.com/go-jose/go-jose/v4"
 	"github.com/google/go-containerregistry/pkg/registry"
 
-	"github.com/helayoty/fiberd/pkg/artifact"
-	"github.com/helayoty/fiberd/pkg/backend"
-	"github.com/helayoty/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/artifact"
+	"github.com/Azure/fiberd/pkg/backend"
+	"github.com/Azure/fiberd/pkg/core"
 )
 
 // mobilityHome is a runtime for the registry protocol alone, with a codec

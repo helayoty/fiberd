@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/helayoty/fiberd/pkg/endpoint"
+	"github.com/Azure/fiberd/pkg/endpoint"
 )
 
 func main() {

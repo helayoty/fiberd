@@ -25,19 +25,19 @@ import (
 
 	"google.golang.org/grpc"
 
-	"github.com/helayoty/fiberd/pkg/artifact"
-	"github.com/helayoty/fiberd/pkg/core"
-	"github.com/helayoty/fiberd/pkg/fiberd"
-	"github.com/helayoty/fiberd/pkg/grant"
-	fhome "github.com/helayoty/fiberd/pkg/home"
-	"github.com/helayoty/fiberd/pkg/runtime/host"
-	"github.com/helayoty/fiberd/sdk/go/client"
+	"github.com/Azure/fiberd/pkg/artifact"
+	"github.com/Azure/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/fiberd"
+	"github.com/Azure/fiberd/pkg/grant"
+	fhome "github.com/Azure/fiberd/pkg/home"
+	"github.com/Azure/fiberd/pkg/runtime/host"
+	"github.com/Azure/fiberd/sdk/go/client"
 
-	"github.com/helayoty/fiberd/examples/substrate/capacity"
-	"github.com/helayoty/fiberd/examples/substrate/herder"
-	subhome "github.com/helayoty/fiberd/examples/substrate/home"
-	"github.com/helayoty/fiberd/examples/substrate/ingress"
-	ateompb "github.com/helayoty/fiberd/examples/substrate/proto/ateom"
+	"github.com/Azure/fiberd/examples/substrate/capacity"
+	"github.com/Azure/fiberd/examples/substrate/herder"
+	subhome "github.com/Azure/fiberd/examples/substrate/home"
+	"github.com/Azure/fiberd/examples/substrate/ingress"
+	ateompb "github.com/Azure/fiberd/examples/substrate/proto/ateom"
 )
 
 func env(name, def string) string {

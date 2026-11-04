@@ -18,10 +18,10 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/emptypb"
 
-	grantv1 "github.com/helayoty/fiberd/api/grant/v1"
-	"github.com/helayoty/fiberd/sdk/go/client"
+	grantv1 "github.com/Azure/fiberd/api/grant/v1"
+	"github.com/Azure/fiberd/sdk/go/client"
 
-	"github.com/helayoty/fiberd/bench/compare"
+	"github.com/Azure/fiberd/bench/compare"
 )
 
 // home is a fake Fibers service. Every Clone answers with the endpoint

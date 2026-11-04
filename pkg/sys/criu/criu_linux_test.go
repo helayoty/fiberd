@@ -12,7 +12,7 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/helayoty/fiberd/pkg/sys/criu"
+	"github.com/Azure/fiberd/pkg/sys/criu"
 )
 
 // TestSocketInode checks that the inode a unix socket's fd link names is the

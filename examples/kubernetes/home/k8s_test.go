@@ -12,13 +12,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/helayoty/fiberd/pkg/core"
-	"github.com/helayoty/fiberd/pkg/endpoint"
-	fhome "github.com/helayoty/fiberd/pkg/home"
+	"github.com/Azure/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/endpoint"
+	fhome "github.com/Azure/fiberd/pkg/home"
 
-	"github.com/helayoty/fiberd/examples/kubernetes/home"
-	"github.com/helayoty/fiberd/examples/kubernetes/kube"
-	"github.com/helayoty/fiberd/examples/kubernetes/kube/kubetest"
+	"github.com/Azure/fiberd/examples/kubernetes/home"
+	"github.com/Azure/fiberd/examples/kubernetes/kube"
+	"github.com/Azure/fiberd/examples/kubernetes/kube/kubetest"
 )
 
 // The cluster the home's Pod lives in.

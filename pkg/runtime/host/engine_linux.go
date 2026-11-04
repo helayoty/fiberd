@@ -30,8 +30,8 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"github.com/helayoty/fiberd/pkg/core"
-	"github.com/helayoty/fiberd/pkg/sys/cgroup"
+	"github.com/Azure/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/sys/cgroup"
 )
 
 const (

@@ -21,15 +21,15 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/protobuf/encoding/protojson"
 
-	procbackend "github.com/helayoty/fiberd/pkg/backend/proc"
-	"github.com/helayoty/fiberd/pkg/core"
-	"github.com/helayoty/fiberd/pkg/grant"
-	"github.com/helayoty/fiberd/pkg/handoff"
-	"github.com/helayoty/fiberd/pkg/rpc"
-	"github.com/helayoty/fiberd/pkg/runtime/host"
-	"github.com/helayoty/fiberd/pkg/tlsconf"
-	"github.com/helayoty/fiberd/pkg/tlsconf/tlsconftest"
-	"github.com/helayoty/fiberd/tests/internal/testenv"
+	procbackend "github.com/Azure/fiberd/pkg/backend/proc"
+	"github.com/Azure/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/grant"
+	"github.com/Azure/fiberd/pkg/handoff"
+	"github.com/Azure/fiberd/pkg/rpc"
+	"github.com/Azure/fiberd/pkg/runtime/host"
+	"github.com/Azure/fiberd/pkg/tlsconf"
+	"github.com/Azure/fiberd/pkg/tlsconf/tlsconftest"
+	"github.com/Azure/fiberd/tests/internal/testenv"
 )
 
 var cgRoot, zygote, sdk string

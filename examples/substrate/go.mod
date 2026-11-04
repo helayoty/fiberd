@@ -2,7 +2,7 @@
 // actors are fibers. Its own module, so Substrate's proto and this
 // example's dependencies never land in fiberd's go.mod. It builds against
 // the checkout it sits in.
-module github.com/helayoty/fiberd/examples/substrate
+module github.com/Azure/fiberd/examples/substrate
 
 go 1.26.0
 
@@ -10,7 +10,7 @@ toolchain go1.26.7
 
 require (
 	github.com/go-jose/go-jose/v4 v4.1.5
-	github.com/helayoty/fiberd v0.0.0
+	github.com/Azure/fiberd v0.0.0
 	golang.org/x/sys v0.47.0
 	google.golang.org/grpc v1.83.2
 	google.golang.org/protobuf v1.36.12
@@ -27,4 +27,4 @@ require (
 	oras.land/oras-go/v2 v2.6.2 // indirect
 )
 
-replace github.com/helayoty/fiberd => ../..
+replace github.com/Azure/fiberd => ../..

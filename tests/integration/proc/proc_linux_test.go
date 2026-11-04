@@ -29,17 +29,17 @@ import (
 	"github.com/go-jose/go-jose/v4"
 	"github.com/google/go-containerregistry/pkg/registry"
 
-	"github.com/helayoty/fiberd/pkg/artifact"
-	"github.com/helayoty/fiberd/pkg/backend"
-	procbackend "github.com/helayoty/fiberd/pkg/backend/proc"
-	"github.com/helayoty/fiberd/pkg/core"
-	fiberendpoint "github.com/helayoty/fiberd/pkg/endpoint"
-	"github.com/helayoty/fiberd/pkg/grant"
-	"github.com/helayoty/fiberd/pkg/handoff"
-	"github.com/helayoty/fiberd/pkg/runtime/host"
-	"github.com/helayoty/fiberd/pkg/sys/caps"
-	"github.com/helayoty/fiberd/pkg/tlsconf"
-	"github.com/helayoty/fiberd/tests/internal/testenv"
+	"github.com/Azure/fiberd/pkg/artifact"
+	"github.com/Azure/fiberd/pkg/backend"
+	procbackend "github.com/Azure/fiberd/pkg/backend/proc"
+	"github.com/Azure/fiberd/pkg/core"
+	fiberendpoint "github.com/Azure/fiberd/pkg/endpoint"
+	"github.com/Azure/fiberd/pkg/grant"
+	"github.com/Azure/fiberd/pkg/handoff"
+	"github.com/Azure/fiberd/pkg/runtime/host"
+	"github.com/Azure/fiberd/pkg/sys/caps"
+	"github.com/Azure/fiberd/pkg/tlsconf"
+	"github.com/Azure/fiberd/tests/internal/testenv"
 )
 
 // newHost opens the host runtime over the fork backend, as fiberd

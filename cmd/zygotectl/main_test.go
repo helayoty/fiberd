@@ -14,7 +14,7 @@ import (
 
 	"github.com/google/go-containerregistry/pkg/registry"
 
-	"github.com/helayoty/fiberd/pkg/artifact"
+	"github.com/Azure/fiberd/pkg/artifact"
 )
 
 // here is the host the command is told it runs on. Naming all three

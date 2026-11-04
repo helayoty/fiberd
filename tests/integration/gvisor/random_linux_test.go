@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/helayoty/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/core"
 )
 
 // TestRandomPerIncarnation pins that sandboxes restored from one image

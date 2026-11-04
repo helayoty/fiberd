@@ -14,9 +14,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/helayoty/fiberd/pkg/artifact"
-	"github.com/helayoty/fiberd/pkg/backend"
-	"github.com/helayoty/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/artifact"
+	"github.com/Azure/fiberd/pkg/backend"
+	"github.com/Azure/fiberd/pkg/core"
 )
 
 // homePlatform is what pkg/runtime/host records at open. It is the host's

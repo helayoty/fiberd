@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/helayoty/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/core"
 )
 
 // TestCloneSyscallBudget pins how many system calls a fiber makes on its

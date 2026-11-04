@@ -17,11 +17,11 @@ import (
 	"testing"
 	"time"
 
-	gvisorbackend "github.com/helayoty/fiberd/pkg/backend/gvisor"
-	"github.com/helayoty/fiberd/pkg/core"
-	fiberendpoint "github.com/helayoty/fiberd/pkg/endpoint"
-	"github.com/helayoty/fiberd/pkg/runtime/host"
-	"github.com/helayoty/fiberd/tests/internal/testenv"
+	gvisorbackend "github.com/Azure/fiberd/pkg/backend/gvisor"
+	"github.com/Azure/fiberd/pkg/core"
+	fiberendpoint "github.com/Azure/fiberd/pkg/endpoint"
+	"github.com/Azure/fiberd/pkg/runtime/host"
+	"github.com/Azure/fiberd/tests/internal/testenv"
 )
 
 var (

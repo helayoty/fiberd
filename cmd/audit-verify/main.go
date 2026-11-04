@@ -18,8 +18,8 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 
-	"github.com/helayoty/fiberd/internal/cli"
-	"github.com/helayoty/fiberd/pkg/core"
+	"github.com/Azure/fiberd/internal/cli"
+	"github.com/Azure/fiberd/pkg/core"
 )
 
 // version is set at link time with -ldflags "-X main.version=v0.1.0".

@@ -20,11 +20,11 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/protobuf/encoding/protojson"
 
-	"github.com/helayoty/fiberd/pkg/core"
-	"github.com/helayoty/fiberd/pkg/grant"
-	"github.com/helayoty/fiberd/pkg/rpc"
-	"github.com/helayoty/fiberd/pkg/tlsconf"
-	"github.com/helayoty/fiberd/pkg/tlsconf/tlsconftest"
+	"github.com/Azure/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/grant"
+	"github.com/Azure/fiberd/pkg/rpc"
+	"github.com/Azure/fiberd/pkg/tlsconf"
+	"github.com/Azure/fiberd/pkg/tlsconf/tlsconftest"
 )
 
 // pyHome is fiberd's core and gRPC face over the proc backend with the

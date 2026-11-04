@@ -17,7 +17,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/helayoty/fiberd/pkg/sys/criu"
+	"github.com/Azure/fiberd/pkg/sys/criu"
 )
 
 // mountNSChild starts a process in a mount namespace of its own that

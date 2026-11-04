@@ -5,7 +5,7 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/helayoty/fiberd/pkg/sys/caps"
+	"github.com/Azure/fiberd/pkg/sys/caps"
 )
 
 // TestNarrowCaps checks that fiberd narrows only for a measured runtime that

@@ -18,11 +18,11 @@ import (
 	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 
-	grantv1 "github.com/helayoty/fiberd/api/grant/v1"
-	"github.com/helayoty/fiberd/pkg/core"
-	"github.com/helayoty/fiberd/pkg/rpc"
-	"github.com/helayoty/fiberd/pkg/tlsconf"
-	"github.com/helayoty/fiberd/pkg/tlsconf/tlsconftest"
+	grantv1 "github.com/Azure/fiberd/api/grant/v1"
+	"github.com/Azure/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/rpc"
+	"github.com/Azure/fiberd/pkg/tlsconf"
+	"github.com/Azure/fiberd/pkg/tlsconf/tlsconftest"
 )
 
 // fakeStream is a server stream that only knows its context.

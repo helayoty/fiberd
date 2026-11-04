@@ -16,8 +16,8 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"github.com/helayoty/fiberd/pkg/backend"
-	"github.com/helayoty/fiberd/pkg/backend/proc"
+	"github.com/Azure/fiberd/pkg/backend"
+	"github.com/Azure/fiberd/pkg/backend/proc"
 )
 
 // The container init in every dump test, and its mount table. Ids 200

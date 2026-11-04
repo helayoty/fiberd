@@ -35,13 +35,13 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 
-	grantv1 "github.com/helayoty/fiberd/api/grant/v1"
-	"github.com/helayoty/fiberd/pkg/artifact"
-	"github.com/helayoty/fiberd/pkg/core"
-	fiberendpoint "github.com/helayoty/fiberd/pkg/endpoint"
-	"github.com/helayoty/fiberd/pkg/fiberd"
-	"github.com/helayoty/fiberd/pkg/grant"
-	"github.com/helayoty/fiberd/tests/internal/testenv"
+	grantv1 "github.com/Azure/fiberd/api/grant/v1"
+	"github.com/Azure/fiberd/pkg/artifact"
+	"github.com/Azure/fiberd/pkg/core"
+	fiberendpoint "github.com/Azure/fiberd/pkg/endpoint"
+	"github.com/Azure/fiberd/pkg/fiberd"
+	"github.com/Azure/fiberd/pkg/grant"
+	"github.com/Azure/fiberd/tests/internal/testenv"
 )
 
 // The slice a fiber fills, its grant's device budget and the engine

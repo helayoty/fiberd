@@ -15,14 +15,14 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 
-	"github.com/helayoty/fiberd/pkg/backend"
-	procbackend "github.com/helayoty/fiberd/pkg/backend/proc"
-	"github.com/helayoty/fiberd/pkg/core"
-	"github.com/helayoty/fiberd/pkg/grant"
-	"github.com/helayoty/fiberd/pkg/rpc"
-	"github.com/helayoty/fiberd/pkg/runtime/host"
-	"github.com/helayoty/fiberd/sdk/go/client"
-	"github.com/helayoty/fiberd/tests/internal/testenv"
+	"github.com/Azure/fiberd/pkg/backend"
+	procbackend "github.com/Azure/fiberd/pkg/backend/proc"
+	"github.com/Azure/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/grant"
+	"github.com/Azure/fiberd/pkg/rpc"
+	"github.com/Azure/fiberd/pkg/runtime/host"
+	"github.com/Azure/fiberd/sdk/go/client"
+	"github.com/Azure/fiberd/tests/internal/testenv"
 )
 
 // TestE2ECloneNumbers measures Clone as a consumer sees it, over gRPC on

@@ -27,13 +27,13 @@ import (
 	"sync"
 	"time"
 
-	"github.com/helayoty/fiberd/pkg/core"
-	"github.com/helayoty/fiberd/pkg/endpoint"
-	"github.com/helayoty/fiberd/pkg/home"
-	"github.com/helayoty/fiberd/pkg/home/grantdir"
-	"github.com/helayoty/fiberd/pkg/sys/cgroup"
+	"github.com/Azure/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/endpoint"
+	"github.com/Azure/fiberd/pkg/home"
+	"github.com/Azure/fiberd/pkg/home/grantdir"
+	"github.com/Azure/fiberd/pkg/sys/cgroup"
 
-	"github.com/helayoty/fiberd/examples/kubernetes/kube"
+	"github.com/Azure/fiberd/examples/kubernetes/kube"
 )
 
 // ReadyCondition is the readiness gate the issuer puts on grant Pods and

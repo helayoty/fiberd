@@ -24,9 +24,9 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/types/known/emptypb"
 
-	grantv1 "github.com/helayoty/fiberd/api/grant/v1"
+	grantv1 "github.com/Azure/fiberd/api/grant/v1"
 
-	"github.com/helayoty/fiberd/examples/knative/activator"
+	"github.com/Azure/fiberd/examples/knative/activator"
 )
 
 func TestRevisionFlags(t *testing.T) {

@@ -9,7 +9,7 @@ import (
 
 	"k8s.io/utils/clock"
 
-	"github.com/helayoty/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/core"
 )
 
 // ErrRoundTimeout is the error a poll round reports when it did not

@@ -18,7 +18,7 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 
-	"github.com/helayoty/fiberd/pkg/grant"
+	"github.com/Azure/fiberd/pkg/grant"
 )
 
 func newKey(t *testing.T) *jose.JSONWebKey {

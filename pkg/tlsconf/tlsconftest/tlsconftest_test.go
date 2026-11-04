@@ -5,7 +5,7 @@ import (
 	"crypto/x509"
 	"testing"
 
-	"github.com/helayoty/fiberd/pkg/tlsconf/tlsconftest"
+	"github.com/Azure/fiberd/pkg/tlsconf/tlsconftest"
 )
 
 // Issued certificates verify against their CA for the use they were

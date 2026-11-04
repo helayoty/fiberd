@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/helayoty/fiberd/pkg/core"
-	"github.com/helayoty/fiberd/pkg/core/coretest"
+	"github.com/Azure/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/core/coretest"
 )
 
 // createFiber drives one full Resolve→commit→unlock cycle and returns the

@@ -14,8 +14,8 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 
-	"github.com/helayoty/fiberd/examples/kubernetes/kube"
-	"github.com/helayoty/fiberd/examples/kubernetes/kube/kubetest"
+	"github.com/Azure/fiberd/examples/kubernetes/kube"
+	"github.com/Azure/fiberd/examples/kubernetes/kube/kubetest"
 )
 
 const cgPath = "/apis/fiberd.io/v1alpha1/namespaces/tenant-a/capacitygrants/conform"

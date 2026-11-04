@@ -11,8 +11,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/helayoty/fiberd/pkg/backend"
-	"github.com/helayoty/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/backend"
+	"github.com/Azure/fiberd/pkg/core"
 )
 
 // permOf is the permission bits of path, following a link, 0 when it

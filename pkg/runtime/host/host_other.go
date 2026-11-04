@@ -5,7 +5,7 @@ package host
 import (
 	"os"
 
-	"github.com/helayoty/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/core"
 )
 
 // Runtime is a placeholder so callers build on platforms without cgroup

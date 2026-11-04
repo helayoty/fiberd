@@ -19,11 +19,11 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 
-	grantv1 "github.com/helayoty/fiberd/api/grant/v1"
-	"github.com/helayoty/fiberd/pkg/core"
-	"github.com/helayoty/fiberd/pkg/rpc"
-	"github.com/helayoty/fiberd/pkg/runtime/host/wsfs"
-	"github.com/helayoty/fiberd/pkg/tlsconf"
+	grantv1 "github.com/Azure/fiberd/api/grant/v1"
+	"github.com/Azure/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/rpc"
+	"github.com/Azure/fiberd/pkg/runtime/host/wsfs"
+	"github.com/Azure/fiberd/pkg/tlsconf"
 )
 
 // memFiles is a core.FileStore in memory over the stub runtime. It takes

@@ -14,7 +14,7 @@ import (
 	"strings"
 	"text/tabwriter"
 
-	"github.com/helayoty/fiberd/bench/compare"
+	"github.com/Azure/fiberd/bench/compare"
 )
 
 // Read parses JSON lines. Blank lines are skipped and a bad line is an

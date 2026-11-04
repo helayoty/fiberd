@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/helayoty/fiberd/pkg/backend"
-	"github.com/helayoty/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/backend"
+	"github.com/Azure/fiberd/pkg/core"
 )
 
 // TestExitRightAfterCloneIsReported covers a zygote that answers CLONE and

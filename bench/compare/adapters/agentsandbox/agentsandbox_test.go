@@ -17,10 +17,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/helayoty/fiberd/bench/compare"
+	"github.com/Azure/fiberd/bench/compare"
 
-	"github.com/helayoty/fiberd/examples/kubernetes/kube"
-	"github.com/helayoty/fiberd/examples/kubernetes/kube/kubetest"
+	"github.com/Azure/fiberd/examples/kubernetes/kube"
+	"github.com/Azure/fiberd/examples/kubernetes/kube/kubetest"
 )
 
 func counter(t *testing.T) int {

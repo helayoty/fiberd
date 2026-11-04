@@ -16,7 +16,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/helayoty/fiberd/pkg/sys/criu"
+	"github.com/Azure/fiberd/pkg/sys/criu"
 )
 
 // fakeCriu writes a shell script that stands in for the criu binary and

@@ -26,12 +26,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/helayoty/fiberd/pkg/core"
-	"github.com/helayoty/fiberd/pkg/endpoint"
-	"github.com/helayoty/fiberd/pkg/grant"
-	"github.com/helayoty/fiberd/sdk/go/client"
+	"github.com/Azure/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/endpoint"
+	"github.com/Azure/fiberd/pkg/grant"
+	"github.com/Azure/fiberd/sdk/go/client"
 
-	"github.com/helayoty/fiberd/bench/compare"
+	"github.com/Azure/fiberd/bench/compare"
 )
 
 // Options configure the adapter.

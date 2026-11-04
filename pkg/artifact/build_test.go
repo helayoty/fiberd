@@ -10,7 +10,7 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/helayoty/fiberd/pkg/artifact"
+	"github.com/Azure/fiberd/pkg/artifact"
 )
 
 // fakePlatform is what fakeHost reports as this host.

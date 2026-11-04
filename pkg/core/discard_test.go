@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/helayoty/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/core"
 )
 
 // discardRuntime is mobileRuntime that can also delete a session's

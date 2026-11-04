@@ -16,10 +16,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/helayoty/fiberd/pkg/backend"
-	"github.com/helayoty/fiberd/pkg/core"
-	"github.com/helayoty/fiberd/pkg/runtime/host"
-	"github.com/helayoty/fiberd/pkg/runtime/host/wsfs"
+	"github.com/Azure/fiberd/pkg/backend"
+	"github.com/Azure/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/runtime/host"
+	"github.com/Azure/fiberd/pkg/runtime/host/wsfs"
 )
 
 // mountSourcesOf maps each mount point in pid's mount namespace to its

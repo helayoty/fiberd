@@ -17,7 +17,7 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/helayoty/fiberd/pkg/sys/criu"
+	"github.com/Azure/fiberd/pkg/sys/criu"
 )
 
 // header is the 8 magic bytes a pagemap image starts with.

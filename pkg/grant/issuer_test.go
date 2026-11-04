@@ -16,8 +16,8 @@ import (
 	"github.com/go-jose/go-jose/v4/jwt"
 	"google.golang.org/protobuf/encoding/protojson"
 
-	"github.com/helayoty/fiberd/pkg/core"
-	"github.com/helayoty/fiberd/pkg/grant"
+	"github.com/Azure/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/grant"
 )
 
 // serveIssuer mounts an Issuer at the root of a test server whose URL

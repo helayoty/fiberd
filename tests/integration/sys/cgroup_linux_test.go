@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/helayoty/fiberd/pkg/sys/cgroup"
+	"github.com/Azure/fiberd/pkg/sys/cgroup"
 )
 
 // TestCgroupHelperProcess is the body of the processes the cgroup tests

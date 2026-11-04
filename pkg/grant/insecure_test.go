@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/helayoty/fiberd/pkg/grant"
+	"github.com/Azure/fiberd/pkg/grant"
 )
 
 // The insecure JSON verifier skips the signature but not the UID check,

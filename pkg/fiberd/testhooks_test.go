@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/helayoty/fiberd/pkg/fiberd"
-	"github.com/helayoty/fiberd/pkg/grant"
-	"github.com/helayoty/fiberd/pkg/home"
+	"github.com/Azure/fiberd/pkg/fiberd"
+	"github.com/Azure/fiberd/pkg/grant"
+	"github.com/Azure/fiberd/pkg/home"
 )
 
 // TestTimingFlags checks that the testhooks build binds the cadence flags

@@ -6,7 +6,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 
-	"github.com/helayoty/fiberd/pkg/endpoint"
+	"github.com/Azure/fiberd/pkg/endpoint"
 )
 
 // How long EndpointHost waits for the kubelet to write the Pod's address,

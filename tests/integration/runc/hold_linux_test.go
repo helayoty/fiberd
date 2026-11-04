@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	runcbackend "github.com/helayoty/fiberd/pkg/backend/runc"
-	"github.com/helayoty/fiberd/pkg/core"
-	"github.com/helayoty/fiberd/pkg/runtime/host"
+	runcbackend "github.com/Azure/fiberd/pkg/backend/runc"
+	"github.com/Azure/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/runtime/host"
 )
 
 // oneSlot is a pool in which every grant collides with every other.

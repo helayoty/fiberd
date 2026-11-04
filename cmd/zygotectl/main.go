@@ -22,9 +22,9 @@ import (
 	"os"
 	"strings"
 
-	"github.com/helayoty/fiberd/internal/cli"
-	"github.com/helayoty/fiberd/pkg/artifact"
-	"github.com/helayoty/fiberd/pkg/sys/criu"
+	"github.com/Azure/fiberd/internal/cli"
+	"github.com/Azure/fiberd/pkg/artifact"
+	"github.com/Azure/fiberd/pkg/sys/criu"
 )
 
 // version is set at link time with -ldflags "-X main.version=v0.1.0".

@@ -34,9 +34,9 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/helayoty/fiberd/internal/cli"
-	"github.com/helayoty/fiberd/pkg/fiberd"
-	kubehome "github.com/helayoty/fiberd/pkg/home/kubernetes"
+	"github.com/Azure/fiberd/internal/cli"
+	"github.com/Azure/fiberd/pkg/fiberd"
+	kubehome "github.com/Azure/fiberd/pkg/home/kubernetes"
 )
 
 // version is set at link time with -ldflags "-X main.version=v0.1.0".

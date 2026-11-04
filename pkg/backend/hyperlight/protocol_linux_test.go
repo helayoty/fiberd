@@ -18,9 +18,9 @@ import (
 
 	"go.uber.org/goleak"
 
-	"github.com/helayoty/fiberd/pkg/artifact"
-	"github.com/helayoty/fiberd/pkg/backend"
-	"github.com/helayoty/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/artifact"
+	"github.com/Azure/fiberd/pkg/backend"
+	"github.com/Azure/fiberd/pkg/core"
 )
 
 // TestParseFacts checks that the four facts parse, or what is wrong with them.

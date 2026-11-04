@@ -15,12 +15,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/helayoty/fiberd/pkg/endpoint"
-	"github.com/helayoty/fiberd/pkg/fiberd"
-	"github.com/helayoty/fiberd/pkg/grant"
-	"github.com/helayoty/fiberd/pkg/home"
-	kubehome "github.com/helayoty/fiberd/pkg/home/kubernetes"
-	"github.com/helayoty/fiberd/pkg/home/kubernetes/fake"
+	"github.com/Azure/fiberd/pkg/endpoint"
+	"github.com/Azure/fiberd/pkg/fiberd"
+	"github.com/Azure/fiberd/pkg/grant"
+	"github.com/Azure/fiberd/pkg/home"
+	kubehome "github.com/Azure/fiberd/pkg/home/kubernetes"
+	"github.com/Azure/fiberd/pkg/home/kubernetes/fake"
 )
 
 // defaultCgroup is -cgroup-root's default.

@@ -42,7 +42,7 @@ import (
 	"google.golang.org/protobuf/types/known/emptypb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	"github.com/helayoty/fiberd/sdk/go/client"
+	"github.com/Azure/fiberd/sdk/go/client"
 )
 
 // Annotation keys.

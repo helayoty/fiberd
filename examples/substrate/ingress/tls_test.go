@@ -24,7 +24,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/helayoty/fiberd/examples/substrate/ingress"
+	"github.com/Azure/fiberd/examples/substrate/ingress"
 )
 
 // pki is a CA and what it issues, as Substrate projects it into Pods.

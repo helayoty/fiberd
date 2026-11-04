@@ -6,7 +6,7 @@ import (
 	"errors"
 	"log"
 
-	"github.com/helayoty/fiberd/pkg/sys/cgroup"
+	"github.com/Azure/fiberd/pkg/sys/cgroup"
 )
 
 // engineRelayer is a backend whose fibers have no process of their own,

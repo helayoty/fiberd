@@ -17,10 +17,10 @@ import (
 
 	"github.com/google/go-containerregistry/pkg/registry"
 
-	"github.com/helayoty/fiberd/pkg/artifact"
-	"github.com/helayoty/fiberd/pkg/core"
-	"github.com/helayoty/fiberd/pkg/runtime/host"
-	"github.com/helayoty/fiberd/pkg/sys/caps"
+	"github.com/Azure/fiberd/pkg/artifact"
+	"github.com/Azure/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/runtime/host"
+	"github.com/Azure/fiberd/pkg/sys/caps"
 )
 
 // pushTemplates builds one bare artifact per args list from the test

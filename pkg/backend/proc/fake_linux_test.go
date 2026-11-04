@@ -24,8 +24,8 @@ import (
 	"go.uber.org/goleak"
 	"golang.org/x/sys/unix"
 
-	"github.com/helayoty/fiberd/pkg/backend"
-	"github.com/helayoty/fiberd/pkg/sys/criu"
+	"github.com/Azure/fiberd/pkg/backend"
+	"github.com/Azure/fiberd/pkg/sys/criu"
 )
 
 // TestMain fails the package when a test leaves a goroutine behind, such

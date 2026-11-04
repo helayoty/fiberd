@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/helayoty/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/core"
 )
 
 // Verifier implements core.Verifier against a JWKS Cache. It never makes

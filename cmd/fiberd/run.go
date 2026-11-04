@@ -41,12 +41,12 @@ import (
 
 	"google.golang.org/protobuf/encoding/protojson"
 
-	"github.com/helayoty/fiberd/internal/cli"
-	"github.com/helayoty/fiberd/pkg/core"
-	"github.com/helayoty/fiberd/pkg/endpoint"
-	"github.com/helayoty/fiberd/pkg/fiberd"
-	"github.com/helayoty/fiberd/pkg/grant"
-	"github.com/helayoty/fiberd/sdk/go/client"
+	"github.com/Azure/fiberd/internal/cli"
+	"github.com/Azure/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/endpoint"
+	"github.com/Azure/fiberd/pkg/fiberd"
+	"github.com/Azure/fiberd/pkg/grant"
+	"github.com/Azure/fiberd/sdk/go/client"
 )
 
 // runNode is the -node-id fiberd runs as under run, and the audience of

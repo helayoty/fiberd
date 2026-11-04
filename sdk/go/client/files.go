@@ -9,8 +9,8 @@ import (
 	"io/fs"
 	"sync/atomic"
 
-	grantv1 "github.com/helayoty/fiberd/api/grant/v1"
-	"github.com/helayoty/fiberd/pkg/rpc"
+	grantv1 "github.com/Azure/fiberd/api/grant/v1"
+	"github.com/Azure/fiberd/pkg/rpc"
 )
 
 // FileInfo describes one entry of a fiber's workspace.

@@ -16,11 +16,11 @@ import (
 	"k8s.io/klog/v2"
 	"k8s.io/klog/v2/textlogger"
 
-	"github.com/helayoty/fiberd/internal/cli"
-	"github.com/helayoty/fiberd/pkg/fiberd"
-	"github.com/helayoty/fiberd/pkg/grant"
-	"github.com/helayoty/fiberd/pkg/home"
-	kubehome "github.com/helayoty/fiberd/pkg/home/kubernetes"
+	"github.com/Azure/fiberd/internal/cli"
+	"github.com/Azure/fiberd/pkg/fiberd"
+	"github.com/Azure/fiberd/pkg/grant"
+	"github.com/Azure/fiberd/pkg/home"
+	kubehome "github.com/Azure/fiberd/pkg/home/kubernetes"
 )
 
 // The forms fiberd runs in, besides fiberd run.

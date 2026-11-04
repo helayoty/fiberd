@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/helayoty/fiberd/pkg/backend"
+	"github.com/Azure/fiberd/pkg/backend"
 )
 
 // fileSHA256 is the hex SHA-256 of a file.

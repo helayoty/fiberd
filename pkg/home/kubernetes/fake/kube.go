@@ -13,7 +13,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
-	"github.com/helayoty/fiberd/pkg/home/kubernetes"
+	"github.com/Azure/fiberd/pkg/home/kubernetes"
 )
 
 var claimsResource = schema.GroupResource{Group: "resource.k8s.io", Resource: "resourceclaims"}

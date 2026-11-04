@@ -12,10 +12,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/helayoty/fiberd/pkg/core"
-	"github.com/helayoty/fiberd/pkg/endpoint"
+	"github.com/Azure/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/endpoint"
 
-	"github.com/helayoty/fiberd/examples/slurm/home"
+	"github.com/Azure/fiberd/examples/slurm/home"
 )
 
 func env(over map[string]string) func(string) string {

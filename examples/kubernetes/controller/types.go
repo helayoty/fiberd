@@ -3,7 +3,7 @@ package controller
 import (
 	"encoding/json"
 
-	"github.com/helayoty/fiberd/examples/kubernetes/kube"
+	"github.com/Azure/fiberd/examples/kubernetes/kube"
 )
 
 // The CapacityGrant custom resource, fiberd.io/v1alpha1. Its spec is the

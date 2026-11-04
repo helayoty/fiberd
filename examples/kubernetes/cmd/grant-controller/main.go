@@ -19,10 +19,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/helayoty/fiberd/pkg/grant"
+	"github.com/Azure/fiberd/pkg/grant"
 
-	"github.com/helayoty/fiberd/examples/kubernetes/controller"
-	"github.com/helayoty/fiberd/examples/kubernetes/kube"
+	"github.com/Azure/fiberd/examples/kubernetes/controller"
+	"github.com/Azure/fiberd/examples/kubernetes/kube"
 )
 
 // Where the cluster client and this Pod's namespace come from, and a hook

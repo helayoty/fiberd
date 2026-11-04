@@ -1,6 +1,6 @@
 package home
 
-import "github.com/helayoty/fiberd/examples/kubernetes/kube"
+import "github.com/Azure/fiberd/examples/kubernetes/kube"
 
 // The objects the home reads, cut down to the fields it uses.
 

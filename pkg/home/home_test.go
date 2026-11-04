@@ -11,10 +11,10 @@ import (
 
 	"google.golang.org/protobuf/encoding/protojson"
 
-	"github.com/helayoty/fiberd/pkg/core"
-	"github.com/helayoty/fiberd/pkg/grant"
-	"github.com/helayoty/fiberd/pkg/home"
-	"github.com/helayoty/fiberd/pkg/runtime/stub"
+	"github.com/Azure/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/grant"
+	"github.com/Azure/fiberd/pkg/home"
+	"github.com/Azure/fiberd/pkg/runtime/stub"
 )
 
 type ready struct {

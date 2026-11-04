@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/helayoty/fiberd/pkg/tlsconf/tlsconftest"
+	"github.com/Azure/fiberd/pkg/tlsconf/tlsconftest"
 )
 
 const keptMsg = "tlsconf: keeping the previous server certificate and client CA"

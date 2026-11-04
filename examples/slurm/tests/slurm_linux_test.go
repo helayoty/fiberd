@@ -23,9 +23,9 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	grantv1 "github.com/helayoty/fiberd/api/grant/v1"
+	grantv1 "github.com/Azure/fiberd/api/grant/v1"
 
-	"github.com/helayoty/fiberd/examples/slurm/home"
+	"github.com/Azure/fiberd/examples/slurm/home"
 )
 
 // TestSlurmMainExit runs the binary and checks its exit status. It is 0

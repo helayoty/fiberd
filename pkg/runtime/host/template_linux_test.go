@@ -17,8 +17,8 @@ import (
 
 	"github.com/google/go-containerregistry/pkg/registry"
 
-	"github.com/helayoty/fiberd/pkg/artifact"
-	"github.com/helayoty/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/artifact"
+	"github.com/Azure/fiberd/pkg/core"
 )
 
 // TestResolveTemplateDigest checks that a registry template's digest names its

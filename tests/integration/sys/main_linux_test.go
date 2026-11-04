@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/helayoty/fiberd/tests/internal/testenv"
+	"github.com/Azure/fiberd/tests/internal/testenv"
 )
 
 // cgRoot is the cgroup subtree the dev container delegates to the tests.

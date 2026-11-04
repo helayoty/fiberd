@@ -19,7 +19,7 @@ import (
 	"github.com/go-logr/logr"
 	"k8s.io/utils/clock"
 
-	"github.com/helayoty/fiberd/pkg/grant"
+	"github.com/Azure/fiberd/pkg/grant"
 )
 
 const (

@@ -17,10 +17,10 @@ import (
 	"testing"
 	"time"
 
-	procbackend "github.com/helayoty/fiberd/pkg/backend/proc"
-	"github.com/helayoty/fiberd/pkg/core"
-	fiberendpoint "github.com/helayoty/fiberd/pkg/endpoint"
-	"github.com/helayoty/fiberd/pkg/runtime/host"
+	procbackend "github.com/Azure/fiberd/pkg/backend/proc"
+	"github.com/Azure/fiberd/pkg/core"
+	fiberendpoint "github.com/Azure/fiberd/pkg/endpoint"
+	"github.com/Azure/fiberd/pkg/runtime/host"
 )
 
 // unixOnlyProc is the fork backend without its tcp scheme, so a tcp home

@@ -29,8 +29,8 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/helayoty/fiberd/examples/substrate/capacity"
-	ateletpb "github.com/helayoty/fiberd/examples/substrate/proto/atelet"
+	"github.com/Azure/fiberd/examples/substrate/capacity"
+	ateletpb "github.com/Azure/fiberd/examples/substrate/proto/atelet"
 )
 
 func write(t *testing.T, dir, name, s string) string {

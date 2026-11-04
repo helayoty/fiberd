@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/helayoty/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/core"
 )
 
 // auditLog keeps audit records in memory. It is safe for concurrent use.

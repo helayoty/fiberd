@@ -5,11 +5,11 @@ package controller
 import (
 	"testing"
 
-	"github.com/helayoty/fiberd/pkg/backend"
-	gvisorbackend "github.com/helayoty/fiberd/pkg/backend/gvisor"
-	hlbackend "github.com/helayoty/fiberd/pkg/backend/hyperlight"
-	procbackend "github.com/helayoty/fiberd/pkg/backend/proc"
-	runcbackend "github.com/helayoty/fiberd/pkg/backend/runc"
+	"github.com/Azure/fiberd/pkg/backend"
+	gvisorbackend "github.com/Azure/fiberd/pkg/backend/gvisor"
+	hlbackend "github.com/Azure/fiberd/pkg/backend/hyperlight"
+	procbackend "github.com/Azure/fiberd/pkg/backend/proc"
+	runcbackend "github.com/Azure/fiberd/pkg/backend/runc"
 )
 
 // TestIsolatingMatchesTheBackends checks that the runtimes the controller

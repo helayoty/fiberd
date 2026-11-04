@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/helayoty/fiberd/pkg/fiberd"
+	"github.com/Azure/fiberd/pkg/fiberd"
 )
 
 // TestReleaseHasNoTestFlags checks that a release build has neither

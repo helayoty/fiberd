@@ -15,8 +15,8 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 
-	"github.com/helayoty/fiberd/pkg/core"
-	"github.com/helayoty/fiberd/pkg/home/kubernetes"
+	"github.com/Azure/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/home/kubernetes"
 )
 
 var claimsResource = schema.GroupResource{Group: "resource.k8s.io", Resource: "resourceclaims"}

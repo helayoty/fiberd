@@ -7,8 +7,8 @@ import (
 
 	"google.golang.org/grpc/codes"
 
-	grantv1 "github.com/helayoty/fiberd/api/grant/v1"
-	"github.com/helayoty/fiberd/pkg/core"
+	grantv1 "github.com/Azure/fiberd/api/grant/v1"
+	"github.com/Azure/fiberd/pkg/core"
 )
 
 // C13: Discard deletes a parked session by name. Clone(S), Park, Discard,

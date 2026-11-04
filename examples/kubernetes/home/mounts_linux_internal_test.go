@@ -11,8 +11,8 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/helayoty/fiberd/examples/kubernetes/kube"
-	"github.com/helayoty/fiberd/examples/kubernetes/kube/kubetest"
+	"github.com/Azure/fiberd/examples/kubernetes/kube"
+	"github.com/Azure/fiberd/examples/kubernetes/kube/kubetest"
 )
 
 // fakeMounter is a mount table in memory. Paths in ro answer EROFS until

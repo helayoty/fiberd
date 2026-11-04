@@ -12,7 +12,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"github.com/helayoty/fiberd/pkg/sys/mounts"
+	"github.com/Azure/fiberd/pkg/sys/mounts"
 )
 
 // cgroupMount is the cgroup v2 mount a container gives fiberd.

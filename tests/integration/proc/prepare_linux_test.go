@@ -12,7 +12,7 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/helayoty/fiberd/tests/internal/testenv"
+	"github.com/Azure/fiberd/tests/internal/testenv"
 )
 
 var (

@@ -27,15 +27,15 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/encoding/protojson"
 
-	grantv1 "github.com/helayoty/fiberd/api/grant/v1"
-	"github.com/helayoty/fiberd/pkg/core"
-	"github.com/helayoty/fiberd/pkg/fiberd"
-	"github.com/helayoty/fiberd/pkg/grant"
-	"github.com/helayoty/fiberd/pkg/home"
-	"github.com/helayoty/fiberd/pkg/rpc"
-	"github.com/helayoty/fiberd/pkg/runtime/stub"
-	"github.com/helayoty/fiberd/pkg/tlsconf"
-	"github.com/helayoty/fiberd/pkg/tlsconf/tlsconftest"
+	grantv1 "github.com/Azure/fiberd/api/grant/v1"
+	"github.com/Azure/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/fiberd"
+	"github.com/Azure/fiberd/pkg/grant"
+	"github.com/Azure/fiberd/pkg/home"
+	"github.com/Azure/fiberd/pkg/rpc"
+	"github.com/Azure/fiberd/pkg/runtime/stub"
+	"github.com/Azure/fiberd/pkg/tlsconf"
+	"github.com/Azure/fiberd/pkg/tlsconf/tlsconftest"
 )
 
 const nodeID = "node-a"
@@ -137,7 +137,7 @@ func (r *running) stop(t *testing.T) error {
 // returned, and fails when one outlives the deadline.
 func noRunGoroutines(t *testing.T) {
 	t.Helper()
-	const mark = "created by github.com/helayoty/fiberd/pkg/fiberd.RunContext"
+	const mark = "created by github.com/Azure/fiberd/pkg/fiberd.RunContext"
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		buf := make([]byte, 8<<20)

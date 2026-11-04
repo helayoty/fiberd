@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/helayoty/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/core"
 )
 
 // TestRootfsReadOnly: the rootfs is one host directory served to every

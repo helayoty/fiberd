@@ -18,7 +18,7 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 
-	"github.com/helayoty/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/core"
 )
 
 // spoolOf writes a spool in dir. unchained is written before the spool

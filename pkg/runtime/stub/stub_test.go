@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/helayoty/fiberd/pkg/core"
-	"github.com/helayoty/fiberd/pkg/runtime/stub"
+	"github.com/Azure/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/runtime/stub"
 )
 
 func TestCapabilities(t *testing.T) {

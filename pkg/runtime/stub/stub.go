@@ -12,7 +12,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/helayoty/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/core"
 )
 
 type fiber struct {

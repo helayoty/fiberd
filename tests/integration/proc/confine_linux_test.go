@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/helayoty/fiberd/pkg/backend"
-	procbackend "github.com/helayoty/fiberd/pkg/backend/proc"
+	"github.com/Azure/fiberd/pkg/backend"
+	procbackend "github.com/Azure/fiberd/pkg/backend/proc"
 )
 
 // warmDirect opens the fork backend on its own, without the host

@@ -1,7 +1,7 @@
 // The Kubernetes integration of fiberd: its own module, so what it needs
 // never lands in fiberd's own go.mod. It builds against the checkout it
 // sits in.
-module github.com/helayoty/fiberd/examples/kubernetes
+module github.com/Azure/fiberd/examples/kubernetes
 
 go 1.26.0
 
@@ -9,7 +9,7 @@ toolchain go1.26.7
 
 require (
 	github.com/go-jose/go-jose/v4 v4.1.5
-	github.com/helayoty/fiberd v0.0.0
+	github.com/Azure/fiberd v0.0.0
 )
 
 require (
@@ -26,4 +26,4 @@ require (
 	oras.land/oras-go/v2 v2.6.2 // indirect
 )
 
-replace github.com/helayoty/fiberd => ../..
+replace github.com/Azure/fiberd => ../..

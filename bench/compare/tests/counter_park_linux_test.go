@@ -17,9 +17,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/helayoty/fiberd/bench/compare"
-	"github.com/helayoty/fiberd/bench/compare/adapters/fiberd"
-	"github.com/helayoty/fiberd/pkg/endpoint"
+	"github.com/Azure/fiberd/bench/compare"
+	"github.com/Azure/fiberd/bench/compare/adapters/fiberd"
+	"github.com/Azure/fiberd/pkg/endpoint"
 )
 
 // repoRoot is the checkout's root, from this package.

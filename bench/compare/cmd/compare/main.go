@@ -21,14 +21,14 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/helayoty/fiberd/examples/kubernetes/kube"
+	"github.com/Azure/fiberd/examples/kubernetes/kube"
 
-	"github.com/helayoty/fiberd/bench/compare"
-	"github.com/helayoty/fiberd/bench/compare/adapters/agentsandbox"
-	"github.com/helayoty/fiberd/bench/compare/adapters/fiberd"
-	"github.com/helayoty/fiberd/bench/compare/adapters/firecracker"
-	"github.com/helayoty/fiberd/bench/compare/adapters/pod"
-	"github.com/helayoty/fiberd/bench/compare/promtext"
+	"github.com/Azure/fiberd/bench/compare"
+	"github.com/Azure/fiberd/bench/compare/adapters/agentsandbox"
+	"github.com/Azure/fiberd/bench/compare/adapters/fiberd"
+	"github.com/Azure/fiberd/bench/compare/adapters/firecracker"
+	"github.com/Azure/fiberd/bench/compare/adapters/pod"
+	"github.com/Azure/fiberd/bench/compare/promtext"
 )
 
 type opts struct {

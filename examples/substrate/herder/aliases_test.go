@@ -1,6 +1,6 @@
 package herder
 
-import ateompb "github.com/helayoty/fiberd/examples/substrate/proto/ateom"
+import ateompb "github.com/Azure/fiberd/examples/substrate/proto/ateom"
 
 // Short names for the generated types, so the tests read as the protocol.
 type (

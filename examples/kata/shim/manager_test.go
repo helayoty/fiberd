@@ -25,7 +25,7 @@ import (
 	"github.com/containerd/plugin"
 	"github.com/containerd/plugin/registry"
 
-	fshim "github.com/helayoty/fiberd/examples/kata/shim"
+	fshim "github.com/Azure/fiberd/examples/kata/shim"
 )
 
 // daemon is what Manager.Start handed over to run as the shim daemon.

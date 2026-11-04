@@ -14,7 +14,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/helayoty/fiberd/pkg/sys/caps"
+	"github.com/Azure/fiberd/pkg/sys/caps"
 )
 
 // allCaps is every capability number a mask can hold.

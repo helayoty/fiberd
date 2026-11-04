@@ -22,9 +22,9 @@ import (
 
 	"google.golang.org/protobuf/encoding/protojson"
 
-	"github.com/helayoty/fiberd/pkg/core"
-	"github.com/helayoty/fiberd/pkg/fiberd"
-	"github.com/helayoty/fiberd/pkg/grant"
+	"github.com/Azure/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/fiberd"
+	"github.com/Azure/fiberd/pkg/grant"
 )
 
 // fiberdNode is the -node-id fiberd runs as here, and the audience of
@@ -151,7 +151,7 @@ func fiberdHealth(t *testing.T, c *fiberd.Config) map[string]any {
 // returned, and fails when one outlives the deadline.
 func noFiberdGoroutines(t *testing.T) {
 	t.Helper()
-	const mark = "created by github.com/helayoty/fiberd/pkg/fiberd.RunContext"
+	const mark = "created by github.com/Azure/fiberd/pkg/fiberd.RunContext"
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		buf := make([]byte, 8<<20)

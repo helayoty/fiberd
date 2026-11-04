@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/helayoty/fiberd/pkg/backend"
-	gvisorbackend "github.com/helayoty/fiberd/pkg/backend/gvisor"
-	"github.com/helayoty/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/backend"
+	gvisorbackend "github.com/Azure/fiberd/pkg/backend/gvisor"
+	"github.com/Azure/fiberd/pkg/core"
 )
 
 // thpEnabled is the THP_enabled field of /proc/<pid>/status, the inverse

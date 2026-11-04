@@ -18,14 +18,14 @@ import (
 	"google.golang.org/grpc/test/bufconn"
 	"google.golang.org/protobuf/encoding/protojson"
 
-	"github.com/helayoty/fiberd/pkg/core"
-	"github.com/helayoty/fiberd/pkg/core/coretest"
-	"github.com/helayoty/fiberd/pkg/grant"
-	"github.com/helayoty/fiberd/pkg/rpc"
-	"github.com/helayoty/fiberd/pkg/runtime/stub"
-	"github.com/helayoty/fiberd/sdk/go/client"
+	"github.com/Azure/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/core/coretest"
+	"github.com/Azure/fiberd/pkg/grant"
+	"github.com/Azure/fiberd/pkg/rpc"
+	"github.com/Azure/fiberd/pkg/runtime/stub"
+	"github.com/Azure/fiberd/sdk/go/client"
 
-	"github.com/helayoty/fiberd/examples/knative/activator"
+	"github.com/Azure/fiberd/examples/knative/activator"
 )
 
 // A stub home in process, and a fake "guest" behind every endpoint the

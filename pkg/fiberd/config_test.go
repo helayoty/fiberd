@@ -14,11 +14,11 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 
-	"github.com/helayoty/fiberd/pkg/artifact"
-	runcbackend "github.com/helayoty/fiberd/pkg/backend/runc"
-	"github.com/helayoty/fiberd/pkg/endpoint"
-	"github.com/helayoty/fiberd/pkg/fiberd"
-	"github.com/helayoty/fiberd/pkg/grant"
+	"github.com/Azure/fiberd/pkg/artifact"
+	runcbackend "github.com/Azure/fiberd/pkg/backend/runc"
+	"github.com/Azure/fiberd/pkg/endpoint"
+	"github.com/Azure/fiberd/pkg/fiberd"
+	"github.com/Azure/fiberd/pkg/grant"
 )
 
 // parse binds a fresh Config, parses args and finishes it.

@@ -8,8 +8,8 @@ package hyperlight
 import (
 	"context"
 
-	"github.com/helayoty/fiberd/pkg/backend"
-	"github.com/helayoty/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/backend"
+	"github.com/Azure/fiberd/pkg/core"
 )
 
 // Options configure the Hyperlight backend.

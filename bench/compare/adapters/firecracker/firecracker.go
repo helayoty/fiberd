@@ -29,7 +29,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/helayoty/fiberd/bench/compare"
+	"github.com/Azure/fiberd/bench/compare"
 )
 
 // Options configure the adapter.

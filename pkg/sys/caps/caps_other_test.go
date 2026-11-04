@@ -5,7 +5,7 @@ package caps_test
 import (
 	"testing"
 
-	"github.com/helayoty/fiberd/pkg/sys/caps"
+	"github.com/Azure/fiberd/pkg/sys/caps"
 )
 
 // TestNoCapabilities checks that off Linux there are no capabilities to

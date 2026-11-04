@@ -33,7 +33,7 @@
 FROM node:24-bookworm-slim@sha256:a5f4366e834695d5f363b920c104953a535d3a9864d1bdf74566a0ebe01daee5 AS node
 FROM golang:1.26-bookworm@sha256:dc9ad6c05acc7a88e5b71bde60a5fe3bd4b9f0db209011711b464107438a8107
 
-LABEL org.opencontainers.image.source="https://github.com/helayoty/fiberd" \
+LABEL org.opencontainers.image.source="https://github.com/Azure/fiberd" \
       org.opencontainers.image.description="fiberd Linux development workbench: Go, criu, runsc, Rust, cargo-hyperlight, CPython 3.14 and Node.js 24" \
       org.opencontainers.image.licenses="Apache-2.0"
 

@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/helayoty/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/core"
 )
 
 // TestSpoolFsyncFailure pins what a failed fsync means. Every sync append

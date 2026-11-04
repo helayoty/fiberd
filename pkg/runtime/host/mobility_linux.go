@@ -13,8 +13,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/helayoty/fiberd/pkg/artifact"
-	"github.com/helayoty/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/artifact"
+	"github.com/Azure/fiberd/pkg/core"
 )
 
 // What a parked session's discard and the boot sweep ask of the runtime.

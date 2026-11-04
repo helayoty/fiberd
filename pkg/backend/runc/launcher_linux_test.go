@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/helayoty/fiberd/pkg/backend"
+	"github.com/Azure/fiberd/pkg/backend"
 )
 
 // TestExitedIn checks the /proc reading waitPID relies on. A zombie counts

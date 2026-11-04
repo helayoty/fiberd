@@ -11,8 +11,8 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 
-	"github.com/helayoty/fiberd/pkg/artifact"
-	"github.com/helayoty/fiberd/pkg/grant"
+	"github.com/Azure/fiberd/pkg/artifact"
+	"github.com/Azure/fiberd/pkg/grant"
 )
 
 func genKey(t *testing.T, alg jose.SignatureAlgorithm) *jose.JSONWebKey {

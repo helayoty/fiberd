@@ -6,8 +6,8 @@ import (
 
 	"google.golang.org/protobuf/encoding/protojson"
 
-	grantv1 "github.com/helayoty/fiberd/api/grant/v1"
-	"github.com/helayoty/fiberd/pkg/core"
+	grantv1 "github.com/Azure/fiberd/api/grant/v1"
+	"github.com/Azure/fiberd/pkg/core"
 )
 
 // InsecureJSONVerifier accepts a CapacityGrant encoded as protobuf JSON in

@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	procbackend "github.com/helayoty/fiberd/pkg/backend/proc"
-	"github.com/helayoty/fiberd/pkg/core"
+	procbackend "github.com/Azure/fiberd/pkg/backend/proc"
+	"github.com/Azure/fiberd/pkg/core"
 )
 
 // mountAt returns the optional fields (shared:N, master:N, ...) of the

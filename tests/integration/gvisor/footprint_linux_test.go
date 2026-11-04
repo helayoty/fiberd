@@ -13,9 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/helayoty/fiberd/pkg/backend"
-	gvisorbackend "github.com/helayoty/fiberd/pkg/backend/gvisor"
-	"github.com/helayoty/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/backend"
+	gvisorbackend "github.com/Azure/fiberd/pkg/backend/gvisor"
+	"github.com/Azure/fiberd/pkg/core"
 )
 
 // cgroupLeaf makes an empty cgroup under the delegated root and opens

@@ -13,7 +13,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/helayoty/fiberd/tests/internal/testenv"
+	"github.com/Azure/fiberd/tests/internal/testenv"
 )
 
 // TestFiberdRunsHello runs the examples/fiberd-cli templates the way the

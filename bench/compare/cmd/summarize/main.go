@@ -19,8 +19,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/helayoty/fiberd/bench/compare"
-	"github.com/helayoty/fiberd/bench/compare/summary"
+	"github.com/Azure/fiberd/bench/compare"
+	"github.com/Azure/fiberd/bench/compare/summary"
 )
 
 // phases name the directories the run scripts write.

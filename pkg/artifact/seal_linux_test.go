@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/helayoty/fiberd/pkg/artifact"
+	"github.com/Azure/fiberd/pkg/artifact"
 )
 
 // TestSealFullDevice seals into /dev/full, where every write fails as on

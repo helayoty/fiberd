@@ -10,7 +10,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/helayoty/fiberd/pkg/home/kubernetes"
+	"github.com/Azure/fiberd/pkg/home/kubernetes"
 )
 
 // TestWarmMessage checks the condition message for every size of warm

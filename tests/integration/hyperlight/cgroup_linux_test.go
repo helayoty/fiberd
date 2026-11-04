@@ -14,8 +14,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/helayoty/fiberd/pkg/backend"
-	hlbackend "github.com/helayoty/fiberd/pkg/backend/hyperlight"
+	"github.com/Azure/fiberd/pkg/backend"
+	hlbackend "github.com/Azure/fiberd/pkg/backend/hyperlight"
 )
 
 // TestHelperStartsInCgroup checks what only a real helper process shows:

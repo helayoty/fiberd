@@ -16,7 +16,7 @@ import (
 
 	"github.com/google/go-containerregistry/pkg/registry"
 
-	"github.com/helayoty/fiberd/pkg/artifact"
+	"github.com/Azure/fiberd/pkg/artifact"
 )
 
 // sealMagic is how every sealed file starts.

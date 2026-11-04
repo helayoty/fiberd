@@ -9,8 +9,8 @@ import (
 	"os"
 	"syscall"
 
-	"github.com/helayoty/fiberd/pkg/backend"
-	"github.com/helayoty/fiberd/pkg/handoff"
+	"github.com/Azure/fiberd/pkg/backend"
+	"github.com/Azure/fiberd/pkg/handoff"
 )
 
 // handoffEndpoint is what a handoff fiber is told to serve on. It binds

@@ -9,9 +9,9 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/helayoty/fiberd/examples/kubernetes/home"
-	"github.com/helayoty/fiberd/examples/kubernetes/kube"
-	"github.com/helayoty/fiberd/examples/kubernetes/kube/kubetest"
+	"github.com/Azure/fiberd/examples/kubernetes/home"
+	"github.com/Azure/fiberd/examples/kubernetes/kube"
+	"github.com/Azure/fiberd/examples/kubernetes/kube/kubetest"
 )
 
 // mountTmpfs mounts a fresh tmpfs at dir until the test ends.

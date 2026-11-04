@@ -13,7 +13,7 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/helayoty/fiberd/pkg/sys/criu"
+	"github.com/Azure/fiberd/pkg/sys/criu"
 )
 
 // fakeCriu stands in for the criu binary behind Options.Commander. It

@@ -1,6 +1,6 @@
 package fiberd
 
-import "github.com/helayoty/fiberd/pkg/core"
+import "github.com/Azure/fiberd/pkg/core"
 
 // SetAuditHealth replaces what /healthz reads as the spool's state, so a
 // test can poison it.

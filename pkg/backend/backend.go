@@ -18,8 +18,8 @@ import (
 	"os"
 	"time"
 
-	"github.com/helayoty/fiberd/pkg/artifact"
-	"github.com/helayoty/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/artifact"
+	"github.com/Azure/fiberd/pkg/core"
 )
 
 // ErrUnsupported: this backend cannot run on this platform.

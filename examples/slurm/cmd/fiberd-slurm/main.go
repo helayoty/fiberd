@@ -21,11 +21,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/helayoty/fiberd/pkg/fiberd"
-	"github.com/helayoty/fiberd/pkg/grant"
-	fhome "github.com/helayoty/fiberd/pkg/home"
+	"github.com/Azure/fiberd/pkg/fiberd"
+	"github.com/Azure/fiberd/pkg/grant"
+	fhome "github.com/Azure/fiberd/pkg/home"
 
-	"github.com/helayoty/fiberd/examples/slurm/home"
+	"github.com/Azure/fiberd/examples/slurm/home"
 )
 
 func main() {

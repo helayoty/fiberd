@@ -2,15 +2,15 @@
 // own module, so what it needs never lands in fiberd's own go.mod. It
 // builds against the checkout it sits in, and borrows the Kubernetes
 // example's small API client instead of client-go.
-module github.com/helayoty/fiberd/bench/compare
+module github.com/Azure/fiberd/bench/compare
 
 go 1.26.0
 
 toolchain go1.26.7
 
 require (
-	github.com/helayoty/fiberd v0.0.0
-	github.com/helayoty/fiberd/examples/kubernetes v0.0.0
+	github.com/Azure/fiberd v0.0.0
+	github.com/Azure/fiberd/examples/kubernetes v0.0.0
 	go.uber.org/goleak v1.3.0
 	google.golang.org/grpc v1.83.2
 	google.golang.org/protobuf v1.36.12
@@ -25,6 +25,6 @@ require (
 )
 
 replace (
-	github.com/helayoty/fiberd => ../..
-	github.com/helayoty/fiberd/examples/kubernetes => ../../examples/kubernetes
+	github.com/Azure/fiberd => ../..
+	github.com/Azure/fiberd/examples/kubernetes => ../../examples/kubernetes
 )

@@ -17,9 +17,9 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"github.com/helayoty/fiberd/pkg/backend"
-	"github.com/helayoty/fiberd/pkg/backend/proc"
-	"github.com/helayoty/fiberd/pkg/sys/criu"
+	"github.com/Azure/fiberd/pkg/backend"
+	"github.com/Azure/fiberd/pkg/backend/proc"
+	"github.com/Azure/fiberd/pkg/sys/criu"
 )
 
 // A fiber with a workspace is born into a copy of the container's mount

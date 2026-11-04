@@ -1,14 +1,14 @@
 // The Knative-over-Hyperlight example: its own module, so what it needs
 // never lands in fiberd's own go.mod. It builds against the checkout it
 // sits in.
-module github.com/helayoty/fiberd/examples/knative
+module github.com/Azure/fiberd/examples/knative
 
 go 1.26.0
 
 toolchain go1.26.7
 
 require (
-	github.com/helayoty/fiberd v0.0.0
+	github.com/Azure/fiberd v0.0.0
 	google.golang.org/grpc v1.83.2
 	google.golang.org/protobuf v1.36.12
 )
@@ -21,4 +21,4 @@ require (
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260526163538-3dc84a4a5aaa // indirect
 )
 
-replace github.com/helayoty/fiberd => ../..
+replace github.com/Azure/fiberd => ../..

@@ -16,7 +16,7 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/helayoty/fiberd/pkg/sys/netns"
+	"github.com/Azure/fiberd/pkg/sys/netns"
 )
 
 // newNetNS starts a process in a network namespace of its own and

@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/helayoty/fiberd/pkg/artifact"
+	"github.com/Azure/fiberd/pkg/artifact"
 )
 
 // The parent store holds template memory in the clear. It is owner-only,

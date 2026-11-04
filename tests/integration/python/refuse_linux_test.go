@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/helayoty/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/core"
 )
 
 // TestRulesRefuseAtServe pins that a template which breaks a rule of the

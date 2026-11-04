@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/helayoty/fiberd/pkg/core"
-	"github.com/helayoty/fiberd/pkg/sys/cgroup"
-	"github.com/helayoty/fiberd/tests/internal/testenv"
+	"github.com/Azure/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/sys/cgroup"
+	"github.com/Azure/fiberd/tests/internal/testenv"
 )
 
 // stormProc measures fork and copy-on-write through the real runtime

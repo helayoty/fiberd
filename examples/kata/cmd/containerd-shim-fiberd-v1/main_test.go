@@ -13,7 +13,7 @@ import (
 	"github.com/containerd/plugin/registry"
 	"google.golang.org/protobuf/proto"
 
-	fshim "github.com/helayoty/fiberd/examples/kata/shim"
+	fshim "github.com/Azure/fiberd/examples/kata/shim"
 )
 
 // runMain runs main as containerd runs the binary, with args, and returns

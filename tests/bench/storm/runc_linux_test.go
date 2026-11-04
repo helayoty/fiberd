@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/helayoty/fiberd/pkg/core"
-	"github.com/helayoty/fiberd/tests/internal/testenv"
+	"github.com/Azure/fiberd/pkg/core"
+	"github.com/Azure/fiberd/tests/internal/testenv"
 )
 
 // stormRunc is the proc storm on the runc backend, so the two compare

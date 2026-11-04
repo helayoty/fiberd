@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/helayoty/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/core"
 )
 
 // sandboxes lists the sandbox ids under the current runtime's runsc root.

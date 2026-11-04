@@ -12,10 +12,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/helayoty/fiberd/pkg/core"
-	"github.com/helayoty/fiberd/pkg/grant"
-	"github.com/helayoty/fiberd/pkg/home"
-	"github.com/helayoty/fiberd/pkg/home/grantdir"
+	"github.com/Azure/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/grant"
+	"github.com/Azure/fiberd/pkg/home"
+	"github.com/Azure/fiberd/pkg/home/grantdir"
 )
 
 type Config struct {

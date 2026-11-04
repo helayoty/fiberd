@@ -8,7 +8,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/rest"
 
-	"github.com/helayoty/fiberd/pkg/home/kubernetes"
+	"github.com/Azure/fiberd/pkg/home/kubernetes"
 )
 
 func group(name, preferred string, versions ...string) metav1.APIGroup {

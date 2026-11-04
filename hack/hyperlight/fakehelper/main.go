@@ -14,7 +14,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/helayoty/fiberd/hack/hyperlight/fakehelper/helper"
+	"github.com/Azure/fiberd/hack/hyperlight/fakehelper/helper"
 )
 
 func main() {

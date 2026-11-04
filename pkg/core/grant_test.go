@@ -3,7 +3,7 @@ package core_test
 import (
 	"testing"
 
-	"github.com/helayoty/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/core"
 )
 
 // TestIsolationNames checks that ParseIsolation accepts the proto names in

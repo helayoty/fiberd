@@ -1,7 +1,7 @@
 // Package coretest holds helpers for tests of code built on pkg/core.
 package coretest
 
-import "github.com/helayoty/fiberd/pkg/core"
+import "github.com/Azure/fiberd/pkg/core"
 
 // GrantStatus returns the ledger's status for one grant, and false when
 // the grant is not admitted.

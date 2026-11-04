@@ -12,10 +12,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/helayoty/fiberd/pkg/artifact"
-	"github.com/helayoty/fiberd/pkg/backend"
-	"github.com/helayoty/fiberd/pkg/backend/runc"
-	"github.com/helayoty/fiberd/pkg/sys/criu"
+	"github.com/Azure/fiberd/pkg/artifact"
+	"github.com/Azure/fiberd/pkg/backend"
+	"github.com/Azure/fiberd/pkg/backend/runc"
+	"github.com/Azure/fiberd/pkg/sys/criu"
 )
 
 // okCriu stands in for criu at open: check passes and nothing else is

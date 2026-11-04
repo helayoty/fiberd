@@ -4,7 +4,7 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/helayoty/fiberd/pkg/artifact"
+	"github.com/Azure/fiberd/pkg/artifact"
 )
 
 // TestComplete checks the seam every host-facts caller goes through. A

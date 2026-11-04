@@ -27,11 +27,11 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/helayoty/fiberd"
-Documentation = "https://github.com/helayoty/fiberd/blob/main/sdk/python/README.md"
-Source = "https://github.com/helayoty/fiberd/tree/main/sdk/python"
-Issues = "https://github.com/helayoty/fiberd/issues"
-Changelog = "https://github.com/helayoty/fiberd/releases"
+Homepage = "https://github.com/Azure/fiberd"
+Documentation = "https://github.com/Azure/fiberd/blob/main/sdk/python/README.md"
+Source = "https://github.com/Azure/fiberd/tree/main/sdk/python"
+Issues = "https://github.com/Azure/fiberd/issues"
+Changelog = "https://github.com/Azure/fiberd/releases"
 
 [project.scripts]
 fiberd-template = "fiberd.template._cli:main"

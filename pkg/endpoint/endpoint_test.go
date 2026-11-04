@@ -10,7 +10,7 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/helayoty/fiberd/pkg/endpoint"
+	"github.com/Azure/fiberd/pkg/endpoint"
 )
 
 // Parse accepts unix paths (with or without the scheme) and tcp addresses

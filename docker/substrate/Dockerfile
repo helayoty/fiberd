@@ -27,7 +27,7 @@ RUN set -eu; mkdir -p /out; \
     hack/gvisor/rootfs.sh /out/rootfs
 
 FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587
-LABEL org.opencontainers.image.source="https://github.com/helayoty/fiberd" \
+LABEL org.opencontainers.image.source="https://github.com/Azure/fiberd" \
       org.opencontainers.image.description="fiberd's Agent Substrate example: the ateom-fiberd worker, runsc, and a gVisor rootfs with the reference workload as the actor" \
       org.opencontainers.image.licenses="Apache-2.0"
 ARG DEBIAN_FRONTEND=noninteractive

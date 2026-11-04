@@ -14,7 +14,7 @@ package fiberd.grant.v1;
 import "google/protobuf/empty.proto";
 import "google/protobuf/timestamp.proto";
 
-option go_package = "github.com/helayoty/fiberd/api/grant/v1;grantv1";
+option go_package = "github.com/Azure/fiberd/api/grant/v1;grantv1";
 
 // Tier is the runtime capability a home advertises and a grant demands.
 // A grant with min_tier above the home's tier is never satisfied by a

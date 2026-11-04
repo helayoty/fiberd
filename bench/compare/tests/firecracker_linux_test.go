@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/helayoty/fiberd/bench/compare/adapters/firecracker"
+	"github.com/Azure/fiberd/bench/compare/adapters/firecracker"
 )
 
 // TestMain doubles as the UFFD handler the exec launcher starts: it

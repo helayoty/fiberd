@@ -5,9 +5,9 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/helayoty/fiberd/pkg/sys/caps"
+	"github.com/Azure/fiberd/pkg/sys/caps"
 
-	"github.com/helayoty/fiberd/examples/kubernetes/kube"
+	"github.com/Azure/fiberd/examples/kubernetes/kube"
 )
 
 // The grant Pod, written as the API server takes it. Only the fields the

@@ -16,7 +16,7 @@ import (
 
 	"github.com/containerd/containerd/v2/pkg/shim"
 
-	fshim "github.com/helayoty/fiberd/examples/kata/shim"
+	fshim "github.com/Azure/fiberd/examples/kata/shim"
 )
 
 func main() {

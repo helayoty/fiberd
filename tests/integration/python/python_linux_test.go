@@ -21,13 +21,13 @@ import (
 	"testing"
 	"time"
 
-	gvisorbackend "github.com/helayoty/fiberd/pkg/backend/gvisor"
-	procbackend "github.com/helayoty/fiberd/pkg/backend/proc"
-	runcbackend "github.com/helayoty/fiberd/pkg/backend/runc"
-	"github.com/helayoty/fiberd/pkg/core"
-	fiberendpoint "github.com/helayoty/fiberd/pkg/endpoint"
-	"github.com/helayoty/fiberd/pkg/runtime/host"
-	"github.com/helayoty/fiberd/tests/internal/testenv"
+	gvisorbackend "github.com/Azure/fiberd/pkg/backend/gvisor"
+	procbackend "github.com/Azure/fiberd/pkg/backend/proc"
+	runcbackend "github.com/Azure/fiberd/pkg/backend/runc"
+	"github.com/Azure/fiberd/pkg/core"
+	fiberendpoint "github.com/Azure/fiberd/pkg/endpoint"
+	"github.com/Azure/fiberd/pkg/runtime/host"
+	"github.com/Azure/fiberd/tests/internal/testenv"
 )
 
 var (

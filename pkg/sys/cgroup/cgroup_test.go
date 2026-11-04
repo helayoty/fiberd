@@ -11,7 +11,7 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/helayoty/fiberd/pkg/sys/cgroup"
+	"github.com/Azure/fiberd/pkg/sys/cgroup"
 )
 
 // fakeDir is a plain directory standing in for a cgroup, with the

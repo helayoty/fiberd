@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/helayoty/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/core"
 )
 
 // drainRuntime is fakeRuntime with what a drain test needs on top. It

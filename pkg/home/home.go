@@ -10,7 +10,7 @@ import (
 	"context"
 	"log"
 
-	"github.com/helayoty/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/core"
 )
 
 // EventKind is what the home delivered.

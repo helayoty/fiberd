@@ -20,7 +20,7 @@ import (
 	"github.com/containerd/plugin"
 	"github.com/containerd/plugin/registry"
 
-	"github.com/helayoty/fiberd/sdk/go/client"
+	"github.com/Azure/fiberd/sdk/go/client"
 )
 
 // RuntimeName is the runtime_type containerd's config names.

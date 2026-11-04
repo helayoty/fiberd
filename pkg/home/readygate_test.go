@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/helayoty/fiberd/pkg/home"
+	"github.com/Azure/fiberd/pkg/home"
 )
 
 // publisher records every publish a ReadyGate made and fails the ones it

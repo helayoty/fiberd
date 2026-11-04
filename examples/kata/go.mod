@@ -1,7 +1,7 @@
 // The Kata-shaped example: a containerd shim whose containers are fibers.
 // Its own module, so containerd's dependency tree never lands in fiberd's
 // go.mod. It builds against the checkout it sits in.
-module github.com/helayoty/fiberd/examples/kata
+module github.com/Azure/fiberd/examples/kata
 
 go 1.26.0
 
@@ -15,7 +15,7 @@ require (
 	github.com/containerd/fifo v1.1.0
 	github.com/containerd/plugin v1.0.0
 	github.com/containerd/ttrpc v1.2.7
-	github.com/helayoty/fiberd v0.0.0
+	github.com/Azure/fiberd v0.0.0
 	google.golang.org/grpc v1.83.2
 	google.golang.org/protobuf v1.36.12
 )
@@ -50,4 +50,4 @@ require (
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260526163538-3dc84a4a5aaa // indirect
 )
 
-replace github.com/helayoty/fiberd => ../..
+replace github.com/Azure/fiberd => ../..

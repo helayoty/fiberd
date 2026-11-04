@@ -77,7 +77,7 @@ RUN set -eu; mkdir -p /out/bin /out/lib /out/doc; \
 
 FROM ${RUNTIME_BASE} AS fiberd
 # Labels for local builds. The release workflow adds the rest.
-LABEL org.opencontainers.image.source="https://github.com/helayoty/fiberd" \
+LABEL org.opencontainers.image.source="https://github.com/Azure/fiberd" \
       org.opencontainers.image.description="fiberd with criu and the zygote library" \
       org.opencontainers.image.licenses="Apache-2.0"
 ARG DEBIAN_FRONTEND=noninteractive

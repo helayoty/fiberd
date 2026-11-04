@@ -8,7 +8,7 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/peer"
 
-	"github.com/helayoty/fiberd/pkg/tlsconf"
+	"github.com/Azure/fiberd/pkg/tlsconf"
 )
 
 type callerKey struct{}

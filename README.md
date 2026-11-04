@@ -49,23 +49,23 @@ Read in this order, and look up any term in the [glossary](docs/glossary.md).
 Each release has an archive per platform, named `fiberd_<version>_<os>_<arch>.tar.gz`, for linux or darwin on amd64 or arm64. The libfiberzygote archives hold the [zygote library](sdk/c/template/README.md). Check the checksum and provenance before you unpack.
 
 ```bash
-gh release download v0.1.0 -R helayoty/fiberd -p fiberd_0.1.0_linux_amd64.tar.gz -p SHA256SUMS
+gh release download v0.1.0 -R Azure/fiberd -p fiberd_0.1.0_linux_amd64.tar.gz -p SHA256SUMS
 shasum -a 256 --ignore-missing -c SHA256SUMS
-gh attestation verify fiberd_0.1.0_linux_amd64.tar.gz -R helayoty/fiberd
+gh attestation verify fiberd_0.1.0_linux_amd64.tar.gz -R Azure/fiberd
 tar -xzf fiberd_0.1.0_linux_amd64.tar.gz
 ./fiberd -version
 ```
 
 The release publishes three images, each with the same version tags.
 
-- `ghcr.io/helayoty/fiberd` holds fiberd, criu and the zygote library.
-- `ghcr.io/helayoty/fiberd-runc` adds the runc fiberd was built and tested against.
-- `ghcr.io/helayoty/fiberd-gvisor` adds the runsc fiberd was built and tested against.
+- `ghcr.io/azure/fiberd` holds fiberd, criu and the zygote library.
+- `ghcr.io/azure/fiberd-runc` adds the runc fiberd was built and tested against.
+- `ghcr.io/azure/fiberd-gvisor` adds the runsc fiberd was built and tested against.
 
 The two variants also hold the empty mount points of a sandbox rootfs at `/usr/share/fiberd/rootfs`. A deployment on the runc or gVisor runtime builds on one of them and adds its workload.
 
 ```bash
-gh attestation verify oci://ghcr.io/helayoty/fiberd:0.1.0 -R helayoty/fiberd
+gh attestation verify oci://ghcr.io/azure/fiberd:0.1.0 -R Azure/fiberd
 ```
 
 Releases after v0.1.0 also publish the [Python SDK](sdk/python/README.md) to PyPI. Its sdist and wheels are release assets too, under the same `SHA256SUMS` and provenance.

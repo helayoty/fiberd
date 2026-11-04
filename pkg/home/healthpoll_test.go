@@ -11,8 +11,8 @@ import (
 
 	testingclock "k8s.io/utils/clock/testing"
 
-	"github.com/helayoty/fiberd/pkg/core"
-	"github.com/helayoty/fiberd/pkg/home"
+	"github.com/Azure/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/home"
 )
 
 const pollEvery = time.Second

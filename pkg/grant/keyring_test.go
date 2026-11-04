@@ -16,7 +16,7 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 
-	"github.com/helayoty/fiberd/pkg/grant"
+	"github.com/Azure/fiberd/pkg/grant"
 )
 
 // ringNow has no monotonic reading and no sub-second part, so it survives

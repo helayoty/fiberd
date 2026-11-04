@@ -3,7 +3,7 @@
 //
 //	go tool -modfile=hack/tools/go.mod buf ...
 //	go tool -modfile=hack/tools/go.mod protoc-gen-go ...
-module github.com/helayoty/fiberd/hack/tools
+module github.com/Azure/fiberd/hack/tools
 
 go 1.26.7
 

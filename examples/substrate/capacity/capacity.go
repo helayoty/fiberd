@@ -44,7 +44,7 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 
-	ateletpb "github.com/helayoty/fiberd/examples/substrate/proto/atelet"
+	ateletpb "github.com/Azure/fiberd/examples/substrate/proto/atelet"
 )
 
 const (

@@ -23,7 +23,7 @@ package atelet;
 // the method and every field number are, so they are unchanged.
 // Regenerate with `go tool -modfile=../../hack/tools/go.mod buf generate`
 // in this directory's module.
-option go_package = "github.com/helayoty/fiberd/examples/substrate/proto/atelet;ateletpb";
+option go_package = "github.com/Azure/fiberd/examples/substrate/proto/atelet;ateletpb";
 
 // AteomSupport provides callouts for ateom.
 //

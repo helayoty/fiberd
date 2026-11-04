@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/helayoty/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/core"
 )
 
 // TestRateLimitTake checks the clone rate limit's token bucket. A full bucket

@@ -1,4 +1,4 @@
-module github.com/helayoty/fiberd
+module github.com/Azure/fiberd
 
 go 1.26.0
 

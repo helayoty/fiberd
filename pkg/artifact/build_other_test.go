@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/helayoty/fiberd/pkg/artifact"
+	"github.com/Azure/fiberd/pkg/artifact"
 )
 
 // TestBuildImagesNeedLinux checks that off Linux a build runs no zygote:

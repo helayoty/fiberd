@@ -7,7 +7,7 @@ import (
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 
-	"github.com/helayoty/fiberd/pkg/home/kubernetes/fake"
+	"github.com/Azure/fiberd/pkg/home/kubernetes/fake"
 )
 
 // TestZeroKube checks that the zero value is an empty cluster, where

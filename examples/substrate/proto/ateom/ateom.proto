@@ -23,7 +23,7 @@ package ateom;
 // atelet speaks to a worker's herder. Regenerate with `go tool
 // -modfile=../../hack/tools/go.mod buf generate` in this directory's
 // module.
-option go_package = "github.com/helayoty/fiberd/examples/substrate/proto/ateom;ateompb";
+option go_package = "github.com/Azure/fiberd/examples/substrate/proto/ateom;ateompb";
 
 // Ateom is the interface to control a single gVisor (or, in the future microVM)
 // guest inside a worker pod.

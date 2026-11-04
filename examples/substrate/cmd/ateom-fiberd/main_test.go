@@ -22,15 +22,15 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/helayoty/fiberd/pkg/artifact"
-	"github.com/helayoty/fiberd/pkg/fiberd"
-	"github.com/helayoty/fiberd/pkg/grant"
+	"github.com/Azure/fiberd/pkg/artifact"
+	"github.com/Azure/fiberd/pkg/fiberd"
+	"github.com/Azure/fiberd/pkg/grant"
 
-	"github.com/helayoty/fiberd/examples/substrate/capacity"
-	"github.com/helayoty/fiberd/examples/substrate/herder"
-	"github.com/helayoty/fiberd/examples/substrate/ingress"
-	ateletpb "github.com/helayoty/fiberd/examples/substrate/proto/atelet"
-	ateompb "github.com/helayoty/fiberd/examples/substrate/proto/ateom"
+	"github.com/Azure/fiberd/examples/substrate/capacity"
+	"github.com/Azure/fiberd/examples/substrate/herder"
+	"github.com/Azure/fiberd/examples/substrate/ingress"
+	ateletpb "github.com/Azure/fiberd/examples/substrate/proto/atelet"
+	ateompb "github.com/Azure/fiberd/examples/substrate/proto/ateom"
 )
 
 func TestEnv(t *testing.T) {

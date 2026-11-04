@@ -5,7 +5,7 @@ package fiberd
 import (
 	"path/filepath"
 
-	procbackend "github.com/helayoty/fiberd/pkg/backend/proc"
+	procbackend "github.com/Azure/fiberd/pkg/backend/proc"
 )
 
 // procOptions configures the fork backend. The bind of the host's root a

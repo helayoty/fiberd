@@ -48,7 +48,7 @@ RUN set -eu; mkdir -p /out; \
     done
 
 FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587
-LABEL org.opencontainers.image.source="https://github.com/helayoty/fiberd" \
+LABEL org.opencontainers.image.source="https://github.com/Azure/fiberd" \
       org.opencontainers.image.description="fiberd's Slurm example: a one-node Slurm cluster with fiberd-slurm, the reference issuer and zygote, criu, and the conformance, storm and storm-grower binaries" \
       org.opencontainers.image.licenses="Apache-2.0"
 ARG DEBIAN_FRONTEND=noninteractive

@@ -9,7 +9,7 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/helayoty/fiberd/pkg/fiberd"
+	"github.com/Azure/fiberd/pkg/fiberd"
 )
 
 // TestFiberdEnsurePrivateReadOnly checks that a private state directory

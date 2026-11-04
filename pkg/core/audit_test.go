@@ -20,7 +20,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/helayoty/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/core"
 )
 
 // TestSpoolSequenceAndDurability walks one spool directory in order.
