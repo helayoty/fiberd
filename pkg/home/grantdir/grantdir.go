@@ -4,8 +4,8 @@
 // (unverified: it is only used to stop admissions) from the last copy.
 // An empty file is skipped until its token is written, so emptying a
 // grant's file to rewrite it does not remove the grant.
-// The standalone home points it at -grants-dir; the Kubernetes home at
-// the Secret volume the issuer controller projects grants into.
+// The standalone home points it at -grants-dir. So does the Kubernetes
+// home, whose grant fetcher writes there.
 package grantdir
 
 import (

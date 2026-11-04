@@ -39,6 +39,25 @@ func TestConfigValidate(t *testing.T) {
 		{name: "a negative grants poll interval is refused", change: func(c *kubernetes.Config) { c.GrantsPoll = -time.Second }, wantErr: "grants poll interval -1s is negative"},
 		{name: "an unknown family is refused", change: func(c *kubernetes.Config) { c.Family = "ipx" }, wantErr: `unknown endpoint family "ipx"`},
 		{name: "the unix family is accepted", change: func(c *kubernetes.Config) { c.Family = endpoint.Unix }},
+		{name: "a grant token file needs the issuer URL",
+			change:  func(c *kubernetes.Config) { c.GrantTokenFile, c.GrantsDir = "/run/token", "/run/grants" },
+			wantErr: "grant token file needs the issuer URL"},
+		{name: "a grant token file needs the grants directory",
+			change:  func(c *kubernetes.Config) { c.GrantTokenFile, c.GrantIssuerURL = "/run/token", "https://issuer.test" },
+			wantErr: "grant token file needs the grants directory"},
+		{name: "an http issuer URL is refused when the fetch sends the Pod's token",
+			change: func(c *kubernetes.Config) {
+				c.GrantTokenFile, c.GrantsDir, c.GrantIssuerURL = "/run/token", "/run/grants", "http://issuer.test"
+			},
+			wantErr: `issuer URL "http://issuer.test" is not https, and the grant fetch sends the Pod's token to it`},
+		{name: "an issuer URL that does not parse is refused when the fetch is on",
+			change: func(c *kubernetes.Config) {
+				c.GrantTokenFile, c.GrantsDir, c.GrantIssuerURL = "/run/token", "/run/grants", "://issuer.test"
+			},
+			wantErr: "is not https"},
+		{name: "an http issuer URL is accepted without the fetch", change: func(c *kubernetes.Config) { c.GrantIssuerURL = "http://issuer.test" }},
+		{name: "a negative grant fetch timeout is refused", change: func(c *kubernetes.Config) { c.GrantFetchTimeout = -time.Second },
+			wantErr: "grant fetch timeout -1s is negative"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

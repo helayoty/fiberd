@@ -4,7 +4,7 @@
 
 This example runs fiberd on a cluster. A controller turns each CapacityGrant resource into a signed [grant](../../docs/glossary.md#grant) and a grant Pod that runs [fiberd](../../docs/glossary.md#fiberd). It is for anyone who wants to run fiberd on a Kubernetes cluster. It is its own Go module and is not imported by fiberd.
 
-![Controller setup is separate from local serving: a CapacityGrant resource produces one Pod and an owned grant Secret; projection and warm-up precede the custom readiness gate, while repeated Clone and direct fiber traffic stay off the controller path.](../../docs/images/example-kubernetes.svg)
+![Controller setup is separate from local serving. A CapacityGrant resource produces one grant Pod whose fiberd container runs fiberd -home kubernetes, fetches its grant from the controller and verifies it, warms its template and sets the fiberd.io/zygote-ready gate. Repeated Clone calls and direct fiber traffic stay off the controller path, and Clone never schedules a Pod.](../../docs/images/example-kubernetes.svg)
 
 ## What it proves
 

@@ -248,7 +248,7 @@ func (c *Config) Bind(fs *flag.FlagSet) {
 	fs.BoolVar(&c.API.TLS.InsecurePlaintext, "insecure-plaintext", false, "serve the API without TLS and without caller identity (development and tests only)")
 
 	fs.StringVar(&c.Trust.Verifier, "verifier", "", "grant verifier: jwks (signed JWTs, keys from -issuer) or insecure-json (development only); required")
-	fs.StringVar(&c.Trust.Issuer, "issuer", "", "issuer URL: OIDC discovery root for -verifier=jwks, and what Miss details report")
+	fs.StringVar(&c.Trust.Issuer, "issuer", "", "issuer URL: OIDC discovery root for -verifier=jwks, and what Miss details report. With -grant-token-file the Kubernetes home fetches its grant from -issuer plus /v1/grant, so it must then be https")
 	fs.DurationVar(&c.Trust.JWKSMaxStale, "jwks-max-stale", time.Hour, "refuse to verify when the key set is older than this (set to the lease TTL)")
 	fs.DurationVar(&c.Trust.MaxLease, "max-lease", 0, "-verifier=jwks: refuse grants signed for longer than this (exp - iat) or without a lease (0 accepts any)")
 
@@ -259,7 +259,7 @@ func (c *Config) Bind(fs *flag.FlagSet) {
 		func(v string) error { return host.ParseTemplateFlag(c.Runtime.Templates, v) })
 	fs.StringVar(&c.Runtime.Parity, "parity", "strict", "proc: how closely artifact images and other homes' deltas must match this host: strict, off, or kernel=exact|series|off,libc=exact|off (arch always)")
 	fs.Uint64Var(&c.Runtime.GrantCeiling, "grant-ceiling", 0, "proc: fixed block ceiling per grant in bytes (memory.high); 0 = fibers.max * w_budget + zygote + 25%")
-	fs.Func("fiber-hide", "proc: directory fibers must not see, besides the service-account token, <state>/private, <state>/deltas, -workspace-dir and -grants-dir (repeatable)",
+	fs.Func("fiber-hide", "proc: directory fibers must not see, besides the service-account token, <state>/private, <state>/deltas, -workspace-dir, -grants-dir and the -grant-token-file directory (repeatable)",
 		func(v string) error { c.Runtime.FiberHide = append(c.Runtime.FiberHide, v); return nil })
 	fs.StringVar(&c.Runtime.WorkspaceDir, "workspace-dir", "", "proc: directory holding the workspace of every fiber whose grant has a disk budget, fiberd's alone and hidden from fibers, each mounted at /workspace in its own fiber (default <state>/workspaces). One holding <state>/run refuses to start")
 	fs.StringVar(&c.Runtime.Gvisor.Rootfs, "gvisor-rootfs", "", "gvisor: rootfs directory every sandbox runs in; -template commands are paths inside it")

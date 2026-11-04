@@ -257,6 +257,64 @@ func TestPeekUID(t *testing.T) {
 	}
 }
 
+// PeekExpiry reads exp without trusting the token, so even a token signed
+// by a stranger yields its expiry, and a token without exp or one that
+// does not parse fails.
+func TestPeekExpiry(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	stranger, err := grant.GenerateKey(jose.EdDSA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	withExp, err := grant.Sign(sample(now), stranger, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := sample(now)
+	g.LeaseExpiry = time.Time{}
+	withoutExp, err := grant.Sign(g, stranger, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enc := base64.RawURLEncoding.EncodeToString
+	hs := enc([]byte(`{"alg":"HS256"}`)) + "." + enc([]byte(`{"exp":1700000600}`)) + "." + enc([]byte("sig"))
+	// A token with an exp padded past the size limit. Verify refuses it
+	// before parsing, and so must the peek, or the limit is no bound.
+	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.EdDSA, Key: stranger}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	big, err := jwt.Signed(signer).Claims(map[string]any{"exp": 1_700_000_600, "pad": strings.Repeat("x", grant.MaxTokenBytes)}).Serialize()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		name    string
+		token   string
+		want    time.Time
+		wantErr bool
+		wantIs  error // the error wanted, when one in particular is due
+	}{
+		{name: "a token signed by anyone yields its exp", token: withExp, want: sample(now).LeaseExpiry},
+		{name: "a token without exp fails", token: withoutExp, wantErr: true},
+		{name: "garbage fails", token: "not-a-jwt", wantErr: true},
+		{name: "a disallowed algorithm fails", token: hs, wantErr: true},
+		{name: "a token over the size limit fails unparsed", token: big, wantErr: true, wantIs: grant.ErrTokenTooLarge},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := grant.PeekExpiry(tc.token)
+			if (err != nil) != tc.wantErr || !got.Equal(tc.want) {
+				t.Fatalf("PeekExpiry = %s, %v, want %s (error %v)", got, err, tc.want, tc.wantErr)
+			}
+			if tc.wantIs != nil && !errors.Is(err, tc.wantIs) {
+				t.Fatalf("PeekExpiry = %v, want %v", err, tc.wantIs)
+			}
+		})
+	}
+}
+
 // issueT0 is a whole second, so a lease from it is whole seconds too.
 var issueT0 = time.Unix(1_700_000_000, 0).UTC()
 

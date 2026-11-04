@@ -1,24 +1,31 @@
 // Package kubernetes is fiberd's home in a Kubernetes grant Pod, where
-// fiberd is the Pod's one container. Grants arrive as *.jwt files in a
-// directory projected into the Pod. Control-plane liveness is the API
-// server answering for the Pod. Readiness is a Pod condition a readiness
-// gate waits on, set once a template is warm. The cgroup subtree is the
-// Pod's own, under the kubelet's ceiling. Endpoints are the Pod's IP, and
-// the device channel is the Pod's ResourceClaim. Scope is what the Pod is,
-// namespace, service account, node and claims, and the home loses it when
-// the Pod is gone, replaced or terminating, the namespace terminates, a
-// claim is deleted under a live Pod, or the cluster has not served the
-// claims for the stale TTL.
+// fiberd is the Pod's one container. The home fetches the Pod's grant
+// from the controller with the Pod's bound service-account token, renews
+// it at half its lease and writes it into the grants directory. The
+// directory is polled for *.jwt files, so a grant another writer drops
+// there is read too. Without a token file, grants arrive only as such
+// files.
+//
+// Control-plane liveness is the API server answering for the Pod.
+// Readiness is a Pod condition a readiness gate waits on, set once a
+// template is warm. The cgroup subtree is the Pod's own, under the
+// kubelet's ceiling. Endpoints are the Pod's IP, and the device channel
+// is the Pod's ResourceClaim. Scope is what the Pod is, namespace,
+// service account, node and claims, and the home loses it when the Pod
+// is gone, replaced or terminating, the namespace terminates, a claim is
+// deleted under a live Pod, or the cluster has not served the claims for
+// the stale TTL.
 //
 // The production controller that creates grant Pods is a separate
 // project. It lists PodConditionZygoteReady as a readiness gate on every
-// grant Pod and writes the grants directory.
+// grant Pod and serves the grants the home fetches.
 package kubernetes
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -45,6 +52,9 @@ const (
 	DefaultStaleTTL = 30 * time.Second
 	// DefaultGrantsPoll is how often the grants directory is read.
 	DefaultGrantsPoll = 2 * time.Second
+	// DefaultGrantFetchTimeout is how long New retries the first grant
+	// fetch.
+	DefaultGrantFetchTimeout = 60 * time.Second
 	// cgroupMount is where the Pod's cgroup v2 hierarchy is mounted.
 	cgroupMount = "/sys/fs/cgroup"
 )
@@ -65,11 +75,27 @@ type Config struct {
 	// Poll is how often the API server is asked. It is also how long one
 	// round may take. Default half of StaleTTL.
 	Poll time.Duration
-	// GrantsDir is the projected directory polled for *.jwt files. Empty
-	// means no delivery, and grants then arrive only inside Clone requests.
+	// GrantsDir is the directory polled for *.jwt files, and the one the
+	// grant fetch writes. Empty means no delivery, and grants then arrive
+	// only inside Clone requests.
 	GrantsDir string
 	// GrantsPoll is how often GrantsDir is read. Default DefaultGrantsPoll.
 	GrantsPoll time.Duration
+	// GrantTokenFile is the path of the Pod's bound service-account
+	// token, sent to fetch the Pod's grant. Empty means no fetch, and
+	// grants arrive only as files. Set, it needs GrantIssuerURL and
+	// GrantsDir.
+	GrantTokenFile string
+	// GrantIssuerURL is the issuer, the controller. Grants are fetched
+	// from it with "/v1/grant" appended. It must be https when the fetch
+	// is on.
+	GrantIssuerURL string
+	// GrantCAFile is the PEM CA bundle the grant endpoint's certificate
+	// must chain to. Empty means the system roots.
+	GrantCAFile string
+	// GrantFetchTimeout is how long New retries the first grant fetch.
+	// Default DefaultGrantFetchTimeout.
+	GrantFetchTimeout time.Duration
 	// Cache is the verifier's key cache, refreshed in the background while
 	// the home runs. Nil means no issuer keys to refresh.
 	Cache *grant.Cache
@@ -100,6 +126,9 @@ func (c Config) withDefaults() Config {
 	if c.GrantsPoll == 0 {
 		c.GrantsPoll = DefaultGrantsPoll
 	}
+	if c.GrantFetchTimeout == 0 {
+		c.GrantFetchTimeout = DefaultGrantFetchTimeout
+	}
 	if c.Clock == nil {
 		c.Clock = clock.RealClock{}
 	}
@@ -129,6 +158,14 @@ func (c Config) Validate() error {
 		return fmt.Errorf("kubernetes home: poll interval %s is not shorter than the stale TTL %s", c.Poll, c.StaleTTL)
 	case c.GrantsPoll < 0:
 		return fmt.Errorf("kubernetes home: grants poll interval %s is negative", c.GrantsPoll)
+	case c.GrantTokenFile != "" && c.GrantIssuerURL == "":
+		return errors.New("kubernetes home: a grant token file needs the issuer URL")
+	case c.GrantTokenFile != "" && c.GrantsDir == "":
+		return errors.New("kubernetes home: a grant token file needs the grants directory")
+	case c.GrantTokenFile != "" && !isHTTPS(c.GrantIssuerURL):
+		return fmt.Errorf("kubernetes home: issuer URL %q is not https, and the grant fetch sends the Pod's token to it", c.GrantIssuerURL)
+	case c.GrantFetchTimeout < 0:
+		return fmt.Errorf("kubernetes home: grant fetch timeout %s is negative", c.GrantFetchTimeout)
 	}
 	switch c.Family {
 	case "", endpoint.Unix, endpoint.Inet4, endpoint.Inet6:
@@ -136,6 +173,12 @@ func (c Config) Validate() error {
 		return fmt.Errorf("kubernetes home: unknown endpoint family %q", c.Family)
 	}
 	return nil
+}
+
+// isHTTPS reports whether raw parses as an https URL with a host.
+func isHTTPS(raw string) bool {
+	u, err := url.Parse(raw)
+	return err == nil && u.Scheme == "https" && u.Host != ""
 }
 
 // Home is the Kubernetes home. It implements home.Home, and the optional
@@ -147,8 +190,9 @@ type Home struct {
 	health     *core.SourceHealth
 	cgroupRoot string
 
-	// stop ends what New started, the wait for the Pod's address. Close
-	// cancels it, and so does Run when its context ends.
+	// stop ends what New started, the first grant fetch and the wait for
+	// the Pod's address. Close cancels it, and so does Run when its
+	// context ends.
 	stopCtx context.Context
 	stop    context.CancelFunc
 	started atomic.Bool
@@ -156,6 +200,8 @@ type Home struct {
 	losses home.ScopeLossQueue
 	gate   home.ReadyGate
 	poll   *home.HealthPoll
+	// fetch renews the Pod's grant. Nil without a grant token file.
+	fetch *fetcher
 
 	// mu guards what the last fully answered round stored, and the clock
 	// of the claims going unreadable.
@@ -172,7 +218,16 @@ type Home struct {
 // read happens in EndpointHost, Devices or the first poll round. The
 // health starts in sync, so a Pod the API server has not answered for
 // yet is not unhealthy before the stale TTL has passed.
-func New(cfg Config) (*Home, error) {
+//
+// With a grant token file, New fetches the Pod's grant before it
+// returns, retrying for up to GrantFetchTimeout. It fails when no grant
+// came by then, unless the grants directory holds an unexpired grant
+// file for the Pod. Run renews the grant from there.
+func New(cfg Config) (*Home, error) { return newHome(cfg, nil) }
+
+// newHome is New. built, when set, is handed the home before the first
+// grant fetch.
+func newHome(cfg Config, built func(*Home)) (*Home, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
@@ -192,6 +247,22 @@ func New(cfg Config) (*Home, error) {
 		Health: h.health, Every: cfg.Poll, Clock: cfg.Clock, Round: h.round,
 		OnError:     func(err error) { h.log.Error(err, "API server did not answer") },
 		OnRecovered: func() { h.log.Info("API server answered again") },
+	}
+	if cfg.GrantTokenFile == "" {
+		return h, nil
+	}
+	f, err := newFetcher(cfg, h.log)
+	if err != nil {
+		h.stop()
+		return nil, fmt.Errorf("kubernetes home: %w", err)
+	}
+	h.fetch = f
+	if built != nil {
+		built(h)
+	}
+	if err := f.start(h.stopCtx, cfg.GrantFetchTimeout); err != nil {
+		h.stop()
+		return nil, err
 	}
 	return h, nil
 }
@@ -284,10 +355,10 @@ func (h *Home) SetIssuerReachable(reachable bool) {
 	h.log.Info("Issuer reachability overridden", "reachable", reachable)
 }
 
-// Run drives the liveness poll, the delivery of scope losses and the key
-// cache refresh until ctx ends. It returns only once all of them have
-// stopped. A second Run logs and returns at once, as a shared
-// informer does.
+// Run drives the liveness poll, the delivery of scope losses, the key
+// cache refresh and the grant renewal until ctx ends. It returns only
+// once all of them have stopped. A second Run logs and returns at once,
+// as a shared informer does.
 func (h *Home) Run(ctx context.Context) {
 	if !h.started.CompareAndSwap(false, true) {
 		h.log.Info("Run called again, the second call does nothing")
@@ -301,6 +372,9 @@ func (h *Home) Run(ctx context.Context) {
 	wg.Go(func() { h.poll.Run(ctx) })
 	if h.cfg.Cache != nil {
 		wg.Go(func() { h.cfg.Cache.Run(ctx, h.cfg.StaleTTL/2) })
+	}
+	if h.fetch != nil {
+		wg.Go(func() { h.fetch.run(ctx) })
 	}
 	wg.Wait()
 }

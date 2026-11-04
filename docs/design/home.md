@@ -8,7 +8,7 @@ Environments differ in how [grants](../glossary.md#grant) arrive, how they show 
 
 ## How it works
 
-One binary carries every core home, and `-home` picks one. `fiberd -home standalone` is the default. `fiberd -home kubernetes` runs in a grant Pod, and [kubernetes.md](kubernetes.md) gives that home's answers.
+One binary carries every core home, and `-home` picks one. `fiberd -home standalone` is the default. `fiberd -home kubernetes` runs in a grant Pod, and [kubernetes.md](kubernetes.md) gives that home's answers. The Kubernetes home can fetch its grant itself, from its controller ([grant fetch](kubernetes.md#grant-fetch)).
 
 | Question | The standalone home's answer |
 | --- | --- |
@@ -44,7 +44,7 @@ sequenceDiagram
 
 **Grant delivery.** fiberd verifies a delivered token like any other. The home is the authority, so a delivery lifts the UID's deny-list entry before admission. A token that fails verification is logged and skipped. A removal goes through the core's revocation path ([core.md](core.md)).
 
-**The grant directory.** Every file-fed home shares `pkg/home/grantdir`. It polls a directory every 2 seconds. A new or changed `*.jwt` regular file is GrantAdded. An empty file is skipped until its token is written, because a writer creates or truncates the file first. A grant emptied this way is not removed. A FIFO or device is skipped, because reading it could block the poll. A file larger than the token size limit is skipped unread, and one that grows past it counts as removed. A removed file is GrantRemoved, with the UID read unverified from the last copy seen. The Kubernetes home points it at the directory its control plane delivers grants into.
+**The grant directory.** Every file-fed home shares `pkg/home/grantdir`. It polls a directory every 2 seconds. A new or changed `*.jwt` regular file is GrantAdded. An empty file is skipped until its token is written, because a writer creates or truncates the file first. A grant emptied this way is not removed. A FIFO or device is skipped, because reading it could block the poll. A file larger than the token size limit is skipped unread, and one that grows past it counts as removed. A removed file is GrantRemoved, with the UID read unverified from the last copy seen. The Kubernetes home writes the grants it fetches into that directory and reads whatever else lands there.
 
 **Issuer reachability.** The core owns the staleness rule, so it is the same in every home, and a home only marks syncs. The issuer counts as unreachable once the last sync is older than the stale TTL (`-stale-ttl`, 30 seconds by default). It counts as reachable again only below half of that, which stops flapping. Startup counts as a sync. The standalone home's sync is a successful key refresh, attempted every half TTL. Without an issuer, a timer keeps it reachable. Which miss each state gives is in [outcomes](../protocol.md#outcomes).
 
@@ -53,5 +53,5 @@ sequenceDiagram
 ## Security notes and known gaps
 
 - **Scope claims are facts, not authorization.** Nothing checks them at Clone time. They let an auditor check where work ran.
-- **The grant directory is an authority.** Whoever can write it can add or remove grants on this home. A removal names its UID from an unverified copy, so a planted file that is then deleted denies that UID here. Only the control plane should be able to write the directory.
+- **The grant directory is an authority.** Whoever can write it can add or remove grants on this home. A removal names its UID from an unverified copy, so a planted file that is then deleted denies that UID here. Only the control plane, and the home itself where it fetches its grants, should be able to write the directory.
 - **Without an issuer, misses are [deferred, never shed](../glossary.md#clone-misses)**, since nothing ever marks the issuer unreachable.

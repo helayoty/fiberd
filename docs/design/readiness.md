@@ -45,7 +45,7 @@ flowchart LR
 7. A full disk and a failed fsync are visible in monitoring, and the spool is copied off the host where records matter.
 8. Readiness, [scope](../glossary.md#scope) loss, deletion and, where sessions must survive a stop, the [drain](../glossary.md#drain) within the platform's grace period are tested against the real platform, not only through the test hooks ([fiberd.md](fiberd.md)).
 9. The conformance suite passes on the exact production backend and configuration, and the benchmarks are re-run there with the method in [benchmarks.md](../benchmarks.md).
-10. Only the control plane can write each home's grant directory ([home.md](home.md)).
+10. Only the control plane, and fiberd where it fetches its own grant, can write each home's grant directory ([home.md](home.md)).
 11. Callers reconcile their grants through an inventory other than Watch ([core.md](core.md)).
 
 ## Security notes and known gaps

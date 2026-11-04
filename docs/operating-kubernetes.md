@@ -26,7 +26,7 @@ kubectl apply -f examples/kubernetes/kind/manifests/{00-namespaces,10-crd,20-iss
 
 ## From CapacityGrant to a ready home
 
-![The grant-issuer Deployment runs grant-controller, which reconciles CapacityGrant resources and creates grant Pods and their projected JWT Secrets. Each grant Pod's one container, fiberd, runs tini as PID 1 with fiberd-k8s under it, and holds its warm template and local fibers. Kubernetes schedules grant Pods, and Clone does not schedule Pods.](./images/kubernetes-runtime-model.svg)
+![A tenant creates a CapacityGrant. The fiberd-k8s-controller Deployment reconciles it and creates a grant Deployment, whose grant Pod's one container runs fiberd -home kubernetes. The kubelet projects a service-account token bound to the Pod, and fiberd fetches its grant from the controller with it. fiberd holds one warm template and its local fibers, handles Clone and answers the healthz and readyz probes. Kubernetes schedules grant Pods, not fibers.](./images/kubernetes-runtime-model.svg)
 
 1. A platform component creates a `CapacityGrant`.
 2. The controller creates the Pod `<name>-grant` and signs a grant whose UID is the resource UID and whose audience is the Pod name.

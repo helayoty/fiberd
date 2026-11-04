@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -48,13 +49,22 @@ func testEnv(vars map[string]string, ask func(ctx context.Context, c *fiberd.Con
 // TestBuildConfig checks what each form makes of its flags and the
 // downward API's variables. Serving with -home kubernetes needs the whole
 // Pod identity, names every missing part, and takes the Pod name as the
-// node id and the container's own cgroup unless told otherwise. The
-// probes take the same flags and need no identity.
+// node id and the container's own cgroup unless told otherwise. Fetching
+// the grant needs -issuer and -grants-dir, names each one missing, and
+// hides the token file's directory from fibers. The probes and -home
+// standalone take the same flags and check neither the identity nor the
+// grant fetch.
 func TestBuildConfig(t *testing.T) {
 	hostname, _ := os.Hostname()
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fetch := []string{"-issuer", "https://issuer.example", "-grants-dir", "/grants"}
 	pod := map[string]string{"POD_NAME": "grant-a-0", "POD_NAMESPACE": "tenant", "POD_UID": "uid-1"}
 	fromEnv := podIdentity{Name: "grant-a-0", Namespace: "tenant", UID: "uid-1"}
 	kube := []string{"-home", "kubernetes"}
+	token := []string{"-grant-token-file", "/var/run/secrets/fiberd/token"}
 	cases := []struct {
 		name string
 		cmd  string
@@ -65,7 +75,9 @@ func TestBuildConfig(t *testing.T) {
 		wantPod     podIdentity
 		wantNode    string
 		wantCgroup  string
-		wantState   string // checked when set
+		wantState   string     // checked when set
+		wantGrant   grantFetch // the zero value stands for the defaults
+		wantHide    []string   // fiberd.Runtime.FiberHide
 		wantVersion bool
 		// wantErr are parts of the error, none for no error. notErr is a
 		// part it must not hold.
@@ -110,6 +122,50 @@ func TestBuildConfig(t *testing.T) {
 			wantHome: "kubernetes", wantNode: hostname, wantCgroup: defaultCgroup, wantState: "/run/fz"},
 		{name: "a probe refuses an unknown home too", cmd: readyzCmd, args: []string{"-home", "nomad"},
 			wantErr: []string{`-home "nomad" unknown`}},
+		{name: "the grant fetch is off by default and its first fetch waits 60s", cmd: serveCmd, args: kube, env: pod,
+			wantHome: "kubernetes", wantPod: fromEnv, wantNode: "grant-a-0", wantCgroup: "",
+			wantGrant: grantFetch{Timeout: 60 * time.Second}},
+		{name: "-grant-token-file with -issuer and -grants-dir passes", cmd: serveCmd, env: pod,
+			args: append(slices.Clone(kube), "-grant-token-file", "/var/run/secrets/fiberd/token", "-grant-ca-file", "/etc/fiberd/ca.pem",
+				"-grant-fetch-timeout", "90s", "-issuer", "https://issuer.example", "-grants-dir", "/grants"),
+			wantHome: "kubernetes", wantPod: fromEnv, wantNode: "grant-a-0", wantCgroup: "",
+			wantGrant: grantFetch{TokenFile: "/var/run/secrets/fiberd/token", CAFile: "/etc/fiberd/ca.pem", Timeout: 90 * time.Second},
+			wantHide:  []string{"/var/run/secrets/fiberd"}},
+		{name: "-grant-token-file hides its directory after -fiber-hide", cmd: serveCmd, env: pod,
+			args:     slices.Concat(kube, token, fetch, []string{"-fiber-hide", "/srv/extra"}),
+			wantHome: "kubernetes", wantPod: fromEnv, wantNode: "grant-a-0", wantCgroup: "",
+			wantGrant: grantFetch{TokenFile: "/var/run/secrets/fiberd/token", Timeout: kubehome.DefaultGrantFetchTimeout},
+			wantHide:  []string{"/srv/extra", "/var/run/secrets/fiberd"}},
+		{name: "a relative -grant-token-file hides its absolute directory", cmd: serveCmd, env: pod,
+			args:     slices.Concat(kube, []string{"-grant-token-file", "secrets/token"}, fetch),
+			wantHome: "kubernetes", wantPod: fromEnv, wantNode: "grant-a-0", wantCgroup: "",
+			wantGrant: grantFetch{TokenFile: "secrets/token", Timeout: kubehome.DefaultGrantFetchTimeout},
+			wantHide:  []string{filepath.Join(wd, "secrets")}},
+		{name: "a blank -grant-token-file is unset", cmd: serveCmd, env: pod,
+			args:     append(slices.Clone(kube), "-grant-token-file", " "),
+			wantHome: "kubernetes", wantPod: fromEnv, wantNode: "grant-a-0", wantCgroup: ""},
+		{name: "-grant-token-file and -grant-ca-file lose their spaces", cmd: serveCmd, env: pod,
+			args:     slices.Concat(kube, []string{"-grant-token-file", " /var/run/secrets/fiberd/token ", "-grant-ca-file", " /etc/fiberd/ca.pem "}, fetch),
+			wantHome: "kubernetes", wantPod: fromEnv, wantNode: "grant-a-0", wantCgroup: "",
+			wantGrant: grantFetch{TokenFile: "/var/run/secrets/fiberd/token", CAFile: "/etc/fiberd/ca.pem", Timeout: kubehome.DefaultGrantFetchTimeout},
+			wantHide:  []string{"/var/run/secrets/fiberd"}},
+		{name: "-grant-token-file without -issuer names it", cmd: serveCmd, env: pod,
+			args:    append(slices.Concat(kube, token), "-grants-dir", "/grants"),
+			wantErr: []string{"-grant-token-file needs -issuer and -grants-dir, missing -issuer"}, notErr: "missing -issuer, -grants-dir"},
+		{name: "-grant-token-file without -grants-dir names it", cmd: serveCmd, env: pod,
+			args:    append(slices.Concat(kube, token), "-issuer", "https://issuer.example"),
+			wantErr: []string{"-grant-token-file needs -issuer and -grants-dir, missing -grants-dir"}, notErr: "missing -issuer"},
+		{name: "-grant-token-file without either names both", cmd: serveCmd, env: pod, args: slices.Concat(kube, token),
+			wantErr: []string{"missing -issuer, -grants-dir"}},
+		{name: "-grant-ca-file alone names -grant-token-file", cmd: serveCmd, env: pod,
+			args:    append(slices.Clone(kube), "-grant-ca-file", "/etc/fiberd/ca.pem"),
+			wantErr: []string{"-grant-ca-file needs -grant-token-file"}},
+		{name: "a probe ignores the grant flags", cmd: healthzCmd, args: slices.Concat(kube, token),
+			wantHome: "kubernetes", wantNode: hostname, wantCgroup: defaultCgroup,
+			wantGrant: grantFetch{TokenFile: "/var/run/secrets/fiberd/token", Timeout: kubehome.DefaultGrantFetchTimeout}},
+		{name: "standalone ignores the grant flags", cmd: serveCmd, args: token,
+			wantHome: "standalone", wantNode: hostname, wantCgroup: defaultCgroup,
+			wantGrant: grantFetch{TokenFile: "/var/run/secrets/fiberd/token", Timeout: kubehome.DefaultGrantFetchTimeout}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -140,6 +196,16 @@ func TestBuildConfig(t *testing.T) {
 			if tc.wantState != "" && o.fiberd.Node.StateDir != tc.wantState {
 				t.Fatalf("state %q, want %q", o.fiberd.Node.StateDir, tc.wantState)
 			}
+			wantGrant := tc.wantGrant
+			if wantGrant == (grantFetch{}) {
+				wantGrant = grantFetch{Timeout: kubehome.DefaultGrantFetchTimeout}
+			}
+			if o.grant != wantGrant {
+				t.Fatalf("grant fetch %+v, want %+v", o.grant, wantGrant)
+			}
+			if !slices.Equal(o.fiberd.Runtime.FiberHide, tc.wantHide) {
+				t.Fatalf("fiber hide %q, want %q", o.fiberd.Runtime.FiberHide, tc.wantHide)
+			}
 		})
 	}
 }
@@ -161,11 +227,15 @@ func TestRunExitCodes(t *testing.T) {
 	}{
 		{name: "-version", args: []string{"-version"}, wantCode: 0, wantStdout: "fiberd "},
 		{name: "-h prints the forms and the flags", args: []string{"-h"}, wantCode: 0,
-			wantStderr: []string{"usage: fiberd [flags]", "fiberd healthz [flags]", "fiberd readyz [flags]", "-home", "-pod-name", "-verifier"}},
+			wantStderr: []string{"usage: fiberd [flags]", "fiberd healthz [flags]", "fiberd readyz [flags]", "-home", "-pod-name", "-grant-token-file", "-verifier"}},
 		{name: "a bad flag", args: []string{"-nope"}, wantCode: 2, wantStderr: []string{"flag provided but not defined: -nope"}},
 		{name: "an unknown home", args: []string{"-home", "nomad"}, wantCode: 2, wantStderr: []string{`-home "nomad" unknown`}},
 		{name: "kubernetes with an incomplete identity", args: []string{"-home", "kubernetes", "-pod-name", "grant-a-0"}, wantCode: 2,
 			wantStderr: []string{"-pod-namespace (POD_NAMESPACE), -pod-uid (POD_UID)"}},
+		{name: "kubernetes fetching its grant without -issuer", wantCode: 2,
+			args: []string{"-home", "kubernetes", "-pod-name", "grant-a-0", "-pod-namespace", "tenant", "-pod-uid", "uid-1",
+				"-grant-token-file", "/var/run/secrets/fiberd/token", "-grants-dir", "/grants"},
+			wantStderr: []string{"fiberd: -grant-token-file needs -issuer and -grants-dir, missing -issuer"}},
 		{name: "healthz on a healthy fiberd", args: []string{"healthz", "-state", "/run/fz"}, wantCode: 0,
 			wantAsked: "healthz", wantState: "/run/fz"},
 		{name: "healthz on a sick fiberd", args: []string{"healthz"}, sick: true, wantCode: 1,
@@ -226,8 +296,9 @@ func TestRunExitCodes(t *testing.T) {
 
 // TestHomeFactory checks the kubernetes home fiberd builds. It gets the
 // Pod identity, fiberd's stale TTL, grants dir, devices and endpoint
-// family, the key cache fiberd hands the factory, and the client the
-// Kube constructor built. A constructor's error surfaces.
+// family, the grant fetch flags with -issuer, the key cache fiberd hands
+// the factory, and the client the Kube constructor built. A
+// constructor's error surfaces.
 func TestHomeFactory(t *testing.T) {
 	podArgs := []string{"-home", "kubernetes", "-pod-name", "grant-a-0", "-pod-namespace", "tenant", "-pod-uid", "uid-1"}
 	jwks := &grant.Cache{}
@@ -245,10 +316,18 @@ func TestHomeFactory(t *testing.T) {
 				"-endpoint-family", "inet4", "-cgroup-root", "/sys/fs/cgroup/pod"},
 			want: kubehome.Config{PodName: "grant-a-0", PodNamespace: "tenant", PodUID: "uid-1",
 				StaleTTL: 45 * time.Second, GrantsDir: "/grants", Cache: jwks, Family: endpoint.Inet4,
-				Devices: []string{"nvidia0", "nvidia1"}, CgroupRoot: "/sys/fs/cgroup/pod"}},
+				Devices: []string{"nvidia0", "nvidia1"}, CgroupRoot: "/sys/fs/cgroup/pod",
+				GrantFetchTimeout: kubehome.DefaultGrantFetchTimeout}},
 		{name: "the defaults read the container's own cgroup",
 			want: kubehome.Config{PodName: "grant-a-0", PodNamespace: "tenant", PodUID: "uid-1",
-				StaleTTL: 30 * time.Second, Family: endpoint.Unix}},
+				StaleTTL: 30 * time.Second, Family: endpoint.Unix, GrantFetchTimeout: kubehome.DefaultGrantFetchTimeout}},
+		{name: "the home fetches its grant from -issuer with the grant flags",
+			args: []string{"-issuer", "https://issuer.example", "-grants-dir", "/grants", "-grant-token-file", "/var/run/secrets/fiberd/token",
+				"-grant-ca-file", "/etc/fiberd/ca.pem", "-grant-fetch-timeout", "90s"},
+			want: kubehome.Config{PodName: "grant-a-0", PodNamespace: "tenant", PodUID: "uid-1",
+				StaleTTL: 30 * time.Second, GrantsDir: "/grants", Family: endpoint.Unix,
+				GrantTokenFile: "/var/run/secrets/fiberd/token", GrantIssuerURL: "https://issuer.example",
+				GrantCAFile: "/etc/fiberd/ca.pem", GrantFetchTimeout: 90 * time.Second}},
 		{name: "a Kube constructor error surfaces", kubeErr: errors.New("no service account"),
 			wantErr: "kubernetes home: no service account"},
 		{name: "a home constructor error surfaces", homeErr: errors.New("pod has no uid"),
@@ -276,7 +355,7 @@ func TestHomeFactory(t *testing.T) {
 				return nil, tc.homeErr
 			}
 			var built home.Home
-			_, err = e.kubeHome(context.Background(), o.pod, &built)(&o.fiberd, tc.jwks)
+			_, err = e.kubeHome(context.Background(), o.pod, o.grant, &built)(&o.fiberd, tc.jwks)
 			if tc.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 					t.Fatalf("factory = %v, want an error with %q", err, tc.wantErr)
@@ -305,6 +384,12 @@ func TestHomeFactory(t *testing.T) {
 			}
 			if !slices.Equal(got.Devices, w.Devices) || got.CgroupRoot != w.CgroupRoot {
 				t.Fatalf("home devices %q cgroup root %q, want %q %q", got.Devices, got.CgroupRoot, w.Devices, w.CgroupRoot)
+			}
+			if got.GrantTokenFile != w.GrantTokenFile || got.GrantIssuerURL != w.GrantIssuerURL ||
+				got.GrantCAFile != w.GrantCAFile || got.GrantFetchTimeout != w.GrantFetchTimeout {
+				t.Fatalf("home grant token file %q issuer %q CA file %q fetch timeout %v, want %q %q %q %v",
+					got.GrantTokenFile, got.GrantIssuerURL, got.GrantCAFile, got.GrantFetchTimeout,
+					w.GrantTokenFile, w.GrantIssuerURL, w.GrantCAFile, w.GrantFetchTimeout)
 			}
 		})
 	}

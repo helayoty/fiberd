@@ -188,3 +188,24 @@ func PeekUID(token string) (string, error) {
 	}
 	return std.ID, nil
 }
+
+// PeekExpiry reads the lease expiry (exp) WITHOUT verifying the token.
+// Only for bookkeeping that never trusts the value, such as deciding
+// whether a grant file left on disk is worth starting on before the
+// file is delivered and verified. It bounds the token's size and
+// algorithm as Verify does, before any parsing. A token without exp is
+// an error.
+func PeekExpiry(token string) (time.Time, error) {
+	tok, err := parse(token)
+	if err != nil {
+		return time.Time{}, err
+	}
+	var std jwt.Claims
+	if err := tok.UnsafeClaimsWithoutVerification(&std); err != nil {
+		return time.Time{}, err
+	}
+	if std.Expiry == nil {
+		return time.Time{}, errors.New("grant: token has no exp")
+	}
+	return std.Expiry.Time(), nil
+}

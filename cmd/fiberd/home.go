@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -89,6 +90,7 @@ type options struct {
 	fiberd  fiberd.Config
 	home    string      // -home
 	pod     podIdentity // -pod-name, -pod-namespace, -pod-uid
+	grant   grantFetch  // -grant-token-file, -grant-ca-file, -grant-fetch-timeout
 	version bool        // -version
 }
 
@@ -96,14 +98,24 @@ type options struct {
 // the downward API.
 type podIdentity struct{ Name, Namespace, UID string }
 
+// grantFetch is how a kubernetes home fetches its own grant from -issuer.
+// An empty TokenFile leaves grants to arrive as files only.
+type grantFetch struct {
+	TokenFile, CAFile string
+	Timeout           time.Duration
+}
+
 // flagError is a flag error the flag package has already reported.
 type flagError struct{ error }
 
 // buildConfig parses args for the form cmd and checks them. Serving with
 // -home kubernetes needs the whole Pod identity. Without -node-id the
 // Pod name is the node id, so a grant's audience names the Pod. Without
-// -cgroup-root the home reads the container's own cgroup. The probe
-// forms need no identity. -version skips the checks.
+// -cgroup-root the home reads the container's own cgroup. Fetching the
+// grant with -grant-token-file needs -issuer and -grants-dir too, and
+// -grant-ca-file needs -grant-token-file. The token file's directory is
+// hidden from fibers. The probe forms need none of it. -version skips
+// the checks.
 func buildConfig(cmd string, args []string, getenv func(string) string, stderr io.Writer) (*options, error) {
 	o := &options{}
 	fs := flag.NewFlagSet(cmd, flag.ContinueOnError)
@@ -116,6 +128,8 @@ func buildConfig(cmd string, args []string, getenv func(string) string, stderr i
 		}
 		return nil, flagError{err}
 	}
+	o.grant.TokenFile = strings.TrimSpace(o.grant.TokenFile)
+	o.grant.CAFile = strings.TrimSpace(o.grant.CAFile)
 	if o.version {
 		return o, nil
 	}
@@ -137,6 +151,18 @@ func buildConfig(cmd string, args []string, getenv func(string) string, stderr i
 		if err := o.pod.check(); err != nil {
 			return nil, err
 		}
+		if err := o.grant.check(o.fiberd.Trust.Issuer, o.fiberd.Node.GrantsDir); err != nil {
+			return nil, err
+		}
+		if o.grant.TokenFile != "" {
+			// proc fibers run as fiberd's uid, so file modes cannot keep
+			// them from the Pod's token. Its directory is hidden instead.
+			abs, err := filepath.Abs(o.grant.TokenFile)
+			if err != nil {
+				return nil, fmt.Errorf("-grant-token-file: %w", err)
+			}
+			o.fiberd.Runtime.FiberHide = append(o.fiberd.Runtime.FiberHide, filepath.Dir(abs))
+		}
 		if !set["node-id"] {
 			o.fiberd.Node.ID = o.pod.Name
 		}
@@ -157,6 +183,9 @@ func (o *options) bind(fs *flag.FlagSet, getenv func(string) string) {
 	fs.StringVar(&o.pod.Name, "pod-name", getenv("POD_NAME"), "this grant Pod's name, for -home kubernetes. The downward API fills it through POD_NAME")
 	fs.StringVar(&o.pod.Namespace, "pod-namespace", getenv("POD_NAMESPACE"), "this grant Pod's namespace, for -home kubernetes. The downward API fills it through POD_NAMESPACE")
 	fs.StringVar(&o.pod.UID, "pod-uid", getenv("POD_UID"), "this grant Pod's UID, for -home kubernetes. The downward API fills it through POD_UID")
+	fs.StringVar(&o.grant.TokenFile, "grant-token-file", "", "this grant Pod's bound service-account token file, for -home kubernetes. fiberd fetches and renews its own grant from -issuer at /v1/grant with it and writes the grant into -grants-dir. Empty leaves grants to arrive as files only")
+	fs.StringVar(&o.grant.CAFile, "grant-ca-file", "", "PEM CA bundle the grant endpoint's certificate must chain to, for -grant-token-file. Empty means the system roots")
+	fs.DurationVar(&o.grant.Timeout, "grant-fetch-timeout", kubehome.DefaultGrantFetchTimeout, "how long the start retries the first grant fetch before fiberd refuses to start, for -grant-token-file. A Pod restarting with an unexpired grant file starts anyway")
 	fs.BoolVar(&o.version, "version", false, "print the version and exit")
 }
 
@@ -177,6 +206,31 @@ func (p podIdentity) check() error {
 	}
 	return fmt.Errorf("-home kubernetes needs the Pod identity, missing %s. The downward API fills each one",
 		strings.Join(missing, ", "))
+}
+
+// check names every flag the grant fetch needs and lacks in one error.
+// buildConfig has trimmed the file flags. The home's own Validate checks
+// the values themselves.
+func (g grantFetch) check(issuer, grantsDir string) error {
+	if g.TokenFile == "" {
+		if g.CAFile != "" {
+			return errors.New("-grant-ca-file needs -grant-token-file")
+		}
+		return nil
+	}
+	var missing []string
+	for _, f := range []struct{ flag, value string }{
+		{"-issuer", issuer},
+		{"-grants-dir", grantsDir},
+	} {
+		if strings.TrimSpace(f.value) == "" {
+			missing = append(missing, f.flag)
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	return fmt.Errorf("-grant-token-file needs -issuer and -grants-dir, missing %s", strings.Join(missing, ", "))
 }
 
 // usage prints the form's synopsis, then every flag.
@@ -262,7 +316,7 @@ type closer interface{ Close() }
 // started then.
 func (e env) runKube(ctx context.Context, o *options) error {
 	var built home.Home
-	err := e.runFiberd(ctx, &o.fiberd, e.kubeHome(ctx, o.pod, &built))
+	err := e.runFiberd(ctx, &o.fiberd, e.kubeHome(ctx, o.pod, o.grant, &built))
 	if c, ok := built.(closer); ok {
 		c.Close()
 	}
@@ -274,7 +328,8 @@ func (e env) runKube(ctx context.Context, o *options) error {
 // fails the run. ctx carries the logger. NewKube checks it once, and the
 // rest.Config timeout bounds discovery. The home it builds lands in
 // built, and ctx ending closes it, which cuts EndpointHost's wait short.
-func (e env) kubeHome(ctx context.Context, pod podIdentity, built *home.Home) fiberd.HomeFactory {
+// The grant fetch reaches the issuer fiberd verifies grants against.
+func (e env) kubeHome(ctx context.Context, pod podIdentity, fetch grantFetch, built *home.Home) fiberd.HomeFactory {
 	return func(c *fiberd.Config, jwks *grant.Cache) (home.Home, error) {
 		family, err := c.Family()
 		if err != nil {
@@ -285,17 +340,21 @@ func (e env) kubeHome(ctx context.Context, pod podIdentity, built *home.Home) fi
 			return nil, fmt.Errorf("kubernetes home: %w", err)
 		}
 		h, err := e.newHome(kubehome.Config{
-			Kube:         kube,
-			PodName:      pod.Name,
-			PodNamespace: pod.Namespace,
-			PodUID:       pod.UID,
-			StaleTTL:     c.Node.StaleTTL,
-			GrantsDir:    c.Node.GrantsDir,
-			Cache:        jwks,
-			Family:       family,
-			Devices:      c.Node.Devices,
-			CgroupRoot:   c.Node.CgroupRoot,
-			Logger:       klog.FromContext(ctx),
+			Kube:              kube,
+			PodName:           pod.Name,
+			PodNamespace:      pod.Namespace,
+			PodUID:            pod.UID,
+			StaleTTL:          c.Node.StaleTTL,
+			GrantsDir:         c.Node.GrantsDir,
+			GrantTokenFile:    fetch.TokenFile,
+			GrantIssuerURL:    c.Trust.Issuer,
+			GrantCAFile:       fetch.CAFile,
+			GrantFetchTimeout: fetch.Timeout,
+			Cache:             jwks,
+			Family:            family,
+			Devices:           c.Node.Devices,
+			CgroupRoot:        c.Node.CgroupRoot,
+			Logger:            klog.FromContext(ctx),
 		})
 		if err != nil {
 			return nil, err
