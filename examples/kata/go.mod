@@ -8,8 +8,8 @@ go 1.26.0
 toolchain go1.26.7
 
 require (
-	github.com/containerd/containerd/api v1.9.0
-	github.com/containerd/containerd/v2 v2.1.4
+	github.com/containerd/containerd/api v1.10.0
+	github.com/containerd/containerd/v2 v2.2.9
 	github.com/containerd/errdefs v1.0.0
 	github.com/containerd/errdefs/pkg v0.3.0
 	github.com/containerd/fifo v1.1.0
@@ -22,16 +22,16 @@ require (
 
 require (
 	github.com/Microsoft/go-winio v0.6.2 // indirect
-	github.com/Microsoft/hcsshim v0.13.0 // indirect
-	github.com/containerd/cgroups/v3 v3.0.5 // indirect
-	github.com/containerd/console v1.0.4 // indirect
+	github.com/Microsoft/hcsshim v0.14.1 // indirect
+	github.com/containerd/cgroups/v3 v3.1.2 // indirect
+	github.com/containerd/console v1.0.5 // indirect
 	github.com/containerd/continuity v0.4.5 // indirect
 	github.com/containerd/go-runc v1.1.0 // indirect
 	github.com/containerd/log v0.1.0 // indirect
 	github.com/containerd/typeurl/v2 v2.2.3 // indirect
 	github.com/go-jose/go-jose/v4 v4.1.5 // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect
-	github.com/golang/groupcache v0.0.0-20210331224755-41bb18bfe9da // indirect
+	github.com/golang/groupcache v0.0.0-20241129210726-2c02b8208cf8 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/mdlayher/socket v0.5.1 // indirect
 	github.com/mdlayher/vsock v1.2.1 // indirect
@@ -39,7 +39,7 @@ require (
 	github.com/moby/sys/userns v0.1.0 // indirect
 	github.com/opencontainers/go-digest v1.0.0 // indirect
 	github.com/opencontainers/image-spec v1.1.1 // indirect
-	github.com/opencontainers/runtime-spec v1.2.1 // indirect
+	github.com/opencontainers/runtime-spec v1.3.0 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/sirupsen/logrus v1.9.3 // indirect
 	go.opencensus.io v0.24.0 // indirect
