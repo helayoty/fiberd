@@ -52,16 +52,16 @@ var (
 	// deltas past its quota on this home. The fiber keeps running, and the
 	// caller backs off (SHED) or releases something.
 	ErrDeltaQuota = errors.New("fiberd: grant's parked deltas would exceed its quota on this home")
-	// ErrCallerMismatch means the grant is bound to a client certificate
-	// other than the one the request arrived over.
-	ErrCallerMismatch = errors.New("fiberd: grant is bound to another caller's certificate")
+	// ErrCallerMismatch means the grant is bound to a client key other
+	// than the one the request arrived over.
+	ErrCallerMismatch = errors.New("fiberd: grant is bound to another caller's key")
 	// ErrUnboundGrant means the home requires bound grants and this one
-	// names no caller certificate.
-	ErrUnboundGrant = errors.New("fiberd: grant is not bound to a caller certificate")
-	// ErrHandoffUnbound means a handoff grant names no caller certificate.
-	// Handoff checks the caller's certificate in the fiber, so it needs
-	// one.
-	ErrHandoffUnbound = errors.New("fiberd: handoff grant is not bound to a caller certificate")
+	// names no caller key.
+	ErrUnboundGrant = errors.New("fiberd: grant is not bound to a caller key")
+	// ErrHandoffUnbound means a handoff grant names no caller key. A
+	// handoff fiber pins its caller's certificate, so the grant needs a
+	// caller.
+	ErrHandoffUnbound = errors.New("fiberd: handoff grant is not bound to a caller key")
 	// ErrNoTenant: a named session was cloned or parked under a grant
 	// without a tenant. A named session is filed under its tenant, so
 	// without one there is nothing to file it under or to look it up by.

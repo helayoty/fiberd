@@ -37,7 +37,7 @@ type harness struct {
 }
 
 // boundVerifier is the insecure JSON verifier with every grant bound to
-// one caller certificate, as a signed grant with a cnf claim would be.
+// one caller key, as a signed grant with a cnf claim would be.
 type boundVerifier struct{ thumbprint string }
 
 func (v boundVerifier) Verify(ctx context.Context, token []byte) (core.Grant, error) {
@@ -290,8 +290,8 @@ func TestIdempotentAttachAndTierFloor(t *testing.T) {
 }
 
 func TestCallerOwnsItsGrantsFibers(t *testing.T) {
-	owner := tlsconf.Caller{Thumbprint: "owner-x5t"}
-	other := tlsconf.Caller{Thumbprint: "other-x5t"}
+	owner := tlsconf.Caller{Thumbprint: "owner-jkt"}
+	other := tlsconf.Caller{Thumbprint: "other-jkt"}
 	h := newHarness(t, core.TierCheckpoint, func(a *core.Core) { a.Verify = boundVerifier{thumbprint: owner.Thumbprint} })
 	gw := (&rpc.Gateway{Server: h.server}).Handler()
 	g := jsonGrant(t, core.Grant{UID: "g1", Audience: "node-a", Tenant: "acme"})
@@ -355,8 +355,8 @@ func TestCallerOwnsItsGrantsFibers(t *testing.T) {
 // an unknown one NotFound, and another caller is Unauthenticated. The
 // gateway serves the same call at POST /v1/discard.
 func TestDiscard(t *testing.T) {
-	owner := tlsconf.Caller{Thumbprint: "owner-x5t"}
-	other := tlsconf.Caller{Thumbprint: "other-x5t"}
+	owner := tlsconf.Caller{Thumbprint: "owner-jkt"}
+	other := tlsconf.Caller{Thumbprint: "other-jkt"}
 	g := jsonGrant(t, core.Grant{UID: "g1", Audience: "node-a", Tenant: "acme"})
 	cases := []struct {
 		name     string
@@ -597,7 +597,7 @@ func (r *routingRuntime) HandoffRoute(fiberID string) (string, string, []byte, b
 // plaintext request carries no caller, so a bound grant is refused before
 // any fiber is made.
 func TestCloneCarriesTheCertificates(t *testing.T) {
-	owner := tlsconf.Caller{Thumbprint: "owner-x5t", Cert: []byte("owner der")}
+	owner := tlsconf.Caller{Thumbprint: "owner-jkt", Cert: []byte("owner der")}
 	cases := []struct {
 		name   string
 		caller *tlsconf.Caller

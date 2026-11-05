@@ -23,7 +23,7 @@ Every Clone request carries a signed CapacityGrant as a JSON Web Token (JWT). Th
 
 [fiberd](glossary.md#fiberd) verifies the signature and these claims offline, as [grant.md](design/grant.md) describes.
 
-The API serves mutual TLS (mTLS), so the token is encrypted on the wire, and a grant bound to the caller's certificate cannot be replayed by another caller. Keep it out of logs, metadata and readable files all the same.
+The API serves mutual TLS (mTLS), so the token is encrypted on the wire, and a grant bound to the key of the caller's certificate cannot be replayed by another caller. Keep it out of logs, metadata and readable files all the same.
 
 Verification does not reject a token merely because `exp` is in the past. Lease expiry is a capacity event handled by admission and the lease reaper, so it produces a capacity miss rather than `Unauthenticated`. Stale or unavailable key material produces `SHED` when the verifier cannot safely decide.
 
@@ -45,7 +45,7 @@ Verification does not reject a token merely because `exp` is in the past. Lease 
 - `policy.session_class` is the grant's [session class](glossary.md#session-class), which names, within the tenant, the domain its deltas are published and sealed under ([artifact.md](design/artifact.md)). `policy.audit_class` is carried as a label.
 - `policy.psi_some_avg10_shed` and `policy.psi_some_avg10_park` override the pressure watermarks when non-zero.
 - `policy.isolation` is `UNTRUSTED` or `TRUSTED`, and unset means `UNTRUSTED`. An untrusted grant is admitted only by a home whose runtime isolates tenants from the host kernel (gVisor, Hyperlight or cloudhv). Any other home refuses it with `FailedPrecondition`.
-- `policy.endpoint_mode` is the endpoint mode, `DIRECT` or `HANDOFF`, and unset means `DIRECT`. A `DIRECT` fiber listens on its own endpoint. A `HANDOFF` fiber is reached over TLS through the home's [handoff](glossary.md#handoff) listener. A `HANDOFF` grant must be bound to a caller certificate, and an unbound one is refused with `Unauthenticated`. A home that does not hand off connections refuses the grant with `FailedPrecondition` at admission, as a needs-tier [miss](glossary.md#clone-misses).
+- `policy.endpoint_mode` is the endpoint mode, `DIRECT` or `HANDOFF`, and unset means `DIRECT`. A `DIRECT` fiber listens on its own endpoint. A `HANDOFF` fiber is reached over TLS through the home's [handoff](glossary.md#handoff) listener. A `HANDOFF` grant must be bound to a caller's key, and an unbound one is refused with `Unauthenticated`. A home that does not hand off connections refuses the grant with `FailedPrecondition` at admission, as a needs-tier [miss](glossary.md#clone-misses).
 - `device_budget.bytes` and `device_budget.class` are the [device budget](glossary.md#device-budget) and the requested device class. The host enforces the bytes. A grant that names a class is admitted only where its [engine](glossary.md#engine) declares that class.
 - `disk_budget_bytes` is the per-fiber workspace ceiling in bytes, for the [file calls](#files). Zero means the grant's fibers have no workspace. A home whose runtime gives fibers no workspace refuses a grant that sets it with `FailedPrecondition` at admission. proc and runc give fibers a workspace. gVisor does not, and Hyperlight never will.
 
@@ -105,7 +105,7 @@ The fiber is asked to stop serving before it is checkpointed ([zygote.md](design
 
 Release looks up a running fiber ID. To delete a session that is already parked, use [Discard](#discard).
 
-Calling Park or Release with an unknown or old-epoch fiber ID returns `NotFound`. So does a fiber whose grant is bound to another caller's certificate.
+Calling Park or Release with an unknown or old-epoch fiber ID returns `NotFound`. So does a fiber whose grant is bound to another caller's key.
 
 ### Discard
 
@@ -182,10 +182,10 @@ The endpoint is a transport address, not a separate identity. Address allocation
 For a `HANDOFF` fiber, `endpoint` is the home's handoff listener, the same `tcp://` address for every such fiber. The caller dials it with TLS 1.3 and does three things.
 
 - It sends `<routing_key>.fiberd` as the TLS server name.
-- It presents the certificate the grant is bound to.
+- It presents the client certificate that the fiber's Clone arrived under. A fiber born before a renewal accepts only the old certificate, a resumed or moved fiber included.
 - It accepts the server only if it presents `server_cert`, or, for a caller that pins keys, only if the base64url SHA-256 of its public key (SubjectPublicKeyInfo) equals `server_key_sha256`. The two name the same certificate.
 
-The home closes the connection without a reply if the server name is unknown, the fiber has ended, or no ClientHello arrives within 1 second. The fiber refuses any client certificate other than the grant's. In Go, `client.Fiber.DialHandoff` does all of this and pins the key during the handshake. In Python, `fiberd.client.Fiber.dial_handoff` trusts `server_cert` alone during the handshake and checks the key pin after it, before any byte is sent. A resumed session keeps its server key, on this home and on any home that shares the handoff key, but it gets a new routing key. Use the one from the latest Clone. fiberd's side is in [handoff.md](design/handoff.md).
+The home closes the connection without a reply if the server name is unknown, the fiber has ended, or no ClientHello arrives within 1 second. The fiber refuses any client certificate other than the one its Clone arrived under. In Go, `client.Fiber.DialHandoff` does all of this and pins the key during the handshake. In Python, `fiberd.client.Fiber.dial_handoff` trusts `server_cert` alone during the handshake and checks the key pin after it, before any byte is sent. A resumed session keeps its server key, on this home and on any home that shares the handoff key, but it gets a new routing key. Use the one from the latest Clone. fiberd's side is in [handoff.md](design/handoff.md).
 
 ## Outcomes
 
@@ -195,7 +195,7 @@ The core returns transport-independent outcomes, and the gRPC layer maps them as
 - `DEFERRED_FALLBACK` becomes `Unavailable`. It includes `Miss{code: DEFERRED_FALLBACK, issuer, preferred_home}`. `preferred_home` names the home to send the next Clone to, set when the session's parked state should remain there ([clone misses](glossary.md#clone-misses)).
 - A tier gap, a needs-tier [miss](glossary.md#clone-misses), becomes `FailedPrecondition`.
 - A malformed request becomes `InvalidArgument`.
-- An invalid grant, signature, issuer or audience becomes `Unauthenticated`. So does a token for a grant not yet admitted, when the home names another grant UID as its own ([home.md](design/home.md)).
+- An invalid grant, signature, issuer or audience becomes `Unauthenticated`. So does a token for a grant not yet admitted, when the home names another grant UID as its own ([home.md](design/home.md)). So does any call over a client certificate whose key has no thumbprint, a P-224 key for example ([grant.md](design/grant.md)).
 - An unknown fiber, and a session Discard finds nowhere, become `NotFound`.
 - A file call on a fiber whose grant has no workspace becomes `FailedPrecondition` with a `NoWorkspace` detail, so a client tells it apart from a tier gap.
 - A file larger than the disk budget becomes `ResourceExhausted` with no `Miss`, so a client never mistakes it for `SHED`.

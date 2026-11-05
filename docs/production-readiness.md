@@ -8,7 +8,7 @@ This page lists what stands between the reference implementation and a productio
 
 | Area | What the code does | What production needs | Owner |
 | --- | --- | --- | --- |
-| Control transport | Mutual TLS by default, with each [grant](glossary.md#grant) bound to the caller's certificate. Every example runs `-insecure-plaintext`, and the Knative and Kata callers dial without TLS | Serve TLS in every [home](glossary.md#home) and dial with a client certificate | [grant.md](design/grant.md) |
+| Control transport | Mutual TLS by default, with each [grant](glossary.md#grant) bound to the key of the caller's certificate. Every example runs `-insecure-plaintext`, and the Knative and Kata callers dial without TLS | Serve TLS in every [home](glossary.md#home) and dial with a client certificate | [grant.md](design/grant.md) |
 | [Release](glossary.md#release) | A [yield](glossary.md#yield), [scope](glossary.md#scope) loss and the [epoch](glossary.md#epoch) bump log a failed runtime release and still drop the [fiber](glossary.md#fiber) from the ledger | Retry or quarantine a failed release before freeing its place under `fibers.max` | [core.md](design/core.md) |
 | Epoch | [Fence](glossary.md#fence) safety needs a persistent epoch. A grant Pod keeps it on `emptyDir` | A state directory that lives as long as the home's identity, its audience and grant UIDs | [kubernetes.md](design/kubernetes.md) |
 | Mobility | An unreachable registry falls back to a fresh session | No fresh-state fallback where continuity matters | [artifact.md](design/artifact.md) |

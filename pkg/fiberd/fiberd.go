@@ -30,7 +30,6 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials"
 
 	"github.com/Azure/fiberd/pkg/artifact"
 	"github.com/Azure/fiberd/pkg/backend"
@@ -866,7 +865,7 @@ func RunContext(ctx context.Context, c *Config, newHome HomeFactory) error {
 	srv := &rpc.Server{Core: ag, Issuer: c.Trust.Issuer}
 	var gopts []grpc.ServerOption
 	if serverTLS != nil {
-		gopts = append(gopts, grpc.Creds(credentials.NewTLS(serverTLS)))
+		gopts = append(gopts, grpc.Creds(rpc.ServerCreds(serverTLS)))
 	}
 	gs := rpc.NewGRPCServer(srv, gopts...)
 	gl, err := net.Listen("tcp", c.API.Listen)
@@ -883,7 +882,8 @@ func RunContext(ctx context.Context, c *Config, newHome HomeFactory) error {
 			return fmt.Errorf("-http %s: %w", c.API.HTTP, err)
 		}
 		gw := &rpc.Gateway{Server: srv, Health: healthz}
-		hs = &http.Server{Handler: gw.Handler(), TLSConfig: serverTLS, ReadHeaderTimeout: 5 * time.Second}
+		hs = &http.Server{Handler: gw.Handler(), TLSConfig: serverTLS, ConnContext: rpc.ConnContext,
+			ReadHeaderTimeout: 5 * time.Second}
 		defer func() { _ = hs.Close() }()
 		serving.Go(func() {
 			log.Printf("fiberd json gateway on %s", hl.Addr())

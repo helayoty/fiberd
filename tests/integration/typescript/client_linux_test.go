@@ -27,7 +27,6 @@ import (
 	"github.com/Azure/fiberd/pkg/handoff"
 	"github.com/Azure/fiberd/pkg/rpc"
 	"github.com/Azure/fiberd/pkg/runtime/host"
-	"github.com/Azure/fiberd/pkg/tlsconf"
 	"github.com/Azure/fiberd/pkg/tlsconf/tlsconftest"
 	"github.com/Azure/fiberd/tests/internal/testenv"
 )
@@ -126,7 +125,7 @@ func serveHome(t *testing.T, routed bool) map[string]any {
 		strangerCert, strangerKey := ca.Client(t, "stranger").Write(t, dir, "stranger")
 		result["tls"] = map[string]string{"cert": cert, "key": key, "ca": caFile}
 		result["stranger"] = map[string]string{"cert": strangerCert, "key": strangerKey}
-		verify = boundVerifier{thumbprint: tlsconf.Thumbprint(caller.Cert)}
+		verify = boundVerifier{thumbprint: caller.Thumbprint(t)}
 		opts = append(opts, grpc.Creds(credentials.NewTLS(&tls.Config{
 			MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{ca.Server(t).TLS()},
 			ClientAuth: tls.RequireAndVerifyClientCert, ClientCAs: ca.Pool(),

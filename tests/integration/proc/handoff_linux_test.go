@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/Azure/fiberd/pkg/core"
-	"github.com/Azure/fiberd/pkg/tlsconf"
 	"github.com/Azure/fiberd/pkg/tlsconf/tlsconftest"
 )
 
@@ -32,7 +31,7 @@ func TestHandoffRefusesInHandshake(t *testing.T) {
 	other := ca.Client(t, "other")
 	stranger := tlsconftest.NewCA(t, "stranger").Client(t, "stranger")
 	g := core.Grant{UID: "ghr", TemplateDigest: "sha256:ref", WBudgetBytes: 64 << 20,
-		CallerThumbprint: tlsconf.Thumbprint(caller.Cert), Policy: core.Policy{EndpointMode: core.EndpointHandoff}}
+		CallerThumbprint: caller.Thumbprint(t), Policy: core.Policy{EndpointMode: core.EndpointHandoff}}
 	if err := rt.PrepareTemplate(ctx, g); err != nil {
 		t.Fatal(err)
 	}
@@ -97,11 +96,11 @@ func isAlert(err error) bool {
 func TestHandoffKeyNeverOnDisk(t *testing.T) {
 	rt := newRuntime(t)
 	ctx := context.Background()
-	callerA, x5tA := callerCert(t)
-	callerB, x5tB := callerCert(t)
+	callerA, thumbprintA := callerCert(t)
+	callerB, thumbprintB := callerCert(t)
 	run := filepath.Join("/tmp", "fz-"+fmt.Sprint(os.Getpid()))
-	ga := core.Grant{UID: "gka", TemplateDigest: "sha256:ref", WBudgetBytes: 64 << 20, CallerThumbprint: x5tA, Policy: core.Policy{EndpointMode: core.EndpointHandoff}}
-	gb := core.Grant{UID: "gkb", TemplateDigest: "sha256:ref", WBudgetBytes: 64 << 20, CallerThumbprint: x5tB, Policy: core.Policy{EndpointMode: core.EndpointHandoff}}
+	ga := core.Grant{UID: "gka", TemplateDigest: "sha256:ref", WBudgetBytes: 64 << 20, CallerThumbprint: thumbprintA, Policy: core.Policy{EndpointMode: core.EndpointHandoff}}
+	gb := core.Grant{UID: "gkb", TemplateDigest: "sha256:ref", WBudgetBytes: 64 << 20, CallerThumbprint: thumbprintB, Policy: core.Policy{EndpointMode: core.EndpointHandoff}}
 	for _, g := range []core.Grant{ga, gb} {
 		if err := rt.PrepareTemplate(ctx, g); err != nil {
 			t.Fatal(err)

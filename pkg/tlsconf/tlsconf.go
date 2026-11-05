@@ -9,7 +9,7 @@
 package tlsconf
 
 import (
-	"crypto/sha256"
+	"crypto"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
@@ -18,6 +18,8 @@ import (
 	"fmt"
 	"os"
 	"time"
+
+	"github.com/go-jose/go-jose/v4"
 )
 
 var (
@@ -100,8 +102,9 @@ func loadPool(path string) (*x509.CertPool, error) {
 
 // Caller is who is on the other end of a verified connection.
 type Caller struct {
-	// Thumbprint is the base64url SHA-256 of the DER certificate, the
-	// value of a grant's cnf x5t#S256 claim.
+	// Thumbprint is the RFC 7638 thumbprint of the caller's public key,
+	// the value of a grant's cnf jkt, so a renewed certificate with the
+	// same key names the same caller.
 	Thumbprint string
 	// Cert is the DER certificate itself, the one a handoff fiber of a
 	// grant bound to this caller is told to accept.
@@ -109,17 +112,39 @@ type Caller struct {
 }
 
 // CallerOf names the peer from its verified chain, whose leaf comes first.
+// ok is false for an empty chain and for a leaf whose key has no
+// thumbprint. A server must refuse the second, never serve it as a peer
+// without identity.
 func CallerOf(chain []*x509.Certificate) (Caller, bool) {
 	if len(chain) == 0 {
 		return Caller{}, false
 	}
-	return Caller{Thumbprint: Thumbprint(chain[0]), Cert: chain[0].Raw}, true
+	tp, err := keyThumbprint(chain[0])
+	if err != nil {
+		return Caller{}, false
+	}
+	return Caller{Thumbprint: tp, Cert: chain[0].Raw}, true
 }
 
-// Thumbprint is the RFC 8705 x5t#S256 of a certificate.
-func Thumbprint(cert *x509.Certificate) string {
-	sum := sha256.Sum256(cert.Raw)
-	return base64.RawURLEncoding.EncodeToString(sum[:])
+// Thumbprint is the RFC 7638 thumbprint of a certificate's public key,
+// the base64url SHA-256 of the key's canonical JWK, which is the value of
+// a grant's cnf jkt. A key without a canonical JWK form, a P-224 one for
+// example, is an error.
+func Thumbprint(cert *x509.Certificate) (string, error) {
+	tp, err := keyThumbprint(cert)
+	if err != nil {
+		return "", fmt.Errorf("tlsconf: %w", err)
+	}
+	return tp, nil
+}
+
+// keyThumbprint is Thumbprint with an error its caller prefixes.
+func keyThumbprint(cert *x509.Certificate) (string, error) {
+	tp, err := (&jose.JSONWebKey{Key: cert.PublicKey}).Thumbprint(crypto.SHA256)
+	if err != nil {
+		return "", fmt.Errorf("certificate key has no JWK thumbprint: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(tp), nil
 }
 
 // ThumbprintFile is Thumbprint of the first certificate in a PEM file.
@@ -140,6 +165,10 @@ func ThumbprintFile(path string) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("tlsconf: %s: %w", path, err)
 		}
-		return Thumbprint(cert), nil
+		tp, err := keyThumbprint(cert)
+		if err != nil {
+			return "", fmt.Errorf("tlsconf: %s: %w", path, err)
+		}
+		return tp, nil
 	}
 }

@@ -3,6 +3,8 @@
 package host
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -17,8 +19,8 @@ import (
 // nothing, because connections come through fz_accept.
 const handoffEndpoint = "handoff"
 
-// handoffIdentity is the identity derived for a grant and the caller its
-// fibers accept. It is kept so HandoffRoute has the pin at hand and the
+// handoffIdentity is the identity derived for a grant and the caller the
+// grant names. It is kept so HandoffRoute has the pin at hand and the
 // derivation runs once.
 type handoffIdentity struct {
 	id     handoff.Identity
@@ -40,7 +42,7 @@ func (r *Runtime) canHandoff() bool {
 }
 
 // prepareIdentity derives the grant's TLS identity (once) and records
-// the caller its fibers accept, so HandoffRoute can name the pin. It
+// the caller the grant names, so HandoffRoute can name the pin. It
 // writes nothing, because identityFor puts the identity on each fiber's record.
 func (r *Runtime) prepareIdentity(grantUID, caller string) error {
 	r.mu.Lock()
@@ -74,13 +76,20 @@ func (r *Runtime) forgetIdentity(grantUID string) {
 	r.mu.Unlock()
 }
 
+// certThumbprint is the x5t#S256 a handoff fiber pins its caller's
+// certificate by.
+func certThumbprint(der []byte) string {
+	sum := sha256.Sum256(der)
+	return base64.RawURLEncoding.EncodeToString(sum[:])
+}
+
 // identityFor is the grant's TLS identity for a handoff fiber's record,
-// the key PEM, the certificate PEM, the caller thumbprint and the
-// caller's certificate as PEM. callerCert is the DER the clone arrived
-// under, which the thumbprint is of. A fiber pins that one certificate
-// in its handshake. The identity is never a file, because fibers of
-// every grant run as fiberd's user and no file mode would keep grants
-// apart.
+// the key PEM, the certificate PEM, the hash of the caller's certificate
+// and that certificate as PEM. callerCert is the DER the clone arrived
+// under. Its hash is computed here because the grant names the caller's
+// key, and a fiber pins the one certificate in its handshake. The
+// identity is never a file, because fibers of every grant run as
+// fiberd's user and no file mode would keep grants apart.
 func (r *Runtime) identityFor(grantUID string, callerCert []byte) (*backend.Identity, error) {
 	r.mu.Lock()
 	had, ok := r.identities[grantUID]
@@ -94,7 +103,7 @@ func (r *Runtime) identityFor(grantUID string, callerCert []byte) (*backend.Iden
 	if had.caller == "" {
 		return nil, errors.New("host: handoff identity names no caller")
 	}
-	return &backend.Identity{KeyPEM: string(had.id.KeyPEM), CertPEM: string(had.id.CertPEM), Caller: had.caller,
+	return &backend.Identity{KeyPEM: string(had.id.KeyPEM), CertPEM: string(had.id.CertPEM), Caller: certThumbprint(callerCert),
 		CallerPEM: string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: callerCert}))}, nil
 }
 

@@ -2,22 +2,33 @@ package tlsconf_test
 
 import (
 	"bytes"
+	"crypto/ecdsa"
+	"crypto/ed25519"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/base64"
 	"encoding/pem"
 	"errors"
+	"math/big"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/Azure/fiberd/pkg/core"
 	"github.com/Azure/fiberd/pkg/tlsconf"
 	"github.com/Azure/fiberd/pkg/tlsconf/tlsconftest"
 )
@@ -46,6 +57,16 @@ func newFiles(t *testing.T, leaf func(ca tlsconftest.Pair) tlsconftest.Pair) fil
 	}
 	f.missing = filepath.Join(dir, "nope.pem")
 	return f
+}
+
+// thumbprint is Thumbprint of a certificate whose key has one.
+func thumbprint(t *testing.T, cert *x509.Certificate) string {
+	t.Helper()
+	tp, err := tlsconf.Thumbprint(cert)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tp
 }
 
 func TestServerTransportChoice(t *testing.T) {
@@ -214,7 +235,7 @@ func TestHandshakeNamesCaller(t *testing.T) {
 				t.Fatalf("handshake: client %v, server %v", cliErr, serr)
 			}
 			c, ok := tlsconf.CallerOf(st.PeerCertificates)
-			if !ok || c.Thumbprint != tlsconf.Thumbprint(tc.client.Cert) {
+			if !ok || c.Thumbprint != thumbprint(t, tc.client.Cert) {
 				t.Fatalf("caller = %+v ok=%v, want the client's thumbprint", c, ok)
 			}
 			// What grant-issuer -bind-cert puts in cnf is what the handshake sees.
@@ -551,8 +572,119 @@ func TestServerReloadsWhileServing(t *testing.T) {
 	}
 }
 
+// A caller is named by its key, not by its certificate. The name is the
+// RFC 7638 thumbprint, so any JWT library derives the same one, and a
+// renewal over the same key keeps it.
+func TestThumbprint(t *testing.T) {
+	// The RSA key of RFC 7638 section 3.1.
+	const rfcRSAModulus = "0vx7agoebGcQSuuPiLJXZptN9nndrQmbXEps2aiAFbWhM78LhWx4cbbfAAtVT86zwu1RK7aPFFxuhDR1L6tSoc_BJECPebWKRXjBZCiFV4n3oknjhMstn64tZ_2W-5JsGY4Hc5n9yBXArwl93lqt7_RN5w6Cf0h4QyQ5v-65YGjQR0_FDW2QvzqY368QQMicAtaSqzs8KJZgnYb9c7d0zgdAZHzu6qMQvRL5hajrn1n91CbOpbISD08qNLyrdkt-bFTWhAI4vMQFh6WeZu0fM4lFd2NcRwr3XPksINHaQ-G_xBniIqbw0Ls1jF44-csFCur-kEgU8awapJzKnqDKgw"
+	// The P-521 key of RFC 7520 section 3.1, whose x starts with a zero byte.
+	const (
+		rfcP521X = "AHKZLLOsCOzz5cY97ewNUajB957y-C-U88c3v13nmGZx6sYl_oJXu9A5RkTKqjqvjyekWF-7ytDyRXYgCF5cj0Kt"
+		rfcP521Y = "AdymlHvOiLxXkEhayXQnNCvDX4h9htZaCJN34kfmC6pV5OhQHiraVySsUdaQkAgDPrwQrJmbnX9cwlGfP-HqHZR1"
+	)
+	b64 := base64.RawURLEncoding
+	decode := func(s string) []byte {
+		t.Helper()
+		b, err := b64.DecodeString(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	// hashOf over a canonical JWK written out by hand is the thumbprint
+	// RFC 7638 defines. Over a DER certificate it is the certificate
+	// hash, which a renewal changes.
+	hashOf := func(b []byte) string {
+		sum := sha256.Sum256(b)
+		return b64.EncodeToString(sum[:])
+	}
+
+	rfcRSA := &rsa.PublicKey{N: new(big.Int).SetBytes(decode(rfcRSAModulus)), E: 65537} // "AQAB"
+	rfcP521, err := ecdsa.ParseUncompressedPublicKey(elliptic.P521(), slices.Concat([]byte{4}, decode(rfcP521X), decode(rfcP521Y)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rfcEd := ed25519.PublicKey(decode("11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo"))
+	edPub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ca := tlsconftest.NewCA(t, "ca")
+	p256 := ca.Client(t, "c")
+	// The uncompressed point, a 0x04 byte before the two 32-byte
+	// coordinates, already padded the way a JWK wants them.
+	point, err := p256.Key.PublicKey.Bytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := ca.Client(t, "first")
+	renewed := ca.Renew(t, first)
+
+	cases := []struct {
+		name    string
+		cert    *x509.Certificate
+		want    string            // the exact thumbprint, when it is known
+		same    *x509.Certificate // a second certificate over cert's key
+		differs *x509.Certificate // a certificate over another key
+		wantErr bool
+	}{
+		{name: "the RFC 7638 section 3.1 RSA vector", cert: &x509.Certificate{PublicKey: rfcRSA},
+			want: "NzbLsXh8uDCcd-6MNwXF4W_7noWXFZAfHkxZsRGC9Xs"},
+		{name: "the RFC 8037 appendix A.3 Ed25519 vector", cert: &x509.Certificate{PublicKey: rfcEd},
+			want: "kPrK_qmxVWaYVA9wwBF6Iuo3vVzz7TxHCTwXBygrS4k"},
+		{name: "an Ed25519 key hand-computed through its canonical form", cert: &x509.Certificate{PublicKey: edPub},
+			want: hashOf([]byte(`{"crv":"Ed25519","kty":"OKP","x":"` + b64.EncodeToString(edPub) + `"}`))},
+		{name: "a P-256 key hand-computed through its canonical form", cert: p256.Cert,
+			want: hashOf([]byte(`{"crv":"P-256","kty":"EC","x":"` + b64.EncodeToString(point[1:33]) + `","y":"` + b64.EncodeToString(point[33:]) + `"}`))},
+		{name: "a P-521 key whose coordinate starts with a zero byte keeps its padding", cert: &x509.Certificate{PublicKey: rfcP521},
+			want: hashOf([]byte(`{"crv":"P-521","kty":"EC","x":"` + rfcP521X + `","y":"` + rfcP521Y + `"}`))},
+		{name: "two certificates from one key give one thumbprint", cert: first.Cert, same: renewed.Cert},
+		{name: "two keys give two thumbprints", cert: p256.Cert, differs: ca.Client(t, "other").Cert},
+		{name: "a key without a canonical JWK form is an error", cert: ca.UnnamedClient(t).Cert, wantErr: true},
+		{name: "a certificate without a key is an error", cert: &x509.Certificate{}, wantErr: true},
+	}
+	// A grant's callerThumbprint must fit this pattern.
+	wellFormed := regexp.MustCompile(core.CallerThumbprintPattern)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := tlsconf.Thumbprint(tc.cert)
+			if tc.wantErr {
+				if err == nil || got != "" {
+					t.Fatalf("Thumbprint = %q, %v, want an error and no thumbprint", got, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !wellFormed.MatchString(got) {
+				t.Fatalf("Thumbprint = %q, want 43 base64url characters", got)
+			}
+			if tc.want != "" && got != tc.want {
+				t.Fatalf("Thumbprint = %q, want %q", got, tc.want)
+			}
+			if tc.same != nil {
+				if again := thumbprint(t, tc.same); again != got {
+					t.Fatalf("Thumbprint = %q then %q, want one thumbprint for one key", got, again)
+				}
+				for _, c := range []*x509.Certificate{tc.cert, tc.same} {
+					if got == hashOf(c.Raw) {
+						t.Fatalf("Thumbprint = %q, the hash of a certificate, want the key's", got)
+					}
+				}
+			}
+			if tc.differs != nil && thumbprint(t, tc.differs) == got {
+				t.Fatalf("Thumbprint = %q for two keys, want two thumbprints", got)
+			}
+		})
+	}
+}
+
 // A connection without a verified chain has no caller. With one, the
-// caller is the leaf, never an intermediate.
+// caller is the leaf, never an intermediate. A leaf that no grant can
+// name is no caller either.
 func TestCallerOf(t *testing.T) {
 	ca := tlsconftest.NewCA(t, "ca")
 	leaf := ca.Client(t, "c")
@@ -564,7 +696,8 @@ func TestCallerOf(t *testing.T) {
 	}{
 		{name: "no chain is no caller", chain: nil},
 		{name: "an empty chain is no caller", chain: []*x509.Certificate{}},
-		{name: "the leaf names the caller", chain: []*x509.Certificate{leaf.Cert, ca.Cert}, want: tlsconf.Thumbprint(leaf.Cert), wantOK: true},
+		{name: "the leaf names the caller", chain: []*x509.Certificate{leaf.Cert, ca.Cert}, want: thumbprint(t, leaf.Cert), wantOK: true},
+		{name: "a leaf whose key has no canonical form is no caller", chain: []*x509.Certificate{ca.UnnamedClient(t).Cert, ca.Cert}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -607,13 +740,14 @@ func TestThumbprintFile(t *testing.T) {
 		want    string
 		wantErr string
 	}{
-		{name: "a single certificate", content: leaf.CertPEM(), want: tlsconf.Thumbprint(leaf.Cert)},
-		{name: "a key before the certificate is skipped", content: cat(keyPEM, leaf.CertPEM()), want: tlsconf.Thumbprint(leaf.Cert)},
-		{name: "the first of a chain is the leaf", content: cat(leaf.CertPEM(), ca.CertPEM()), want: tlsconf.Thumbprint(leaf.Cert)},
+		{name: "a single certificate", content: leaf.CertPEM(), want: thumbprint(t, leaf.Cert)},
+		{name: "a key before the certificate is skipped", content: cat(keyPEM, leaf.CertPEM()), want: thumbprint(t, leaf.Cert)},
+		{name: "the first of a chain is the leaf", content: cat(leaf.CertPEM(), ca.CertPEM()), want: thumbprint(t, leaf.Cert)},
 		{name: "a missing file", content: nil, wantErr: "no such file"},
 		{name: "a file of only a key", content: keyPEM, wantErr: "holds no PEM certificate"},
 		{name: "a file that is not PEM", content: []byte("hello"), wantErr: "holds no PEM certificate"},
 		{name: "a certificate block that is not DER", content: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: []byte("junk")}), wantErr: "x509"},
+		{name: "a certificate whose key has no canonical form", content: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: ca.UnnamedClient(t).Cert.Raw}), wantErr: "no JWK thumbprint"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

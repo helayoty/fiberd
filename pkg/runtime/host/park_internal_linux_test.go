@@ -388,7 +388,7 @@ func TestPark(t *testing.T) {
 func TestResume(t *testing.T) {
 	g := core.Grant{UID: "g1", TemplateDigest: "sha256:tmpl", FiberMax: 2, WBudgetBytes: 64 * mib}
 	handoffG := g
-	handoffG.Policy.EndpointMode, handoffG.CallerThumbprint = core.EndpointHandoff, "x5t"
+	handoffG.Policy.EndpointMode, handoffG.CallerThumbprint = core.EndpointHandoff, "jkt"
 	next := core.Fence{GrantUID: "g1", Epoch: 2, Seq: 1}
 	// parkFirst parks the fixture's fiber and returns the ref.
 	parkFirst := func(t *testing.T, f *parkFixture) string {

@@ -5,6 +5,8 @@ package host
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/pem"
 	"errors"
 	"os"
@@ -23,11 +25,20 @@ var callerDER = []byte("caller der")
 // callerPEM is callerDER as the record carries it.
 var callerPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: callerDER})
 
+// callerCertHash is the x5t#S256 of callerDER, which a record names its
+// caller by.
+var callerCertHash = func() string {
+	sum := sha256.Sum256(callerDER)
+	return base64.RawURLEncoding.EncodeToString(sum[:])
+}()
+
 // TestIdentityFor checks that a handoff fiber's record takes the grant's
-// key, certificate and caller, and the caller's certificate as PEM, as
-// libfiberzygote parses it. A clone without the caller's certificate, as
-// one without mutual TLS, gets no identity, and neither does a grant
-// whose identity was never prepared or names no caller.
+// key and certificate, the hash of the caller's certificate and that
+// certificate as PEM, as libfiberzygote parses it. The grant names the
+// caller's key, which no fiber could match a certificate against. A
+// clone without the caller's certificate, as one without mutual TLS,
+// gets no identity, and neither does a grant whose identity was never
+// prepared or names no caller.
 func TestIdentityFor(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -36,10 +47,10 @@ func TestIdentityFor(t *testing.T) {
 		callerCert []byte
 		wantErr    string
 	}{
-		{name: "key, certificate, caller, caller certificate", prepared: true, caller: "x5t", callerCert: callerDER},
-		{name: "no caller certificate", prepared: true, caller: "x5t", wantErr: "no caller certificate"},
+		{name: "the record names the caller by its certificate's hash, not the grant's key thumbprint", prepared: true, caller: "jkt", callerCert: callerDER},
+		{name: "no caller certificate", prepared: true, caller: "jkt", wantErr: "no caller certificate"},
 		{name: "no caller", prepared: true, callerCert: callerDER, wantErr: "names no caller"},
-		{name: "no identity prepared", caller: "x5t", callerCert: callerDER, wantErr: "no handoff identity prepared"},
+		{name: "no identity prepared", caller: "jkt", callerCert: callerDER, wantErr: "no handoff identity prepared"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -60,8 +71,11 @@ func TestIdentityFor(t *testing.T) {
 				t.Fatal(err)
 			}
 			had := r.identities["g1"].id
-			if id.KeyPEM != string(had.KeyPEM) || id.CertPEM != string(had.CertPEM) || id.Caller != "x5t" || id.CallerPEM != string(callerPEM) {
+			if id.KeyPEM != string(had.KeyPEM) || id.CertPEM != string(had.CertPEM) || id.CallerPEM != string(callerPEM) {
 				t.Fatalf("identity = %+v, want the grant's and the caller's certificate", id)
+			}
+			if id.Caller != callerCertHash || id.Caller == tc.caller {
+				t.Fatalf("record caller = %q, want the certificate's hash %q and never the grant's %q", id.Caller, callerCertHash, tc.caller)
 			}
 		})
 	}
@@ -91,7 +105,7 @@ func TestIdentityLifecycle(t *testing.T) {
 			for i, s := range tc.steps {
 				switch s {
 				case "prepare":
-					if err := r.prepareIdentity("ga", "x5t"); err != nil {
+					if err := r.prepareIdentity("ga", "jkt"); err != nil {
 						t.Fatal(err)
 					}
 					if i == 0 {
@@ -183,7 +197,7 @@ func recvHandoff(t *testing.T, fd int) ([]byte, []int) {
 // zero byte with the socket attached, and every other fiber or state is
 // refused without blocking.
 func TestDeliver(t *testing.T) {
-	g := core.Grant{UID: "g1", TemplateDigest: "sha256:tmpl", WBudgetBytes: 64 << 20, Policy: core.Policy{EndpointMode: core.EndpointHandoff}, CallerThumbprint: "x5t"}
+	g := core.Grant{UID: "g1", TemplateDigest: "sha256:tmpl", WBudgetBytes: 64 << 20, Policy: core.Policy{EndpointMode: core.EndpointHandoff}, CallerThumbprint: "jkt"}
 	direct := core.Grant{UID: "g2", TemplateDigest: "sha256:tmpl", WBudgetBytes: 64 << 20}
 	cases := []struct {
 		name string

@@ -12,8 +12,8 @@ import (
 type DiscardRequest struct {
 	GrantJWT []byte // the signed grant; verified offline
 	Session  string
-	// CallerThumbprint is the x5t#S256 of the client certificate the
-	// request arrived over.
+	// CallerThumbprint is the thumbprint of the key in the client
+	// certificate the request arrived over.
 	CallerThumbprint string
 }
 

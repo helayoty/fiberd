@@ -23,7 +23,6 @@ import (
 	"github.com/Azure/fiberd/pkg/core"
 	"github.com/Azure/fiberd/pkg/grant"
 	"github.com/Azure/fiberd/pkg/rpc"
-	"github.com/Azure/fiberd/pkg/tlsconf"
 	"github.com/Azure/fiberd/pkg/tlsconf/tlsconftest"
 )
 
@@ -38,7 +37,7 @@ type pyHome struct {
 }
 
 // boundVerifier is the insecure JSON verifier with every grant bound to
-// one caller certificate, as a signed grant with a cnf claim would be.
+// one caller key, as a signed grant with a cnf claim would be.
 type boundVerifier struct{ thumbprint string }
 
 func (v boundVerifier) Verify(ctx context.Context, token []byte) (core.Grant, error) {
@@ -48,7 +47,8 @@ func (v boundVerifier) Verify(ctx context.Context, token []byte) (core.Grant, er
 }
 
 // serveHome starts the home in plaintext on a unix socket, or over mutual
-// TLS on loopback with the grant bound to the owner certificate it writes.
+// TLS on loopback with the grant bound to the key of the owner certificate
+// it writes.
 func serveHome(t *testing.T, withTLS bool) *pyHome {
 	t.Helper()
 	rt := openProc(t, backends[0].template)
@@ -64,7 +64,7 @@ func serveHome(t *testing.T, withTLS bool) *pyHome {
 		cert, key := owner.Write(t, dir, "owner")
 		caFile, _ := ca.Write(t, dir, "ca")
 		h.tls = map[string]string{"cert": cert, "key": key, "ca": caFile}
-		verify = boundVerifier{thumbprint: tlsconf.Thumbprint(owner.Cert)}
+		verify = boundVerifier{thumbprint: owner.Thumbprint(t)}
 		opts = append(opts, grpc.Creds(credentials.NewTLS(&tls.Config{
 			MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{ca.Server(t).TLS()},
 			ClientAuth: tls.RequireAndVerifyClientCert, ClientCAs: ca.Pool(),

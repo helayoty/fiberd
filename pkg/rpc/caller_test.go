@@ -38,26 +38,36 @@ type plainAuth struct{}
 
 func (plainAuth) AuthType() string { return "insecure" }
 
+// tlsPeer is the context of a gRPC call from a TLS peer that presented
+// certs.
+func tlsPeer(certs ...*x509.Certificate) context.Context {
+	return peer.NewContext(context.Background(), &peer.Peer{Addr: &net.TCPAddr{},
+		AuthInfo: credentials.TLSInfo{State: tls.ConnectionState{PeerCertificates: certs}}})
+}
+
 // Only a TLS peer with a certificate names a caller. Plaintext, a peer
 // without TLS, and a TLS peer that sent no certificate leave the context
-// without one. Unary and streaming calls agree.
+// without one. A TLS peer whose certificate cannot name it is refused
+// before the handler runs. Unary and streaming calls agree.
 func TestCallerInterceptors(t *testing.T) {
-	leaf := tlsconftest.NewCA(t, "ca").Client(t, "c")
+	ca := tlsconftest.NewCA(t, "ca")
+	leaf := ca.Client(t, "c")
 	withPeer := func(auth credentials.AuthInfo) context.Context {
 		return peer.NewContext(context.Background(), &peer.Peer{Addr: &net.TCPAddr{}, AuthInfo: auth})
 	}
 	cases := []struct {
-		name string
-		ctx  context.Context
-		want string // thumbprint, "" for no caller
+		name     string
+		ctx      context.Context
+		want     string // thumbprint, "" for no caller
+		wantCode codes.Code
 	}{
 		{name: "no peer has no caller", ctx: context.Background()},
 		{name: "a plaintext peer has no caller", ctx: withPeer(plainAuth{})},
 		{name: "a peer without auth info has no caller", ctx: withPeer(nil)},
-		{name: "a TLS peer without a certificate has no caller", ctx: withPeer(credentials.TLSInfo{})},
-		{name: "a TLS peer with a certificate is the caller",
-			ctx:  withPeer(credentials.TLSInfo{State: tls.ConnectionState{PeerCertificates: []*x509.Certificate{leaf.Cert}}}),
-			want: tlsconf.Thumbprint(leaf.Cert)},
+		{name: "a TLS peer without a certificate has no caller", ctx: tlsPeer()},
+		{name: "a TLS peer with a certificate is the caller", ctx: tlsPeer(leaf.Cert), want: leaf.Thumbprint(t)},
+		{name: "a TLS peer whose key has no thumbprint is refused", ctx: tlsPeer(ca.UnnamedClient(t).Cert),
+			wantCode: codes.Unauthenticated},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -70,32 +80,110 @@ func TestCallerInterceptors(t *testing.T) {
 					t.Fatalf("%s: caller cert is not the leaf's DER", via)
 				}
 			}
+			verdict := func(via string, err error, ran bool) {
+				if status.Code(err) != tc.wantCode || ran != (tc.wantCode == codes.OK) {
+					t.Fatalf("%s = %v, handler ran %v, want %v", via, err, ran, tc.wantCode)
+				}
+			}
+			ran := false
 			_, err := rpc.CallerInterceptor()(tc.ctx, nil, nil, func(ctx context.Context, _ any) (any, error) {
+				ran = true
 				check("unary", ctx)
 				return nil, nil
 			})
-			if err != nil {
-				t.Fatal(err)
-			}
+			verdict("unary", err, ran)
+			ran = false
 			err = rpc.CallerStreamInterceptor()(nil, fakeStream{ctx: tc.ctx}, nil, func(_ any, ss grpc.ServerStream) error {
+				ran = true
 				check("stream", ss.Context())
 				return nil
 			})
+			verdict("stream", err, ran)
+		})
+	}
+}
+
+// A TLS peer whose certificate cannot name it is refused on gRPC and on
+// the JSON gateway. Served without a caller it would pass for plaintext,
+// which parks any caller's fibers and lists every grant.
+func TestUnnamedTLSPeerIsNotPlaintext(t *testing.T) {
+	ca := tlsconftest.NewCA(t, "ca")
+	owner := ca.Client(t, "owner")
+	ownerCtx := rpc.WithCaller(context.Background(), tlsconf.Caller{Thumbprint: owner.Thumbprint(t)})
+	h := newHarness(t, core.TierCheckpoint, func(a *core.Core) { a.Verify = boundVerifier{thumbprint: owner.Thumbprint(t)} })
+	gw := (&rpc.Gateway{Server: h.server}).Handler()
+	g := jsonGrant(t, core.Grant{UID: "g1", Audience: "node-a", Tenant: "acme", FiberMax: 4})
+
+	// The first case leaves its fiber running, so g1 stays listed for the
+	// cases that are served.
+	cases := []struct {
+		name       string
+		certs      []*x509.Certificate // nil is a request with no TLS state
+		wantPark   codes.Code
+		wantStatus int
+		wantListed bool // GET /v1/status shows g1
+	}{
+		{name: "a TLS peer whose key has no thumbprint is refused", certs: []*x509.Certificate{ca.UnnamedClient(t).Cert},
+			wantPark: codes.Unauthenticated, wantStatus: http.StatusUnauthorized},
+		{name: "a TLS peer the grant is bound to is served", certs: []*x509.Certificate{owner.Cert},
+			wantPark: codes.OK, wantStatus: http.StatusOK, wantListed: true},
+		{name: "a request with no TLS state is served",
+			wantPark: codes.OK, wantStatus: http.StatusOK, wantListed: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// A named session, since only a named session parks.
+			r, err := h.server.Clone(ownerCtx, &grantv1.CloneRequest{GrantJwt: g, Session: tc.name})
 			if err != nil {
-				t.Fatal(err)
+				t.Fatalf("clone by owner: %v", err)
+			}
+			ctx := context.Background()
+			req := httptest.NewRequest("GET", "/v1/status", nil)
+			if tc.certs != nil {
+				ctx = tlsPeer(tc.certs...)
+				req.TLS = &tls.ConnectionState{PeerCertificates: tc.certs}
+			}
+
+			park := &grantv1.ParkRequest{FiberId: r.GetFiberId()}
+			_, err = rpc.CallerInterceptor()(ctx, park, nil, func(ctx context.Context, _ any) (any, error) {
+				return h.server.Park(ctx, park)
+			})
+			if status.Code(err) != tc.wantPark {
+				t.Fatalf("park = %v, want %v", err, tc.wantPark)
+			}
+
+			rec := httptest.NewRecorder()
+			gw.ServeHTTP(rec, req)
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("GET /v1/status = %d %s, want %d", rec.Code, rec.Body.String(), tc.wantStatus)
+			}
+			if rec.Code != http.StatusOK {
+				checkStatusBody(t, rec.Body.Bytes(), codes.Unauthenticated, nil, "cannot name a caller")
+				return
+			}
+			var sts []map[string]any
+			if err := json.Unmarshal(rec.Body.Bytes(), &sts); err != nil {
+				t.Fatalf("status body %q: %v", rec.Body.String(), err)
+			}
+			listed := false
+			for _, st := range sts {
+				listed = listed || st["grantUid"] == "g1"
+			}
+			if listed != tc.wantListed {
+				t.Fatalf("status lists g1 = %v, want %v (%s)", listed, tc.wantListed, rec.Body.String())
 			}
 		})
 	}
 }
 
-// Over a real mutual-TLS connection the certificate a caller presents is
-// the identity fiberd checks a bound grant against, on gRPC and on the
-// JSON gateway alike.
+// Over a real mutual-TLS connection the key in the certificate a caller
+// presents is the identity fiberd checks a bound grant against, on gRPC
+// and on the JSON gateway alike.
 func TestMutualTLSBindsGrantsToCallers(t *testing.T) {
 	ca := tlsconftest.NewCA(t, "ca")
 	owner, other := ca.Client(t, "owner"), ca.Client(t, "other")
-	ownerX5t := tlsconf.Thumbprint(owner.Cert)
-	h := newHarness(t, core.TierCheckpoint, func(a *core.Core) { a.Verify = boundVerifier{thumbprint: ownerX5t} })
+	ownerThumbprint := owner.Thumbprint(t)
+	h := newHarness(t, core.TierCheckpoint, func(a *core.Core) { a.Verify = boundVerifier{thumbprint: ownerThumbprint} })
 	scfg := &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{ca.Server(t).TLS()},
 		ClientAuth: tls.VerifyClientCertIfGiven, ClientCAs: ca.Pool()}
 
@@ -103,10 +191,11 @@ func TestMutualTLSBindsGrantsToCallers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	gs := rpc.NewGRPCServer(h.server, grpc.Creds(credentials.NewTLS(scfg)))
+	gs := rpc.NewGRPCServer(h.server, grpc.Creds(rpc.ServerCreds(scfg)))
 	go func() { _ = gs.Serve(lis) }()
 	t.Cleanup(gs.Stop)
 	web := httptest.NewUnstartedServer((&rpc.Gateway{Server: h.server}).Handler())
+	web.Config.ConnContext = rpc.ConnContext
 	web.TLS = scfg
 	web.StartTLS()
 	t.Cleanup(web.Close)

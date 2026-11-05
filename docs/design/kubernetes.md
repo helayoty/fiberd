@@ -70,4 +70,4 @@ A cluster that serves no ResourceClaims is a loss too, once the Pod's claims hav
 - On a node whose containerd applies its default AppArmor profile, fiberd's cgroupfs and sysctl remounts are denied. An unprivileged Pod needs `appArmorProfile: Unconfined` beside its Unconfined seccomp profile.
 - proc fibers run as fiberd's uid, so file modes cannot keep the Pod's token from them. fiberd hides the directory of `-grant-token-file` from fibers instead.
 - A privileged Pod hands fiberd's container far more than the measured set its backend needs ([sys.md](sys.md)). Which runtimes run privileged is the controller's choice.
-- Without `-client-ca`, no grant is bound to a caller certificate, and its JWT is a bearer token until its lease ends ([security.md](../security.md#grants)).
+- Without `-client-ca`, no grant is bound to a caller's key, and its JWT is a bearer token until its lease ends ([security.md](../security.md#grants)).

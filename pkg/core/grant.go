@@ -138,8 +138,8 @@ type Grant struct {
 	// grant's fibers get no workspace and every file call on them is
 	// refused.
 	DiskBudgetBytes uint64
-	// CallerThumbprint is the x5t#S256 of the one client certificate the
-	// grant may be presented over.
+	// CallerThumbprint is the RFC 7638 thumbprint of the one client key
+	// the grant may be presented over, the token's cnf jkt.
 	CallerThumbprint string
 	// Token is the signed grant this value was verified from. fiberd
 	// sets it on admit so the ledger snapshot carries the proof, not only

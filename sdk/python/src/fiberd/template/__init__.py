@@ -529,7 +529,7 @@ class Fiber:
     def accept(self, *, handshake_timeout: float = _handoff.HANDSHAKE_TIMEOUT, poll: float = 0.5) -> ssl.SSLSocket:
         """The next handed-off connection, as an ssl.SSLSocket with TLS terminated under the grant's identity.
 
-        Only the certificate the grant is bound to completes the handshake.
+        Only the certificate the clone arrived under completes the handshake.
         Any other connection fails it, and the next is waited for.
         Blocks. Raises ConnectionResetError once fiberd closes the channel,
         which it does at release, and once the fiber is asked to stop
@@ -562,8 +562,8 @@ class Fiber:
     def _terminate(self, ctx: ssl.SSLContext, fd: int, handshake_timeout: float = _handoff.HANDSHAKE_TIMEOUT) -> Optional[ssl.SSLSocket]:
         """TLS over one handed-off descriptor, or None, with it closed, when the handshake fails or the caller is not the grant's.
 
-        The handshake admits the bound caller's certificate alone. The
-        thumbprint check after it is the second look.
+        The handshake admits the certificate the clone arrived under alone.
+        The thumbprint check after it is the second look.
         """
         assert self.identity is not None
         raw = socket.socket(fileno=fd)

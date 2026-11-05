@@ -120,7 +120,20 @@ func TestVerify(t *testing.T) {
 	edited := func(edit func(map[string]any)) string { return rewrite(t, good, key, edit) }
 	noGrant := edited(func(m map[string]any) { delete(m, "grant") })
 	badGrant := edited(func(m map[string]any) { m["grant"] = map[string]any{"fibers": "many"} })
-	emptyCnf := edited(func(m map[string]any) { m["cnf"] = map[string]any{"x5t#S256": ""} })
+	emptyCnf := edited(func(m map[string]any) { m["cnf"] = map[string]any{"jkt": ""} })
+	bareCnf := edited(func(m map[string]any) { m["cnf"] = map[string]any{} })
+	nullCnf := edited(func(m map[string]any) { m["cnf"] = nil })
+	numberJKT := edited(func(m map[string]any) { m["cnf"] = map[string]any{"jkt": 5} })
+	nullJKT := edited(func(m map[string]any) { m["cnf"] = map[string]any{"jkt": nil} })
+	stringCnf := edited(func(m map[string]any) { m["cnf"] = "x" })
+	emptyX5tCnf := edited(func(m map[string]any) {
+		m["cnf"] = map[string]any{"jkt": strings.Repeat("Q", 43), "x5t#S256": ""}
+	})
+	x5tCnf := edited(func(m map[string]any) { m["cnf"] = map[string]any{"x5t#S256": strings.Repeat("Q", 43)} })
+	bothCnf := edited(func(m map[string]any) {
+		m["cnf"] = map[string]any{"jkt": strings.Repeat("Q", 43), "x5t#S256": strings.Repeat("Q", 43)}
+	})
+	otherCaller := edited(func(m map[string]any) { m["cnf"] = map[string]any{"jkt": strings.Repeat("R", 43)} })
 	noExp := edited(func(m map[string]any) { delete(m, "exp") })
 	laterExp := edited(func(m map[string]any) { m["exp"] = m["exp"].(float64) + 60 })
 	noIat := edited(func(m map[string]any) { delete(m, "iat") })
@@ -140,16 +153,26 @@ func TestVerify(t *testing.T) {
 		want        error  // errors.Is target, or nil to only require failure
 		wantMsg     string // substring the error must carry, when there is no sentinel
 		wantOK      bool
-		wantExpired bool // on success, the verified lease is already past
+		wantExpired bool   // on success, the verified lease is already past
+		wantCaller  string // on success, the caller the grant is bound to, when set
 	}{
-		{name: "good", token: good, pub: &pub, opts: grant.VerifyOptions{Audience: "node-a"}, wantOK: true},
+		{name: "good", token: good, pub: &pub, opts: grant.VerifyOptions{Audience: "node-a"}, wantOK: true, wantCaller: strings.Repeat("Q", 43)},
 		{name: "wrong audience", token: good, pub: &pub, opts: grant.VerifyOptions{Audience: "node-b"}, want: grant.ErrWrongAudience},
 		{name: "empty audience option", token: good, pub: &pub, opts: grant.VerifyOptions{}, want: grant.ErrWrongAudience},
 		{name: "wrong issuer", token: good, pub: &pub, opts: grant.VerifyOptions{Audience: "node-a", Issuer: "https://other"}, want: grant.ErrWrongIssuer},
 		{name: "no key", token: good, pub: nil, opts: grant.VerifyOptions{Audience: "node-a"}, wantMsg: "no key"},
 		{name: "a token without the grant claim", token: noGrant, pub: &pub, opts: grant.VerifyOptions{Audience: "node-a"}, want: grant.ErrMissingGrant},
 		{name: "a grant claim that is not a CapacityGrant", token: badGrant, pub: &pub, opts: grant.VerifyOptions{Audience: "node-a"}, wantMsg: "decode grant claim"},
-		{name: "a cnf claim without a thumbprint", token: emptyCnf, pub: &pub, opts: grant.VerifyOptions{Audience: "node-a"}, wantMsg: "x5t#S256"},
+		{name: "a cnf claim without a thumbprint", token: emptyCnf, pub: &pub, opts: grant.VerifyOptions{Audience: "node-a"}, wantMsg: "no jkt"},
+		{name: "an empty cnf claim is refused", token: bareCnf, pub: &pub, opts: grant.VerifyOptions{Audience: "node-a"}, wantMsg: "no jkt"},
+		{name: "a null cnf claim is refused", token: nullCnf, pub: &pub, opts: grant.VerifyOptions{Audience: "node-a"}, wantMsg: "no jkt"},
+		{name: "a null jkt is refused", token: nullJKT, pub: &pub, opts: grant.VerifyOptions{Audience: "node-a"}, wantMsg: "no jkt"},
+		{name: "a jkt that is not a string is refused", token: numberJKT, pub: &pub, opts: grant.VerifyOptions{Audience: "node-a"}, wantMsg: "decode cnf claim"},
+		{name: "a cnf that is not an object is refused", token: stringCnf, pub: &pub, opts: grant.VerifyOptions{Audience: "node-a"}, wantMsg: "decode cnf claim"},
+		{name: "an empty x5t#S256 beside a jkt is refused", token: emptyX5tCnf, pub: &pub, opts: grant.VerifyOptions{Audience: "node-a"}, wantMsg: "x5t#S256"},
+		{name: "a cnf bound to a certificate hash is refused", token: x5tCnf, pub: &pub, opts: grant.VerifyOptions{Audience: "node-a"}, wantMsg: "x5t#S256"},
+		{name: "a cnf carrying both jkt and x5t#S256 is refused", token: bothCnf, pub: &pub, opts: grant.VerifyOptions{Audience: "node-a"}, wantMsg: "x5t#S256"},
+		{name: "the jkt is the caller binding", token: otherCaller, pub: &pub, opts: grant.VerifyOptions{Audience: "node-a"}, wantOK: true, wantCaller: strings.Repeat("R", 43)},
 		{name: "a lease without exp", token: noExp, pub: &pub, opts: grant.VerifyOptions{Audience: "node-a"}, want: grant.ErrClaimMismatch},
 		{name: "an exp that disagrees with the lease", token: laterExp, pub: &pub, opts: grant.VerifyOptions{Audience: "node-a"}, want: grant.ErrClaimMismatch},
 		{name: "two audiences", token: twoAud, pub: &pub, opts: grant.VerifyOptions{Audience: "node-a"}, want: grant.ErrClaimMismatch},
@@ -208,6 +231,9 @@ func TestVerify(t *testing.T) {
 				if got.Expired(now) != tc.wantExpired {
 					t.Fatalf("Expired(now) = %v, want %v", got.Expired(now), tc.wantExpired)
 				}
+				if tc.wantCaller != "" && got.CallerThumbprint != tc.wantCaller {
+					t.Fatalf("CallerThumbprint = %q, want %q", got.CallerThumbprint, tc.wantCaller)
+				}
 				return
 			}
 			if err == nil {
@@ -218,6 +244,52 @@ func TestVerify(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), tc.wantMsg) {
 				t.Fatalf("err = %v, want it to mention %q", err, tc.wantMsg)
+			}
+		})
+	}
+}
+
+// Sign binds a grant to its caller's key through cnf.jkt alone, and
+// leaves an unbound grant without a cnf claim.
+func TestSignWritesCnf(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	key, err := grant.GenerateKey(jose.EdDSA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name   string
+		caller string // empty signs an unbound grant
+	}{
+		{name: "a bound grant carries cnf.jkt only", caller: strings.Repeat("Q", 43)},
+		{name: "an unbound grant carries no cnf"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			g := sample(now)
+			g.CallerThumbprint = tc.caller
+			tok, err := grant.Sign(g, key, now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			payload, err := base64.RawURLEncoding.DecodeString(strings.Split(tok, ".")[1])
+			if err != nil {
+				t.Fatal(err)
+			}
+			var claims map[string]any
+			if err := json.Unmarshal(payload, &claims); err != nil {
+				t.Fatal(err)
+			}
+			cnf, bound := claims["cnf"]
+			if tc.caller == "" {
+				if bound {
+					t.Fatalf("cnf = %v, want no cnf claim", cnf)
+				}
+				return
+			}
+			members, _ := cnf.(map[string]any)
+			if len(members) != 1 || members["jkt"] != tc.caller {
+				t.Fatalf("cnf = %v, want only jkt %q", cnf, tc.caller)
 			}
 		})
 	}

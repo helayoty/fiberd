@@ -314,7 +314,7 @@ type fixture struct {
 	args   []string
 	state  string
 	client *tls.Config // the caller's mutual TLS, nil for plaintext
-	thumb  string      // the caller certificate's thumbprint
+	thumb  string      // the thumbprint of the caller's key
 	issuer *grant.Issuer
 	cwd    string
 }
@@ -395,7 +395,7 @@ func TestRunServes(t *testing.T) {
 			},
 		},
 		{
-			name: "mutual TLS binds the grant to the caller's certificate",
+			name: "mutual TLS binds the grant to the caller's key",
 			setup: func(t *testing.T, _ string) fixture {
 				dir := t.TempDir()
 				ca := tlsconftest.NewCA(t, "ca")

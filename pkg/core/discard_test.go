@@ -57,7 +57,7 @@ func TestDiscard(t *testing.T) {
 	gb := core.Grant{UID: "gb", Tenant: "acme", Audience: "B", TemplateDigest: "sha256:t", FiberMax: 4, WBudgetBytes: 10 << 20}
 	globex := core.Grant{UID: "gx", Tenant: "globex", Audience: "A", TemplateDigest: "sha256:t", FiberMax: 4}
 	untenanted := core.Grant{UID: "gn", Audience: "A", TemplateDigest: "sha256:t", FiberMax: 4}
-	bound := core.Grant{UID: "gc", Tenant: "acme", Audience: "A", TemplateDigest: "sha256:t", FiberMax: 4, CallerThumbprint: "x5t-owner"}
+	bound := core.Grant{UID: "gc", Tenant: "acme", Audience: "A", TemplateDigest: "sha256:t", FiberMax: 4, CallerThumbprint: "jkt-owner"}
 	expired := core.Grant{UID: "ge", Tenant: "acme", Audience: "A", TemplateDigest: "sha256:t", FiberMax: 4, LeaseExpiry: time.Now().Add(-time.Minute)}
 	const key = "acme/sha256:t/S" // acme's S in the store
 	ctx := context.Background()
@@ -143,7 +143,7 @@ func TestDiscard(t *testing.T) {
 				return ""
 			},
 			wantCode: core.DeferredFallback, wantErr: core.ErrGrantExpired, wantState: "gone", wantStored: true},
-		{name: "a token for another caller is refused", token: "gc", thumbprint: "x5t-other",
+		{name: "a token for another caller is refused", token: "gc", thumbprint: "jkt-other",
 			wantCode: core.Unauthenticated, wantErr: core.ErrCallerMismatch, wantState: "gone"},
 		{name: "a store that cannot withdraw the published copy refuses and keeps the session",
 			setup: func(t *testing.T, h *homes) string {

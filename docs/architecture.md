@@ -73,4 +73,4 @@ Every component below is code in fiberd process, except the [zygote](glossary.md
 
 ## Boundaries
 
-Callers reach fiberd over mutual TLS with a grant bound to their certificate, and fiberd trusts only keys published by its issuer. How strongly fibers are kept apart depends on the backend. proc and runc share the host kernel, while gVisor and Hyperlight put a kernel of their own between tenants. The registry is untrusted storage. [security.md](security.md) covers each boundary and the known gaps.
+Callers reach fiberd over mutual TLS with a grant bound to the key of their certificate, and fiberd trusts only keys published by its issuer. How strongly fibers are kept apart depends on the backend. proc and runc share the host kernel, while gVisor and Hyperlight put a kernel of their own between tenants. The registry is untrusted storage. [security.md](security.md) covers each boundary and the known gaps.

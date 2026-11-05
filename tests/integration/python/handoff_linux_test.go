@@ -25,7 +25,6 @@ import (
 	"github.com/Azure/fiberd/pkg/core"
 	"github.com/Azure/fiberd/pkg/handoff"
 	"github.com/Azure/fiberd/pkg/runtime/host"
-	"github.com/Azure/fiberd/pkg/tlsconf"
 	"github.com/Azure/fiberd/pkg/tlsconf/tlsconftest"
 )
 
@@ -68,7 +67,7 @@ func TestHandoff(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			rt, run := openHandoffProc(t, tt.template, &handoff.Router{})
 			g := core.Grant{UID: "gho", TemplateDigest: "sha256:pyref", FiberMax: 4, WBudgetBytes: 64 << 20,
-				CallerThumbprint: tlsconf.Thumbprint(caller.Cert), Policy: core.Policy{EndpointMode: core.EndpointHandoff}}
+				CallerThumbprint: caller.Thumbprint(t), Policy: core.Policy{EndpointMode: core.EndpointHandoff}}
 			if err := rt.PrepareTemplate(ctx, g); err != nil {
 				t.Fatalf("prepare: %v", err)
 			}
@@ -128,7 +127,7 @@ func TestHandoffClient(t *testing.T) {
 	t.Cleanup(func() { _ = l.Close() })
 	go func() { _ = router.Serve(l) }()
 	g := core.Grant{UID: "ghc", TemplateDigest: "sha256:pyref", FiberMax: 4, WBudgetBytes: 64 << 20,
-		CallerThumbprint: tlsconf.Thumbprint(caller.Cert), Policy: core.Policy{EndpointMode: core.EndpointHandoff}}
+		CallerThumbprint: caller.Thumbprint(t), Policy: core.Policy{EndpointMode: core.EndpointHandoff}}
 	if err := rt.PrepareTemplate(ctx, g); err != nil {
 		t.Fatalf("prepare: %v", err)
 	}

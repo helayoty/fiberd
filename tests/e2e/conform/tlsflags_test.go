@@ -79,10 +79,10 @@ func TestGrantCallerThumbprint(t *testing.T) {
 		mut   func(g *core.Grant)
 		want  string
 	}{
-		{name: "bound to the harness certificate", thumb: "harness-x5t", want: "harness-x5t"},
+		{name: "bound to the harness key", thumb: "harness-jkt", want: "harness-jkt"},
 		{name: "empty leaves the grant unbound", want: ""},
-		{name: "a case override wins", thumb: "harness-x5t", mut: func(g *core.Grant) { g.CallerThumbprint = "other-x5t" }, want: "other-x5t"},
-		{name: "a case can unbind", thumb: "harness-x5t", mut: func(g *core.Grant) { g.CallerThumbprint = "" }, want: ""},
+		{name: "a case override wins", thumb: "harness-jkt", mut: func(g *core.Grant) { g.CallerThumbprint = "other-jkt" }, want: "other-jkt"},
+		{name: "a case can unbind", thumb: "harness-jkt", mut: func(g *core.Grant) { g.CallerThumbprint = "" }, want: ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -206,8 +206,8 @@ func chunk(n int) *grantv1.UploadRequest {
 // store answers maps to one code each.
 func TestFileCalls(t *testing.T) {
 	const budget = 4 << 20
-	owner := tlsconf.Caller{Thumbprint: "owner-x5t"}
-	other := tlsconf.Caller{Thumbprint: "other-x5t"}
+	owner := tlsconf.Caller{Thumbprint: "owner-jkt"}
+	other := tlsconf.Caller{Thumbprint: "other-jkt"}
 	store := &memFiles{}
 	h := newHarness(t, core.TierCheckpoint, withFiles(store), func(a *core.Core) { a.Verify = boundVerifier{thumbprint: owner.Thumbprint} })
 	fibers := map[string]string{}

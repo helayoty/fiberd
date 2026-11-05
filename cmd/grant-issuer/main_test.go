@@ -20,7 +20,6 @@ import (
 	"github.com/Azure/fiberd/pkg/artifact"
 	"github.com/Azure/fiberd/pkg/core"
 	"github.com/Azure/fiberd/pkg/grant"
-	"github.com/Azure/fiberd/pkg/tlsconf"
 	"github.com/Azure/fiberd/pkg/tlsconf/tlsconftest"
 )
 
@@ -200,6 +199,7 @@ func TestMint(t *testing.T) {
 	dir := t.TempDir()
 	caller := tlsconftest.NewCA(t, "ca").Client(t, "caller")
 	certFile, keyPEM := caller.Write(t, dir, "caller")
+	callerThumbprint := caller.Thumbprint(t)
 	base := []string{"mint", "-key", key, "-issuer", "https://issuer.test", "-aud", "node-a"}
 
 	cases := []struct {
@@ -232,7 +232,7 @@ func TestMint(t *testing.T) {
 						Isolation: core.Trusted, EndpointMode: core.EndpointHandoff},
 					DeviceBudget:     core.DeviceBudget{Bytes: 1 << 30, Class: "gpu"},
 					DiskBudgetBytes:  256 << 20,
-					CallerThumbprint: tlsconf.Thumbprint(caller.Cert)}
+					CallerThumbprint: callerThumbprint}
 				if g != want {
 					t.Fatalf("grant\n got %+v\nwant %+v", g, want)
 				}

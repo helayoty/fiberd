@@ -421,11 +421,11 @@ func TestPrepareTemplate(t *testing.T) {
 			mod:     func(c *Config) { c.Handoff, c.HandoffKey = handoffRouter(), handoffKey },
 			wantErr: ErrNoHandoff},
 		{name: "a handoff grant: its identity is derived and the caller pinned", be: func() backend.Backend { return newSandboxBackend(core.TierSnapshot) },
-			grant: core.Grant{UID: "g1", TemplateDigest: "sha256:tmpl", Policy: core.Policy{EndpointMode: core.EndpointHandoff}, CallerThumbprint: "x5t"},
+			grant: core.Grant{UID: "g1", TemplateDigest: "sha256:tmpl", Policy: core.Policy{EndpointMode: core.EndpointHandoff}, CallerThumbprint: "jkt"},
 			mod:   func(c *Config) { c.Handoff, c.HandoffKey = handoffRouter(), handoffKey },
 			check: func(t *testing.T, r *Runtime, _ backend.Backend) {
 				id, ok := r.identities["g1"]
-				if !ok || id.caller != "x5t" || id.id.KeySHA256 == "" {
+				if !ok || id.caller != "jkt" || id.id.KeySHA256 == "" {
 					t.Fatalf("identity = %+v, %v", id, ok)
 				}
 			}},
@@ -636,7 +636,7 @@ var tcpPolicy = endpoint.Policy{Family: endpoint.Inet4, Host: "127.0.0.1", PortM
 func TestClone(t *testing.T) {
 	g := core.Grant{UID: "g1", TemplateDigest: "sha256:tmpl", FiberMax: 4, WBudgetBytes: 64 * mib}
 	handoffG := g
-	handoffG.Policy.EndpointMode, handoffG.CallerThumbprint = core.EndpointHandoff, "x5t"
+	handoffG.Policy.EndpointMode, handoffG.CallerThumbprint = core.EndpointHandoff, "jkt"
 	fence := core.Fence{GrantUID: "g1", Epoch: 1, Seq: 1}
 	cases := []struct {
 		name    string
@@ -739,7 +739,7 @@ func TestClone(t *testing.T) {
 					t.Fatalf("fiber spec = %+v, %d pairs made by the backend", ff.spec, sb.pairs.Load())
 				}
 				id := r.identities["g1"]
-				want := &backend.Identity{KeyPEM: string(id.id.KeyPEM), CertPEM: string(id.id.CertPEM), Caller: "x5t", CallerPEM: string(callerPEM)}
+				want := &backend.Identity{KeyPEM: string(id.id.KeyPEM), CertPEM: string(id.id.CertPEM), Caller: callerCertHash, CallerPEM: string(callerPEM)}
 				if ff.spec.Identity == nil || *ff.spec.Identity != *want || ff.spec.Generation != 1 {
 					t.Fatalf("fiber spec = %+v, want the grant's identity and the caller's certificate at generation 1", ff.spec)
 				}

@@ -19,8 +19,9 @@ type CloneRequest struct {
 	Session  string        // optional: "" = anonymous fiber
 	Deadline time.Duration // hard budget for the runtime work
 	Payload  []byte        // opaque, size-capped, delivered as data, never config
-	// CallerThumbprint is the x5t#S256 of the client certificate the
-	// request arrived over, and CallerCert is that certificate as DER.
+	// CallerThumbprint is the thumbprint of the key in the client
+	// certificate the request arrived over, and CallerCert is that
+	// certificate as DER.
 	CallerThumbprint string
 	CallerCert       []byte
 }
@@ -146,8 +147,8 @@ type Core struct {
 	// Empty admits any verified grant that names this home. Delivered
 	// grants are not subject to it.
 	SelfAdmitUID string
-	// RequireBoundGrants refuses grants without a caller certificate
-	// binding. Set it whenever the transport is mutual TLS.
+	// RequireBoundGrants refuses grants without a caller key binding. Set
+	// it whenever the transport is mutual TLS.
 	RequireBoundGrants bool
 
 	Ledger    *Ledger
@@ -750,8 +751,8 @@ func renewsLease(held, g Grant) bool {
 
 // changesFixedFields reports whether g differs from the admitted grant
 // in anything but its lease, its caller thumbprint and its token. A
-// renewal moves the lease. The caller's client certificate rotates under
-// the same grant. Every mint signs a new token. Every other field is
+// renewal moves the lease. The caller thumbprint changes when the caller's
+// key rotates under the same grant. Every mint signs a new token. Every other field is
 // fixed while the grant is admitted.
 //
 // It compares the whole Grant with those three fields taken from held.

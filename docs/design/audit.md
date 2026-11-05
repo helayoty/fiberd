@@ -44,7 +44,7 @@ How a failed record affects [Clone](../glossary.md#clone), [Park](../glossary.md
 
 ### Health
 
-A poisoned spool shows on `GET /healthz`, both on the admin socket and on the JSON gateway. The body carries `"audit": "ok"`, or `"audit": "poisoned"` once an fsync has failed. The status is then 503 instead of 200. The fsync error itself names the spool's path, so it goes only to fiberd's log, once, when it happens. The gateway serves `/healthz` without authentication. An unreachable issuer shows only as `"issuerReachable": false` and stays 200, because fiberd fences it and recovers without a restart.
+A poisoned spool shows on `GET /healthz`, both on the admin socket and on the JSON gateway. The body carries `"audit": "ok"`, or `"audit": "poisoned"` once an fsync has failed. The status is then 503 instead of 200. The fsync error itself names the spool's path, so it goes only to fiberd's log, once, when it happens. The gateway serves `/healthz` without a grant. Over mutual TLS it still needs a client certificate that names a caller ([grant.md](grant.md)). An unreachable issuer shows only as `"issuerReachable": false` and stays 200, because fiberd fences it and recovers without a restart.
 
 ```json
 {"epoch": 3, "tier": "FIBER_CHECKPOINT", "issuerReachable": true, "audit": "poisoned"}

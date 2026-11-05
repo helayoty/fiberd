@@ -199,7 +199,7 @@ func TestAdmitWaitsForInflight(t *testing.T) {
 			wantFirst: core.OK, wantSecond: core.OK, wantAdmitted: true, wantWarms: 2, wantLease: time.Hour},
 		{name: "a second with a shorter lease shares the first's success", secondLease: -30 * time.Minute,
 			wantFirst: core.OK, wantSecond: core.OK, wantAdmitted: true, wantWarms: 1},
-		{name: "a second for a new caller admits it after the first", second: func(g *core.Grant) { g.CallerThumbprint = "x5t-new" },
+		{name: "a second for a new caller admits it after the first", second: func(g *core.Grant) { g.CallerThumbprint = "jkt-new" },
 			wantFirst: core.OK, wantSecond: core.OK, wantAdmitted: true, wantWarms: 2},
 		{name: "a second that changes a fixed field is refused after the first", second: func(g *core.Grant) { g.FiberMax = 8 },
 			wantFirst: core.OK, wantSecond: core.Invalid, wantErr: core.ErrGrantChanged, wantAdmitted: true, wantWarms: 1},
@@ -293,7 +293,7 @@ func TestAdmitRedeliveryKeepsFixedFields(t *testing.T) {
 			PSISomeAvg10Shed: 20, PSISomeAvg10Park: 40, Isolation: core.Untrusted, EndpointMode: core.EndpointDirect},
 		DeviceBudget:     core.DeviceBudget{Class: "sim"},
 		DiskBudgetBytes:  1 << 20,
-		CallerThumbprint: "x5t-old",
+		CallerThumbprint: "jkt-old",
 		Token:            "token-old",
 	}
 	cases := []struct {
@@ -342,7 +342,7 @@ func TestAdmitRedeliveryKeepsFixedFields(t *testing.T) {
 			want: core.OK},
 		{name: "a shorter lease is admitted", change: func(g *core.Grant) { g.LeaseExpiry = lease.Add(-30 * time.Minute) },
 			want: core.OK},
-		{name: "a new caller thumbprint is admitted", change: func(g *core.Grant) { g.CallerThumbprint = "x5t-new" },
+		{name: "a new caller thumbprint is admitted", change: func(g *core.Grant) { g.CallerThumbprint = "jkt-new" },
 			want: core.OK},
 		{name: "a new token is admitted", change: func(g *core.Grant) { g.Token = "token-new" },
 			want: core.OK},

@@ -206,7 +206,7 @@ func (Isolation) EnumDescriptor() ([]byte, []int) {
 }
 
 // EndpointMode is how callers reach a grant's fibers. HANDOFF needs a
-// grant bound to a caller certificate and a home whose backend can pass
+// grant bound to a caller's key and a home whose backend can pass
 // connections to fibers (proc, runc). Other homes refuse the grant with
 // FailedPrecondition.
 type EndpointMode int32
@@ -217,7 +217,7 @@ const (
 	// The home accepts each TLS connection on one address, routes it by
 	// the TLS server name (CloneResponse.routing_key) and passes the
 	// socket to the fiber, which terminates TLS and accepts only the
-	// grant's caller certificate.
+	// client certificate its Clone arrived under.
 	EndpointMode_HANDOFF EndpointMode = 1
 )
 

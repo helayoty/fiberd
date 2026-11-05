@@ -7,7 +7,7 @@ under, is the context's only trust anchor, with VERIFY_X509_PARTIAL_CHAIN
 so OpenSSL takes a leaf as one. Any other certificate fails the
 handshake, with or without the home's CA behind it. The thumbprint of the
 peer (RFC 8705 x5t#S256) is checked again after the handshake, against
-the caller the grant is bound to.
+the hash the home sent with the identity.
 """
 
 from __future__ import annotations
@@ -37,7 +37,7 @@ def thumbprint(der: bytes) -> str:
 
 
 def pinned(peer_der: bytes | None, caller: str) -> bool:
-    """Whether the peer presented the one certificate the grant is bound to."""
+    """Whether the peer presented the one certificate the fiber's clone arrived under."""
     if not peer_der or not caller:
         return False
     return thumbprint(peer_der) == caller
@@ -118,7 +118,7 @@ def send_alert(ctx: ServerContext, sock: socket.socket) -> None:
 
 
 def check_caller(caller: str, caller_pem: str) -> None:
-    """Refuses a caller certificate that is missing, unparsable, or not the one caller is the thumbprint of."""
+    """Refuses a caller certificate that is missing, unparsable, or does not match the hash sent with it."""
     if not caller_pem:
         raise TemplateError("the home sent no caller certificate with the handoff identity, so this fiber cannot pin its caller")
     try:
@@ -126,14 +126,14 @@ def check_caller(caller: str, caller_pem: str) -> None:
     except ValueError as e:
         raise TemplateError(f"the caller certificate the home sent with the handoff identity does not parse ({e})") from e
     if thumbprint(caller_der) != caller:
-        raise TemplateError("the caller certificate the home sent with the handoff identity is not the caller the grant is bound to")
+        raise TemplateError("the caller certificate the home sent with the handoff identity does not match the hash sent with it")
 
 
 def server_context(identity_fd: int, caller: str, caller_pem: str) -> ServerContext:
     """The TLS 1.3 server context of a handoff fiber.
 
-    caller_pem, the certificate of the caller the grant is bound to, is
-    the one trust anchor, so only that certificate completes a handshake.
+    caller_pem, the certificate the fiber's clone arrived under, is the
+    one trust anchor, so only that certificate completes a handshake.
     Resumption is off, so every connection presents it.
     """
     check_caller(caller, caller_pem)

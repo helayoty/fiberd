@@ -142,7 +142,7 @@ func mint(args []string, stdout, stderr io.Writer) error {
 	devBudget := fs.String("device-budget", "0", "per-fiber slice of the engine's device state, bytes with optional Ki/Mi/Gi suffix (0 = no device)")
 	diskBudget := fs.String("disk-budget", "0", "per-fiber workspace ceiling, bytes with optional Ki/Mi/Gi suffix (0 = no workspace)")
 	devClass := fs.String("device-class", "", "device class the budget is for (gpu, sim; empty = any)")
-	bindCert := fs.String("bind-cert", "", "PEM client certificate the grant is bound to (cnf x5t#S256). Homes serving mutual TLS require it")
+	bindCert := fs.String("bind-cert", "", "PEM client certificate whose key the grant is bound to (cnf jkt). Homes serving mutual TLS require it")
 	isolation := fs.String("isolation", "UNTRUSTED", "UNTRUSTED (only gvisor or hyperlight homes serve it) or TRUSTED (any home, including proc and runc)")
 	endpointMode := fs.String("endpoint-mode", "DIRECT", "DIRECT (each fiber listens) or HANDOFF (proc and runc homes route TLS connections to fibers, which check the -bind-cert caller)")
 	if err := cli.ParseFlags(fs, args, stderr); err != nil {

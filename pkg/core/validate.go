@@ -37,9 +37,9 @@ const (
 	// template digest be a usable key into fiberd's template map.
 	TemplateDigestPattern = `^sha256:[a-f0-9]{64}$`
 
-	// CallerThumbprintPattern is the form of an RFC 8705 x5t#S256
-	// thumbprint. That is a SHA-256 hash in unpadded base64url, which is
-	// always 43 characters.
+	// CallerThumbprintPattern is the form of an RFC 7638 JWK thumbprint.
+	// That is a SHA-256 hash in unpadded base64url, which is always 43
+	// characters.
 	CallerThumbprintPattern = `^[A-Za-z0-9_-]{43}$`
 )
 
@@ -57,7 +57,7 @@ var (
 //   - An empty Tenant is allowed. Such a grant runs anonymous fibers only.
 //   - An empty TemplateDigest or CallerThumbprint is allowed. The home
 //     then serves its default template, and the grant is not bound to a
-//     caller certificate.
+//     caller key.
 //   - A zero LeaseExpiry is allowed and means the lease never expires.
 //   - A zero FiberMax is allowed, since Grant documents it as unlimited.
 //     Only a negative one or one above math.MaxUint32 is refused.

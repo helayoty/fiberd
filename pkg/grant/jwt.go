@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/go-jose/go-jose/v4"
+	josejson "github.com/go-jose/go-jose/v4/json"
 	"github.com/go-jose/go-jose/v4/jwt"
 	"google.golang.org/protobuf/encoding/protojson"
 
@@ -31,16 +32,21 @@ import (
 // or DEFERRED_FALLBACK); an Unauthenticated error would send the caller
 // down the wrong path. The lease is copied into Grant.LeaseExpiry.
 //
-// A grant bound to a caller also carries the RFC 8705 confirmation
-// claim, copied into Grant.CallerThumbprint.
+// A grant bound to a caller also carries the RFC 7800 confirmation
+// claim. Its jkt member is the RFC 7638 thumbprint of the caller's public
+// key, copied into Grant.CallerThumbprint.
 
 type grantClaim struct {
 	Grant json.RawMessage `json:"grant"`
-	Cnf   *cnfClaim       `json:"cnf,omitempty"`
+	// Raw, so a cnf that is present and null differs from an absent one.
+	Cnf json.RawMessage `json:"cnf,omitempty"`
 }
 
 type cnfClaim struct {
-	X5tS256 string `json:"x5t#S256"`
+	JKT string `json:"jkt,omitempty"`
+	// Read only to refuse it, and raw so that any value counts as present.
+	// A certificate hash is no key binding, alone or beside a jkt.
+	X5tS256 json.RawMessage `json:"x5t#S256,omitempty"`
 }
 
 // MaxTokenBytes bounds a token before any parsing.
@@ -88,7 +94,9 @@ func Sign(g core.Grant, key *jose.JSONWebKey, now time.Time) (string, error) {
 	}
 	gc := grantClaim{Grant: body}
 	if g.CallerThumbprint != "" {
-		gc.Cnf = &cnfClaim{X5tS256: g.CallerThumbprint}
+		if gc.Cnf, err = josejson.Marshal(cnfClaim{JKT: g.CallerThumbprint}); err != nil {
+			return "", err
+		}
 	}
 	return jwt.Signed(signer).Claims(std).Claims(gc).Serialize()
 }
@@ -152,11 +160,22 @@ func verifyParsed(tok *jwt.JSONWebToken, pub *jose.JSONWebKey, opts VerifyOption
 		return core.Grant{}, fmt.Errorf("grant: decode grant claim: %w", err)
 	}
 	g := FromProto(&p)
-	if gc.Cnf != nil {
-		if gc.Cnf.X5tS256 == "" {
-			return core.Grant{}, errors.New("grant: cnf claim carries no x5t#S256")
+	// A cnf that is present must bind, so a null one is refused like an
+	// empty one. Only an absent cnf leaves the grant unbound.
+	if len(gc.Cnf) != 0 {
+		// The claims decoder reads cnf as it reads every other claim. A
+		// member matches by exact name and a repeated member is an error.
+		var cnf cnfClaim
+		if err := josejson.Unmarshal(gc.Cnf, &cnf); err != nil {
+			return core.Grant{}, fmt.Errorf("grant: decode cnf claim: %w", err)
 		}
-		g.CallerThumbprint = gc.Cnf.X5tS256
+		if len(cnf.X5tS256) != 0 {
+			return core.Grant{}, errors.New("grant: cnf claim carries x5t#S256, want jkt")
+		}
+		if cnf.JKT == "" {
+			return core.Grant{}, errors.New("grant: cnf claim carries no jkt")
+		}
+		g.CallerThumbprint = cnf.JKT
 	}
 
 	// Registered claims are the cross-check; the grant claim is the content.

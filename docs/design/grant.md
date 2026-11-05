@@ -16,7 +16,7 @@ sequenceDiagram
   participant K as Key cache
   participant A as Core
   C->>S: Clone over mutual TLS
-  S->>S: caller = thumbprint of client certificate
+  S->>S: caller = thumbprint of client certificate's key
   S->>S: refuse unknown fields
   S->>A: Clone(token, session, payload, caller)
   A->>V: verify token
@@ -42,7 +42,11 @@ The verifier does not enforce `exp`. Lease expiry is a capacity miss the [core](
 
 **Keys.** Keys come only from OIDC discovery of the configured issuer, and the discovery document must name that same issuer. Neither the discovery fetch nor the key fetch follows a redirect, and an https issuer must name an https `jwks_uri`. Keys are looked up by `kid` alone. An unknown `kid` triggers one refresh, at most once a minute. A key set older than `-jwks-max-stale` is refreshed once, and is refused if still stale. A stale key set, or one never loaded, makes the token unverifiable rather than bad, so the answer is [SHED](../glossary.md#clone-misses), not `Unauthenticated`. Each refresh is the standalone home's liveness signal ([home.md](home.md)).
 
-**Caller binding.** The `cnf` claim holds the `x5t#S256` thumbprint, the base64url SHA-256 of the caller's whole certificate. A bound grant presented over another certificate, or over plaintext, is refused. A home serving mutual TLS refuses unbound grants. When a token names another caller than the already admitted grant with that UID, it is refused until the home delivers the grant again.
+**Caller binding.** The `cnf` claim ([RFC 7800](https://www.rfc-editor.org/rfc/rfc7800)) binds a grant to one caller. Its `jkt` member is the [RFC 7638](https://www.rfc-editor.org/rfc/rfc7638) thumbprint of the public key in the caller's client certificate. That is the base64url SHA-256 of the key's canonical JWK, 43 characters. A `cnf` that is null or has no `jkt` is refused. So is a `cnf` that carries `x5t#S256`, the hash of a whole certificate, alone or beside a `jkt`. A bound grant presented over another key, or over plaintext, is refused. A home serving mutual TLS refuses unbound grants.
+
+The thumbprint exists for RSA, P-256, P-384, P-521 and Ed25519 keys. A client certificate over another key, P-224 for example, cannot name a caller. `grant-issuer mint -bind-cert` fails on it. A mutual-TLS call that presents one is refused as `Unauthenticated` on gRPC and with 401 on the JSON gateway, `/healthz` included.
+
+A caller that renews its certificate over the same key keeps the same thumbprint, so its grants keep working with no new mint. A caller with a new key is refused as `Unauthenticated` until its grants are minted for the new key, under the same UIDs or new ones. Clone runs under the grant the home has admitted, not under the token's own claims. The verifier does not enforce `exp` either. So an older token for a UID, bound to the same key, keeps working while the home keeps that UID admitted and renewed. A home that does not hold the UID answers a token whose [lease](../glossary.md#lease) has run out with a capacity [miss](../glossary.md#clone-misses) on first sight. When a token names another caller than the already admitted grant with that UID, it is refused until the home delivers the grant again.
 
 **Transport and ownership.** The gRPC API and the JSON gateway require TLS 1.3 and a client certificate signed by `-client-ca`. The start fails unless exactly one of these holds.
 
@@ -51,7 +55,7 @@ The verifier does not enforce `exp`. Lease expiry is a capacity miss the [core](
 
 fiberd re-reads the three files when their mtime or size changes, checked at most once per second. A renewal that fails to load keeps the previous certificate and client CA. It is logged once and retried when the files change again. A bad file at start still fails the start.
 
-The certificate's thumbprint is the caller on every call. Park, Release and the [file calls](../protocol.md#files) answer `NotFound` for a fiber whose grant is bound to another caller, the same as for a fiber that does not exist. Watch and the gateway's status report only the caller's grants.
+The thumbprint of the certificate's key is the caller on every call. Park, Release and the [file calls](../protocol.md#files) answer `NotFound` for a fiber whose grant is bound to another caller, the same as for a fiber that does not exist. Watch and the gateway's status report only the caller's grants.
 
 **Admission completeness.** The RPC server refuses unknown fields at any depth before the core sees a Clone, so a caller cannot shape the workload the [template](../glossary.md#template) fixed ([protocol.md](../protocol.md#admission-completeness)).
 
@@ -61,7 +65,7 @@ The certificate's thumbprint is the caller on every call. Park, Release and the 
 
 ## Security notes and known gaps
 
-- **A caller's certificate rotation means re-minting.** The thumbprint covers the whole certificate, so a caller with a new certificate needs its grants minted again for it, under the same UIDs or new ones. Keep leases short.
+- **A caller's key rotation means re-minting.** The thumbprint covers the certificate's key, so a renewal over the same key needs nothing. A caller with a new key needs its grants minted again for it, under the same UIDs or new ones. On Kubernetes with cert-manager, a renewal keeps the key only when the caller's Certificate sets `privateKey.rotationPolicy: Never`. With key rotation on, every renewal is a new key and the grant must be minted again. Keep leases short.
 - **An unbound JWT is a bearer token.** Anyone holding it can spend the capacity at the named home. Keep tokens out of logs, annotations and readable files. Over plaintext only unbound grants work.
 - **Without `-max-lease`** a grant may carry no lease and never expire.
 - **A key ring holds private keys.** One stored key prints only its kid, algorithm and retirement time. A whole ring handed to a logger is encoded with every private key, so log only its kids.

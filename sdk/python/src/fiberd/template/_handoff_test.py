@@ -173,7 +173,7 @@ CONTEXT_REFUSALS = [
     # the caller certificate, the identity PEM, the message wanted
     ("no caller certificate", "", "good", "no caller certificate"),
     ("a caller certificate that is not PEM", "not pem", "good", "does not parse"),
-    ("a caller certificate that is not the bound caller's", "other", "good", "not the caller the grant is bound to"),
+    ("a caller certificate that is not the bound caller's", "other", "good", "does not match the hash sent with it"),
     ("an identity that does not load", "good", "garbage", "do not load"),
 ]
 
@@ -442,7 +442,7 @@ CONTEXT_FIBERS = [
     ("a unix fiber has nothing to accept", "/tmp/ep.sock", "ident", "only a handoff fiber"),
     ("a handoff fiber without an identity", "handoff", None, "holds no identity"),
     ("an identity without the caller's certificate", "handoff", "no caller cert", "no caller certificate"),
-    ("an identity with another caller's certificate", "handoff", "other caller", "not the caller the grant is bound to"),
+    ("an identity with another caller's certificate", "handoff", "other caller", "does not match the hash sent with it"),
 ]
 
 

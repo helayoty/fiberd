@@ -145,8 +145,8 @@ func Dial(ctx context.Context, target string) (*Client, error) {
 }
 
 // DialTLS connects to a home over mutual TLS. cfg carries the home's CA
-// and this caller's certificate. Grants bound to that certificate work
-// only on this connection.
+// and this caller's certificate. Grants bound to the key of that
+// certificate work only on a connection that presents it.
 func DialTLS(ctx context.Context, target string, cfg *tls.Config) (*Client, error) {
 	return dial(target, credentials.NewTLS(cfg))
 }

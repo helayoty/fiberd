@@ -329,10 +329,10 @@ func TestGrantBoundTo(t *testing.T) {
 		thumbprint string
 		want       bool
 	}{
-		{name: "the named caller", admitted: &core.Grant{UID: "g1", CallerThumbprint: "x5t"}, thumbprint: "x5t", want: true},
-		{name: "another caller", admitted: &core.Grant{UID: "g1", CallerThumbprint: "x5t"}, thumbprint: "other"},
+		{name: "the named caller", admitted: &core.Grant{UID: "g1", CallerThumbprint: "jkt"}, thumbprint: "jkt", want: true},
+		{name: "another caller", admitted: &core.Grant{UID: "g1", CallerThumbprint: "jkt"}, thumbprint: "other"},
 		{name: "an unbound grant and no caller", admitted: &core.Grant{UID: "g1"}, want: true},
-		{name: "an unbound grant and a caller", admitted: &core.Grant{UID: "g1"}, thumbprint: "x5t"},
+		{name: "an unbound grant and a caller", admitted: &core.Grant{UID: "g1"}, thumbprint: "jkt"},
 		{name: "an unknown grant is bound to nobody", thumbprint: ""},
 	}
 	for _, tc := range cases {

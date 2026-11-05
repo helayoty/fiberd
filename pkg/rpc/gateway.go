@@ -81,7 +81,7 @@ func (g *Gateway) Handler() http.Handler {
 		}
 		WriteHealth(w, g.Health())
 	})
-	return httpCaller(mux)
+	return g.httpCaller(mux)
 }
 
 func (g *Gateway) decode(w http.ResponseWriter, r *http.Request, m proto.Message) bool {

@@ -18,20 +18,20 @@ flowchart LR
   fiberd <-->|"templates with sealed images, signed and sealed parents and deltas"| Registry
 ```
 
-- **Caller to [fiberd](glossary.md#fiberd).** Every control call is authenticated with mutual TLS (mTLS), and the [grant](glossary.md#grant) it presents is bound to the caller's certificate.
+- **Caller to [fiberd](glossary.md#fiberd).** Every control call is authenticated with mutual TLS (mTLS), and the [grant](glossary.md#grant) it presents is bound to the key of the caller's certificate.
 - **[Issuer](glossary.md#issuer) to fiberd.** fiberd trusts only keys it finds through OpenID Connect (OIDC) discovery, the standard document in which the configured issuer lists its public keys.
 - **fiberd to [fiber](glossary.md#fiber).** Fibers are kept apart from fiberd and from each other by [cgroups](glossary.md#cgroup), namespaces and a scrubbed process state, with inherited descriptors closed and a fresh environment.
 - **fiberd to registry.** Nothing is restored unless it is signed or pinned by digest, and neither tenant nor template memory reaches the registry in the clear. Only a template's code and config are readable there.
 
 ## Control plane
 
-Every control call, `Park`, `Release` and `Watch` included, runs over mutual TLS, and the caller is the identity in its client certificate. TLS terminates at fiberd, so a router in front of fiberd is itself an mTLS client and grants are bound to the router's certificate. [Grant verification](design/grant.md) has the transport rules, the checks and the development switch that turns TLS off.
+Every control call, `Park`, `Release` and `Watch` included, runs over mutual TLS, and the caller is the identity in its client certificate. TLS terminates at fiberd, so a router in front of fiberd is itself an mTLS client and grants are bound to the key of the router's certificate. [Grant verification](design/grant.md) has the transport rules, the checks and the development switch that turns TLS off.
 
 fiberd reloads its serving certificate, key and client CA when the files change, so a renewal that cert-manager writes in place needs no restart. A renewal that fails to load keeps the previous pair and is logged once.
 
 ## Grants
 
-fiberd verifies a grant's JSON Web Token (JWT) offline against the issuer's published keys, refuses one for another home or with a lease longer than `-max-lease`, and checks that its `cnf` (confirmation) claim names the caller's certificate, so a copied token cannot be replayed by another caller. A grant the home takes back is revoked and its grant UID deny-listed until every token for it has expired. The verifier is in [grant.md](design/grant.md) and revocation in [core.md](design/core.md).
+fiberd verifies a grant's JSON Web Token (JWT) offline against the issuer's published keys, refuses one for another home or with a lease longer than `-max-lease`, and checks that its `cnf` (confirmation) claim names the key of the caller's certificate, so a copied token cannot be replayed by another caller. A grant the home takes back is revoked and its grant UID deny-listed until every token for it has expired. The verifier is in [grant.md](design/grant.md) and revocation in [core.md](design/core.md).
 
 ## Identities
 
@@ -48,7 +48,7 @@ What a fiber can read of the home's credentials differs by [backend](glossary.md
 
 ## Fiber connections
 
-In the `DIRECT` endpoint mode ([handoff](glossary.md#handoff)) an endpoint is a route, not an identity, and fiberd neither authenticates nor encrypts it. A `HANDOFF` fiber is reached only over TLS 1.3 that the fiber terminates itself. The fiber accepts only the certificate the grant is bound to, and the caller pins the grant's server key from the Clone response. fiberd routes on the server name alone and never holds the [session](glossary.md#session) keys. [handoff.md](design/handoff.md) has the mechanism.
+In the `DIRECT` endpoint mode ([handoff](glossary.md#handoff)) an endpoint is a route, not an identity, and fiberd neither authenticates nor encrypts it. A `HANDOFF` fiber is reached only over TLS 1.3 that the fiber terminates itself. The fiber accepts only the client certificate its Clone arrived under, and the caller pins the grant's server key from the Clone response. fiberd routes on the server name alone and never holds the [session](glossary.md#session) keys. [handoff.md](design/handoff.md) has the mechanism.
 
 A `DIRECT` TCP fiber on runc, gVisor or Hyperlight is reached through fiberd's [relay](glossary.md#relay), which copies bytes without reading them, so TLS in the workload keeps fiberd blind. Its connections are capped per fiber and per home, and they cost fiberd descriptors outside the fiber's cgroup ([networking.md](design/networking.md)).
 
@@ -107,4 +107,4 @@ Every state transition appends a hash-chained record to fiberd's private spool, 
 - Address-space layout randomisation (ASLR) is off for every [zygote](glossary.md#zygote) and its fibers, so the fibers of a template share one fixed memory layout on every home. A memory-corruption exploit inside a fiber is easier, because an address learned in one fiber holds in all of them.
 - Whoever can write the grant directory can deny a grant UID on that home ([home.md](design/home.md)).
 - Running fiberd itself inside a user namespace (a Pod with `hostUsers` set to false) is untested. runc's per-grant user namespace is a different thing and restores fine ([user-namespaces.md](design/user-namespaces.md)).
-- A caller's certificate rotation means re-minting its grants (fiberd's own serving certificate reloads without that), and an unbound JWT is a bearer token ([grant.md](design/grant.md)).
+- A caller's key rotation means re-minting its grants. A certificate renewed over the same key needs no new mint. fiberd's own serving certificate reloads in place without one. An unbound JWT is a bearer token ([grant.md](design/grant.md)).

@@ -17,13 +17,12 @@ import (
 	"github.com/Azure/fiberd/pkg/grant"
 	"github.com/Azure/fiberd/pkg/rpc"
 	"github.com/Azure/fiberd/pkg/runtime/stub"
-	"github.com/Azure/fiberd/pkg/tlsconf"
 	"github.com/Azure/fiberd/pkg/tlsconf/tlsconftest"
 	"github.com/Azure/fiberd/sdk/go/client"
 )
 
 // boundVerifier is the insecure JSON verifier with every grant bound to
-// one caller certificate, as a signed grant with a cnf claim would be.
+// one caller key, as a signed grant with a cnf claim would be.
 type boundVerifier struct{ thumbprint string }
 
 func (v boundVerifier) Verify(ctx context.Context, token []byte) (core.Grant, error) {
@@ -59,12 +58,13 @@ func tcpHome(t *testing.T, verify core.Verifier, cfg *tls.Config) (string, *grpc
 }
 
 // Dial reaches a plaintext home. DialTLS reaches a mutual-TLS home, and
-// the certificate it presents is the caller a bound grant must name.
+// the key its certificate is over is the caller a bound grant must name.
 func TestDial(t *testing.T) {
 	ca := tlsconftest.NewCA(t, "ca")
 	owner, other := ca.Client(t, "owner"), ca.Client(t, "other")
+	renewed, rekeyed := ca.Renew(t, owner), ca.Client(t, "owner")
 	plainAddr, _ := tcpHome(t, grant.InsecureJSONVerifier{}, nil)
-	tlsAddr, _ := tcpHome(t, boundVerifier{thumbprint: tlsconf.Thumbprint(owner.Cert)}, &tls.Config{
+	tlsAddr, _ := tcpHome(t, boundVerifier{thumbprint: owner.Thumbprint(t)}, &tls.Config{
 		MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{ca.Server(t).TLS()},
 		ClientAuth: tls.RequireAndVerifyClientCert, ClientCAs: ca.Pool(),
 	})
@@ -84,6 +84,15 @@ func TestDial(t *testing.T) {
 			dial: func(ctx context.Context) (*client.Client, error) {
 				return client.DialTLS(ctx, tlsAddr, clientCfg(owner))
 			}},
+		{name: "a renewed certificate over the same key still clones",
+			dial: func(ctx context.Context) (*client.Client, error) {
+				return client.DialTLS(ctx, tlsAddr, clientCfg(renewed))
+			}},
+		{name: "a new key under the bound caller's name is Unauthenticated",
+			dial: func(ctx context.Context) (*client.Client, error) {
+				return client.DialTLS(ctx, tlsAddr, clientCfg(rekeyed))
+			},
+			wantCode: codes.Unauthenticated},
 		{name: "another caller over mutual TLS is Unauthenticated",
 			dial: func(ctx context.Context) (*client.Client, error) {
 				return client.DialTLS(ctx, tlsAddr, clientCfg(other))

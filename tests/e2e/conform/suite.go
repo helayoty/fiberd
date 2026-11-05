@@ -42,9 +42,9 @@ type Driver struct {
 	// the third home (mobility.go, gpu.go) dial with the same config, so one
 	// ServerName covers every home.
 	TLS *tls.Config
-	// CallerThumbprint is the x5t#S256 thumbprint of the certificate the
-	// harness presents. It goes into every minted grant. Empty leaves
-	// grants unbound, which a target serving TLS refuses.
+	// CallerThumbprint is the RFC 7638 thumbprint of the key in the
+	// certificate the harness presents. It goes into every minted grant.
+	// Empty leaves grants unbound, which a target serving TLS refuses.
 	CallerThumbprint string
 	// TargetTier is the tier the target advertises; C7 mints a grant one
 	// tier above it, C2 needs at least FIBER_CHECKPOINT.

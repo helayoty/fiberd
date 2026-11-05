@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/Azure/fiberd/pkg/core"
-	"github.com/Azure/fiberd/pkg/tlsconf"
 	"github.com/Azure/fiberd/pkg/tlsconf/tlsconftest"
 )
 
@@ -42,7 +41,7 @@ func TestChannelDescriptors(t *testing.T) {
 			spec := core.CloneSpec{Grant: g, Fence: core.Fence{GrantUID: g.UID, Epoch: 1, Seq: 1}, Deadline: 2 * time.Second}
 			caller := tlsconftest.NewCA(t, "ca").Client(t, "caller")
 			if tc.handoff {
-				g.CallerThumbprint, g.Policy.EndpointMode = tlsconf.Thumbprint(caller.Cert), core.EndpointHandoff
+				g.CallerThumbprint, g.Policy.EndpointMode = caller.Thumbprint(t), core.EndpointHandoff
 				spec.Grant, spec.CallerCert = g, caller.Cert.Raw
 			}
 			if err := rt.PrepareTemplate(ctx, g); err != nil {

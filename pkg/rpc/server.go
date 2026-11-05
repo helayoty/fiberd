@@ -32,7 +32,8 @@ type Server struct {
 
 // NewGRPCServer builds a grpc.Server with the caller and admission
 // interceptors and the Fibers service registered. Pass
-// grpc.Creds(credentials.NewTLS(cfg)) for mutual TLS.
+// grpc.Creds(rpc.ServerCreds(cfg)) for mutual TLS, so each connection's
+// caller is named once at its handshake.
 func NewGRPCServer(s *Server, opts ...grpc.ServerOption) *grpc.Server {
 	opts = append(opts,
 		grpc.ChainUnaryInterceptor(CallerInterceptor(), AdmissionInterceptor()),
@@ -84,7 +85,7 @@ func (s *Server) Clone(ctx context.Context, req *grantv1.CloneRequest) (*grantv1
 }
 
 // owns reports whether the request's caller may see or act on grant uid,
-// which holds when the grant is bound to the caller's certificate. A
+// which holds when the grant is bound to the caller's key. A
 // plaintext request has no caller identity and sees everything.
 func (s *Server) owns(ctx context.Context, grantUID string) bool {
 	c, ok := CallerFrom(ctx)

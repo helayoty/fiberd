@@ -126,12 +126,12 @@ func TestCloneOutcomes(t *testing.T) {
 	past := time.Now().Add(-time.Minute)
 	g1 := core.Grant{UID: "g1", Tenant: "acme", Audience: "node-a", FiberMax: 1}
 	full := func(t *testing.T, a *core.Core) { a.Ledger.AdmitGrant(g1); createFiber(t, a.Ledger, "g1", "", "f1") }
-	bound := core.Grant{UID: "gb", Tenant: "acme", Audience: "node-a", CallerThumbprint: "router-x5t"}
+	bound := core.Grant{UID: "gb", Tenant: "acme", Audience: "node-a", CallerThumbprint: "router-jkt"}
 	trusted := core.Grant{UID: "gtr", Tenant: "acme", Audience: "node-a", Policy: core.Policy{Isolation: core.Trusted}}
 	shared := func(t *testing.T, a *core.Core) {
 		a.Runtime = fakeRuntime{tier: core.TierCheckpoint, exits: make(chan core.FiberExit, 8), shared: true}
 	}
-	handoff := core.Grant{UID: "gh", Tenant: "acme", Audience: "node-a", CallerThumbprint: "router-x5t", Policy: core.Policy{EndpointMode: core.EndpointHandoff}}
+	handoff := core.Grant{UID: "gh", Tenant: "acme", Audience: "node-a", CallerThumbprint: "router-jkt", Policy: core.Policy{EndpointMode: core.EndpointHandoff}}
 	unboundHandoff := core.Grant{UID: "gu", Tenant: "acme", Audience: "node-a", Policy: core.Policy{EndpointMode: core.EndpointHandoff}}
 	syncG := core.Grant{UID: "gs", Tenant: "acme", Audience: "node-a", Policy: core.Policy{Durability: core.Sync}}
 	routes := func(t *testing.T, a *core.Core) {
@@ -168,11 +168,11 @@ func TestCloneOutcomes(t *testing.T) {
 		unheld       bool   // the token's grant must not be in the ledger afterwards
 	}{
 		{name: "handoff grant answers the fiber's route", health: "up", tier: core.TierCheckpoint, grants: []core.Grant{handoff},
-			setup: routes, token: "gh", caller: "router-x5t", want: core.OK, running: 1, wantRoute: "rk-gh/1/1"},
+			setup: routes, token: "gh", caller: "router-jkt", want: core.OK, running: 1, wantRoute: "rk-gh/1/1"},
 		{name: "handoff grant without a caller binding is unauthenticated", health: "up", tier: core.TierCheckpoint, grants: []core.Grant{unboundHandoff},
 			setup: routes, token: "gu", want: core.Unauthenticated, wantErr: core.ErrHandoffUnbound},
 		{name: "handoff grant on a home that does not hand off is needs-tier", health: "up", tier: core.TierCheckpoint, grants: []core.Grant{handoff},
-			token: "gh", caller: "router-x5t", want: core.NeedsTier, wantErr: core.ErrNeedsHandoff},
+			token: "gh", caller: "router-jkt", want: core.NeedsTier, wantErr: core.ErrNeedsHandoff},
 		{name: "a disk budget on a runtime without workspaces is needs-tier", health: "up", tier: core.TierCheckpoint, grants: []core.Grant{disk},
 			token: "gd", want: core.NeedsTier, wantErr: core.ErrNeedsWorkspace},
 		{name: "a disk budget on a runtime without workspaces is needs-tier with the issuer down", health: "down", tier: core.TierCheckpoint, grants: []core.Grant{disk},
@@ -182,30 +182,30 @@ func TestCloneOutcomes(t *testing.T) {
 		{name: "no disk budget needs no workspaces", health: "up", tier: core.TierCheckpoint, grants: []core.Grant{g1},
 			token: "g1", want: core.OK, running: 1},
 		{name: "direct fiber has no route", health: "up", tier: core.TierCheckpoint, grants: []core.Grant{bound},
-			token: "gb", caller: "router-x5t", want: core.OK, running: 1},
+			token: "gb", caller: "router-jkt", want: core.OK, running: 1},
 		{name: "bound grant from its caller creates", health: "up", tier: core.TierCheckpoint, grants: []core.Grant{bound},
-			token: "gb", caller: "router-x5t", requireBound: true, want: core.OK, running: 1},
+			token: "gb", caller: "router-jkt", requireBound: true, want: core.OK, running: 1},
 		{name: "bound grant from another caller is unauthenticated", health: "up", tier: core.TierCheckpoint, grants: []core.Grant{bound},
-			token: "gb", caller: "intruder-x5t", want: core.Unauthenticated, wantErr: core.ErrCallerMismatch},
+			token: "gb", caller: "intruder-jkt", want: core.Unauthenticated, wantErr: core.ErrCallerMismatch},
 		{name: "bound grant over plaintext is unauthenticated", health: "up", tier: core.TierCheckpoint, grants: []core.Grant{bound},
 			token: "gb", want: core.Unauthenticated, wantErr: core.ErrCallerMismatch},
 		{name: "unbound grant where binding is required is unauthenticated", health: "up", tier: core.TierCheckpoint, grants: []core.Grant{g1},
-			token: "g1", caller: "router-x5t", requireBound: true, want: core.Unauthenticated, wantErr: core.ErrUnboundGrant},
+			token: "g1", caller: "router-jkt", requireBound: true, want: core.Unauthenticated, wantErr: core.ErrUnboundGrant},
 		// The admitted grant and the token must bind the UID to the same
 		// caller, because Park, Release and Watch check the admitted one.
 		{name: "bound grant delivered ahead creates for its caller", health: "up", tier: core.TierCheckpoint, grants: []core.Grant{bound},
 			setup: func(t *testing.T, a *core.Core) { a.Ledger.AdmitGrant(bound) },
-			token: "gb", caller: "router-x5t", want: core.OK, running: 1},
+			token: "gb", caller: "router-jkt", want: core.OK, running: 1},
 		{name: "token re-minted for another caller than the admitted grant is unauthenticated", health: "up", tier: core.TierCheckpoint, grants: []core.Grant{bound},
 			setup: func(t *testing.T, a *core.Core) {
-				a.Ledger.AdmitGrant(core.Grant{UID: "gb", Tenant: "acme", Audience: "node-a", CallerThumbprint: "old-x5t"})
+				a.Ledger.AdmitGrant(core.Grant{UID: "gb", Tenant: "acme", Audience: "node-a", CallerThumbprint: "old-jkt"})
 			},
-			token: "gb", caller: "router-x5t", want: core.Unauthenticated, wantErr: core.ErrCallerMismatch},
+			token: "gb", caller: "router-jkt", want: core.Unauthenticated, wantErr: core.ErrCallerMismatch},
 		{name: "token that drops the admitted grant's caller binding is unauthenticated", health: "up", tier: core.TierCheckpoint, grants: []core.Grant{g1},
 			setup: func(t *testing.T, a *core.Core) {
-				a.Ledger.AdmitGrant(core.Grant{UID: "g1", Tenant: "acme", Audience: "node-a", CallerThumbprint: "router-x5t"})
+				a.Ledger.AdmitGrant(core.Grant{UID: "g1", Tenant: "acme", Audience: "node-a", CallerThumbprint: "router-jkt"})
 			},
-			token: "g1", caller: "router-x5t", want: core.Unauthenticated, wantErr: core.ErrCallerMismatch},
+			token: "g1", caller: "router-jkt", want: core.Unauthenticated, wantErr: core.ErrCallerMismatch},
 		{name: "bad token is unauthenticated", health: "up", tier: core.TierCheckpoint, token: "nope", want: core.Unauthenticated},
 		{name: "wrong audience is unauthenticated", health: "up", tier: core.TierCheckpoint,
 			grants: []core.Grant{{UID: "gx", Tenant: "acme", Audience: "node-b"}}, token: "gx", want: core.Unauthenticated, wantErr: core.ErrWrongAudience},

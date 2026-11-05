@@ -190,7 +190,7 @@ func hasCap(mask string, c int) bool {
 	return err == nil && v&(1<<uint(c)) != 0
 }
 
-// callerCert is a self-signed client certificate and its x5t#S256.
+// callerCert is a self-signed client certificate and its key's thumbprint.
 func callerCert(t *testing.T) (tls.Certificate, string) {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -206,7 +206,11 @@ func callerCert(t *testing.T) (tls.Certificate, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key, Leaf: leaf}, tlsconf.Thumbprint(leaf)
+	tp, err := tlsconf.Thumbprint(leaf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key, Leaf: leaf}, tp
 }
 
 // handOff connects to a handoff fiber the way fiberd does. One end of
@@ -445,7 +449,7 @@ func TestCgroupDelegationIsProcsOnly(t *testing.T) {
 // container's network namespace leads nowhere. relay_linux_test.go has
 // the bytes going through.
 func TestEndpointFamilies(t *testing.T) {
-	caller, callerX5t := callerCert(t)
+	caller, callerThumbprint := callerCert(t)
 	cases := []struct {
 		name string
 		mode core.EndpointMode
@@ -463,7 +467,7 @@ func TestEndpointFamilies(t *testing.T) {
 			hm := newHome(t, nil)
 			ctx := context.Background()
 			g := core.Grant{UID: "ep-" + tc.name, TemplateDigest: "sha256:ref", FiberMax: 4, WBudgetBytes: 64 << 20,
-				CallerThumbprint: callerX5t, Policy: core.Policy{EndpointMode: tc.mode}}
+				CallerThumbprint: callerThumbprint, Policy: core.Policy{EndpointMode: tc.mode}}
 			if err := hm.rt.PrepareTemplate(ctx, g); err != nil {
 				t.Fatal(err)
 			}

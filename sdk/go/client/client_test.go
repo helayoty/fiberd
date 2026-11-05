@@ -282,11 +282,11 @@ func TestWatchStreamsStatus(t *testing.T) {
 	}
 }
 
-// selfSigned is a caller's client certificate and its x5t#S256.
+// selfSigned is a caller's client certificate and its key's thumbprint.
 func selfSigned(t *testing.T) (tls.Certificate, string) {
 	t.Helper()
 	p := tlsconftest.SelfSigned(t, &x509.Certificate{})
-	return p.TLS(), tlsconf.Thumbprint(p.Cert)
+	return p.TLS(), p.Thumbprint(t)
 }
 
 // A handoff fiber is dialed over TLS with its routing key as SNI. The
@@ -301,7 +301,7 @@ func TestDialHandoff(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	caller, callerX5t := selfSigned(t)
+	caller, callerThumbprint := selfSigned(t)
 	stranger, _ := selfSigned(t)
 	pair, err := tls.X509KeyPair(id.CertPEM, id.KeyPEM)
 	if err != nil {
@@ -316,7 +316,11 @@ func TestDialHandoff(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			if tlsconf.Thumbprint(leaf) != callerX5t {
+			tp, err := tlsconf.Thumbprint(leaf)
+			if err != nil {
+				return err
+			}
+			if tp != callerThumbprint {
 				return errors.New("not the grant's caller")
 			}
 			return nil

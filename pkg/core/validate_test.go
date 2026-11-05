@@ -85,7 +85,7 @@ func TestGrantValidate(t *testing.T) {
 		{name: "a digest with a space", mutate: func(g *core.Grant) { g.TemplateDigest = "sha256:abc def" }, wantErrs: []string{`templateDigest "sha256:abc def"`}},
 		{name: "a digest with an equals sign", mutate: func(g *core.Grant) { g.TemplateDigest = "sha256:abc=def" }, wantErrs: []string{"templateDigest"}},
 		{name: "a digest with a tab", mutate: func(g *core.Grant) { g.TemplateDigest = "sha256:abc\tdef" }, wantErrs: []string{"templateDigest"}},
-		// Regression: an x5t#S256 is always 43 characters.
+		// Regression: an RFC 7638 thumbprint is always 43 characters.
 		{name: "a thumbprint of the wrong length", mutate: func(g *core.Grant) { g.CallerThumbprint = strings.Repeat("Q", 42) }, wantErrs: []string{"callerThumbprint"}},
 		{name: "a padded thumbprint", mutate: func(g *core.Grant) { g.CallerThumbprint = strings.Repeat("Q", 42) + "=" }, wantErrs: []string{"callerThumbprint"}},
 		{name: "every fault is reported at once",

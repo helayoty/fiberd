@@ -278,7 +278,7 @@ func handOff(t *testing.T, rt core.Runtime, fiberID string, cert tls.Certificate
 	return tls.Client(c, handoff.ClientConfig(key, pin, cert))
 }
 
-// callerCert is a self-signed client certificate and its x5t#S256.
+// callerCert is a self-signed client certificate and its key's thumbprint.
 func callerCert(t *testing.T) (tls.Certificate, string) {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -294,7 +294,11 @@ func callerCert(t *testing.T) (tls.Certificate, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key, Leaf: leaf}, tlsconf.Thumbprint(leaf)
+	tp, err := tlsconf.Thumbprint(leaf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key, Leaf: leaf}, tp
 }
 
 // talkOver sends one line on c, returns the reply and closes c.
@@ -386,13 +390,13 @@ func TestCloneServeStatsRelease(t *testing.T) {
 }
 
 func TestParkResumeKeepsState(t *testing.T) {
-	caller, callerX5t := callerCert(t)
+	caller, callerThumbprint := callerCert(t)
 	stranger, _ := callerCert(t)
 	cases := []struct {
 		name string
 		mode core.EndpointMode
-		// callerX5t binds the grant to the caller's certificate.
-		callerX5t string
+		// callerThumbprint binds the grant to the caller's key.
+		callerThumbprint string
 		// say sends one line to the fiber and returns the reply.
 		say func(t *testing.T, rt core.Runtime, h core.FiberHandle, line string) string
 		// refused, when set, is a connection the fiber must turn away.
@@ -409,9 +413,9 @@ func TestParkResumeKeepsState(t *testing.T) {
 			// The fiber never listens and terminates TLS itself. Its
 			// channel to the host is external to the checkpoint and
 			// replaced on resume, with the resume's record first on it.
-			name:      "handoff",
-			mode:      core.EndpointHandoff,
-			callerX5t: callerX5t,
+			name:             "handoff",
+			mode:             core.EndpointHandoff,
+			callerThumbprint: callerThumbprint,
 			say: func(t *testing.T, rt core.Runtime, h core.FiberHandle, line string) string {
 				return talkOver(t, handOff(t, rt, h.ID, caller), line)
 			},
@@ -437,14 +441,14 @@ func TestParkResumeKeepsState(t *testing.T) {
 			if tc.refused != nil {
 				refused = func(h core.FiberHandle) { tc.refused(t, rt, h) }
 			}
-			parkResumeKeepsState(t, rt, tc.mode, tc.callerX5t, caller.Certificate[0], func(h core.FiberHandle, line string) string { return tc.say(t, rt, h, line) }, refused)
+			parkResumeKeepsState(t, rt, tc.mode, tc.callerThumbprint, caller.Certificate[0], func(h core.FiberHandle, line string) string { return tc.say(t, rt, h, line) }, refused)
 		})
 	}
 }
 
-func parkResumeKeepsState(t *testing.T, rt core.Runtime, mode core.EndpointMode, callerX5t string, callerDER []byte, say func(core.FiberHandle, string) string, refused func(core.FiberHandle)) {
+func parkResumeKeepsState(t *testing.T, rt core.Runtime, mode core.EndpointMode, callerThumbprint string, callerDER []byte, say func(core.FiberHandle, string) string, refused func(core.FiberHandle)) {
 	ctx := context.Background()
-	g := core.Grant{UID: "g5", TemplateDigest: "sha256:ref", WBudgetBytes: 64 << 20, CallerThumbprint: callerX5t, Policy: core.Policy{EndpointMode: mode}}
+	g := core.Grant{UID: "g5", TemplateDigest: "sha256:ref", WBudgetBytes: 64 << 20, CallerThumbprint: callerThumbprint, Policy: core.Policy{EndpointMode: mode}}
 	if err := rt.PrepareTemplate(ctx, g); err != nil {
 		t.Fatal(err)
 	}
