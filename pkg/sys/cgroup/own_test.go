@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -65,8 +66,53 @@ func TestOwnFromStripsTheFiberdLeaf(t *testing.T) {
 // controllers. Plain file operations let it run on any OS. The processes
 // move to the fiberd leaf, and the missing controllers that the root's
 // cgroup.controllers lists (all when it is absent) are enabled for the
-// subtree. Memory is a must. A root already delegated is not touched.
+// subtree. Memory is a must. A root already delegated is not touched. A
+// row's fail answers Delegate's writes the way a live root does.
 func TestDelegate(t *testing.T) {
+	const subtree = "cgroup.subtree_control"
+	leafProcs := filepath.Join(ownLeaf, "cgroup.procs")
+	// arrival refuses the first enable as pids enter the root.
+	arrival := func(pids string) func(root, file, v string) error {
+		arrived := false
+		return func(root, file, _ string) error {
+			if file != subtree || arrived {
+				return nil
+			}
+			arrived = true
+			if err := os.WriteFile(filepath.Join(root, "cgroup.procs"), []byte(pids), 0o644); err != nil {
+				return err
+			}
+			return syscall.EBUSY
+		}
+	}
+	// onEnable gives every enable err.
+	onEnable := func(err error) func(root, file, v string) error {
+		return func(_, file, _ string) error {
+			if file == subtree {
+				return err
+			}
+			return nil
+		}
+	}
+	// pidsRefusedOnce refuses +pids once, and refuses any controller that
+	// comes a second time.
+	pidsRefusedOnce := func() func(root, file, v string) error {
+		written := map[string]bool{}
+		refused := false
+		return func(_, file, v string) error {
+			switch {
+			case file != subtree:
+				return nil
+			case v == "+pids" && !refused:
+				refused = true
+				return syscall.EBUSY
+			case written[v]:
+				return syscall.EINVAL
+			}
+			written[v] = true
+			return nil
+		}
+	}
 	cases := []struct {
 		name  string
 		files map[string]string // the root's files before the call
@@ -75,7 +121,11 @@ func TestDelegate(t *testing.T) {
 		control  string
 		ownProcs string // last pid moved into the fiberd leaf, "" for no leaf
 		prepare  func(t *testing.T, root string)
-		err      string // substring of the refusal, "" for success
+		// fail answers a write to file, relative to root, before it lands.
+		// nil lets it through to the plain file.
+		fail   func(root, file, v string) error
+		err    string // substring of the refusal, $ROOT for the root, "" for success
+		notErr string // what the refusal must not say
 	}{
 		{name: "processes move to the fiberd leaf, then memory and pids are enabled",
 			files:   map[string]string{"cgroup.subtree_control": "", "cgroup.procs": "1\n42\n"},
@@ -124,6 +174,45 @@ func TestDelegate(t *testing.T) {
 				}
 			},
 			err: "enable memory under"},
+		{name: "a pid that exited is skipped",
+			files: map[string]string{subtree: "", "cgroup.procs": "1\n42\n"},
+			fail: func(_, file, v string) error {
+				if file == leafProcs && v == "42" {
+					return syscall.ESRCH
+				}
+				return nil
+			},
+			control: "+pids", ownProcs: "1"},
+		{name: "a process that arrives during the move is moved on the next pass",
+			files: map[string]string{subtree: "", "cgroup.procs": "1\n"},
+			fail:  arrival("1\n7\n"), control: "+pids", ownProcs: "7"},
+		{name: "a process that arrives in an empty root gets the leaf then",
+			files: map[string]string{subtree: "", "cgroup.procs": ""},
+			fail:  arrival("7\n"), control: "+pids", ownProcs: "7"},
+		{name: "a controller enabled before the arrival is not written again",
+			files: map[string]string{subtree: "", "cgroup.procs": "1\n"},
+			fail:  pidsRefusedOnce(), control: "+pids", ownProcs: "1"},
+		{name: "a root that never empties is refused",
+			files: map[string]string{subtree: "", "cgroup.procs": "1\n42\n"},
+			fail:  onEnable(syscall.EBUSY), err: "enable memory under $ROOT: processes still in it: 1 42", notErr: "cgroup mount"},
+		{name: "a busy root with no pid left to list says so",
+			files: map[string]string{subtree: "", "cgroup.procs": ""},
+			fail:  onEnable(syscall.EBUSY), err: "enable memory under $ROOT: processes still in it: none listed"},
+		{name: "a read-only mount keeps its hint",
+			files: map[string]string{subtree: "", "cgroup.procs": ""},
+			fail:  onEnable(syscall.EROFS), err: "enable memory under $ROOT (is the cgroup mount writable?)"},
+		{name: "a move a read-only mount refuses gets the hint too",
+			files: map[string]string{subtree: "", "cgroup.procs": "1\n"},
+			fail: func(_, file, _ string) error {
+				if file == leafProcs {
+					return syscall.EROFS
+				}
+				return nil
+			},
+			err: "move pid 1 into the fiberd leaf (is the cgroup mount writable?)"},
+		{name: "any other refusal has no hint",
+			files: map[string]string{subtree: "", "cgroup.procs": ""},
+			fail:  onEnable(syscall.EPERM), err: "enable memory under", notErr: "cgroup mount"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -134,10 +223,27 @@ func TestDelegate(t *testing.T) {
 			if tc.prepare != nil {
 				tc.prepare(t, root)
 			}
+			if tc.fail != nil {
+				delegateWrite = func(d Dir, name, v string) error {
+					file, err := filepath.Rel(root, d.file(name))
+					if err != nil {
+						return err
+					}
+					if err := tc.fail(root, file, v); err != nil {
+						return err
+					}
+					return d.write(name, v)
+				}
+				t.Cleanup(func() { delegateWrite = Dir.write })
+			}
 			got, err := Delegate(Root(root))
 			if tc.err != "" {
-				if err == nil || !strings.Contains(err.Error(), tc.err) {
-					t.Fatalf("Delegate = %v, want a refusal mentioning %q", err, tc.err)
+				want := strings.ReplaceAll(tc.err, "$ROOT", root)
+				if err == nil || !strings.Contains(err.Error(), want) {
+					t.Fatalf("Delegate = %v, want a refusal mentioning %q", err, want)
+				}
+				if tc.notErr != "" && strings.Contains(err.Error(), tc.notErr) {
+					t.Fatalf("Delegate = %v, want a refusal without %q", err, tc.notErr)
 				}
 				return
 			}

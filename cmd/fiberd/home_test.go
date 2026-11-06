@@ -86,7 +86,9 @@ func TestBuildConfig(t *testing.T) {
 	fetch := []string{"-issuer", "https://issuer.example", "-grants-dir", "/grants"}
 	pod := map[string]string{"POD_NAME": "grant-a-0", "POD_NAMESPACE": "tenant", "POD_UID": "uid-1"}
 	fromEnv := podIdentity{Name: "grant-a-0", Namespace: "tenant", UID: "uid-1"}
-	kube := []string{"-home", "kubernetes"}
+	// kube names a runtime that carves a cgroup, since the stub keeps the
+	// flag's default root.
+	kube := []string{"-home", "kubernetes", "-runtime", "proc"}
 	token := []string{"-grant-token-file", "/var/run/secrets/fiberd/token"}
 	cases := []struct {
 		name string
@@ -122,6 +124,8 @@ func TestBuildConfig(t *testing.T) {
 		{name: "a passed -cgroup-root is kept", cmd: serveCmd, env: pod, args: append(slices.Clone(kube), "-cgroup-root", "/sys/fs/cgroup/pod"),
 			wantHome: "kubernetes", wantPod: fromEnv, wantNode: "grant-a-0", wantCgroup: "/sys/fs/cgroup/pod"},
 		{name: "a -cgroup-root passed as its default is kept", cmd: serveCmd, env: pod, args: append(slices.Clone(kube), "-cgroup-root", defaultCgroup),
+			wantHome: "kubernetes", wantPod: fromEnv, wantNode: "grant-a-0", wantCgroup: defaultCgroup},
+		{name: "the stub keeps the default cgroup root", cmd: serveCmd, env: pod, args: []string{"-home", "kubernetes"},
 			wantHome: "kubernetes", wantPod: fromEnv, wantNode: "grant-a-0", wantCgroup: defaultCgroup},
 		{name: "a missing identity names each flag", cmd: serveCmd, args: kube,
 			wantErr: []string{"-pod-name (POD_NAME)", "-pod-namespace (POD_NAMESPACE)", "-pod-uid (POD_UID)"}},
@@ -368,7 +372,8 @@ type factoryCtxKey struct{}
 // only one left. A constructor's error surfaces, and only a signal's
 // marks it a stop.
 func TestHomeFactory(t *testing.T) {
-	podArgs := []string{"-home", "kubernetes", "-pod-name", "grant-a-0", "-pod-namespace", "tenant", "-pod-uid", "uid-1"}
+	podArgs := []string{"-home", "kubernetes", "-pod-name", "grant-a-0", "-pod-namespace", "tenant", "-pod-uid", "uid-1",
+		"-runtime", "proc"}
 	jwks := &grant.Cache{}
 	cases := []struct {
 		name    string

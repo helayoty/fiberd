@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
+	"time"
 )
 
 // Own is the cgroup this process runs in, under mount (normally
@@ -69,7 +71,9 @@ func ScopeOf(procCgroup string) string {
 // Returns the `grants` subtree the runtime owns. Idempotent: an already
 // delegated root is left alone. Controllers the root cannot offer (a
 // Slurm step gets cpuset, cpu and memory, no pids) are skipped; memory
-// is required.
+// is required. The root is live, so a process can enter it after the
+// move and the kernel then refuses the controller. Delegate moves the
+// newcomers and tries again a few times before it gives up.
 func Delegate(root Dir, controllers ...string) (Dir, error) {
 	if len(controllers) == 0 {
 		controllers = []string{"memory", "pids"}
@@ -78,46 +82,105 @@ func Delegate(root Dir, controllers ...string) (Dir, error) {
 	if err != nil {
 		return Dir{}, err
 	}
-	sub, err := os.ReadFile(root.file("cgroup.subtree_control"))
+	sub, err := root.read("cgroup.subtree_control")
 	if err != nil {
 		return Dir{}, fmt.Errorf("cgroup: root %s: %w", root.Path, err)
 	}
 	have := map[string]bool{}
-	for _, c := range strings.Fields(string(sub)) {
+	for _, c := range strings.Fields(sub) {
 		have[c] = true
 	}
-	missing := false
+	var want []string
 	for _, c := range controllers {
 		if !have[c] {
-			missing = true
+			want = append(want, c)
 		}
 	}
-	if missing {
-		procs, err := os.ReadFile(root.file("cgroup.procs"))
+	for try := 1; len(want) > 0; try++ {
+		procs, err := root.read("cgroup.procs")
 		if err != nil {
+			return Dir{}, fmt.Errorf("cgroup: root %s: %w", root.Path, err)
+		}
+		if err := root.evacuate(strings.Fields(procs)); err != nil {
 			return Dir{}, err
 		}
-		if pids := strings.Fields(string(procs)); len(pids) > 0 {
-			own := root.Child(ownLeaf)
-			if err := os.Mkdir(own.Path, 0o755); err != nil && !errors.Is(err, os.ErrExist) {
-				return Dir{}, fmt.Errorf("cgroup: fiberd leaf: %w", err)
-			}
-			for _, pid := range pids {
-				if err := os.WriteFile(own.file("cgroup.procs"), []byte(pid), 0o644); err != nil && !errors.Is(err, os.ErrNotExist) {
-					return Dir{}, fmt.Errorf("cgroup: move pid %s into the fiberd leaf: %w", pid, err)
-				}
-			}
-		}
-		for _, c := range controllers {
-			if have[c] {
-				continue
-			}
-			if err := root.write("cgroup.subtree_control", "+"+c); err != nil {
-				return Dir{}, fmt.Errorf("cgroup: enable %s under %s (is the cgroup mount writable?): %w", c, root.Path, err)
-			}
+		want, err = root.enable(want)
+		switch {
+		case err == nil:
+		case !errors.Is(err, syscall.EBUSY):
+			return Dir{}, err
+		case try == delegateTries:
+			return Dir{}, root.neverEmptied(want[0])
+		default:
+			time.Sleep(delegatePause)
 		}
 	}
 	return root.Child("grants"), nil
+}
+
+// delegateWrite is the write Delegate makes. Tests replace it.
+var delegateWrite = Dir.write
+
+// delegateTries bounds the passes over a root that keeps refusing a
+// controller. A burst of late arrivals fits, a root something keeps
+// filling fails fast.
+const delegateTries = 5
+
+// delegatePause sits between passes. A process that is exiting stays
+// listed and still counts, yet a move of it does nothing, so a pass
+// straight after the last one would only spend a try on it.
+const delegatePause = 10 * time.Millisecond
+
+// evacuate moves pids, the processes in d, into the fiberd leaf, which it
+// makes on first need. A process gone by then is skipped.
+func (d Dir) evacuate(pids []string) error {
+	if len(pids) == 0 {
+		return nil
+	}
+	own := d.Child(ownLeaf)
+	if err := os.Mkdir(own.Path, 0o755); err != nil && !errors.Is(err, os.ErrExist) {
+		return fmt.Errorf("cgroup: fiberd leaf%s: %w", readOnlyHint(err), err)
+	}
+	for _, pid := range pids {
+		err := delegateWrite(own, "cgroup.procs", pid)
+		if err == nil || errors.Is(err, syscall.ENOENT) || errors.Is(err, syscall.ESRCH) {
+			continue
+		}
+		return fmt.Errorf("cgroup: move pid %s into the fiberd leaf%s: %w", pid, readOnlyHint(err), err)
+	}
+	return nil
+}
+
+// enable writes controllers into d's cgroup.subtree_control in order and
+// returns those still to enable, the refused one first.
+func (d Dir) enable(controllers []string) ([]string, error) {
+	for i, c := range controllers {
+		if err := delegateWrite(d, "cgroup.subtree_control", "+"+c); err != nil {
+			return controllers[i:], fmt.Errorf("cgroup: enable %s under %s%s: %w", c, d.Path, readOnlyHint(err), err)
+		}
+	}
+	return nil, nil
+}
+
+// neverEmptied is the refusal for a root that still held processes on the
+// last try. An exiting thread can keep a root busy with no pid left to
+// list.
+func (d Dir) neverEmptied(controller string) error {
+	procs, _ := d.read("cgroup.procs")
+	pids := strings.Join(strings.Fields(procs), " ")
+	if pids == "" {
+		pids = "none listed"
+	}
+	return fmt.Errorf("cgroup: enable %s under %s: processes still in it: %s: %w", controller, d.Path, pids, syscall.EBUSY)
+}
+
+// readOnlyHint names the one cause a read-only cgroup mount has. Every
+// other error speaks for itself.
+func readOnlyHint(err error) string {
+	if errors.Is(err, syscall.EROFS) {
+		return " (is the cgroup mount writable?)"
+	}
+	return ""
 }
 
 // available filters controllers to those cgroup.controllers lists for d

@@ -127,8 +127,9 @@ type flagError struct{ error }
 // buildConfig parses args for the form cmd and checks them. Serving with
 // -home kubernetes needs the whole Pod identity. Without -node-id the
 // Pod name is the node id, so a grant's audience names the Pod. Without
-// -cgroup-root the home reads the container's own cgroup. Fetching the
-// grant with -grant-token-file needs -issuer and -grants-dir too, and
+// -cgroup-root the home reads the container's own cgroup, except on the
+// stub runtime, which carves none and keeps the flag's default. Fetching
+// the grant with -grant-token-file needs -issuer and -grants-dir too, and
 // -grant-ca-file needs -grant-token-file. The token file's directory is
 // hidden from fibers. The probe forms need none of it. -version skips
 // the checks.
@@ -182,7 +183,7 @@ func buildConfig(cmd string, args []string, getenv func(string) string, stderr i
 		if !set["node-id"] {
 			o.fiberd.Node.ID = o.pod.Name
 		}
-		if !set["cgroup-root"] {
+		if !set["cgroup-root"] && o.fiberd.Runtime.Name != "stub" {
 			o.fiberd.Node.CgroupRoot = ""
 		}
 	default:
