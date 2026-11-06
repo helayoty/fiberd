@@ -25,6 +25,9 @@ import (
 //	  zygote-images/      0700
 //	    <grant>/          a self-checkpoint until it is filed under parents/
 //	  <hex>/images/       0700, an artifact's author images, opened for a warm
+//	  snapshots/          0700, outside the prune, emptied at start
+//	    <grant hash>-<ns>/ 0500, files 0400, a Hyperlight snapshot opened for one
+//	                      warm, removed when that warm ends
 //
 // An entry is named by the parentSHA of a warm instance in r.warms, or
 // by the manifest of a delta under DeltaDir (parked here, claimed from
@@ -328,6 +331,17 @@ func (r *Runtime) sweepStores() {
 			if err := os.RemoveAll(filepath.Join(dir, p)); err != nil {
 				log.Printf("host: sweep %s: %v", filepath.Join(dir, p), err)
 			}
+		}
+	}
+	// No warm instance outlives the fiberd that opened its snapshot, so
+	// every one there, and any plaintext tar an open left, is a dead
+	// warm's template in the clear. They are read-only, so they go the way
+	// they were made to (artifact.RemoveSnapshot).
+	snaps, _ := os.ReadDir(r.snapshotsDir())
+	for _, e := range snaps {
+		p := filepath.Join(r.snapshotsDir(), strings.TrimSuffix(e.Name(), ".tar.open"))
+		if err := artifact.RemoveSnapshot(p); err != nil {
+			log.Printf("host: sweep snapshot %s: %v", p, err)
 		}
 	}
 }

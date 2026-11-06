@@ -755,6 +755,30 @@ func TestPull(t *testing.T) {
 		// Pull unpacked it.
 		{name: "images in the clear", want: "without a seal",
 			setup: pushFrom(plainImages, artifact.ArtifactType, "zygote", "config.json", "images.tar")},
+		// A Hyperlight snapshot pushed under a layer type that is not its
+		// own: the layer says one thing and the config another, so it
+		// does not pack to the digest pulled.
+		{name: "a Hyperlight snapshot under another media type", want: "packs to",
+			setup: pushFrom(func(t *testing.T) string {
+				_, pub := fleet(t)
+				out := t.TempDir()
+				if _, err := artifact.Build(ctx, artifact.BuildOptions{HyperlightSnapshot: snapshotTree(t), Out: out, SealTo: pub, Platform: hlPlatform}); err != nil {
+					t.Fatal(err)
+				}
+				return out
+			}, artifact.ArtifactType, "config.json", "images.tar")},
+		// A Hyperlight snapshot artifact holding an executable its config
+		// does not vouch for.
+		{name: "a Hyperlight snapshot with an unvouched zygote", want: "without a hash",
+			setup: pushFrom(func(t *testing.T) string {
+				_, pub := fleet(t)
+				out := t.TempDir()
+				if _, err := artifact.Build(ctx, artifact.BuildOptions{HyperlightSnapshot: snapshotTree(t), Out: out, SealTo: pub, Platform: hlPlatform}); err != nil {
+					t.Fatal(err)
+				}
+				writeFile(t, artifact.ZygotePath(out), "#!/bin/sh\n")
+				return out
+			}, artifact.ArtifactType, "zygote", "config.json", "images.tar")},
 		{name: "images in the clear under a config that names a seal", want: "is not sealed",
 			setup: pushFrom(func(t *testing.T) string {
 				dir := plainImages(t)

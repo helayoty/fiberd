@@ -61,6 +61,8 @@ type fakeBackend struct {
 	unwarmed []string
 	closed   bool
 	nextPID  int
+	// instances is the Warm.Instance of each grant's latest warm.
+	instances map[string]uint64
 	// warmCalls counts Warm calls, idempotent prepares included.
 	warmCalls int
 	// resumeCalls counts Resume calls, refused ones included.
@@ -72,6 +74,9 @@ type fakeBackend struct {
 	// Knobs a test sets before calling the runtime.
 	warmErr, cloneErr, parkErr, resumeErr error
 	warm                                  backend.Warm
+	// warmGate, when set, holds every Warm after it is counted until the
+	// channel is closed.
+	warmGate chan struct{}
 	// footprint is what Clone, Bind and Resume report as the leaf's own
 	// count before the hand-out.
 	footprint uint64
@@ -117,15 +122,27 @@ func (b *fakeBackend) Warm(_ context.Context, spec backend.WarmSpec) (backend.Wa
 	enter(spec.CgroupFD)
 	enter(spec.ProbeCgroupFD)
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	b.warmCalls++
+	gate := b.warmGate
+	b.mu.Unlock()
+	if gate != nil {
+		<-gate
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	if b.warmErr != nil {
 		return backend.Warm{}, b.warmErr
 	}
 	b.warms[spec.GrantUID] = spec
 	b.nextPID++
 	w := b.warm
-	w.ID, w.PID = spec.GrantUID, b.nextPID
+	// Warms are named by grant, as Hyperlight's are, and told apart by
+	// their instance.
+	w.ID, w.PID, w.Instance = spec.GrantUID, b.nextPID, uint64(b.nextPID)
+	if b.instances == nil {
+		b.instances = map[string]uint64{}
+	}
+	b.instances[spec.GrantUID] = w.Instance
 	return w, nil
 }
 
@@ -393,9 +410,12 @@ func (b *fakeBackend) die(fiberID, status string) {
 	b.exits <- backend.Exit{FiberID: fiberID, Status: status}
 }
 
-// warmGone reports the end of a grant's warm instance.
+// warmGone reports the end of a grant's latest warm instance.
 func (b *fakeBackend) warmGone(grantUID string) {
-	b.exits <- backend.Exit{WarmID: grantUID}
+	b.mu.Lock()
+	instance := b.instances[grantUID]
+	b.mu.Unlock()
+	b.exits <- backend.Exit{WarmID: grantUID, Instance: instance}
 }
 
 func (b *fakeBackend) fiber(id string) *fakeFiber {
@@ -751,6 +771,21 @@ func (m *poolMixin) discardedIDs() []string {
 type isolatorMixin struct{ isolates bool }
 
 func (m isolatorMixin) IsolatesTenants() bool { return m.isolates }
+
+type snapshotMixin struct{ format string }
+
+func (m snapshotMixin) ImagesFormat() string { return m.format }
+
+// snapshotBackend is a snapshot backend whose warm instance is restored
+// from the snapshot a template artifact carries, as Hyperlight's is.
+type snapshotBackend struct {
+	*fakeBackend
+	snapshotMixin
+}
+
+func newSnapshotBackend(format string) snapshotBackend {
+	return snapshotBackend{newFakeBackend(core.TierSnapshot), snapshotMixin{format}}
+}
 
 type workspaceMixin struct{ holds bool }
 

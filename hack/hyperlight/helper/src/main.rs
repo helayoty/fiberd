@@ -19,7 +19,7 @@
 //!
 //!   hyperlight-helper --guest <path> [--heap-mb N] [--engine <sock>]  (fd 3 = control)
 //!   hyperlight-helper --guest <path> --check           (self-test, no fd 3)
-//!   hyperlight-helper --version                        (the snapshot facts)
+//!   hyperlight-helper --version                        (the snapshot facts, and nothing more)
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -123,6 +123,9 @@ fn parse_args() -> Result<Args> {
     while let Some(k) = it.next() {
         match k.as_str() {
             "--version" => {
+                // The facts alone. No `template-dir` line follows them,
+                // since this helper refuses `--template-dir` (below), so
+                // fiberd never hands it a template's snapshot.
                 println!("{}", facts());
                 std::process::exit(0);
             }
@@ -133,6 +136,14 @@ fn parse_args() -> Result<Args> {
             // The template command's first word names the guest for
             // fiberd's benefit; anything else is unknown.
             "guest" => {}
+            // A template artifact carrying a guest snapshot is restored by a
+            // helper for that guest. This one runs its own guest only, and
+            // says so rather than warm the wrong one.
+            "--template-dir" => {
+                return Err(anyhow!(
+                    "--template-dir: this helper restores its own guest only, not a template's snapshot; use a helper for that guest"
+                ));
+            }
             other => return Err(anyhow!("unknown argument {other}")),
         }
     }

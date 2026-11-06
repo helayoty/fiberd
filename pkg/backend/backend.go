@@ -39,6 +39,11 @@ type Template struct {
 	Argv      []string
 	Dir       string // artifact directory; empty for a bare command
 	ImagesDir string // checkpoint of the warm template, when the artifact has one
+	// SnapshotDir is the template's own snapshot, opened for this warm
+	// alone and read-only, when the artifact carries one in a format the
+	// backend restores (SnapshotRestorer). The host removes it when the
+	// warm instance ends.
+	SnapshotDir string
 	// ZygoteSHA256 is the hash the host verified the executable at
 	// Argv[0] to have. A backend that runs the template somewhere other
 	// than the host (gvisor binds a copy into the sandbox) checks what it
@@ -99,6 +104,11 @@ const MountSourcePrefix = "fiberd-"
 type Warm struct {
 	ID  string // backend's handle, passed back to Clone and Unwarm
 	PID int    // the process, for logs; 0 when there is none
+	// Instance tells this warm instance from another with the same ID,
+	// and comes back on its Exit. 0 from a backend that does not number
+	// its warms, whose stale end of a dropped warm is not told apart from
+	// its successor's.
+	Instance uint64
 	// Bytes is what one fiber of this template costs in the W counter
 	// (see WMeter) before it dirties anything, when the backend can
 	// measure it (a sandbox restored from the template image); 0 lets the
@@ -264,6 +274,11 @@ type Exit struct {
 	PooledID string
 	WarmID   string
 	Status   string // "exit:N" or "signal:NAME"; free text otherwise
+	// Instance is, with WarmID, the Warm.Instance that ended. A backend
+	// that names warms by grant reports the end of one the host dropped
+	// after a later warm of the grant has the same WarmID, and the host
+	// must not take it for the later one's.
+	Instance uint64
 }
 
 // PoolSpec asks for one sandbox restored ahead of its identity.
@@ -355,6 +370,18 @@ type IDMapper interface {
 	// maps to. It fails when the grant cannot have its range on this home
 	// because an admitted grant of another key holds it.
 	MappedRoot(key string) (uint32, error)
+}
+
+// SnapshotRestorer is implemented by backends whose warm instance is
+// restored from a snapshot the template artifact carries as its images,
+// rather than made by running the template's executable. ImagesFormat is
+// the artifact.Config.ImagesFormat it restores, empty when it can restore
+// none now (a backend that offers no tier). The host opens
+// such a snapshot for each warm (Template.SnapshotDir), refuses one in a
+// format the backend does not restore, and refuses a registry template
+// that carries none, since such a backend runs no template's executable.
+type SnapshotRestorer interface {
+	ImagesFormat() string
 }
 
 // Platformer is implemented by backends whose checkpoints depend on

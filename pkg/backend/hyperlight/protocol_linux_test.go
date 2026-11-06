@@ -64,7 +64,7 @@ func TestPlatform(t *testing.T) {
 	}{
 		{name: "a usable helper", starter: says(kvmIntel),
 			want: artifact.Platform{Kernel: "hyperlight-hyperlight_host/0.17.0", Libc: "fiberd-hyperlight-helper/0.1.0+kvm+GenuineIntel"}},
-		{name: "the fake helper", starter: says(fake), want: artifact.Platform{Kernel: "hyperlight-none", Libc: "fakehelper/3+none+none"}},
+		{name: "the fake helper", starter: says(fake), want: artifact.Platform{Kernel: "hyperlight-none", Libc: "fakehelper/4+none+none"}},
 		{name: "no usable helper", starter: &fakeStarter{versionErr: errors.New("exit status 1")}, want: artifact.Platform{Kernel: "hyperlight-unusable", Libc: "n/a"}},
 	}
 	for _, tc := range cases {
@@ -198,7 +198,7 @@ func TestFakeHelperProtocol(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if warm.ID != "g1" || warm.PID <= 0 {
+			if warm.ID != "g1" || warm.PID <= 0 || warm.Instance == 0 {
 				t.Fatalf("Warm = %+v", warm)
 			}
 		}},
@@ -332,7 +332,7 @@ func TestFakeHelperProtocol(t *testing.T) {
 			be.Unwarm("g1")
 			awaitRun(t, s.started()[0])
 			got := []backend.Exit{awaitExit(t, be), awaitExit(t, be)}
-			want := []backend.Exit{{FiberID: f.ID, Status: "signal:helper"}, {WarmID: "g1", Status: "helper exited"}}
+			want := []backend.Exit{{FiberID: f.ID, Status: "signal:helper"}, {WarmID: "g1", Instance: warm.Instance, Status: "helper exited"}}
 			if !reflect.DeepEqual(got, want) {
 				t.Fatalf("exits = %+v, want %+v", got, want)
 			}
@@ -344,6 +344,22 @@ func TestFakeHelperProtocol(t *testing.T) {
 				t.Fatal("a clone under the unwarmed helper succeeded")
 			}
 			be.Unwarm("g1") // nothing to do twice
+		}},
+		// The grant's warms share its WarmID, so the instance is what tells
+		// the end of the one above from the end of this one.
+		{name: "Warm again: another instance of the grant, and its end says which", run: func(t *testing.T) {
+			again, err := be.Warm(warmCtx(t), backend.WarmSpec{GrantUID: "g1", WorkDir: work, CgroupFD: -1, ProbeCgroupFD: -1,
+				Template: backend.Template{Argv: []string{"guest", "--init-ms", "5"}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if again.ID != warm.ID || again.Instance == 0 || again.Instance == warm.Instance {
+				t.Fatalf("Warm = %+v after %+v, want the same ID under another instance", again, warm)
+			}
+			be.Unwarm("g1")
+			if e := awaitExit(t, be); e != (backend.Exit{WarmID: "g1", Instance: again.Instance, Status: "helper exited"}) {
+				t.Fatalf("exit = %+v, want the second instance's", e)
+			}
 		}},
 	}
 	for _, s := range steps {

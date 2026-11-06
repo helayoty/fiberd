@@ -19,6 +19,11 @@
 // guest reaches it only through the helper, which puts the fiber's fence
 // in each request, so the helper's cgroup speaks for every fiber and the
 // host sends the engine RELAY for it (RelaysEngine).
+//
+// A template artifact may carry the guest's snapshot as its images
+// (artifact.ImagesFormatHyperlight). The host opens a read-only copy of it
+// for each warm (SnapshotRestorer), and the helper restores the warm
+// instance from it, given as --template-dir.
 package hyperlight
 
 import (
@@ -36,6 +41,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -79,45 +85,6 @@ const (
 	probeLate      = 250 * time.Millisecond
 	versionTimeout = 5 * time.Second
 )
-
-var ErrHelper = errors.New("hyperlight: helper error")
-
-// facts is what a helper's snapshots depend on. The helper reports it on
-// `--version` and on READY as one token each, in this order.
-//
-//	helper      the helper and its version ("fiberd-hyperlight-helper/0.3.0")
-//	hyperlight  the hyperlight_host crate the helper was built with
-//	hypervisor  the one in use on this host (kvm, mshv)
-//	cpu         the CPU vendor string (GenuineIntel, AuthenticAMD)
-//
-// Hyperlight refuses to load a snapshot from another version, hypervisor
-// or CPU vendor, and the park layout is the helper's own. Recording the
-// facts as the platform refuses a mismatch before the resume instead of
-// failing inside it.
-type facts struct {
-	helper, hyperlight, hypervisor, cpu string
-}
-
-// parseFacts reads the four tokens after READY or from `--version`.
-func parseFacts(tokens []string) (facts, error) {
-	if len(tokens) != 4 {
-		return facts{}, fmt.Errorf("%w: want 4 facts (helper hyperlight hypervisor cpu), got %q", ErrHelper, strings.Join(tokens, " "))
-	}
-	for _, t := range tokens {
-		if t == "" {
-			return facts{}, fmt.Errorf("%w: empty fact in %q", ErrHelper, strings.Join(tokens, " "))
-		}
-	}
-	return facts{helper: tokens[0], hyperlight: tokens[1], hypervisor: tokens[2], cpu: tokens[3]}, nil
-}
-
-// platform maps the facts onto the parity fields. The Hyperlight version
-// goes where a kernel release goes, so kernel=series relaxes it to a
-// minor series. Everything else goes, exact, where libc goes. The host
-// keeps the architecture.
-func (f facts) platform() artifact.Platform {
-	return artifact.Platform{Kernel: "hyperlight-" + f.hyperlight, Libc: f.helper + "+" + f.hypervisor + "+" + f.cpu}
-}
 
 // starter starts helper processes. It is the one point where a process
 // enters the backend, so the unit tests put a goroutine there.
@@ -183,6 +150,12 @@ type Backend struct {
 	tier    core.Tier
 	why     error // why tier is unspecified, nil when it is not
 	facts   facts // from `helper --version` at open, and every READY must agree
+	// restores is set when `helper --version` advertises the template-dir
+	// line, and only then is the helper given --template-dir.
+	restores bool
+
+	// instances numbers the helpers Warm starts (helper.instance).
+	instances atomic.Uint64
 
 	mu     sync.Mutex
 	warms  map[string]*helper
@@ -197,6 +170,9 @@ type helper struct {
 	pmu  sync.Mutex
 	pend map[string]chan reply // fence -> reply
 	gone chan struct{}
+	// instance tells this helper from another warm of the grant, which
+	// shares id, on its Exit.
+	instance uint64
 	// cloneTook is how long the probe clone at warm took from CLONE to
 	// CLONED, 0 when it measured nothing (DefaultDeadlines). published is
 	// set once Warm hands the instance to the host, and only then does
@@ -235,7 +211,7 @@ func newBackend(o Options, start starter) *Backend {
 		start = execStarter{o.Helper}
 	}
 	b := &Backend{opt: o, starter: start, warms: map[string]*helper{}, fibers: map[string]*fiber{}, exits: make(chan backend.Exit, 1024)}
-	f, err := probeFacts(start)
+	f, restores, err := probeFacts(start)
 	if err != nil {
 		b.why = fmt.Errorf("helper %s unusable: %w", o.Helper, err)
 		return b
@@ -246,7 +222,7 @@ func newBackend(o Options, start starter) *Backend {
 			return b
 		}
 	}
-	b.facts = f
+	b.facts, b.restores = f, restores
 	b.tier = core.TierSnapshot
 	return b
 }
@@ -256,17 +232,31 @@ func newBackend(o Options, start starter) *Backend {
 func (b *Backend) ProbeErr() error { return b.why }
 
 // probeFacts runs `helper --version` for the facts a snapshot through
-// this helper depends on. They are known before any grant is warmed,
-// because the host records them at open.
-func probeFacts(start starter) (facts, error) {
+// this helper depends on, and whether it advertises that it restores a
+// template's snapshot (restoresLine). They are known before any grant is
+// warmed, because the host records them at open.
+func probeFacts(start starter) (facts, bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), versionTimeout)
 	defer cancel()
 	out, err := start.Version(ctx)
 	if err != nil {
-		return facts{}, fmt.Errorf("--version: %w", err)
+		return facts{}, false, fmt.Errorf("--version: %w", err)
 	}
-	return parseFacts(strings.Fields(strings.SplitN(out, "\n", 2)[0]))
+	first, rest, _ := strings.Cut(out, "\n")
+	f, err := parseFacts(strings.Fields(first))
+	if err != nil {
+		return facts{}, false, err
+	}
+	restores := false
+	for _, l := range strings.Split(rest, "\n") {
+		restores = restores || strings.TrimSpace(l) == restoresLine
+	}
+	return f, restores, nil
 }
+
+// restoresLine is the line after the facts on `helper --version` of a
+// helper that restores a template's snapshot given as --template-dir.
+const restoresLine = "template-dir"
 
 func (b *Backend) Name() string    { return "hyperlight" }
 func (b *Backend) Tier() core.Tier { return b.tier }
@@ -274,6 +264,19 @@ func (b *Backend) Tier() core.Tier { return b.tier }
 // IsolatesTenants is true because a fiber is a micro-VM guest behind the
 // hypervisor.
 func (b *Backend) IsolatesTenants() bool { return true }
+
+// ImagesFormat implements backend.SnapshotRestorer: the helper restores a
+// Hyperlight snapshot a template artifact carries (--template-dir) when it
+// is usable and its --version says so (restoresLine). Any other helper
+// restores none, so the host refuses such a template rather than open its
+// snapshot for a helper that might ignore the flag and warm its own guest
+// under the template's digest.
+func (b *Backend) ImagesFormat() string {
+	if b.tier < core.TierSnapshot || !b.restores {
+		return ""
+	}
+	return artifact.ImagesFormatHyperlight
+}
 
 // RelaysEngine is true because a fiber has no process of its own. Its
 // engine requests come from the helper, in the warm instance's cgroup,
@@ -327,6 +330,28 @@ func (b *Backend) Warm(ctx context.Context, sp backend.WarmSpec) (backend.Warm, 
 	if b.tier < core.TierSnapshot {
 		return backend.Warm{}, errors.New("hyperlight: helper or guest unavailable")
 	}
+	// --template-dir reaches only a helper that advertised it, whatever the
+	// caller asks, since one that ignores it would warm its own guest.
+	if sp.Template.SnapshotDir != "" && !b.restores {
+		return backend.Warm{}, fmt.Errorf("hyperlight: helper %s does not advertise %s on --version, so it is never given a template's snapshot", b.opt.Helper, restoresLine)
+	}
+	// A registry template is warmed from its snapshot or not at all: the
+	// helper never runs a template's executable, so one without a snapshot
+	// would have the helper warm its own guest under the template's
+	// digest, and parity would pass.
+	if sp.Template.Dir != "" && sp.Template.SnapshotDir == "" {
+		return backend.Warm{}, fmt.Errorf("hyperlight: template %s comes from a registry without a Hyperlight snapshot, and the helper would warm its own guest in its place", sp.Template.Digest)
+	}
+	// A registry template's arguments come from its author, so none may
+	// name what fiberd gives the helper (HelperFlag). An operator's own
+	// -template command is the operator's to write.
+	if sp.Template.Dir != "" && len(sp.Template.Argv) > 1 {
+		for _, a := range sp.Template.Argv[1:] {
+			if HelperFlag(a) {
+				return backend.Warm{}, fmt.Errorf("hyperlight: template %s passes %s, which is fiberd's alone", sp.Template.Digest, a)
+			}
+		}
+	}
 	fds, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_STREAM|syscall.SOCK_CLOEXEC, 0)
 	if err != nil {
 		return backend.Warm{}, fmt.Errorf("hyperlight: socketpair: %w", err)
@@ -340,6 +365,12 @@ func (b *Backend) Warm(ctx context.Context, sp backend.WarmSpec) (backend.Warm, 
 	}
 	if sp.EnginePath != "" {
 		args = append(args, "--engine", sp.EnginePath)
+	}
+	// A template whose artifact carries the guest's snapshot: the helper
+	// restores the warm instance from the read-only copy the host opened
+	// for this warm, rather than from its own guest.
+	if sp.Template.SnapshotDir != "" {
+		args = append(args, "--template-dir", sp.Template.SnapshotDir)
 	}
 	// The template command's own arguments, after the helper's; the
 	// first word is the guest's name for the helper's benefit.
@@ -372,7 +403,7 @@ func (b *Backend) Warm(ctx context.Context, sp backend.WarmSpec) (backend.Warm, 
 		return backend.Warm{}, err
 	}
 	uc, _ := conn.(*net.UnixConn)
-	h := &helper{id: sp.GrantUID, proc: proc, ctl: uc, pend: map[string]chan reply{}, gone: make(chan struct{})}
+	h := &helper{id: sp.GrantUID, instance: b.instances.Add(1), proc: proc, ctl: uc, pend: map[string]chan reply{}, gone: make(chan struct{})}
 
 	ready := make(chan error, 1)
 	rd := bufio.NewReaderSize(uc, 64<<10)
@@ -444,7 +475,7 @@ func (b *Backend) Warm(ctx context.Context, sp backend.WarmSpec) (backend.Warm, 
 		log.Printf("hyperlight: template of %s sized from a probe of %s, default deadlines create=%s resume=%s", h.id, took.Round(time.Millisecond),
 			sizeDeadline(took, createDeadline), sizeDeadline(took, resumeDeadline))
 	}
-	return backend.Warm{ID: h.id, PID: proc.Pid()}, nil
+	return backend.Warm{ID: h.id, PID: proc.Pid(), Instance: h.instance}, nil
 }
 
 // probeClone makes one fiber from the warm snapshot, ends it, and returns
@@ -670,7 +701,7 @@ func (b *Backend) helperGone(h *helper) {
 		b.exits <- backend.Exit{FiberID: id, Status: "signal:helper"}
 	}
 	if published {
-		b.exits <- backend.Exit{WarmID: h.id, Status: "helper exited"}
+		b.exits <- backend.Exit{WarmID: h.id, Instance: h.instance, Status: "helper exited"}
 	}
 }
 
@@ -903,9 +934,10 @@ func payloadHex(p []byte) string {
 func (b *Backend) FiberOverheadBytes() uint64 { return 0 }
 
 var (
-	_ backend.Backend         = (*Backend)(nil)
-	_ backend.Platformer      = (*Backend)(nil)
-	_ backend.DeadlineAdvisor = (*Backend)(nil)
-	_ backend.WReporter       = (*Backend)(nil)
-	_ backend.Overheader      = (*Backend)(nil)
+	_ backend.Backend          = (*Backend)(nil)
+	_ backend.Platformer       = (*Backend)(nil)
+	_ backend.DeadlineAdvisor  = (*Backend)(nil)
+	_ backend.WReporter        = (*Backend)(nil)
+	_ backend.Overheader       = (*Backend)(nil)
+	_ backend.SnapshotRestorer = (*Backend)(nil)
 )

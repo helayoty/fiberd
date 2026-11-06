@@ -9,7 +9,9 @@
 //	             and how images.tar is sealed
 //	images.tar   CRIU images of the zygote taken right after READY: the
 //	             parent pages that fiber deltas are computed against.
-//	             Sealed to the fleet's wrap key (wrap.go), never plain
+//	             Sealed to the fleet's wrap key (wrap.go), never plain.
+//	             Or a Hyperlight guest's snapshot (snapshot.go), under
+//	             its own media type, and then no zygote
 //
 // The manifest digest is the template digest a grant carries.
 package artifact
@@ -40,6 +42,15 @@ const (
 	MediaTypeBinary = "application/vnd.fiberd.zygote.bin.v1"
 	MediaTypeConfig = "application/vnd.fiberd.zygote.config.v1+json"
 	MediaTypeImages = "application/vnd.fiberd.zygote.criu.v1.tar"
+	// MediaTypeHyperlight is images.tar holding a Hyperlight guest's
+	// snapshot, a tree a helper restores the warm template from, rather
+	// than CRIU images (ImagesFormatHyperlight).
+	MediaTypeHyperlight = "application/vnd.fiberd.zygote.hyperlight.v1.tar"
+
+	// ImagesFormatHyperlight is Config.ImagesFormat for a Hyperlight
+	// snapshot. Its artifact needs no zygote, since the helper restores
+	// the guest from the snapshot and runs no executable of the template's.
+	ImagesFormatHyperlight = "hyperlight"
 
 	fileZygote   = "zygote"
 	fileConfig   = "config.json"
@@ -65,8 +76,11 @@ type Config struct {
 	Linking string `json:"linking,omitempty"`
 	// Images says how images.tar is sealed. Nil when the artifact has no
 	// images. An artifact never carries images in the clear.
-	Images  *ImagesSeal `json:"images,omitempty"`
-	BuiltAt time.Time   `json:"built_at"`
+	Images *ImagesSeal `json:"images,omitempty"`
+	// ImagesFormat is what images.tar holds: empty for CRIU images of
+	// the zygote, ImagesFormatHyperlight for a Hyperlight snapshot.
+	ImagesFormat string    `json:"images_format,omitempty"`
+	BuiltAt      time.Time `json:"built_at"`
 	// Digest is the manifest digest. It is never stored in config.json
 	// (it is a layer); Pull fills it from the transfer, and ReadDigest
 	// reads the DIGEST side file Pack and Pull write.
@@ -75,6 +89,39 @@ type Config struct {
 
 // HasImages reports whether the artifact carries a sealed images.tar.
 func (c Config) HasImages() bool { return c.Images != nil }
+
+// HasZygote reports whether the artifact carries an executable. A
+// Hyperlight snapshot artifact never does: the helper restores the guest
+// and runs no executable of the template's, and a fiberd from before the
+// format, which would run its own guest in the snapshot's place, cannot
+// pull an artifact without one.
+func (c Config) HasZygote() bool { return c.ImagesFormat == "" }
+
+// checkFormat refuses a config whose images format this fiberd does not
+// know, or one that names a format without images to hold it.
+func (c Config) checkFormat() error {
+	switch c.ImagesFormat {
+	case "":
+	case ImagesFormatHyperlight:
+		if c.Images == nil {
+			return fmt.Errorf("artifact: images format %q without images", c.ImagesFormat)
+		}
+		if c.ZygoteSHA256 != "" {
+			return fmt.Errorf("artifact: a %s snapshot carries no zygote, and its config names one", c.ImagesFormat)
+		}
+	default:
+		return fmt.Errorf("artifact: unknown images format %q", c.ImagesFormat)
+	}
+	return nil
+}
+
+// imagesMediaType is the media type of images.tar in an artifact of cfg.
+func imagesMediaType(cfg Config) string {
+	if cfg.ImagesFormat == ImagesFormatHyperlight {
+		return MediaTypeHyperlight
+	}
+	return MediaTypeImages
+}
 
 // ReadConfig loads config.json from an artifact directory.
 func ReadConfig(dir string) (Config, error) {
@@ -158,7 +205,13 @@ func pack(ctx context.Context, fs *file.Store, dir string, cfg Config) (ocispec.
 		layers = append(layers, d)
 		return nil
 	}
-	if err := add(fileZygote, MediaTypeBinary, true); err != nil {
+	if err := cfg.checkFormat(); err != nil {
+		return ocispec.Descriptor{}, err
+	}
+	if err := checkZygoteLayer(dir, cfg); err != nil {
+		return ocispec.Descriptor{}, err
+	}
+	if err := add(fileZygote, MediaTypeBinary, cfg.HasZygote()); err != nil {
 		return ocispec.Descriptor{}, err
 	}
 	if err := add(fileConfig, MediaTypeConfig, true); err != nil {
@@ -167,7 +220,7 @@ func pack(ctx context.Context, fs *file.Store, dir string, cfg Config) (ocispec.
 	if err := checkImagesLayer(dir, cfg); err != nil {
 		return ocispec.Descriptor{}, err
 	}
-	if err := add(fileImages, MediaTypeImages, false); err != nil {
+	if err := add(fileImages, imagesMediaType(cfg), false); err != nil {
 		return ocispec.Descriptor{}, err
 	}
 	created := cfg.BuiltAt.UTC().Format(time.RFC3339)
@@ -214,7 +267,8 @@ func Push(ctx context.Context, dir, ref string) (string, error) {
 }
 
 // Pull downloads the artifact at repo@digest (or repo:tag) into dst. The
-// manifest digest is verified by the transfer. Sealed images stay sealed.
+// manifest digest is verified by the transfer, and the directory must pack
+// to it, as Reverify holds it at every warm. Sealed images stay sealed.
 // A home opens them with UnpackImages.
 func Pull(ctx context.Context, ref, dst string) (Config, error) {
 	repo, target, err := repository(ref)
@@ -254,22 +308,44 @@ func Pull(ctx context.Context, ref, dst string) (Config, error) {
 	if m.ArtifactType != ArtifactType {
 		return Config{}, fmt.Errorf("artifact: %s is %q, not a zygote artifact", ref, m.ArtifactType)
 	}
-	if err := os.Chmod(ZygotePath(dst), 0o755); err != nil {
-		return Config{}, err
-	}
 	cfg, err := ReadConfig(dst)
 	if err != nil {
 		return Config{}, err
 	}
-	sum, err := fileSHA256(ZygotePath(dst))
-	if err != nil {
-		return Config{}, fmt.Errorf("artifact: hash pulled zygote: %w", err)
+	if err := cfg.checkFormat(); err != nil {
+		return Config{}, err
 	}
-	if sum != cfg.ZygoteSHA256 {
-		return Config{}, fmt.Errorf("artifact: pulled zygote sha256 %s does not match config %s", sum, cfg.ZygoteSHA256)
+	if err := checkZygoteLayer(dst, cfg); err != nil {
+		return Config{}, err
+	}
+	if cfg.HasZygote() {
+		if err := os.Chmod(ZygotePath(dst), 0o755); err != nil {
+			return Config{}, err
+		}
+		sum, err := fileSHA256(ZygotePath(dst))
+		if err != nil {
+			return Config{}, fmt.Errorf("artifact: hash pulled zygote: %w", err)
+		}
+		if sum != cfg.ZygoteSHA256 {
+			return Config{}, fmt.Errorf("artifact: pulled zygote sha256 %s does not match config %s", sum, cfg.ZygoteSHA256)
+		}
 	}
 	if err := checkImagesLayer(dst, cfg); err != nil {
 		return Config{}, err
+	}
+	// The directory must pack to the digest pulled, the rule Reverify
+	// holds it to at every later warm. So a manifest Pack would not write
+	// is refused here: a layer under a media type other than the one its
+	// config gives it (a Hyperlight snapshot under the CRIU type, which a
+	// home would open as CRIU images, or the reverse), a layer too many
+	// or too few.
+	_ = fs.Close()
+	got, err := packedDigest(ctx, dst, cfg)
+	if err != nil {
+		return Config{}, err
+	}
+	if got != desc.Digest.String() {
+		return Config{}, fmt.Errorf("artifact: %s packs to %s, not the %s pulled", ref, got, desc.Digest)
 	}
 	if err := writeDigest(dst, desc.Digest.String()); err != nil {
 		return Config{}, err
@@ -292,30 +368,54 @@ func Reverify(ctx context.Context, dir, digest string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	fs, err := file.New(dir)
+	got, err := packedDigest(ctx, dir, cfg)
 	if err != nil {
 		return Config{}, err
 	}
-	desc, err := pack(ctx, fs, dir, cfg)
-	_ = fs.Close()
-	if err != nil {
-		return Config{}, err
-	}
-	if got := desc.Digest.String(); got != digest {
+	if got != digest {
 		return Config{}, fmt.Errorf("artifact: cached %s packs to %s", digest, got)
 	}
-	sum, err := fileSHA256(ZygotePath(dir))
-	if err != nil {
-		return Config{}, err
-	}
-	if sum != cfg.ZygoteSHA256 {
-		return Config{}, fmt.Errorf("artifact: cached zygote sha256 %s does not match config %s", sum, cfg.ZygoteSHA256)
-	}
-	if err := os.Chmod(ZygotePath(dir), 0o755); err != nil {
-		return Config{}, err
+	if cfg.HasZygote() {
+		sum, err := fileSHA256(ZygotePath(dir))
+		if err != nil {
+			return Config{}, err
+		}
+		if sum != cfg.ZygoteSHA256 {
+			return Config{}, fmt.Errorf("artifact: cached zygote sha256 %s does not match config %s", sum, cfg.ZygoteSHA256)
+		}
+		if err := os.Chmod(ZygotePath(dir), 0o755); err != nil {
+			return Config{}, err
+		}
 	}
 	cfg.Digest = digest
 	return cfg, nil
+}
+
+// packedDigest is the manifest digest dir packs to, as Pack computes it.
+func packedDigest(ctx context.Context, dir string, cfg Config) (string, error) {
+	fs, err := file.New(dir)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = fs.Close() }()
+	desc, err := pack(ctx, fs, dir, cfg)
+	if err != nil {
+		return "", err
+	}
+	return desc.Digest.String(), nil
+}
+
+// checkZygoteLayer refuses a Hyperlight snapshot artifact directory that
+// holds a zygote, which its config names no hash for, so an executable
+// never travels unverified.
+func checkZygoteLayer(dir string, cfg Config) error {
+	if cfg.HasZygote() {
+		return nil
+	}
+	if _, err := os.Lstat(ZygotePath(dir)); err == nil {
+		return fmt.Errorf("artifact: %s without a hash in config.json", fileZygote)
+	}
+	return nil
 }
 
 // checkImagesLayer refuses an artifact directory whose images.tar and
@@ -352,6 +452,9 @@ func checkImagesLayer(dir string, cfg Config) error {
 func UnpackImages(dir string, cfg Config, k *SealKey) error {
 	if cfg.Images == nil {
 		return errors.New("artifact: no images to unpack")
+	}
+	if cfg.ImagesFormat != "" {
+		return fmt.Errorf("artifact: images are a %s snapshot, which is opened for a warm alone (OpenSnapshot)", cfg.ImagesFormat)
 	}
 	if k == nil {
 		return fmt.Errorf("artifact: images sealed to fleet key %q, and this home has no seal key (-delta-seal-key)", cfg.Images.KeyID)

@@ -37,6 +37,13 @@ type BuildOptions struct {
 	// detected (ldd for the libc on Linux), so a caller that names all
 	// three runs nothing. Backend and Templates are not recorded.
 	Platform Platform
+	// HyperlightSnapshot is the directory of a Hyperlight guest's
+	// snapshot to carry as the artifact's images instead of CRIU images
+	// of a zygote (ImagesFormatHyperlight), sealed to SealTo. Zygote must
+	// then be empty, and Platform must name the kernel and libc a
+	// Hyperlight home reports, the helper's facts (hyperlight.PlatformOf),
+	// since the snapshot depends on the helper and not on this host.
+	HyperlightSnapshot string
 }
 
 // Build runs the zygote the way a home does (control channel on fd 3),
@@ -51,6 +58,9 @@ type BuildOptions struct {
 //	true        false     yes, to READY     no     no
 //	true        true      no                no     no
 func Build(ctx context.Context, o BuildOptions) (string, error) {
+	if o.HyperlightSnapshot != "" {
+		return buildHyperlight(ctx, o)
+	}
 	if o.Zygote == "" || o.Out == "" {
 		return "", errors.New("artifact: Zygote and Out are required")
 	}
@@ -133,4 +143,71 @@ func copyFile(src, dst string, mode os.FileMode) error {
 		return err
 	}
 	return out.Close()
+}
+
+// buildHyperlight writes a Hyperlight snapshot artifact: the snapshot
+// tree tarred (TarSnapshot) and sealed as its images, and a config
+// naming the helper's facts as its platform. It carries no zygote.
+// Nothing runs, and the plaintext tar is gone when it returns.
+func buildHyperlight(ctx context.Context, o BuildOptions) (string, error) {
+	if o.Out == "" {
+		return "", errors.New("artifact: Out is required")
+	}
+	if o.Zygote != "" {
+		return "", errors.New("artifact: a Hyperlight snapshot artifact carries no zygote; the helper restores the guest")
+	}
+	if o.SealTo == nil {
+		return "", errors.New("artifact: a Hyperlight snapshot is sealed to the fleet's wrap key; pass -seal-to fleet-pub.json (grant-issuer keygen -alg A256GCM writes it)")
+	}
+	if o.Platform.Kernel == "" || o.Platform.Libc == "" {
+		return "", errors.New("artifact: a Hyperlight snapshot records the helper's facts as its platform; give Platform the kernel and libc they map to (hyperlight.PlatformOf)")
+	}
+	if st, err := os.Lstat(o.HyperlightSnapshot); err != nil {
+		return "", fmt.Errorf("artifact: Hyperlight snapshot: %w", err)
+	} else if !st.IsDir() {
+		return "", fmt.Errorf("artifact: Hyperlight snapshot %s is not a directory (a symlink to one is refused)", o.HyperlightSnapshot)
+	}
+	var err error
+	if o.Out, err = filepath.Abs(o.Out); err != nil {
+		return "", err
+	}
+	snap, err := filepath.Abs(o.HyperlightSnapshot)
+	if err != nil {
+		return "", err
+	}
+	// The build clears and writes Out, and tars the snapshot whole, so
+	// neither may hold the other.
+	if within(o.Out, snap) || within(snap, o.Out) {
+		return "", fmt.Errorf("artifact: -out %s and the snapshot %s overlap", o.Out, snap)
+	}
+	if err := os.MkdirAll(o.Out, 0o755); err != nil {
+		return "", err
+	}
+	p := o.Platform.Complete()
+	cfg := Config{Args: o.Args, Arch: p.Arch, Kernel: p.Kernel, Libc: p.Libc, ImagesFormat: ImagesFormatHyperlight,
+		BuiltAt: time.Now().UTC().Truncate(time.Second)}
+	// What an earlier build into Out left is not this build's.
+	_ = os.Remove(ZygotePath(o.Out))
+	_ = os.RemoveAll(filepath.Join(o.Out, dirImages))
+	_ = os.Remove(filepath.Join(o.Out, fileImages))
+	plain := filepath.Join(o.Out, fileImages+".plain")
+	defer func() { _ = os.Remove(plain) }()
+	if err := TarSnapshot(o.HyperlightSnapshot, plain); err != nil {
+		return "", fmt.Errorf("artifact: tar Hyperlight snapshot: %w", err)
+	}
+	s, err := SealImages(plain, filepath.Join(o.Out, fileImages), o.SealTo)
+	if err != nil {
+		return "", err
+	}
+	cfg.Images = &s
+	if err := writeConfig(o.Out, cfg); err != nil {
+		return "", err
+	}
+	return Pack(ctx, o.Out)
+}
+
+// within reports whether path is dir or lies beneath it.
+func within(dir, path string) bool {
+	rel, err := filepath.Rel(dir, path)
+	return err == nil && (rel == "." || filepath.IsLocal(rel))
 }

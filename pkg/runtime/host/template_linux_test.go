@@ -54,7 +54,7 @@ func TestResolveTemplateDigest(t *testing.T) {
 			}
 			// Nothing listens on port 1, so a pull fails at once.
 			r := &Runtime{cfg: Config{Registry: "127.0.0.1:1/tmpl", TemplateCache: cache}}
-			_, err := r.resolveTemplate(context.Background(), tc.digest)
+			_, err := r.resolveTemplate(context.Background(), tc.digest, "g1")
 			if _, serr := os.Stat(sentinel); serr != nil {
 				t.Fatalf("resolveTemplate(%q) removed a file beside the template cache: %v", tc.digest, serr)
 			}
@@ -183,13 +183,13 @@ func TestResolveTemplateRegistry(t *testing.T) {
 		run  func(t *testing.T)
 	}{
 		{"an entry in the templates map is never pulled", func(t *testing.T) {
-			tpl, err := r.resolveTemplate(ctx, "sha256:local")
+			tpl, err := r.resolveTemplate(ctx, "sha256:local", "g1")
 			if err != nil || strings.Join(tpl.Argv, " ") != "/zyg/local --x" || tpl.Dir != "" || tpl.ImagesDir != "" {
 				t.Fatalf("resolveTemplate = %+v %v", tpl, err)
 			}
 		}},
 		{"a bare template is pulled and needs only the architecture to match", func(t *testing.T) {
-			tpl, err := r.resolveTemplate(ctx, bare)
+			tpl, err := r.resolveTemplate(ctx, bare, "g1")
 			if err != nil {
 				t.Fatalf("resolveTemplate: %v", err)
 			}
@@ -216,36 +216,36 @@ func TestResolveTemplateRegistry(t *testing.T) {
 			if err := os.WriteFile(zygote, []byte("#!/bin/sh\nrm -rf /\n"), 0o755); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := r.resolveTemplate(ctx, bare); err != nil {
+			if _, err := r.resolveTemplate(ctx, bare, "g1"); err != nil {
 				t.Fatalf("resolveTemplate: %v", err)
 			}
 			if got, _ := os.ReadFile(zygote); string(got) != string(orig) {
 				t.Fatalf("the cache still runs the rewritten zygote: %q", got)
 			}
 			// Intact, it is verified and kept.
-			if _, err := r.resolveTemplate(ctx, bare); err != nil {
+			if _, err := r.resolveTemplate(ctx, bare, "g1"); err != nil {
 				t.Fatalf("resolveTemplate: %v", err)
 			}
 		}},
 		{"another architecture is refused", func(t *testing.T) {
-			if _, err := r.resolveTemplate(ctx, foreign); !errors.Is(err, ErrParity) || !strings.Contains(err.Error(), "arch amd64") {
+			if _, err := r.resolveTemplate(ctx, foreign, "g1"); !errors.Is(err, ErrParity) || !strings.Contains(err.Error(), "arch amd64") {
 				t.Fatalf("resolveTemplate = %v, want ErrParity on the architecture", err)
 			}
 		}},
 		{"a template with images needs this kernel and libc", func(t *testing.T) {
-			tpl, err := r.resolveTemplate(ctx, imaged)
+			tpl, err := r.resolveTemplate(ctx, imaged, "g1")
 			if err != nil || tpl.ImagesDir != artifact.ImagesDir(cacheDir(imaged)) {
 				t.Fatalf("resolveTemplate = %+v %v", tpl, err)
 			}
 			if got, _ := os.ReadFile(filepath.Join(tpl.ImagesDir, fakePagesFile)); string(got) != "artifact pages" {
 				t.Fatalf("images = %q", got)
 			}
-			if _, err := r.resolveTemplate(ctx, imagedElsewhere); !errors.Is(err, ErrParity) || !strings.Contains(err.Error(), "kernel 6.9.0-elsewhere") {
+			if _, err := r.resolveTemplate(ctx, imagedElsewhere, "g1"); !errors.Is(err, ErrParity) || !strings.Contains(err.Error(), "kernel 6.9.0-elsewhere") {
 				t.Fatalf("resolveTemplate = %v, want ErrParity on the kernel", err)
 			}
 			relaxed := &Runtime{cfg: r.cfg, host: r.host, be: r.be, tier: r.tier}
 			relaxed.cfg.Parity = artifact.Parity{Kernel: artifact.ParityOff, Libc: artifact.ParityOff}
-			if _, err := relaxed.resolveTemplate(ctx, imagedElsewhere); err != nil {
+			if _, err := relaxed.resolveTemplate(ctx, imagedElsewhere, "g1"); err != nil {
 				t.Fatalf("resolveTemplate with parity off = %v", err)
 			}
 		}},
@@ -255,7 +255,7 @@ func TestResolveTemplateRegistry(t *testing.T) {
 		{"a template parity refuses never has its images opened or held", func(t *testing.T) {
 			images := artifact.ImagesDir(cacheDir(imagedElsewhere))
 			_ = os.RemoveAll(images)
-			if _, err := r.resolveTemplate(ctx, imagedElsewhere); !errors.Is(err, ErrParity) {
+			if _, err := r.resolveTemplate(ctx, imagedElsewhere, "g1"); !errors.Is(err, ErrParity) {
 				t.Fatalf("resolveTemplate = %v, want ErrParity", err)
 			}
 			if exists(images) {
@@ -295,7 +295,7 @@ func TestResolveTemplateRegistry(t *testing.T) {
 			for _, tc := range cases {
 				t.Run(tc.name, func(t *testing.T) {
 					_ = os.RemoveAll(artifact.ImagesDir(cacheDir(imaged)))
-					tpl, err := tc.rt().resolveTemplate(ctx, imaged)
+					tpl, err := tc.rt().resolveTemplate(ctx, imaged, "g1")
 					if tc.wantErr != "" {
 						if !errors.Is(err, ErrNoTemplate) || !strings.Contains(err.Error(), tc.wantErr) {
 							t.Fatalf("resolveTemplate = %v, want ErrNoTemplate saying %q", err, tc.wantErr)
@@ -345,7 +345,7 @@ func TestResolveTemplateRegistry(t *testing.T) {
 			}
 			for _, tc := range cases {
 				t.Run(tc.name, func(t *testing.T) {
-					_, err := tc.rt.resolveTemplate(ctx, tc.digest)
+					_, err := tc.rt.resolveTemplate(ctx, tc.digest, "g1")
 					if tc.refused {
 						if !errors.Is(err, ErrParity) || !strings.Contains(err.Error(), "not a static executable") || !strings.Contains(err.Error(), "gvisor") || !strings.Contains(err.Error(), "-parity libc=off") {
 							t.Fatalf("resolveTemplate = %v, want ErrParity naming the linking, the backend and the way out", err)
@@ -360,7 +360,7 @@ func TestResolveTemplateRegistry(t *testing.T) {
 		}},
 		{"a digest the registry lacks leaves no cache entry", func(t *testing.T) {
 			missing := "sha256:" + strings.Repeat("9", 64)
-			if _, err := r.resolveTemplate(ctx, missing); !errors.Is(err, ErrNoTemplate) {
+			if _, err := r.resolveTemplate(ctx, missing, "g1"); !errors.Is(err, ErrNoTemplate) {
 				t.Fatalf("resolveTemplate = %v, want ErrNoTemplate", err)
 			}
 			if exists(cacheDir(missing)) {
@@ -486,7 +486,7 @@ func TestPruneAuthorImages(t *testing.T) {
 			waitFor(t, "the images to go with the second warm", func() bool { return !exists(images) && !exists(link) })
 		}},
 		{name: "a resolve in flight keeps its images through a prune until its warm names them", run: func(t *testing.T, rt *Runtime, images, _ string) {
-			tpl, err := rt.resolveTemplate(ctx, imaged)
+			tpl, err := rt.resolveTemplate(ctx, imaged, "g1")
 			if err != nil || tpl.ImagesDir != images {
 				t.Fatalf("resolveTemplate = %+v %v", tpl, err)
 			}

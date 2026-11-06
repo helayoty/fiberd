@@ -54,6 +54,9 @@ The state layout keeps what fibers must never read under one hidden directory.
     zygote-images/      self-checkpoints not yet filed, mode 0700
     <digest>/images/    author images opened for a warm, mode 0700, pruned
                         once no warm instance or delta names them
+    snapshots/          Hyperlight snapshots opened for warm instances, one
+                        copy each, mode 0700, read-only inside, removed when
+                        the warm ends and swept at start
   deltas/               parked deltas, also hidden from fibers, swept at
                         start of those no parked session names
   workspaces/           running fibers' workspaces (-workspace-dir), mode

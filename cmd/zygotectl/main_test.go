@@ -324,3 +324,124 @@ func TestSealTo(t *testing.T) {
 		})
 	}
 }
+
+// TestBuildHyperlight checks that build carries a Hyperlight snapshot as
+// the artifact's sealed images, with the helper's facts as its platform,
+// and refuses a build that names neither the helper nor its facts, or
+// both. The helper is a script that prints the facts.
+func TestBuildHyperlight(t *testing.T) {
+	jwk, err := artifact.GenerateSealKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	master, _ := artifact.SealKeyFromJWK(jwk)
+	w, _ := artifact.DeriveWrapKey(master)
+	dir := t.TempDir()
+	pub := filepath.Join(dir, "fleet-pub.json")
+	b, _ := w.PublicJWK()
+	if err := os.WriteFile(pub, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	snap := filepath.Join(dir, "snap")
+	if err := os.MkdirAll(filepath.Join(snap, "blobs", "sha256"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(snap, "blobs", "sha256", "aa"), []byte("pages"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	const facts = "example-helper/0.1.0+abc hyperlight_host/0.18.0 kvm GenuineIntel"
+	helper := filepath.Join(dir, "helper")
+	if err := os.WriteFile(helper, []byte("#!/bin/sh\n[ \"$1\" = --version ] && echo '"+facts+"'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	wantKernel, wantLibc := "hyperlight-hyperlight_host/0.18.0", "example-helper/0.1.0+abc+kvm+GenuineIntel"
+	cases := []struct {
+		name    string
+		args    []string
+		code    int
+		wantErr string
+	}{
+		{name: "the facts given whole", args: []string{"-hyperlight-facts", facts}},
+		{name: "the facts from the helper", args: []string{"-hyperlight-helper", helper}},
+		{name: "a helper not named by an absolute path", code: 1, wantErr: "is not an absolute path", args: []string{"-hyperlight-helper", "helper"}},
+		{name: "neither", code: 1, wantErr: "needs one of"},
+		{name: "both", code: 1, wantErr: "needs one of", args: []string{"-hyperlight-helper", helper, "-hyperlight-facts", facts}},
+		{name: "facts a helper would not print", code: 1, wantErr: "want 4 facts", args: []string{"-hyperlight-facts", "helper/1 kvm"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out := filepath.Join(t.TempDir(), "art")
+			args := append([]string{"build", "-hyperlight-snapshot", snap, "-seal-to", pub, "-out", out}, tc.args...)
+			code, stdout, stderr := call(args...)
+			if code != tc.code || !strings.Contains(stderr, tc.wantErr) {
+				t.Fatalf("build = %d, stdout %q, stderr %q; want %d with %q", code, stdout, stderr, tc.code, tc.wantErr)
+			}
+			if tc.code != 0 {
+				return
+			}
+			cfg, err := artifact.ReadConfig(out)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.ImagesFormat != artifact.ImagesFormatHyperlight || cfg.Kernel != wantKernel || cfg.Libc != wantLibc || cfg.Arch != here.Arch {
+				t.Fatalf("config = %+v, want a Hyperlight snapshot on %s/%s/%s", cfg, here.Arch, wantKernel, wantLibc)
+			}
+			if d, _ := artifact.ReadDigest(out); strings.TrimSpace(stdout) != d {
+				t.Fatalf("build printed %q, the artifact's digest is %q", stdout, d)
+			}
+		})
+	}
+	if code, _, stderr := call("build", "-zygote", helper, "-skip-images", "-no-smoke", "-hyperlight-facts", facts, "-out", t.TempDir()); code == 0 || !strings.Contains(stderr, "go with -hyperlight-snapshot") {
+		t.Fatalf("a Hyperlight flag without a snapshot = %d %q", code, stderr)
+	}
+	if code, _, stderr := call("build", "-hyperlight-snapshot", snap, "-hyperlight-facts", facts, "-skip-images", "-seal-to", pub, "-out", t.TempDir()); code == 0 || !strings.Contains(stderr, "not -hyperlight-snapshot") {
+		t.Fatalf("a CRIU flag with a snapshot = %d %q", code, stderr)
+	}
+	for _, bad := range [][]string{{"-hyperlight-arch", "x86_64"}, {"-args", "--template-dir /etc"}} {
+		args := append([]string{"build", "-hyperlight-snapshot", snap, "-hyperlight-facts", facts, "-seal-to", pub, "-out", t.TempDir()}, bad...)
+		if code, _, stderr := call(args...); code == 0 {
+			t.Errorf("build %q succeeded, stderr %q", bad, stderr)
+		}
+	}
+	// Built here for homes of another architecture.
+	out := filepath.Join(t.TempDir(), "art")
+	if code, _, stderr := call("build", "-hyperlight-snapshot", snap, "-hyperlight-facts", facts, "-hyperlight-arch", "arm64", "-seal-to", pub, "-out", out); code != 0 {
+		t.Fatalf("build for arm64 = %d %q", code, stderr)
+	}
+	if cfg, _ := artifact.ReadConfig(out); cfg.Arch != "arm64" {
+		t.Fatalf("arch = %q, want arm64", cfg.Arch)
+	}
+	// inspect judges a snapshot against a helper, never this host's kernel.
+	for _, c := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "without a helper", want: "judge it against a helper"},
+		{name: "against the helper that made it, on its architecture", args: []string{"-hyperlight-facts", facts}, want: "arch arm64"},
+		{name: "against another helper", args: []string{"-hyperlight-facts", "other/1 hyperlight_host/0.18.0 kvm GenuineIntel"}, want: "libc"},
+		{name: "against the helper that made it, on the homes' architecture", args: []string{"-hyperlight-facts", facts, "-hyperlight-arch", "arm64"}, want: `"usable_here": "ok"`},
+	} {
+		code, stdout, stderr := call(append([]string{"inspect", "-dir", out}, c.args...)...)
+		if code != 0 || !strings.Contains(stdout, c.want) {
+			t.Errorf("inspect %s = %d %q %q, want a verdict with %q", c.name, code, stdout, stderr, c.want)
+		}
+	}
+	// An architecture without a helper's facts judges nothing, and is
+	// refused rather than ignored, as is an architecture homes do not run.
+	for _, bad := range [][]string{{"-hyperlight-arch", "arm64"}, {"-hyperlight-facts", facts, "-hyperlight-arch", "x86_64"}} {
+		if code, stdout, stderr := call(append([]string{"inspect", "-dir", out}, bad...)...); code != 1 || stdout != "" || stderr == "" {
+			t.Errorf("inspect %q = %d %q %q, want it refused", bad, code, stdout, stderr)
+		}
+	}
+	if _, _, stderr := call("inspect", "-dir", out, "-hyperlight-arch", "arm64"); !strings.Contains(stderr, "goes with -hyperlight-helper or -hyperlight-facts") {
+		t.Errorf("inspect -hyperlight-arch alone says %q", stderr)
+	}
+	same := filepath.Join(t.TempDir(), "art")
+	if code, _, stderr := call("build", "-hyperlight-snapshot", snap, "-hyperlight-facts", facts, "-hyperlight-arch", here.Arch, "-seal-to", pub, "-out", same); code != 0 {
+		t.Fatalf("build = %d %q", code, stderr)
+	}
+	if code, stdout, _ := call("inspect", "-dir", same, "-hyperlight-facts", facts); code != 0 || !strings.Contains(stdout, `"usable_here": "ok"`) {
+		t.Errorf("inspect against its own helper = %d %q, want ok", code, stdout)
+	}
+}

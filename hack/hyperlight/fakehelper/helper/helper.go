@@ -26,7 +26,12 @@ import (
 
 // Facts mirrors the Rust helper's snapshot facts (helper, hyperlight_host,
 // hypervisor, cpu). The fake has none of the last three.
-const Facts = "fakehelper/3 none none none"
+const Facts = "fakehelper/4 none none none"
+
+// Version is what `fakehelper --version` prints: the facts, then the line
+// that advertises it restores a template's snapshot given as
+// --template-dir (hack/hyperlight/PROTOCOL.md).
+const Version = Facts + "\ntemplate-dir"
 
 // SeedBytes is the seed every CLONE and RESUME carries, as hex.
 const SeedBytes = 32
@@ -36,6 +41,10 @@ type Helper struct {
 	out    chan string
 	log    io.Writer
 	engine string // the grant's engine socket, "" when it has none
+	// template is what the template's snapshot holds as metadata.json,
+	// which a fiber answers "template" with ("-" without a snapshot), so
+	// a test can tell the snapshot fiberd opened reached the helper.
+	template string
 
 	mu      sync.Mutex
 	boxes   map[string]*sandbox
@@ -146,7 +155,13 @@ type state struct {
 // socket, "" when it has none. Every sandbox, endpoint and goroutine is
 // gone when it returns.
 func Serve(ctl net.Conn, log io.Writer, engine string) error {
-	h := &Helper{out: make(chan string, 256), log: log, engine: engine, boxes: map[string]*sandbox{}, births: map[string]bool{}, stop: make(chan struct{})}
+	return ServeTemplate(ctl, log, engine, "")
+}
+
+// ServeTemplate is Serve for a template whose snapshot holds template as
+// its metadata.json (--template-dir).
+func ServeTemplate(ctl net.Conn, log io.Writer, engine, template string) error {
+	h := &Helper{out: make(chan string, 256), log: log, engine: engine, template: template, boxes: map[string]*sandbox{}, births: map[string]bool{}, stop: make(chan struct{})}
 	wrote := make(chan struct{})
 	go func() {
 		defer close(wrote)
@@ -355,6 +370,11 @@ func (b *sandbox) client(c net.Conn) {
 		switch {
 		case line == "ping":
 			reply = "pong"
+		case line == "template":
+			reply = b.h.template
+			if reply == "" {
+				reply = "-"
+			}
 		case strings.HasPrefix(line, "dirty "):
 			n, _ := strconv.ParseUint(strings.TrimPrefix(line, "dirty "), 10, 64)
 			b.mu.Lock()

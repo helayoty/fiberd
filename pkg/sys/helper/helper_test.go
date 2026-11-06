@@ -159,6 +159,7 @@ var directStarts = map[string]int{
 	"pkg/artifact/checkpoint_linux.go":           1, // a zygote, which sets its own fixed environment
 	"pkg/backend/cloudhv/jail_linux.go":          1, // fiberd's own stage, with an empty environment
 	"pkg/backend/hyperlight/hyperlight_linux.go": 1, // the Hyperlight helper
+	"cmd/zygotectl/main.go":                      1, // the Hyperlight helper's --version, as a home runs it
 }
 
 // TestHelpersStartThroughCommand reads the source for direct starts.
