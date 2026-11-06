@@ -59,7 +59,7 @@ The `Fibers` service has eight RPCs.
 
 The request has exactly four fields.
 
-- `grant_jwt` contains the signed grant.
+- `grant_jwt` contains the signed grant. A home that holds its [own grant](glossary.md#own-grant) never admits this token ([home.md](design/home.md#own-grant)).
 - `session` is an optional stable name. An empty value requests an anonymous fiber. A proc or runc fiber learns the name at birth ([zygote.md](design/zygote.md)).
 - `deadline` is an optional absolute timestamp for runtime work.
 - `payload` is up to 4096 opaque bytes for the new fiber ([Clone](glossary.md#clone)).
@@ -109,7 +109,7 @@ Calling Park or Release with an unknown or old-epoch fiber ID returns `NotFound`
 
 ### Discard
 
-`Discard(DiscardRequest) returns (Empty)` deletes a parked session's delta by name. The request carries `grant_jwt` and `session`, and the token is checked as Clone checks it, caller binding included. A success writes a `discard` audit record, and the next Clone of that session is a CREATE.
+`Discard(DiscardRequest) returns (Empty)` deletes a parked session's delta by name. The request carries `grant_jwt` and `session`, and the token is checked as Clone checks it, caller binding included. On a home that holds its [own grant](glossary.md#own-grant), the home's UID with no grant admitted runs under that grant and admits nothing ([home.md](design/home.md#own-grant)). A success writes a `discard` audit record, and the next Clone of that session is a CREATE.
 
 - A session parked on this home loses its published copy first, then its delta and the TCP port it kept, and the home forgets it. If the delta registry cannot be reached, the call fails with `Internal` and nothing changes.
 - A session this home does not know is looked up in the delta registry, and its published copy is deleted there ([artifact.md](design/artifact.md)). So any home that shares the registry can discard it, under a grant of the same [tenant](glossary.md#tenant) and [session class](glossary.md#session-class).
@@ -204,7 +204,7 @@ The core returns transport-independent outcomes, and the gRPC layer maps them as
 - Park, Release and Discard runtime failures become `Internal`.
 - Audit failures can become `Internal`.
 
-Any other capacity miss, such as an unknown, full, expired or revoked grant, is chosen by whether the home reports the issuer reachable.
+Any other capacity miss, such as an unknown, full, expired or revoked grant, or an own grant that is missing or does not verify, is chosen by whether the home reports the issuer reachable.
 
 - When the issuer is reachable, unavailable capacity becomes `DEFERRED_FALLBACK`.
 - When the issuer is unreachable, it becomes `SHED`, so callers never queue on a dead control plane.

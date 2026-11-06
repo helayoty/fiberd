@@ -147,6 +147,10 @@ type Core struct {
 	// Empty admits any verified grant that names this home. Delivered
 	// grants are not subject to it.
 	SelfAdmitUID string
+	// OwnGrant, when set, returns the token of the grant this home holds
+	// for itself. Clone then admits that token on the home's own UID and
+	// never the presented one.
+	OwnGrant func() ([]byte, bool)
 	// RequireBoundGrants refuses grants without a caller key binding. Set
 	// it whenever the transport is mutual TLS.
 	RequireBoundGrants bool
@@ -184,7 +188,7 @@ type Core struct {
 	Epoch *EpochStore
 	// Revoked, when set, is the deny-list Remove adds to and Admit
 	// refuses from. Nil means a removed grant is re-admitted by the next
-	// Clone that presents a valid token for it.
+	// delivery, or by the next Clone that self-admits it.
 	Revoked *Revoked
 
 	devicesMu sync.Mutex
@@ -268,8 +272,10 @@ func (a *Core) Clone(ctx context.Context, req CloneRequest) (CloneResponse, Stat
 
 	// 2. Self-admission: a verified grant that names this home is admitted
 	// on first sight. Its signature is the same proof a delivery carries,
-	// here inline. The template is warmed synchronously; homes pre-warm grants
-	// they are told about ahead of time so this is normally a no-op.
+	// here inline. A home that holds a grant of its own admits that one
+	// and never the presented token. The template is warmed
+	// synchronously; homes pre-warm grants they are told about ahead of
+	// time so this is normally a no-op.
 	if _, known := a.Ledger.Grant(g.UID); !known {
 		// The audience names a home, not a grant: a token minted for a
 		// terminated Pod verifies on the later Pod that reuses its name,
@@ -277,26 +283,38 @@ func (a *Core) Clone(ctx context.Context, req CloneRequest) (CloneResponse, Stat
 		if a.SelfAdmitUID != "" && g.UID != a.SelfAdmitUID {
 			return CloneResponse{}, Unauthenticated, fmt.Errorf("%w: uid=%q, this home self-admits only %q", ErrWrongAudience, g.UID, a.SelfAdmitUID)
 		}
-		if code, err := a.Admit(ctx, g); err != nil {
+		// g stays the presented grant, since the caller check below
+		// compares the admitted grant with it.
+		admit := g
+		if a.OwnGrant != nil {
+			own, err := a.ownGrant(ctx, g)
+			if err != nil {
+				return CloneResponse{}, a.missCode(err), err
+			}
+			admit = own
+		}
+		if code, err := a.Admit(ctx, admit); err != nil {
 			return CloneResponse{}, code, err
 		}
 	}
 	// The clone runs under the admitted grant, not the token's claims. A
 	// token minted under the same UID may claim other budgets or another
 	// durability than the grant the home admitted, and it must not get
-	// around them. A grant revoked meanwhile is left to the ledger, which
-	// refuses the resolve.
-	if held, ok := a.Ledger.Grant(g.UID); ok {
-		if held.CallerThumbprint != g.CallerThumbprint {
-			// The token names another caller than the admitted grant, as
-			// when the issuer re-mints the UID with a new cnf. Park, Release
-			// and Watch authorize against the admitted grant, so a fiber
-			// from this token would answer to the wrong caller. Refuse until
-			// the grant is delivered again.
-			return CloneResponse{}, Unauthenticated, fmt.Errorf("%w: the token names another caller than the admitted grant", ErrCallerMismatch)
-		}
-		g = held
+	// around them. A grant gone again by now is a miss, and the ledger
+	// checks once more under its lock at the resolve.
+	held, ok := a.Ledger.Grant(g.UID)
+	if !ok {
+		return CloneResponse{}, a.missCode(ErrGrantUnknown), fmt.Errorf("%w: %s", ErrGrantUnknown, g.UID)
 	}
+	if held.CallerThumbprint != g.CallerThumbprint {
+		// The token names another caller than the admitted grant, as
+		// when the issuer re-mints the UID with a new cnf. Park, Release
+		// and Watch authorize against the admitted grant, so a fiber
+		// from this token would answer to the wrong caller. Refuse until
+		// the grant is delivered again.
+		return CloneResponse{}, Unauthenticated, fmt.Errorf("%w: the token names another caller than the admitted grant", ErrCallerMismatch)
+	}
+	g = held
 
 	// 3. Backpressure before any work: the clone rate limit, then the pressure
 	// ladder's shed rung. Attach is exempt from the ladder (it creates
@@ -576,6 +594,26 @@ func (a *Core) locate(ctx context.Context, g Grant, session string) (StatusCode,
 // here. Without it the copy is left in place and logged.
 type DeltaDiscarder interface {
 	DiscardDelta(ctx context.Context, deltaRef string) error
+}
+
+// ownGrant is the grant the home holds for itself, verified for the UID
+// the presented grant g names, which Clone admits in place of g. An
+// expired g is refused first, as Admit refuses it. A home that holds no
+// grant, or one whose token does not verify for the UID, leaves Clone
+// with a capacity miss.
+func (a *Core) ownGrant(ctx context.Context, g Grant) (Grant, error) {
+	if g.Expired(a.Ledger.Now()) {
+		return Grant{}, ErrGrantExpired
+	}
+	tok, ok := a.OwnGrant()
+	if !ok {
+		return Grant{}, fmt.Errorf("%w: %s, the home holds no grant of its own", ErrGrantUnknown, g.UID)
+	}
+	own, err := a.reverify(ctx, Grant{UID: g.UID, Token: string(tok)})
+	if err != nil {
+		return Grant{}, fmt.Errorf("%w: %s, the home's own grant: %w", ErrGrantUnknown, g.UID, err)
+	}
+	return own, nil
 }
 
 // Admit records a verified grant and warms its template. Concurrent
@@ -1063,12 +1101,13 @@ func (a *Core) discardDelta(ctx context.Context, fence Fence, session, deltaRef 
 // Yield is the ladder's last rung and the reaper's verb: the grant is
 // revoked and every running fiber under it is released, each with its
 // audit record. Parked deltas stay, since they are the only state that
-// cannot be rebuilt, and a valid token presented again re-admits the grant
-// and resumes them. Only Remove denies it. They last until the next boot
-// only. Reconcile drops a session whose grant it does not admit again and
-// the sweep removes its delta, since the ledger keys a session by grant
-// UID. Only a copy published to the registry outlives the grant, for
-// another grant of the same tenant to claim.
+// cannot be rebuilt, and the grant admitted again resumes them. A delivery
+// admits it, and so does a Clone, from the home's own grant where it holds
+// one and from a valid token elsewhere. Only Remove denies it. They last
+// until the next boot only. Reconcile drops a session whose grant it does
+// not admit again and the sweep removes its delta, since the ledger keys a
+// session by grant UID. Only a copy published to the registry outlives the
+// grant, for another grant of the same tenant to claim.
 func (a *Core) Yield(ctx context.Context, grantUID string, reason string) {
 	// Revoke first, then list. A clone that commits after the revocation
 	// is refused by the ledger and released by its Clone, so the list

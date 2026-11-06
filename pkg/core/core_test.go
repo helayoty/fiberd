@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -343,6 +344,87 @@ func TestCloneOutcomes(t *testing.T) {
 			}
 			if _, held := a.Ledger.Grant(tc.token); tc.unheld && held {
 				t.Fatalf("grant %q is in the ledger after a refused clone", tc.token)
+			}
+		})
+	}
+}
+
+// hookAuditor runs on for every record and accepts it, so a test can act
+// on fiberd from inside a step.
+type hookAuditor struct{ on func(core.AuditRecord) }
+
+func (h hookAuditor) Append(_ context.Context, _ core.Durability, r core.AuditRecord) error {
+	h.on(r)
+	return nil
+}
+
+// findingRuntime is a mobileRuntime that records the digest of the grant
+// each FindDelta ran under.
+type findingRuntime struct {
+	*mobileRuntime
+	seen []string
+}
+
+func (f *findingRuntime) FindDelta(ctx context.Context, g core.Grant, session string) (core.RemoteDelta, bool, error) {
+	f.seen = append(f.seen, g.TemplateDigest)
+	return f.mobileRuntime.FindDelta(ctx, g, session)
+}
+
+// TestCloneGrantGoneAfterAdmit yields the grant from inside its own
+// admission, so Clone finds it gone where it takes the admitted grant up.
+// The clone is a miss, and nothing after that point runs under the
+// presented token's claims. A grant admitted again by then carries the
+// clone under the re-admitted grant.
+func TestCloneGrantGoneAfterAdmit(t *testing.T) {
+	g := core.Grant{UID: "g1", Tenant: "acme", Audience: "node-a", TemplateDigest: "sha256:t", LeaseExpiry: time.Now().Add(time.Hour)}
+	readmitted := g
+	readmitted.TemplateDigest = "sha256:held"
+	ctx := context.Background()
+	cases := []struct {
+		name    string
+		session string
+		readmit bool // the grant is admitted again before the clone goes on
+		want    core.StatusCode
+		wantErr error
+		seen    []string // the digests FindDelta ran under
+		running int
+	}{
+		{name: "a named session's clone is a miss and looks nothing up",
+			session: "S", want: core.DeferredFallback, wantErr: core.ErrGrantUnknown},
+		{name: "an anonymous clone is a miss",
+			want: core.DeferredFallback, wantErr: core.ErrGrantUnknown},
+		{name: "a grant admitted again carries the clone under the re-admitted grant",
+			session: "S", readmit: true, want: core.OK, seen: []string{"sha256:held"}, running: 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a := newCore(t, "up", core.TierCheckpoint, g)
+			rt := &findingRuntime{mobileRuntime: &mobileRuntime{
+				fakeRuntime: fakeRuntime{tier: core.TierCheckpoint, exits: make(chan core.FiberExit, 8)},
+				home:        "node-a", st: &store{deltas: map[string]published{}},
+			}}
+			a.Runtime = rt
+			a.Audit = hookAuditor{on: func(r core.AuditRecord) {
+				if r.Event != "admit" {
+					return
+				}
+				a.Yield(ctx, g.UID, "gone during admission")
+				if tc.readmit {
+					a.Ledger.AdmitGrant(readmitted)
+				}
+			}}
+			_, code, err := a.Clone(ctx, core.CloneRequest{GrantJWT: []byte(g.UID), Session: tc.session, Deadline: time.Second})
+			if tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
+				t.Fatalf("Clone err = %v, want %v", err, tc.wantErr)
+			}
+			if code != tc.want {
+				t.Fatalf("Clone code = %d, want %d (err %v)", code, tc.want, err)
+			}
+			if !slices.Equal(rt.seen, tc.seen) {
+				t.Fatalf("FindDelta ran under digests %q, want %q", rt.seen, tc.seen)
+			}
+			if st, _ := coretest.GrantStatus(a.Ledger, g.UID); st.Running != tc.running {
+				t.Fatalf("running = %d after clone, want %d", st.Running, tc.running)
 			}
 		})
 	}

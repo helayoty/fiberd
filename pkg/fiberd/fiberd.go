@@ -65,6 +65,9 @@ type (
 	// SelfAdmitter knows the one grant UID it may self-admit on Clone (a
 	// Pod UID). An empty answer admits any verified grant naming the home.
 	SelfAdmitter interface{ SelfAdmitUID() string }
+	// OwnGranter holds a grant of its own (the Pod's grant file). Clone
+	// admits that token on the home's UID, never the one presented.
+	OwnGranter interface{ OwnGrant() ([]byte, bool) }
 )
 
 // HomeFactory builds the home once the key cache exists. jwks is nil
@@ -784,8 +787,17 @@ func RunContext(ctx context.Context, c *Config, newHome HomeFactory) error {
 		Revoked:            revoked,
 		StatusInterval:     c.Timing.StatusEvery,
 	}
-	if sa, ok := h.(SelfAdmitter); ok && !c.hooks.selfAdmitAny() {
-		ag.SelfAdmitUID = sa.SelfAdmitUID()
+	// Under -admin-unsafe neither is set, so any UID self-admits.
+	if !c.hooks.selfAdmitAny() {
+		if sa, ok := h.(SelfAdmitter); ok {
+			ag.SelfAdmitUID = sa.SelfAdmitUID()
+		}
+		if og, ok := h.(OwnGranter); ok {
+			if c.Node.GrantsDir == "" {
+				return fmt.Errorf("home %s admits only the grant it holds, which needs -grants-dir", h.Name())
+			}
+			ag.OwnGrant = og.OwnGrant
+		}
 	}
 
 	// Signals. Everything below stops when ctx ends, and the watcher ends

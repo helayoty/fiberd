@@ -235,7 +235,7 @@ func (a *Core) Reconcile(ctx context.Context, snap Snapshot) (ReconcileReport, e
 		rep.GrantsReadmitted++
 	}
 	if untokened > 0 {
-		log.Printf("reconcile: %d snapshot grant(s) carried no token and were not re-admitted; a valid token presented again admits each", untokened)
+		log.Printf("reconcile: %d snapshot grant(s) carried no token and were not re-admitted; the next delivery or self-admission admits each again", untokened)
 	}
 	checker, canCheck := a.Runtime.(DeltaChecker)
 	for _, s := range snap.Sessions {
@@ -318,16 +318,16 @@ func (a *Core) sweepDeltas(ctx context.Context, snap Snapshot) int {
 	return n
 }
 
-// reverify checks a snapshot entry's token the way Clone checks a
-// presented one, and returns what the token says, with the token kept, in
-// place of what the file says.
+// reverify checks a held token, a snapshot entry's or the home's own
+// grant, the way Clone checks a presented one. It returns what the token
+// says, with the token kept, in place of what the holder says.
 func (a *Core) reverify(ctx context.Context, g Grant) (Grant, error) {
 	vg, err := a.Verify.Verify(ctx, []byte(g.Token))
 	if err != nil {
-		return Grant{}, fmt.Errorf("snapshot token: %w", err)
+		return Grant{}, fmt.Errorf("held token: %w", err)
 	}
 	if vg.UID != g.UID {
-		return Grant{}, fmt.Errorf("snapshot token is for grant %q", vg.UID)
+		return Grant{}, fmt.Errorf("held token is for grant %q", vg.UID)
 	}
 	if a.NodeID != "" && vg.Audience != a.NodeID {
 		return Grant{}, fmt.Errorf("%w: aud=%q node=%q", ErrWrongAudience, vg.Audience, a.NodeID)

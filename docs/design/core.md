@@ -58,7 +58,7 @@ The commit is the step where the ledger records the new fiber as running. It kee
 
 **Leases and revocation.**
 
-- Every 5 seconds a reaper yields every grant whose [lease](../glossary.md#lease) lapsed. A valid token re-admits it.
+- Every 5 seconds a reaper yields every grant whose [lease](../glossary.md#lease) lapsed. A delivery admits it again. So does a Clone with a live token, unless the home holds its [own grant](../glossary.md#own-grant). Clone then admits only that grant ([home.md](home.md#own-grant)). A grant gone again before Clone takes it up is a capacity [miss](../glossary.md#clone-misses).
 - A grant delivered again under an admitted UID may change only its lease, its caller's thumbprint and its token. Any other change is refused, so an [issuer](../glossary.md#issuer) mints a new UID for it. The lease becomes the delivered one, longer or shorter. The [warm](../glossary.md#warm) [template](../glossary.md#template) stays through a renewal.
 - When the home removes a grant, the grant is yielded and its UID also goes on a deny-list. Only the home delivering the grant again lifts the entry, never a Clone.
 - The deny-list is its own file, because an unreadable snapshot counts as empty and a deny-list never may. An unreadable deny-list fails the start.

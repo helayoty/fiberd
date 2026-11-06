@@ -9,7 +9,10 @@ A signed, time-limited permission to run one program on one [home](#home), with 
 The control plane that decides who gets capacity and signs [grants](#grant). It publishes its public keys, so every [home](#home) can verify a grant offline.
 
 ## Lease
-How long a [grant](#grant) is valid, as its [issuer](#issuer) signed it. When the lease runs out the home [yields](#yield) the grant, and a token with a later lease admits it again.
+How long a [grant](#grant) is valid, as its [issuer](#issuer) signed it. When the lease runs out the home [yields](#yield) the grant, and serves it again only once it admits a later lease.
+
+## Own grant
+A [grant](#grant) a [home](#home) holds for itself, such as the one a Kubernetes Pod fetches from its controller. A [clone](#clone) on that home admits this grant and never the caller's token, so the home serves only while its own grant holds.
 
 ## Home
 Where [fiberd](#fiberd) runs, such as a plain host, a Kubernetes Pod or a Slurm job. The standalone and Kubernetes homes are part of fiberd, and `-home` picks one. It delivers [grants](#grant) ahead of traffic and revokes one it takes back. It tells fiberd whether the [issuer](#issuer) is reachable, and gives fiberd a slice of the machine.

@@ -53,27 +53,41 @@ func TestTimingFlags(t *testing.T) {
 }
 
 // TestAdminUnsafeSelfAdmit checks that -admin-unsafe lifts the home's
-// self-admit UID, and that a testhooks build without the flag keeps it.
+// self-admit UID and its own grant, and that a testhooks build without
+// the flag keeps both.
 func TestAdminUnsafeSelfAdmit(t *testing.T) {
 	cases := []struct {
 		name   string
 		unsafe bool
+		dir    bool // -grants-dir is passed
+		home   fiberd.HomeFactory
+		uid    string // the UID the clone presents
 		want   codes.Code
 	}{
-		{name: "another UID is refused without -admin-unsafe", want: codes.Unauthenticated},
-		{name: "-admin-unsafe admits another UID", unsafe: true, want: codes.OK},
+		{name: "another UID is refused without -admin-unsafe", home: selfAdmitting("own"), uid: "foreign", want: codes.Unauthenticated},
+		{name: "-admin-unsafe admits another UID", unsafe: true, home: selfAdmitting("own"), uid: "foreign", want: codes.OK},
+		{name: "the own UID is a miss without -admin-unsafe when the home holds no grant",
+			dir: true, home: ownGranting("own"), uid: "own", want: codes.Unavailable},
+		{name: "-admin-unsafe self-admits the own UID, and starts without -grants-dir", unsafe: true,
+			home: ownGranting("own"), uid: "own", want: codes.OK},
+		{name: "-admin-unsafe admits another UID on a home holding its own grant", unsafe: true,
+			home: ownGranting("own"), uid: "foreign", want: codes.OK},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			state := stateDir(t)
 			var args []string
 			if tc.unsafe {
 				args = append(args, "-admin-unsafe")
 			}
-			r := start(t, newConfig(t, stateDir(t), args...), selfAdmitting("own"))
+			if tc.dir {
+				args = append(args, grantsDir(state)...)
+			}
+			r := start(t, newConfig(t, state, args...), tc.home)
 			_, err := dial(t, r.grpc, nil).Clone(context.Background(),
-				&grantv1.CloneRequest{GrantJwt: jsonGrant(t, testGrant("foreign"))})
+				&grantv1.CloneRequest{GrantJwt: jsonGrant(t, testGrant(tc.uid))})
 			if status.Code(err) != tc.want {
-				t.Fatalf("Clone of another UID: %v, want %v", err, tc.want)
+				t.Fatalf("Clone of %s: %v, want %v", tc.uid, err, tc.want)
 			}
 			if err := r.stop(t); err != nil {
 				t.Fatal(err)

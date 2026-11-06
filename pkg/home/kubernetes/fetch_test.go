@@ -1159,3 +1159,61 @@ func TestNextDelay(t *testing.T) {
 		})
 	}
 }
+
+// TestOwnGrant checks what the home answers as its own grant. It is the
+// Pod's grant file, and nothing when the file is gone, holds another
+// UID's token, or the home fetches no grant.
+func TestOwnGrant(t *testing.T) {
+	granted := answer{status: http.StatusOK}
+	cases := []struct {
+		name    string
+		noFetch bool // the home is built without a grant fetch
+		change  func(t *testing.T, e *fetchEnv)
+		want    bool
+	}{
+		{name: "the Pod's grant file is the own grant", want: true},
+		{name: "a gone file is no own grant", change: func(t *testing.T, e *fetchEnv) {
+			if err := os.Remove(e.grantFile()); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "a file holding another UID's token is no own grant", change: func(t *testing.T, e *fetchEnv) {
+			tok, err := e.ctl.mint("other-pod", "other", testStart, testStart.Add(testLease))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(e.grantFile(), []byte(tok), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "a home without a grant fetch has no own grant", noFetch: true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if c.noFetch {
+				if tok, ok := newTestHome(t).OwnGrant(); ok || tok != nil {
+					t.Fatalf("OwnGrant = %d bytes, %v, want none", len(tok), ok)
+				}
+				return
+			}
+			e := newFetchEnv(t, granted)
+			h, err := e.newHome(t)
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			if c.change != nil {
+				c.change(t, e)
+			}
+			tok, ok := h.OwnGrant()
+			if ok != c.want {
+				t.Fatalf("OwnGrant answered %v, want %v", ok, c.want)
+			}
+			if want := e.ctl.tokens()[0]; c.want && string(tok) != want {
+				t.Fatalf("OwnGrant = %s, want grant 1", e.which(string(tok)))
+			}
+			if !c.want && tok != nil {
+				t.Fatalf("OwnGrant answered %s with no own grant", e.which(string(tok)))
+			}
+		})
+	}
+}

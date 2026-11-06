@@ -80,7 +80,9 @@ func (a *Core) Discard(ctx context.Context, req DiscardRequest) (StatusCode, err
 
 // authenticate verifies a token as Clone's frontend does: the signature, the
 // audience and the caller binding. A grant this home admitted answers
-// for the token, and it must name the same caller.
+// for the token, and it must name the same caller. On the home's own UID
+// with no grant admitted, the grant the home holds for itself answers
+// instead, and nothing is admitted.
 func (a *Core) authenticate(ctx context.Context, token []byte, thumbprint string) (Grant, StatusCode, error) {
 	g, err := a.Verify.Verify(ctx, token)
 	if err != nil {
@@ -98,7 +100,15 @@ func (a *Core) authenticate(ctx context.Context, token []byte, thumbprint string
 	case g.CallerThumbprint == "" && a.RequireBoundGrants:
 		return Grant{}, Unauthenticated, ErrUnboundGrant
 	}
-	if held, ok := a.Ledger.Grant(g.UID); ok {
+	held, ok := a.Ledger.Grant(g.UID)
+	if !ok && a.OwnGrant != nil && g.UID == a.SelfAdmitUID {
+		own, err := a.ownGrant(ctx, g)
+		if err != nil {
+			return Grant{}, a.missCode(err), err
+		}
+		held, ok = own, true
+	}
+	if ok {
 		if held.CallerThumbprint != g.CallerThumbprint {
 			return Grant{}, Unauthenticated, fmt.Errorf("%w: the token names another caller than the admitted grant", ErrCallerMismatch)
 		}

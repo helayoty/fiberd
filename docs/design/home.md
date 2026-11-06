@@ -19,7 +19,7 @@ One binary carries every core home, and `-home` picks one. `fiberd -home standal
 | What does the home vouch for? | Nothing |
 | Which devices may an [engine](../glossary.md#engine) drive? | The static `-devices` set, its [device channel](../glossary.md#device-channel) |
 
-A home may also implement three optional interfaces. A **[scope](../glossary.md#scope) loser** reports when its scope is gone. An **endpoint hoster** knows the one address its [fibers](../glossary.md#fiber) share, such as a Pod IP, and fills `-endpoint-host` for an inet4 or inet6 family when the flag is empty. A **self-admitter** names the one grant UID that Clone may admit on first sight. Clone refuses a token for any other UID as unauthenticated. Grants the home delivers are not affected. The Kubernetes home implements all three, and names its Pod UID. The Slurm home, an example outside core, implements the first two ([slurm.md](slurm.md)).
+A home may also implement four optional interfaces. A **[scope](../glossary.md#scope) loser** reports when its scope is gone. An **endpoint hoster** knows the one address its [fibers](../glossary.md#fiber) share, such as a Pod IP, and fills `-endpoint-host` for an inet4 or inet6 family when the flag is empty. A **self-admitter** names the one grant UID that Clone may admit itself. Clone refuses a token for any other unadmitted UID as unauthenticated. Grants the home delivers are not affected. An **[own-grant](../glossary.md#own-grant) home** holds a grant for itself and admits that one ([rules](#own-grant)). The Kubernetes home implements all four, and names its Pod UID. The Slurm home, an example outside core, implements the first two ([slurm.md](slurm.md)).
 
 A home that polls a control plane can reuse three pieces of `pkg/home`. They are a scope-loss queue that delivers each reason once, a health poll that marks the issuer reachable when a round answers, and a readiness gate that publishes whether any template is warm.
 
@@ -49,6 +49,16 @@ sequenceDiagram
 **Issuer reachability.** The core owns the staleness rule, so it is the same in every home, and a home only marks syncs. The issuer counts as unreachable once the last sync is older than the stale TTL (`-stale-ttl`, 30 seconds by default). It counts as reachable again only below half of that, which stops flapping. Startup counts as a sync. The standalone home's sync is a successful key refresh, attempted every half TTL. Without an issuer, a timer keeps it reachable. Which miss each state gives is in [outcomes](../protocol.md#outcomes).
 
 **Scope.** A home asserts its scope as name and value claims. fiberd stamps them on every audit record ([audit.md](audit.md)) and never interprets them. Scope never decides whether a fiber is valid. Only the [lease](../glossary.md#lease) and the [fence](../glossary.md#fence) do. A home that loses its scope bumps the [epoch](../glossary.md#epoch) ([core.md](core.md) says what that ends). When a loss concerns only one grant, the home may remove that grant instead.
+
+### Own grant
+
+An own grant is a grant the home holds for itself, such as the file the Kubernetes home's [grant fetch](kubernetes.md#grant-fetch) wrote. A grant already admitted behaves as on any home. On the home's own UID with no grant admitted, these rules hold.
+
+- Clone admits the own grant, verified as any token is, and never the presented token. The presented token must still verify and name the same caller as the own grant.
+- A presented token that has expired is a capacity [miss](../protocol.md#outcomes). So is an own grant that has expired, is missing or does not verify. Whether the issuer is reachable picks the miss.
+- Discard runs under the own grant, and the caller must be the one that grant names. Nothing is admitted. A token for another UID keeps its reach to the [registry](../glossary.md#registry)'s copy ([Discard](../protocol.md#discard)).
+
+fiberd refuses to start such a home without `-grants-dir`.
 
 ## Security notes and known gaps
 

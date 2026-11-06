@@ -209,6 +209,14 @@ func testGrant(uid string) core.Grant {
 		LeaseExpiry: time.Now().Add(10 * time.Minute).Truncate(time.Second)}
 }
 
+// ownGrant is testGrant("own") on the template digest, with room for
+// fiberMax fibers.
+func ownGrant(digest string, fiberMax int) core.Grant {
+	g := testGrant("own")
+	g.TemplateDigest, g.FiberMax = digest, fiberMax
+	return g
+}
+
 // dial is a Fibers client for fiberd's gRPC address.
 func dial(t *testing.T, addr net.Addr, tc *tls.Config) grantv1.FibersClient {
 	t.Helper()
@@ -286,10 +294,17 @@ type (
 		home.Home
 		uid string
 	}
+	// ownGrantHome names its UID and holds token as its own grant, or
+	// none when token is nil.
+	ownGrantHome struct {
+		selfAdmitHome
+		token []byte
+	}
 )
 
-func (h hostedHome) EndpointHost() string    { return h.host }
-func (h selfAdmitHome) SelfAdmitUID() string { return h.uid }
+func (h hostedHome) EndpointHost() string       { return h.host }
+func (h selfAdmitHome) SelfAdmitUID() string    { return h.uid }
+func (h ownGrantHome) OwnGrant() ([]byte, bool) { return h.token, h.token != nil }
 func (h scopedHome) OnScopeLost(f func(context.Context, string)) {
 	h.lost <- f
 }
@@ -306,6 +321,27 @@ func selfAdmitting(uid string) fiberd.HomeFactory {
 		h, err := fiberd.Standalone(c, jwks)
 		return selfAdmitHome{Home: h, uid: uid}, err
 	}
+}
+
+func ownGranting(uid string) fiberd.HomeFactory {
+	return func(c *fiberd.Config, jwks *grant.Cache) (home.Home, error) {
+		h, err := fiberd.Standalone(c, jwks)
+		return ownGrantHome{selfAdmitHome: selfAdmitHome{Home: h, uid: uid}}, err
+	}
+}
+
+// ownHolding is ownGranting with token as the home's own grant.
+func ownHolding(uid, token string) fiberd.HomeFactory {
+	return func(c *fiberd.Config, jwks *grant.Cache) (home.Home, error) {
+		h, err := fiberd.Standalone(c, jwks)
+		return ownGrantHome{selfAdmitHome: selfAdmitHome{Home: h, uid: uid}, token: []byte(token)}, err
+	}
+}
+
+// grantsDir is -grants-dir on a directory under state, which the home
+// creates when it starts polling.
+func grantsDir(state string) []string {
+	return []string{"-grants-dir", filepath.Join(state, "grants")}
 }
 
 // fixture is what a case's setup made, such as more flags and what a
@@ -347,6 +383,8 @@ func mint(t *testing.T, is *grant.Issuer, g core.Grant) string {
 // and the admin socket. Each case ends with a clean stop. Run returns nil,
 // the admin socket is gone and nothing Run started is left running.
 func TestRunServes(t *testing.T) {
+	// homeTok is the grant a home holds for itself in the own-grant case.
+	homeTok := jsonGrant(t, ownGrant("sha256:home", 2))
 	cases := []struct {
 		name string
 		args []string
@@ -521,6 +559,47 @@ func TestRunServes(t *testing.T) {
 				if _, err := dial(t, r.grpc, nil).Clone(context.Background(),
 					&grantv1.CloneRequest{GrantJwt: jsonGrant(t, testGrant("any"))}); err != nil {
 					t.Fatalf("Clone: %v", err)
+				}
+			},
+		},
+		{
+			name:  "a home holding no grant of its own admits no token on its UID",
+			home:  ownGranting("own"),
+			setup: func(_ *testing.T, state string) fixture { return fixture{args: grantsDir(state)} },
+			check: func(t *testing.T, r *running, _ fixture) {
+				if _, err := dial(t, r.grpc, nil).Clone(context.Background(),
+					&grantv1.CloneRequest{GrantJwt: jsonGrant(t, testGrant("own"))}); status.Code(err) != codes.Unavailable {
+					t.Fatalf("Clone of the home's UID: %v, want Unavailable", err)
+				}
+			},
+		},
+		{
+			name:  "a home holding its own grant admits it, never the token presented",
+			home:  ownHolding("own", homeTok),
+			setup: func(_ *testing.T, state string) fixture { return fixture{args: grantsDir(state)} },
+			check: func(t *testing.T, r *running, f fixture) {
+				// The token presented names another template and room for
+				// one fiber. The home's grant has room for two, so a second
+				// clone fits only under it.
+				cl := dial(t, r.grpc, nil)
+				presented := jsonGrant(t, ownGrant("sha256:caller", 1))
+				for i := range 2 {
+					if _, err := cl.Clone(context.Background(), &grantv1.CloneRequest{GrantJwt: presented}); err != nil {
+						t.Fatalf("Clone %d of the home's UID: %v", i+1, err)
+					}
+				}
+				snap, err := (&core.SnapshotStore{Path: filepath.Join(f.state, "private", "ledger.json")}).Load()
+				if err != nil {
+					t.Fatal(err)
+				}
+				var held []core.Grant
+				for _, g := range snap.Grants {
+					if g.UID == "own" {
+						held = append(held, g)
+					}
+				}
+				if len(held) != 1 || held[0].TemplateDigest != "sha256:home" || held[0].Token != homeTok {
+					t.Fatalf("ledger.json holds %+v for own, want the home's grant on sha256:home", held)
 				}
 			},
 		},
@@ -956,6 +1035,8 @@ func TestRunRefuses(t *testing.T) {
 			setup: func(t *testing.T, state string) []string { under(t, state, "audit.jsonl", true); return nil }},
 		{name: "deny-list unreadable", want: "deny-list:",
 			setup: func(t *testing.T, state string) []string { under(t, state, "revoked.json", false); return nil }},
+		{name: "a home holding its own grant without -grants-dir", home: ownGranting("own"),
+			want: "home standalone admits only the grant it holds, which needs -grants-dir"},
 		{name: "snapshot unreadable", want: "snapshot:",
 			setup: func(t *testing.T, state string) []string { under(t, state, "ledger.json", true); return nil }},
 		{name: "admin socket path taken", want: "admin socket:",

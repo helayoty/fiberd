@@ -24,12 +24,13 @@ The downward API fills the Pod's identity. `-pod-name`, `-pod-namespace` and `-p
 
 | Flag | What it does |
 | --- | --- |
-| `-grant-token-file` | The Pod's bound service-account token. It turns the grant fetch on, which then needs `-issuer` and `-grants-dir` |
+| `-grants-dir` | The directory the grant fetch writes and fiberd polls for `*.jwt` files. fiberd refuses to start without it |
+| `-grant-token-file` | The Pod's bound service-account token. It turns the grant fetch on, which then needs `-issuer` |
 | `-issuer` | The controller's https address. The grant endpoint is `/v1/grant` under it |
 | `-grant-ca-file` | The PEM bundle the endpoint's certificate must chain to. Empty means the system roots |
 | `-grant-fetch-timeout` | How long the first fetch retries before fiberd refuses to start. Defaults to 60 seconds |
 
-fiberd renews the grant at half its remaining lease. Through a controller outage it keeps serving the current grant until that lease ends. A container that restarts with an unexpired grant file starts on it. The retry rules are in [grant fetch](design/kubernetes.md#grant-fetch). Without `-grant-token-file`, grants arrive only as `*.jwt` files in `-grants-dir`.
+fiberd renews the grant at half its remaining lease. Through a controller outage it keeps serving the current grant until that lease ends. After that, every [Clone](glossary.md#clone) is a capacity [miss](glossary.md#clone-misses) until a new grant is delivered, because a caller's token never admits a grant on this home. A container that restarts with an unexpired grant file starts on it. The retry and admission rules are in [grant fetch](design/kubernetes.md#grant-fetch). Without `-grant-token-file`, grants arrive only as `*.jwt` files in `-grants-dir`.
 
 ## Probes and drain
 

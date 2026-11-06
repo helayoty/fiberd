@@ -405,6 +405,9 @@ func (e env) kubeHome(ctx context.Context, pod podIdentity, fetch grantFetch, bu
 	}
 }
 
-// Without it a renamed method would let the Kubernetes home self-admit
-// any grant naming it.
-var _ fiberd.SelfAdmitter = (*kubehome.Home)(nil)
+// Without these a renamed method would let the Kubernetes home self-admit
+// any grant naming it, or a presented token on its own UID.
+var (
+	_ fiberd.SelfAdmitter = (*kubehome.Home)(nil)
+	_ fiberd.OwnGranter   = (*kubehome.Home)(nil)
+)

@@ -31,7 +31,7 @@ fiberd reloads its serving certificate, key and client CA when the files change,
 
 ## Grants
 
-fiberd verifies a grant's JSON Web Token (JWT) offline against the issuer's published keys, refuses one for another home or with a lease longer than `-max-lease`, and checks that its `cnf` (confirmation) claim names the key of the caller's certificate, so a copied token cannot be replayed by another caller. A grant the home takes back is revoked and its grant UID deny-listed until every token for it has expired. The verifier is in [grant.md](design/grant.md) and revocation in [core.md](design/core.md).
+fiberd verifies a grant's JSON Web Token (JWT) offline against the issuer's published keys, refuses one for another home or with a lease longer than `-max-lease`, and checks that its `cnf` (confirmation) claim names the key of the caller's certificate, so a copied token cannot be replayed by another caller. A grant the home takes back is revoked and its grant UID deny-listed until every token for it has expired. A Kubernetes Pod serves only while its [own grant](glossary.md#own-grant) holds, since a caller's token never admits a grant there ([kubernetes.md](design/kubernetes.md#grant-fetch)). The verifier is in [grant.md](design/grant.md) and revocation in [core.md](design/core.md).
 
 ## Identities
 

@@ -82,8 +82,9 @@ type Config struct {
 	// round may take. Default half of StaleTTL.
 	Poll time.Duration
 	// GrantsDir is the directory polled for *.jwt files, and the one the
-	// grant fetch writes. Empty means no delivery, and grants then arrive
-	// only inside Clone requests.
+	// grant fetch writes. Empty means no delivery and no grant to admit.
+	// fiberd refuses to start this home so, unless a test-hooks build runs
+	// under -admin-unsafe, where grants arrive inside Clone requests.
 	GrantsDir string
 	// GrantsPoll is how often GrantsDir is read. Default DefaultGrantsPoll.
 	GrantsPoll time.Duration
@@ -304,6 +305,20 @@ func (h *Home) CgroupRoot() string         { return h.cgroupRoot }
 // grant under it and a token for an earlier Pod of the same name must not
 // self-admit here.
 func (h *Home) SelfAdmitUID() string { return h.cfg.PodUID }
+
+// OwnGrant is the Pod's own grant, the file the grant fetch wrote. Clone
+// admits it on the Pod UID in place of the token presented. A home
+// without a grant fetch holds none.
+func (h *Home) OwnGrant() ([]byte, bool) {
+	if h.fetch == nil {
+		return nil, false
+	}
+	tok, _, ok := h.fetch.held()
+	if !ok {
+		return nil, false
+	}
+	return []byte(tok), true
+}
 
 // Ready reports whether any grant's template is warm, which is what the
 // Pod condition says once it is published.

@@ -37,7 +37,8 @@ type Home interface {
 	Name() string
 	// Grants delivers grants ahead of traffic and removals. A home
 	// that delivers nothing returns a nil channel, and grants then arrive only
-	// inside Clone requests.
+	// inside Clone requests. On a home that holds a grant of its own,
+	// Clone admits that grant instead of the token it carries.
 	Grants(ctx context.Context) (<-chan GrantEvent, error)
 	// Health is the control-plane liveness the miss codes key on.
 	Health() *core.SourceHealth
