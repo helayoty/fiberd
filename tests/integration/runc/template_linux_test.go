@@ -38,7 +38,7 @@ func pushTemplate(t *testing.T) (repo, digest string) {
 	srv := httptest.NewServer(registry.New())
 	t.Cleanup(srv.Close)
 	repo = srv.URL + "/zygotes/ref"
-	if _, err := artifact.Push(ctx, out, repo+":v1"); err != nil {
+	if _, err := artifact.Push(ctx, out, repo+":v1", nil); err != nil {
 		t.Fatalf("push artifact: %v", err)
 	}
 	return repo, digest

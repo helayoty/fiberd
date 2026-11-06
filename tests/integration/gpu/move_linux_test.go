@@ -388,7 +388,7 @@ func (m *move) template(t *testing.T, build bool) tmpl {
 	if _, err := artifact.Build(ctx, opts); err != nil {
 		t.Fatalf("build the template: %v", err)
 	}
-	digest, err := artifact.Push(ctx, out, ref)
+	digest, err := artifact.Push(ctx, out, ref, nil)
 	if err != nil {
 		t.Fatalf("push the template: %v", err)
 	}

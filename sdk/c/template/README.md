@@ -25,7 +25,7 @@ snprintf(line, sizeof line, "DEVICE %s %llu 0", fence, bytes);
 fz_report_line(line);
 ```
 
-fiberd launches the template itself. Map the grant's template digest to its command with `-template`, such as `-template "default=/path/to/mytemplate --flag"`, where `default` matches any digest. `zygotectl build` and `zygotectl push` instead publish it as an artifact that a home pulls by digest.
+fiberd launches the template itself. Map the grant's template digest to its command with `-template`, such as `-template "default=/path/to/mytemplate --flag"`, where `default` matches any digest. `zygotectl build` and `zygotectl push` instead publish it as an artifact that a home pulls by digest. `zygotectl push` logs in to a registry that asks with what `docker login` stored. A home never logs in, so that registry must serve pulls without a login ([artifact.md](../../../docs/design/artifact.md)).
 
 `zygotectl build` runs the template the way a home does, waits for READY and checkpoints it with criu. The checkpoint is the template's memory, so it is sealed to the fleet's public wrap key, `-seal-to fleet-pub.json`, which `grant-issuer keygen -alg A256GCM` writes beside the fleet's seal key. Only homes holding that seal key open it ([artifact.md](../../../docs/design/artifact.md)). A build with a checkpoint and no `-seal-to` is refused. With `-skip-images` it takes no checkpoint and needs no criu, but still runs the template to READY once as a smoke test, so a template that cannot start fails the build rather than its first warm. `-no-smoke` skips that run, for a slow warm-up or a template the build host cannot run, such as a `--gvisor` one, which waits on `/proc/gvisor/checkpoint` that only a sandbox has.
 

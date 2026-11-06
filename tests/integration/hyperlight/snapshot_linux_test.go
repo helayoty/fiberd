@@ -62,7 +62,7 @@ func snapshotHome(t *testing.T, helper string) (*host.Runtime, string, string) {
 	if _, err := artifact.Build(ctx, artifact.BuildOptions{HyperlightSnapshot: tree, Out: out, Args: []string{"--init-ms", "20"}, SealTo: wrap.Public(), Platform: p}); err != nil {
 		t.Fatalf("build: %v", err)
 	}
-	digest, err := artifact.Push(ctx, out, srv.URL+"/tmpl/hl:v1")
+	digest, err := artifact.Push(ctx, out, srv.URL+"/tmpl/hl:v1", nil)
 	if err != nil {
 		t.Fatalf("push: %v", err)
 	}

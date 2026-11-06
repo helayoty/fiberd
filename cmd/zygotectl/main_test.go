@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/google/go-containerregistry/pkg/registry"
+	"oras.land/oras-go/v2/registry/remote/auth"
 
 	"github.com/Azure/fiberd/pkg/artifact"
 )
@@ -71,6 +72,49 @@ func TestRunDispatch(t *testing.T) {
 			code, stdout, stderr := call(tc.args...)
 			if code != tc.want || !strings.HasPrefix(stdout, tc.wantStdout) || !strings.Contains(stderr, tc.wantStderr) {
 				t.Fatalf("exit %d, stdout %q, stderr %q, want %d with %q and %q", code, stdout, stderr, tc.want, tc.wantStdout, tc.wantStderr)
+			}
+		})
+	}
+}
+
+// A push logs in with what docker login stored, for that registry alone.
+// A machine that stored nothing pushes anonymously, and a broken config
+// stops the push rather than drop the login.
+func TestDockerLogin(t *testing.T) {
+	const stored = `{"auths":{"registry.test":{"auth":"YXV0aG9yOnNlY3JldA=="}}}`
+	cases := []struct {
+		name    string
+		config  string // config.json, no file when empty
+		host    string
+		want    auth.Credential
+		wantErr string
+	}{
+		{name: "the login stored for the registry", config: stored, host: "registry.test", want: auth.Credential{Username: "author", Password: "secret"}},
+		{name: "another registry has no login", config: stored, host: "other.test"},
+		{name: "no config is no login", host: "registry.test"},
+		{name: "a broken config is an error", config: "{", host: "registry.test", wantErr: "decode config file"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			t.Setenv("DOCKER_CONFIG", dir)
+			if tc.config != "" {
+				if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(tc.config), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			got, err := dockerLogin(t.Context(), tc.host)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("error = %v, want it to say %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want {
+				t.Fatalf("login = %+v, want %+v", got, tc.want)
 			}
 		})
 	}

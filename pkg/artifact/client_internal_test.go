@@ -3,6 +3,8 @@ package artifact
 import (
 	"context"
 	"fmt"
+	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -15,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/go-containerregistry/pkg/registry"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"oras.land/oras-go/v2/registry/remote/auth"
 	"oras.land/oras-go/v2/registry/remote/retry"
@@ -149,6 +152,96 @@ func TestRegistryRedirects(t *testing.T) {
 	}
 }
 
+// TestPushLogin holds a login to the push it was given to. A registry on
+// TLS gets it when it asks, a registry named with http:// never does, and
+// neither the shared clients nor their token cache keep it, so a pull
+// after the push is still anonymous.
+func TestPushLogin(t *testing.T) {
+	login := auth.Credential{Username: "author", Password: "secret"}
+	src := t.TempDir()
+	for name, body := range map[string]string{fileZygote: "zygote", fileConfig: "{}"} {
+		if err := os.WriteFile(filepath.Join(src, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cases := []struct {
+		name   string
+		plain  bool   // the registry is named with http://
+		asks   bool   // it asks for a login
+		host   string // the host the login is for, the registry's when empty
+		noCred bool   // the push is given no credential
+		pushed bool   // the push lands
+		read   bool   // the credential is read
+	}{
+		{name: "a TLS registry that asks takes the login", asks: true, pushed: true, read: true},
+		{name: "a TLS registry that asks refuses a push with no credential", asks: true, noCred: true},
+		{name: "a login for another host is not offered", asks: true, host: "other.test", read: true},
+		{name: "a TLS registry that does not ask leaves the credential unread", pushed: true},
+		{name: "a plain registry that asks never gets the login", plain: true, asks: true},
+		{name: "a plain registry that does not ask leaves the credential unread", plain: true, pushed: true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var logins atomic.Int32
+			open := registry.New(registry.Logger(log.New(io.Discard, "", 0)))
+			guard := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				user, password, ok := r.BasicAuth()
+				if ok {
+					logins.Add(1)
+				}
+				if c.asks && (!ok || user != login.Username || password != login.Password) {
+					w.Header().Set("Www-Authenticate", `Basic realm="registry"`)
+					w.WriteHeader(http.StatusUnauthorized)
+					return
+				}
+				open.ServeHTTP(w, r)
+			})
+			var srv *httptest.Server
+			if c.plain {
+				srv = httptest.NewServer(guard)
+			} else {
+				srv = httptest.NewTLSServer(guard)
+			}
+			t.Cleanup(srv.Close)
+			useClients(t, srv.Client().Transport)
+
+			host := c.host
+			if host == "" {
+				host = srv.Listener.Addr().String()
+			}
+			var read atomic.Bool
+			var cred auth.CredentialFunc
+			if !c.noCred {
+				cred = func(ctx context.Context, hostport string) (auth.Credential, error) {
+					read.Store(true)
+					return auth.StaticCredential(host, login)(ctx, hostport)
+				}
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+			defer cancel()
+			ref := srv.URL + "/r:t"
+			_, err := Push(ctx, src, ref, cred)
+			if (err == nil) != c.pushed {
+				t.Fatalf("push error = %v, want pushed = %t", err, c.pushed)
+			}
+			if got := read.Load(); got != c.read {
+				t.Fatalf("credential read = %t, want %t", got, c.read)
+			}
+			if (c.plain || !c.pushed) && logins.Load() != 0 {
+				t.Fatalf("%d requests carried a login, want none", logins.Load())
+			}
+			if tlsClient.Credential != nil || plainClient.Credential != nil {
+				t.Fatal("a shared client holds a credential")
+			}
+			if c.asks && c.pushed {
+				if _, err := Pull(ctx, ref, t.TempDir()); err == nil {
+					t.Fatal("a pull after the push used its login")
+				}
+			}
+		})
+	}
+}
+
 // TestRegistryCallsRefuseRedirects runs every call that reaches a registry
 // against one that redirects off TLS. heads and untag let a call past its
 // first request, so each place that returns a registry error is reached.
@@ -175,7 +268,11 @@ func TestRegistryCallsRefuseRedirects(t *testing.T) {
 		want  string // how the error starts
 	}{
 		{name: "Push", want: "artifact: push", call: func(ctx context.Context, ref string) error {
-			_, err := Push(ctx, src, ref)
+			_, err := Push(ctx, src, ref, nil)
+			return err
+		}},
+		{name: "Push with a credential", want: "artifact: push", call: func(ctx context.Context, ref string) error {
+			_, err := Push(ctx, src, ref, auth.StaticCredential("registry.test", auth.Credential{}))
 			return err
 		}},
 		{name: "PushDir", want: "artifact: push", call: func(ctx context.Context, ref string) error {
