@@ -17,4 +17,6 @@ type testHooks struct{}
 
 func (*testHooks) bind(*flag.FlagSet, *Timing) {}
 
+func (*testHooks) selfAdmitAny() bool { return false }
+
 func (*testHooks) register(*http.ServeMux, home.Home, *core.Core, func() map[string]any) {}

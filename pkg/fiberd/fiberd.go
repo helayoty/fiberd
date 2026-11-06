@@ -760,7 +760,7 @@ func RunContext(ctx context.Context, c *Config, newHome HomeFactory) error {
 		Revoked:            revoked,
 		StatusInterval:     c.Timing.StatusEvery,
 	}
-	if sa, ok := h.(SelfAdmitter); ok {
+	if sa, ok := h.(SelfAdmitter); ok && !c.hooks.selfAdmitAny() {
 		ag.SelfAdmitUID = sa.SelfAdmitUID()
 	}
 

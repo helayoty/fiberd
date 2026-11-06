@@ -15,18 +15,22 @@ import (
 // implements it to take part.
 type IssuerReachableSetter interface{ SetIssuerReachable(reachable bool) }
 
-// testHooks are the test-only admin controls, built only with the
+// testHooks are the test-only controls, built only with the
 // fiberd_testhooks tag. A release binary has neither -admin-unsafe nor
-// the handlers behind it, nor the cadence flags (see testhooks_off.go).
+// what it switches on, nor the cadence flags (see testhooks_off.go).
 type testHooks struct{ adminUnsafe bool }
 
 // bind adds -admin-unsafe and the cadence flags on timing, which the
 // conformance runs turn down so the suite finishes in seconds.
 func (t *testHooks) bind(fs *flag.FlagSet, timing *Timing) {
-	fs.BoolVar(&t.adminUnsafe, "admin-unsafe", false, "enable test-only admin controls (POST /issuer, POST /scope-lost)")
+	fs.BoolVar(&t.adminUnsafe, "admin-unsafe", false, "enable test-only admin controls (POST /issuer, POST /scope-lost) and self-admit any grant UID")
 	fs.DurationVar(&timing.StatusEvery, "status-interval", 0, "W sampling and Watch cadence (0 is one second)")
 	fs.DurationVar(&timing.PressureEvery, "pressure-interval", 0, "pressure ladder evaluation cadence (0 is one second, negative disables the ladder)")
 }
+
+// selfAdmitAny lifts the home's self-admit UID under -admin-unsafe, since
+// a conformance run mints grants under UIDs of its own.
+func (t *testHooks) selfAdmitAny() bool { return t.adminUnsafe }
 
 // register adds POST /issuer and POST /scope-lost to the admin socket.
 // Both refuse unless fiberd was started with -admin-unsafe.

@@ -3,6 +3,7 @@
 package fiberd_test
 
 import (
+	"context"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -10,6 +11,10 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
+	grantv1 "github.com/Azure/fiberd/api/grant/v1"
 	"github.com/Azure/fiberd/pkg/fiberd"
 	"github.com/Azure/fiberd/pkg/grant"
 	"github.com/Azure/fiberd/pkg/home"
@@ -43,6 +48,37 @@ func TestTimingFlags(t *testing.T) {
 			if err != nil || c.Timing != tc.want {
 				t.Fatalf("Timing = %+v, %v, want %+v", c.Timing, err, tc.want)
 			}
+		})
+	}
+}
+
+// TestAdminUnsafeSelfAdmit checks that -admin-unsafe lifts the home's
+// self-admit UID, and that a testhooks build without the flag keeps it.
+func TestAdminUnsafeSelfAdmit(t *testing.T) {
+	cases := []struct {
+		name   string
+		unsafe bool
+		want   codes.Code
+	}{
+		{name: "another UID is refused without -admin-unsafe", want: codes.Unauthenticated},
+		{name: "-admin-unsafe admits another UID", unsafe: true, want: codes.OK},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var args []string
+			if tc.unsafe {
+				args = append(args, "-admin-unsafe")
+			}
+			r := start(t, newConfig(t, stateDir(t), args...), selfAdmitting("own"))
+			_, err := dial(t, r.grpc, nil).Clone(context.Background(),
+				&grantv1.CloneRequest{GrantJwt: jsonGrant(t, testGrant("foreign"))})
+			if status.Code(err) != tc.want {
+				t.Fatalf("Clone of another UID: %v, want %v", err, tc.want)
+			}
+			if err := r.stop(t); err != nil {
+				t.Fatal(err)
+			}
+			noRunGoroutines(t)
 		})
 	}
 }
