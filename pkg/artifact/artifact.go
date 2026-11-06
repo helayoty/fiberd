@@ -261,7 +261,7 @@ func Push(ctx context.Context, dir, ref string) (string, error) {
 		return "", err
 	}
 	if _, err := oras.Copy(ctx, fs, tag, repo, tag, oras.DefaultCopyOptions); err != nil {
-		return "", fmt.Errorf("artifact: push %s: %w", ref, err)
+		return "", fmt.Errorf("artifact: push %s: %w", ref, refusal(err))
 	}
 	return desc.Digest.String(), nil
 }
@@ -292,7 +292,7 @@ func Pull(ctx context.Context, ref, dst string) (Config, error) {
 	defer func() { _ = fs.Close() }()
 	desc, err := oras.Copy(ctx, repo, target, fs, target, oras.DefaultCopyOptions)
 	if err != nil {
-		return Config{}, fmt.Errorf("artifact: pull %s: %w", ref, err)
+		return Config{}, fmt.Errorf("artifact: pull %s: %w", ref, refusal(err))
 	}
 	mb, err := content.FetchAll(ctx, fs, desc)
 	if err != nil {
@@ -505,6 +505,7 @@ func repository(ref string) (*remote.Repository, string, error) {
 		return nil, "", fmt.Errorf("artifact: %q: %w", ref, err)
 	}
 	repo.PlainHTTP = plainHTTP
+	repo.Client = registryClient(plainHTTP)
 	return repo, target, nil
 }
 

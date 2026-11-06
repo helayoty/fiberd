@@ -3,6 +3,7 @@ package artifact
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"testing"
 
 	"oras.land/oras-go/v2/errdef"
@@ -23,6 +24,7 @@ func TestIsNotFound(t *testing.T) {
 		{name: "a message that says so", err: errors.New("MANIFEST_UNKNOWN: manifest Not Found"), want: true},
 		{name: "an error response with status 500", err: &errcode.ErrorResponse{Method: "GET", StatusCode: 500}},
 		{name: "any other error", err: errors.New("connection refused")},
+		{name: "a refused redirect whose Location says so", err: &url.Error{Op: "Head", URL: "http://host/not found", Err: &redirectError{host: "reg.example", reason: "redirect leaves TLS"}}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

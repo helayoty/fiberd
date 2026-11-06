@@ -109,7 +109,7 @@ func PushDir(ctx context.Context, dir, ref, artifactType string, annotations map
 		return "", err
 	}
 	if _, err := oras.Copy(ctx, fs, tag, repo, tag, oras.DefaultCopyOptions); err != nil {
-		return "", fmt.Errorf("artifact: push %s: %w", ref, err)
+		return "", fmt.Errorf("artifact: push %s: %w", ref, refusal(err))
 	}
 	return desc.Digest.String(), nil
 }
@@ -146,11 +146,11 @@ func Resolve(ctx context.Context, ref string) (Located, bool, error) {
 		if isNotFound(err) {
 			return Located{}, false, nil
 		}
-		return Located{}, false, fmt.Errorf("artifact: resolve %s: %w", ref, err)
+		return Located{}, false, fmt.Errorf("artifact: resolve %s: %w", ref, refusal(err))
 	}
 	rc, err := repo.Manifests().Fetch(ctx, desc)
 	if err != nil {
-		return Located{}, false, err
+		return Located{}, false, fmt.Errorf("artifact: resolve %s: %w", ref, refusal(err))
 	}
 	defer func() { _ = rc.Close() }()
 	mb, err := content.ReadAll(rc, desc)
@@ -188,7 +188,7 @@ func PullDir(ctx context.Context, ref, dst string) (string, error) {
 	defer func() { _ = fs.Close() }()
 	desc, err := oras.Copy(ctx, repo, target, fs, target, oras.DefaultCopyOptions)
 	if err != nil {
-		return "", fmt.Errorf("artifact: pull %s: %w", ref, err)
+		return "", fmt.Errorf("artifact: pull %s: %w", ref, refusal(err))
 	}
 	return desc.Digest.String(), nil
 }
@@ -216,7 +216,7 @@ func Delete(ctx context.Context, ref string) (removed bool, err error) {
 		if isNotFound(err) {
 			return false, nil
 		}
-		return false, err
+		return false, fmt.Errorf("artifact: delete %s: %w", ref, refusal(err))
 	}
 	isTag := !strings.HasPrefix(target, "sha256:")
 	untagged := false // the tag went by reference, so the manifest's fate does not decide
@@ -230,11 +230,11 @@ func Delete(ctx context.Context, ref string) (removed bool, err error) {
 			untagged = true // another deleter took it first
 		case errors.Is(err, errUntagUnsupported):
 		default:
-			return false, fmt.Errorf("artifact: untag %s: %w", ref, err)
+			return false, fmt.Errorf("artifact: untag %s: %w", ref, refusal(err))
 		}
 	}
 	if err := repo.Manifests().Delete(ctx, desc); err != nil && !isNotFound(err) {
-		return false, fmt.Errorf("artifact: delete %s: %w", ref, err)
+		return false, fmt.Errorf("artifact: delete %s: %w", ref, refusal(err))
 	} else if !untagged {
 		removed = err == nil
 	}
@@ -261,11 +261,7 @@ func deleteByReference(ctx context.Context, repo *remote.Repository, tag string)
 	if err != nil {
 		return err
 	}
-	client := repo.Client
-	if client == nil {
-		client = http.DefaultClient
-	}
-	resp, err := client.Do(req)
+	resp, err := repo.Client.Do(req)
 	if err != nil {
 		return err
 	}
@@ -283,7 +279,8 @@ func deleteByReference(ctx context.Context, repo *remote.Repository, tag string)
 }
 
 // isNotFound recognises a missing tag or manifest however the registry
-// and client phrase it.
+// and client phrase it. A refused redirect is never one, whatever its
+// Location says.
 func isNotFound(err error) bool {
 	if errors.Is(err, errdef.ErrNotFound) {
 		return true
@@ -292,7 +289,7 @@ func isNotFound(err error) bool {
 	if errors.As(err, &ec) && ec.StatusCode == 404 {
 		return true
 	}
-	return strings.Contains(strings.ToLower(err.Error()), "not found")
+	return strings.Contains(strings.ToLower(refusal(err).Error()), "not found")
 }
 
 // Repository is the remote.Repository for callers that need it directly.
