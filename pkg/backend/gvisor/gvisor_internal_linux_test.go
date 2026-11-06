@@ -25,6 +25,7 @@ import (
 
 	"github.com/Azure/fiberd/pkg/backend"
 	"github.com/Azure/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/sys/helper"
 )
 
 // newFake opens a backend over an in-process fake runsc. Everything it
@@ -463,7 +464,7 @@ func TestWriteBundle(t *testing.T) {
 			if err := json.Unmarshal(data, &s); err != nil {
 				t.Fatal(err)
 			}
-			wantEnv := append([]string{"PATH=/bin:/usr/bin"}, tc.env...)
+			wantEnv := append([]string{helper.PathEnv}, tc.env...)
 			if s.OCIVersion != "1.0.2" || s.Process.Cwd != "/" || strings.Join(s.Process.Args, " ") != "/bin/refzygote --gvisor" ||
 				strings.Join(s.Process.Env, " ") != strings.Join(wantEnv, " ") || s.Root.Path != "/rootfs" || s.Hostname != "fiber" {
 				t.Fatalf("spec = %+v", s)

@@ -66,7 +66,7 @@ func writeLog(name string, n int) string {
 }
 
 // TestCriuCheckAndDump checks the default commander's run of `criu check`
-// and `criu dump`: the binary is the one named or criu on PATH, the
+// and `criu dump`: the binary is the one named and never one on PATH, the
 // arguments reach it, its output comes back on failure, and a finished
 // context ends it.
 func TestCriuCheckAndDump(t *testing.T) {
@@ -74,14 +74,14 @@ func TestCriuCheckAndDump(t *testing.T) {
 		name      string
 		dump      bool   // DumpWith rather than Available
 		body      string // the fake's script, "" for no binary at all
-		fromPath  bool   // name no binary and find the fake as `criu` on PATH
+		onPath    bool   // name no binary, with the fake as `criu` on PATH
 		cancelled bool
 		wantArgs  []string
 		wantErr   string // substring of the error, "" for success
 		wantIs    error
 	}{
 		{name: "check passes", body: "exit 0", wantArgs: []string{"check", "--no-default-config"}},
-		{name: "the default binary is criu on PATH", body: "exit 0", fromPath: true, wantArgs: []string{"check", "--no-default-config"}},
+		{name: "a criu on PATH never runs", body: "exit 0", onPath: true},
 		{name: "check fails with its output", body: "echo 'Error (cr-check.c:1): no mnt_id'; exit 1",
 			wantArgs: []string{"check", "--no-default-config"},
 			wantErr:  "criu check: exit status 1: Error (cr-check.c:1): no mnt_id"},
@@ -102,7 +102,7 @@ func TestCriuCheckAndDump(t *testing.T) {
 			if tc.body != "" {
 				o.Bin = fakeCriu(t, args, tc.body, dir, "")
 			}
-			if tc.fromPath {
+			if tc.onPath {
 				t.Setenv("PATH", filepath.Dir(o.Bin))
 				o.Bin = ""
 			}
@@ -116,6 +116,13 @@ func TestCriuCheckAndDump(t *testing.T) {
 				err = o.DumpWith(ctx, 7, dir, criu.LeaveRunning, []string{"--external", "unix[4242]"})
 			} else {
 				err = o.Available(ctx)
+			}
+			if tc.onPath {
+				// Whether this host has a criu of its own does not matter.
+				if _, statErr := os.Stat(args); !errors.Is(statErr, fs.ErrNotExist) {
+					t.Fatalf("the fake on PATH ran (criu = %v, stat = %v)", err, statErr)
+				}
+				return
 			}
 			if tc.wantIs != nil {
 				if !errors.Is(err, tc.wantIs) {

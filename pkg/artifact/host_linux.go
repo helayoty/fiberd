@@ -3,8 +3,10 @@
 package artifact
 
 import (
-	"os/exec"
+	"context"
 	"syscall"
+
+	"github.com/Azure/fiberd/pkg/sys/helper"
 )
 
 func unameRelease() string {
@@ -23,6 +25,9 @@ func unameRelease() string {
 }
 
 // libcVersion asks the dynamic loader.
-func libcVersion() string {
-	return parseLdd(exec.Command("ldd", "--version").Output())
+func libcVersion() string { return LibcVersion("ldd") }
+
+// LibcVersion is the libc the ldd called bin names.
+func LibcVersion(bin string) string {
+	return parseLdd(helper.Command(context.Background(), bin, "--version").Output())
 }

@@ -3,14 +3,16 @@ package criu
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 )
 
-// TestRestoreArgv checks the command line a restore runs: the named
-// binary or criu on PATH, after the wrapper when there is one.
+// TestRestoreArgv checks the command line a restore runs: the binary it
+// is given, after the wrapper when there is one.
 func TestRestoreArgv(t *testing.T) {
 	cases := []struct {
 		name string
@@ -18,16 +20,36 @@ func TestRestoreArgv(t *testing.T) {
 		args []string
 		want []string
 	}{
-		{name: "criu on PATH", args: []string{"restore", "-D", "/img"}, want: []string{"criu", "restore", "-D", "/img"}},
-		{name: "a named binary", opt: Options{Bin: "/opt/criu"}, args: []string{"check"}, want: []string{"/opt/criu", "check"}},
-		{name: "through a wrapper", opt: Options{Bin: "/opt/criu", Wrap: []string{"wrap", "--sys"}}, args: []string{"restore"},
+		{name: "no wrapper", args: []string{"restore", "-D", "/img"}, want: []string{"/opt/criu", "restore", "-D", "/img"}},
+		{name: "through a wrapper", opt: Options{Wrap: []string{"wrap", "--sys"}}, args: []string{"restore"},
 			want: []string{"wrap", "--sys", "/opt/criu", "restore"}},
-		{name: "no arguments", opt: Options{Wrap: []string{"wrap"}}, want: []string{"wrap", "criu"}},
+		{name: "no arguments", opt: Options{Wrap: []string{"wrap"}}, want: []string{"wrap", "/opt/criu"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := tc.opt.restoreArgv(tc.args); !slices.Equal(got, tc.want) {
+			if got := tc.opt.restoreArgv("/opt/criu", tc.args); !slices.Equal(got, tc.want) {
 				t.Fatalf("restoreArgv = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestStartResolvesFirst checks that a restore refuses a bare binary the
+// fixed directories do not hold, rather than hand the name to a wrapper
+// whose PATH reaches less. The refusal comes before any process.
+func TestStartResolvesFirst(t *testing.T) {
+	cases := []struct {
+		name string
+		opt  Options
+	}{
+		{name: "no wrapper", opt: Options{Bin: "fiberd-test-no-such-criu"}},
+		{name: "through a wrapper", opt: Options{Bin: "fiberd-test-no-such-criu", Wrap: []string{"/nonexistent/wrap"}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := execCommander{opt: tc.opt}.Start([]string{"restore"}, nil, -1)
+			if !errors.Is(err, fs.ErrNotExist) || !strings.Contains(err.Error(), tc.opt.Bin) {
+				t.Fatalf("Start = %v, want %s not found", err, tc.opt.Bin)
 			}
 		})
 	}

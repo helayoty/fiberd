@@ -32,6 +32,7 @@ import (
 
 	"github.com/Azure/fiberd/pkg/core"
 	"github.com/Azure/fiberd/pkg/sys/cgroup"
+	"github.com/Azure/fiberd/pkg/sys/helper"
 )
 
 const (
@@ -1071,7 +1072,7 @@ func (e *engine) spawn(child *os.File) (*os.Process, error) {
 		return nil, err
 	}
 	defer func() { _ = cgf.Close() }()
-	env := []string{"PATH=/usr/bin:/bin"}
+	env := []string{helper.PathEnv}
 	if len(e.devices) > 0 {
 		env = append(env, "FIBERD_DEVICES="+strings.Join(e.devices, ","))
 	}

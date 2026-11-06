@@ -20,7 +20,7 @@ A suggested order is fiberd, home, grant, core, audit, runtime-host, backends, z
 | [resources.md](resources.md) | The cgroup hierarchy, the memory formula and sizing | `pkg/runtime/host`, `pkg/sys/cgroup` |
 | [backends.md](backends.md) | The backend interface and how proc, runc, gVisor and Hyperlight make a fiber | `pkg/backend`, `pkg/backend/proc`, `pkg/backend/runc`, `pkg/backend/gvisor`, `pkg/backend/hyperlight` |
 | [cloudhv.md](cloudhv.md) | How a Cloud Hypervisor fiber is a jailed micro-VM, and why a Clone restores copy-on-write | `pkg/backend/cloudhv` |
-| [sys.md](sys.md) | Cgroup delegation, [CRIU](../glossary.md#criu) dump and restore, read-only container mounts, capability narrowing and network namespaces | `pkg/sys/caps`, `pkg/sys/cgroup`, `pkg/sys/criu`, `pkg/sys/mounts`, `pkg/sys/netns` |
+| [sys.md](sys.md) | Cgroup delegation, [CRIU](../glossary.md#criu) dump and restore, read-only container mounts, capability narrowing, network namespaces and helper starts | `pkg/sys/caps`, `pkg/sys/cgroup`, `pkg/sys/criu`, `pkg/sys/helper`, `pkg/sys/mounts`, `pkg/sys/netns` |
 | [zygote.md](zygote.md) | The library a template links to, its wire protocol and how a [zygote](../glossary.md#zygote) forks a fiber | `sdk/c/template` |
 | [seccomp.md](seccomp.md) | The fiber filter every proc and runc zygote installs, and the runc capability set | `sdk/c/template` |
 | [sdk.md](sdk.md) | The SDK's four languages, how the Python binding brings the interpreter through a raw fork, and the rules it enforces | `sdk/python`, `sdk/go/client`, `sdk/typescript` |

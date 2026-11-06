@@ -94,8 +94,9 @@ COPY --from=build /out/doc /usr/share/doc/fiberd
 # No USER on purpose. fiberd creates namespaces and cgroups and runs criu,
 # so it starts as root and drops the capabilities it does not need
 # (pkg/sys/caps).
-# tini is PID 1 and reaps the orphans a fiber or sandbox leaves.
-ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/fiberd"]
+# tini is PID 1 and reaps the orphans a fiber or sandbox leaves. It is the
+# static build the tini package ships, so PID 1 loads no shared library.
+ENTRYPOINT ["/usr/bin/tini-static", "--", "/usr/local/bin/fiberd"]
 
 # The mount points of a sandbox rootfs, as hack/gvisor/rootfs.sh makes them
 # plus the two every rootfs copy carries (docs/design/backends.md). Empty
@@ -124,8 +125,8 @@ RUN set -eu; . /tmp/fiberd-pins/runsc.env; arch=$(uname -m); \
     chmod 0755 /usr/local/bin/runsc; \
     rm -rf /tmp/fiberd-pins; runsc --version
 
-# fiberd and the runc it was built and tested against. The entrypoint, tini
-# and the absence of a USER come from the fiberd stage.
+# fiberd and the runc it was built and tested against. The entrypoint, static
+# tini and the absence of a USER come from the fiberd stage.
 FROM fiberd AS fiberd-runc
 LABEL org.opencontainers.image.description="fiberd with runc for the runc runtime"
 ARG DEBIAN_FRONTEND=noninteractive

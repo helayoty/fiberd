@@ -77,6 +77,7 @@ import (
 	"github.com/Azure/fiberd/pkg/backend"
 	"github.com/Azure/fiberd/pkg/core"
 	"github.com/Azure/fiberd/pkg/sys/criu"
+	"github.com/Azure/fiberd/pkg/sys/helper"
 )
 
 // Options configure the fork backend.
@@ -883,7 +884,7 @@ func (b *Backend) Warm(ctx context.Context, spec backend.WarmSpec) (backend.Warm
 		// home. FIBERD_OWN_MNTNS has the zygote take a mount namespace
 		// of its own in fz_init, before any thread, which it prepares
 		// for its fibers before READY (see sendSetup).
-		cmd.Env = []string{"PATH=/usr/bin:/bin", ownMntnsEnv}
+		cmd.Env = []string{helper.PathEnv, ownMntnsEnv}
 		if len(spec.Devices) > 0 {
 			// The device channel: the one grant-specific thing an engine
 			// needs at warm-up (a CUDA engine reads it as its visible set).

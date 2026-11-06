@@ -21,6 +21,8 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/Azure/fiberd/pkg/sys/helper"
 )
 
 // Every VMM runs in a mount namespace of its own (jail_linux.go), where
@@ -250,7 +252,7 @@ type process interface {
 type execStarter struct{ vmm string }
 
 func (s execStarter) Version(ctx context.Context) (string, error) {
-	out, err := exec.CommandContext(ctx, s.vmm, "--version").CombinedOutput()
+	out, err := helper.Command(ctx, s.vmm, "--version").CombinedOutput()
 	return string(out), err
 }
 

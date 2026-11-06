@@ -11,7 +11,7 @@
 #      request resumes it (RESUME) with the state intact.
 #
 #   examples/knative/run.sh            (from the repo root; needs go, curl)
-#   CONFORM_HL_HELPER=bin/hyperlight-helper CONFORM_HL_GUEST=bin/hyperlight-guest examples/knative/run.sh
+#   CONFORM_HL_HELPER=$PWD/bin/hyperlight-helper CONFORM_HL_GUEST=$PWD/bin/hyperlight-guest examples/knative/run.sh
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 STATE=${KNATIVE_STATE:-bin/knative-state}

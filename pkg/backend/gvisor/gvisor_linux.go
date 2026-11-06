@@ -53,7 +53,6 @@ import (
 	"log"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -66,6 +65,7 @@ import (
 	"github.com/Azure/fiberd/pkg/artifact"
 	"github.com/Azure/fiberd/pkg/backend"
 	"github.com/Azure/fiberd/pkg/core"
+	"github.com/Azure/fiberd/pkg/sys/helper"
 )
 
 const (
@@ -561,7 +561,7 @@ func clip(out string) string {
 // and gofer it leaves behind run without them. The context ending kills
 // it.
 func (b *Backend) execRunsc(ctx context.Context, cgroupFD int, args []string, out io.Writer) error {
-	cmd := exec.CommandContext(ctx, b.opt.Runsc, args...)
+	cmd := helper.Command(ctx, b.opt.Runsc, args...)
 	// A command that is not detached writes to a pipe. Should a process
 	// it leaves behind hold that pipe open, Run returns this long after
 	// the command itself has exited instead of waiting for the pipe.
@@ -654,7 +654,7 @@ func (b *Backend) writeBundle(dir string, argv, env []string, workDir, channel, 
 	s.OCIVersion = "1.0.2"
 	s.Process.Cwd = "/"
 	s.Process.Args = argv
-	s.Process.Env = append([]string{"PATH=/bin:/usr/bin"}, env...)
+	s.Process.Env = append([]string{helper.PathEnv}, env...)
 	// The rootfs is one host directory shared by every sandbox of every
 	// grant, served by the gofer with fiberd's credentials, and the
 	// workload is uid 0 in its sandbox. Read-only, or one fiber rewrites
@@ -1206,8 +1206,8 @@ func awaitExit(pid int) (string, bool) {
 
 // exitStatus is how the exited process pid ended when this process is
 // its parent, which reaps it here. runsc reparents a detached sandbox
-// to init, so that is fiberd when it is a container's init. Otherwise
-// the status is "exited", since only a parent can read one.
+// to init, and only a parent can read a status, so it is "exited" unless
+// fiberd is that init. In the published images init is tini.
 func exitStatus(pid int) string {
 	var ws unix.WaitStatus
 	wpid, err := unix.Wait4(pid, &ws, unix.WNOHANG, nil)

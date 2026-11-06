@@ -160,7 +160,13 @@ type Runtime struct {
 	Runc         Runc
 	Hyperlight   Hyperlight
 	Cloudhv      Cloudhv
+	Helpers      Helpers
 }
+
+// Helpers name the criu and runsc binaries. Empty finds each in
+// pkg/sys/helper's fixed directories. No flag sets them, so a test or a
+// program embedding fiberd names its own.
+type Helpers struct{ CRIU, Runsc string }
 
 // Cloudhv is what the cloudhv backend needs, the VMM and the guest's
 // images that hack/cloudhv/build.sh makes.
@@ -180,8 +186,7 @@ type Engine struct {
 	MemoryMax uint64 // -engine-memory-max
 }
 
-// Gvisor, Runc and Hyperlight are what only that backend needs. The
-// backends find their criu, runsc and runc binaries on PATH.
+// Gvisor, Runc and Hyperlight are what only that backend needs.
 type (
 	Gvisor struct {
 		Rootfs          string // -gvisor-rootfs
@@ -194,7 +199,7 @@ type (
 // gvisorOptions configures the gVisor backend. Its state lives under the
 // home's own state directory.
 func (c *Config) gvisorOptions() gvisorbackend.Options {
-	return gvisorbackend.Options{Rootfs: c.Runtime.Gvisor.Rootfs, StateDir: filepath.Join(c.Node.StateDir, "gvisor"),
+	return gvisorbackend.Options{Runsc: c.Runtime.Helpers.Runsc, Rootfs: c.Runtime.Gvisor.Rootfs, StateDir: filepath.Join(c.Node.StateDir, "gvisor"),
 		TemplatesOnDisk: c.Runtime.Gvisor.TemplatesOnDisk}
 }
 
@@ -254,7 +259,7 @@ func (c *Config) Bind(fs *flag.FlagSet) {
 	fs.DurationVar(&c.Trust.JWKSMaxStale, "jwks-max-stale", time.Hour, "refuse to verify when the key set is older than this (set to the lease TTL)")
 	fs.DurationVar(&c.Trust.MaxLease, "max-lease", 0, "-verifier=jwks: refuse grants signed for longer than this (exp - iat) or without a lease (0 accepts any)")
 
-	fs.StringVar(&c.Runtime.Name, "runtime", "stub", "runtime: stub (in-memory), or a sandbox backend on the host runtime: proc (fork zygote + criu from PATH; park/resume is offered with criu 4.2 or later whose `criu check` passes), runc (the zygote as an OCI container's init), gvisor (runsc sandbox per fiber), hyperlight (micro-VM snapshots through a helper process), cloudhv (a Cloud Hypervisor micro-VM per fiber)")
+	fs.StringVar(&c.Runtime.Name, "runtime", "stub", "runtime: stub (in-memory), or a sandbox backend on the host runtime: proc (fork zygote + criu; park/resume is offered with criu 4.2 or later whose `criu check` passes), runc (the zygote as an OCI container's init), gvisor (runsc sandbox per fiber), hyperlight (micro-VM snapshots through a helper process), cloudhv (a Cloud Hypervisor micro-VM per fiber)")
 	fs.StringVar(&c.Runtime.StubTier, "runtime-tier", "FIBER_CHECKPOINT", "tier the stub runtime advertises (stub only)")
 	c.Runtime.Templates = map[string]string{}
 	fs.Func("template", "proc: digest=path [args] mapping a template digest to a zygote command (repeatable; key `default` catches the rest)",
@@ -271,7 +276,7 @@ func (c *Config) Bind(fs *flag.FlagSet) {
 	fs.Uint64Var(&c.Runtime.Engine.MemoryMax, "engine-memory-max", host.DefaultEngineMemoryMax, "proc, runc, gvisor, hyperlight, cloudhv: memory.max in bytes of each device engine's cgroup leaf, which a simulated engine's pool must fit")
 	fs.StringVar(&c.Runtime.Runc.Rootfs, "runc-rootfs", "", "runc: rootfs directory the zygote container runs in; -template commands are paths inside it")
 	fs.StringVar(&c.Runtime.Runc.UsernsPool, "userns-pool", runcbackend.DefaultPool, "runc: START:SLOTS host id pool that grants' user namespaces take 65536-id slots from, picked by a hash of the grant uid. A pool overlapping /etc/subuid or /etc/subgid is refused")
-	fs.StringVar(&c.Runtime.Hyperlight.Helper, "hyperlight-helper", "", "hyperlight: helper executable speaking hack/hyperlight/PROTOCOL.md (the Rust helper, or fakehelper)")
+	fs.StringVar(&c.Runtime.Hyperlight.Helper, "hyperlight-helper", "", "hyperlight: absolute path of the helper executable speaking hack/hyperlight/PROTOCOL.md (the Rust helper, or fakehelper)")
 	fs.StringVar(&c.Runtime.Hyperlight.Guest, "hyperlight-guest", "", "hyperlight: guest binary the helper loads")
 	fs.StringVar(&c.Runtime.Cloudhv.VMM, "cloudhv-vmm", "", "cloudhv: the static cloud-hypervisor executable, or hack/cloudhv/fakevmm without KVM (hack/cloudhv/build.sh)")
 	fs.StringVar(&c.Runtime.Cloudhv.Kernel, "cloudhv-kernel", "", "cloudhv: the guest vmlinux")
@@ -626,6 +631,9 @@ func RunContext(ctx context.Context, c *Config, newHome HomeFactory) error {
 			if c.Runtime.Hyperlight.Helper == "" {
 				return errors.New("-runtime=hyperlight needs -hyperlight-helper (hack/hyperlight/helper, or fakehelper without a hypervisor)")
 			}
+			if !filepath.IsAbs(c.Runtime.Hyperlight.Helper) {
+				return fmt.Errorf("-hyperlight-helper %q is not an absolute path", c.Runtime.Hyperlight.Helper)
+			}
 			be = hlbackend.New(hlbackend.Options{Helper: c.Runtime.Hyperlight.Helper, Guest: c.Runtime.Hyperlight.Guest})
 		case "cloudhv":
 			ch := c.Runtime.Cloudhv
@@ -643,7 +651,7 @@ func RunContext(ctx context.Context, c *Config, newHome HomeFactory) error {
 			if err != nil {
 				return fmt.Errorf("-userns-pool: %w", err)
 			}
-			be, err = runcbackend.New(runcbackend.Options{Rootfs: c.Runtime.Runc.Rootfs, StateDir: filepath.Join(c.Node.StateDir, "runc"), Pool: pool})
+			be, err = runcbackend.New(runcbackend.Options{CRIU: c.Runtime.Helpers.CRIU, Rootfs: c.Runtime.Runc.Rootfs, StateDir: filepath.Join(c.Node.StateDir, "runc"), Pool: pool})
 			if err != nil {
 				return err
 			}

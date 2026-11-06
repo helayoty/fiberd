@@ -107,7 +107,7 @@ func TestMain(m *testing.M) {
 			backends = append(backends, backend{name: "runc", template: inRootfs, pathEnv: "-", open: openRunc})
 		}
 		if haveRunsc == nil {
-			backends = append(backends, backend{name: "gvisor", template: inRootfs, pathEnv: "/bin:/usr/bin", pooled: true, open: openGvisor})
+			backends = append(backends, backend{name: "gvisor", template: inRootfs, pathEnv: "/usr/bin:/bin", pooled: true, open: openGvisor})
 		}
 	}
 	code := m.Run()

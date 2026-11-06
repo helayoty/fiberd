@@ -24,6 +24,7 @@ import (
 	"github.com/Azure/fiberd/pkg/backend"
 	"github.com/Azure/fiberd/pkg/core"
 	"github.com/Azure/fiberd/pkg/sys/criu"
+	"github.com/Azure/fiberd/pkg/sys/helper"
 )
 
 // TestBackendFacts checks what the backend says about itself, with and without
@@ -281,7 +282,7 @@ func TestWarmCommand(t *testing.T) {
 			if cmd.Dir != workDir {
 				t.Errorf("cwd = %q, want the run directory %q", cmd.Dir, workDir)
 			}
-			wantEnv := []string{"PATH=/usr/bin:/bin", ownMntnsEnv}
+			wantEnv := []string{helper.PathEnv, ownMntnsEnv}
 			if len(tc.devices) > 0 {
 				wantEnv = append(wantEnv, "FIBERD_DEVICES="+strings.Join(tc.devices, ","))
 			}

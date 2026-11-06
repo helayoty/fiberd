@@ -14,6 +14,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/Azure/fiberd/pkg/sys/helper"
 )
 
 // rawZygote starts refzygote the way the backend does, with one end of a
@@ -47,7 +49,7 @@ func rawZygoteWith(t *testing.T, dir string, wrap []string, setup string) (*net.
 	cmd.Dir = dir
 	cmd.ExtraFiles = []*os.File{theirs}
 	cmd.Stdout, cmd.Stderr = logf, logf
-	cmd.Env = []string{"PATH=/usr/bin:/bin", "FIBERD_OWN_MNTNS=1"} // as the proc backend starts it
+	cmd.Env = []string{helper.PathEnv, "FIBERD_OWN_MNTNS=1"} // as the proc backend starts it
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start %s: %v", zygoteBin, err)

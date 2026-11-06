@@ -10,6 +10,7 @@ import (
 	"syscall"
 
 	"github.com/Azure/fiberd/pkg/sys/criu"
+	"github.com/Azure/fiberd/pkg/sys/helper"
 )
 
 // checkpointZygote runs the zygote to READY, dumps it leaving it running,
@@ -61,7 +62,7 @@ func runZygote(ctx context.Context, o BuildOptions, work string, at func(pid int
 	defer func() { _ = parent.Close() }()
 	cmd := exec.Command(ZygotePath(o.Out), o.Args...)
 	cmd.ExtraFiles = []*os.File{child}
-	cmd.Env = []string{"PATH=/usr/bin:/bin"}
+	cmd.Env = []string{helper.PathEnv}
 	// A session leader, as criu requires of a dump root outside a shell job.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	devnull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)

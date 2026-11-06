@@ -21,6 +21,7 @@ import (
 
 	"github.com/Azure/fiberd/pkg/backend"
 	"github.com/Azure/fiberd/pkg/backend/proc"
+	"github.com/Azure/fiberd/pkg/sys/helper"
 )
 
 // TestMain fails the package when a test leaves a goroutine behind.
@@ -298,7 +299,7 @@ func TestBundleConfig(t *testing.T) {
 				if want := []string{"/bin/zygote", "-x", "--log", "/host/zygote.log"}; !reflect.DeepEqual(p.Args, want) {
 					t.Errorf("args = %v, want %v", p.Args, want)
 				}
-				if want := []string{"PATH=/usr/bin:/bin", nestedUsernsEnv, rebindEnv}; !reflect.DeepEqual(p.Env, want) {
+				if want := []string{helper.PathEnv, nestedUsernsEnv, rebindEnv}; !reflect.DeepEqual(p.Env, want) {
 					t.Errorf("env = %v, want %v", p.Env, want)
 				}
 				if p.Cwd != "/host" || p.Terminal || p.NoNewPrivileges || p.User["uid"] != 0 || p.User["gid"] != 0 {
@@ -329,7 +330,7 @@ func TestBundleConfig(t *testing.T) {
 		// engine under runc had no device to open.
 		{name: "the device channel reaches the zygote's environment", devices: []string{"/dev/nvidia0", "/dev/nvidia1"},
 			check: func(t *testing.T, _ *launcher, _ backend.WarmSpec, cfg ociConfig) {
-				if want := []string{"PATH=/usr/bin:/bin", nestedUsernsEnv, rebindEnv, "FIBERD_DEVICES=/dev/nvidia0,/dev/nvidia1"}; !reflect.DeepEqual(cfg.Process.Env, want) {
+				if want := []string{helper.PathEnv, nestedUsernsEnv, rebindEnv, "FIBERD_DEVICES=/dev/nvidia0,/dev/nvidia1"}; !reflect.DeepEqual(cfg.Process.Env, want) {
 					t.Errorf("env = %v, want %v", cfg.Process.Env, want)
 				}
 			}},

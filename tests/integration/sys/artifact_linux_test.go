@@ -269,8 +269,8 @@ func cfgOf(t *testing.T, dir string) artifact.Config {
 	return c
 }
 
-// TestArtifactHostInfo checks the parity facts against the kernel and a
-// stand-in ldd on PATH, whose first line names the libc.
+// TestArtifactHostInfo checks the parity facts against the kernel, and
+// the libc against a stand-in ldd whose first line names it.
 func TestArtifactHostInfo(t *testing.T) {
 	osrelease, err := os.ReadFile("/proc/sys/kernel/osrelease")
 	if err != nil {
@@ -288,17 +288,19 @@ func TestArtifactHostInfo(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			dir := t.TempDir()
+			ldd := filepath.Join(t.TempDir(), "ldd")
 			if tc.ldd != "" {
-				execFile(t, filepath.Join(dir, "ldd"), tc.ldd)
+				execFile(t, ldd, tc.ldd)
 			}
-			t.Setenv("PATH", dir)
+			if got := artifact.LibcVersion(ldd); got != tc.libc {
+				t.Fatalf("LibcVersion = %q, want %q", got, tc.libc)
+			}
 			arch, kernel, libc := artifact.HostInfo()
-			if arch != runtime.GOARCH || kernel != strings.TrimSpace(string(osrelease)) || libc != tc.libc {
-				t.Fatalf("HostInfo = %s, %s, %q; want %s, %s, %q", arch, kernel, libc, runtime.GOARCH, osrelease, tc.libc)
+			if arch != runtime.GOARCH || kernel != strings.TrimSpace(string(osrelease)) {
+				t.Fatalf("HostInfo = %s, %s, want %s, %s", arch, kernel, runtime.GOARCH, osrelease)
 			}
-			if host := artifact.Host(); host.Libc != tc.libc {
-				t.Fatalf("Host records libc %q, want %q", host.Libc, tc.libc)
+			if host := artifact.Host(); host.Libc != libc {
+				t.Fatalf("Host records libc %q, want %q", host.Libc, libc)
 			}
 		})
 	}

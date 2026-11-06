@@ -32,6 +32,7 @@ import (
 	"github.com/Azure/fiberd/pkg/backend"
 	"github.com/Azure/fiberd/pkg/backend/proc"
 	"github.com/Azure/fiberd/pkg/sys/criu"
+	"github.com/Azure/fiberd/pkg/sys/helper"
 	"github.com/Azure/fiberd/pkg/sys/netns"
 )
 
@@ -369,7 +370,7 @@ func (l *launcher) runc(ctx context.Context, args ...string) (string, error) {
 
 // execRunc is the default run, the binary itself.
 func (l *launcher) execRunc(ctx context.Context, args []string) ([]byte, error) {
-	return exec.CommandContext(ctx, l.opt.Runc, args...).CombinedOutput()
+	return helper.Command(ctx, l.opt.Runc, args...).CombinedOutput()
 }
 
 // cgroupMount is where the cgroup v2 hierarchy is mounted.
@@ -531,8 +532,12 @@ func (l *launcher) Command(spec backend.WarmSpec, argv []string, ctl, logf *os.F
 	if err := os.Remove(l.runcLog(spec)); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return nil, fmt.Errorf("runc: remove old runc log: %w", err)
 	}
+	bin, err := helper.Resolve(l.opt.Runc)
+	if err != nil {
+		return nil, err
+	}
 	wrap := l.sysWrap()
-	cmd = exec.Command(wrap[0], append(wrap[1:], l.opt.Runc, "--root", l.root(), "--log", l.runcLog(spec), "--debug",
+	cmd = helper.Command(context.Background(), wrap[0], append(wrap[1:], bin, "--root", l.root(), "--log", l.runcLog(spec), "--debug",
 		"run", "--preserve-fds", "1", "--bundle", b, l.cid(spec))...)
 	cmd.ExtraFiles = []*os.File{ctl} // fd 3 in the container's init
 	devnull, err := os.OpenFile(os.DevNull, os.O_RDONLY, 0)
@@ -577,7 +582,7 @@ func (l *launcher) bundleConfig(spec backend.WarmSpec, argv []string, rootfs, cg
 			"options": []string{"rbind", "ro", "nosuid", "nodev", "noexec"}})
 	}
 	idMap := []map[string]uint32{{"containerID": 0, "hostID": rng.Start, "size": rng.Count}}
-	env := []string{"PATH=/usr/bin:/bin", nestedUsernsEnv, rebindEnv}
+	env := []string{helper.PathEnv, nestedUsernsEnv, rebindEnv}
 	if len(spec.Devices) > 0 {
 		// The device channel, as proc passes it: the one grant-specific
 		// thing an engine needs at warm-up.

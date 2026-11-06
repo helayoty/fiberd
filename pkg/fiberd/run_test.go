@@ -899,9 +899,13 @@ func TestRunRefuses(t *testing.T) {
 		// Confinement fails closed: a backend whose tools are missing
 		// offers no tier, and fiberd does not start over it.
 		{name: "gvisor whose runsc is missing", args: []string{"-runtime", "gvisor", "-template", "default=/z", "-gvisor-rootfs", "/r"},
-			want: "gvisor runtime: ", wantLinux: "gvisor runtime: host: backend gvisor offers no tier: runsc runsc unavailable"},
-		{name: "hyperlight whose helper is missing", args: []string{"-runtime", "hyperlight", "-template", "default=/g", "-hyperlight-helper", noTool},
-			want: "hyperlight runtime: ", wantLinux: "hyperlight runtime: host: backend hyperlight offers no tier: helper " + noTool + " unusable"},
+			want: "gvisor runtime: ", wantLinux: "gvisor runtime: host: backend gvisor offers no tier: runsc " + noTool + " unavailable"},
+		{name: "hyperlight whose helper is missing", args: []string{"-runtime", "hyperlight", "-template", "default=/g", "-hyperlight-helper", "/" + noTool},
+			want: "hyperlight runtime: ", wantLinux: "hyperlight runtime: host: backend hyperlight offers no tier: helper /" + noTool + " unusable"},
+		{name: "hyperlight with a bare helper name", args: []string{"-runtime", "hyperlight", "-template", "default=/g", "-hyperlight-helper", noTool},
+			want: `-hyperlight-helper "` + noTool + `" is not an absolute path`},
+		{name: "hyperlight with a relative helper path", args: []string{"-runtime", "hyperlight", "-template", "default=/g", "-hyperlight-helper", "bin/" + noTool},
+			want: `-hyperlight-helper "bin/` + noTool + `" is not an absolute path`},
 		{name: "bad parity", args: append([]string{"-parity", "kernel=sometimes"}, proc...), want: "parity"},
 		{name: "unknown endpoint family", args: append([]string{"-endpoint-family", "pigeon"}, proc...), want: `endpoint family "pigeon"`},
 		{name: "endpoint host of the wrong family", args: append([]string{"-endpoint-family", "inet4", "-endpoint-host", "::1"}, proc...),
@@ -954,9 +958,6 @@ func TestRunRefuses(t *testing.T) {
 			if tc.linux && runtime.GOOS != "linux" {
 				t.Skip("the case rests on Linux getcwd semantics")
 			}
-			// An empty PATH, so a backend's probe of criu or runsc fails at
-			// the lookup and starts nothing.
-			t.Setenv("PATH", t.TempDir())
 			state := stateDir(t)
 			args := tc.args
 			if tc.setup != nil {
@@ -966,7 +967,11 @@ func TestRunRefuses(t *testing.T) {
 			if nh == nil {
 				nh = fiberd.Standalone
 			}
-			r, err := launch(t, context.Background(), newConfig(t, state, args...), nh)
+			cfg := newConfig(t, state, args...)
+			// Binaries that are not there, so a backend's probe of criu or
+			// runsc fails at the lookup and starts nothing.
+			cfg.Runtime.Helpers = fiberd.Helpers{CRIU: noTool, Runsc: noTool}
+			r, err := launch(t, context.Background(), cfg, nh)
 			if r != nil {
 				_ = r.stop(t)
 				t.Fatal("Run started, want an error")

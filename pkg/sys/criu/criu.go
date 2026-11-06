@@ -11,11 +11,13 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/Azure/fiberd/pkg/sys/helper"
 )
 
 // Options select the binary and the flags common to every call.
 type Options struct {
-	Bin string // default "criu"
+	Bin string // default "criu", found as helper.Resolve finds it
 	// Wrap is a command a restore runs through, given criu and its
 	// arguments after its own: for a restore that needs mounts of its
 	// own (the runc backend's /sys bind). It must exec criu in place,
@@ -57,21 +59,26 @@ func (o Options) commander() Commander {
 	return execCommander{opt: o}
 }
 
-// restoreArgv is the command line of a restore, through Wrap when set.
-func (o Options) restoreArgv(args []string) []string {
-	return append(append(append([]string{}, o.Wrap...), o.bin()), args...)
+// restoreArgv is the command line of a restore by the criu at bin, through
+// Wrap when set.
+func (o Options) restoreArgv(bin string, args []string) []string {
+	return append(append(append([]string{}, o.Wrap...), bin), args...)
 }
 
 // execCommander runs the real binary.
 type execCommander struct{ opt Options }
 
 func (e execCommander) Output(ctx context.Context, args []string) ([]byte, error) {
-	return exec.CommandContext(ctx, e.opt.bin(), args...).CombinedOutput()
+	return helper.Command(ctx, e.opt.bin(), args...).CombinedOutput()
 }
 
 func (e execCommander) Start(args []string, files []*os.File, cgroupFD int) (Process, error) {
-	argv := e.opt.restoreArgv(args)
-	cmd := exec.Command(argv[0], argv[1:]...)
+	bin, err := helper.Resolve(e.opt.bin())
+	if err != nil {
+		return nil, err
+	}
+	argv := e.opt.restoreArgv(bin, args)
+	cmd := helper.Command(context.Background(), argv[0], argv[1:]...)
 	cmd.ExtraFiles = files
 	cmd.SysProcAttr = sysProcAttr(cgroupFD)
 	if err := cmd.Start(); err != nil {
