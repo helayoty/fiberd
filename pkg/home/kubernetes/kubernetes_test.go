@@ -14,6 +14,7 @@ import (
 	"github.com/Azure/fiberd/pkg/endpoint"
 	"github.com/Azure/fiberd/pkg/home/kubernetes"
 	"github.com/Azure/fiberd/pkg/home/kubernetes/fake"
+	"github.com/Azure/fiberd/pkg/sys/cgroup"
 )
 
 func validConfig() kubernetes.Config {
@@ -59,6 +60,7 @@ func TestConfigValidate(t *testing.T) {
 		{name: "a negative grant fetch timeout is refused", change: func(c *kubernetes.Config) { c.GrantFetchTimeout = -time.Second },
 			wantErr: "grant fetch timeout -1s is negative"},
 	}
+	kubernetes.SetDelegateOwn(t, func() (cgroup.Dir, error) { return cgroup.Dir{Path: t.TempDir()}, nil })
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			cfg := validConfig()
@@ -84,11 +86,17 @@ func TestNewDefaults(t *testing.T) {
 	}{
 		{name: "a given cgroup root is kept", cgroupRoot: "/sys/fs/cgroup/kubepods/pod1",
 			wantCgroupRoot: func(root string) bool { return root == "/sys/fs/cgroup/kubepods/pod1" }},
-		{name: "an empty cgroup root is the cgroup fiberd runs in",
-			wantCgroupRoot: func(root string) bool { return strings.HasPrefix(root, "/sys/fs/cgroup") }},
+		{name: "an empty cgroup root is the grants subtree of fiberd's delegated cgroup",
+			wantCgroupRoot: func(root string) bool { return root == "/sys/fs/cgroup/kubepods/pod2/grants" }},
 	}
+	delegated := 0
+	kubernetes.SetDelegateOwn(t, func() (cgroup.Dir, error) {
+		delegated++
+		return cgroup.Dir{Path: "/sys/fs/cgroup/kubepods/pod2/grants"}, nil
+	})
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
+			delegated = 0
 			cfg := validConfig()
 			cfg.CgroupRoot = c.cgroupRoot
 			h, err := kubernetes.New(t.Context(), cfg)
@@ -101,6 +109,15 @@ func TestNewDefaults(t *testing.T) {
 			if !c.wantCgroupRoot(h.CgroupRoot()) {
 				t.Fatalf("CgroupRoot = %q", h.CgroupRoot())
 			}
+			// A given root is the operator's to delegate, so New leaves
+			// the cgroup fiberd runs in alone.
+			wantDelegated := 0
+			if c.cgroupRoot == "" {
+				wantDelegated = 1
+			}
+			if delegated != wantDelegated {
+				t.Fatalf("delegated %d times, want %d", delegated, wantDelegated)
+			}
 			if h.Health() == nil || !h.Health().Healthy(time.Now()) {
 				t.Fatal("a new home does not start healthy")
 			}
@@ -112,6 +129,18 @@ func TestNewDefaults(t *testing.T) {
 				t.Fatalf("Grants without a directory = %v, %v", ch, err)
 			}
 		})
+	}
+}
+
+// TestNewDelegateFails checks that a home whose own cgroup cannot be
+// delegated does not start, rather than run with no grant ever admitted.
+func TestNewDelegateFails(t *testing.T) {
+	kubernetes.SetDelegateOwn(t, func() (cgroup.Dir, error) {
+		return cgroup.Dir{}, errors.New("enable memory: device or resource busy")
+	})
+	_, err := kubernetes.New(t.Context(), validConfig())
+	if err == nil || !strings.Contains(err.Error(), "device or resource busy") {
+		t.Fatalf("New = %v, want the delegation error", err)
 	}
 }
 

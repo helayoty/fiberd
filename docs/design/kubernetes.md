@@ -33,7 +33,7 @@ flowchart LR
 | How grants arrive | With `-grant-token-file` set, the home fetches its own grant from the controller's grant endpoint with the Pod's token, writes it into `-grants-dir` and renews it at half the remaining lease. The directory is polled, so other `*.jwt` files dropped into it are read too, and without the flag they are the only way |
 | Control-plane liveness | The API server answering for the Pod, its namespace and its ResourceClaims, asked every half stale time-to-live (TTL) |
 | Readiness | The Pod condition `fiberd.io/zygote-ready`. Its reason is `TemplateWarm` while any grant's [template](../glossary.md#template) is [warm](../glossary.md#warm), and `NoWarmTemplate` otherwise |
-| The [cgroup](../glossary.md#cgroup) subtree | `-cgroup-root`, else the container's own. The kubelet's memory limit is the ceiling, and its memory QoS is what lets the template's `memory.min` hold above the delegated root ([resources.md](resources.md)) |
+| The [cgroup](../glossary.md#cgroup) subtree | `-cgroup-root`, else the container's own, which fiberd delegates at start: it moves into a `fiberd` leaf, since cgroup v2 enables no controller below a cgroup with processes, and carves grants under `grants`. The kubelet's memory limit is the ceiling, and its memory QoS is what lets the template's `memory.min` hold above the delegated root ([resources.md](resources.md)) |
 | Endpoints | The Pod IP of the configured family, waited for up to 90 seconds |
 | [Device channel](../glossary.md#device-channel) | The Pod's Dynamic Resource Allocation (DRA) claim, or a static device list |
 | [Scope](../glossary.md#scope) | `namespace`, `pod`, `pod_uid`, `service_account`, `node`, and one `resource_claim` per ResourceClaim |

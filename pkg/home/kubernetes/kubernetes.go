@@ -59,6 +59,12 @@ const (
 	cgroupMount = "/sys/fs/cgroup"
 )
 
+// delegateOwn readies the cgroup fiberd runs in for the runtime to carve
+// grants under. That cgroup holds fiberd itself, and cgroup v2 enables no
+// controller for the children of a cgroup with processes, so fiberd moves
+// into a leaf first, as the Slurm and substrate homes do. Tests replace it.
+var delegateOwn = func() (cgroup.Dir, error) { return cgroup.Delegate(cgroup.Own(cgroupMount)) }
+
 // Config is what cmd/fiberd hands New.
 type Config struct {
 	// Kube is the cluster. Required.
@@ -106,7 +112,9 @@ type Config struct {
 	// or ids, handed to every grant's engine as its device channel.
 	Devices []string
 	// CgroupRoot is the cgroup v2 subtree fiberd may carve. Empty means
-	// the cgroup this process runs in, under /sys/fs/cgroup.
+	// the cgroup this process runs in, under /sys/fs/cgroup, delegated:
+	// fiberd moves into its `fiberd` leaf and carves under its `grants`
+	// child.
 	CgroupRoot string
 	// Clock drives the polls and stamps the health. Default the real
 	// clock.
@@ -244,7 +252,11 @@ func newHome(ctx context.Context, cfg Config, built func(*Home)) (*Home, error) 
 		cgroupRoot: cfg.CgroupRoot,
 	}
 	if h.cgroupRoot == "" {
-		h.cgroupRoot = cgroup.Own(cgroupMount).Path
+		root, err := delegateOwn()
+		if err != nil {
+			return nil, fmt.Errorf("kubernetes home: %w", err)
+		}
+		h.cgroupRoot = root.Path
 	}
 	h.stopCtx, h.stop = context.WithCancel(context.Background())
 	h.gate.Publish = h.publishGate

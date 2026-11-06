@@ -2,7 +2,10 @@ package kubernetes
 
 import (
 	"context"
+	"testing"
 	"time"
+
+	"github.com/Azure/fiberd/pkg/sys/cgroup"
 )
 
 // What the external tests reach into.
@@ -63,4 +66,12 @@ func NextDelay(in DelayInput) time.Duration {
 		wrote: in.Wrote, status: in.Status, retryAfter: in.RetryAfter, hasRetryAfter: in.HasRetryAfter,
 		failures: in.Failures, remaining: in.Remaining, jitter: in.Jitter,
 	})
+}
+
+// SetDelegateOwn makes New ready its own cgroup with f until t ends, so a
+// test never moves itself into a leaf of the host's cgroup.
+func SetDelegateOwn(t testing.TB, f func() (cgroup.Dir, error)) {
+	old := delegateOwn
+	delegateOwn = f
+	t.Cleanup(func() { delegateOwn = old })
 }
