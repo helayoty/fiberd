@@ -277,8 +277,8 @@ func (c *Config) Bind(fs *flag.FlagSet) {
 	fs.StringVar(&c.Runtime.Runc.Rootfs, "runc-rootfs", "", "runc: rootfs directory the zygote container runs in; -template commands are paths inside it")
 	fs.StringVar(&c.Runtime.Runc.UsernsPool, "userns-pool", runcbackend.DefaultPool, "runc: START:SLOTS host id pool that grants' user namespaces take 65536-id slots from, picked by a hash of the grant uid. A pool overlapping /etc/subuid or /etc/subgid is refused")
 	fs.StringVar(&c.Runtime.Hyperlight.Helper, "hyperlight-helper", "", "hyperlight: absolute path of the helper executable speaking hack/hyperlight/PROTOCOL.md (the Rust helper, or fakehelper)")
-	fs.StringVar(&c.Runtime.Hyperlight.Guest, "hyperlight-guest", "", "hyperlight: guest binary the helper loads")
-	fs.StringVar(&c.Runtime.Cloudhv.VMM, "cloudhv-vmm", "", "cloudhv: the static cloud-hypervisor executable, or hack/cloudhv/fakevmm without KVM (hack/cloudhv/build.sh)")
+	fs.StringVar(&c.Runtime.Hyperlight.Guest, "hyperlight-guest", "", "hyperlight: absolute path of the guest binary the helper loads")
+	fs.StringVar(&c.Runtime.Cloudhv.VMM, "cloudhv-vmm", "", "cloudhv: absolute path of the static cloud-hypervisor executable, or of hack/cloudhv/fakevmm without KVM (hack/cloudhv/build.sh)")
 	fs.StringVar(&c.Runtime.Cloudhv.Kernel, "cloudhv-kernel", "", "cloudhv: the guest vmlinux")
 	fs.StringVar(&c.Runtime.Cloudhv.Rootfs, "cloudhv-rootfs", "", "cloudhv: the guest's read-only rootfs image (a directory for the fake VMM); -template commands are paths inside it")
 	fs.Uint64Var(&c.Runtime.Cloudhv.MemoryMiB, "cloudhv-memory-mib", 0, "cloudhv: each guest's memory in MiB (0 = 256)")
@@ -510,6 +510,16 @@ func (c *Config) AdminSocket() string { return filepath.Join(c.PrivateDir(), "ad
 // that long.
 func Run(c *Config, newHome HomeFactory) error { return RunContext(context.Background(), c, newHome) }
 
+// absolutePath refuses a relative path that a program would resolve
+// somewhere other than fiberd's working directory, so the flag fails at
+// start and not at the first warm. An unset flag passes.
+func absolutePath(name, path string) error {
+	if path == "" || filepath.IsAbs(path) {
+		return nil
+	}
+	return fmt.Errorf("%s %q is not an absolute path", name, path)
+}
+
 // watchSignals waits for SIGINT or SIGTERM, or for ctx to end, and then
 // calls stop. A SIGTERM with a timeout above zero runs drain first, for
 // at most that long. A second signal during the drain ends it early, and
@@ -631,14 +641,20 @@ func RunContext(ctx context.Context, c *Config, newHome HomeFactory) error {
 			if c.Runtime.Hyperlight.Helper == "" {
 				return errors.New("-runtime=hyperlight needs -hyperlight-helper (hack/hyperlight/helper, or fakehelper without a hypervisor)")
 			}
-			if !filepath.IsAbs(c.Runtime.Hyperlight.Helper) {
-				return fmt.Errorf("-hyperlight-helper %q is not an absolute path", c.Runtime.Hyperlight.Helper)
+			if err := absolutePath("-hyperlight-helper", c.Runtime.Hyperlight.Helper); err != nil {
+				return err
+			}
+			if err := absolutePath("-hyperlight-guest", c.Runtime.Hyperlight.Guest); err != nil {
+				return err
 			}
 			be = hlbackend.New(hlbackend.Options{Helper: c.Runtime.Hyperlight.Helper, Guest: c.Runtime.Hyperlight.Guest})
 		case "cloudhv":
 			ch := c.Runtime.Cloudhv
 			if ch.VMM == "" || ch.Kernel == "" || ch.Rootfs == "" {
 				return errors.New("-runtime=cloudhv needs -cloudhv-vmm, -cloudhv-kernel and -cloudhv-rootfs (hack/cloudhv/build.sh builds them, or the fake VMM without KVM)")
+			}
+			if err := absolutePath("-cloudhv-vmm", ch.VMM); err != nil {
+				return err
 			}
 			be = chbackend.New(chbackend.Options{VMM: ch.VMM, Kernel: ch.Kernel, Rootfs: ch.Rootfs, StateDir: filepath.Join(c.Node.StateDir, "cloudhv"),
 				MemoryMiB: ch.MemoryMiB, RestoreMode: ch.RestoreMode,

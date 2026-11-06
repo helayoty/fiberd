@@ -849,6 +849,8 @@ func TestRunRefuses(t *testing.T) {
 	missing := "/nonexistent/fiberd-test"
 	noTool := "fiberd-test-no-such-tool"
 	proc := []string{"-runtime", "proc", "-template", "default=/bin/true"}
+	hyperlight := []string{"-runtime", "hyperlight", "-template", "default=/g", "-hyperlight-helper", "/" + noTool}
+	cloudhv := []string{"-runtime", "cloudhv", "-template", "default=/g", "-cloudhv-kernel", "/k", "-cloudhv-rootfs", "/r"}
 	cases := []struct {
 		name  string
 		args  []string
@@ -906,6 +908,16 @@ func TestRunRefuses(t *testing.T) {
 			want: `-hyperlight-helper "` + noTool + `" is not an absolute path`},
 		{name: "hyperlight with a relative helper path", args: []string{"-runtime", "hyperlight", "-template", "default=/g", "-hyperlight-helper", "bin/" + noTool},
 			want: `-hyperlight-helper "bin/` + noTool + `" is not an absolute path`},
+		{name: "hyperlight with a bare guest name", args: append([]string{"-hyperlight-guest", noTool}, hyperlight...),
+			want: `-hyperlight-guest "` + noTool + `" is not an absolute path`},
+		{name: "hyperlight with a relative guest path", args: append([]string{"-hyperlight-guest", "bin/" + noTool}, hyperlight...),
+			want: `-hyperlight-guest "bin/` + noTool + `" is not an absolute path`},
+		{name: "hyperlight with an absolute guest path", args: append([]string{"-hyperlight-guest", "/" + noTool}, hyperlight...),
+			want: "hyperlight runtime: "},
+		{name: "cloudhv with a bare VMM name", args: append([]string{"-cloudhv-vmm", noTool}, cloudhv...),
+			want: `-cloudhv-vmm "` + noTool + `" is not an absolute path`},
+		{name: "cloudhv with a relative VMM path", args: append([]string{"-cloudhv-vmm", "bin/" + noTool}, cloudhv...),
+			want: `-cloudhv-vmm "bin/` + noTool + `" is not an absolute path`},
 		{name: "bad parity", args: append([]string{"-parity", "kernel=sometimes"}, proc...), want: "parity"},
 		{name: "unknown endpoint family", args: append([]string{"-endpoint-family", "pigeon"}, proc...), want: `endpoint family "pigeon"`},
 		{name: "endpoint host of the wrong family", args: append([]string{"-endpoint-family", "inet4", "-endpoint-host", "::1"}, proc...),
