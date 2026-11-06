@@ -36,9 +36,11 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  IMAGE: ghcr.io/${{ github.repository }}
-  IMAGE_RUNC: ghcr.io/${{ github.repository }}-runc
-  IMAGE_GVISOR: ghcr.io/${{ github.repository }}-gvisor
+  # Literal, since a registry refuses capitals and this level cannot
+  # lowercase the repository's name.
+  IMAGE: ghcr.io/azure/fiberd
+  IMAGE_RUNC: ghcr.io/azure/fiberd-runc
+  IMAGE_GVISOR: ghcr.io/azure/fiberd-gvisor
   # The input on a manual run, the pushed tag otherwise.
   TAG: ${{ inputs.tag || github.ref_name }}
   DESCRIPTION: fiberd with criu and the zygote library
@@ -78,11 +80,24 @@ jobs:
             exit 1
           fi
           major=${BASH_REMATCH[1]} minor=${BASH_REMATCH[2]} pre=${BASH_REMATCH[4]}
+          # A dry run never reaches a push, so a bad image name stops here.
+          for image in "$IMAGE" "$IMAGE_RUNC" "$IMAGE_GVISOR"; do
+            if [[ "$image" != "${image,,}" ]]; then
+              echo "image names must be lowercase: $image" >&2
+              exit 1
+            fi
+          done
           if [[ "$DRY_RUN" == true ]]; then
             # A dry run publishes nothing, so the tag is not checked against
             # releases, tags or main.
             echo "dry run of $TAG at $GITHUB_SHA ($GITHUB_REF_NAME): nothing will be published"
           else
+            # The image names are literal, so a fork or a moved repository stops
+            # here and not at its first push, after every gate has run.
+            if [[ "$IMAGE" != "ghcr.io/${GITHUB_REPOSITORY,,}" ]]; then
+              echo "$GITHUB_REPOSITORY cannot publish $IMAGE" >&2
+              exit 1
+            fi
             # Fail before building if the tag is already released, for example by
             # a tag push and a manual run for the same tag.
             if [[ $(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null) == false ]]; then
@@ -836,6 +851,36 @@ jobs:
           # The ./ keeps npm from reading npm/<file> as a GitHub owner/repo.
           npm publish "./npm/fiberd-client-$VERSION.tgz" --access public --provenance --tag "$DIST_TAG"
 
+  # A private package works for the release but not for anyone else. A new
+  # package can start private, so a first release can fail here. Make the
+  # package public, then re-run the failed jobs. This job runs once the
+  # release is live and stays out of cleanup's needs, so a private package
+  # never costs a pushed image.
+  check-pull:
+    name: check that a pull needs no login
+    needs: [validate-tag, publish-release]
+    if: ${{ !inputs.dry_run }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: inspect each image without a login
+        shell: bash
+        env:
+          DOCKER_CONFIG: ${{ runner.temp }}/no-login
+          VERSION: ${{ needs.validate-tag.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$DOCKER_CONFIG"
+          failed=0
+          for image in "$IMAGE" "$IMAGE_RUNC" "$IMAGE_GVISOR"; do
+            if ! docker manifest inspect "$image:$VERSION" >/dev/null; then
+              echo "::error::$image:$VERSION needs a login. Set the package's visibility to public, then re-run this job."
+              failed=1
+            fi
+          done
+          exit "$failed"
+
   cleanup:
     name: clean up a failed or cancelled release
     needs: [validate-tag, ci, integration, conformance, examples, fuzz, python-sdist, python-wheels, npm-package, build-assets, build-image, release-draft, publish-image, publish-release, publish-pypi, publish-npm]
@@ -895,7 +940,7 @@ jobs:
           # Each image is its own package. A package this run never pushed to
           # does not exist yet, which is not an error.
           for image in "$IMAGE" "$IMAGE_RUNC" "$IMAGE_GVISOR"; do
-            name=${image#"ghcr.io/$owner/"}
+            name=${image##*/}
             echo "cleaning $image"
             # Tags that existed point back where they were. A tag this run
             # created goes away with the version that carries it.
