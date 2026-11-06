@@ -804,7 +804,7 @@ func TestResumeOnAnotherRuntimeFromSameArtifact(t *testing.T) {
 	srv := httptest.NewServer(registry.New())
 	defer srv.Close()
 	reg := srv.URL
-	if _, err := artifact.Push(ctx, out, reg+"/zygotes/ref:v1"); err != nil {
+	if _, err := artifact.Push(ctx, out, reg+"/zygotes/ref:v1", nil); err != nil {
 		t.Fatal(err)
 	}
 	mk := func(name string) core.Runtime {
@@ -891,7 +891,7 @@ func TestSessionMovesThroughRegistry(t *testing.T) {
 	// Blobs on disk, so the end of the test can read everything the
 	// registry holds.
 	reg, blobs := diskRegistry(t)
-	if _, err := artifact.Push(ctx, out, reg+"/zygotes/ref:v1"); err != nil {
+	if _, err := artifact.Push(ctx, out, reg+"/zygotes/ref:v1", nil); err != nil {
 		t.Fatal(err)
 	}
 	// One grant per home (its own uid and audience), the same template:
@@ -1029,7 +1029,7 @@ func TestTemplateParityGate(t *testing.T) {
 	srv := httptest.NewServer(registry.New())
 	defer srv.Close()
 	reg := srv.URL
-	if _, err := artifact.Push(ctx, out, reg+"/zygotes/ref:v1"); err != nil {
+	if _, err := artifact.Push(ctx, out, reg+"/zygotes/ref:v1", nil); err != nil {
 		t.Fatal(err)
 	}
 	here := artifact.Host()
@@ -1092,7 +1092,7 @@ func TestMobilityParityGate(t *testing.T) {
 	srv := httptest.NewServer(registry.New())
 	defer srv.Close()
 	reg := srv.URL
-	if _, err := artifact.Push(ctx, out, reg+"/zygotes/ref:v1"); err != nil {
+	if _, err := artifact.Push(ctx, out, reg+"/zygotes/ref:v1", nil); err != nil {
 		t.Fatal(err)
 	}
 	mk := func(home string, parity artifact.Parity, platform artifact.Platform) *core.Core {
@@ -1202,7 +1202,7 @@ func TestTemplateFromRegistryArtifact(t *testing.T) {
 	srv := httptest.NewServer(registry.New())
 	defer srv.Close()
 	reg := srv.URL
-	if _, err := artifact.Push(ctx, out, reg+"/zygotes/ref:v1"); err != nil {
+	if _, err := artifact.Push(ctx, out, reg+"/zygotes/ref:v1", nil); err != nil {
 		t.Fatalf("push: %v", err)
 	}
 	cache := t.TempDir()
@@ -1369,7 +1369,7 @@ func TestResumedDeltaRetiredAndDiscarded(t *testing.T) {
 	srv := httptest.NewServer(registry.New())
 	defer srv.Close()
 	reg := srv.URL
-	if _, err := artifact.Push(ctx, out, reg+"/zygotes/ref:v1"); err != nil {
+	if _, err := artifact.Push(ctx, out, reg+"/zygotes/ref:v1", nil); err != nil {
 		t.Fatal(err)
 	}
 	g := core.Grant{UID: "ret-a", Audience: "home-a", Tenant: "acme", TemplateDigest: digest, FiberMax: 4, WBudgetBytes: 32 << 20,

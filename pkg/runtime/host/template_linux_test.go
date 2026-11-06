@@ -149,7 +149,7 @@ func templateArtifact(t *testing.T, reg string, p artifact.Platform, images bool
 	if err := os.WriteFile(filepath.Join(dir, "config.json"), b, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	digest, err := artifact.Push(context.Background(), dir, reg+"/tmpl/x:"+fmt.Sprintf("%v-%s-%s", images, p.Kernel, linking))
+	digest, err := artifact.Push(context.Background(), dir, reg+"/tmpl/x:"+fmt.Sprintf("%v-%s-%s", images, p.Kernel, linking), nil)
 	if err != nil {
 		t.Fatalf("push: %v", err)
 	}

@@ -35,6 +35,7 @@ import (
 	"oras.land/oras-go/v2/content"
 	"oras.land/oras-go/v2/content/file"
 	"oras.land/oras-go/v2/registry/remote"
+	"oras.land/oras-go/v2/registry/remote/auth"
 )
 
 const (
@@ -231,8 +232,10 @@ func pack(ctx context.Context, fs *file.Store, dir string, cfg Config) (ocispec.
 }
 
 // Push uploads the artifact directory to ref ("host/repo:tag") and
-// returns the manifest digest.
-func Push(ctx context.Context, dir, ref string) (string, error) {
+// returns the manifest digest. cred answers a registry that asks for a
+// login, and is only read if one does. A nil cred pushes anonymously, and
+// a registry named with http:// is never given a login.
+func Push(ctx context.Context, dir, ref string, cred auth.CredentialFunc) (string, error) {
 	dir, err := filepath.Abs(dir)
 	if err != nil {
 		return "", err
@@ -253,6 +256,9 @@ func Push(ctx context.Context, dir, ref string) (string, error) {
 	repo, tag, err := repository(ref)
 	if err != nil {
 		return "", err
+	}
+	if cred != nil && !repo.PlainHTTP {
+		repo.Client = loginClient(cred)
 	}
 	if tag == "" {
 		tag = desc.Digest.String()

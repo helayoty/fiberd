@@ -95,7 +95,7 @@ func TestHyperlightArtifact(t *testing.T) {
 
 	reg := newRegistry(t)
 	ref := strings.TrimPrefix(reg, "http://") + "/hl/app"
-	if _, err := artifact.Push(ctx, dir, "http://"+ref+":v1"); err != nil {
+	if _, err := artifact.Push(ctx, dir, "http://"+ref+":v1", nil); err != nil {
 		t.Fatalf("Push: %v", err)
 	}
 	pulled := filepath.Join(t.TempDir(), "pulled")

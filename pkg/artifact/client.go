@@ -27,6 +27,16 @@ func registryClient(plainHTTP bool) *auth.Client {
 	return tlsClient
 }
 
+// loginClient is the TLS client for one push that may log in with cred. It
+// is a copy with a token cache of its own, so the shared clients that homes
+// pull with never hold a credential or a token made from one.
+func loginClient(cred auth.CredentialFunc) *auth.Client {
+	c := *tlsClient
+	c.Credential = cred
+	c.Cache = auth.NewCache()
+	return &c
+}
+
 // newClient is an auth client over base with the retry policy and the
 // redirect policy below. It copies auth.DefaultClient for its header and
 // token cache and never writes to that process-wide value. A registry

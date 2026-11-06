@@ -38,7 +38,7 @@ func pushTemplates(t *testing.T, args ...[]string) (repo string, digests []strin
 		if err != nil {
 			t.Fatalf("build artifact: %v", err)
 		}
-		if _, err := artifact.Push(ctx, out, fmt.Sprintf("%s:v%d", repo, i)); err != nil {
+		if _, err := artifact.Push(ctx, out, fmt.Sprintf("%s:v%d", repo, i), nil); err != nil {
 			t.Fatalf("push artifact: %v", err)
 		}
 		digests = append(digests, digest)

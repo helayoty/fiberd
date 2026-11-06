@@ -158,7 +158,7 @@ func TestBuildPushPullRoundTrip(t *testing.T) {
 			}
 		}},
 		{"push returns the packed digest", func(t *testing.T) {
-			pushed, err := artifact.Push(ctx, out, ref)
+			pushed, err := artifact.Push(ctx, out, ref, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -660,7 +660,7 @@ func TestPush(t *testing.T) {
 			if c.edit != nil {
 				c.edit(t, dir)
 			}
-			d, err := artifact.Push(context.Background(), dir, reg+"/"+c.ref)
+			d, err := artifact.Push(context.Background(), dir, reg+"/"+c.ref, nil)
 			if c.want != "" {
 				if err == nil || !strings.Contains(err.Error(), c.want) {
 					t.Fatalf("Push = %s, %v; want an error about %q", d, err, c.want)
@@ -679,7 +679,7 @@ func TestPull(t *testing.T) {
 	ctx := context.Background()
 	pushZygote := func(t *testing.T, reg, dir string) {
 		t.Helper()
-		if _, err := artifact.Push(ctx, dir, reg+"/z:t"); err != nil {
+		if _, err := artifact.Push(ctx, dir, reg+"/z:t", nil); err != nil {
 			t.Fatal(err)
 		}
 	}

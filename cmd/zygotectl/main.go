@@ -12,6 +12,9 @@
 // (fleet-pub.json, from grant-issuer keygen -alg A256GCM). The author
 // holds nothing that opens them. Only homes, which hold the fleet's seal
 // key, do.
+//
+// push logs in to a registry that asks with what docker login stored for
+// it. pull never logs in, as a home never does.
 package main
 
 import (
@@ -25,6 +28,9 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"oras.land/oras-go/v2/registry/remote/auth"
+	"oras.land/oras-go/v2/registry/remote/credentials"
 
 	"github.com/Azure/fiberd/internal/cli"
 	"github.com/Azure/fiberd/pkg/artifact"
@@ -197,12 +203,23 @@ func push(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if *dir == "" || *ref == "" {
 		return fmt.Errorf("push: -dir and -ref are required")
 	}
-	digest, err := artifact.Push(ctx, *dir, *ref)
+	digest, err := artifact.Push(ctx, *dir, *ref, dockerLogin)
 	if err != nil {
 		return err
 	}
 	_, _ = fmt.Fprintln(stdout, digest)
 	return nil
+}
+
+// dockerLogin is what docker login stored for hostport, or no login when
+// nothing is stored. Docker's config is read only here, when a registry
+// asks, so a push that needs no login never depends on it.
+func dockerLogin(ctx context.Context, hostport string) (auth.Credential, error) {
+	store, err := credentials.NewStoreFromDocker(credentials.StoreOptions{})
+	if err != nil {
+		return auth.EmptyCredential, err
+	}
+	return credentials.Credential(store)(ctx, hostport)
 }
 
 func pull(ctx context.Context, args []string, stdout, stderr io.Writer) error {

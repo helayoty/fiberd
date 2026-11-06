@@ -46,7 +46,7 @@ func snapshotArtifact(t *testing.T, reg string, p artifact.Platform) string {
 	if _, err := artifact.Build(context.Background(), artifact.BuildOptions{HyperlightSnapshot: tree, Out: out, Args: []string{"--x"}, SealTo: w.Public(), Platform: p}); err != nil {
 		t.Fatalf("Build: %v", err)
 	}
-	digest, err := artifact.Push(context.Background(), out, reg+"/tmpl/x:hl-"+strings.NewReplacer("/", "-", "+", "-").Replace(p.Libc))
+	digest, err := artifact.Push(context.Background(), out, reg+"/tmpl/x:hl-"+strings.NewReplacer("/", "-", "+", "-").Replace(p.Libc), nil)
 	if err != nil {
 		t.Fatalf("push: %v", err)
 	}
